@@ -3,6 +3,8 @@
 ### Requirement: Exercised Device Profiles
 
 V2 SHALL convert mobile and glasses device profiles from schema-only declarations into exercised runtime profiles with explicit performance, interaction, and degradation contracts.
+Source: `about/heart-and-soul/mobile.md`, `about/heart-and-soul/v1.md`, `about/law-and-lore/rfcs/0006-configuration.md`
+Scope: post-v1
 
 #### Scenario: constrained profile is validated as real target
 
@@ -12,6 +14,8 @@ V2 SHALL convert mobile and glasses device profiles from schema-only declaration
 ### Requirement: Device-Aware Capability Negotiation
 
 Capability negotiation SHALL account for device constraints and deployment shape. The runtime MUST be able to deny or degrade capabilities that are valid on desktop but invalid for constrained device profiles.
+Source: `about/heart-and-soul/mobile.md`, `about/law-and-lore/rfcs/0005-session-protocol.md`, `about/law-and-lore/rfcs/0006-configuration.md`
+Scope: post-v1
 
 #### Scenario: constrained device denies unsupported media mode
 
@@ -21,6 +25,8 @@ Capability negotiation SHALL account for device constraints and deployment shape
 ### Requirement: Upstream Composition Contract
 
 V2 SHALL define upstream composition rules for device profiles that cannot host the full compositor locally. Upstream composition MUST preserve timing, authority, and operator visibility semantics.
+Source: `about/heart-and-soul/mobile.md`, `about/heart-and-soul/architecture.md`
+Scope: post-v1
 
 #### Scenario: upstream-composed device preserves operator sovereignty
 

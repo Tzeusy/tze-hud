@@ -40,3 +40,18 @@ This change defines a v2 program centered on four capability expansions:
 - Converts the existing bounded-ingress contract into the first phase of a broader v2 media program.
 - Creates a staged path from bounded ingress to embodied/bidirectional media without collapsing the project's governance model.
 - Forces explicit planning for device profiles, privacy/operator controls, validation lanes, and failure handling before broad media claims are made.
+
+## Doctrine and Contract Reconciliation
+
+This change is reconciled to existing doctrine and post-v1 contracts as follows:
+
+1. **V1 boundary remains unchanged.** V1 continues to defer live media, embodied presence, and exercised mobile/glasses targets.
+   Source: `about/heart-and-soul/v1.md`
+2. **Bounded ingress remains the only admissible first media slice.** One-way visual ingress, default-off activation, and no implied two-way AV remain the mandatory starting point.
+   Source: `openspec/specs/media-webrtc-bounded-ingress/spec.md`
+3. **Privacy/operator policy remains gate-before-admission.** Enablement, operator override, and viewer/privacy ceiling continue to short-circuit media admission in deterministic order.
+   Source: `openspec/specs/media-webrtc-privacy-operator-policy/spec.md`
+4. **Screen sovereignty remains non-negotiable.** Media/device/embodied work must preserve runtime ownership of timing, composition, authority, and fallback behavior.
+   Source: `about/heart-and-soul/architecture.md`
+
+This proposal does not claim that v2 capabilities are already implemented. It defines a post-v1 program with phased gates and explicit evidence requirements.
