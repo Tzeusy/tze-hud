@@ -576,6 +576,22 @@ fn now_wall_us() -> u64 {
         .as_micros() as u64
 }
 
+fn capability_audit_record(
+    kind: CapabilityAuditKindProto,
+    agent_id: impl Into<String>,
+    capability: impl Into<String>,
+    timestamp_wall_us: u64,
+    granted_by: impl Into<String>,
+) -> CapabilityAuditRecord {
+    CapabilityAuditRecord {
+        kind: kind as i32,
+        agent_id: agent_id.into(),
+        capability: capability.into(),
+        timestamp_wall_us,
+        granted_by: granted_by.into(),
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -783,6 +799,10 @@ pub struct CapabilityRevocationEvent {
     pub lease_id: tze_hud_scene::SceneId,
     /// Canonical name of the capability to remove (e.g. `"create_tiles"`, `"publish_zone:subtitle"`).
     pub capability_name: String,
+    /// Source of the revocation for audit records (e.g. `admin_action`).
+    pub granted_by: String,
+    /// Timestamp of revocation command creation (UTC us since epoch).
+    pub timestamp_wall_us: u64,
 }
 
 // ─── Service implementation ─────────────────────────────────────────────────
@@ -983,6 +1003,8 @@ impl HudSessionImpl {
         let event = CapabilityRevocationEvent {
             lease_id,
             capability_name: capability_name.into(),
+            granted_by: "admin_action".to_string(),
+            timestamp_wall_us: now_wall_us(),
         };
         self.capability_revocation_tx
             .send(event)
@@ -1667,6 +1689,18 @@ async fn handle_session_init(
     };
 
     let seq = session.next_server_seq();
+    let capability_audit_records = granted_capabilities
+        .iter()
+        .map(|cap| {
+            capability_audit_record(
+                CapabilityAuditKindProto::CapabilityAuditKindGrant,
+                &init.agent_id,
+                cap,
+                compositor_ts,
+                "session_handshake",
+            )
+        })
+        .collect();
     let _ = tx
         .send(Ok(ServerMessage {
             sequence: seq,
@@ -1686,6 +1720,7 @@ async fn handle_session_init(
                 active_subscriptions: sub_result.active,
                 denied_subscriptions: sub_result.denied,
                 negotiated_protocol_version: negotiated_version,
+                capability_audit_records,
             })),
         }))
         .await;
@@ -4092,15 +4127,29 @@ async fn handle_capability_request(
                     newly_granted.push(cap.clone());
                 }
             }
+            let audit_timestamp = now_wall_us();
+            let capability_audit_records = newly_granted
+                .iter()
+                .map(|cap| {
+                    capability_audit_record(
+                        CapabilityAuditKindProto::CapabilityAuditKindGrant,
+                        &session.agent_name,
+                        cap,
+                        audit_timestamp,
+                        "capability_request",
+                    )
+                })
+                .collect();
             let _ = tx
                 .send(Ok(ServerMessage {
                     sequence: seq,
-                    timestamp_wall_us: now_wall_us(),
+                    timestamp_wall_us: audit_timestamp,
                     payload: Some(ServerPayload::CapabilityNotice(CapabilityNotice {
                         granted: newly_granted,
                         revoked: Vec::new(),
                         reason: req.reason.clone(),
                         effective_at_server_seq: seq,
+                        capability_audit_records,
                     })),
                 }))
                 .await;
@@ -4202,6 +4251,11 @@ async fn handle_capability_revocation(
 
             let lease_id_bytes = scene_id_to_bytes(event.lease_id);
             let reason = format!("CAPABILITY_REVOKED:{cap_name}");
+            let audit_timestamp = if event.timestamp_wall_us > 0 {
+                event.timestamp_wall_us
+            } else {
+                revoked_at_us
+            };
 
             // ── CapabilityNotice (transactional, RFC 0005 §5.3) ──────────────
             // Tells the agent which capability was revoked so it can update its
@@ -4216,6 +4270,13 @@ async fn handle_capability_revocation(
                         revoked: vec![event.capability_name.clone()],
                         reason: reason.clone(),
                         effective_at_server_seq: seq,
+                        capability_audit_records: vec![capability_audit_record(
+                            CapabilityAuditKindProto::CapabilityAuditKindRevoke,
+                            &session.agent_name,
+                            &event.capability_name,
+                            audit_timestamp,
+                            &event.granted_by,
+                        )],
                     })),
                 }))
                 .await;
@@ -7940,6 +8001,22 @@ mod tests {
                     notice.effective_at_server_seq > 0,
                     "effective_at_server_seq must be non-zero"
                 );
+                assert_eq!(
+                    notice.capability_audit_records.len(),
+                    1,
+                    "grant notice should carry one structured audit record"
+                );
+                let audit = &notice.capability_audit_records[0];
+                assert_eq!(
+                    audit.kind,
+                    CapabilityAuditKindProto::CapabilityAuditKindGrant as i32
+                );
+                assert_eq!(audit.capability, "read_telemetry");
+                assert_eq!(audit.granted_by, "capability_request");
+                assert!(
+                    audit.timestamp_wall_us > 0,
+                    "capability audit record timestamp must be set"
+                );
             }
             other => panic!("Expected CapabilityNotice, got: {other:?}"),
         }
@@ -8261,6 +8338,22 @@ mod tests {
                         .contains(&"read_telemetry".to_string()),
                     "read_telemetry should not be initially granted when not requested"
                 );
+                assert_eq!(
+                    established.capability_audit_records.len(),
+                    established.granted_capabilities.len(),
+                    "handshake should emit one capability audit record per granted capability"
+                );
+                for audit in &established.capability_audit_records {
+                    assert_eq!(
+                        audit.kind,
+                        CapabilityAuditKindProto::CapabilityAuditKindGrant as i32
+                    );
+                    assert_eq!(audit.granted_by, "session_handshake");
+                    assert!(
+                        audit.timestamp_wall_us > 0,
+                        "handshake capability audit timestamp must be populated"
+                    );
+                }
                 established.resume_token.clone()
             }
             other => panic!("Expected SessionEstablished, got: {other:?}"),
@@ -10279,6 +10372,8 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "publish_zone:subtitle".to_string(),
+            granted_by: "admin_action".to_string(),
+            timestamp_wall_us: now_wall_us(),
         });
 
         // The agent should receive a CapabilityNotice with revoked=[publish_zone:subtitle]
@@ -10294,6 +10389,22 @@ mod tests {
                 assert!(
                     notice.granted.is_empty(),
                     "CapabilityNotice.granted must be empty for a revocation"
+                );
+                assert_eq!(
+                    notice.capability_audit_records.len(),
+                    1,
+                    "revocation notice should carry one structured audit record"
+                );
+                let audit = &notice.capability_audit_records[0];
+                assert_eq!(
+                    audit.kind,
+                    CapabilityAuditKindProto::CapabilityAuditKindRevoke as i32
+                );
+                assert_eq!(audit.capability, "publish_zone:subtitle");
+                assert_eq!(audit.granted_by, "admin_action");
+                assert!(
+                    audit.timestamp_wall_us > 0,
+                    "capability audit record timestamp must be set"
                 );
             }
             other => panic!("Expected CapabilityNotice, got: {other:?}"),
@@ -10313,6 +10424,8 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "create_tiles".to_string(),
+            granted_by: "admin_action".to_string(),
+            timestamp_wall_us: now_wall_us(),
         });
 
         // CapabilityNotice first
@@ -10362,6 +10475,8 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "publish_zone:subtitle".to_string(),
+            granted_by: "admin_action".to_string(),
+            timestamp_wall_us: now_wall_us(),
         });
 
         // Drain protocol messages
@@ -10394,6 +10509,8 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "create_tiles".to_string(),
+            granted_by: "admin_action".to_string(),
+            timestamp_wall_us: now_wall_us(),
         });
         let _notice = stream.next().await.unwrap().unwrap();
         let _sc = stream.next().await.unwrap().unwrap();
@@ -10425,6 +10542,8 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "totally_unknown_capability".to_string(),
+            granted_by: "admin_action".to_string(),
+            timestamp_wall_us: now_wall_us(),
         });
 
         // Should get a RuntimeError
@@ -10462,6 +10581,8 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "manage_tabs".to_string(),
+            granted_by: "admin_action".to_string(),
+            timestamp_wall_us: now_wall_us(),
         });
 
         // Should get a RuntimeError for capability not present

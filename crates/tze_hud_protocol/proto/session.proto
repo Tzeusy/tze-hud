@@ -303,6 +303,10 @@ message SessionEstablished {
   // Highest mutually supported version: major * 1000 + minor.
   // 0 = field not set (old server); treat as 1000 (v1.0).
   uint32 negotiated_protocol_version = 11;
+
+  // Structured capability grant audit emitted at session handshake.
+  // One record per granted capability, source="session_handshake".
+  repeated CapabilityAuditRecord capability_audit_records = 12;
 }
 
 // Server response: session error (auth failure, version mismatch, protocol violation, etc.)
@@ -405,6 +409,24 @@ message CapabilityNotice {
   repeated string revoked               = 2;  // Capabilities being revoked (spontaneous notice)
   string          reason                = 3;  // Human-readable reason
   uint64          effective_at_server_seq = 4; // Server sequence at which change takes effect
+  // Structured audit records for grant/revoke transitions carried by this notice.
+  repeated CapabilityAuditRecord capability_audit_records = 5;
+}
+
+// Kind of capability audit transition.
+enum CapabilityAuditKindProto {
+  CAPABILITY_AUDIT_KIND_UNSPECIFIED = 0;
+  CAPABILITY_AUDIT_KIND_GRANT = 1;
+  CAPABILITY_AUDIT_KIND_REVOKE = 2;
+}
+
+// Structured capability grant/revocation audit record.
+message CapabilityAuditRecord {
+  CapabilityAuditKindProto kind = 1;
+  string agent_id = 2;
+  string capability = 3;
+  uint64 timestamp_wall_us = 4;  // UTC us since epoch
+  string granted_by = 5;         // e.g. "session_handshake", "capability_request", "admin_action"
 }
 
 // ─── Mutation messages ────────────────────────────────────────────────────────

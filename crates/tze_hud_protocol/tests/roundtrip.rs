@@ -27,6 +27,8 @@ use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
 use tze_hud_protocol::proto::session::{
     AuthCredential,
     BackpressureSignal,
+    CapabilityAuditKindProto,
+    CapabilityAuditRecord,
     // session.proto
     ClientMessage,
     EmitSceneEvent,
@@ -1003,12 +1005,23 @@ fn roundtrip_session_established() {
         ],
         denied_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
         negotiated_protocol_version: 1000,
+        capability_audit_records: vec![CapabilityAuditRecord {
+            kind: CapabilityAuditKindProto::CapabilityAuditKindGrant as i32,
+            agent_id: "weather-agent".to_string(),
+            capability: "resident_mcp".to_string(),
+            timestamp_wall_us: 1_700_000_000_000_000,
+            granted_by: "session_handshake".to_string(),
+        }],
     };
     let decoded = round_trip(&orig);
     assert_eq!(orig.heartbeat_interval_ms, decoded.heartbeat_interval_ms);
     assert_eq!(orig.server_sequence, decoded.server_sequence);
     assert_eq!(orig.estimated_skew_us, decoded.estimated_skew_us);
     assert_eq!(orig.denied_subscriptions, decoded.denied_subscriptions);
+    assert_eq!(
+        orig.capability_audit_records,
+        decoded.capability_audit_records
+    );
     assert_eq!(
         orig.negotiated_protocol_version,
         decoded.negotiated_protocol_version
