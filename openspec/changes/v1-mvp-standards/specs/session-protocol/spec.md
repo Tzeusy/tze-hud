@@ -15,7 +15,7 @@ Scope: v1-mandatory
 
 #### Scenario: Mid-session request cannot exceed session policy authority
 - **WHEN** an agent sends `CapabilityRequest` for capabilities outside its authorized policy set
-- **THEN** the runtime denies the request with `PERMISSION_DENIED` and does not grant a partial escalation
+- **THEN** the runtime denies the request with `RuntimeError(error_code="PERMISSION_DENIED")` and does not grant a partial escalation
 
 ### Requirement: Single Bidirectional Stream Per Agent
 Each resident agent SHALL hold exactly one primary bidirectional gRPC stream of type `stream ClientMessage / stream ServerMessage`. All scene mutations, event subscriptions, lease management, heartbeats, and telemetry SHALL be multiplexed over this single stream. The runtime SHALL NOT proliferate per-concern streams.

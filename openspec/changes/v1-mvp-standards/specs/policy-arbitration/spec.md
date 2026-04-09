@@ -8,7 +8,7 @@ Domain: GOVERNANCE
 ## ADDED Requirements
 
 ### Requirement: V1 Authority Boundary (Implemented Runtime Path)
-In current v1 runtime builds, authoritative enforcement is runtime-owned and split across three surfaces: `tze_hud_runtime` (budget ladder, attention/quiet-hours state, and shell override state), `tze_hud_protocol` session handling (auth/capability/lease admission and mutation rejection surfaces), and `tze_hud_scene::policy` (scene-side policy contract). `tze_hud_policy` remains a pure evaluator reference path and is not yet wired into hot-path mutation authority in v1.
+In v1 runtime builds, authoritative enforcement MUST remain runtime-owned and MUST be split across three surfaces: `tze_hud_runtime` (budget ladder, attention/quiet-hours state, and shell override state), `tze_hud_protocol` session handling (auth/capability/lease admission and mutation rejection surfaces), and `tze_hud_scene::policy` (scene-side policy contract). In v1, `tze_hud_policy` MUST remain a pure evaluator reference path and MUST NOT be treated as the hot-path mutation authority until that wiring is explicitly landed.
 Source: about/heart-and-soul/architecture.md, crates/tze_hud_runtime/src/lib.rs, crates/tze_hud_runtime/src/budget.rs
 Scope: v1-mandatory
 
@@ -17,7 +17,7 @@ Scope: v1-mandatory
 - **THEN** decisions are produced by runtime/session/scene authorities, not by a centralized `tze_hud_policy` execution path
 
 ### Requirement: Target Policy Wiring Is Tracked Separately
-The unified policy-wired arbitration path (single level-by-level execution through policy-owned evaluator contracts) is a target integration track and not yet fully wired in current v1 runtime. Until that seam is landed, the level-stack requirements below are treated as target-state requirements and must be implemented via spec-first follow-on work.
+The unified policy-wired arbitration path (single level-by-level execution through policy-owned evaluator contracts) is a target integration track and not yet fully wired in current v1 runtime. Until that seam is landed, the level-stack requirements below are treated as target-state requirements and MUST be implemented via spec-first follow-on work.
 Source: docs/reconciliations/policy_wiring_epic_prompt.md
 Scope: v1-reserved
 

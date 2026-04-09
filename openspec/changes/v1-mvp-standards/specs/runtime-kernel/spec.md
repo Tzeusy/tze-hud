@@ -8,7 +8,7 @@ Source RFC: 0002 (Runtime Kernel)
 ## ADDED Requirements
 
 ### Requirement: Runtime Authority Boundary for v1
-The runtime kernel is the authoritative v1 enforcement surface for frame-loop safety, resource enforcement, and shell override state. In current v1 runtime reality, these controls execute directly in runtime/session/scene paths; they are not delegated to a centralized `tze_hud_policy` hot-path evaluator.
+The runtime kernel SHALL be the authoritative v1 enforcement surface for frame-loop safety, resource enforcement, and shell override state. In current v1 runtime reality, these controls execute directly in runtime/session/scene paths; they SHALL NOT be delegated to a centralized `tze_hud_policy` hot-path evaluator.
 Source: about/heart-and-soul/architecture.md, crates/tze_hud_runtime/src/lib.rs
 Scope: v1-mandatory
 
