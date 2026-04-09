@@ -282,6 +282,24 @@ fn gauge_label_text_binding_changes_raster_output() {
         rasterize_svg_layers(&layers, &constraints, &params_with_label, 256, 256)
             .expect("rasterize must succeed with non-empty label");
 
+    if pixmap_no_label.data() == pixmap_with_label.data() {
+        // CI images can lack a usable sans-serif system font. In that environment
+        // text-content bindings cannot render glyphs, so this assertion would be
+        // a false negative unrelated to widget binding logic.
+        let mut db = resvg::usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        let query = resvg::usvg::fontdb::Query {
+            families: &[resvg::usvg::fontdb::Family::SansSerif],
+            ..Default::default()
+        };
+        if db.query(&query).is_none() {
+            eprintln!(
+                "skipping text-content raster delta assertion: no sans-serif system font detected"
+            );
+            return;
+        }
+    }
+
     assert_ne!(
         pixmap_no_label.data(),
         pixmap_with_label.data(),
