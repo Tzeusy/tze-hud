@@ -146,6 +146,7 @@ fn widget_parameter_value_color_roundtrip() {
 #[test]
 fn widget_publish_result_accepted_roundtrip() {
     let result = WidgetPublishResult {
+        request_sequence: 42,
         accepted: true,
         widget_name: "gauge_01".to_string(),
         error_code: String::new(),
@@ -154,6 +155,7 @@ fn widget_publish_result_accepted_roundtrip() {
 
     let decoded = round_trip(&result);
 
+    assert_eq!(decoded.request_sequence, 42);
     assert_eq!(decoded.accepted, true);
     assert_eq!(decoded.widget_name, "gauge_01");
     assert!(decoded.error_code.is_empty());
@@ -164,6 +166,7 @@ fn widget_publish_result_accepted_roundtrip() {
 #[test]
 fn widget_publish_result_rejected_roundtrip() {
     let result = WidgetPublishResult {
+        request_sequence: 84,
         accepted: false,
         widget_name: "gauge_01".to_string(),
         error_code: "WIDGET_NOT_FOUND".to_string(),
@@ -172,6 +175,7 @@ fn widget_publish_result_rejected_roundtrip() {
 
     let decoded = round_trip(&result);
 
+    assert_eq!(decoded.request_sequence, 84);
     assert_eq!(decoded.accepted, false);
     assert_eq!(decoded.widget_name, "gauge_01");
     assert_eq!(decoded.error_code, "WIDGET_NOT_FOUND");
@@ -191,6 +195,7 @@ fn widget_publish_result_error_codes_preserved() {
 
     for error_code in error_codes {
         let result = WidgetPublishResult {
+            request_sequence: 7,
             accepted: false,
             widget_name: "test_widget".to_string(),
             error_code: error_code.to_string(),
@@ -199,6 +204,7 @@ fn widget_publish_result_error_codes_preserved() {
 
         let decoded = round_trip(&result);
 
+        assert_eq!(decoded.request_sequence, 7);
         assert_eq!(decoded.error_code, error_code);
         assert_eq!(decoded.error_message, format!("Error: {}", error_code));
     }
@@ -248,6 +254,7 @@ fn server_message_widget_publish_result_envelope_roundtrip() {
         sequence: 99,
         timestamp_wall_us: 2_000_000_000,
         payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
+            request_sequence: 42,
             accepted: true,
             widget_name: "test_widget".to_string(),
             error_code: String::new(),
@@ -261,6 +268,7 @@ fn server_message_widget_publish_result_envelope_roundtrip() {
     assert_eq!(decoded.timestamp_wall_us, 2_000_000_000);
     match decoded.payload {
         Some(ServerPayload::WidgetPublishResult(result)) => {
+            assert_eq!(result.request_sequence, 42);
             assert_eq!(result.accepted, true);
             assert_eq!(result.widget_name, "test_widget");
         }
@@ -280,6 +288,7 @@ fn server_message_widget_publish_result_error_roundtrip() {
         sequence: 50,
         timestamp_wall_us: 1_500_000_000,
         payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
+            request_sequence: 50,
             accepted: false,
             widget_name: "missing_widget".to_string(),
             error_code: "WIDGET_NOT_FOUND".to_string(),
@@ -291,6 +300,7 @@ fn server_message_widget_publish_result_error_roundtrip() {
 
     match decoded.payload {
         Some(ServerPayload::WidgetPublishResult(result)) => {
+            assert_eq!(result.request_sequence, 50);
             assert_eq!(result.accepted, false);
             assert_eq!(result.widget_name, "missing_widget");
             assert_eq!(result.error_code, "WIDGET_NOT_FOUND");
