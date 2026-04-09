@@ -87,6 +87,16 @@ Scope: post-v1-contract-tranche
 - **WHEN** an ingress publication arrives with `expires_at_wall_us` in the past
 - **THEN** the runtime MUST reject or immediately clear the publication and MUST render zero media frames for it
 
+### Requirement: Reconnect Snapshot Behavior For Scheduled Ingress
+If an ingress publication has been accepted but its `present_at_wall_us` has not yet arrived when the session disconnects, that pending publication is runtime-local only and MUST NOT survive reconnect snapshot/resume. The reconnect snapshot MUST include only ingress publications that are already active at snapshot time. Clients that still want the scheduled ingress after resume MUST re-issue it after `SessionResumeResult`.
+Scope: post-v1-contract-tranche
+
+#### Scenario: scheduled ingress is not preserved across reconnect
+- **WHEN** an ingress publication is accepted with `present_at_wall_us` in the future
+- **AND** the session disconnects before the presentation time is reached
+- **THEN** the reconnect snapshot MUST omit that pending publication
+- **AND** the client MUST re-issue the publication after reconnect if it is still desired
+
 ---
 
 ### Requirement: Lease and Budget Coupling
