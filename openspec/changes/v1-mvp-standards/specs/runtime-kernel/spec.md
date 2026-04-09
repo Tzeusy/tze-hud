@@ -392,7 +392,7 @@ Scope: post-v1
 Centralized `tze_hud_policy` hot-path execution across Stages 1-7 is deferred beyond v1. Runtime-kernel v1 requirements in this spec describe shipped runtime-owned behavior; unified policy-path integration is post-v1 work and MUST NOT be implied as active in v1.
 
 ### Requirement: Parallel Render Encoding (Deferred)
-Parallel render encoding (multiple CommandEncoder instances recorded in parallel for Stage 6) is deferred to post-v1 based on profiling data.
+Parallel render encoding (multiple CommandEncoder instances recorded in parallel for Stage 6) is deferred to post-v1 based on profiling data, and v1 render encoding MUST remain single-threaded.
 Source: RFC 0002 §10
 Scope: post-v1
 

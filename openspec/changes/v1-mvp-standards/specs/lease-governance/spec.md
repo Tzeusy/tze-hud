@@ -327,7 +327,7 @@ Scope: v1-reserved
 - **THEN** it must release the current lease and request a new one with a larger budget
 
 ### Requirement: Multi-Lease Atomic Operations
-Atomic operations spanning multiple leases (e.g., swap tiles across two leases) are deferred to post-v1.
+Atomic operations spanning multiple leases (e.g., swap tiles across two leases) are deferred to post-v1, and v1 implementations MUST treat multi-lease updates as non-atomic.
 Source: RFC 0008 §15
 Scope: post-v1
 
@@ -336,7 +336,7 @@ Scope: post-v1
 - **THEN** it must use two separate `LeaseRequest` messages (non-atomic)
 
 ### Requirement: Grace Period Acceleration
-When `expect_resume = false` in `SessionClose`, the runtime MAY accelerate cleanup (implementation-defined). The grace period is a ceiling, not a floor.
+When `expect_resume = false` in `SessionClose`, the runtime MAY accelerate cleanup (implementation-defined). The grace period MUST be treated as a ceiling, not a floor.
 Source: RFC 0008 §5.6
 Scope: v1-reserved
 

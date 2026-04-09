@@ -396,7 +396,7 @@ Freeze/safe-mode state transitions are governed exclusively by the system shell.
 Unified level-stack hot-path wiring is explicitly deferred to post-v1 (v2). Any future promotion of these deferred requirements MUST include fresh reconciliation evidence proving code/spec/doctrine alignment for that release train.
 
 ### Requirement: Dynamic Policy Rules
-Dynamic policy rules that can be loaded or modified at runtime are deferred to post-v1. V1 policy rules are static (derived from configuration at load time).
+Dynamic policy rules that can be loaded or modified at runtime are deferred to post-v1. V1 policy rules MUST remain static (derived from configuration at load time).
 Source: RFC 0009 §16
 Scope: post-v1
 

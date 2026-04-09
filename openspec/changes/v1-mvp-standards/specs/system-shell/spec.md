@@ -301,7 +301,7 @@ Scope: v1-mandatory
 - **THEN** content rendering and chrome rendering are executed as separate passes, preserving the architectural separation required for future render-skip redaction
 
 ### Requirement: Full TypeScript Inspector
-A full TypeScript inspector and admin panel GUI for diagnostics is deferred to post-v1. V1 diagnostic access is CLI-only.
+A full TypeScript inspector and admin panel GUI for diagnostics is deferred to post-v1. V1 diagnostic access MUST be CLI-only.
 Source: RFC 0007 §9
 Scope: post-v1
 
