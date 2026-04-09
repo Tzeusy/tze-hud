@@ -38,13 +38,13 @@ Non-goals for this seam pass:
 |---|---|---|
 | Bounded capability contract envelope | `hud-nn9d.6` / `WM-S1` | `hud-nn9d.6` exists (closed) |
 | Signaling-shape decision | `hud-nn9d.7` / `WM-S2a` | `hud-nn9d.7` exists (closed) |
-| Proto/schema + snapshot deltas | `hud-nn9d.8` / `WM-S2b` | `hud-nn9d.8` (this issue) |
-| Zone transport/layer/reconnect contract | `WM-S2c` | Not yet instantiated |
+| Proto/schema + snapshot deltas | `hud-nn9d.8` / `WM-S2b` | `hud-nn9d.8` (instantiated) |
+| Zone transport/layer/reconnect contract | `hud-nn9d.9` / `WM-S2c` | `hud-nn9d.9` (instantiated) |
 | Runtime activation gate + budgets | `hud-nn9d.10` / `WM-S3` | `hud-nn9d.10` (instantiated) |
 | Privacy/operator/enablement policy | `hud-nn9d.11` / `WM-S3b` | `hud-nn9d.11` (instantiated) |
 | Compositor render/degradation contract | `hud-nn9d.12` / `WM-S3c` | `hud-nn9d.12` (instantiated) |
-| Validation rehearsal scenarios | `hud-nn9d.13` / `WM-S4` | `hud-nn9d.13` (this issue) |
-| Doctrine/readme alignment | `WM-S5`, `WM-S6` | Not yet instantiated |
+| Validation rehearsal scenarios | `hud-nn9d.13` / `WM-S4` | `hud-nn9d.13` (instantiated) |
+| Doctrine/readme alignment | `hud-nn9d.14`, `hud-nn9d.15` / `WM-S5`, `WM-S6` | `hud-nn9d.14` + `hud-nn9d.15` (instantiated) |
 
 Coordinator note: these bead names and ordering come from `docs/reconciliations/webrtc_media_v1_backlog_materialization.md`.
 
