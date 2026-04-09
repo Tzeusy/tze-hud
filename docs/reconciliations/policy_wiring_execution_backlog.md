@@ -32,7 +32,7 @@ Tracker instantiation snapshot (2026-04-09):
 - `PW-04` -> `hud-xjfb` (in_progress)
 - `PW-05`..`PW-08` not yet instantiated
 
-`hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). The event/frame scope decision bead is now materialized as `hud-ew7a`; mutation pilot is tracked as `hud-jq5p` and telemetry conformance as `hud-xjfb`. Downstream reconciliation beads remain pending instantiation. The final signoff closure bead is tracked as `hud-5fb1`.
+`hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). The event/frame scope decision bead is materialized as `hud-ew7a`; mutation pilot and telemetry are tracked as `hud-jq5p` and `hud-xjfb`; post-pilot reconciliation is tracked as `hud-p48t`; and final signoff remains tracked as `hud-5fb1`.
 
 This document remains the coordinator source of truth for remaining bead creation and dependency wiring.
 
@@ -182,6 +182,7 @@ Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` no
 ### PW-06 — Reconcile implementation vs doctrine/spec after pilot and scope decision
 - Type/Priority: `task` / `P1`
 - Depends on: `PW-01`, `PW-02`, `PW-02b`, `PW-03`, `PW-04`, `PW-05`
+- Tracker instantiation status: now tracked as `hud-p48t`
 - Spec-first marker: `reconcile before closure`
 - Spec citations:
   - `about/heart-and-soul/v1.md`
@@ -214,7 +215,7 @@ Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` no
 
 ## Coordinator Application Notes
 
-- Create these as child/follow-on beads under epic `hud-iq2x`.
+- `PW-06` and `PW-07` are already instantiated as `hud-p48t` and `hud-5fb1`; create remaining uninstantiated beads as child/follow-on work under epic `hud-iq2x`.
 - Use explicit dependency edges exactly as listed above.
 - Do not start `PW-03` until `PW-02` and `PW-02b` are complete.
 - Do not pre-create event/frame implementation beads. Create them only if `PW-05` concludes they remain in v1 scope.
