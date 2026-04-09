@@ -8,6 +8,15 @@ Depends on: scene-graph, runtime-kernel, timing-model, input-model
 
 ## ADDED Requirements
 
+### Requirement: Session Authorization Authority Boundary (v1)
+In v1, session authorization authority is runtime-owned: handshake authentication establishes an agent's policy capability set, mutation/lease checks enforce that set, and mid-session capability requests are evaluated against that established authorization policy. This surface is authoritative even while broader policy wiring remains a separate follow-on track.
+Source: RFC 0005 §1.4, §5.3, crates/tze_hud_protocol/src/session_server.rs
+Scope: v1-mandatory
+
+#### Scenario: Mid-session request cannot exceed session policy authority
+- **WHEN** an agent sends `CapabilityRequest` for capabilities outside its authorized policy set
+- **THEN** the runtime denies the request with `PERMISSION_DENIED` and does not grant a partial escalation
+
 ### Requirement: Single Bidirectional Stream Per Agent
 Each resident agent SHALL hold exactly one primary bidirectional gRPC stream of type `stream ClientMessage / stream ServerMessage`. All scene mutations, event subscriptions, lease management, heartbeats, and telemetry SHALL be multiplexed over this single stream. The runtime SHALL NOT proliferate per-concern streams.
 Source: RFC 0005 §2.1, DR-SP1
@@ -613,7 +622,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Capability Request Mid-Session
-An agent SHALL be able to request additional capabilities mid-session via CapabilityRequest (capabilities list, reason). The runtime SHALL respond with CapabilityNotice (granted/revoked lists, reason, effective_at_server_seq) on success, or RuntimeError(PERMISSION_DENIED) on denial. At most one CapabilityRequest SHOULD be in flight per session at a time. The runtime MUST NOT grant all requested capabilities unconditionally; every capability request MUST be validated against the agent's authorization policy (pre-registered grants in configuration, dynamic agent policy, or operator approval). Capabilities not explicitly authorized for the requesting agent MUST be denied.
+An agent SHALL be able to request additional capabilities mid-session via CapabilityRequest (capabilities list, reason). The runtime SHALL respond with CapabilityNotice (granted/revoked lists, reason, effective_at_server_seq) on success, or RuntimeError(PERMISSION_DENIED) on denial. At most one CapabilityRequest SHOULD be in flight per session at a time. In v1, every capability request MUST be validated against the session's established authorization policy (handshake-derived capability policy set). Capabilities not explicitly authorized for the requesting agent MUST be denied. Dynamic operator-approval workflows for capability escalation are post-v1.
 Source: RFC 0005 §5.3
 Scope: v1-mandatory
 
@@ -680,6 +689,12 @@ Scope: v1-mandatory
 #### Scenario: Single gRPC service definition
 - **WHEN** an agent connects to the runtime
 - **THEN** it SHALL use the HudSession service with the Session RPC for all bidirectional communication
+
+---
+
+### Spec-First Handoff Notes
+- `hud-iq2x.8`: finalize source-of-truth semantics for mid-session escalation (session grant set vs lease scope vs operator/dynamic policy path), then promote any deferred escalation language from this spec into executable requirements.
+- `hud-iq2x.7`: align this session authority boundary with the runtime-policy-scene ownership matrix so policy-wiring work does not duplicate stateful enforcement already owned by runtime/session modules.
 
 ---
 

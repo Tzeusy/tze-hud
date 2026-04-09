@@ -7,10 +7,28 @@ Domain: GOVERNANCE
 
 ## ADDED Requirements
 
-### Requirement: Seven-Level Arbitration Stack
-The runtime MUST implement a fixed 7-level arbitration stack with the following precedence (highest to lowest): Level 0 Human Override, Level 1 Safety, Level 2 Privacy, Level 3 Security, Level 4 Attention, Level 5 Resource, Level 6 Content. This ordering is doctrine and MUST NOT be modified.
-Source: RFC 0009 §1.1
+### Requirement: V1 Authority Boundary (Implemented Runtime Path)
+In current v1 runtime builds, authoritative enforcement is runtime-owned and split across three surfaces: `tze_hud_runtime` (budget ladder, attention/quiet-hours state, and shell override state), `tze_hud_protocol` session handling (auth/capability/lease admission and mutation rejection surfaces), and `tze_hud_scene::policy` (scene-side policy contract). `tze_hud_policy` remains a pure evaluator reference path and is not yet wired into hot-path mutation authority in v1.
+Source: about/heart-and-soul/architecture.md, crates/tze_hud_runtime/src/lib.rs, crates/tze_hud_runtime/src/budget.rs
 Scope: v1-mandatory
+
+#### Scenario: Runtime-owned enforcement remains authoritative
+- **WHEN** a v1 runtime evaluates mutation admission and per-session budget state
+- **THEN** decisions are produced by runtime/session/scene authorities, not by a centralized `tze_hud_policy` execution path
+
+### Requirement: Target Policy Wiring Is Tracked Separately
+The unified policy-wired arbitration path (single level-by-level execution through policy-owned evaluator contracts) is a target integration track and not yet fully wired in current v1 runtime. Until that seam is landed, the level-stack requirements below are treated as target-state requirements and must be implemented via spec-first follow-on work.
+Source: docs/reconciliations/policy_wiring_epic_prompt.md
+Scope: v1-reserved
+
+#### Scenario: Unwired policy requirements route to follow-on work
+- **WHEN** an implementer encounters a level-stack requirement here that is not yet wired in runtime code
+- **THEN** they MUST execute spec-first on `hud-iq2x.7` (authority seam) and `hud-iq2x.8` (capability escalation semantics) before claiming runtime compliance
+
+### Requirement: Seven-Level Arbitration Stack
+The target arbitration stack MUST use a fixed 7-level precedence (highest to lowest): Level 0 Human Override, Level 1 Safety, Level 2 Privacy, Level 3 Security, Level 4 Attention, Level 5 Resource, Level 6 Content. This ordering is doctrine and MUST NOT be modified.
+Source: RFC 0009 §1.1
+Scope: v1-reserved
 
 #### Scenario: Stack levels are fixed
 - **WHEN** the arbitration stack is initialized
@@ -19,7 +37,7 @@ Scope: v1-mandatory
 ### Requirement: Cross-Level Conflict Resolution
 When two policies at different levels conflict, the higher level MUST always win (Rule CL-1). Side effects of the losing level MUST be suppressed, not deferred (Rule CL-2). The winning level's override type MUST apply (Rule CL-3). Lower levels MUST NOT be evaluated when a higher level rejects (short-circuit).
 Source: RFC 0009 §2.1
-Scope: v1-mandatory
+Scope: v1-reserved
 
 #### Scenario: Privacy overrides content
 - **WHEN** Level 2 (Privacy) says "redact tile" but Level 6 (Content) says "show tile"
@@ -194,7 +212,7 @@ Scope: v1-mandatory
 ### Requirement: Per-Frame Evaluation Pipeline
 The runtime MUST evaluate the arbitration stack per-frame at the start of each frame cycle, before mutation intake. Per-frame evaluation order MUST be: Level 1 (Safety) -> Level 2 (Privacy) -> Level 5 (Resource) -> Level 6 (Content). If Level 1 triggers safe mode, Levels 2/5/6 MUST NOT be evaluated for that frame. Total per-frame evaluation MUST complete in < 200us.
 Source: RFC 0009 §3.2
-Scope: v1-mandatory
+Scope: v1-reserved
 
 #### Scenario: Per-frame safety check
 - **WHEN** a frame cycle begins
@@ -207,7 +225,7 @@ Scope: v1-mandatory
 ### Requirement: Per-Event Evaluation Pipeline
 The runtime MUST evaluate the arbitration stack per-event during input drain (Stage 1) and local feedback (Stage 2). Per-event evaluation order MUST be: Level 0 (Human Override) -> Level 4 (Attention) -> Level 3 (Security). If Level 0 triggers safe mode, Levels 4 and 3 MUST stop.
 Source: RFC 0009 §3.3
-Scope: v1-mandatory
+Scope: v1-reserved
 
 #### Scenario: Override processed before attention
 - **WHEN** a `Ctrl+Shift+Escape` input and a tab-switch event arrive in the same frame
@@ -216,7 +234,7 @@ Scope: v1-mandatory
 ### Requirement: Per-Mutation Evaluation Pipeline
 Every mutation in every `MutationBatch` MUST pass through the per-mutation evaluation. For tile mutations, the order MUST be: Security (3) -> Resource (5) -> Content (6). For zone publications, the full order MUST be: Override preemption (0) -> Security (3) -> Privacy (2, redaction decoration) -> Attention (4) -> Resource (5) -> Content (6). Short-circuit: if a higher level rejects, lower levels MUST NOT be evaluated. Per-mutation policy check MUST complete in < 50us.
 Source: RFC 0009 §3.4
-Scope: v1-mandatory
+Scope: v1-reserved
 
 #### Scenario: Zone publish full stack
 - **WHEN** a zone publish mutation arrives
@@ -294,7 +312,7 @@ Scope: v1-mandatory
 ### Requirement: Policy Evaluation Latency Budgets
 The runtime MUST meet the following latency budgets: full per-frame evaluation < 200us, per-mutation policy check < 50us, human override response < 1 frame (16.6ms), privacy transition < 2 frames (33.2ms). Individual sub-checks MUST each consume no more than 20us; their measured mean latencies MUST be ordered by cost as follows: capability lookup fastest (< 5us), then attention check (< 10us), then zone contention resolution (< 20us).
 Source: RFC 0009 §9.1
-Scope: v1-mandatory
+Scope: v1-reserved
 
 #### Scenario: Per-frame evaluation within budget
 - **WHEN** the runtime operates under normal load
@@ -363,6 +381,10 @@ Scope: v1-mandatory
 
 ### Cross-Reference: Freeze and Safe Mode State Transitions
 Freeze/safe-mode state transitions are governed exclusively by the system shell. See system-shell spec: "Requirement: Safe Mode and Freeze Interaction (Shell State Invariant)." Policy arbitration and evaluation MUST NOT write `OverrideState` or perform freeze/safe-mode override state transitions.
+
+### Spec-First Handoff Notes
+- `hud-iq2x.7`: define the runtime-policy-scene ownership matrix and the executable seam for PolicyContext/ArbitrationOutcome integration before re-promoting `v1-reserved` stack requirements to `v1-mandatory`.
+- `hud-iq2x.8`: define capability-escalation source semantics (session grant set vs lease scope vs mid-session requests) before claiming Level 3 Security stack parity with this spec.
 
 ### Requirement: Dynamic Policy Rules
 Dynamic policy rules that can be loaded or modified at runtime are deferred to post-v1. V1 policy rules are static (derived from configuration at load time).
