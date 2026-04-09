@@ -1,127 +1,201 @@
-# Policy Wiring Execution Backlog (Coordinator-Ready)
+# Policy Wiring Execution Backlog (Coordinator-Ready, Corrected)
 
-Date: 2026-04-08
+Date: 2026-04-09
 Source issue: `hud-iq2x.2`
-Input report: `docs/reconciliations/policy_wiring_direction_report.md` (from `origin/main`, merged via PR #375)
+Input reports:
+- `docs/reconciliations/policy_wiring_direction_report.md`
+- `docs/reconciliations/policy_wiring_human_signoff_report.md`
+- `docs/reconciliations/policy_wiring_gen1_reconciliation.md`
 
 ## Goal
-Materialize the policy wiring direction output into a concrete, dependency-ordered implementation backlog with explicit spec grounding and low-churn sequencing.
+Materialize the policy wiring direction output into a concrete, dependency-ordered backlog that is safe to execute against current repo reality.
 
-## Low-Churn Execution Order
-1. Spec reconciliation and seam contract first (documentation/spec only).
-2. Mutation-path pilot next (code), preserving runtime ownership boundaries.
-3. Telemetry and conformance harness immediately after pilot to prove budgets and behavior.
-4. Event/frame extension only after mutation path is stable and measurable.
-5. Human review summary and reconciliation tail close the loop.
+This corrected backlog makes three changes to the initial plan:
+
+1. Front-load the already-live lease/session capability seam before broader policy wiring.
+2. Treat capability-escalation semantics as first-class work, not an enhancement.
+3. Replace assumed event/frame implementation with a post-pilot scope decision gate.
+
+## Current Coordinator Caveat
+
+The earlier companion payload `docs/reconciliations/policy_wiring_execution_backlog.proposed_beads.json` reflects the older, less strict plan. Treat that JSON as stale until it is regenerated from this corrected backlog.
+
+No `PW-*` implementation beads are currently instantiated in the tracker. This document is the corrected source of truth for creating them.
+
+## Corrected Low-Churn Execution Order
+
+1. Fix the live lease capability-scope mismatch.
+2. Reconcile v1 policy authority claims across specs.
+3. Define the full runtime/policy/scene seam contract and ownership matrix.
+4. Define capability-escalation policy semantics explicitly.
+5. Implement mutation-path pilot wiring only.
+6. Add telemetry and latency conformance gates for the pilot.
+7. Decide whether event/frame policy wiring remains a v1 implementation goal or whether the v1 spec should shrink.
+8. Reconcile implementation against doctrine/specs and publish signoff.
 
 ## Dependency Graph
+
+- `discovered-from:hud-iq2x.4` -> `PW-00`
 - `discovered-from:hud-iq2x.2` -> `PW-01`
 - `PW-01` -> `PW-02`
+- `PW-00` -> `PW-02b`
+- `PW-01` -> `PW-02b`
 - `PW-02` -> `PW-03`
+- `PW-02b` -> `PW-03`
 - `PW-03` -> `PW-04`
 - `PW-04` -> `PW-05`
 - `PW-01` -> `PW-06`
 - `PW-02` -> `PW-06`
+- `PW-02b` -> `PW-06`
 - `PW-03` -> `PW-06`
 - `PW-04` -> `PW-06`
 - `PW-05` -> `PW-06`
-- `discovered-from:hud-iq2x.3` -> `PW-06`
 - `PW-06` -> `PW-07`
-- `discovered-from:hud-iq2x.4` -> `PW-07`
+- `discovered-from:hud-iq2x.4` -> `PW-08`
 
 ## Proposed Bead Set (for coordinator to create)
+
+### PW-00 — Fix lease capability scope to session-granted subset
+- Type/Priority: `bug` / `P1`
+- Discovered from: `discovered-from:hud-iq2x.4`
+- Spec citations:
+  - `openspec/changes/v1-mvp-standards/specs/lease-governance/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
+- RFC/doctrine citations:
+  - `about/law-and-lore/rfcs/0008-lease-governance.md`
+  - `about/heart-and-soul/security.md`
+- Acceptance:
+  - Lease grants MUST deny or clamp requested capabilities that exceed the session-granted authorization set.
+  - Tests cover over-requested lease capabilities and prove the agent cannot expand lease scope beyond session grants.
+  - Runtime behavior and spec language are aligned for lease capability scope.
+- Notes:
+  - This is a live authority seam and should not wait for broader policy-stack work.
 
 ### PW-01 — Reconcile v1 policy authority claims across specs
 - Type/Priority: `task` / `P1`
 - Discovered from: `discovered-from:hud-iq2x.2`
 - Spec citations:
-  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md` (per-mutation/per-event/per-frame MUST claims)
-  - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md` (runtime authority/budget constraints)
-  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md` (capability request policy semantics)
+  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
 - Acceptance:
   - Distinguish implemented v1 runtime authority from target policy wiring.
   - Remove or reclassify unwired MUST claims that currently overstate implementation.
-  - Add explicit spec-first handoff notes for downstream implementation beads.
+  - Capture explicit handoff notes for downstream implementation beads.
 
-### PW-02 — Define runtime-policy seam contract and ownership matrix
+### PW-02 — Define runtime-policy-scene seam contract and ownership matrix
 - Type/Priority: `task` / `P1`
 - Depends on: `PW-01`
 - Spec-first marker: `REQUIRED before any policy wiring code`
 - Spec citations:
   - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
   - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md`
-  - Doctrine boundary references: `about/heart-and-soul/v1.md`, `about/heart-and-soul/architecture.md`
+  - `openspec/changes/v1-mvp-standards/specs/lease-governance/spec.md`
+- Doctrine boundary references:
+  - `about/heart-and-soul/v1.md`
+  - `about/heart-and-soul/security.md`
+  - `about/heart-and-soul/presence.md`
 - Acceptance:
   - Publish level-by-level (0-6) input-source mapping.
-  - Publish explicit runtime-owned mutable state matrix (budget, safe-mode, contention, lease state).
+  - Publish explicit ownership matrix for runtime-owned mutable state, including budget, safe mode, contention, lease state, and attention state.
+  - Explicitly account for all three policy surfaces: `tze_hud_runtime`, `tze_hud_policy`, and `tze_hud_scene::policy`.
+  - State which abstractions are canonical, transitional, or scheduled for retirement.
   - Define `PolicyContext` construction contract and `ArbitrationOutcome` execution contract.
+
+### PW-02b — Define capability-escalation policy source semantics
+- Type/Priority: `task` / `P1`
+- Depends on: `PW-00`, `PW-01`
+- Spec-first marker: `REQUIRED before mutation-path wiring`
+- Spec citations:
+  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/lease-governance/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
+- Acceptance:
+  - Source of truth for `CapabilityRequest` evaluation is explicit.
+  - Session grants, lease grants, and mid-session escalation semantics are aligned.
+  - Tests cover grant, deny, mixed-capability denial, and reconnect/resume cases.
+  - Any remaining operator-approval or dynamic-policy assumptions are written down, not implied.
 
 ### PW-03 — Implement mutation-path pilot wiring via `tze_hud_policy`
 - Type/Priority: `feature` / `P1`
-- Depends on: `PW-02`
+- Depends on: `PW-02`, `PW-02b`
 - Spec citations:
-  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md` (per-mutation ordering and short-circuit)
-  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md` (mutation/result semantics)
+  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/lease-governance/spec.md`
 - Acceptance:
   - Runtime builds policy evaluation context snapshots for mutation path.
   - Runtime executes policy outcomes while retaining runtime ownership of mutable counters/state.
-  - Safe-mode/freeze/capability behavior remains stable or is explicitly re-specified.
-  - Add/adjust tests for policy ordering and rejection/queue/shed outcomes.
+  - Existing safe-mode, freeze, lease, and capability behavior remains stable or is explicitly re-specified before merge.
+  - Tests cover ordering plus reject/queue/shed/commit outcomes.
+- Notes:
+  - Do not expand to event/frame paths in this bead.
 
 ### PW-04 — Add policy decision telemetry + latency conformance harness
 - Type/Priority: `task` / `P1`
 - Depends on: `PW-03`
 - Spec citations:
-  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md` (per-mutation/per-frame budgets)
-  - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md` (frame budget/degradation requirements)
-  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md` (runtime telemetry frame contract)
+  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
+- Doctrine references:
+  - `about/heart-and-soul/validation.md`
 - Acceptance:
-  - Emit per-level decision counts/outcomes from wired path.
-  - Add CI-visible benchmark/assertions for policy path latency budgets.
-  - Failure output includes actionable diagnostics (level, path, budget, observed percentile).
+  - Emit per-level decision counts/outcomes from the wired mutation path.
+  - Add CI-visible benchmark/assertions for policy-path latency budgets.
+  - Failure output includes actionable diagnostics: level, path, budget, and observed percentile.
+  - Benchmark guidance is deterministic enough for CI use.
 
-### PW-05 — Extend wiring to per-event and per-frame paths
-- Type/Priority: `feature` / `P2`
+### PW-05 — Decide v1 scope for event/frame policy wiring after mutation pilot
+- Type/Priority: `task` / `P1`
 - Depends on: `PW-04`
 - Spec citations:
-  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md` (per-event and per-frame pipelines)
-  - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md` (stage guarantees and frame overlap)
+  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md`
 - Acceptance:
-  - Implement event/frame ordering and short-circuit semantics per reconciled spec.
-  - Preserve one-frame local-override guarantees.
-  - Add end-to-end tests for event/frame policy paths.
+  - Use mutation-path telemetry and latency data to decide whether event/frame policy wiring remains a v1 implementation goal.
+  - Produce one of two explicit outcomes:
+    - event/frame implementation follow-on beads, or
+    - spec-shrink/spec-clarification beads that remove v1 overcommitment.
+  - No event/frame implementation may start before this decision closes.
+- Notes:
+  - This replaces the earlier assumption that event/frame implementation is automatically the next step.
 
-### PW-06 — Reconcile implementation vs doctrine/spec after wiring phases
+### PW-06 — Reconcile implementation vs doctrine/spec after pilot and scope decision
 - Type/Priority: `task` / `P1`
-- Depends on: `PW-01`, `PW-02`, `PW-03`, `PW-04`, `PW-05`
-- Discovered from: `discovered-from:hud-iq2x.3`
+- Depends on: `PW-01`, `PW-02`, `PW-02b`, `PW-03`, `PW-04`, `PW-05`
 - Spec-first marker: `reconcile before closure`
 - Spec citations:
   - `about/heart-and-soul/v1.md`
   - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
   - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md`
   - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/lease-governance/spec.md`
 - Acceptance:
   - Evidence map from code paths/tests to each retained MUST claim.
   - Any uncovered MUST produces explicit new bead(s), not TODO comments.
-  - Contradictions from direction report are closed or consciously deferred.
+  - Contradictions from the direction report are closed, reduced, or consciously deferred with rationale.
 
-### PW-07 — Publish human signoff report for policy wiring program
+### PW-07 — Publish human signoff report for corrected policy wiring program
 - Type/Priority: `task` / `P1`
 - Depends on: `PW-06`
 - Discovered from: `discovered-from:hud-iq2x.4`
-- Spec citations:
-  - `about/heart-and-soul/v1.md`
-  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
-  - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md`
-  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
 - Acceptance:
   - Produce concise signoff report under `docs/reconciliations/`.
   - Link all created/closed follow-on beads and unresolved risks.
-  - Include explicit do-not-do-yet list for post-v1 deferrals.
+  - State explicitly whether event/frame policy wiring remains in v1 scope.
+
+### PW-08 — Patch stale policy direction artifacts and mark proposal-only status
+- Type/Priority: `docs` / `P2`
+- Discovered from: `discovered-from:hud-iq2x.4`
+- Acceptance:
+  - Remove stale prompt-file-missing claims from policy direction artifacts.
+  - Mark older `PW-*` proposal payloads as superseded if they remain in-tree.
+  - Leave future readers with one unambiguous coordinator source of truth.
 
 ## Coordinator Application Notes
+
 - Create these as child/follow-on beads under epic `hud-iq2x`.
-- Use explicit dependency edges exactly as listed in the graph above.
-- Keep `hud-iq2x.3`/`hud-iq2x.4` as report/reconciliation tails if they still map; otherwise supersede with `PW-06`/`PW-07` and link via `discovered-from`.
-- Do not start `PW-03` until `PW-01` + `PW-02` are complete (spec-first guardrail).
+- Use explicit dependency edges exactly as listed above.
+- Do not start `PW-03` until `PW-02` and `PW-02b` are complete.
+- Do not pre-create event/frame implementation beads. Create them only if `PW-05` concludes they remain in v1 scope.

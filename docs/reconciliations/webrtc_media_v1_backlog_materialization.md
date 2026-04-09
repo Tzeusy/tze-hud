@@ -1,89 +1,140 @@
-# WebRTC/Media V1 Backlog Materialization (hud-nn9d.2)
+# WebRTC/Media V1 Backlog Materialization (Corrected)
+
+Date: 2026-04-09
+Source issue: `hud-nn9d.2`
+Inputs:
+- `docs/reconciliations/webrtc_media_v1_direction_report.md`
+- `docs/reconciliations/webrtc_media_v1_human_signoff_report.md`
+- `docs/reconciliations/webrtc_media_v1_reconciliation_gen1.md`
 
 ## Purpose
 
-Materialize follow-on backlog from `docs/reconciliations/webrtc_media_v1_direction_report.md` into a low-churn, spec-first bead plan that a coordinator can apply without reinterpretation.
+Materialize follow-on backlog from the WebRTC/media direction work into a stricter, lower-churn plan that matches actual repo seams.
 
-Companion machine-readable payload: `docs/reconciliations/webrtc_media_v1_backlog_materialization.proposed_beads.json`.
+This corrected backlog changes the original plan in four important ways:
 
-## Source-of-Truth Inputs
+1. Add an explicit repo-seam inventory before writing the first media capability spec.
+2. Split protocol work into signaling-shape and schema/snapshot tasks instead of treating them as one bead.
+3. Move privacy/operator controls and compositor contract definition into the contract tranche.
+4. Delay creation of implementation beads until the corrected spec tranche receives renewed human review and reconciliation.
 
-- Direction report: `docs/reconciliations/webrtc_media_v1_direction_report.md`
-- Epic prompt: `docs/reconciliations/webrtc_media_v1_epic_prompt.md`
-- Existing parent/children: `hud-nn9d` (epic), `hud-nn9d.3` (human report), `hud-nn9d.4` (reconciliation)
+## Current Coordinator Caveat
+
+The companion payload `docs/reconciliations/webrtc_media_v1_backlog_materialization.proposed_beads.json` reflects the earlier, more optimistic plan. Treat that JSON as stale until it is regenerated from this corrected backlog.
+
+The current `hud-nn9d.*` beads closed the direction/signoff/reconciliation pass. They did not instantiate the corrected `WM-*` implementation program below.
 
 ## Ordering Rules
 
-1. No runtime media implementation bead starts before media contracts are written and reviewed.
-2. Contract beads are serialized to avoid protocol/runtime churn from unstable scope.
-3. Implementation beads are gated by both human review (`hud-nn9d.3`) and reconciliation (`hud-nn9d.4`).
-4. Deferred scope is tracked explicitly as blocked follow-on beads, not silent TODOs.
+1. No runtime media implementation bead starts before media contracts, validation strategy, and privacy/operator controls are written and reviewed.
+2. Contract beads are serialized where scope is still unsettled.
+3. Implementation beads are not created until the corrected contract tranche receives renewed human review and reconciliation.
+4. Deferred scope stays explicit as blocked follow-on beads, not TODOs.
 
 ## Proposed Bead Set (Coordinator-Apply)
 
-### Phase A: Spec-first contract tranche (create now)
+### Phase A: Contract and seam inventory tranche (create now)
 
 | Local ID | Title | Type | Priority | Depends on | Why now |
 |---|---|---|---|---|---|
-| WM-S1 | Spec: media/WebRTC post-v1 capability contract (single-ingress slice) | task | 1 | discovered-from:hud-nn9d.2 | Direction report says this is the hard blocker for all decomposition. |
-| WM-S2 | Spec: session-protocol media signaling delta (compat + failure semantics) | task | 1 | WM-S1 | Protocol contract must stabilize before runtime wiring. |
-| WM-S3 | Spec: runtime-kernel media activation gate and budgets | task | 1 | WM-S1, WM-S2 | Prevent ad-hoc media-thread enablement and budget drift. |
-| WM-S4 | Spec: validation-framework media rehearsal scenarios and pass/fail thresholds | task | 1 | WM-S1, WM-S2, WM-S3 | Defines measurable acceptance before implementation beads execute. |
-| WM-S5 | Docs/spec alignment: architecture-v1 phased contract wording for media deferment | task | 2 | WM-S1 | Removes doctrine ambiguity called out in direction report blockers. |
-| WM-S6 | Docs alignment: README media/WebRTC claims vs v1/post-v1 scope | task | 2 | WM-S1, WM-S5, discovered-from:hud-nn9d.4 | Closes public-claim drift where README can imply active v1 WebRTC/media support. |
+| WM-S0 | Inventory repo seams required for first media slice | task | 1 | discovered-from:hud-nn9d.4 | The original plan understated the protocol/schema/config/compositor surface area. |
+| WM-S1 | Spec: media/WebRTC post-v1 capability contract (bounded ingress slice) | task | 1 | WM-S0 | Capability scope must be written only after all required seams are enumerated. |
+| WM-S2a | Spec decision: media signaling shape (`Session` delta vs separate media RPC) | task | 1 | WM-S1 | The repo does not yet have a settled media signaling contract. |
+| WM-S2b | Spec: protocol/schema and snapshot deltas for bounded media ingress | task | 1 | WM-S1, WM-S2a | Covers proto fields, snapshot semantics, and backward compatibility. |
+| WM-S2c | Spec: media zone contract (zone identity, transport constraint, layer attachment, reconnect semantics) | task | 1 | WM-S1, WM-S2b | “Fixed zone” is too vague without an explicit zone/transport contract. |
+| WM-S3 | Spec: runtime media activation gate and budgets | task | 1 | WM-S1, WM-S2a, WM-S2b | Prevent ad hoc media-thread or decode enablement. |
+| WM-S3b | Spec: privacy, operator controls, and enablement policy for media ingress | task | 1 | WM-S1, WM-S2c | Household-screen privacy and operator control are admission criteria, not cleanup work. |
+| WM-S3c | Spec: compositor contract for `VideoSurfaceRef` rendering | task | 1 | WM-S1, WM-S2c, WM-S3 | Rendering and degradation semantics need a contract before implementation exists. |
+| WM-S4 | Spec: validation-framework media rehearsal scenarios and pass/fail thresholds | task | 1 | WM-S1, WM-S2b, WM-S2c, WM-S3, WM-S3b, WM-S3c | Defines measurable acceptance before implementation beads are even created. |
+| WM-S5 | Docs/spec alignment: architecture-v1 phased contract wording for media deferment | task | 2 | WM-S1 | Removes doctrine ambiguity called out in the direction work. |
+| WM-S6 | Docs alignment: README media/WebRTC claims vs v1/post-v1 scope | task | 2 | WM-S1, WM-S5 | Closes public-claim drift around active v1 media support. |
 
-### Phase B: Implementation tranche (create now, blocked)
+### Phase B: Renewed review gates (create now)
 
 | Local ID | Title | Type | Priority | Depends on | Notes |
 |---|---|---|---|---|---|
-| WM-I1 | Implement protocol/media conversion for first-slice signaling path | feature | 1 | WM-S2, hud-nn9d.3, hud-nn9d.4 | Keep embodied/bidirectional semantics deferred. |
-| WM-I2 | Implement runtime media activation gate (`off` by default) + budget hooks | feature | 1 | WM-S3, WM-I1, hud-nn9d.3, hud-nn9d.4 | No media pool unless gate preconditions are met. |
-| WM-I3 | Implement single inbound `VideoSurfaceRef` fixed-zone render path (no audio) | feature | 1 | WM-S1, WM-I2, hud-nn9d.3, hud-nn9d.4 | Smallest credible post-v1 slice from direction report. |
-| WM-I4 | Validation and benchmark implementation for media first-slice gates | task | 1 | WM-S4, WM-I3, hud-nn9d.3, hud-nn9d.4 | Makes readiness evidence explicit in CI/integration flows. |
-| WM-I5 | Security/privacy hardening for media ingress path and operator controls | task | 1 | WM-S1, WM-S2, WM-I2, hud-nn9d.3, hud-nn9d.4 | Required before enabling media in non-dev environments. |
+| WM-G1 | Human review: corrected media contract tranche signoff | task | 1 | WM-S1, WM-S2a, WM-S2b, WM-S2c, WM-S3, WM-S3b, WM-S3c, WM-S4, WM-S5, WM-S6 | Required because the original signoff happened before these corrected seams were spelled out. |
+| WM-G2 | Reconciliation: corrected media contract + backlog coverage | task | 1 | WM-G1 | Verifies that the corrected tranche closes the protocol/schema/config/compositor gaps before implementation begins. |
 
-### Phase C: Deferred scope markers (create as blocked/deferred)
+### Phase C: Implementation tranche (do not create until WM-G1 and WM-G2 are closed)
+
+| Local ID | Title | Type | Priority | Depends on | Notes |
+|---|---|---|---|---|---|
+| WM-I1 | Implement media signaling/schema path for bounded ingress slice | feature | 1 | WM-G2 | Applies the approved signaling-shape and schema/snapshot spec. |
+| WM-I2 | Implement runtime activation gate (`off` by default) plus approved operator controls | feature | 1 | WM-G2, WM-I1 | Includes explicit enablement policy and default-off behavior. |
+| WM-I3 | Implement compositor `VideoSurfaceRef` render path for the approved media zone contract | feature | 1 | WM-G2, WM-I2 | Must match the approved zone identity, transport, and degradation contract. |
+| WM-I4 | Implement validation scenes, benchmarks, and privacy/operator tests for bounded media ingress | task | 1 | WM-G2, WM-I3 | Makes readiness evidence explicit in CI/integration flows. |
+
+### Phase D: Deferred scope markers (create as blocked/deferred only after Phase C is real)
 
 | Local ID | Title | Type | Priority | Depends on | Deferred reason |
 |---|---|---|---|---|---|
-| WM-D1 | Deferred: bidirectional AV/WebRTC session negotiation and embodied presence | feature | 3 | WM-I4, WM-I5 | Explicitly rejected for current tranche; too much churn/risk. |
-| WM-D2 | Deferred: audio routing/mixing policy engine | feature | 3 | WM-I4, WM-I5 | Premature until video ingress contract is stable and measured. |
-| WM-D3 | Deferred: multi-feed compositing and adaptive bitrate orchestration | feature | 4 | WM-I4, WM-I5 | High complexity; out of smallest-credible-slice scope. |
+| WM-D1 | Deferred: bidirectional AV/WebRTC session negotiation and embodied presence | feature | 3 | WM-I4 | Explicitly out of scope for the bounded ingress tranche. |
+| WM-D2 | Deferred: audio routing/mixing policy engine | feature | 3 | WM-I4 | Premature until bounded video ingress is stable and measured. |
+| WM-D3 | Deferred: multi-feed compositing and adaptive bitrate orchestration | feature | 4 | WM-I4 | High complexity and intentionally outside the bounded tranche. |
 
-## Dependency Graph (Low-Churn Execution)
+## Corrected Dependency Graph
 
-1. `WM-S1`
-2. `WM-S2`, `WM-S3`
-3. `WM-S4`, `WM-S5`, `WM-S6`
-4. `hud-nn9d.3` (human report bead captures spec outcomes + proposed deltas)
-5. `hud-nn9d.4` (reconciliation verifies coverage and no scope creep)
-6. `WM-I1` -> `WM-I2` -> `WM-I3` -> `WM-I4` (+ `WM-I5` in parallel with `WM-I2/WM-I3` once contract is stable)
-7. `WM-D1`, `WM-D2`, `WM-D3` remain blocked/deferred
+1. `WM-S0`
+2. `WM-S1`
+3. `WM-S2a`
+4. `WM-S2b`, `WM-S2c`
+5. `WM-S3`, `WM-S3b`, `WM-S3c`
+6. `WM-S4`, `WM-S5`, `WM-S6`
+7. `WM-G1`
+8. `WM-G2`
+9. Only then create `WM-I1` -> `WM-I2` -> `WM-I3` -> `WM-I4`
+10. `WM-D1`, `WM-D2`, `WM-D3` remain blocked/deferred
 
 ## Coordinator-Ready Bead Create Payloads (Do Not Execute Here)
 
 Use these as direct `bd create` inputs from coordinator context. Replace local IDs in dependency arguments with created bead IDs.
 
 ```bash
-bd create "Spec: media/WebRTC post-v1 capability contract (single-ingress slice)" \
+bd create "Inventory repo seams required for first media slice" \
   --type task --priority 1 \
-  --description "Author normative media/WebRTC capability spec for first post-v1 slice. Include timing model, transport boundaries, lease/budget coupling, security/privacy assumptions, explicit non-goals, and measurable acceptance scenarios." \
-  --deps discovered-from:hud-nn9d.2 --json
+  --description "Inventory all repo surfaces required for a bounded post-v1 media ingress slice: protocol, types.proto schema, snapshots, zone transport semantics, config/profile surfaces, compositor contract, validation strategy, privacy/operator controls, and default-off activation gates. Convert each seam into downstream spec work or mark it explicitly deferred." \
+  --deps discovered-from:hud-nn9d.4 --json
 
-bd create "Spec: session-protocol media signaling delta (compat + failure semantics)" \
+bd create "Spec: media/WebRTC post-v1 capability contract (bounded ingress slice)" \
   --type task --priority 1 \
-  --description "Define protocol field/message deltas for first media signaling path with backward compatibility, downgrade/fallback behavior, and error semantics." \
+  --description "Author normative capability spec for the smallest admissible post-v1 media slice after seam inventory is complete. Include timing model, transport boundaries, lease/budget coupling, privacy assumptions, explicit non-goals, and measurable acceptance scenarios." \
+  --deps blocks:<WM-S0-ID> --json
+
+bd create "Spec decision: media signaling shape (Session delta vs separate media RPC)" \
+  --type task --priority 1 \
+  --description "Resolve whether bounded media ingress extends Session messaging or introduces a separate media RPC. Document compatibility, downgrade behavior, and why the chosen shape is lower-churn for this repo." \
   --deps blocks:<WM-S1-ID> --json
 
-bd create "Spec: runtime-kernel media activation gate and budgets" \
+bd create "Spec: protocol/schema and snapshot deltas for bounded media ingress" \
   --type task --priority 1 \
-  --description "Define runtime media worker activation criteria, default-off behavior, explicit budgets, degradation policy coupling, and prerequisite validation evidence." \
-  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2-ID> --json
+  --description "Define proto fields/messages, zone snapshot semantics, reconnect behavior, and backward-compatible schema changes required for bounded media ingress." \
+  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2a-ID> --json
+
+bd create "Spec: media zone contract (zone identity, transport constraint, layer attachment, reconnect semantics)" \
+  --type task --priority 1 \
+  --description "Define the exact approved media zone or zone class for bounded ingress, including transport constraint representation, layer attachment, reconnect/snapshot behavior, and any fixed-zone restrictions." \
+  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2b-ID> --json
+
+bd create "Spec: runtime media activation gate and budgets" \
+  --type task --priority 1 \
+  --description "Define runtime media worker activation criteria, default-off behavior, degradation coupling, quantitative budgets, and prerequisites for enabling the bounded ingress path." \
+  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2a-ID> --deps blocks:<WM-S2b-ID> --json
+
+bd create "Spec: privacy, operator controls, and enablement policy for media ingress" \
+  --type task --priority 1 \
+  --description "Define viewer/privacy constraints, human/operator overrides, observability requirements, and explicit enablement policy for bounded media ingress on a household-facing display." \
+  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2c-ID> --json
+
+bd create "Spec: compositor contract for VideoSurfaceRef rendering" \
+  --type task --priority 1 \
+  --description "Define texture ownership, present-time semantics, degradation/fallback states, and non-audio render behavior for VideoSurfaceRef within the approved media zone contract." \
+  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2c-ID> --deps blocks:<WM-S3-ID> --json
 
 bd create "Spec: validation-framework media rehearsal scenarios and pass/fail thresholds" \
   --type task --priority 1 \
-  --description "Specify validation scenes and benchmark thresholds required before enabling first media slice implementation." \
-  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2-ID> --deps blocks:<WM-S3-ID> --json
+  --description "Specify validation scenes and benchmark thresholds for bounded media ingress, including headless-vs-real-decode strategy, privacy/operator control tests, and CI-visible pass/fail outputs." \
+  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2b-ID> --deps blocks:<WM-S2c-ID> --deps blocks:<WM-S3-ID> --deps blocks:<WM-S3b-ID> --deps blocks:<WM-S3c-ID> --json
 
 bd create "Docs/spec alignment: architecture-v1 phased contract wording for media deferment" \
   --type task --priority 2 \
@@ -92,52 +143,28 @@ bd create "Docs/spec alignment: architecture-v1 phased contract wording for medi
 
 bd create "Docs alignment: README media/WebRTC claims vs v1/post-v1 scope" \
   --type task --priority 2 \
-  --description "Align README claims about protocol planes and media so v1 boundaries (no live media/WebRTC in v1) are explicit and consistent with doctrine/specs while preserving post-v1 direction." \
-  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S5-ID> --deps discovered-from:hud-nn9d.4 --json
+  --description "Align README claims about protocol planes and media so v1 boundaries remain explicit while preserving post-v1 direction." \
+  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S5-ID> --json
 
-bd create "Implement protocol/media conversion for first-slice signaling path" \
-  --type feature --priority 1 \
-  --description "Implement protocol conversion and compatibility behavior for first-slice media signaling only; keep embodied and bidirectional AV out of scope." \
-  --deps blocks:<WM-S2-ID> --deps blocks:hud-nn9d.3 --deps blocks:hud-nn9d.4 --json
-
-bd create "Implement runtime media activation gate (off by default) + budget hooks" \
-  --type feature --priority 1 \
-  --description "Wire runtime activation gate and budget enforcement hooks for media path while preserving default-off behavior." \
-  --deps blocks:<WM-S3-ID> --deps blocks:<WM-I1-ID> --deps blocks:hud-nn9d.3 --deps blocks:hud-nn9d.4 --json
-
-bd create "Implement single inbound VideoSurfaceRef fixed-zone render path (no audio)" \
-  --type feature --priority 1 \
-  --description "Implement minimal one-way video ingest/render slice constrained to fixed-zone policy; no audio and no bidirectional call semantics." \
-  --deps blocks:<WM-S1-ID> --deps blocks:<WM-I2-ID> --deps blocks:hud-nn9d.3 --deps blocks:hud-nn9d.4 --json
-
-bd create "Validation and benchmark implementation for media first-slice gates" \
+bd create "Human review: corrected media contract tranche signoff" \
   --type task --priority 1 \
-  --description "Implement validation scenarios and benchmark checks defined in validation spec bead, including CI-visible pass/fail outputs." \
-  --deps blocks:<WM-S4-ID> --deps blocks:<WM-I3-ID> --deps blocks:hud-nn9d.3 --deps blocks:hud-nn9d.4 --json
+  --description "Produce a refreshed human-readable signoff report for the corrected media contract tranche after the missing protocol/schema/config/compositor seams are specified." \
+  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2a-ID> --deps blocks:<WM-S2b-ID> --deps blocks:<WM-S2c-ID> --deps blocks:<WM-S3-ID> --deps blocks:<WM-S3b-ID> --deps blocks:<WM-S3c-ID> --deps blocks:<WM-S4-ID> --deps blocks:<WM-S5-ID> --deps blocks:<WM-S6-ID> --json
 
-bd create "Security/privacy hardening for media ingress path and operator controls" \
+bd create "Reconciliation: corrected media contract + backlog coverage" \
   --type task --priority 1 \
-  --description "Implement media-ingress threat mitigations, auth/privacy controls, and operator-facing guardrails required before non-dev enablement." \
-  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S2-ID> --deps blocks:<WM-I2-ID> --deps blocks:hud-nn9d.3 --deps blocks:hud-nn9d.4 --json
-
-bd create "Deferred: bidirectional AV/WebRTC session negotiation and embodied presence" \
-  --type feature --priority 3 \
-  --description "Deferred scope marker: bidirectional AV signaling/session semantics and embodied presence. Do not start before first-slice validation and hardening are complete." \
-  --deps blocks:<WM-I4-ID> --deps blocks:<WM-I5-ID> --json
-
-bd create "Deferred: audio routing/mixing policy engine" \
-  --type feature --priority 3 \
-  --description "Deferred scope marker: audio policy/routing engine post first-slice media stabilization." \
-  --deps blocks:<WM-I4-ID> --deps blocks:<WM-I5-ID> --json
-
-bd create "Deferred: multi-feed compositing and adaptive bitrate orchestration" \
-  --type feature --priority 4 \
-  --description "Deferred scope marker: multi-stream and ABR complexity, intentionally out of smallest-credible-slice scope." \
-  --deps blocks:<WM-I4-ID> --deps blocks:<WM-I5-ID> --json
+  --description "Verify that the corrected media contract tranche closes the missing protocol/schema/config/compositor seams and that no implementation beads are created on hidden assumptions." \
+  --deps blocks:<WM-G1-ID> --json
 ```
+
+## Implementation Guardrail
+
+Do not create `WM-I*` beads until `WM-G1` and `WM-G2` are closed. The original backlog's implementation tranche was too optimistic about how narrow the bounded media slice really is.
+
+When Phase C is eventually created, each implementation bead should cite the exact corrected spec beads above and should not merge new scope back into the tranche.
 
 ## Acceptance Traceability
 
-- Target 1 (explicit dependencies): Satisfied by phase tables + create payload dependency wiring.
-- Target 2 (spec-writing first): Satisfied by ordered `WM-S*` tranche gating all `WM-I*` items.
-- Target 3 (low-churn + deferred markers): Satisfied by serialized contract -> review -> implementation flow and explicit `WM-D*` deferred beads.
+- Target 1 (explicit dependencies): Satisfied by the corrected phase tables and create payload dependency wiring.
+- Target 2 (spec-writing first): Satisfied by `WM-S0` through `WM-S6` plus renewed review gates before any implementation beads exist.
+- Target 3 (low-churn + deferred markers): Satisfied by the seam inventory, split protocol work, early privacy/operator requirements, and explicit `WM-D*` deferred beads.
