@@ -69,12 +69,26 @@ impl PublishLoadIdentity {
             PublishLoadMode::Paced => "paced",
         };
         let shape = match self.mode {
-            PublishLoadMode::Burst => format!("count:{}", self.publish_count.unwrap_or(0)),
-            PublishLoadMode::Paced => format!(
-                "duration:{:.6}|target_rate:{:.6}",
-                self.duration_s.unwrap_or(0.0),
-                self.target_rate_rps.unwrap_or(0.0)
-            ),
+            PublishLoadMode::Burst => match self.publish_count {
+                Some(count) => format!("count:{count}"),
+                None => "count:none".to_string(),
+            },
+            PublishLoadMode::Paced => {
+                let duration = match self.duration_s {
+                    Some(duration_s) => format!("duration:{duration_s:.6}"),
+                    None => "duration:none".to_string(),
+                };
+                let count = match self.publish_count {
+                    Some(count) => format!("count:{count}"),
+                    None => "count:none".to_string(),
+                };
+                let target_rate = match self.target_rate_rps {
+                    Some(target_rate_rps) => format!("target_rate:{target_rate_rps:.6}"),
+                    None => "target_rate:none".to_string(),
+                };
+
+                format!("{duration}|{count}|{target_rate}")
+            }
         };
 
         format!(
@@ -169,7 +183,15 @@ impl PublishLoadArtifact {
     }
 
     fn validate_counts(&self) -> Result<(), String> {
-        if self.metrics.success_count + self.metrics.error_count > self.metrics.request_count {
+        let observed_outcomes = self
+            .metrics
+            .success_count
+            .checked_add(self.metrics.error_count)
+            .ok_or_else(|| {
+                "invalid metrics counts: success_count + error_count overflowed u64".to_string()
+            })?;
+
+        if observed_outcomes > self.metrics.request_count {
             return Err(
                 "invalid metrics counts: success_count + error_count exceeds request_count"
                     .to_string(),
@@ -265,6 +287,21 @@ impl PublishLoadArtifact {
                 "calibration_status=uncalibrated requires verdict=uncalibrated".to_string(),
             );
         }
+        if self.verdict == PublishLoadVerdict::Uncalibrated
+            && self.calibration_status != PublishLoadCalibrationStatus::Uncalibrated
+        {
+            return Err(
+                "verdict=uncalibrated requires calibration_status=uncalibrated".to_string(),
+            );
+        }
+        if self.verdict == PublishLoadVerdict::Uncalibrated
+            && !self.threshold_comparisons_informational
+        {
+            return Err(
+                "verdict=uncalibrated requires threshold comparisons to be informational"
+                    .to_string(),
+            );
+        }
 
         Ok(())
     }
@@ -287,6 +324,28 @@ mod tests {
             publish_count: Some(100),
             duration_s: None,
             target_rate_rps: None,
+        };
+
+        let key_a = a.stable_comparison_key();
+        a.publish_count = Some(200);
+        let key_b = a.stable_comparison_key();
+
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn paced_stable_key_changes_when_count_bound_changes() {
+        let mut a = PublishLoadIdentity {
+            target_id: "t1".to_string(),
+            target_host: "host".to_string(),
+            network_scope: "tailnet".to_string(),
+            transport: PublishLoadTransport::Grpc,
+            mode: PublishLoadMode::Paced,
+            widget_name: "w".to_string(),
+            payload_profile: "p".to_string(),
+            publish_count: Some(100),
+            duration_s: None,
+            target_rate_rps: Some(60.0),
         };
 
         let key_a = a.stable_comparison_key();

@@ -71,9 +71,12 @@ fn schema_json_contains_required_fields() {
         "thresholds",
         "traceability",
         "calibration_status",
+        "normalization_mapping_approved",
         "threshold_comparisons_informational",
         "verdict",
         "warnings",
+        "histogram_path",
+        "calibration_path",
     ] {
         assert!(json.get(key).is_some(), "missing required field: {key}");
     }
@@ -138,4 +141,33 @@ fn calibrated_mode_allows_formal_verdict_when_mapping_is_approved() {
     artifact
         .validate()
         .expect("calibrated verdict should validate");
+}
+
+#[test]
+fn verdict_uncalibrated_requires_uncalibrated_status() {
+    let mut artifact = baseline_artifact();
+    artifact.identity.network_scope = "local".to_string();
+    artifact.normalization_mapping_approved = true;
+    artifact.calibration_status = PublishLoadCalibrationStatus::Calibrated;
+    artifact.benchmark_key = artifact.identity.stable_comparison_key();
+
+    let err = artifact
+        .validate()
+        .expect_err("expected validation failure");
+    assert!(
+        err.contains("verdict=uncalibrated") && err.contains("calibration_status=uncalibrated"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn overflowed_success_plus_error_is_rejected() {
+    let mut artifact = baseline_artifact();
+    artifact.metrics.success_count = u64::MAX;
+    artifact.metrics.error_count = 1;
+
+    let err = artifact
+        .validate()
+        .expect_err("expected overflow validation failure");
+    assert!(err.contains("overflowed"), "unexpected error: {err}");
 }
