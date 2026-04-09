@@ -622,7 +622,11 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Capability Request Mid-Session
-An agent SHALL be able to request additional capabilities mid-session via CapabilityRequest (capabilities list, reason). The runtime SHALL respond with CapabilityNotice (granted/revoked lists, reason, effective_at_server_seq) on success, or RuntimeError(PERMISSION_DENIED) on denial. At most one CapabilityRequest SHOULD be in flight per session at a time. In v1, every capability request MUST be validated against the session's established authorization policy (handshake-derived capability policy set). Capabilities not explicitly authorized for the requesting agent MUST be denied. Dynamic operator-approval workflows for capability escalation are post-v1.
+An agent SHALL be able to request additional capabilities mid-session via CapabilityRequest (capabilities list, reason). The runtime SHALL respond with CapabilityNotice (granted/revoked lists, reason, effective_at_server_seq) on success, or RuntimeError(PERMISSION_DENIED) on denial. At most one CapabilityRequest SHOULD be in flight per session at a time. The runtime MUST NOT grant all requested capabilities unconditionally.
+
+In v1, the source of truth for CapabilityRequest authorization SHALL be the static per-agent allow-list loaded from configuration at startup (`[agents.registered]`; guest = empty allow-list unless fallback-unrestricted dev mode is enabled). SessionEstablished/SessionResumeResult.granted_capabilities are the session's currently held grants, while CapabilityRequest eligibility is evaluated against that allow-list (not only against already-held grants). On reconnect/resume, the runtime SHALL restore the prior held grants and continue using the same configured allow-list for any further mid-session escalation checks.
+
+Dynamic policy-rule loading and operator approval flows are post-v1; they MUST be treated as explicit future work rather than implied v1 behavior.
 Source: RFC 0005 §5.3
 Scope: v1-mandatory
 
@@ -641,6 +645,10 @@ Scope: v1-mandatory
 #### Scenario: Partial grant of mixed capabilities
 - **WHEN** an agent requests capabilities=["read_telemetry", "overlay_privileges"] and is authorized for read_telemetry but not overlay_privileges
 - **THEN** the runtime MUST deny the entire request with RuntimeError(error_code="PERMISSION_DENIED", context="overlay_privileges") rather than silently granting only the authorized subset
+
+#### Scenario: Resume restores grants but preserves escalation policy scope
+- **WHEN** an agent resumes with granted_capabilities=["create_tiles"] and the configured allow-list also includes read_telemetry
+- **THEN** SessionResumeResult SHALL restore only ["create_tiles"], and a post-resume CapabilityRequest(capabilities=["read_telemetry"]) SHALL be evaluated against the configured allow-list and MAY be granted
 
 ---
 

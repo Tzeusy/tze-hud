@@ -277,10 +277,10 @@ impl CapabilityPolicy {
         (granted, denied)
     }
 
-    /// Derive a capability policy for a PSK-authenticated agent.
+    /// Derive an unrestricted capability policy.
     ///
-    /// In v1, a valid PSK grants unrestricted access. Future versions will
-    /// consult per-agent registration files.
+    /// Used for legacy/dev fallback-unrestricted mode where identity is not
+    /// constrained by per-agent registration.
     pub fn for_psk_agent() -> Self {
         Self::unrestricted()
     }

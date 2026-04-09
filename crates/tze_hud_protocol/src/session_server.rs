@@ -1454,6 +1454,27 @@ impl HudSession for HudSessionImpl {
 
 // ─── Handshake handlers ─────────────────────────────────────────────────────
 
+/// Resolve the per-agent authorization scope used for `CapabilityRequest`
+/// evaluation.
+///
+/// Source of truth in v1:
+/// - Registered agent entries (`agent_capabilities`) provide the full
+///   allow-list.
+/// - Unregistered agents receive unrestricted scope only when
+///   `fallback_unrestricted=true` (dev/test mode).
+/// - Otherwise unregistered agents are guest scope (empty allow-list).
+fn authorization_scope_for_agent(
+    agent_id: &str,
+    agent_capabilities: &HashMap<String, Vec<String>>,
+    fallback_unrestricted: bool,
+) -> Vec<String> {
+    match agent_capabilities.get(agent_id) {
+        Some(caps) => caps.clone(),
+        None if fallback_unrestricted => vec!["*".to_string()],
+        None => Vec::new(),
+    }
+}
+
 async fn handle_session_init(
     state: &Arc<Mutex<SharedState>>,
     psk: &str,
@@ -1558,14 +1579,12 @@ async fn handle_session_init(
     // ── Step 4: Capability negotiation (RFC 0005 §5.3) ───────────────────────
     // Capabilities are gated against the agent's authorization policy.
     //
-    // Per configuration/spec.md §Requirement: Agent Registration (lines 136-147):
-    // registered agents get their configured capability set; unregistered agents
-    // get guest policy (no capabilities) unless fallback_unrestricted is set.
-    let policy = match agent_capabilities.get(init.agent_id.as_str()) {
-        Some(caps) => CapabilityPolicy::new(caps.clone()),
-        None if fallback_unrestricted => CapabilityPolicy::unrestricted(),
-        None => CapabilityPolicy::guest(),
-    };
+    // Per configuration/spec.md §Requirement: Agent Registration (lines 136-147),
+    // the configured authorization scope is the source of truth for both
+    // handshake grants and future mid-session escalation checks.
+    let authorization_scope =
+        authorization_scope_for_agent(&init.agent_id, agent_capabilities, fallback_unrestricted);
+    let policy = CapabilityPolicy::new(authorization_scope.clone());
     let (granted_capabilities, _denied_caps) =
         policy.partition_capabilities(&init.requested_capabilities);
 
@@ -1578,7 +1597,7 @@ async fn handle_session_init(
     let policy_caps = if policy.is_unrestricted() {
         vec!["*".to_string()]
     } else {
-        granted_capabilities.clone()
+        authorization_scope
     };
     let sub_result =
         subscriptions::filter_subscriptions(&init.initial_subscriptions, &granted_capabilities);
@@ -1746,11 +1765,8 @@ async fn handle_session_resume(
     // mid-session CapabilityRequest escalation and must reflect the agent's full
     // *authorization* scope (not just the already-granted subset), so that
     // post-resume escalation requests stay within the registered allow-list.
-    let resume_policy_caps = match agent_capabilities.get(resume.agent_id.as_str()) {
-        Some(caps) => caps.clone(), // registered: full configured authorization scope
-        None if fallback_unrestricted => vec!["*".to_string()],
-        None => Vec::new(), // guest: no escalation scope
-    };
+    let resume_policy_caps =
+        authorization_scope_for_agent(&resume.agent_id, agent_capabilities, fallback_unrestricted);
     let session_open_at = now_wall_us();
     let mut session = StreamSession {
         session_id: session_id.clone(),
@@ -2999,9 +3015,6 @@ async fn handle_lease_request(
         return;
     }
 
-    // Map canonical wire names to Capability enum values.
-    // Only canonical v1 names are accepted here; validation above ensures no
-    // legacy names reach this mapping.
     let granted_capabilities: Vec<String> = req.capabilities.clone();
     let capabilities: Vec<Capability> = granted_capabilities
         .iter()
@@ -3519,19 +3532,17 @@ async fn handle_subscription_change(
 /// On partial failure or any denial, responds with RuntimeError(PERMISSION_DENIED)
 /// without granting any capabilities (RFC 0005 §5.3 scenario 4).
 ///
-/// For PSK-authenticated agents in v1, the policy is unrestricted, so any
-/// capability not already held will be granted. Guest agents (no capabilities)
-/// will be denied any escalation attempt.
+/// Authorization is evaluated against `session.policy_capabilities`, which is
+/// sourced from the config-driven agent allow-list (or fallback-unrestricted
+/// dev mode). Guest sessions (empty policy scope) are denied any escalation.
 async fn handle_capability_request(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     req: CapabilityRequest,
 ) {
-    // Reconstruct the authorization policy from the session's `policy_capabilities`.
-    // For PSK-authenticated sessions, `policy_capabilities` contains ["*"] (unrestricted).
-    // For restricted agents, it contains the specific allowed capabilities.
-    //
-    // Post-v1: load per-agent policy from config; use session's auth identity.
+    // Reconstruct authorization policy from `session.policy_capabilities`.
+    // This scope comes from the configured per-agent allow-list; only fallback
+    // unrestricted dev mode yields wildcard policy.
     let policy = CapabilityPolicy::new(session.policy_capabilities.clone());
 
     match policy.evaluate_capability_request(&req.capabilities) {
@@ -4869,6 +4880,7 @@ mod tests {
     use super::*;
     use crate::proto::session::hud_session_client::HudSessionClient;
     use crate::proto::session::hud_session_server::HudSessionServer;
+    use std::collections::HashMap;
     use tokio_stream::StreamExt;
     use tze_hud_scene::graph::SceneGraph;
 
@@ -4911,14 +4923,58 @@ mod tests {
                 .unwrap();
         });
 
-        // Give server time to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        let client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
-            .await
-            .unwrap();
+        let client = connect_test_client_with_retry(addr.port()).await;
 
         (client, handle)
+    }
+
+    /// Start a test server with explicit agent capability policy settings.
+    async fn setup_test_with_policy(
+        agent_capabilities: HashMap<String, Vec<String>>,
+        fallback_unrestricted: bool,
+    ) -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let scene = SceneGraph::new(800.0, 600.0);
+        let base = HudSessionImpl::new(scene, "test-key");
+        let service = HudSessionImpl::from_shared_state_with_config(
+            base.state.clone(),
+            "test-key",
+            agent_capabilities,
+            fallback_unrestricted,
+        );
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        let client = connect_test_client_with_retry(addr.port()).await;
+
+        (client, handle)
+    }
+
+    async fn connect_test_client_with_retry(
+        port: u16,
+    ) -> HudSessionClient<tonic::transport::Channel> {
+        let endpoint = format!("http://[::1]:{port}");
+        for attempt in 0..25 {
+            if let Ok(client) = HudSessionClient::connect(endpoint.clone()).await {
+                return client;
+            }
+            if attempt < 24 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            }
+        }
+        panic!("failed to connect test client to {endpoint} after retries");
     }
 
     /// Helper: create a bidirectional stream and perform handshake.
@@ -4971,6 +5027,49 @@ mod tests {
             }
         }
 
+        (tx, messages, response_stream)
+    }
+
+    /// Helper: perform SessionInit with an explicit requested capability list.
+    async fn handshake_with_requested_capabilities(
+        client: &mut HudSessionClient<tonic::transport::Channel>,
+        agent_id: &str,
+        psk: &str,
+        requested_capabilities: Vec<String>,
+    ) -> (
+        tokio::sync::mpsc::Sender<ClientMessage>,
+        Vec<ServerMessage>,
+        tonic::Streaming<ServerMessage>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: agent_id.to_string(),
+                agent_display_name: agent_id.to_string(),
+                pre_shared_key: psk.to_string(),
+                requested_capabilities,
+                initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let mut messages = Vec::new();
+        for _ in 0..2 {
+            if let Some(msg) = response_stream.next().await {
+                messages.push(msg.unwrap());
+            }
+        }
         (tx, messages, response_stream)
     }
 
@@ -7313,9 +7412,10 @@ mod tests {
     /// WHEN a PSK-authenticated agent requests any capability mid-session,
     /// THEN runtime responds with CapabilityNotice (not RuntimeError).
     ///
-    /// PSK sessions in v1 carry an unrestricted policy, so no capability request
-    /// can be denied via this integration path. The denied path (PERMISSION_DENIED)
-    /// is exercised in test_capability_request_denied_for_guest_session and
+    /// `setup_test()` runs with fallback-unrestricted policy, so no capability
+    /// request can be denied through this integration path. The denied path
+    /// (PERMISSION_DENIED) is exercised in
+    /// test_capability_request_denied_for_guest_session and
     /// test_capability_request_partial_grant_denied_entirely below.
     #[tokio::test]
     async fn test_mid_session_capability_request_unrestricted_succeeds() {
@@ -7486,6 +7586,242 @@ mod tests {
             other => {
                 panic!("Expected RuntimeError(PERMISSION_DENIED) for partial grant, got: {other:?}")
             }
+        }
+    }
+
+    /// Scenario: Session grants, lease grants, and mid-session escalation stay aligned.
+    ///
+    /// 1) LeaseRequest asking for capability scope beyond current session grants is denied.
+    /// 2) After CapabilityRequest grants additional authorized scope, the same LeaseRequest
+    ///    is accepted.
+    #[tokio::test]
+    async fn test_lease_scope_requires_session_grant_or_escalation() {
+        let mut policy = HashMap::new();
+        policy.insert(
+            "scope-agent".to_string(),
+            vec![
+                "create_tiles".to_string(),
+                "modify_own_tiles".to_string(),
+                "read_scene_topology".to_string(),
+            ],
+        );
+        let (mut client, _server) = setup_test_with_policy(policy, false).await;
+        let (tx, _init_messages, mut stream) = handshake_with_requested_capabilities(
+            &mut client,
+            "scope-agent",
+            "test-key",
+            vec!["create_tiles".to_string()],
+        )
+        .await;
+
+        // Request lease scope broader than current session grants: must be denied.
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 30_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let denied = next_non_state_change(&mut stream).await;
+        match denied.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(!resp.granted, "lease must be denied before escalation");
+                assert_eq!(resp.deny_code, "PERMISSION_DENIED");
+                assert!(
+                    resp.deny_reason.contains("modify_own_tiles"),
+                    "deny_reason should name the out-of-scope capability"
+                );
+            }
+            other => panic!("Expected denied LeaseResponse, got: {other:?}"),
+        }
+
+        // Escalate mid-session using the configured authorization scope.
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::CapabilityRequest(CapabilityRequest {
+                capabilities: vec!["modify_own_tiles".to_string()],
+                reason: "need edit capability".to_string(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let granted = next_non_state_change(&mut stream).await;
+        match granted.payload {
+            Some(ServerPayload::CapabilityNotice(notice)) => {
+                assert!(
+                    notice.granted.contains(&"modify_own_tiles".to_string()),
+                    "expected modify_own_tiles grant after escalation"
+                );
+            }
+            other => panic!("Expected CapabilityNotice, got: {other:?}"),
+        }
+
+        // Retry the same lease request: should now succeed.
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 30_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let granted_lease = next_non_state_change(&mut stream).await;
+        match granted_lease.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(resp.granted, "lease must be granted after escalation");
+                assert!(
+                    resp.granted_capabilities
+                        .contains(&"modify_own_tiles".to_string())
+                );
+            }
+            other => panic!("Expected granted LeaseResponse, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Reconnect/resume preserves current grants but keeps policy scope
+    /// for future CapabilityRequest evaluation.
+    #[tokio::test]
+    async fn test_capability_request_after_resume_uses_policy_scope() {
+        let mut policy = HashMap::new();
+        policy.insert(
+            "resume-scope-agent".to_string(),
+            vec![
+                "create_tiles".to_string(),
+                "read_telemetry".to_string(),
+                "read_scene_topology".to_string(),
+            ],
+        );
+        let (mut client, _server) = setup_test_with_policy(policy, false).await;
+        let (tx, init_messages, stream) = handshake_with_requested_capabilities(
+            &mut client,
+            "resume-scope-agent",
+            "test-key",
+            vec!["create_tiles".to_string()],
+        )
+        .await;
+
+        let resume_token = match &init_messages[0].payload {
+            Some(ServerPayload::SessionEstablished(established)) => {
+                assert!(
+                    established
+                        .granted_capabilities
+                        .contains(&"create_tiles".to_string())
+                );
+                assert!(
+                    !established
+                        .granted_capabilities
+                        .contains(&"read_telemetry".to_string()),
+                    "read_telemetry should not be initially granted when not requested"
+                );
+                established.resume_token.clone()
+            }
+            other => panic!("Expected SessionEstablished, got: {other:?}"),
+        };
+        drop(tx);
+        drop(stream);
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+        // Reconnect using SessionResume.
+        let (resume_tx, resume_rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let resume_stream = tokio_stream::wrappers::ReceiverStream::new(resume_rx);
+        resume_tx
+            .send(ClientMessage {
+                sequence: 1,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::SessionResume(SessionResume {
+                    agent_id: "resume-scope-agent".to_string(),
+                    resume_token,
+                    last_seen_server_sequence: 2,
+                    pre_shared_key: "test-key".to_string(),
+                    auth_credential: None,
+                })),
+            })
+            .await
+            .unwrap();
+
+        let mut resumed = client.session(resume_stream).await.unwrap().into_inner();
+        let resume_result = resumed.next().await.unwrap().unwrap();
+        match &resume_result.payload {
+            Some(ServerPayload::SessionResumeResult(result)) => {
+                assert!(result.accepted);
+                assert!(
+                    result
+                        .granted_capabilities
+                        .contains(&"create_tiles".to_string())
+                );
+                assert!(
+                    !result
+                        .granted_capabilities
+                        .contains(&"read_telemetry".to_string()),
+                    "resume restores prior grants; it must not auto-grant untouched policy scope"
+                );
+            }
+            other => panic!("Expected SessionResumeResult, got: {other:?}"),
+        }
+        let snapshot = resumed.next().await.unwrap().unwrap();
+        match snapshot.payload {
+            Some(ServerPayload::SceneSnapshot(_)) => {}
+            other => panic!("Expected SceneSnapshot after resume, got: {other:?}"),
+        }
+
+        // Authorized post-resume escalation must succeed.
+        resume_tx
+            .send(ClientMessage {
+                sequence: 2,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::CapabilityRequest(CapabilityRequest {
+                    capabilities: vec!["read_telemetry".to_string()],
+                    reason: "need telemetry feed".to_string(),
+                })),
+            })
+            .await
+            .unwrap();
+
+        let granted = resumed.next().await.unwrap().unwrap();
+        match granted.payload {
+            Some(ServerPayload::CapabilityNotice(notice)) => {
+                assert!(notice.granted.contains(&"read_telemetry".to_string()));
+            }
+            other => panic!("Expected CapabilityNotice, got: {other:?}"),
+        }
+
+        // Mixed request still denies the entire batch after resume.
+        resume_tx
+            .send(ClientMessage {
+                sequence: 3,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::CapabilityRequest(CapabilityRequest {
+                    capabilities: vec![
+                        "read_telemetry".to_string(),
+                        "overlay_privileges".to_string(),
+                    ],
+                    reason: "mixed escalation".to_string(),
+                })),
+            })
+            .await
+            .unwrap();
+
+        let denied = resumed.next().await.unwrap().unwrap();
+        match denied.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(err.error_code, "PERMISSION_DENIED");
+                assert!(
+                    err.context.contains("overlay_privileges"),
+                    "mixed denial context should list unauthorized capability"
+                );
+            }
+            other => panic!("Expected RuntimeError(PERMISSION_DENIED), got: {other:?}"),
         }
     }
 

@@ -8,8 +8,7 @@ Domain: GOVERNANCE
 ## ADDED Requirements
 
 ### Requirement: Lease State Machine
-The runtime MUST implement the following lease state machine with states: REQUESTED, ACTIVE, SUSPENDED, ORPHANED, REVOKED, EXPIRED, DENIED, RELEASED. Valid transitions MUST be: REQUESTED->ACTIVE (granted), REQUESTED->DENIED (denied), ACTIVE->SUSPENDED (safe mode), ACTIVE->ORPHANED (disconnect), ACTIVE->EXPIRED (TTL elapsed), ACTIVE->REVOKED (viewer dismiss, budget policy), ACTIVE->RELEASED (agent releases), SUSPENDED->ACTIVE (safe mode exit), SUSPENDED->REVOKED (max suspension time exceeded), ORPHANED->ACTIVE (reconnect within grace), ORPHANED->EXPIRED (grace period elapsed). DENIED, REVOKED, EXPIRED, and RELEASED are terminal states.
-For REQUESTED->DENIED capability failures, if any requested lease capability is outside the session-granted capability set, the runtime MUST deny the entire lease request and MUST NOT silently clamp to an authorized subset.
+The runtime MUST implement the following lease state machine with states: REQUESTED, ACTIVE, SUSPENDED, ORPHANED, REVOKED, EXPIRED, DENIED, RELEASED. Valid transitions MUST be: REQUESTED->ACTIVE (granted), REQUESTED->DENIED (denied), ACTIVE->SUSPENDED (safe mode), ACTIVE->ORPHANED (disconnect), ACTIVE->EXPIRED (TTL elapsed), ACTIVE->REVOKED (viewer dismiss, budget policy), ACTIVE->RELEASED (agent releases), SUSPENDED->ACTIVE (safe mode exit), SUSPENDED->REVOKED (max suspension time exceeded), ORPHANED->ACTIVE (reconnect within grace), ORPHANED->EXPIRED (grace period elapsed). DENIED, REVOKED, EXPIRED, and RELEASED are terminal states. Lease grants MUST always be a subset of the session's currently granted capabilities at request time.
 Source: RFC 0008 §3.1
 Scope: v1-mandatory
 
@@ -20,6 +19,10 @@ Scope: v1-mandatory
 #### Scenario: Lease denied
 - **WHEN** an agent sends a `LeaseRequest` requesting capabilities beyond its session grants
 - **THEN** the lease transitions to DENIED and the agent receives `LeaseResponse` with `result = DENIED` and populated `deny_reason`
+
+#### Scenario: Escalation required before broader lease scope
+- **WHEN** an agent is authorized for a capability by policy but does not yet hold it in the current session grant set
+- **THEN** a `LeaseRequest` using that capability MUST be denied until the agent first obtains it via `CapabilityRequest`
 
 #### Scenario: Invalid transition rejected
 - **WHEN** a lease is in EXPIRED state
