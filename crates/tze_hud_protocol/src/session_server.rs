@@ -2135,7 +2135,7 @@ impl PolicyAdmissionReport {
 #[derive(Debug, Clone)]
 struct PolicyAdmissionError {
     message: String,
-    report: PolicyAdmissionReport,
+    report: Box<PolicyAdmissionReport>,
 }
 
 fn log_policy_admission_report(
@@ -2398,7 +2398,7 @@ fn evaluate_policy_admission_for_batch(
                         "policy admission blocked ({block_reason:?}) for namespace '{}'",
                         session.namespace
                     ),
-                    report: report.finalize(eval_started_at, &mut latencies),
+                    report: Box::new(report.finalize(eval_started_at, &mut latencies)),
                 });
             }
             PolicyArbitrationOutcome::Reject(err) => {
@@ -2407,7 +2407,7 @@ fn evaluate_policy_admission_for_batch(
                         "policy admission rejected at level {} ({:?}): {}",
                         err.level, err.code, err.message
                     ),
-                    report: report.finalize(eval_started_at, &mut latencies),
+                    report: Box::new(report.finalize(eval_started_at, &mut latencies)),
                 });
             }
         }
