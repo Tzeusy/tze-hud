@@ -341,10 +341,9 @@ Scope: post-v1
 
 ### Requirement: Policy Telemetry
 Policy evaluation latency MUST be tracked in the per-frame `TelemetryRecord` via a `PolicyTelemetry` struct containing: `per_frame_eval_us`, `per_mutation_eval_us_p99`, `mutations_rejected`, `mutations_redacted`, `mutations_queued`, `mutations_shed`, and `override_commands_processed`.
+Note: This remains target-state telemetry for the unified policy wiring seam. In current v1 runtime builds, authoritative hot-path enforcement is still runtime/session/scene-owned (see `Requirement: V1 Authority Boundary (Implemented Runtime Path)` above), and `tze_hud_policy` telemetry is not yet wired into per-frame runtime telemetry output.
 Source: RFC 0009 §9.2
 Scope: v1-reserved
-
-Scope note: This remains target-state telemetry for the unified policy wiring seam. In current v1 runtime builds, authoritative hot-path enforcement is still runtime/session/scene-owned (see `Requirement: V1 Authority Boundary (Implemented Runtime Path)` above), and `tze_hud_policy` telemetry is not yet wired into per-frame runtime telemetry output.
 
 #### Scenario: Telemetry captures rejection count
 - **WHEN** 3 mutations are rejected at Level 3 in a single frame
