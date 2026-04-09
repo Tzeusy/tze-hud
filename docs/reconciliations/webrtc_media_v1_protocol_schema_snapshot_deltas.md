@@ -1,7 +1,7 @@
 # WebRTC/Media V1 Protocol + Schema/Snapshot Delta Contract (WM-S2b)
 
 Date: 2026-04-09
-Issue: `hud-a5ro`
+Issue: `hud-nn9d.8`
 Parent epic: `hud-nn9d`
 Depends on: `hud-nn9d.6` (WM-S1), `hud-nn9d.7` (WM-S2a)
 
@@ -106,28 +106,6 @@ WM-S2a selected the session-envelope extension path. WM-S2b makes that concrete:
 3. Add explicit oneof comments + `reserved` declarations for any removed
    experimental tags/names during rollout to prevent wire reuse.
 
-### Expiry-field precedence and consistency rules
-
-1. `ttl_us` remains a valid relative lifetime field for `ZonePublish`.
-2. `expires_at_wall_us` is the canonical absolute-expiry representation used for
-   snapshot/reconnect parity.
-3. Senders SHOULD provide exactly one expiry form:
-- relative expiry via `ttl_us` with `expires_at_wall_us = 0`, or
-- absolute expiry via `expires_at_wall_us` with `ttl_us = 0`.
-4. When only `ttl_us` is present (`ttl_us > 0`, `expires_at_wall_us = 0`),
-   receivers MUST derive effective absolute expiry as:
-- `present_at_wall_us + ttl_us` when `present_at_wall_us != 0`,
-- otherwise `accepted_at_wall_us + ttl_us`, where `accepted_at_wall_us` is the
-  receiver wall-clock instant at publish acceptance/application.
-5. When only `expires_at_wall_us` is present (`expires_at_wall_us > 0`,
-   `ttl_us = 0`), that value is the effective absolute expiry.
-6. When both `ttl_us` and `expires_at_wall_us` are non-zero:
-- receiver MUST derive the ttl-based absolute expiry using rule (4),
-- publish is valid only if the derived value equals `expires_at_wall_us`,
-- if values differ, receiver MUST reject with deterministic invalid-argument
-  handling (malformed publish contract violation).
-7. `ttl_us = 0` and `expires_at_wall_us = 0` means no publication expiry.
-
 ## Snapshot + Reconnect Contract For Bounded Media Ingress
 
 ### Snapshot inclusion requirements
@@ -188,28 +166,8 @@ WM-S2a selected the session-envelope extension path. WM-S2b makes that concrete:
 - media publication metadata survives snapshot roundtrip,
 - resume ordering remains `SessionResumeResult` then `SceneSnapshot`,
 - downgrade suppression path emits deterministic denial/error behavior.
-- `ttl_us`/`expires_at_wall_us` precedence rules above are enforced for
-  ttl-only, absolute-only, dual-consistent, and dual-conflict publishes.
 
-## Contract Validation Scenarios (normative)
-
-1. **TTL-only publish derives deterministic absolute expiry**
-- **WHEN** `ttl_us > 0`, `expires_at_wall_us = 0`, `present_at_wall_us = 0`
-- **THEN** receiver computes effective expiry as `accepted_at_wall_us + ttl_us`
-  and stores that absolute value for snapshot parity.
-2. **Scheduled TTL publish anchors to present_at**
-- **WHEN** `ttl_us > 0`, `expires_at_wall_us = 0`, `present_at_wall_us > 0`
-- **THEN** receiver computes effective expiry as `present_at_wall_us + ttl_us`.
-3. **Dual-field consistent publish is accepted**
-- **WHEN** both `ttl_us` and `expires_at_wall_us` are non-zero and ttl-derived
-  absolute expiry equals `expires_at_wall_us`
-- **THEN** publish is accepted and canonical absolute expiry is retained.
-4. **Dual-field conflicting publish is rejected**
-- **WHEN** both `ttl_us` and `expires_at_wall_us` are non-zero and ttl-derived
-  absolute expiry does not equal `expires_at_wall_us`
-- **THEN** publish is rejected with deterministic invalid-argument semantics.
-
-## Acceptance Traceability (`hud-a5ro`)
+## Acceptance Traceability (`hud-nn9d.8`)
 
 1. Required protocol/schema deltas are specified:
 - fulfilled by explicit field allocations and message/schema delta tables above.
