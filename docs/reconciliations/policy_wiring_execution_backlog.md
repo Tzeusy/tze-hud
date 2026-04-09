@@ -5,8 +5,10 @@ Source issue: `hud-iq2x.2`
 Coordinator source-of-truth artifact: `policy_wiring_execution_backlog.md`
 Input reports:
 - `docs/reconciliations/policy_wiring_direction_report.md`
+- `docs/reconciliations/policy_wiring_direction_report_20260409.md`
 - `docs/reconciliations/policy_wiring_human_signoff_report.md`
 - `docs/reconciliations/policy_wiring_gen1_reconciliation.md`
+- `docs/reconciliations/policy_wiring_final_reconciliation_20260409.md`
 
 ## Goal
 Materialize the policy wiring direction output into a concrete, dependency-ordered backlog that is safe to execute against current repo reality.
@@ -21,7 +23,7 @@ This corrected backlog makes three changes to the initial plan:
 
 The earlier companion payload `docs/reconciliations/policy_wiring_execution_backlog.proposed_beads.json` reflects the older, less strict plan. Treat that JSON as a legacy/stale artifact and explicitly superseded by this backlog.
 
-No `PW-*` implementation beads are currently instantiated in the tracker. This document is the corrected source of truth for creating them.
+`hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). Mutation pilot and downstream telemetry/scope/reconciliation/signoff beads are still pending instantiation.
 
 ## Corrected Low-Churn Execution Order
 
