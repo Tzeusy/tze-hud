@@ -28,11 +28,14 @@ Tracker instantiation snapshot (2026-04-09):
 - `PW-01` -> `hud-iq2x.6` (closed)
 - `PW-02` -> `hud-iq2x.7` (blocked pending PR review)
 - `PW-02b` -> `hud-iq2x.8` (closed)
-- `PW-03` -> `hud-jq5p` (in_progress)
-- `PW-04` -> `hud-xjfb` (in_progress)
-- `PW-05`..`PW-08` not yet instantiated
+- `PW-03` -> `hud-jq5p` (closed)
+- `PW-04` -> `hud-xjfb` (closed)
+- `PW-05` -> `hud-ew7a` (closed)
+- `PW-06` -> `hud-p48t` (blocked pending PR #403 merge)
+- `PW-07` -> `hud-5fb1` (closed)
+- `PW-08` not yet instantiated
 
-`hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). The event/frame scope decision bead is now materialized as `hud-ew7a`; mutation pilot is tracked as `hud-jq5p` and telemetry conformance as `hud-xjfb`. Downstream reconciliation beads remain pending instantiation. The final signoff closure bead is tracked as `hud-5fb1`.
+`hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). The event/frame scope decision bead is materialized as `hud-ew7a`; mutation pilot and telemetry are tracked as `hud-jq5p` and `hud-xjfb`; post-pilot reconciliation is tracked as `hud-p48t`; and final signoff remains tracked as `hud-5fb1`.
 
 This document remains the coordinator source of truth for remaining bead creation and dependency wiring.
 
@@ -69,7 +72,7 @@ This document remains the coordinator source of truth for remaining bead creatio
 
 ## Bead Specification Set (creation and execution reference)
 
-Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` now exist in tracker form. The sections below remain authoritative for acceptance criteria, citations, and dependency intent.
+Instantiation note: the `PW-*` backlog below is a full dependency view, not a create-from-scratch checklist. `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` now exist in tracker form, and `PW-06`/`PW-07` are tracked as `hud-p48t`/`hud-5fb1`. The sections below remain authoritative for acceptance criteria, citations, and dependency intent.
 
 ### PW-00 — Fix lease capability scope to session-granted subset
 - Type/Priority: `bug` / `P1`
@@ -182,6 +185,7 @@ Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` no
 ### PW-06 — Reconcile implementation vs doctrine/spec after pilot and scope decision
 - Type/Priority: `task` / `P1`
 - Depends on: `PW-01`, `PW-02`, `PW-02b`, `PW-03`, `PW-04`, `PW-05`
+- Tracker instantiation status: now tracked as `hud-p48t`
 - Spec-first marker: `reconcile before closure`
 - Spec citations:
   - `about/heart-and-soul/v1.md`
@@ -214,7 +218,8 @@ Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` no
 
 ## Coordinator Application Notes
 
-- Create these as child/follow-on beads under epic `hud-iq2x`.
+- `PW-06` and `PW-07` are already instantiated as `hud-p48t` and `hud-5fb1`; create remaining uninstantiated beads as child/follow-on work under epic `hud-iq2x`.
+- The `PW-*` backlog above is a complete dependency view; do not duplicate already-instantiated entries.
 - Use explicit dependency edges exactly as listed above.
 - Do not start `PW-03` until `PW-02` and `PW-02b` are complete.
 - Do not pre-create event/frame implementation beads. Create them only if `PW-05` concludes they remain in v1 scope.

@@ -30,7 +30,7 @@ Scope: Verify policy-wiring direction outputs against required evidence set and 
 |---|---|---|
 | 1. Direction report identifies contradictions and tractable path | Contradictions and phased tractable path are explicit in both baseline and Gen-2 direction reports. | Pass |
 | 2. Names exact seams runtime-owned vs policy-owned | Gen-2 report adds explicit runtime/policy/scene/session ownership matrix and seam requirements. | Pass |
-| 3. Follow-on implementation/spec beads created with dependencies and acceptance criteria | `hud-iq2x.5`/`.6`/`.7`/`.8` exist and map to governance-first seams; scope-decision bead `hud-ew7a` is now instantiated, while pilot/telemetry/reconciliation/signoff beads remain pending. | Partial |
+| 3. Follow-on implementation/spec beads created with dependencies and acceptance criteria | `hud-iq2x.5`/`.6`/`.7`/`.8` exist and map to governance-first seams; scope-decision (`hud-ew7a`) and reconciliation/signoff (`hud-p48t`, `hud-5fb1`) are instantiated, while pilot/telemetry beads remain pending. | Partial |
 | 4. Human-readable report summarizes path, risks, and stop/do-not-do-yet items | Human signoff report plus Gen-2 report explicitly provide path, risks, and anti-goals. | Pass |
 | 5. Final reconciliation verifies coverage | This document performs the final evidence and criterion reconciliation against current repo and bead state. | Pass |
 
@@ -48,8 +48,11 @@ Scope: Verify policy-wiring direction outputs against required evidence set and 
 
 1. Mutation-path pilot implementation bead.
 2. Pilot telemetry + latency conformance bead.
-3. Post-pilot reconciliation bead.
-4. Final human signoff closure bead.
+
+### Post-pilot reconciliation now instantiated
+
+- `hud-p48t` now tracks the post-pilot reconciliation bead.
+- `hud-p48t` remains dependency-gated on mutation pilot, telemetry, scope decision (`hud-ew7a`), and spec reconciliation completion.
 
 ### Closure bead now instantiated
 
@@ -60,6 +63,6 @@ Scope: Verify policy-wiring direction outputs against required evidence set and 
 
 [Observed] Direction artifacts are now coherent with doctrine/spec/code evidence and explicitly model the three policy surfaces.
 
-[Observed] The decomposition is only partially materialized in tracker state: governance-first beads, the scope-decision bead (`hud-ew7a`), and the closure signoff bead (`hud-5fb1`) are present, but downstream pilot/telemetry/reconciliation execution still requires coordinator follow-through.
+[Observed] The decomposition is only partially materialized in tracker state: governance-first beads, scope-decision (`hud-ew7a`), post-pilot reconciliation (`hud-p48t`), and final closure signoff (`hud-5fb1`) are present, but the downstream pilot/telemetry beads still require creation by the coordinator.
 
-[Inferred] Closing `hud-iq2x` should wait for those remaining follow-on beads to be instantiated and linked, and for `hud-5fb1` signoff work to complete after those prerequisites land.
+[Inferred] Closing `hud-iq2x` should wait for those remaining follow-on beads to be instantiated and linked, then for `hud-p48t` and `hud-5fb1` closure work to complete after those prerequisites land.
