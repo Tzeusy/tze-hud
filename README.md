@@ -4,13 +4,13 @@ A local, high-performance display runtime that gives LLMs safe, synchronized, li
 
 ## The Problem
 
-LLMs today are stuck in three forms: the CLI, the chat transcript, and generated webpages. None of these let a model hold a region of a shared physical screen, update it continuously, stream media into it, react to touch, or coordinate with other agents on the same display. There is no substrate for LLM presence on surfaces people actually look at.
+LLMs today are stuck in three forms: the CLI, the chat transcript, and generated webpages. None of these let a model hold a region of a shared physical screen, update it continuously, react to touch, or coordinate with other agents on the same display with runtime-level governance. There is no substrate for LLM presence on surfaces people actually look at.
 
 Household screens make this harder. A wall display is visible to the homeowner, their partner, kids, guests, and service workers — all with different information access needs. Privacy, attention governance, and human override have to be structural, built into the rendering and protocol layers.
 
 ## What tze_hud Does
 
-tze_hud owns the screen. The runtime handles compositing, timing, input routing, permissions, and resource budgets. In v1, LLMs connect over MCP (compatibility) and gRPC (resident control) and request presence through leases with TTL, capability scopes, and revocation semantics. WebRTC/live media remains a post-v1 lane.
+tze_hud owns the screen. The runtime handles compositing, timing, input routing, permissions, and resource budgets. In v1, only two protocol planes are active: MCP (compatibility) and gRPC (resident control). LLMs request presence through leases with TTL, capability scopes, and revocation semantics. The WebRTC/media plane is intentionally inactive in v1 and remains post-v1 behind explicit bounded-ingress contract gates (`openspec/specs/media-webrtc-bounded-ingress/spec.md`).
 
 Agents publish semantic intent — "put this text in the subtitle zone," "bind these parameters to the CPU gauge widget" — and the runtime handles layout, visual identity, and rendering at 60fps. Agents never sit in the frame loop. Arrival time is decoupled from presentation time; every payload carries timing semantics.
 
@@ -49,7 +49,8 @@ The rest of this README is command-first and focused on four workflows:
 - **Use case**: Remote deployment, cross-machine validation, automated publish workflows.
 
 v1 scope note:
-- Live media/WebRTC is explicitly deferred in v1 (`about/heart-and-soul/v1.md`, "V1 explicitly defers").
+- Live media/WebRTC is explicitly deferred in v1 (`about/heart-and-soul/v1.md`, "V1 explicitly defers"): no GStreamer media pipelines, no video decode, and no audio/video streaming in default v1 runtime behavior.
+- Post-v1 media activation is spec-first and gate-based (`openspec/specs/media-webrtc-bounded-ingress/spec.md`) and MUST NOT change v1 defaults.
 
 ### Demo and Reference Binaries
 - `vertical_slice` (`examples/vertical_slice/`): Development reference showing scene/lease/zone publish semantics. **Not** intended for operations or remote deployment.
