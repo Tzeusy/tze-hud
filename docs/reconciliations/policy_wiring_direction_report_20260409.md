@@ -57,11 +57,15 @@ Execution brief: `docs/reconciliations/policy_wiring_epic_prompt.md`
 | `hud-iq2x.8` | Capability-escalation policy source semantics | closed |
 | `hud-ew7a` | Event/frame v1 scope decision after mutation pilot telemetry | in_progress |
 
-### Remaining Follow-On Beads Needed (Tracker Status)
+### Remaining Follow-On Beads Needed (Pending Instantiation)
 
 1. Mutation-path pilot wiring via `tze_hud_policy` (depends on `.7` and `.8`).
 2. Policy telemetry + latency conformance harness (depends on mutation pilot).
-3. Post-pilot reconciliation is now instantiated as `hud-p48t` (depends on mutation pilot + telemetry + `hud-ew7a` + `.6`).
+3. Event/frame scope decision bead (depends on telemetry outcome).
+
+### Post-Pilot Reconciliation Instantiated
+
+- Post-pilot reconciliation is now instantiated as `hud-p48t` (depends on mutation pilot + telemetry + `hud-ew7a` + `.6`).
 
 ### Closure Bead Instantiated
 
