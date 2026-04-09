@@ -2034,7 +2034,9 @@ fn mutation_required_capabilities(mutation: &SceneMutation) -> Vec<String> {
 
 fn mutation_kind_for_policy(mutation: &SceneMutation) -> PolicyMutationKind {
     match mutation {
-        SceneMutation::PublishToZone { .. } => PolicyMutationKind::ZonePublication,
+        SceneMutation::PublishToZone { .. } | SceneMutation::ClearZone { .. } => {
+            PolicyMutationKind::ZonePublication
+        }
         SceneMutation::CreateTile { .. } | SceneMutation::DeleteTile { .. } => {
             PolicyMutationKind::Transactional
         }
@@ -2136,6 +2138,22 @@ fn evaluate_policy_admission_for_batch(
 
         let target_namespace = match mutation {
             SceneMutation::CreateTile { namespace, .. } => namespace.clone(),
+            SceneMutation::UpdateTileBounds { tile_id, .. }
+            | SceneMutation::UpdateTileZOrder { tile_id, .. }
+            | SceneMutation::UpdateTileOpacity { tile_id, .. }
+            | SceneMutation::UpdateTileInputMode { tile_id, .. }
+            | SceneMutation::UpdateTileSyncGroup { tile_id, .. }
+            | SceneMutation::UpdateTileExpiry { tile_id, .. }
+            | SceneMutation::DeleteTile { tile_id }
+            | SceneMutation::SetTileRoot { tile_id, .. }
+            | SceneMutation::AddNode { tile_id, .. }
+            | SceneMutation::UpdateNodeContent { tile_id, .. }
+            | SceneMutation::JoinSyncGroup { tile_id, .. }
+            | SceneMutation::LeaveSyncGroup { tile_id } => scene
+                .tiles
+                .get(tile_id)
+                .map(|tile| tile.namespace.clone())
+                .unwrap_or_else(|| session.namespace.clone()),
             _ => session.namespace.clone(),
         };
 
@@ -2192,7 +2210,7 @@ fn evaluate_policy_admission_for_batch(
             target_namespace: &target_namespace,
             agent_id: &session.namespace,
             kind,
-            timestamp_us: now_wall_us(),
+            timestamp_us: now_mono_us(),
         });
 
         match eval.outcome {
@@ -10266,12 +10284,15 @@ mod tests {
             let mut scene = st.scene.lock().await;
             let _tab_id = scene.create_tab("policy-scope-tab", 0).expect("create tab");
 
-            // Manually forge a lease with CreateTiles capability in scene state only.
+            // Manually forge a lease capability set in scene state only.
             // This intentionally diverges scene lease scope from session-held grants.
             scene.grant_lease(
                 "policy-scope-agent",
                 60_000,
-                vec![tze_hud_scene::types::Capability::CreateTiles],
+                vec![
+                    tze_hud_scene::types::Capability::CreateTiles,
+                    tze_hud_scene::types::Capability::ModifyOwnTiles,
+                ],
             )
         };
 
