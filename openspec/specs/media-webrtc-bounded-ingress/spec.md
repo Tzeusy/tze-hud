@@ -81,7 +81,7 @@ Scope: post-v1-contract-tranche
 #### Scenario: scheduled ingress does not render early
 - **WHEN** an ingress publication sets `present_at_wall_us` to 500ms in the future
 - **THEN** the runtime MUST render no media frame for that publication before the declared presentation time
-- **AND** first presentation MUST occur no later than two compositor frames after `present_at_wall_us`
+- **AND** first presentation MUST occur no later than one frame period after `present_at_wall_us`
 
 #### Scenario: expired ingress is not rendered
 - **WHEN** an ingress publication arrives with `expires_at_wall_us` in the past
@@ -99,7 +99,7 @@ Scope: post-v1-contract-tranche
 
 #### Scenario: lease revocation tears down ingress
 - **WHEN** the lease governing an active ingress stream is revoked
-- **THEN** the stream MUST be torn down and removed from active presentation within 100ms
+- **THEN** the stream MUST be torn down and removed from active presentation within one compositor frame
 
 ---
 
