@@ -38,7 +38,7 @@ The execution backlog originated in `hud-iq2x.2` and has since been partially in
 - `PW-02` -> `hud-iq2x.7`: Define runtime-policy seam contract and ownership matrix (blocked pending PR review)
 - `PW-02b` -> `hud-iq2x.8`: Define capability-escalation policy source semantics (closed)
 - `PW-03` -> `hud-jq5p`: Implement mutation-path pilot wiring via `tze_hud_policy` (in progress)
-- `PW-04`: Add policy decision telemetry and latency conformance harness (not yet instantiated)
+- `PW-04` -> `hud-xjfb`: Add policy decision telemetry and latency conformance harness (in progress)
 - `PW-05`: Decide v1 scope for event/frame policy wiring after mutation pilot (not yet instantiated)
 - `PW-06`: Reconcile implementation vs doctrine/spec after wiring phases (not yet instantiated)
 - `PW-07` -> `hud-5fb1`: Publish final policy wiring program signoff report (blocked)
