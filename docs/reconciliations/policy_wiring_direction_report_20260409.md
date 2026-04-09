@@ -51,17 +51,18 @@ Execution brief: `docs/reconciliations/policy_wiring_epic_prompt.md`
 
 | Child bead | Role in plan | Status |
 |---|---|---|
-| `hud-iq2x.5` | Lease capability scope fix (governance seam first) | blocked (PR-linked) |
-| `hud-iq2x.6` | Spec reconciliation across policy/runtime/session | blocked (PR-linked) |
-| `hud-iq2x.7` | Runtime-policy-scene seam contract + ownership matrix | open |
-| `hud-iq2x.8` | Capability-escalation policy source semantics | open |
+| `hud-iq2x.5` | Lease capability scope fix (governance seam first) | closed |
+| `hud-iq2x.6` | Spec reconciliation across policy/runtime/session | closed |
+| `hud-iq2x.7` | Runtime-policy-scene seam contract + ownership matrix | blocked (PR-linked) |
+| `hud-iq2x.8` | Capability-escalation policy source semantics | closed |
+| `hud-ew7a` | Event/frame v1 scope decision after mutation pilot telemetry | in_progress |
 
 ### Remaining Follow-On Beads Needed (Not Yet Instantiated)
 
 1. Mutation-path pilot wiring via `tze_hud_policy` (depends on `.7` and `.8`).
 2. Policy telemetry + latency conformance harness (depends on mutation pilot).
-3. Event/frame scope decision bead (depends on telemetry outcome).
-4. Post-pilot reconciliation bead (depends on all above plus `.6`).
+3. Post-pilot reconciliation bead (depends on pilot + telemetry + scope decision + `.6`).
+4. Human signoff report bead (depends on reconciliation).
 
 ### Closure Bead Instantiated
 
@@ -90,6 +91,6 @@ Execution brief: `docs/reconciliations/policy_wiring_epic_prompt.md`
 
 **Real direction**: Preserve runtime sovereignty and state ownership while incrementally wiring policy as a pure evaluation path with explicit runtime-policy-scene contracts.
 
-**Work on next**: (1) land spec/seam governance beads (`hud-iq2x.6`, `.7`, `.8`) and lease scope fix (`hud-iq2x.5`), (2) instantiate mutation pilot + telemetry/scope decision beads, (3) reconcile and sign off.
+**Work on next**: (1) finish seam contract bead `hud-iq2x.7`, (2) instantiate mutation pilot + telemetry beads, (3) carry `hud-ew7a` through go/no-go closure and then reconcile/sign off.
 
 **Stop pretending**: v1 does not currently run full seven-level arbitration end-to-end in runtime hot paths.
