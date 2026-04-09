@@ -326,7 +326,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Inter-Agent Event Bus
-A full inter-agent event bus enabling direct agent-to-agent event routing beyond the scene-level coordination signals is deferred.
+A full inter-agent event bus enabling direct agent-to-agent event routing beyond the scene-level coordination signals is deferred, and direct agent-to-agent routing MUST NOT be available in v1.
 Source: RFC 0010 §1.1, v1.md §"V1 explicitly defers"
 Scope: post-v1
 
@@ -337,7 +337,7 @@ Scope: post-v1
 ---
 
 ### Requirement: Advanced Event Routing
-Advanced event routing capabilities (priority queues, content-based routing, event transformations) are deferred beyond v1.
+Advanced event routing capabilities (priority queues, content-based routing, event transformations) are deferred beyond v1, and v1 SHALL use only the baseline four-stage pipeline.
 Source: v1.md §"V1 explicitly defers"
 Scope: post-v1
 

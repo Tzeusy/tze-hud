@@ -402,7 +402,7 @@ Scope: v1-mandatory
 - **THEN** the runtime MUST use all documented defaults (target_fps=60, sync_drift_budget_us=500, etc.)
 
 ### Requirement: Media Clock Integration (Deferred)
-Media clock integration (GStreamer pipeline clock, AV synchronization, PTS-to-frame mapping, word-highlighting/subtitle timing, sync groups with media_clock_binding) is explicitly deferred to post-v1. V1 ships sync groups for scene-level coordination only.
+Media clock integration (GStreamer pipeline clock, AV synchronization, PTS-to-frame mapping, word-highlighting/subtitle timing, sync groups with media_clock_binding) is explicitly deferred to post-v1. V1 MUST ship sync groups for scene-level coordination only.
 Source: RFC 0003 §6
 Scope: post-v1
 
@@ -411,7 +411,7 @@ Scope: post-v1
 - **THEN** no GStreamer pipeline clock SHALL be created; ClockedMediaCue message class SHALL be defined in the proto but not actively processed
 
 ### Requirement: Clocked Media/Cue Message Class (Deferred)
-The ClockedMediaCue message class (scheduled against media/display clock for AV sync, subtitles, word-highlighting) is defined in the proto enum but is not actively processed in v1.
+The ClockedMediaCue message class (scheduled against media/display clock for AV sync, subtitles, word-highlighting) is defined in the proto enum but MUST NOT be actively processed in v1.
 Source: RFC 0003 §6, §7.1
 Scope: post-v1
 

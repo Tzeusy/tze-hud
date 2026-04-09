@@ -401,7 +401,7 @@ Unified level-stack hot-path wiring is explicitly deferred to post-v1 (v2). Any 
 - `hud-1jd5`: runtime hot-path arbitration telemetry emission remains deferred until mutation-path policy wiring is explicitly enabled; pure evaluator events in `tze_hud_policy` are not by themselves runtime telemetry delivery evidence.
 
 ### Requirement: Dynamic Policy Rules
-Dynamic policy rules that can be loaded or modified at runtime are deferred to post-v1. V1 policy rules are static (derived from configuration at load time).
+Dynamic policy rules that can be loaded or modified at runtime are deferred to post-v1. V1 policy rules MUST remain static (derived from configuration at load time).
 Source: RFC 0009 §16
 Scope: post-v1
 

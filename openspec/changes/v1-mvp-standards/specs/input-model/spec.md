@@ -530,7 +530,7 @@ Scope: post-v1
 ---
 
 ### Requirement: Stylus and Pressure Input (Post-v1)
-Stylus-specific properties (pressure, tilt, twist) are explicitly deferred post-v1. Pointer events in v1 carry basic coordinates only.
+Stylus-specific properties (pressure, tilt, twist) are explicitly deferred post-v1, and v1 pointer events MUST carry basic coordinates only.
 Source: RFC 0004 §12.4, §14
 Scope: post-v1
 
