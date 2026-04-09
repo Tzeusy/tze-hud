@@ -27,6 +27,9 @@ use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
 use tze_hud_protocol::proto::session::{
     AuthCredential,
     BackpressureSignal,
+    CapabilityAuditKind,
+    CapabilityAuditRecord,
+    CapabilityNotice,
     // session.proto
     ClientMessage,
     EmitSceneEvent,
@@ -1003,6 +1006,13 @@ fn roundtrip_session_established() {
         ],
         denied_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
         negotiated_protocol_version: 1000,
+        capability_audit_records: vec![CapabilityAuditRecord {
+            kind: CapabilityAuditKind::Grant as i32,
+            agent_id: "weather-agent".to_string(),
+            capability: "resident_mcp".to_string(),
+            timestamp_wall_us: 1_700_000_000_000_000,
+            granted_by: "session_handshake".to_string(),
+        }],
     };
     let decoded = round_trip(&orig);
     assert_eq!(orig.heartbeat_interval_ms, decoded.heartbeat_interval_ms);
@@ -1010,9 +1020,46 @@ fn roundtrip_session_established() {
     assert_eq!(orig.estimated_skew_us, decoded.estimated_skew_us);
     assert_eq!(orig.denied_subscriptions, decoded.denied_subscriptions);
     assert_eq!(
+        orig.capability_audit_records,
+        decoded.capability_audit_records
+    );
+    assert_eq!(
         orig.negotiated_protocol_version,
         decoded.negotiated_protocol_version
     );
+}
+
+#[test]
+fn roundtrip_capability_notice_with_audit_records() {
+    let orig = CapabilityNotice {
+        granted: vec!["resident_mcp".to_string()],
+        revoked: vec!["publish_zone:subtitle".to_string()],
+        reason: "policy update".to_string(),
+        effective_at_server_seq: 42,
+        capability_audit_records: vec![
+            CapabilityAuditRecord {
+                kind: CapabilityAuditKind::Grant as i32,
+                agent_id: "weather-agent".to_string(),
+                capability: "resident_mcp".to_string(),
+                timestamp_wall_us: 1_700_000_000_000_001,
+                granted_by: "capability_request".to_string(),
+            },
+            CapabilityAuditRecord {
+                kind: CapabilityAuditKind::Revoke as i32,
+                agent_id: "weather-agent".to_string(),
+                capability: "publish_zone:subtitle".to_string(),
+                timestamp_wall_us: 1_700_000_000_000_002,
+                granted_by: "admin_action".to_string(),
+            },
+        ],
+    };
+
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.granted, decoded.granted);
+    assert_eq!(orig.revoked, decoded.revoked);
+    assert_eq!(orig.reason, decoded.reason);
+    assert_eq!(orig.effective_at_server_seq, decoded.effective_at_server_seq);
+    assert_eq!(orig.capability_audit_records, decoded.capability_audit_records);
 }
 
 #[test]
