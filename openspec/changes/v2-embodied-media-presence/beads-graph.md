@@ -35,7 +35,7 @@ graph TD
   F --> G[6.4 Final package reconciliation and signoff]
 ```
 
-Note: `6.4` maps to bead `hud-8cy3.4` (existing final reconciliation bead), even though section numbering in `tasks.md` stops at `6.3`.
+Note: `6.4` maps to bead `hud-8cy3.4` (existing final reconciliation bead) and is tracked explicitly in `tasks.md`.
 
 ## Detailed Execution Graph (Task-Level Beads)
 
