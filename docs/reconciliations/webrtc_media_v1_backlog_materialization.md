@@ -2,6 +2,7 @@
 
 Date: 2026-04-09
 Source issue: `hud-nn9d.2`
+WM-S0 inventory artifact: `docs/reconciliations/webrtc_media_v1_seam_inventory.md`
 Inputs:
 - `docs/reconciliations/webrtc_media_v1_direction_report.md`
 - `docs/reconciliations/webrtc_media_v1_human_signoff_report.md`
