@@ -628,8 +628,9 @@ async fn test_hit_test_p99_within_budget() {
 
 /// Assert that transaction validation p99 is under the 200µs CPU-calibrated budget.
 ///
-/// Applies 50 single-mutation batches and records the round-trip latency of
-/// each `apply_batch` call including validation and scene mutation.
+/// Applies a large sample of single-mutation `UpdateTileBounds` batches against
+/// a fixed-size scene and records the round-trip latency of each `apply_batch`
+/// call including validation and scene mutation.
 ///
 /// ## Hardware normalization
 ///
@@ -651,15 +652,27 @@ fn test_transaction_validation_p99_within_budget() {
     // CPU-calibrated budget for this machine. On reference hardware this is
     // 200µs; on slow CI with high load it scales proportionally.
     let budget_us = test_budget(TRANSACTION_VALIDATION_BUDGET_US);
-    const BATCH_COUNT: usize = 50;
+    // Keep a larger sample window so p99 is not effectively the max sample.
+    const BATCH_COUNT: usize = 200;
 
     let mut scene = SceneGraph::new(1920.0, 1080.0);
     let tab = scene.create_tab("Main", 0).unwrap();
-    let lease = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+    let lease = scene.grant_lease(
+        "agent",
+        60_000,
+        vec![Capability::CreateTile, Capability::ModifyOwnTiles],
+    );
     // Raise tile budget so budget enforcement doesn't reject batches in this timing test
     if let Some(l) = scene.leases.get_mut(&lease) {
         l.resource_budget.max_tiles = 256;
     }
+
+    // Build a stable baseline scene once; each timed batch updates this tile.
+    // This keeps the benchmark focused on transaction validation throughput
+    // instead of allocator pressure from unbounded tile growth.
+    let tile_id = scene
+        .create_tile(tab, "agent", lease, Rect::new(0.0, 0.0, 80.0, 60.0), 1)
+        .expect("baseline tile should be created");
 
     let mut validation_bucket = LatencyBucket::new("validation");
 
@@ -668,17 +681,14 @@ fn test_transaction_validation_p99_within_budget() {
         let batch = MutationBatch {
             batch_id: SceneId::new(),
             agent_namespace: "agent".to_string(),
-            mutations: vec![SceneMutation::CreateTile {
-                tab_id: tab,
-                namespace: "agent".to_string(),
-                lease_id: lease,
+            mutations: vec![SceneMutation::UpdateTileBounds {
+                tile_id,
                 bounds: Rect::new(
-                    (i as f32 * 5.0) % 1500.0,
-                    (i as f32 * 3.0) % 900.0,
+                    (i as f32 * 2.5) % 1600.0,
+                    (i as f32 * 1.5) % 950.0,
                     80.0,
                     60.0,
                 ),
-                z_order: i as u32 + 1,
             }],
             timing_hints: None,
             lease_id: None,
