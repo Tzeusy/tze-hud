@@ -75,6 +75,11 @@ Required outputs:
 2. Per-level diagnostics
 3. Budget percentile reporting suitable for CI
 
+Implementation note (hud-s98v.2):
+
+1. `crates/tze_hud_protocol/src/session_server.rs` emits mutation-path admission telemetry logs for live and queued paths, including per-outcome counters, per-level diagnostic summaries, and structured latency conformance payloads.
+2. `crates/tze_hud_telemetry/src/validation.rs` defines `policy_mutation_eval_p99` conformance (`POLICY_MUTATION_EVAL_BUDGET_US = 50`) and unit-test-backed pass/fail/no-samples outcomes for CI-visible budget evidence.
+
 ### Workstream C: V1 scope decision
 
 Goal: explicitly choose one of:

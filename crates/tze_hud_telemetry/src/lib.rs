@@ -19,5 +19,7 @@ pub use resource_monitor::{
     AgentFootprint, GrowthRatios, ResourceMonitor, ResourceSnapshot, SPEC_GROWTH_TOLERANCE,
 };
 pub use validation::{
-    AssertionOutcome, BudgetAssertion, CalibrationDimension, HardwareFactors, ValidationReport,
+    AssertionOutcome, BudgetAssertion, CalibrationDimension, HardwareFactors,
+    MutationPathLatencyConformance, POLICY_MUTATION_EVAL_BUDGET_US, ValidationReport,
+    evaluate_policy_mutation_latency_conformance,
 };

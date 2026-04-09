@@ -56,7 +56,8 @@ use tze_hud_policy::types::{
     VisibilityClassification as PolicyVisibilityClassification,
 };
 use tze_hud_policy::{
-    ArbitrationOutcome as PolicyArbitrationOutcome, MutationEvalInput as PolicyMutationEvalInput,
+    ArbitrationOutcome as PolicyArbitrationOutcome, ArbitrationTelemetryEvent,
+    MutationEvalInput as PolicyMutationEvalInput, MutationLatencyAccumulator, PolicyTelemetry,
     evaluate_mutation as evaluate_policy_mutation,
 };
 use tze_hud_resource::{
@@ -65,6 +66,10 @@ use tze_hud_resource::{
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
 use tze_hud_scene::types::*;
+use tze_hud_telemetry::{
+    MutationPathLatencyConformance, POLICY_MUTATION_EVAL_BUDGET_US,
+    evaluate_policy_mutation_latency_conformance,
+};
 use tze_hud_widget::{RuntimeWidgetAssetError, register_runtime_widget_svg_asset};
 
 // ─── Session Configuration ───────────────────────────────────────────────────
@@ -2053,13 +2058,168 @@ fn active_lease_priority_for_namespace(scene: &SceneGraph, namespace: &str) -> O
         .min()
 }
 
+#[derive(Debug, Clone, Default)]
+struct PolicyAdmissionReport {
+    telemetry: PolicyTelemetry,
+    diagnostics: Vec<ArbitrationTelemetryEvent>,
+    evaluated_mutations: u32,
+    over_budget_mutations: u32,
+    max_eval_us: u64,
+    latency_conformance: Option<MutationPathLatencyConformance>,
+}
+
+impl PolicyAdmissionReport {
+    fn record_eval_latency(&mut self, eval_us: u64, latencies: &mut MutationLatencyAccumulator) {
+        latencies.record(eval_us);
+        self.evaluated_mutations = self.evaluated_mutations.saturating_add(1);
+        self.max_eval_us = self.max_eval_us.max(eval_us);
+        if eval_us >= POLICY_MUTATION_EVAL_BUDGET_US {
+            self.over_budget_mutations = self.over_budget_mutations.saturating_add(1);
+        }
+    }
+
+    fn record_outcome(&mut self, outcome: &PolicyArbitrationOutcome) {
+        match outcome {
+            PolicyArbitrationOutcome::Commit => {}
+            PolicyArbitrationOutcome::CommitRedacted { .. } => {
+                self.telemetry.mutations_redacted =
+                    self.telemetry.mutations_redacted.saturating_add(1)
+            }
+            PolicyArbitrationOutcome::Queue { .. } => {
+                self.telemetry.mutations_queued = self.telemetry.mutations_queued.saturating_add(1)
+            }
+            PolicyArbitrationOutcome::Shed { .. } => {
+                self.telemetry.mutations_shed = self.telemetry.mutations_shed.saturating_add(1)
+            }
+            PolicyArbitrationOutcome::Reject(_) => {
+                self.telemetry.mutations_rejected =
+                    self.telemetry.mutations_rejected.saturating_add(1)
+            }
+            PolicyArbitrationOutcome::Blocked { .. } => {}
+        }
+    }
+
+    fn finalize(
+        mut self,
+        eval_started_at: std::time::Instant,
+        latencies: &mut MutationLatencyAccumulator,
+    ) -> Self {
+        self.telemetry.per_frame_eval_us = eval_started_at.elapsed().as_micros() as u64;
+        self.telemetry.per_mutation_eval_us_p99 = latencies.p99_us();
+        self.latency_conformance = Some(evaluate_policy_mutation_latency_conformance(
+            self.evaluated_mutations,
+            self.telemetry.per_mutation_eval_us_p99,
+            self.max_eval_us,
+            self.over_budget_mutations,
+        ));
+        self
+    }
+
+    fn over_budget(&self) -> bool {
+        self.latency_conformance
+            .as_ref()
+            .is_some_and(|conformance| !conformance.within_budget())
+    }
+
+    fn diagnostics_by_level(&self) -> Vec<(u8, usize)> {
+        let mut counts: HashMap<u8, usize> = HashMap::new();
+        for event in &self.diagnostics {
+            *counts.entry(event.level).or_insert(0) += 1;
+        }
+        let mut sorted: Vec<(u8, usize)> = counts.into_iter().collect();
+        sorted.sort_unstable_by_key(|(level, _)| *level);
+        sorted
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PolicyAdmissionError {
+    message: String,
+    report: PolicyAdmissionReport,
+}
+
+fn log_policy_admission_report(
+    namespace: &str,
+    batch_id_len: usize,
+    phase: &'static str,
+    report: &PolicyAdmissionReport,
+    accepted: bool,
+) {
+    const DIAGNOSTICS_PREVIEW_LIMIT: usize = 8;
+    let diagnostics_by_level = report.diagnostics_by_level();
+    let latency_conformance = report.latency_conformance.as_ref();
+    if report.over_budget() {
+        tracing::warn!(
+            namespace = %namespace,
+            phase,
+            batch_id_len,
+            accepted,
+            mutation_count = report.evaluated_mutations,
+            p99_eval_us = report.telemetry.per_mutation_eval_us_p99,
+            max_eval_us = report.max_eval_us,
+            over_budget_mutations = report.over_budget_mutations,
+            rejected = report.telemetry.mutations_rejected,
+            redacted = report.telemetry.mutations_redacted,
+            queued = report.telemetry.mutations_queued,
+            shed = report.telemetry.mutations_shed,
+            diagnostics_count = report.diagnostics.len(),
+            diagnostics_by_level = ?diagnostics_by_level,
+            latency_conformance = ?latency_conformance,
+            "Policy admission latency exceeded budget"
+        );
+    } else {
+        tracing::debug!(
+            namespace = %namespace,
+            phase,
+            batch_id_len,
+            accepted,
+            mutation_count = report.evaluated_mutations,
+            p99_eval_us = report.telemetry.per_mutation_eval_us_p99,
+            max_eval_us = report.max_eval_us,
+            over_budget_mutations = report.over_budget_mutations,
+            rejected = report.telemetry.mutations_rejected,
+            redacted = report.telemetry.mutations_redacted,
+            queued = report.telemetry.mutations_queued,
+            shed = report.telemetry.mutations_shed,
+            diagnostics_count = report.diagnostics.len(),
+            latency_conformance = ?latency_conformance,
+            "Policy admission telemetry"
+        );
+    }
+
+    if !report.diagnostics.is_empty() {
+        let diagnostics_preview: Vec<_> = report
+            .diagnostics
+            .iter()
+            .take(DIAGNOSTICS_PREVIEW_LIMIT)
+            .collect();
+        let diagnostics_truncated = report
+            .diagnostics
+            .len()
+            .saturating_sub(diagnostics_preview.len());
+
+        tracing::debug!(
+            namespace = %namespace,
+            phase,
+            batch_id_len,
+            diagnostics_by_level = ?diagnostics_by_level,
+            diagnostics_preview = ?diagnostics_preview,
+            diagnostics_truncated,
+            "Policy admission diagnostics"
+        );
+    }
+}
+
 fn evaluate_policy_admission_for_batch(
     shared: &SharedState,
     scene: &SceneGraph,
     session: &StreamSession,
     lease_id: SceneId,
     mutations: &[SceneMutation],
-) -> Result<(), String> {
+) -> Result<PolicyAdmissionReport, PolicyAdmissionError> {
+    let eval_started_at = std::time::Instant::now();
+    let mut latencies = MutationLatencyAccumulator::default();
+    let mut report = PolicyAdmissionReport::default();
     let (lease_valid, agent_lease_priority, tiles_limit, mut projected_tiles) =
         if let Some(lease) = scene.leases.get(&lease_id) {
             let usage = scene.lease_resource_usage(&lease_id);
@@ -2201,6 +2361,7 @@ fn evaluate_policy_admission_for_batch(
         ctx.resource_context.budget_exceeded = budget_exceeded;
         ctx.resource_context.is_transactional = kind == PolicyMutationKind::Transactional;
 
+        let mutation_started_at = std::time::Instant::now();
         let eval = evaluate_policy_mutation(&PolicyMutationEvalInput {
             ctx: &ctx,
             mutation_ref: SceneId::new(),
@@ -2212,6 +2373,12 @@ fn evaluate_policy_admission_for_batch(
             kind,
             timestamp_us: now_mono_us(),
         });
+        report.record_eval_latency(
+            mutation_started_at.elapsed().as_micros() as u64,
+            &mut latencies,
+        );
+        report.record_outcome(&eval.outcome);
+        report.diagnostics.extend(eval.events);
 
         match eval.outcome {
             PolicyArbitrationOutcome::Commit
@@ -2226,21 +2393,27 @@ fn evaluate_policy_admission_for_batch(
                 }
             }
             PolicyArbitrationOutcome::Blocked { block_reason } => {
-                return Err(format!(
-                    "policy admission blocked ({block_reason:?}) for namespace '{}'",
-                    session.namespace
-                ));
+                return Err(PolicyAdmissionError {
+                    message: format!(
+                        "policy admission blocked ({block_reason:?}) for namespace '{}'",
+                        session.namespace
+                    ),
+                    report: report.finalize(eval_started_at, &mut latencies),
+                });
             }
             PolicyArbitrationOutcome::Reject(err) => {
-                return Err(format!(
-                    "policy admission rejected at level {} ({:?}): {}",
-                    err.level, err.code, err.message
-                ));
+                return Err(PolicyAdmissionError {
+                    message: format!(
+                        "policy admission rejected at level {} ({:?}): {}",
+                        err.level, err.code, err.message
+                    ),
+                    report: report.finalize(eval_started_at, &mut latencies),
+                });
             }
         }
     }
 
-    Ok(())
+    Ok(report.finalize(eval_started_at, &mut latencies))
 }
 
 async fn handle_mutation_batch(
@@ -2765,34 +2938,53 @@ async fn handle_mutation_batch(
         let scene = st.scene.lock().await;
         evaluate_policy_admission_for_batch(&st, &scene, session, lease_id, &scene_mutations)
     };
-    if let Err(error_message) = policy_gate {
-        if !batch.batch_id.is_empty() {
-            session.dedup_window.insert(
-                batch.batch_id.clone(),
-                CachedResult {
-                    accepted: false,
-                    created_ids: Vec::new(),
-                    error_code: "MUTATION_REJECTED".to_string(),
-                    error_message: error_message.clone(),
-                },
+    match policy_gate {
+        Ok(report) => {
+            log_policy_admission_report(
+                &session.namespace,
+                batch.batch_id.len(),
+                "live",
+                &report,
+                true,
             );
         }
-        let seq = session.next_server_seq();
-        drop(st);
-        let _ = tx
-            .send(Ok(ServerMessage {
-                sequence: seq,
-                timestamp_wall_us: now_wall_us(),
-                payload: Some(ServerPayload::MutationResult(MutationResult {
-                    batch_id: batch.batch_id,
-                    accepted: false,
-                    created_ids: Vec::new(),
-                    error_code: "MUTATION_REJECTED".to_string(),
-                    error_message,
-                })),
-            }))
-            .await;
-        return;
+        Err(error) => {
+            log_policy_admission_report(
+                &session.namespace,
+                batch.batch_id.len(),
+                "live",
+                &error.report,
+                false,
+            );
+            let error_message = error.message;
+            if !batch.batch_id.is_empty() {
+                session.dedup_window.insert(
+                    batch.batch_id.clone(),
+                    CachedResult {
+                        accepted: false,
+                        created_ids: Vec::new(),
+                        error_code: "MUTATION_REJECTED".to_string(),
+                        error_message: error_message.clone(),
+                    },
+                );
+            }
+            let seq = session.next_server_seq();
+            drop(st);
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::MutationResult(MutationResult {
+                        batch_id: batch.batch_id,
+                        accepted: false,
+                        created_ids: Vec::new(),
+                        error_code: "MUTATION_REJECTED".to_string(),
+                        error_message,
+                    })),
+                }))
+                .await;
+            return;
+        }
     }
 
     // Map the proto batch_id bytes to a SceneId for rejection-correlation.
@@ -3115,14 +3307,32 @@ async fn apply_queued_batch_to_scene(
         let scene = st.scene.lock().await;
         evaluate_policy_admission_for_batch(&st, &scene, session, lease_id, &scene_mutations)
     };
-    if let Err(error_message) = policy_gate {
-        tracing::warn!(
-            namespace = %session.namespace,
-            batch_id_len = batch.batch_id.len(),
-            "Dropping queued batch after policy admission reject: {}",
-            error_message
-        );
-        return;
+    match policy_gate {
+        Ok(report) => {
+            log_policy_admission_report(
+                &session.namespace,
+                batch.batch_id.len(),
+                "queued",
+                &report,
+                true,
+            );
+        }
+        Err(error) => {
+            log_policy_admission_report(
+                &session.namespace,
+                batch.batch_id.len(),
+                "queued",
+                &error.report,
+                false,
+            );
+            tracing::warn!(
+                namespace = %session.namespace,
+                batch_id_len = batch.batch_id.len(),
+                "Dropping queued batch after policy admission reject: {}",
+                error.message
+            );
+            return;
+        }
     }
 
     // Map the proto batch_id bytes to a SceneId for validation correlation.
@@ -10417,6 +10627,108 @@ mod tests {
             }
             other => panic!("Expected MutationResult rejection, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_policy_admission_report_tracks_outcomes_and_latency_conformance() {
+        let mut report = PolicyAdmissionReport::default();
+        let mut latencies = MutationLatencyAccumulator::default();
+
+        report.record_eval_latency(12, &mut latencies);
+        report.record_eval_latency(70, &mut latencies);
+
+        report.record_outcome(&PolicyArbitrationOutcome::Commit);
+        report.record_outcome(&PolicyArbitrationOutcome::CommitRedacted {
+            redaction_reason: tze_hud_policy::RedactionReason::MultiViewerRestriction,
+        });
+        report.record_outcome(&PolicyArbitrationOutcome::Queue {
+            queue_reason: tze_hud_policy::QueueReason::AttentionBudgetExhausted {
+                per_agent: true,
+                per_zone: false,
+            },
+            earliest_present_us: Some(42),
+            redacted: false,
+        });
+        report.record_outcome(&PolicyArbitrationOutcome::Shed {
+            degradation_level: 5,
+        });
+        report.record_outcome(&PolicyArbitrationOutcome::Reject(
+            tze_hud_policy::ArbitrationError {
+                code: tze_hud_policy::ArbitrationErrorCode::CapabilityDenied,
+                agent_id: "policy-agent".to_string(),
+                mutation_ref: SceneId::new(),
+                message: "capability denied".to_string(),
+                hint: None,
+                level: 3,
+            },
+        ));
+
+        report.diagnostics.push(ArbitrationTelemetryEvent::reject(
+            3,
+            "CAPABILITY_DENIED",
+            "policy-agent",
+            SceneId::new(),
+            1,
+        ));
+        report.diagnostics.push(ArbitrationTelemetryEvent::queue(
+            "policy-agent",
+            SceneId::new(),
+            2,
+        ));
+
+        let finalized = report.finalize(std::time::Instant::now(), &mut latencies);
+        assert_eq!(finalized.telemetry.mutations_rejected, 1);
+        assert_eq!(finalized.telemetry.mutations_redacted, 1);
+        assert_eq!(finalized.telemetry.mutations_queued, 1);
+        assert_eq!(finalized.telemetry.mutations_shed, 1);
+        assert_eq!(finalized.evaluated_mutations, 2);
+        assert_eq!(finalized.over_budget_mutations, 1);
+        assert_eq!(finalized.max_eval_us, 70);
+        assert_eq!(finalized.telemetry.per_mutation_eval_us_p99, 70);
+        assert!(
+            finalized.over_budget(),
+            "p99 over budget must be marked as non-conformant"
+        );
+        assert_eq!(finalized.diagnostics_by_level(), vec![(3, 1), (4, 1)]);
+    }
+
+    #[test]
+    fn test_policy_admission_report_marks_within_budget_latency() {
+        let mut report = PolicyAdmissionReport::default();
+        let mut latencies = MutationLatencyAccumulator::default();
+        report.record_eval_latency(8, &mut latencies);
+        report.record_eval_latency(14, &mut latencies);
+
+        let finalized = report.finalize(std::time::Instant::now(), &mut latencies);
+        assert_eq!(finalized.telemetry.per_mutation_eval_us_p99, 14);
+        assert_eq!(finalized.over_budget_mutations, 0);
+        assert!(
+            !finalized.over_budget(),
+            "all samples under budget should pass conformance"
+        );
+        let conformance = finalized
+            .latency_conformance
+            .expect("conformance should be attached during finalize");
+        assert_eq!(conformance.budget_us, POLICY_MUTATION_EVAL_BUDGET_US);
+        assert!(conformance.within_budget());
+    }
+
+    #[test]
+    fn test_policy_admission_report_treats_budget_boundary_as_over_budget() {
+        let mut report = PolicyAdmissionReport::default();
+        let mut latencies = MutationLatencyAccumulator::default();
+        report.record_eval_latency(POLICY_MUTATION_EVAL_BUDGET_US, &mut latencies);
+
+        let finalized = report.finalize(std::time::Instant::now(), &mut latencies);
+        assert_eq!(
+            finalized.telemetry.per_mutation_eval_us_p99,
+            POLICY_MUTATION_EVAL_BUDGET_US
+        );
+        assert_eq!(finalized.over_budget_mutations, 1);
+        assert!(
+            finalized.over_budget(),
+            "p99 at strict budget boundary must be marked as non-conformant"
+        );
     }
 
     /// WHEN revoke_capability_on_lease is called for a lease not owned by any session,

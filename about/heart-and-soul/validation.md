@@ -134,7 +134,7 @@ Per-session aggregates: total frames, FPS, frame time at p50/p95/p99, latency br
 - **input_to_scene_commit** — time from input event to the scene graph reflecting the agent's response (agent receives event, processes, sends mutation, mutation applied). Budget: p99 < 50ms for local agents, varies for remote.
 - **input_to_next_present** — time from input event to the next rendered frame containing the committed scene change appearing on screen. This is refresh-rate-dependent: at 60Hz the floor is ~16.6ms even if the scene commits instantly. Budget: p99 < 33ms (within two frames at 60Hz).
 
-**Other performance budgets:** p99 frame time < 16.6ms (normalized), zero lease violations, zero budget overruns, sync drift < 500μs, texture memory under budget.
+**Other performance budgets:** p99 frame time < 16.6ms (normalized), zero lease violations, zero budget overruns, sync drift < 500μs, texture memory under budget, and mutation-path policy admission `policy_mutation_eval_p99` < 50μs (bounded pilot conformance harness).
 
 Benchmark binary runs scenarios headlessly, emits JSON. Same telemetry schema in production at configurable sampling rate.
 
