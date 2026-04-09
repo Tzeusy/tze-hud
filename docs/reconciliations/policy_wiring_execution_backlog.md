@@ -66,7 +66,7 @@ This document remains the coordinator source of truth for remaining bead creatio
 - `PW-06` -> `PW-07`
 - `discovered-from:hud-iq2x.4` -> `PW-08`
 
-## Proposed Bead Set (for coordinator to create)
+## Bead Specification Set (creation and execution reference)
 
 Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, and `PW-03` now exist in tracker form. The sections below remain authoritative for acceptance criteria, citations, and dependency intent.
 
