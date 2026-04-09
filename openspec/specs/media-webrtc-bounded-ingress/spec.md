@@ -12,6 +12,7 @@ Current downstream contract artifacts in this tranche:
 3. Runtime activation gate + budgets (`WM-S3`): `docs/reconciliations/webrtc_media_v1_runtime_activation_gate_budgets.md`
 4. Privacy/operator policy (`WM-S3b`): `openspec/specs/media-webrtc-privacy-operator-policy/spec.md`
 5. Compositor contract for `VideoSurfaceRef` rendering (`WM-S3c`): `docs/reconciliations/webrtc_media_v1_compositor_videosurfaceref_contract.md`
+6. Validation rehearsal scenarios + thresholds (`WM-S4`): `docs/reconciliations/webrtc_media_v1_validation_rehearsal_thresholds.md`
 
 ---
 
