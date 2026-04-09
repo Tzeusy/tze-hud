@@ -29,9 +29,10 @@ Tracker instantiation snapshot (2026-04-09):
 - `PW-02` -> `hud-iq2x.7` (blocked pending PR review)
 - `PW-02b` -> `hud-iq2x.8` (closed)
 - `PW-03` -> `hud-jq5p` (in_progress)
-- `PW-04`..`PW-08` not yet instantiated
+- `PW-04` -> `hud-xjfb` (in_progress)
+- `PW-05`..`PW-08` not yet instantiated
 
-`hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). The event/frame scope decision bead is now materialized as `hud-ew7a`; mutation pilot plus downstream telemetry/reconciliation/signoff beads are still pending instantiation. The final signoff closure bead is tracked as `hud-5fb1`.
+`hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). The event/frame scope decision bead is now materialized as `hud-ew7a`; mutation pilot is tracked as `hud-jq5p` and telemetry conformance as `hud-xjfb`. Downstream reconciliation beads remain pending instantiation. The final signoff closure bead is tracked as `hud-5fb1`.
 
 This document remains the coordinator source of truth for remaining bead creation and dependency wiring.
 
@@ -69,6 +70,8 @@ This document remains the coordinator source of truth for remaining bead creatio
 ## Bead Specification Set (creation and execution reference)
 
 Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, and `PW-03` now exist in tracker form. The sections below remain authoritative for acceptance criteria, citations, and dependency intent.
+
+Instantiation note: `PW-04` now exists in tracker form. The section below remains authoritative for acceptance criteria, citations, and dependency intent.
 
 ### PW-00 — Fix lease capability scope to session-granted subset
 - Type/Priority: `bug` / `P1`
@@ -149,6 +152,7 @@ Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, and `PW-03` now exist i
 
 ### PW-04 — Add policy decision telemetry + latency conformance harness
 - Type/Priority: `task` / `P1`
+- Tracker issue: `hud-xjfb`
 - Depends on: `PW-03`
 - Spec citations:
   - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
