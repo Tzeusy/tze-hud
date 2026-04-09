@@ -23,7 +23,17 @@ This corrected backlog makes three changes to the initial plan:
 
 The earlier companion payload `docs/reconciliations/policy_wiring_execution_backlog.proposed_beads.json` reflects the older, less strict plan. Treat that JSON as a legacy/stale artifact and explicitly superseded by this backlog.
 
+Tracker instantiation snapshot (2026-04-09):
+- `PW-00` -> `hud-iq2x.5` (closed)
+- `PW-01` -> `hud-iq2x.6` (closed)
+- `PW-02` -> `hud-iq2x.7` (blocked pending PR review)
+- `PW-02b` -> `hud-iq2x.8` (closed)
+- `PW-03` -> `hud-jq5p` (in progress)
+- `PW-04`..`PW-08` not yet instantiated
+
 `hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). Mutation pilot and downstream telemetry/scope/reconciliation beads are still pending instantiation; the final signoff closure bead is now tracked separately as `hud-5fb1`.
+
+This document remains the coordinator source of truth for remaining bead creation and dependency wiring.
 
 ## Corrected Low-Churn Execution Order
 
@@ -57,6 +67,8 @@ The earlier companion payload `docs/reconciliations/policy_wiring_execution_back
 - `discovered-from:hud-iq2x.4` -> `PW-08`
 
 ## Proposed Bead Set (for coordinator to create)
+
+Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, and `PW-03` now exist in tracker form. The sections below remain authoritative for acceptance criteria, citations, and dependency intent.
 
 ### PW-00 — Fix lease capability scope to session-granted subset
 - Type/Priority: `bug` / `P1`
@@ -121,6 +133,7 @@ The earlier companion payload `docs/reconciliations/policy_wiring_execution_back
 
 ### PW-03 — Implement mutation-path pilot wiring via `tze_hud_policy`
 - Type/Priority: `feature` / `P1`
+- Tracker issue: `hud-jq5p`
 - Depends on: `PW-02`, `PW-02b`
 - Spec citations:
   - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
