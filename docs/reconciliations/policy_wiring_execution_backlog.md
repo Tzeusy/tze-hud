@@ -28,9 +28,12 @@ Tracker instantiation snapshot (2026-04-09):
 - `PW-01` -> `hud-iq2x.6` (closed)
 - `PW-02` -> `hud-iq2x.7` (blocked pending PR review)
 - `PW-02b` -> `hud-iq2x.8` (closed)
-- `PW-03` -> `hud-jq5p` (in_progress)
-- `PW-04` -> `hud-xjfb` (in_progress)
-- `PW-05`..`PW-08` not yet instantiated
+- `PW-03` -> `hud-jq5p` (closed)
+- `PW-04` -> `hud-xjfb` (closed)
+- `PW-05` -> `hud-ew7a` (closed)
+- `PW-06` -> `hud-p48t` (blocked pending PR #403 merge)
+- `PW-07` -> `hud-5fb1` (closed)
+- `PW-08` not yet instantiated
 
 `hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). The event/frame scope decision bead is materialized as `hud-ew7a`; mutation pilot and telemetry are tracked as `hud-jq5p` and `hud-xjfb`; post-pilot reconciliation is tracked as `hud-p48t`; and final signoff remains tracked as `hud-5fb1`.
 
