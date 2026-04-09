@@ -375,6 +375,11 @@ fn load_bundle_dir_inner(
             (p.name.as_str(), allowed)
         })
         .collect();
+    let binding_validation_context = BindingValidationContext {
+        param_names: &param_names,
+        param_types: &param_types,
+        param_enum_values: &param_enum_values,
+    };
 
     // Step 5: Parse optional runtime hover behavior.
     let hover_behavior =
@@ -417,9 +422,7 @@ fn load_bundle_dir_inner(
             tokens,
             readability_technique,
             &raw_layer.bindings,
-            &param_names,
-            &param_types,
-            &param_enum_values,
+            &binding_validation_context,
         )?;
 
         // Store the resolved SVG text (post-substitution) as bytes.
@@ -478,9 +481,7 @@ fn validate_svg_layer_and_manifest_bindings(
     tokens: &HashMap<String, String>,
     readability_technique: SvgReadabilityTechnique,
     raw_bindings: &[RawBinding],
-    param_names: &HashSet<&str>,
-    param_types: &HashMap<&str, WidgetParamType>,
-    param_enum_values: &HashMap<&str, &[String]>,
+    binding_validation_context: &BindingValidationContext<'_>,
 ) -> Result<(Vec<u8>, Vec<WidgetBinding>), BundleError> {
     let resolved_svg = validate_svg_layer(
         path_str,
@@ -508,13 +509,19 @@ fn validate_svg_layer_and_manifest_bindings(
         raw_bindings,
         svg_file,
         &element_ids,
-        param_names,
-        param_types,
-        param_enum_values,
+        binding_validation_context.param_names,
+        binding_validation_context.param_types,
+        binding_validation_context.param_enum_values,
         path_str,
     )?;
 
     Ok((resolved_svg, bindings))
+}
+
+struct BindingValidationContext<'a> {
+    param_names: &'a HashSet<&'a str>,
+    param_types: &'a HashMap<&'a str, WidgetParamType>,
+    param_enum_values: &'a HashMap<&'a str, &'a [String]>,
 }
 
 fn validate_svg_layer(
