@@ -504,8 +504,7 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
 
         if psk_is_trivial_default(&opts.psk) {
             eprintln!(
-                "error: refusing startup with default PSK value {:?} in strict mode",
-                DEFAULT_PSK
+                "error: refusing startup with default PSK value {DEFAULT_PSK:?} in strict mode"
             );
             eprintln!("hint: set --psk <strong-key> or TZE_HUD_PSK to a non-default secret.");
             std::process::exit(1);
