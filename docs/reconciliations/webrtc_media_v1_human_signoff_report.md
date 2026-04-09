@@ -1,5 +1,46 @@
 # WebRTC/Media V1 Human Signoff Report (hud-nn9d.3)
 
+## Corrected Contract Tranche Refresh (hud-nn9d.16, 2026-04-09)
+
+This refresh supersedes the original signoff posture for implementation-gating
+purposes. The original `hud-nn9d.3` report established "spec-first, no
+implementation yet." The corrected tranche now verifies that the required
+contract seams were explicitly instantiated before implementation planning
+resumes.
+
+### Corrected Tranche Coverage (WM Map)
+
+| Contract seam | Tracker bead | Status |
+|---|---|---|
+| WM-S1 bounded ingress capability | `hud-nn9d.6` | Closed |
+| WM-S2a signaling shape decision | `hud-nn9d.7` | Closed |
+| WM-S2b protocol/schema + snapshot deltas | `hud-nn9d.8` | Closed |
+| WM-S2c zone transport/layer/reconnect contract | `hud-nn9d.9` | Closed |
+| WM-S3 runtime activation gate + budgets | `hud-nn9d.10` | Closed |
+| WM-S3b privacy/operator/enablement policy | `hud-nn9d.11` | Closed |
+| WM-S3c compositor `VideoSurfaceRef` contract | `hud-nn9d.12` | Closed |
+| WM-S4 validation rehearsal thresholds | `hud-nn9d.13` | Closed |
+| WM-S5 architecture wording alignment | `hud-nn9d.14` | Closed |
+| WM-S6 README boundary alignment | `hud-nn9d.15` | Closed |
+
+### Updated Human Signoff Decision
+
+1. The corrected media contract tranche is now **spec-complete** at the
+   contract layer.
+2. v1 remains media-deferred; no doctrine boundary changed.
+3. Implementation planning may proceed only behind WM-G2 reconciliation closure
+   (`hud-nn9d.17`) and must retain default-off activation semantics from WM-S3.
+
+### Residual Risks Before Implementation
+
+- **Contract integration risk**: WM artifacts were authored across multiple
+  passes; WM-G2 must verify no hidden contradictions remain across protocol,
+  zone, compositor, and policy documents.
+- **Operational risk**: Lane-B real-decode rehearsal remains a signoff
+  requirement for implementation readiness even after WM-S4 spec completion.
+- **Scope-drift risk**: Any bidirectional AV/audio scope expansion still
+  requires new contract work outside this tranche.
+
 ## Decision for Human Review
 
 **Recommendation:** Do **not** add live WebRTC/media runtime capability to the v1 GA contract.
