@@ -17,13 +17,13 @@ Scope: v1-mandatory
 - **THEN** decisions are produced by runtime/session/scene authorities, not by a centralized `tze_hud_policy` execution path
 
 ### Requirement: Target Policy Wiring Is Tracked Separately
-The unified policy-wired arbitration path (single level-by-level execution through policy-owned evaluator contracts) is a target integration track and not yet fully wired in current v1 runtime. Until that seam is landed, the level-stack requirements below are treated as target-state requirements and MUST be implemented via spec-first follow-on work.
-Source: docs/reconciliations/policy_wiring_epic_prompt.md
+The unified policy-wired arbitration path (single level-by-level execution through policy-owned evaluator contracts) is a target integration track and not fully wired in current v1 runtime. The v1 closeout path keeps bounded mutation-path wiring plus telemetry conformance as the retained v1 floor; frame/event unified hot-path wiring remains deferred. Until the unified seam is landed, level-stack requirements below remain target-state requirements and MUST be implemented via spec-first follow-on work.
+Source: docs/reconciliations/policy_wiring_epic_prompt.md, docs/reconciliations/policy_wiring_closeout_decision_20260410.md
 Scope: v1-reserved
 
 #### Scenario: Unwired policy requirements route to follow-on work
 - **WHEN** an implementer encounters a level-stack requirement here that is not yet wired in runtime code
-- **THEN** they MUST execute spec-first on `hud-iq2x.7` (authority seam) and `hud-iq2x.8` (capability escalation semantics) before claiming runtime compliance
+- **THEN** they MUST route it through spec-first follow-on work and MUST NOT claim v1 runtime compliance for that requirement until wiring lands
 
 ### Requirement: Seven-Level Arbitration Stack
 The target arbitration stack MUST use a fixed 7-level precedence (highest to lowest): Level 0 Human Override, Level 1 Safety, Level 2 Privacy, Level 3 Security, Level 4 Attention, Level 5 Resource, Level 6 Content. This ordering is doctrine and MUST NOT be modified.
