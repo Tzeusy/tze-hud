@@ -21,7 +21,8 @@ Scope: `/project-direction` completion package for policy wiring after governanc
 2. [Observed] The live authority bug for lease scope is fixed; lease requests outside session-granted capabilities are denied.
 3. [Observed] `CapabilityRequest` semantics are now explicit and all-or-nothing against configured policy scope.
 4. [Observed] The seam contract now defines `tze_hud_runtime` as the mutable authority owner, `tze_hud_policy` as the pure evaluator target, and `tze_hud_scene::policy` as transitional.
-5. [Unknown] Whether mutation-path pilot wiring can land within the policy-path latency budget without reopening v1 churn remains unproven.
+5. [Observed] Mutation-path telemetry budget conformance is now encoded and test-backed (`crates/tze_hud_telemetry/src/validation.rs`, `crates/tze_hud_protocol/src/session_server.rs`).
+6. [Unknown] End-to-end hardware-specific p99 behavior for all runtime workloads still depends on live telemetry sampling, not unit tests alone.
 
 ## What Completion Means Now
 
@@ -88,6 +89,13 @@ Goal: explicitly choose one of:
 2. `shrink-v1-claims`: even mutation-path policy wiring is not a v1 requirement
 
 [Inferred] This decision is the real closeout gate for the policy program.
+
+Decision outcome (hud-s98v.3, 2026-04-10):
+
+1. [Observed] `keep-v1-bounded` is selected.
+2. [Observed] The bounded mutation-path pilot plus conformance harness is retained as the v1 closeout floor.
+3. [Observed] Frame/event unified hot-path policy wiring remains explicitly deferred to v2.
+4. [Observed] The detailed decision record is captured in `docs/reconciliations/policy_wiring_closeout_decision_20260410.md`.
 
 ### Workstream D: Final reconciliation and signoff
 
