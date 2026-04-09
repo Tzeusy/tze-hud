@@ -47,12 +47,12 @@ The following remain deferred beyond this slice and require separate capability 
 ## Requirements
 
 ### Requirement: Post-v1 Activation Boundary
-Media/WebRTC ingress SHALL remain post-v1 and SHALL NOT alter v1 doctrine defaults. The runtime MUST keep media ingress disabled unless explicit post-v1 activation criteria are met. Activation criteria MUST require all of: approved signaling contract, approved schema/snapshot deltas, approved zone transport contract, approved runtime budget gate, approved privacy/operator policy, approved compositor contract, and approved validation scenarios.
+Media/WebRTC ingress MUST remain post-v1 and MUST NOT alter v1 doctrine defaults. The runtime MUST keep media ingress disabled unless explicit post-v1 activation criteria are met. Activation criteria MUST require all of: approved signaling contract, approved schema/snapshot deltas, approved zone transport contract, approved runtime budget gate, approved privacy/operator policy, approved compositor contract, and approved validation scenarios.
 Scope: post-v1-contract-tranche
 
 #### Scenario: v1 runtime remains media-disabled
 - **WHEN** the runtime starts under v1 defaults
-- **THEN** no media worker threads SHALL be spawned and no live media ingress SHALL be accepted
+- **THEN** no media worker threads MUST be spawned and no live media ingress MUST be accepted
 
 #### Scenario: activation denied when any prerequisite contract is missing
 - **WHEN** post-v1 media ingress is requested but one prerequisite contract above is not approved
@@ -61,7 +61,7 @@ Scope: post-v1-contract-tranche
 ---
 
 ### Requirement: Directional Transport Boundary
-The first ingress slice SHALL be strictly one-way visual ingress into the compositor. The runtime MUST NOT accept upstream outbound media, negotiated bidirectional AV channels, or audio channels in this slice. The slice MUST admit at most one active inbound media stream at a time.
+The first ingress slice MUST be strictly one-way visual ingress into the compositor. The runtime MUST NOT accept upstream outbound media, negotiated bidirectional AV channels, or audio channels in this slice. The slice MUST admit at most one active inbound media stream at a time.
 Scope: post-v1-contract-tranche
 
 #### Scenario: second concurrent stream is rejected
@@ -75,7 +75,7 @@ Scope: post-v1-contract-tranche
 ---
 
 ### Requirement: Timing Semantics for Presentation and Expiry
-Ingress publications MUST declare presentation lifecycle timing in wall-clock terms (`present_at_wall_us`, `expires_at_wall_us`) and runtime scheduling MUST honor that timing against compositor presentation cadence. The runtime MUST NOT present frames before `present_at_wall_us` and MUST stop presenting at or after `expires_at_wall_us`.
+Ingress publications MUST declare presentation lifecycle timing in wall-clock terms (`present_at_wall_us`, `expires_at_wall_us`) and runtime scheduling MUST honor that timing against compositor presentation cadence. The runtime MUST NOT present frames before `present_at_wall_us` and MUST NOT present frames at or after `expires_at_wall_us`. Presentation MAY cease earlier if ingress is torn down due to lease revocation, budget breach, or operator/policy disable.
 Scope: post-v1-contract-tranche
 
 #### Scenario: scheduled ingress does not render early
