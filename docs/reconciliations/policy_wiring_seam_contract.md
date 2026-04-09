@@ -19,11 +19,11 @@ This contract covers all three policy surfaces:
 |---|---|---|---|
 | Runtime authority modules (`BudgetEnforcer`, `AttentionBudgetTracker`, `SafeModeController`, freeze queue) | `crates/tze_hud_runtime` | Canonical (v1 live) | Own and mutate enforcement state; runtime remains sovereign writer. |
 | Lease/capability and contention enforcement in scene graph | `crates/tze_hud_scene` | Canonical (v1 live) | Owns lease state machine, zone occupancy, contention policy, and mutation validation pipeline. |
-| `PolicyContext` and `ArbitrationOutcome` data model | `crates/tze_hud_policy/src/types.rs` | Canonical (wiring target) | Read-only snapshot in, pure decision out, no side effects. |
-| Pure per-mutation/per-frame/per-event evaluators | `crates/tze_hud_policy/src/mutation.rs`, `frame.rs`, `event.rs`, `stack.rs` | Canonical (wiring target) | Runtime constructs context and executes results; evaluator remains stateless. |
+| `PolicyContext` and `ArbitrationOutcome` data model | `crates/tze_hud_policy/src/types.rs` | Canonical (wiring target) | Read-only snapshot in, decision out. Evaluators MUST NOT perform side effects. |
+| Per-mutation/per-frame/per-event evaluators | `crates/tze_hud_policy/src/mutation.rs`, `frame.rs`, `event.rs`, `stack.rs` | Canonical (wiring target) | Runtime constructs context and executes results; evaluators MUST NOT retain mutable runtime authority state. |
 | `tze_hud_scene::policy::{PolicyContext, PolicyDecision, ArbitrationAction, PolicyEvaluator}` | `crates/tze_hud_scene/src/policy/mod.rs` | Transitional | Scene-side contract/test surface only; not runtime-wired authority. Keep for seam clarity, not as an additional state owner. |
 
-Decision: `tze_hud_policy` types are the canonical policy abstraction for wiring work; `tze_hud_scene::policy` remains transitional until an explicit consolidation/deprecation bead lands.
+Decision: `tze_hud_policy` types are the canonical policy abstraction for wiring work; `tze_hud_scene::policy` remains transitional until an explicit consolidation/deprecation bead lands. Stateful helpers inside `tze_hud_policy` (for example `override_queue.rs`) are orchestration utilities, not policy authority owners.
 
 ## 3. Level-by-Level Input-Source Mapping (0-6)
 
@@ -93,7 +93,7 @@ let ctx = PolicyContext {
 | `Queue { ... }` | Enqueue for deferred delivery (quiet-hours/freeze semantics) using existing runtime queue mechanisms; preserve atomic ordering/coalescing guarantees. | Runtime |
 | `Reject(error)` | Do not mutate scene state; emit structured error response/telemetry with level+code and correlation identifiers. | Runtime/protocol |
 | `Shed { ... }` | Preserve authoritative state where spec requires (for example occupancy updates), but omit render output according to degradation policy. No agent-facing hard error. | Runtime + scene |
-| `Blocked { Freeze }` | Treat as Level 0 freeze queueing contract (not an authorization denial). Delivery resumes on unfreeze/timeout path. | Runtime shell |
+| `Blocked { block_reason: BlockReason::Freeze }` | Treat as Level 0 freeze queueing contract (not an authorization denial). Delivery resumes on unfreeze/timeout path. | Runtime shell |
 
 Execution invariants:
 
