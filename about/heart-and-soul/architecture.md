@@ -14,6 +14,18 @@ Models do not paint pixels directly. Models request, publish, or subscribe to: s
 
 ![Three-Plane Protocol Architecture](assets/protocol-planes_dark.svg)
 
+### Phased contract boundary
+
+This document describes the target multi-phase architecture. It is not a claim
+that every plane is active in v1.
+
+- **V1 shipping boundary:** MCP compatibility plane + gRPC resident control
+  plane are active. Live media/WebRTC and clocked media runtime behavior remain
+  deferred (see `about/heart-and-soul/v1.md`).
+- **Post-v1 media tranche:** the WebRTC/media lane activates only after the
+  bounded-ingress contract gates are explicitly approved (see
+  `openspec/specs/media-webrtc-bounded-ingress/spec.md`).
+
 Trying to force one protocol to do everything will cripple the system. We need multiple planes, each matched to its traffic class.
 
 ### 1. Compatibility plane: MCP
@@ -24,9 +36,10 @@ MCP is the compatibility perimeter, not the hot path. JSON-RPC over stdio or Str
 
 Resident and embodied agents connect over native gRPC with protobuf, using one primary bidirectional session stream per agent. Scene mutations, lease management, event subscriptions, and telemetry are multiplexed over this single stream (see "Session model" below). HTTP/2 concurrent-stream limits apply — do not proliferate independent streams per agent.
 
-### 3. Media plane: WebRTC
+### 3. Media plane: WebRTC (post-v1 lane)
 
 Live interactive audio/video lives on WebRTC: camera feeds, assistant voice/video sessions, smart-glasses live surfaces, low-latency bidirectional AV, and optional media-adjacent data channels.
+This lane is intentionally inactive in v1 and remains a post-v1 capability.
 
 ### 4. Future browser/remoting plane: WebTransport
 
@@ -129,7 +142,7 @@ V1 defers: blur, glass/frosted effects, tile drop shadows, animated opacity tran
 
 ## Session model: one stream per agent
 
-Each resident agent maintains one primary bidirectional gRPC session stream. Scene mutations, event subscriptions, lease management, and telemetry are multiplexed over this single stream. A separate media signaling stream may exist for embodied agents negotiating WebRTC sessions.
+Each resident agent maintains one primary bidirectional gRPC session stream. Scene mutations, event subscriptions, lease management, and telemetry are multiplexed over this single stream. Post-v1, a separate media signaling stream may exist for embodied agents negotiating WebRTC sessions; v1 intentionally ships without this stream.
 
 Do not proliferate independent long-lived streams per agent. HTTP/2 connections have concurrent-stream limits that become a bottleneck under many active streams. One session stream per agent, plus optional media signaling, is the target topology. The Session/Protocol RFC will define the multiplexing format, but the principle is: few fat streams, not many thin ones.
 
@@ -214,7 +227,7 @@ Widget SVG templates use a different mechanism for the same tokens: `{{token.key
 
 ## Media: GStreamer
 
-Media is not an add-on. It is one of the reasons the project exists. The media layer is built around GStreamer: graph-based pipelines, clock/timestamp/segment synchronization, Rust bindings for applications and plugins. This shapes live ingest, decode, synchronization, stream switching, timed metadata, subtitle/cue alignment, and low-latency AV composition.
+Media is not an add-on. It is one of the reasons the project exists. Media remains explicitly post-v1 in runtime behavior, but the architectural substrate is GStreamer: graph-based pipelines, clock/timestamp/segment synchronization, Rust bindings for applications and plugins. This shapes live ingest, decode, synchronization, stream switching, timed metadata, subtitle/cue alignment, and low-latency AV composition once post-v1 activation gates are met.
 
 ## Policy arbitration
 
