@@ -2014,6 +2014,16 @@ fn parse_visibility_classification(
 fn mutation_required_capabilities(mutation: &SceneMutation) -> Vec<String> {
     match mutation {
         SceneMutation::CreateTile { .. } => vec!["create_tiles".to_string()],
+        SceneMutation::UpdateTileBounds { .. }
+        | SceneMutation::UpdateTileZOrder { .. }
+        | SceneMutation::UpdateTileOpacity { .. }
+        | SceneMutation::UpdateTileInputMode { .. }
+        | SceneMutation::UpdateTileSyncGroup { .. }
+        | SceneMutation::UpdateTileExpiry { .. }
+        | SceneMutation::DeleteTile { .. }
+        | SceneMutation::SetTileRoot { .. }
+        | SceneMutation::AddNode { .. }
+        | SceneMutation::UpdateNodeContent { .. } => vec!["modify_own_tiles".to_string()],
         SceneMutation::PublishToZone { zone_name, .. }
         | SceneMutation::ClearZone { zone_name, .. } => {
             vec![format!("publish_zone:{zone_name}")]
@@ -10301,6 +10311,86 @@ mod tests {
                 assert!(
                     !result.accepted,
                     "CreateTile must be rejected when session scope lacks create_tiles"
+                );
+                assert_eq!(result.batch_id, batch_id, "batch_id must echo request");
+            }
+            other => panic!("Expected MutationResult rejection, got: {other:?}"),
+        }
+    }
+
+    /// Policy admission pilot regression:
+    /// WHEN session capability scope does not include modify_own_tiles
+    /// BUT scene lease capability is manually broadened to include ModifyOwnTiles
+    /// THEN mutation admission must reject tile-modification mutations.
+    #[tokio::test]
+    async fn test_mutation_admission_rejects_modify_when_session_scope_lacks_capability() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+
+        // Handshake with no requested capabilities.
+        let (tx, _init_messages, mut stream) = handshake_with_requested_capabilities(
+            &mut client,
+            "policy-scope-agent",
+            "test-key",
+            Vec::new(),
+        )
+        .await;
+
+        // Create an active tab and a tile whose lease is forged with ModifyOwnTiles only.
+        let (forged_lease_id, tile_id) = {
+            let st = shared_state.lock().await;
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene
+                .create_tab("policy-scope-tab-modify", 0)
+                .expect("create tab");
+
+            // Manually forge a lease capability set that is broader than session-held grants.
+            let lease_id = scene.grant_lease(
+                "policy-scope-agent",
+                60_000,
+                vec![tze_hud_scene::types::Capability::ModifyOwnTiles],
+            );
+            let tile_id = scene
+                .create_tile(
+                    tab_id,
+                    "policy-scope-agent",
+                    lease_id,
+                    tze_hud_scene::Rect::new(4.0, 4.0, 100.0, 80.0),
+                    1,
+                )
+                .expect("create tile with forged lease");
+            (lease_id, tile_id)
+        };
+
+        let forged_lease_bytes = scene_id_to_bytes(forged_lease_id);
+        let tile_id_bytes = scene_id_to_bytes(tile_id);
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: forged_lease_bytes,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::UpdateTileOpacity(
+                        crate::proto::UpdateTileOpacityMutation {
+                            tile_id: tile_id_bytes,
+                            opacity: 0.5,
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .expect("send mutation batch");
+
+        let msg = next_non_state_change(&mut stream).await;
+        match &msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(
+                    !result.accepted,
+                    "UpdateTileOpacity must be rejected when session scope lacks modify_own_tiles"
                 );
                 assert_eq!(result.batch_id, batch_id, "batch_id must echo request");
             }
