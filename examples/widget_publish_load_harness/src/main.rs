@@ -479,15 +479,12 @@ fn build_session_init(cli: &Cli, psk: &str, sequence: u64) -> session_proto::Cli
             agent_id: cli.agent_id.clone(),
             agent_display_name: cli.agent_id.clone(),
             pre_shared_key: String::new(),
-            requested_capabilities: vec![
-                "publish_widget".to_string(),
-                format!("publish_widget:{}", cli.widget_name),
-            ],
+            requested_capabilities: vec![format!("publish_widget:{}", cli.widget_name)],
             initial_subscriptions: Vec::new(),
             resume_token: Vec::new(),
             agent_timestamp_wall_us: now_wall_us(),
             min_protocol_version: 1000,
-            max_protocol_version: 1000,
+            max_protocol_version: 1001,
             auth_credential: Some(session_proto::AuthCredential {
                 credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
                     session_proto::PreSharedKeyCredential {
@@ -553,10 +550,9 @@ async fn send_publish(
     stats.request_count += 1;
     stats.payload_bytes_out += msg.encoded_len() as u64;
     let send_begin = Instant::now();
+    inflight.insert(seq, send_begin);
     tx.send(msg).await?;
     stats.aggregate_send_time_us += send_begin.elapsed().as_micros() as u64;
-
-    inflight.insert(seq, Instant::now());
     *next_seq += 1;
 
     Ok(())
