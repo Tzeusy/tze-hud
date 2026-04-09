@@ -9,6 +9,7 @@ This specification is normative for the contract envelope only. It does not repl
 Current downstream contract artifacts in this tranche:
 1. Signaling shape decision (`WM-S2a`): `docs/reconciliations/webrtc_media_v1_signaling_shape_decision.md`
 2. Protocol/schema + snapshot deltas (`WM-S2b`): `docs/reconciliations/webrtc_media_v1_protocol_schema_snapshot_deltas.md`
+3. Runtime activation gate + budgets (`WM-S3`): `docs/reconciliations/webrtc_media_v1_runtime_activation_gate_budgets.md`
 
 ---
 
