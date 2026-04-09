@@ -334,9 +334,10 @@ pub struct WidgetAnimationState {
 // ─── Standalone SVG rasterization (CPU-only, no GPU) ─────────────────────────
 
 fn widget_usvg_options() -> resvg::usvg::Options<'static> {
-    let mut opts = resvg::usvg::Options::default();
-    opts.fontdb = shared_widget_fontdb();
-    opts
+    resvg::usvg::Options {
+        fontdb: shared_widget_fontdb(),
+        ..Default::default()
+    }
 }
 
 fn shared_widget_fontdb() -> Arc<resvg::usvg::fontdb::Database> {
