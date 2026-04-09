@@ -1179,28 +1179,27 @@ impl WinitApp {
     /// hit-testing can flip back to capture when the cursor enters an active
     /// widget hover region.
     fn refresh_cursor_position_from_os(&mut self) {
-        if self.state.effective_mode != WindowMode::Overlay {
-            return;
-        }
-        #[cfg(target_os = "windows")]
-        {
-            use windows::Win32::Foundation::POINT;
-            use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        if self.state.effective_mode == WindowMode::Overlay {
+            #[cfg(target_os = "windows")]
+            {
+                use windows::Win32::Foundation::POINT;
+                use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-            let Some(window) = &self.state.window else {
-                return;
-            };
-            let window_pos = window
-                .outer_position()
-                .unwrap_or(winit::dpi::PhysicalPosition::new(0, 0));
+                let Some(window) = &self.state.window else {
+                    return;
+                };
+                let window_pos = window
+                    .outer_position()
+                    .unwrap_or(winit::dpi::PhysicalPosition::new(0, 0));
 
-            let mut pt = POINT { x: 0, y: 0 };
-            // SAFETY: GetCursorPos writes to the provided POINT and has no
-            // additional safety preconditions.
-            let ok = unsafe { GetCursorPos(&mut pt).is_ok() };
-            if ok {
-                self.state.cursor_x = (pt.x - window_pos.x) as f32;
-                self.state.cursor_y = (pt.y - window_pos.y) as f32;
+                let mut pt = POINT { x: 0, y: 0 };
+                // SAFETY: GetCursorPos writes to the provided POINT and has no
+                // additional safety preconditions.
+                let ok = unsafe { GetCursorPos(&mut pt).is_ok() };
+                if ok {
+                    self.state.cursor_x = (pt.x - window_pos.x) as f32;
+                    self.state.cursor_y = (pt.y - window_pos.y) as f32;
+                }
             }
         }
     }

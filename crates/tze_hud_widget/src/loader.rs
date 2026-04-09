@@ -474,6 +474,7 @@ fn load_bundle_dir_inner(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_svg_layer_and_manifest_bindings(
     path_str: &str,
     svg_file: &str,
