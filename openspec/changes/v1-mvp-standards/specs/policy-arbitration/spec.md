@@ -16,19 +16,19 @@ Scope: v1-mandatory
 - **WHEN** a v1 runtime evaluates mutation admission and per-session budget state
 - **THEN** decisions are produced by runtime/session/scene authorities, not by a centralized `tze_hud_policy` execution path
 
-### Requirement: Target Policy Wiring Is Tracked Separately
-The unified policy-wired arbitration path (single level-by-level execution through policy-owned evaluator contracts) is a target integration track and not fully wired in current v1 runtime. The v1 closeout path keeps bounded mutation-path wiring plus telemetry conformance as the retained v1 floor; frame/event unified hot-path wiring remains deferred. Until the unified seam is landed, level-stack requirements below remain target-state requirements and MUST be implemented via spec-first follow-on work.
-Source: docs/reconciliations/policy_wiring_epic_prompt.md, docs/reconciliations/policy_wiring_closeout_decision_20260410.md
-Scope: v1-reserved
+### Requirement: Unified Policy Hot-Path Wiring Is Deferred Beyond v1
+The unified policy-wired arbitration path (single level-by-level execution through policy-owned evaluator contracts) is deferred beyond v1. In shipped v1 runtime builds, runtime/session/scene-owned enforcement remains the authority surface. Unified hot-path policy wiring MUST be treated as explicit post-v1 (v2) work.
+Source: docs/reconciliations/policy_wiring_epic_prompt.md
+Scope: post-v1
 
-#### Scenario: Unwired policy requirements route to follow-on work
-- **WHEN** an implementer encounters a level-stack requirement here that is not yet wired in runtime code
-- **THEN** they MUST route it through spec-first follow-on work and MUST NOT claim v1 runtime compliance for that requirement until wiring lands
+#### Scenario: v1 release does not claim unified hot-path wiring
+- **WHEN** an operator audits v1 policy behavior
+- **THEN** they MUST treat unified policy-stack execution as deferred and rely on runtime/session/scene enforcement semantics for v1 truth
 
 ### Requirement: Seven-Level Arbitration Stack
 The target arbitration stack MUST use a fixed 7-level precedence (highest to lowest): Level 0 Human Override, Level 1 Safety, Level 2 Privacy, Level 3 Security, Level 4 Attention, Level 5 Resource, Level 6 Content. This ordering is doctrine and MUST NOT be modified.
 Source: RFC 0009 §1.1
-Scope: v1-reserved
+Scope: post-v1
 
 #### Scenario: Stack levels are fixed
 - **WHEN** the arbitration stack is initialized
@@ -37,7 +37,7 @@ Scope: v1-reserved
 ### Requirement: Cross-Level Conflict Resolution
 When two policies at different levels conflict, the higher level MUST always win (Rule CL-1). Side effects of the losing level MUST be suppressed, not deferred (Rule CL-2). The winning level's override type MUST apply (Rule CL-3). Lower levels MUST NOT be evaluated when a higher level rejects (short-circuit).
 Source: RFC 0009 §2.1
-Scope: v1-reserved
+Scope: post-v1
 
 #### Scenario: Privacy overrides content
 - **WHEN** Level 2 (Privacy) says "redact tile" but Level 6 (Content) says "show tile"
@@ -221,7 +221,7 @@ Scope: v1-mandatory
 ### Requirement: Per-Frame Evaluation Pipeline
 The runtime MUST evaluate the arbitration stack per-frame at the start of each frame cycle, before mutation intake. Per-frame evaluation order MUST be: Level 1 (Safety) -> Level 2 (Privacy) -> Level 5 (Resource) -> Level 6 (Content). If Level 1 triggers safe mode, Levels 2/5/6 MUST NOT be evaluated for that frame. Total per-frame evaluation MUST complete in < 200us.
 Source: RFC 0009 §3.2
-Scope: v1-reserved
+Scope: post-v1
 
 #### Scenario: Per-frame safety check
 - **WHEN** a frame cycle begins
@@ -234,7 +234,7 @@ Scope: v1-reserved
 ### Requirement: Per-Event Evaluation Pipeline
 The runtime MUST evaluate the arbitration stack per-event during input drain (Stage 1) and local feedback (Stage 2). Per-event evaluation order MUST be: Level 0 (Human Override) -> Level 4 (Attention) -> Level 3 (Security). If Level 0 triggers safe mode, Levels 4 and 3 MUST stop.
 Source: RFC 0009 §3.3
-Scope: v1-reserved
+Scope: post-v1
 
 #### Scenario: Override processed before attention
 - **WHEN** a `Ctrl+Shift+Escape` input and a tab-switch event arrive in the same frame
@@ -243,7 +243,7 @@ Scope: v1-reserved
 ### Requirement: Per-Mutation Evaluation Pipeline
 Every mutation in every `MutationBatch` MUST pass through the per-mutation evaluation. For tile mutations, the order MUST be: Security (3) -> Resource (5) -> Content (6). For zone publications, the full order MUST be: Override preemption (0) -> Security (3) -> Privacy (2, redaction decoration) -> Attention (4) -> Resource (5) -> Content (6). Short-circuit: if a higher level rejects, lower levels MUST NOT be evaluated. Per-mutation policy check MUST complete in < 50us.
 Source: RFC 0009 §3.4
-Scope: v1-reserved
+Scope: post-v1
 
 #### Scenario: Zone publish full stack
 - **WHEN** a zone publish mutation arrives
@@ -321,7 +321,7 @@ Scope: v1-mandatory
 ### Requirement: Policy Evaluation Latency Budgets
 The runtime MUST meet the following latency budgets: full per-frame evaluation < 200us, per-mutation policy check < 50us, human override response < 1 frame (16.6ms), privacy transition < 2 frames (33.2ms). Individual sub-checks MUST each consume no more than 20us; their measured mean latencies MUST be ordered by cost as follows: capability lookup fastest (< 5us), then attention check (< 10us), then zone contention resolution (< 20us).
 Source: RFC 0009 §9.1
-Scope: v1-reserved
+Scope: post-v1
 
 #### Scenario: Per-frame evaluation within budget
 - **WHEN** the runtime operates under normal load
@@ -391,9 +391,8 @@ Scope: v1-mandatory
 ### Cross-Reference: Freeze and Safe Mode State Transitions
 Freeze/safe-mode state transitions are governed exclusively by the system shell. See system-shell spec: "Requirement: Safe Mode and Freeze Interaction (Shell State Invariant)." Policy arbitration and evaluation MUST NOT write `OverrideState` or perform freeze/safe-mode override state transitions.
 
-### Spec-First Handoff Notes
-- `hud-iq2x.7`: define the runtime-policy-scene ownership matrix and the executable seam for PolicyContext/ArbitrationOutcome integration before re-promoting `v1-reserved` stack requirements to `v1-mandatory`.
-- `hud-iq2x.8`: define capability-escalation source semantics (session grant set vs lease scope vs mid-session requests) before claiming Level 3 Security stack parity with this spec.
+### Closeout Note: v1 Scope Shrink
+Unified level-stack hot-path wiring is explicitly deferred to post-v1 (v2). Any future promotion of these deferred requirements MUST include fresh reconciliation evidence proving code/spec/doctrine alignment for that release train.
 
 ### Requirement: Dynamic Policy Rules
 Dynamic policy rules that can be loaded or modified at runtime are deferred to post-v1. V1 policy rules are static (derived from configuration at load time).
@@ -407,7 +406,7 @@ Scope: post-v1
 ### Requirement: Per-Agent Arbitration Diagnostics
 The `RuntimeService.GetSessionDiagnostics` RPC exposing per-agent arbitration statistics (reject counts by code, shed counts by level, queue depths) is deferred to post-v1. In v1, these statistics MUST be available only via telemetry.
 Source: RFC 0009 §13.2
-Scope: v1-reserved
+Scope: post-v1
 
 #### Scenario: V1 diagnostics via telemetry only
 - **WHEN** an operator needs per-agent arbitration statistics in v1

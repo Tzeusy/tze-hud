@@ -700,9 +700,8 @@ Scope: v1-mandatory
 
 ---
 
-### Spec-First Handoff Notes
-- `hud-iq2x.8`: finalize source-of-truth semantics for mid-session escalation (session grant set vs lease scope vs operator/dynamic policy path), then promote any deferred escalation language from this spec into executable requirements.
-- `hud-iq2x.7`: align this session authority boundary with the runtime-policy-scene ownership matrix so policy-wiring work does not duplicate stateful enforcement already owned by runtime/session modules.
+### Closeout Note: Session Authority in Shrunk v1 Scope
+Session-protocol v1 authority semantics are runtime-owned and remain normative for shipped behavior. Unified policy hot-path wiring and any operator/dynamic escalation orchestration beyond these semantics are deferred to post-v1 and MUST NOT be implied as active v1 requirements.
 
 ---
 
