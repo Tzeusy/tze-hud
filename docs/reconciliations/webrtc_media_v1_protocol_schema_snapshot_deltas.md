@@ -1,7 +1,7 @@
 # WebRTC/Media V1 Protocol + Schema/Snapshot Delta Contract (WM-S2b)
 
 Date: 2026-04-09
-Issue: `hud-a5ro`
+Issue: `hud-nn9d.8`
 Parent epic: `hud-nn9d`
 Depends on: `hud-nn9d.6` (WM-S1), `hud-nn9d.7` (WM-S2a)
 
@@ -209,7 +209,7 @@ WM-S2a selected the session-envelope extension path. WM-S2b makes that concrete:
   absolute expiry does not equal `expires_at_wall_us`
 - **THEN** publish is rejected with deterministic invalid-argument semantics.
 
-## Acceptance Traceability (`hud-a5ro`)
+## Acceptance Traceability (`hud-nn9d.8`)
 
 1. Required protocol/schema deltas are specified:
 - fulfilled by explicit field allocations and message/schema delta tables above.

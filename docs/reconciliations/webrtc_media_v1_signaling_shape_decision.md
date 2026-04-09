@@ -51,7 +51,7 @@ delay other session messages (for example scene mutations or input events).
 3. **Downgrade behavior is deterministic.**
    - If either gate is missing, agents MUST fall back to existing non-media zone publication behavior and MUST NOT attempt media signaling payloads.
    - If policy/config keeps media disabled (default-off runtime posture), runtime denial is treated as normal downgrade, not as transport failure.
-4. **Reconnect behavior follows existing session rules.** On reconnect, clients re-evaluate capability/version from `SessionResumeResult` before resuming any media-intent flow; no separate media session resumption path is introduced in this tranche. Scheduled-but-not-active ingress publishes are not preserved across reconnect and MUST be re-issued after resume if still desired.
+4. **Reconnect behavior follows existing session rules.** On reconnect, clients re-evaluate capability/version from `SessionResumeResult` before resuming any media-intent flow; no separate media session resumption path is introduced in this tranche.
 
 ## Deferred Boundary
 
@@ -59,6 +59,6 @@ A separate media RPC remains deferred and may be reconsidered only when embodied
 
 ## Consequence For WM-S2b
 
-`WM-S2b` should specify concrete protobuf field allocations, reconnect/snapshot
-rules, and compatibility/failure semantics under this chosen shape in:
+`WM-S2b` specifies concrete protobuf field allocations, reconnect/snapshot rules,
+and compatibility/failure semantics under this chosen shape in:
 `docs/reconciliations/webrtc_media_v1_protocol_schema_snapshot_deltas.md`.
