@@ -2841,6 +2841,16 @@ fn canonical_name_to_capability(name: &str) -> Option<Capability> {
     }
 }
 
+fn capability_grant_covers(granted: &str, requested: &str) -> bool {
+    if granted == "*" || granted == requested {
+        return true;
+    }
+
+    (granted == "publish_zone:*" && requested.starts_with("publish_zone:"))
+        || (granted == "publish_widget:*" && requested.starts_with("publish_widget:"))
+        || (granted == "emit_scene_event:*" && requested.starts_with("emit_scene_event:"))
+}
+
 async fn handle_lease_request(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -2933,6 +2943,56 @@ async fn handle_lease_request(
                         unknown_caps.len()
                     ),
                     hint: hint_json,
+                    ..Default::default()
+                })),
+            }))
+            .await;
+        return;
+    }
+
+    // Lease capability scope must stay within the session's currently granted
+    // authority surface. Do not silently clamp to a subset: deny the full
+    // request when any requested capability is out of scope.
+    let unauthorized_caps: Vec<String> = req
+        .capabilities
+        .iter()
+        .filter(|requested| {
+            !session
+                .capabilities
+                .iter()
+                .any(|granted| capability_grant_covers(granted, requested))
+        })
+        .cloned()
+        .collect();
+    if !unauthorized_caps.is_empty() {
+        let deny_reason = format!(
+            "requested lease scope exceeds session-granted capabilities: {}",
+            unauthorized_caps.join(", ")
+        );
+        let deny_code = "PERMISSION_DENIED".to_string();
+        if client_sequence > 0 {
+            session.lease_correlation_cache.insert(
+                client_sequence,
+                CachedLeaseResponse {
+                    granted: false,
+                    lease_id: Vec::new(),
+                    granted_ttl_ms: 0,
+                    granted_priority: 0,
+                    granted_capabilities: Vec::new(),
+                    deny_reason: deny_reason.clone(),
+                    deny_code: deny_code.clone(),
+                },
+            );
+        }
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                    granted: false,
+                    deny_reason,
+                    deny_code,
                     ..Default::default()
                 })),
             }))
@@ -7077,6 +7137,53 @@ mod tests {
                     resp.deny_code, "CONFIG_UNKNOWN_CAPABILITY",
                     "deny_code must be CONFIG_UNKNOWN_CAPABILITY, got: {:?}",
                     resp.deny_code
+                );
+            }
+            other => panic!("Expected LeaseResponse(denied), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: LeaseRequest scope must not exceed current session grants
+    /// (lease-governance/spec.md Requirement: Lease State Machine).
+    ///
+    /// WHEN lease request includes capabilities outside `SessionEstablished.granted_capabilities`,
+    /// THEN runtime denies the entire lease request (no silent subset grant).
+    #[tokio::test]
+    async fn test_lease_request_scope_exceeding_session_grants_is_denied() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _messages, mut response_stream) =
+            handshake(&mut client, "lease-scope-agent", "test-key").await;
+
+        // Handshake helper grants create_tiles/access_input_events/read_scene_topology.
+        // Requesting modify_own_tiles exceeds the current session-granted scope.
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = next_non_state_change(&mut response_stream).await;
+        match &msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(
+                    !resp.granted,
+                    "Lease must be denied when requested scope exceeds session grants"
+                );
+                assert_eq!(resp.deny_code, "PERMISSION_DENIED");
+                assert!(
+                    resp.deny_reason.contains("modify_own_tiles"),
+                    "deny_reason should identify unauthorized capability; got {:?}",
+                    resp.deny_reason
+                );
+                assert!(
+                    resp.granted_capabilities.is_empty(),
+                    "Denied lease must not return granted_capabilities subset"
                 );
             }
             other => panic!("Expected LeaseResponse(denied), got: {other:?}"),

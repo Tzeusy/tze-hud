@@ -215,6 +215,8 @@ The runtime evaluates:
 5. Requested `lease_priority` is within the agent's priority capability ceiling.
 6. Requested `resource_budget` does not exceed the session's configured maximum (SS6.1).
 
+If check (4) fails for any requested capability, the runtime denies the entire `LeaseRequest`; it does not clamp or partially grant the capability scope.
+
 If all checks pass, the runtime assigns a `LeaseId` (SceneId, UUIDv7) and transitions to `ACTIVE`. Side effects:
 - `LeaseResponse` with `result = GRANTED` sent to agent.
 - `LeaseStateChange` emitted on `lease_changes` subscription category.
