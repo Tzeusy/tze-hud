@@ -49,6 +49,91 @@ const PRODUCTION_CONFIG: &str = include_str!("../config/production.toml");
 /// root — so `../../profiles` reaches `profiles/` at the repo root.
 const PROFILES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../profiles");
 
+/// Test-scoped writable directory for runtime widget asset store probes.
+struct RuntimeWidgetAssetStoreTestDir {
+    root: std::path::PathBuf,
+    store_path: std::path::PathBuf,
+}
+
+impl RuntimeWidgetAssetStoreTestDir {
+    fn create() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "tze_hud_production_boot_widget_store_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        let store_path = root.join("runtime_widget_assets");
+        std::fs::create_dir_all(&store_path)
+            .expect("test runtime widget asset store dir must be creatable");
+        Self { root, store_path }
+    }
+}
+
+impl Drop for RuntimeWidgetAssetStoreTestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Inject or override `[widget_runtime_assets].store_path` with a writable
+/// test-local directory so boot tests don't depend on CI cache env wiring.
+fn with_writable_widget_store(base_toml: &str) -> (String, RuntimeWidgetAssetStoreTestDir) {
+    let temp_store = RuntimeWidgetAssetStoreTestDir::create();
+    let escaped_store_path = temp_store
+        .store_path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+
+    let mut out = String::with_capacity(base_toml.len() + escaped_store_path.len() + 96);
+    let mut in_widget_runtime_assets = false;
+    let mut saw_section = false;
+    let mut saw_store_path = false;
+
+    for line in base_toml.lines() {
+        let trimmed = line.trim();
+        let is_header = trimmed.starts_with('[') && trimmed.ends_with(']');
+        if is_header {
+            if in_widget_runtime_assets && !saw_store_path {
+                out.push_str(&format!("store_path = \"{escaped_store_path}\"\n"));
+            }
+            in_widget_runtime_assets = trimmed == "[widget_runtime_assets]";
+            if in_widget_runtime_assets {
+                saw_section = true;
+            }
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        if in_widget_runtime_assets && trimmed.starts_with("store_path") {
+            out.push_str(&format!("store_path = \"{escaped_store_path}\"\n"));
+            saw_store_path = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    if in_widget_runtime_assets && !saw_store_path {
+        out.push_str(&format!("store_path = \"{escaped_store_path}\"\n"));
+    }
+
+    if !saw_section {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("\n[widget_runtime_assets]\n");
+        out.push_str(&format!("store_path = \"{escaped_store_path}\"\n"));
+    }
+
+    (out, temp_store)
+}
+
 /// Boot the runtime with the committed production config and verify startup
 /// succeeds.
 ///
@@ -56,12 +141,13 @@ const PROFILES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../profiles"
 /// the runtime's config parsing regresses, this test fails immediately.
 #[tokio::test]
 async fn production_config_boot_succeeds() {
+    let (config_toml, _store_dir) = with_writable_widget_store(PRODUCTION_CONFIG);
     let config = HeadlessConfig {
         width: 320,
         height: 240,
         grpc_port: 0, // No gRPC server — pure boot test.
         psk: "production-boot-test".to_string(),
-        config_toml: Some(PRODUCTION_CONFIG.to_string()),
+        config_toml: Some(config_toml),
     };
 
     let result = HeadlessRuntime::new(config).await;
@@ -86,6 +172,7 @@ async fn production_config_grants_registered_agent_capabilities() {
     use tze_hud_protocol::proto::session as session_proto;
     use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 
+    let (config_toml, _store_dir) = with_writable_widget_store(PRODUCTION_CONFIG);
     // Ephemeral port to avoid port conflicts in parallel CI.
     let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
     let free_port = listener.local_addr().unwrap().port();
@@ -96,7 +183,7 @@ async fn production_config_grants_registered_agent_capabilities() {
         height: 240,
         grpc_port: free_port,
         psk: "production-boot-test".to_string(),
-        config_toml: Some(PRODUCTION_CONFIG.to_string()),
+        config_toml: Some(config_toml),
     };
 
     let runtime = HeadlessRuntime::new(config)
@@ -207,6 +294,7 @@ async fn production_config_denies_unregistered_agent() {
     use tze_hud_protocol::proto::session as session_proto;
     use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 
+    let (config_toml, _store_dir) = with_writable_widget_store(PRODUCTION_CONFIG);
     // Ephemeral port.
     let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
     let free_port = listener.local_addr().unwrap().port();
@@ -217,7 +305,7 @@ async fn production_config_denies_unregistered_agent() {
         height: 240,
         grpc_port: free_port,
         psk: "production-boot-test".to_string(),
-        config_toml: Some(PRODUCTION_CONFIG.to_string()),
+        config_toml: Some(config_toml),
     };
 
     let runtime = HeadlessRuntime::new(config)
@@ -409,6 +497,7 @@ subtitle      = "exemplar-subtitle"
 alert-banner  = "exemplar-alert-banner"
 "#
     );
+    let (config_toml, _store_dir) = with_writable_widget_store(&config_toml);
 
     let config = HeadlessConfig {
         width: 320,
