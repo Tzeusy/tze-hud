@@ -120,6 +120,7 @@ Instantiation note: the `PW-*` backlog below is a full dependency view, not a cr
   - Explicitly account for all three policy surfaces: `tze_hud_runtime`, `tze_hud_policy`, and `tze_hud_scene::policy`.
   - State which abstractions are canonical, transitional, or scheduled for retirement.
   - Define `PolicyContext` construction contract and `ArbitrationOutcome` execution contract.
+  - Publish and maintain the contract artifact at `docs/reconciliations/policy_wiring_seam_contract.md`.
 
 ### PW-02b — Define capability-escalation policy source semantics
 - Type/Priority: `task` / `P1`
