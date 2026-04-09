@@ -342,7 +342,7 @@ pub fn evaluate_policy_mutation_latency_conformance(
         AssertionOutcome::NoSamples {
             metric: metric.clone(),
         }
-    } else if p99_eval_us <= POLICY_MUTATION_EVAL_BUDGET_US {
+    } else if p99_eval_us < POLICY_MUTATION_EVAL_BUDGET_US {
         AssertionOutcome::Pass {
             metric: metric.clone(),
             observed: p99_eval_us,
@@ -723,6 +723,20 @@ mod tests {
         assert!(
             matches!(report.assertion, AssertionOutcome::NoSamples { .. }),
             "expected NoSamples, got {report:?}"
+        );
+    }
+
+    #[test]
+    fn mutation_path_latency_conformance_fails_at_exact_budget_boundary() {
+        let report = evaluate_policy_mutation_latency_conformance(
+            64,
+            POLICY_MUTATION_EVAL_BUDGET_US,
+            POLICY_MUTATION_EVAL_BUDGET_US,
+            1,
+        );
+        assert!(
+            report.assertion.is_fail(),
+            "expected fail for p99 at strict budget boundary: {report:?}"
         );
     }
 

@@ -2073,7 +2073,7 @@ impl PolicyAdmissionReport {
         latencies.record(eval_us);
         self.evaluated_mutations = self.evaluated_mutations.saturating_add(1);
         self.max_eval_us = self.max_eval_us.max(eval_us);
-        if eval_us > POLICY_MUTATION_EVAL_BUDGET_US {
+        if eval_us >= POLICY_MUTATION_EVAL_BUDGET_US {
             self.over_budget_mutations = self.over_budget_mutations.saturating_add(1);
         }
     }
@@ -2145,6 +2145,7 @@ fn log_policy_admission_report(
     report: &PolicyAdmissionReport,
     accepted: bool,
 ) {
+    const DIAGNOSTICS_PREVIEW_LIMIT: usize = 8;
     let diagnostics_by_level = report.diagnostics_by_level();
     let latency_conformance = report.latency_conformance.as_ref();
     if report.over_budget() {
@@ -2167,7 +2168,7 @@ fn log_policy_admission_report(
             "Policy admission latency exceeded budget"
         );
     } else {
-        tracing::info!(
+        tracing::debug!(
             namespace = %namespace,
             phase,
             batch_id_len,
@@ -2187,12 +2188,23 @@ fn log_policy_admission_report(
     }
 
     if !report.diagnostics.is_empty() {
-        tracing::info!(
+        let diagnostics_preview: Vec<_> = report
+            .diagnostics
+            .iter()
+            .take(DIAGNOSTICS_PREVIEW_LIMIT)
+            .collect();
+        let diagnostics_truncated = report
+            .diagnostics
+            .len()
+            .saturating_sub(diagnostics_preview.len());
+
+        tracing::debug!(
             namespace = %namespace,
             phase,
             batch_id_len,
             diagnostics_by_level = ?diagnostics_by_level,
-            diagnostics = ?report.diagnostics,
+            diagnostics_preview = ?diagnostics_preview,
+            diagnostics_truncated,
             "Policy admission diagnostics"
         );
     }
@@ -10699,6 +10711,24 @@ mod tests {
             .expect("conformance should be attached during finalize");
         assert_eq!(conformance.budget_us, POLICY_MUTATION_EVAL_BUDGET_US);
         assert!(conformance.within_budget());
+    }
+
+    #[test]
+    fn test_policy_admission_report_treats_budget_boundary_as_over_budget() {
+        let mut report = PolicyAdmissionReport::default();
+        let mut latencies = MutationLatencyAccumulator::default();
+        report.record_eval_latency(POLICY_MUTATION_EVAL_BUDGET_US, &mut latencies);
+
+        let finalized = report.finalize(std::time::Instant::now(), &mut latencies);
+        assert_eq!(
+            finalized.telemetry.per_mutation_eval_us_p99,
+            POLICY_MUTATION_EVAL_BUDGET_US
+        );
+        assert_eq!(finalized.over_budget_mutations, 1);
+        assert!(
+            finalized.over_budget(),
+            "p99 at strict budget boundary must be marked as non-conformant"
+        );
     }
 
     /// WHEN revoke_capability_on_lease is called for a lease not owned by any session,
