@@ -40,8 +40,8 @@ Non-goals for this seam pass:
 | Signaling-shape decision | `hud-nn9d.7` / `WM-S2a` | `hud-nn9d.7` exists (closed) |
 | Proto/schema + snapshot deltas | `hud-nn9d.8` / `WM-S2b` | `hud-nn9d.8` (this issue) |
 | Zone transport/layer/reconnect contract | `WM-S2c` | Not yet instantiated |
-| Runtime activation gate + budgets | `hud-nn9d.10` / `WM-S3` | `hud-nn9d.10` (this issue) |
-| Privacy/operator/enablement policy | `WM-S3b` | Not yet instantiated |
+| Runtime activation gate + budgets | `hud-nn9d.10` / `WM-S3` | `hud-nn9d.10` (instantiated) |
+| Privacy/operator/enablement policy | `hud-nn9d.11` / `WM-S3b` | `hud-nn9d.11` (this issue) |
 | Compositor render/degradation contract | `WM-S3c` | Not yet instantiated |
 | Validation rehearsal scenarios | `WM-S4` | Not yet instantiated |
 | Doctrine/readme alignment | `WM-S5`, `WM-S6` | Not yet instantiated |
