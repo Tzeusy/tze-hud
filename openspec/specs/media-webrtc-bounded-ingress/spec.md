@@ -136,7 +136,30 @@ Scope: post-v1-contract-tranche
 ---
 
 ### Requirement: Zone and Layer Containment
-Media ingress MUST be constrained to an approved media zone contract and declared layer attachment semantics. Ingress MUST NOT be routable to arbitrary zones or bypass runtime-owned layering rules.
+Media ingress MUST be constrained to a fixed runtime-owned media zone class and
+MUST NOT be routable to arbitrary zone types. The approved class for this slice
+is exactly one zone type per tab with:
+1. `accepted_media_types` including `VideoSurfaceRef`.
+2. `transport_constraint = WebRtcRequired`.
+3. `layer_attachment` fixed in configuration and not overridable by publisher
+   payloads at runtime.
+
+Publishers MUST target this zone by canonical `zone_name`; any other zone name
+MUST be rejected for media ingress. The runtime MUST enforce that media
+transport admission (`MediaIngressOpen`) and content publication (`ZonePublish`
+with `VideoSurfaceRef`) bind to the same approved zone identity.
+
+Reconnect semantics for this zone MUST follow snapshot-first contract limits:
+1. reconnect snapshot persists only declarative active publication state for the
+   approved zone (`VideoSurfaceRef` + publication metadata),
+2. transport session internals are never snapshotted,
+3. after resume, runtime MUST treat pre-disconnect transport as
+   non-authoritative until stream-epoch reconciliation succeeds or a fresh open
+   occurs.
+
+If configuration declares a fixed media zone set (single approved media zone
+name/class per tab), runtime MUST reject any attempt to open/publish media to a
+zone outside that fixed set.
 Scope: post-v1-contract-tranche
 
 #### Scenario: non-media zone target is rejected
@@ -146,6 +169,20 @@ Scope: post-v1-contract-tranche
 #### Scenario: layer attachment contract is enforced
 - **WHEN** an ingress publish targets an approved media zone
 - **THEN** the resulting visual surface MUST attach only to the layer class declared by the zone contract
+
+#### Scenario: transport constraint mismatch is rejected
+- **WHEN** media ingress open/publish targets a zone without `transport_constraint = WebRtcRequired`
+- **THEN** runtime MUST reject admission as a zone transport contract violation
+
+#### Scenario: reconnect restores publication metadata but not transport session
+- **WHEN** a media zone has an active publication at disconnect and session resume succeeds
+- **THEN** reconnect snapshot MUST restore only declarative media publication state for that zone
+- **AND** the transport session MUST require stream-epoch reconciliation or fresh open before being treated as active
+
+#### Scenario: fixed-zone restriction rejects alternate zone identity
+- **WHEN** runtime is configured with a fixed approved media zone name per tab
+- **AND** publisher attempts media ingress against a different zone name
+- **THEN** runtime MUST reject the request and preserve current approved-zone state unchanged
 
 ---
 
