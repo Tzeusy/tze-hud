@@ -9,6 +9,7 @@ Domain: GOVERNANCE
 
 ### Requirement: Lease State Machine
 The runtime MUST implement the following lease state machine with states: REQUESTED, ACTIVE, SUSPENDED, ORPHANED, REVOKED, EXPIRED, DENIED, RELEASED. Valid transitions MUST be: REQUESTED->ACTIVE (granted), REQUESTED->DENIED (denied), ACTIVE->SUSPENDED (safe mode), ACTIVE->ORPHANED (disconnect), ACTIVE->EXPIRED (TTL elapsed), ACTIVE->REVOKED (viewer dismiss, budget policy), ACTIVE->RELEASED (agent releases), SUSPENDED->ACTIVE (safe mode exit), SUSPENDED->REVOKED (max suspension time exceeded), ORPHANED->ACTIVE (reconnect within grace), ORPHANED->EXPIRED (grace period elapsed). DENIED, REVOKED, EXPIRED, and RELEASED are terminal states.
+For REQUESTED->DENIED capability failures, if any requested lease capability is outside the session-granted capability set, the runtime MUST deny the entire lease request and MUST NOT silently clamp to an authorized subset.
 Source: RFC 0008 §3.1
 Scope: v1-mandatory
 

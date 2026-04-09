@@ -313,7 +313,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Lease Management RPCs
-LeaseRequest (ACQUIRE/RENEW/RELEASE) SHALL be a transactional message on the session stream. The runtime SHALL respond with LeaseResponse (grant/deny/revoke). LeaseStateChange notifications SHALL be delivered to the agent when lease state changes occur. All lease_id fields SHALL use SceneId (16-byte UUIDv7).
+LeaseRequest (ACQUIRE/RENEW/RELEASE) SHALL be a transactional message on the session stream. The runtime SHALL respond with LeaseResponse (grant/deny/revoke). LeaseStateChange notifications SHALL be delivered to the agent when lease state changes occur. All lease_id fields SHALL use SceneId (16-byte UUIDv7). Lease capability scope in LeaseRequest MUST be a subset of the capabilities currently granted to the session; if any requested capability exceeds session grant, the runtime MUST deny the full LeaseRequest (LeaseResponse granted=false, deny_code=PERMISSION_DENIED) rather than granting only the authorized subset.
 Source: RFC 0005 §3.1, §3.2
 Scope: v1-mandatory
 

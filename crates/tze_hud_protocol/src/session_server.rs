@@ -2841,6 +2841,22 @@ fn canonical_name_to_capability(name: &str) -> Option<Capability> {
     }
 }
 
+fn capability_grant_covers(granted: &str, requested: &str) -> bool {
+    if granted == "*" || granted == requested {
+        return true;
+    }
+
+    (granted == "publish_zone:*" && requested.starts_with("publish_zone:"))
+        || (granted == "publish_widget:*" && requested.starts_with("publish_widget:"))
+        || (granted == "emit_scene_event:*" && requested.starts_with("emit_scene_event:"))
+}
+
+fn capability_set_covers(granted: &[String], requested: &str) -> bool {
+    granted
+        .iter()
+        .any(|grant| capability_grant_covers(grant, requested))
+}
+
 async fn handle_lease_request(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -2875,8 +2891,6 @@ async fn handle_lease_request(
             return;
         }
     }
-
-    let st = state.lock().await;
 
     // Validate requested capabilities against the canonical v1 vocabulary.
     // Non-canonical names (including legacy names like create_tile, receive_input)
@@ -2940,6 +2954,51 @@ async fn handle_lease_request(
         return;
     }
 
+    // Lease capability scope must stay within the session's currently granted
+    // authority surface. Do not silently clamp to a subset: deny the full
+    // request when any requested capability is out of scope.
+    let unauthorized_caps: Vec<String> = req
+        .capabilities
+        .iter()
+        .filter(|requested| !capability_set_covers(&session.capabilities, requested))
+        .cloned()
+        .collect();
+    if !unauthorized_caps.is_empty() {
+        let deny_reason = format!(
+            "requested lease scope exceeds session-granted capabilities: {}",
+            unauthorized_caps.join(", ")
+        );
+        let deny_code = "PERMISSION_DENIED".to_string();
+        if client_sequence > 0 {
+            session.lease_correlation_cache.insert(
+                client_sequence,
+                CachedLeaseResponse {
+                    granted: false,
+                    lease_id: Vec::new(),
+                    granted_ttl_ms: 0,
+                    granted_priority: 0,
+                    granted_capabilities: Vec::new(),
+                    deny_reason: deny_reason.clone(),
+                    deny_code: deny_code.clone(),
+                },
+            );
+        }
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                    granted: false,
+                    deny_reason,
+                    deny_code,
+                    ..Default::default()
+                })),
+            }))
+            .await;
+        return;
+    }
+
     // Map canonical wire names to Capability enum values.
     // Only canonical v1 names are accepted here; validation above ensures no
     // legacy names reach this mapping.
@@ -2961,6 +3020,7 @@ async fn handle_lease_request(
     // `effective_priority` returns u32 (wire type); priority values are 0-4 so the
     // conversion to u8 is always lossless.
     let priority_u8 = granted_priority as u8;
+    let st = state.lock().await;
     let lease_id = st.scene.lock().await.grant_lease_with_priority(
         &session.namespace,
         ttl,
@@ -3977,7 +4037,9 @@ async fn handle_widget_asset_register(
         let durable_hit = if existing.is_none() {
             st.runtime_widget_store
                 .as_ref()
-                .map(|store| store.contains(tze_hud_resource::ResourceId::from_bytes(expected_hash)))
+                .map(|store| {
+                    store.contains(tze_hud_resource::ResourceId::from_bytes(expected_hash))
+                })
                 .unwrap_or(false)
         } else {
             false
@@ -4412,7 +4474,7 @@ async fn handle_widget_publish(
 
     // ── Step 1: Capability check (string-based, matches session.capabilities) ──
     let required_cap = format!("publish_widget:{widget_name}");
-    let has_cap = session.capabilities.iter().any(|c| c == &required_cap);
+    let has_cap = capability_set_covers(&session.capabilities, &required_cap);
 
     if !has_cap {
         // Per spec: WIDGET_CAPABILITY_MISSING. For durable widgets we send a result;
@@ -4764,7 +4826,7 @@ fn validate_emission(
 
     // ── Step 2: Capability check ──────────────────────────────────────────
     let required_cap = format!("emit_scene_event:{}", emit.bare_name);
-    if !session.capabilities.contains(&required_cap) {
+    if !capability_set_covers(&session.capabilities, &required_cap) {
         return Err((
             "AGENT_EVENT_CAPABILITY_MISSING".to_string(),
             format!("missing capability: {required_cap}"),
@@ -7081,6 +7143,69 @@ mod tests {
             }
             other => panic!("Expected LeaseResponse(denied), got: {other:?}"),
         }
+    }
+
+    /// Scenario: LeaseRequest scope must not exceed current session grants
+    /// (lease-governance/spec.md Requirement: Lease State Machine).
+    ///
+    /// WHEN lease request includes capabilities outside `SessionEstablished.granted_capabilities`,
+    /// THEN runtime denies the entire lease request (no silent subset grant).
+    #[tokio::test]
+    async fn test_lease_request_scope_exceeding_session_grants_is_denied() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _messages, mut response_stream) =
+            handshake(&mut client, "lease-scope-agent", "test-key").await;
+
+        // Handshake helper grants create_tiles/access_input_events/read_scene_topology.
+        // Requesting modify_own_tiles exceeds the current session-granted scope.
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = next_non_state_change(&mut response_stream).await;
+        match &msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(
+                    !resp.granted,
+                    "Lease must be denied when requested scope exceeds session grants"
+                );
+                assert_eq!(resp.deny_code, "PERMISSION_DENIED");
+                assert!(
+                    resp.deny_reason.contains("modify_own_tiles"),
+                    "deny_reason should identify unauthorized capability; got {:?}",
+                    resp.deny_reason
+                );
+                assert!(
+                    resp.granted_capabilities.is_empty(),
+                    "Denied lease must not return granted_capabilities subset"
+                );
+            }
+            other => panic!("Expected LeaseResponse(denied), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_capability_set_covers_wildcard_grants() {
+        let caps = vec![
+            "publish_zone:*".to_string(),
+            "publish_widget:*".to_string(),
+            "emit_scene_event:*".to_string(),
+        ];
+        assert!(capability_set_covers(&caps, "publish_zone:subtitle"));
+        assert!(capability_set_covers(&caps, "publish_widget:gauge"));
+        assert!(capability_set_covers(
+            &caps,
+            "emit_scene_event:status_update"
+        ));
+        assert!(!capability_set_covers(&caps, "create_tiles"));
     }
 
     /// Scenario: PSK agent with access_input_events capability successfully subscribes to
@@ -9713,6 +9838,49 @@ mod tests {
                 );
             }
             other => panic!("Expected WidgetPublishResult(rejected), got: {other:?}"),
+        }
+
+        drop(tx);
+    }
+
+    /// Scenario: wildcard publish_widget capability authorizes any widget publish.
+    #[tokio::test]
+    async fn test_widget_publish_wildcard_capability_allows_publish() {
+        let (mut client, _handle) = setup_widget_test().await;
+
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "widget-wildcard-agent",
+            "test-key",
+            &["publish_widget:*"],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
+                widget_name: "gauge".to_string(),
+                instance_id: String::new(),
+                params: vec![],
+                transition_ms: 0,
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        match &result_msg.payload {
+            Some(ServerPayload::WidgetPublishResult(result)) => {
+                assert!(
+                    result.accepted,
+                    "Expected wildcard capability to authorize publish"
+                );
+                assert_eq!(result.widget_name, "gauge");
+            }
+            other => panic!("Expected WidgetPublishResult, got: {other:?}"),
         }
 
         drop(tx);
