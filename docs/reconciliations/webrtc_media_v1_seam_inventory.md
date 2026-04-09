@@ -37,8 +37,8 @@ Non-goals for this seam pass:
 | Inventory seam | Next spec bead(s) | Status in tracker |
 |---|---|---|
 | Bounded capability contract envelope | `hud-nn9d.6` / `WM-S1` | `hud-nn9d.6` exists (closed) |
-| Signaling-shape decision | `WM-S2a` | `hud-nn9d.7` (this issue) |
-| Proto/schema + snapshot deltas | `WM-S2b` | Not yet instantiated |
+| Signaling-shape decision | `hud-nn9d.7` / `WM-S2a` | `hud-nn9d.7` exists (closed) |
+| Proto/schema + snapshot deltas | `hud-a5ro` / `WM-S2b` | `hud-a5ro` (this issue) |
 | Zone transport/layer/reconnect contract | `WM-S2c` | Not yet instantiated |
 | Runtime activation gate + budgets | `WM-S3` | Not yet instantiated |
 | Privacy/operator/enablement policy | `WM-S3b` | Not yet instantiated |

@@ -59,4 +59,6 @@ A separate media RPC remains deferred and may be reconsidered only when embodied
 
 ## Consequence For WM-S2b
 
-`WM-S2b` should now specify concrete protobuf field allocations and failure semantics under this chosen shape, rather than branching between two transport designs.
+`WM-S2b` should specify concrete protobuf field allocations, reconnect/snapshot
+rules, and compatibility/failure semantics under this chosen shape in:
+`docs/reconciliations/webrtc_media_v1_protocol_schema_snapshot_deltas.md`.

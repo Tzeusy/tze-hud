@@ -6,6 +6,10 @@ Define the smallest admissible media/WebRTC capability slice after v1: one-way i
 
 This specification is normative for the contract envelope only. It does not replace downstream detailed specs for signaling shape, schema/snapshot deltas, zone contract details, runtime activation budgets, privacy/operator policy, compositor rendering semantics, or validation harness specifics.
 
+Current downstream contract artifacts in this tranche:
+1. Signaling shape decision (`WM-S2a`): `docs/reconciliations/webrtc_media_v1_signaling_shape_decision.md`
+2. Protocol/schema + snapshot deltas (`WM-S2b`): `docs/reconciliations/webrtc_media_v1_protocol_schema_snapshot_deltas.md`
+
 ---
 
 ## Bounded Slice Definition
@@ -76,6 +80,16 @@ Scope: post-v1-contract-tranche
 
 ### Requirement: Timing Semantics for Presentation and Expiry
 Ingress publications MUST declare presentation lifecycle timing in wall-clock terms (`present_at_wall_us`, `expires_at_wall_us`) and runtime scheduling MUST honor that timing against compositor presentation cadence. The runtime MUST NOT present frames before `present_at_wall_us` and MUST NOT present frames at or after `expires_at_wall_us`. Presentation MAY cease earlier if ingress is torn down due to lease revocation, budget breach, or operator/policy disable.
+
+When ingress publication contracts include both relative expiry (`ttl_us`) and
+absolute expiry (`expires_at_wall_us`), implementations MUST apply deterministic
+normalization:
+1. `expires_at_wall_us` is canonical for persisted snapshot/reconnect state.
+2. `ttl_us` remains valid as relative input and maps to absolute expiry via:
+- `present_at_wall_us + ttl_us` when `present_at_wall_us != 0`;
+- otherwise `accepted_at_wall_us + ttl_us` at receiver admission time.
+3. If both `ttl_us` and `expires_at_wall_us` are non-zero and resolve to
+different expiry instants, publication MUST be rejected as invalid.
 Scope: post-v1-contract-tranche
 
 #### Scenario: scheduled ingress does not render early
@@ -86,6 +100,14 @@ Scope: post-v1-contract-tranche
 #### Scenario: expired ingress is not rendered
 - **WHEN** an ingress publication arrives with `expires_at_wall_us` in the past
 - **THEN** the runtime MUST reject or immediately clear the publication and MUST render zero media frames for it
+
+#### Scenario: ttl-only ingress derives canonical absolute expiry
+- **WHEN** an ingress publication provides `ttl_us > 0` and `expires_at_wall_us = 0`
+- **THEN** receiver MUST derive and persist effective absolute expiry using the deterministic mapping above
+
+#### Scenario: conflicting ttl and absolute expiry is rejected
+- **WHEN** an ingress publication provides both `ttl_us > 0` and `expires_at_wall_us > 0`, but ttl-derived expiry does not equal `expires_at_wall_us`
+- **THEN** receiver MUST reject the publication as a malformed timing contract
 
 ### Requirement: Reconnect Snapshot Behavior For Scheduled Ingress
 If an ingress publication has been accepted but its `present_at_wall_us` has not yet arrived when the session disconnects, that pending publication is runtime-local only and MUST NOT survive reconnect snapshot/resume. The reconnect snapshot MUST include only ingress publications that are already active at snapshot time. Clients that still want the scheduled ingress after resume MUST re-issue it after `SessionResumeResult`.
