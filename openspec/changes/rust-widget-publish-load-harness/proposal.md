@@ -1,6 +1,6 @@
 ## Why
 
-The current `/user-test-performance` workflow records useful historical numbers, but its Python gRPC path cannot measure repeated widget publishes honestly because durable `WidgetPublishResult` acknowledgements are not correlated to the originating client envelope sequence. The repo also lacks a dedicated spec for a resident-agent publish-load harness, so any Rust implementation would otherwise be inventing its own contract for metrics, artifacts, and verdict semantics.
+The current `/user-test` workflow records useful historical numbers, but its Python gRPC path cannot measure repeated widget publishes honestly because durable `WidgetPublishResult` acknowledgements are not correlated to the originating client envelope sequence. The repo also lacks a dedicated spec for a resident-agent publish-load harness, so any Rust implementation would otherwise be inventing its own contract for metrics, artifacts, and verdict semantics.
 
 ## What Changes
 
@@ -23,5 +23,5 @@ The current `/user-test-performance` workflow records useful historical numbers,
 
 - New Rust workspace example crate for the harness, reusing `tze_hud_protocol` generated client types and `tze_hud_validation` artifact sinks
 - Protocol/runtime/test changes in `crates/tze_hud_protocol` to carry and assert `WidgetPublishResult.request_sequence`
-- New benchmark telemetry and artifact schema for publish-load runs, plus a derived CSV compatibility path for `.claude/skills/user-test-performance`
-- Skill and documentation updates so `/user-test-performance` invokes the Rust harness for gRPC widget publish benchmarking instead of the current Python gRPC path
+- New benchmark telemetry and artifact schema for publish-load runs, plus a derived CSV compatibility path for the benchmark-history ledger consumed by `/user-test`
+- Skill and documentation updates so `/user-test` invokes the Rust harness for gRPC widget publish benchmarking instead of the current Python gRPC path
