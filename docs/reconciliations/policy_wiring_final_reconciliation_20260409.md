@@ -42,7 +42,7 @@ Scope: Verify policy-wiring direction outputs against required evidence set and 
 2. `hud-iq2x.6` (spec reconciliation) is closed.
 3. `hud-iq2x.7` (seam contract) is blocked on PR review flow.
 4. `hud-iq2x.8` (capability escalation semantics) is closed.
-5. `hud-ew7a` (event/frame scope decision after telemetry) is instantiated and in progress.
+5. `hud-ew7a` (event/frame scope decision after telemetry) is instantiated and `in_progress`.
 
 ### Still missing for full decomposition closure
 
