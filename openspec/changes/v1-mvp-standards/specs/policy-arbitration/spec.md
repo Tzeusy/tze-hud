@@ -143,6 +143,11 @@ Scope: v1-mandatory
 
 ### Requirement: Level 3 Security Enforcement
 The security level MUST enforce capability scopes, lease validity, and namespace isolation. All required capabilities MUST pass (security is conjunctive -- a single failing check rejects the mutation). Capability checks MUST be hash-table lookups; each individual check MUST complete in < 5us under nominal load. The check MUST produce `Reject(CapabilityDenied)`, `Reject(CapabilityScopeInsufficient)`, or `Reject(NamespaceViolation)` with the missing capability named in the `hint` field.
+
+Capability-source semantics in v1 are split and explicit:
+- Session-held grants are the live authority for mutation and lease-scope checks.
+- CapabilityRequest escalation eligibility is evaluated against the static config-derived per-agent allow-list.
+- Dynamic rule updates and operator approval paths are post-v1 and MUST NOT be implied as active in v1 unless explicitly implemented.
 Source: RFC 0009 §11.4
 Scope: v1-mandatory
 
@@ -157,6 +162,10 @@ Scope: v1-mandatory
 #### Scenario: Capability check latency
 - **WHEN** a single capability check is performed
 - **THEN** it MUST complete in < 5us under nominal load
+
+#### Scenario: Escalation policy source is distinct from held grants
+- **WHEN** a capability is present in the per-agent allow-list but absent from current session grants
+- **THEN** mutation and lease checks MUST still deny it until granted, and CapabilityRequest MAY grant it using the allow-list source
 
 ### Requirement: Level 4 Attention Management
 The attention level MUST manage interruption flow with five classes matching the InterruptionClass enum defined in RFC 0010 §3.1: SILENT (always passes, never counted against budget), LOW (discarded during quiet hours; too stale by quiet hours exit to be useful), NORMAL (queued during quiet hours; delivered when quiet hours end), HIGH (passes through quiet hours unless `pass_through_class` raises the threshold; subject to attention budget), CRITICAL (always passes, bypasses both quiet hours and attention budget; only the runtime may emit CRITICAL). Attention budget MUST track rolling per-agent and per-zone counters over the last 60 seconds with configurable limits (defaults: 20 per agent per minute, 10 per zone per minute; 30 per zone per minute for Stack-policy zones per RFC 0010 §7). When budget is exhausted, mutations MUST be coalesced (latest-wins within agent+zone key). Attention budget check MUST complete in < 10us. Note: RFC 0009 §11.5 uses the older doctrine names (Gentle/Normal/Urgent) and older default values (6/12); RFC 0010 §3.1 is authoritative for both the enum names and the default budgets.
