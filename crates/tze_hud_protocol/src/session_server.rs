@@ -46,6 +46,19 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
+use tze_hud_policy::types::{
+    AttentionContext as PolicyAttentionContext, ContentContext as PolicyContentContext,
+    InterruptionClass as PolicyInterruptionClass, MutationKind as PolicyMutationKind,
+    OverrideState as PolicyOverrideState, PolicyContext as PolicyContextSnapshot,
+    PrivacyContext as PolicyPrivacyContext, RedactionStyle as PolicyRedactionStyle,
+    ResourceContext as PolicyResourceContext, SafetyState as PolicySafetyState,
+    SecurityContext as PolicySecurityContext, ViewerClass as PolicyViewerClass,
+    VisibilityClassification as PolicyVisibilityClassification,
+};
+use tze_hud_policy::{
+    ArbitrationOutcome as PolicyArbitrationOutcome, MutationEvalInput as PolicyMutationEvalInput,
+    evaluate_mutation as evaluate_policy_mutation,
+};
 use tze_hud_resource::{
     RuntimeWidgetStoreError, RuntimeWidgetStorePutOutcome as DurablePutOutcome,
 };
@@ -1972,6 +1985,264 @@ fn validate_timing_hints(
     Ok(())
 }
 
+fn degradation_to_policy_level(level: crate::session::RuntimeDegradationLevel) -> u32 {
+    match level {
+        crate::session::RuntimeDegradationLevel::Normal => 0,
+        crate::session::RuntimeDegradationLevel::CoalescingMore => 1,
+        crate::session::RuntimeDegradationLevel::MediaQualityReduced => 2,
+        crate::session::RuntimeDegradationLevel::StreamsReduced => 3,
+        crate::session::RuntimeDegradationLevel::RenderingSimplified => 4,
+        crate::session::RuntimeDegradationLevel::SheddingTiles => 5,
+        crate::session::RuntimeDegradationLevel::AudioOnlyFallback => 6,
+    }
+}
+
+fn parse_visibility_classification(
+    content_classification: Option<&str>,
+) -> PolicyVisibilityClassification {
+    match content_classification
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("household") => PolicyVisibilityClassification::Household,
+        Some("private") => PolicyVisibilityClassification::Private,
+        Some("sensitive") => PolicyVisibilityClassification::Sensitive,
+        _ => PolicyVisibilityClassification::Public,
+    }
+}
+
+fn mutation_required_capabilities(mutation: &SceneMutation) -> Vec<String> {
+    match mutation {
+        SceneMutation::CreateTile { .. } => vec!["create_tiles".to_string()],
+        SceneMutation::UpdateTileBounds { .. }
+        | SceneMutation::UpdateTileZOrder { .. }
+        | SceneMutation::UpdateTileOpacity { .. }
+        | SceneMutation::UpdateTileInputMode { .. }
+        | SceneMutation::UpdateTileSyncGroup { .. }
+        | SceneMutation::UpdateTileExpiry { .. }
+        | SceneMutation::DeleteTile { .. }
+        | SceneMutation::SetTileRoot { .. }
+        | SceneMutation::AddNode { .. }
+        | SceneMutation::UpdateNodeContent { .. } => vec!["modify_own_tiles".to_string()],
+        SceneMutation::PublishToZone { zone_name, .. }
+        | SceneMutation::ClearZone { zone_name, .. } => {
+            vec![format!("publish_zone:{zone_name}")]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn mutation_kind_for_policy(mutation: &SceneMutation) -> PolicyMutationKind {
+    match mutation {
+        SceneMutation::PublishToZone { .. } | SceneMutation::ClearZone { .. } => {
+            PolicyMutationKind::ZonePublication
+        }
+        SceneMutation::CreateTile { .. } | SceneMutation::DeleteTile { .. } => {
+            PolicyMutationKind::Transactional
+        }
+        _ => PolicyMutationKind::TileMutation,
+    }
+}
+
+fn active_lease_priority_for_namespace(scene: &SceneGraph, namespace: &str) -> Option<u32> {
+    scene
+        .leases
+        .values()
+        .filter(|lease| lease.namespace == namespace && lease.state == LeaseState::Active)
+        .map(|lease| lease.priority as u32)
+        .min()
+}
+
+fn evaluate_policy_admission_for_batch(
+    shared: &SharedState,
+    scene: &SceneGraph,
+    session: &StreamSession,
+    lease_id: SceneId,
+    mutations: &[SceneMutation],
+) -> Result<(), String> {
+    let (lease_valid, agent_lease_priority, tiles_limit, mut projected_tiles) =
+        if let Some(lease) = scene.leases.get(&lease_id) {
+            let usage = scene.lease_resource_usage(&lease_id);
+            (
+                lease.state == LeaseState::Active,
+                lease.priority as u32,
+                lease.resource_budget.max_tiles.max(1),
+                usage.tiles,
+            )
+        } else {
+            (false, 2, 1, 0)
+        };
+
+    let base_ctx = PolicyContextSnapshot {
+        override_state: PolicyOverrideState {
+            freeze_active: shared.freeze_active,
+            safe_mode_active: shared.safe_mode_active,
+            freeze_duration_ms: 0,
+            max_freeze_duration_ms: 300_000,
+        },
+        safety_state: PolicySafetyState {
+            gpu_healthy: true,
+            scene_graph_intact: true,
+            frame_time_p95_us: 0,
+            emergency_threshold_us: 14_000,
+        },
+        privacy_context: PolicyPrivacyContext {
+            effective_viewer_class: PolicyViewerClass::Owner,
+            viewer_classes: vec![PolicyViewerClass::Owner],
+            redaction_style: PolicyRedactionStyle::Pattern,
+        },
+        security_context: PolicySecurityContext {
+            granted_capabilities: session.capabilities.clone(),
+            agent_namespace: session.namespace.clone(),
+            lease_valid,
+            lease_id: Some(lease_id),
+        },
+        attention_context: PolicyAttentionContext {
+            quiet_hours_active: false,
+            quiet_hours_end_us: None,
+            per_agent_interruptions_last_60s: 0,
+            per_agent_limit: 20,
+            per_zone_interruptions_last_60s: 0,
+            per_zone_limit: 10,
+            pass_through_class: PolicyInterruptionClass::High,
+            interruption_class: PolicyInterruptionClass::Normal,
+            budget_refill_us: None,
+        },
+        resource_context: PolicyResourceContext {
+            degradation_level: degradation_to_policy_level(shared.degradation_level),
+            tiles_used: projected_tiles,
+            tiles_limit,
+            should_shed: false,
+            is_transactional: false,
+            budget_exceeded: false,
+            budgets_paused: shared.freeze_active,
+        },
+        content_context: PolicyContentContext {
+            zone_name: None,
+            contention_policy: None,
+            agent_lease_priority,
+            occupant_lease_priority: None,
+            stack_depth: 0,
+            max_stack_depth: 0,
+        },
+    };
+
+    for mutation in mutations {
+        let mut ctx = base_ctx.clone();
+        let required_capabilities = mutation_required_capabilities(mutation);
+        let required_capability_refs: Vec<&str> = required_capabilities
+            .iter()
+            .map(|cap| cap.as_str())
+            .collect();
+        let kind = mutation_kind_for_policy(mutation);
+
+        let target_namespace = match mutation {
+            SceneMutation::CreateTile { namespace, .. } => namespace.clone(),
+            SceneMutation::UpdateTileBounds { tile_id, .. }
+            | SceneMutation::UpdateTileZOrder { tile_id, .. }
+            | SceneMutation::UpdateTileOpacity { tile_id, .. }
+            | SceneMutation::UpdateTileInputMode { tile_id, .. }
+            | SceneMutation::UpdateTileSyncGroup { tile_id, .. }
+            | SceneMutation::UpdateTileExpiry { tile_id, .. }
+            | SceneMutation::DeleteTile { tile_id }
+            | SceneMutation::SetTileRoot { tile_id, .. }
+            | SceneMutation::AddNode { tile_id, .. }
+            | SceneMutation::UpdateNodeContent { tile_id, .. }
+            | SceneMutation::JoinSyncGroup { tile_id, .. }
+            | SceneMutation::LeaveSyncGroup { tile_id } => scene
+                .tiles
+                .get(tile_id)
+                .map(|tile| tile.namespace.clone())
+                .unwrap_or_else(|| session.namespace.clone()),
+            _ => session.namespace.clone(),
+        };
+
+        let agent_declared_classification = match mutation {
+            SceneMutation::PublishToZone {
+                content_classification,
+                ..
+            } => parse_visibility_classification(content_classification.as_deref()),
+            _ => PolicyVisibilityClassification::Public,
+        };
+
+        if kind == PolicyMutationKind::ZonePublication
+            && let SceneMutation::PublishToZone { zone_name, .. }
+            | SceneMutation::ClearZone { zone_name, .. } = mutation
+        {
+            let contention_policy = scene
+                .zone_registry
+                .get_by_name(zone_name)
+                .map(|zone| zone.contention_policy);
+            let active_publishes = scene.zone_registry.active_publishes.get(zone_name);
+            let stack_depth = active_publishes.map_or(0, |publishes| publishes.len() as u32);
+            let max_stack_depth = match contention_policy {
+                Some(ContentionPolicy::Stack { max_depth }) => u32::from(max_depth),
+                _ => 0,
+            };
+            let occupant_lease_priority = active_publishes
+                .and_then(|publishes| publishes.last())
+                .and_then(|record| {
+                    active_lease_priority_for_namespace(scene, &record.publisher_namespace)
+                });
+
+            ctx.content_context = PolicyContentContext {
+                zone_name: Some(zone_name.clone()),
+                contention_policy,
+                agent_lease_priority,
+                occupant_lease_priority,
+                stack_depth,
+                max_stack_depth,
+            };
+        }
+
+        let budget_exceeded = matches!(mutation, SceneMutation::CreateTile { .. })
+            && projected_tiles.saturating_add(1) > tiles_limit;
+        ctx.resource_context.tiles_used = projected_tiles;
+        ctx.resource_context.budget_exceeded = budget_exceeded;
+        ctx.resource_context.is_transactional = kind == PolicyMutationKind::Transactional;
+
+        let eval = evaluate_policy_mutation(&PolicyMutationEvalInput {
+            ctx: &ctx,
+            mutation_ref: SceneId::new(),
+            agent_declared_classification,
+            zone_default_classification: None,
+            required_capabilities: &required_capability_refs,
+            target_namespace: &target_namespace,
+            agent_id: &session.namespace,
+            kind,
+            timestamp_us: now_mono_us(),
+        });
+
+        match eval.outcome {
+            PolicyArbitrationOutcome::Commit
+            | PolicyArbitrationOutcome::CommitRedacted { .. }
+            | PolicyArbitrationOutcome::Queue { .. }
+            | PolicyArbitrationOutcome::Shed { .. } => {
+                if matches!(mutation, SceneMutation::CreateTile { .. }) && !budget_exceeded {
+                    projected_tiles = projected_tiles.saturating_add(1);
+                }
+                if matches!(mutation, SceneMutation::DeleteTile { .. }) {
+                    projected_tiles = projected_tiles.saturating_sub(1);
+                }
+            }
+            PolicyArbitrationOutcome::Blocked { block_reason } => {
+                return Err(format!(
+                    "policy admission blocked ({block_reason:?}) for namespace '{}'",
+                    session.namespace
+                ));
+            }
+            PolicyArbitrationOutcome::Reject(err) => {
+                return Err(format!(
+                    "policy admission rejected at level {} ({:?}): {}",
+                    err.level, err.code, err.message
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn handle_mutation_batch(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -2488,6 +2759,42 @@ async fn handle_mutation_batch(
         }
     }
 
+    // Bounded mutation-path policy pilot:
+    // evaluate pure policy decisions at admission time before scene commit.
+    let policy_gate = {
+        let scene = st.scene.lock().await;
+        evaluate_policy_admission_for_batch(&st, &scene, session, lease_id, &scene_mutations)
+    };
+    if let Err(error_message) = policy_gate {
+        if !batch.batch_id.is_empty() {
+            session.dedup_window.insert(
+                batch.batch_id.clone(),
+                CachedResult {
+                    accepted: false,
+                    created_ids: Vec::new(),
+                    error_code: "MUTATION_REJECTED".to_string(),
+                    error_message: error_message.clone(),
+                },
+            );
+        }
+        let seq = session.next_server_seq();
+        drop(st);
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::MutationResult(MutationResult {
+                    batch_id: batch.batch_id,
+                    accepted: false,
+                    created_ids: Vec::new(),
+                    error_code: "MUTATION_REJECTED".to_string(),
+                    error_message,
+                })),
+            }))
+            .await;
+        return;
+    }
+
     // Map the proto batch_id bytes to a SceneId for rejection-correlation.
     // Falls back (with a debug log) when the field is absent or malformed.
     let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
@@ -2799,6 +3106,23 @@ async fn apply_queued_batch_to_scene(
             }
             None => {}
         }
+    }
+
+    // Re-validate queued batches against current policy admission state.
+    // If policy now rejects (for example capability scope narrowed while frozen),
+    // drop the queued batch silently: the enqueue path already sent accepted=true.
+    let policy_gate = {
+        let scene = st.scene.lock().await;
+        evaluate_policy_admission_for_batch(&st, &scene, session, lease_id, &scene_mutations)
+    };
+    if let Err(error_message) = policy_gate {
+        tracing::warn!(
+            namespace = %session.namespace,
+            batch_id_len = batch.batch_id.len(),
+            "Dropping queued batch after policy admission reject: {}",
+            error_message
+        );
+        return;
     }
 
     // Map the proto batch_id bytes to a SceneId for validation correlation.
@@ -9934,6 +10258,164 @@ mod tests {
                 assert_eq!(e.error_code, "CAPABILITY_NOT_PRESENT");
             }
             other => panic!("Expected RuntimeError for absent capability, got: {other:?}"),
+        }
+    }
+
+    /// Policy admission pilot regression:
+    /// WHEN session capability scope does not include create_tiles
+    /// BUT scene lease capability is manually broadened to include CreateTiles
+    /// THEN mutation admission must reject CreateTile using session-held grants.
+    #[tokio::test]
+    async fn test_mutation_admission_rejects_when_session_scope_lacks_capability() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+
+        // Handshake with no requested capabilities.
+        let (tx, _init_messages, mut stream) = handshake_with_requested_capabilities(
+            &mut client,
+            "policy-scope-agent",
+            "test-key",
+            Vec::new(),
+        )
+        .await;
+
+        // Create an active tab so mutation admission can proceed to scene apply path.
+        let forged_lease_id = {
+            let st = shared_state.lock().await;
+            let mut scene = st.scene.lock().await;
+            let _tab_id = scene.create_tab("policy-scope-tab", 0).expect("create tab");
+
+            // Manually forge a lease capability set in scene state only.
+            // This intentionally diverges scene lease scope from session-held grants.
+            scene.grant_lease(
+                "policy-scope-agent",
+                60_000,
+                vec![
+                    tze_hud_scene::types::Capability::CreateTiles,
+                    tze_hud_scene::types::Capability::ModifyOwnTiles,
+                ],
+            )
+        };
+
+        let forged_lease_bytes = scene_id_to_bytes(forged_lease_id);
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: forged_lease_bytes,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
+                        crate::proto::CreateTileMutation {
+                            tab_id: Vec::new(),
+                            bounds: Some(crate::proto::Rect {
+                                x: 8.0,
+                                y: 8.0,
+                                width: 120.0,
+                                height: 90.0,
+                                ..Default::default()
+                            }),
+                            z_order: 1,
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .expect("send mutation batch");
+
+        let msg = next_non_state_change(&mut stream).await;
+        match &msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(
+                    !result.accepted,
+                    "CreateTile must be rejected when session scope lacks create_tiles"
+                );
+                assert_eq!(result.batch_id, batch_id, "batch_id must echo request");
+            }
+            other => panic!("Expected MutationResult rejection, got: {other:?}"),
+        }
+    }
+
+    /// Policy admission pilot regression:
+    /// WHEN session capability scope does not include modify_own_tiles
+    /// BUT scene lease capability is manually broadened to include ModifyOwnTiles
+    /// THEN mutation admission must reject tile-modification mutations.
+    #[tokio::test]
+    async fn test_mutation_admission_rejects_modify_when_session_scope_lacks_capability() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+
+        // Handshake with no requested capabilities.
+        let (tx, _init_messages, mut stream) = handshake_with_requested_capabilities(
+            &mut client,
+            "policy-scope-agent",
+            "test-key",
+            Vec::new(),
+        )
+        .await;
+
+        // Create an active tab and a tile whose lease is forged with ModifyOwnTiles only.
+        let (forged_lease_id, tile_id) = {
+            let st = shared_state.lock().await;
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene
+                .create_tab("policy-scope-tab-modify", 0)
+                .expect("create tab");
+
+            // Manually forge a lease capability set that is broader than session-held grants.
+            let lease_id = scene.grant_lease(
+                "policy-scope-agent",
+                60_000,
+                vec![tze_hud_scene::types::Capability::ModifyOwnTiles],
+            );
+            let tile_id = scene
+                .create_tile(
+                    tab_id,
+                    "policy-scope-agent",
+                    lease_id,
+                    tze_hud_scene::Rect::new(4.0, 4.0, 100.0, 80.0),
+                    1,
+                )
+                .expect("create tile with forged lease");
+            (lease_id, tile_id)
+        };
+
+        let forged_lease_bytes = scene_id_to_bytes(forged_lease_id);
+        let tile_id_bytes = scene_id_to_bytes(tile_id);
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: forged_lease_bytes,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::UpdateTileOpacity(
+                        crate::proto::UpdateTileOpacityMutation {
+                            tile_id: tile_id_bytes,
+                            opacity: 0.5,
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .expect("send mutation batch");
+
+        let msg = next_non_state_change(&mut stream).await;
+        match &msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(
+                    !result.accepted,
+                    "UpdateTileOpacity must be rejected when session scope lacks modify_own_tiles"
+                );
+                assert_eq!(result.batch_id, batch_id, "batch_id must echo request");
+            }
+            other => panic!("Expected MutationResult rejection, got: {other:?}"),
         }
     }
 

@@ -9,7 +9,7 @@
 //!
 //! | Authority | Crate | Role |
 //! |-----------|-------|------|
-//! | Policy arbitration | `tze_hud_policy` | Pure read-only evaluator; **not wired in v1** |
+//! | Policy arbitration | `tze_hud_policy` | Pure read-only evaluator; wired for bounded mutation admission in `tze_hud_protocol` (v1 pilot), not wired across runtime frame/event hot paths |
 //! | Resource accounting | `tze_hud_resource` | Decoded-byte budget registry; GC; dedup |
 //! | Budget enforcement | `tze_hud_runtime::budget` | Enforcement ladder (Warning/Throttle/Revoke) |
 //! | Attention budgets | `tze_hud_runtime::attention_budget` | Stateful event-pipeline tracker |
@@ -20,10 +20,11 @@
 //! `BudgetEnforcer` owns the per-agent enforcement state machine
 //! (`Normal` → `Warning` → `Throttled` → `Revoked`), the enforcement ladder tick, the
 //! frame-time guardian, and the per-mutation admission gate. `tze_hud_policy`
-//! is a standalone reference design (pure evaluator, no side effects) and is
-//! NOT wired into the runtime for v1. No policy decisions flow through
-//! `PolicyContext` or `ArbitrationOutcome` at runtime — all enforcement
-//! decisions originate from `budget.rs` and `attention_budget/`.**
+//! remains a pure evaluator with no mutable authority state. In v1, bounded
+//! mutation admission in `tze_hud_protocol::session_server` calls
+//! `evaluate_mutation` with `PolicyContext` snapshots; runtime frame/event
+//! enforcement decisions still originate from `budget.rs` and
+//! `attention_budget/`.**
 //!
 //! See `budget.rs`, `attention_budget/`, and `shell/safe_mode.rs` for boundary
 //! doc comments in each authority module.

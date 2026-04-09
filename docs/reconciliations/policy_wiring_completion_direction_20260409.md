@@ -7,7 +7,7 @@ Scope: `/project-direction` completion package for policy wiring after governanc
 
 [Observed] Recent policy work fixed the live lease/session authority seam, aligned mid-session capability escalation semantics, and reconciled the runtime/policy/scene ownership model. See `crates/tze_hud_protocol/src/session_server.rs`, `docs/reconciliations/policy_wiring_seam_contract.md`, and `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`.
 
-[Observed] The runtime still explicitly says `tze_hud_policy` is not wired into v1 hot paths. See `crates/tze_hud_runtime/src/lib.rs`.
+[Observed] The bounded mutation-path pilot is now wired in protocol admission (`crates/tze_hud_protocol/src/session_server.rs`) while runtime frame/event hot paths remain runtime-owned and outside policy evaluation (`crates/tze_hud_runtime/src/lib.rs`).
 
 [Inferred] Honest "completion" no longer means "finish full seven-level policy wiring everywhere in v1." It means:
 
