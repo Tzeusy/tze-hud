@@ -48,12 +48,16 @@ Scope: Verify policy-wiring direction outputs against required evidence set and 
 2. Pilot telemetry + latency conformance bead.
 3. Event/frame scope decision bead.
 4. Post-pilot reconciliation bead.
-5. Final human signoff closure bead.
+
+### Closure bead now instantiated
+
+- `hud-5fb1` now tracks the final human signoff closure artifact for the policy-wiring program.
+- `hud-5fb1` should remain dependency-gated on the post-pilot reconciliation work before epic closure.
 
 ## Conclusion
 
 [Observed] Direction artifacts are now coherent with doctrine/spec/code evidence and explicitly model the three policy surfaces.
 
-[Observed] The decomposition is only partially materialized in tracker state: governance-first beads are present, but the downstream pilot/telemetry/scope/reconciliation/signoff beads still require creation by the coordinator.
+[Observed] The decomposition is only partially materialized in tracker state: governance-first beads and the final closure signoff bead (`hud-5fb1`) are present, but the downstream pilot/telemetry/scope/reconciliation beads still require creation by the coordinator.
 
-[Inferred] Closing `hud-iq2x` should wait for those remaining follow-on beads to be instantiated and linked after `.5`-`.8` governance work lands.
+[Inferred] Closing `hud-iq2x` should wait for those remaining follow-on beads to be instantiated and linked, and for `hud-5fb1` signoff work to complete after those prerequisites land.

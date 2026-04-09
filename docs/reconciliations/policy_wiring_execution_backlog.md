@@ -23,7 +23,7 @@ This corrected backlog makes three changes to the initial plan:
 
 The earlier companion payload `docs/reconciliations/policy_wiring_execution_backlog.proposed_beads.json` reflects the older, less strict plan. Treat that JSON as a legacy/stale artifact and explicitly superseded by this backlog.
 
-`hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). Mutation pilot and downstream telemetry/scope/reconciliation/signoff beads are still pending instantiation.
+`hud-iq2x.5` through `hud-iq2x.8` now instantiate the governance-first front of this plan (lease scope, spec reconciliation, seam matrix, capability-escalation semantics). Mutation pilot and downstream telemetry/scope/reconciliation beads are still pending instantiation; the final signoff closure bead is now tracked separately as `hud-5fb1`.
 
 ## Corrected Low-Churn Execution Order
 
@@ -183,6 +183,7 @@ The earlier companion payload `docs/reconciliations/policy_wiring_execution_back
 - Type/Priority: `task` / `P1`
 - Depends on: `PW-06`
 - Discovered from: `discovered-from:hud-iq2x.4`
+- Tracker instantiation status: now tracked as `hud-5fb1`
 - Acceptance:
   - Produce concise signoff report under `docs/reconciliations/`.
   - Link all created/closed follow-on beads and unresolved risks.

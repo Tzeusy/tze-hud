@@ -62,7 +62,11 @@ Execution brief: `docs/reconciliations/policy_wiring_epic_prompt.md`
 2. Policy telemetry + latency conformance harness (depends on mutation pilot).
 3. Event/frame scope decision bead (depends on telemetry outcome).
 4. Post-pilot reconciliation bead (depends on all above plus `.6`).
-5. Human signoff report bead (depends on reconciliation).
+
+### Closure Bead Instantiated
+
+- `hud-5fb1` now tracks the final human signoff report closure artifact.
+- This bead should execute only after the post-pilot reconciliation bead closes.
 
 ## 5. Risks and Stop/Do-Not-Do-Yet
 
