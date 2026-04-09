@@ -19,7 +19,7 @@ Scope: Verify policy-wiring direction outputs against required evidence set and 
 | Required evidence family | Coverage | Key references |
 |---|---|---|
 | Doctrine (`heart-and-soul`) | Covered | `about/heart-and-soul/v1.md:11-21`, `about/heart-and-soul/architecture.md:1-17`, `about/heart-and-soul/privacy.md:1-20`, `about/heart-and-soul/attention.md:1-16`, `about/heart-and-soul/validation.md:1-20` |
-| OpenSpec (policy/runtime/session) | Covered | `openspec/.../policy-arbitration/spec.md:11-22`, `openspec/.../policy-arbitration/spec.md:217-230`, `openspec/.../runtime-kernel/spec.md:59-73`, `openspec/.../session-protocol/spec.md:616-636` |
+| OpenSpec (policy/runtime/session) | Covered | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:11-22`, `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:217-230`, `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md:59-73`, `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:616-636` |
 | Runtime/Policy/Protocol code | Covered | `crates/tze_hud_runtime/src/lib.rs:12-26`, `crates/tze_hud_runtime/src/budget.rs:18-35`, `crates/tze_hud_policy/src/lib.rs:31-46`, `crates/tze_hud_protocol/src/session_server.rs:2844-3004`, `crates/tze_hud_protocol/src/session_server.rs:3455-3527` |
 | Scene-side policy contract | Covered | `crates/tze_hud_scene/src/policy/mod.rs:1-7`, `crates/tze_hud_scene/src/policy/mod.rs:170-204` |
 | Lease governance RFC seam | Covered | `about/law-and-lore/rfcs/0008-lease-governance.md:101-109` |
