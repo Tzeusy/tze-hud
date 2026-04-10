@@ -1,0 +1,9 @@
+# Widget publish load harness target registry.
+# Resolve benchmark destinations by --target-id.
+
+[[targets]]
+target_id = "local-dev"
+grpc_endpoint = "127.0.0.1:50051"
+target_host = "localhost"
+network_scope = "local"
+psk_env = "MCP_TEST_PSK"
