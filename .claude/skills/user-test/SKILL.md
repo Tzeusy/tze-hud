@@ -377,7 +377,101 @@ The bar cycles through: blue -> green -> yellow -> red -> blue (reset) -> clear 
 
 Report pass/fail per step. A step fails if the tester observes: missing animation, wrong color, misaligned label, missing rounded end-caps, or visible artifacts after the reset/clear-to-empty step.
 
+#### 7c: Rapid-Fire Stream Test (100 publishes / 5 seconds)
+
+Use this fixture to simulate a dense progress-update stream and validate that the HUD stays responsive under frequent widget publishes.
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/progress-bar-rapidfire-100-5s.json \
+  --delay-ms 50
+```
+
+Fixture details (`progress-bar-rapidfire-100-5s.json`):
+- 100 sequential updates (`1%` -> `100%`)
+- publish cadence: 50ms between requests (~5s total sequence duration)
+- per-message transition: 45ms
+- fixed widget target: `main-progress`
+
+Expected outcomes:
+- No MCP transport or validation errors across the 100 publishes.
+- Progress bar appears continuously animated without freezing/stalling.
+- Final visible state settles at `100%`.
+- No visual artifacts in label text during rapid updates.
+
 ## Subtitle Exemplar Scenario
+
+## Presence Card Exemplar Scenario
+
+Use `scripts/presence_card_exemplar.py` to exercise the Presence Card raw-tile
+resident flow on a live HUD. This scenario uses the resident gRPC session
+stream, not the MCP zone/widget surface.
+
+It drives the exact operator-visible lifecycle needed for the Presence Card
+manual proof path:
+
+1. Start 3 resident sessions (`agent-alpha`, `agent-beta`, `agent-gamma`)
+2. Create 3 stacked bottom-left cards
+3. Wait 30s and rebuild all 3 cards with updated `Last active` text
+4. Disconnect `agent-gamma`
+5. Pause for badge/orphan observation
+6. Wait for orphan grace expiry while `agent-alpha` and `agent-beta` continue
+7. Finish with 2 remaining cards and a JSON transcript artifact
+
+Implementation note:
+The current resident session surface in this branch does not yet expose the
+RFC 0011 resource-upload messages needed for `StaticImageNode` avatar upload.
+This scenario therefore uses 32x32 solid-color avatar squares for the visual
+proof path. That still exercises the `hud-sx7q.3` target behavior: stacked
+cards, periodic text updates, disconnect/orphan observation, and cleanup.
+
+### CLI
+
+```bash
+python3 .claude/skills/user-test/scripts/presence_card_exemplar.py \
+  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --psk-env TZE_HUD_PSK \
+  --tab-height 1080 \
+  --transcript-out test_results/presence-card-latest.json
+```
+
+Optional flags:
+
+- `--update-wait-s` (default `30`) — first periodic content-update wait
+- `--heartbeat-timeout-s` (default `15`) — heartbeat-timeout reference for manual observation
+- `--orphan-grace-s` (default `30`) — orphan grace-period wait
+- `--observe-badge-s` (default `1.0`) — badge observation pause after disconnect
+
+### Output
+
+The script emits one JSON object per step to stdout and writes a transcript file
+by default to `test_results/presence-card-latest.json`.
+
+Each step includes:
+
+- `code` — stable step identifier
+- `title` — short operator-facing label
+- `action` — what the script is doing
+- `expected_visual` — what the operator should confirm on screen
+- `status` — `started` or `completed`
+
+### Human Acceptance Criteria
+
+Verify the visible sequence in order:
+
+| Step | Expected visual |
+|---|---|
+| Create | 3 stacked cards visible in the bottom-left corner |
+| Update | All 3 cards show `Last active: 30s ago` |
+| Disconnect | Only `agent-gamma` disconnects |
+| Orphan observe | Disconnect badge appears on `agent-gamma` only |
+| Cleanup | `agent-gamma` disappears after grace expiry |
+| Final state | `agent-alpha` and `agent-beta` remain at original positions with no reflow |
+
+This scenario is the repo-native execution surface for
+`docs/exemplar-presence-card-user-test.md`.
 
 Use `scripts/subtitle_exemplar.py` to exercise the subtitle zone on a live HUD.
 The script validates streaming breakpoint reveal, single-line baseline rendering,

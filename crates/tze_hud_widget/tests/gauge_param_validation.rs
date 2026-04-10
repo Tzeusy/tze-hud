@@ -1,7 +1,7 @@
 //! Parameter validation tests for the production exemplar gauge widget.
 //!
 //! These tests load the canonical production gauge bundle from
-//! `assets/widgets/gauge/` and exercise all four parameter types through the
+//! `assets/widgets/gauge/` and exercise its parameter types through the
 //! scene graph's `publish_to_widget` validation path.
 //!
 //! Acceptance criteria (hud-awpt):
@@ -37,9 +37,15 @@ fn gauge_test_tokens() -> HashMap<String, String> {
         ("color.border.default".to_string(), "#2a2a4e".to_string()),
         ("color.outline.default".to_string(), "#3a3a5e".to_string()),
         ("color.severity.info".to_string(), "#4a9eff".to_string()),
+        ("color.text.secondary".to_string(), "#8f96a3".to_string()),
         ("color.text.accent".to_string(), "#ffffff".to_string()),
         ("color.text.primary".to_string(), "#cccccc".to_string()),
+        ("opacity.backdrop.opaque".to_string(), "0.9".to_string()),
+        ("border.radius.small".to_string(), "4".to_string()),
+        ("border.radius.medium".to_string(), "8".to_string()),
+        ("border.radius.large".to_string(), "16".to_string()),
         ("key".to_string(), "test-key".to_string()),
+        ("stroke.border.width".to_string(), "1".to_string()),
         ("stroke.outline.width".to_string(), "1".to_string()),
     ])
 }
@@ -399,7 +405,7 @@ fn gauge_severity_empty_string_is_rejected() {
 
 // ─── AC 5: Default values match widget.toml schema ───────────────────────────
 
-/// WHEN the production gauge bundle is loaded THEN all four parameter defaults
+/// WHEN the production gauge bundle is loaded THEN all parameter defaults
 /// match the values declared in `assets/widgets/gauge/widget.toml` exactly.
 ///
 /// Expected from widget.toml:
@@ -407,6 +413,8 @@ fn gauge_severity_empty_string_is_rejected() {
 ///   label      = ""          (string)
 ///   fill_color = [74,158,255,255] → Rgba { r: 74/255, g: 158/255, b: 1.0, a: 1.0 }
 ///   severity   = "info"      (enum)
+///   tooltip_visible = 0.0    (f32)
+///   readout    = "0/100 (0%)" (string)
 #[test]
 fn gauge_default_values_match_widget_toml_schema() {
     let path = production_gauge_path();
@@ -416,7 +424,7 @@ fn gauge_default_values_match_widget_toml_schema() {
         BundleScanResult::Err(e) => panic!("production gauge bundle failed to load: {e}"),
     };
     let schema = &bundle.definition.parameter_schema;
-    assert_eq!(schema.len(), 4, "gauge schema should have 4 parameters");
+    assert_eq!(schema.len(), 6, "gauge schema should have 6 parameters");
 
     // Find each parameter by name and verify its default.
     let level_decl = schema
@@ -483,6 +491,32 @@ fn gauge_default_values_match_widget_toml_schema() {
         matches!(&severity_decl.default_value, WidgetParameterValue::Enum(s) if s == "info"),
         "severity default should be Enum(\"info\"), got: {:?}",
         severity_decl.default_value
+    );
+
+    let tooltip_visible_decl = schema
+        .iter()
+        .find(|p| p.name == "tooltip_visible")
+        .expect("'tooltip_visible' parameter should be declared");
+    assert!(
+        matches!(
+            tooltip_visible_decl.default_value,
+            WidgetParameterValue::F32(v) if v.abs() < 1e-6
+        ),
+        "tooltip_visible default should be F32(0.0), got: {:?}",
+        tooltip_visible_decl.default_value
+    );
+
+    let readout_decl = schema
+        .iter()
+        .find(|p| p.name == "readout")
+        .expect("'readout' parameter should be declared");
+    assert!(
+        matches!(
+            &readout_decl.default_value,
+            WidgetParameterValue::String(s) if s == "0/100 (0%)"
+        ),
+        "readout default should be String(\"0/100 (0%)\"), got: {:?}",
+        readout_decl.default_value
     );
 }
 

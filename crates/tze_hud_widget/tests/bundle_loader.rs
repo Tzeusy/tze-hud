@@ -1709,7 +1709,11 @@ fn canonical_gauge_tokens() -> HashMap<String, String> {
     tokens.insert("color.border.default".to_string(), "#333333".to_string());
     tokens.insert("color.text.accent".to_string(), "#4A9EFF".to_string());
     tokens.insert("color.text.primary".to_string(), "#FFFFFF".to_string());
+    tokens.insert("color.text.secondary".to_string(), "#8F96A3".to_string());
     tokens.insert("color.outline.default".to_string(), "#000000".to_string());
+    tokens.insert("border.radius.medium".to_string(), "8".to_string());
+    tokens.insert("border.radius.large".to_string(), "16".to_string());
+    tokens.insert("stroke.border.width".to_string(), "1".to_string());
     tokens.insert("stroke.outline.width".to_string(), "1".to_string());
     tokens.insert("color.severity.info".to_string(), "#4A9EFF".to_string());
     tokens
@@ -1781,7 +1785,7 @@ fn exemplar_gauge_token_resolution_correct() {
     );
 }
 
-/// AC-3: The exemplar gauge registers as "gauge" with 4 params, 2 layers, and
+/// AC-3: The exemplar gauge registers as "gauge" with 6 params, 2 layers, and
 /// correct default values for each parameter.
 ///
 /// Source: hud-x5cm §Acceptance criterion 3.
@@ -1805,11 +1809,11 @@ fn exemplar_gauge_registration_structure() {
         "widget description must not be empty"
     );
 
-    // 4 parameters: level, label, fill_color, severity.
+    // 6 parameters: level, label, fill_color, severity, tooltip_visible, readout.
     assert_eq!(
         def.parameter_schema.len(),
-        4,
-        "must have exactly 4 parameters"
+        6,
+        "must have exactly 6 parameters"
     );
     let param_names: Vec<&str> = def
         .parameter_schema
@@ -1825,6 +1829,14 @@ fn exemplar_gauge_registration_structure() {
     assert!(
         param_names.contains(&"severity"),
         "must declare 'severity' param"
+    );
+    assert!(
+        param_names.contains(&"tooltip_visible"),
+        "must declare 'tooltip_visible' param"
+    );
+    assert!(
+        param_names.contains(&"readout"),
+        "must declare 'readout' param"
     );
 
     // Defaults: level=0.0, label="", fill_color=[74,158,255,255], severity="info".
@@ -1906,7 +1918,35 @@ fn exemplar_gauge_registration_structure() {
         severity_param.default_value
     );
 
-    // 2 layers: background.svg (no bindings) and fill.svg (4 bindings).
+    let tooltip_visible_param = def
+        .parameter_schema
+        .iter()
+        .find(|p| p.name == "tooltip_visible")
+        .unwrap();
+    assert!(
+        matches!(
+            tooltip_visible_param.default_value,
+            tze_hud_scene::types::WidgetParameterValue::F32(v) if (v - 0.0_f32).abs() < 1e-6
+        ),
+        "tooltip_visible default must be 0.0, got {:?}",
+        tooltip_visible_param.default_value
+    );
+
+    let readout_param = def
+        .parameter_schema
+        .iter()
+        .find(|p| p.name == "readout")
+        .unwrap();
+    assert!(
+        matches!(
+            &readout_param.default_value,
+            tze_hud_scene::types::WidgetParameterValue::String(s) if s == "0/100 (0%)"
+        ),
+        "readout default must be '0/100 (0%)', got {:?}",
+        readout_param.default_value
+    );
+
+    // 2 layers: background.svg (no bindings) and fill.svg (7 bindings).
     assert_eq!(def.layers.len(), 2, "must have exactly 2 layers");
     assert_eq!(
         def.layers[0].svg_file, "background.svg",
@@ -1922,8 +1962,8 @@ fn exemplar_gauge_registration_structure() {
     );
     assert_eq!(
         def.layers[1].bindings.len(),
-        4,
-        "fill.svg must have exactly 4 bindings"
+        7,
+        "fill.svg must have exactly 7 bindings"
     );
 }
 

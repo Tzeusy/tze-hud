@@ -2,14 +2,13 @@
 
 Date: 2026-04-10
 Scope: `/project-direction` planning package for a Rust resident publish-load harness
-Issue: hud-31c5
-Status: Planned and locally validated; captured in repo via PR
+Status: Planned and locally validated; not pushed
 
 ## Executive summary
 
-[Observed] The project is trying to prove that an agent-native HUD can be a real-time, resident, hot-path system rather than a loose collection of remote API calls. The architecture centers the resident gRPC session stream and treats validation as a first-class product surface, not an afterthought. See [architecture.md](../../about/heart-and-soul/architecture.md) and [validation.md](../../about/heart-and-soul/validation.md).
+[Observed] The project is trying to prove that an agent-native HUD can be a real-time, resident, hot-path system rather than a loose collection of remote API calls. The architecture centers the resident gRPC session stream and treats validation as a first-class product surface, not an afterthought. See [architecture.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/architecture.md:31) and [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md:3).
 
-[Observed] The current implementation is directionally ready for a Rust harness, but the truth is narrower than the existing Python tooling suggests. The repo already supports the gRPC widget publish path and already has artifact infrastructure, yet the current contract cannot honestly correlate repeated durable widget publishes because `WidgetPublishResult` does not carry `request_sequence` in the implementation-facing spec and proto. See [session.proto](../../crates/tze_hud_protocol/proto/session.proto), [session_server.rs](../../crates/tze_hud_protocol/src/session_server.rs), and [0005-session-protocol.md](../../about/law-and-lore/rfcs/0005-session-protocol.md).
+[Observed] The current implementation is directionally ready for a Rust harness, but the truth is narrower than the existing Python tooling suggests. The repo already supports the gRPC widget publish path and already has artifact infrastructure, yet the current contract cannot honestly correlate repeated durable widget publishes because `WidgetPublishResult` does not carry `request_sequence` in the implementation-facing spec and proto. See [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563), [session_server.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/src/session_server.rs:4481), and [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/law-and-lore/rfcs/0005-session-protocol.md:600).
 
 [Inferred] The highest-priority next work is therefore not “write the Rust harness” in isolation. It is a three-step sequence: repair request correlation in the session contract, define the harness spec and validation semantics, then implement a narrow Rust example crate and route `/user-test-performance` through it. Anything broader before that would be planning theater rather than auditable validation infrastructure.
 
@@ -25,33 +24,33 @@ Status: Planned and locally validated; captured in repo via PR
 
 | # | Requirement | Class | Evidence | Status |
 |---|------------|-------|---------|--------|
-| 1 | Resident hot-path benchmarks use one bidirectional gRPC session stream, not many ad hoc connections | Hard | [architecture.md](../../about/heart-and-soul/architecture.md), [session-protocol spec](../../openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md) | Partial |
-| 2 | Durable widget publishes must be measurable with request-level correlation | Hard | [0005-session-protocol.md](../../about/law-and-lore/rfcs/0005-session-protocol.md), [session.proto](../../crates/tze_hud_protocol/proto/session.proto) | Unmet |
-| 3 | Performance evidence must be structured, trendable, and machine-readable | Hard | [validation.md](../../about/heart-and-soul/validation.md), [validation-framework spec](../../openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md) | Partial |
-| 4 | Formal pass/fail performance claims require calibrated or explicitly `uncalibrated` semantics | Hard | [validation.md](../../about/heart-and-soul/validation.md), [validation-framework spec](../../openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md) | Partial |
-| 5 | Initial scope stays on the same primary target as `/user-test-performance`, with future targets deferred | Soft | [.claude skill](../../.claude/skills/user-test-performance/SKILL.md) | Met |
-| 6 | The harness should reuse existing validation/artifact infrastructure instead of inventing a second benchmark universe | Soft | [examples/benchmark/src/main.rs](../../examples/benchmark/src/main.rs), [layer4.rs](../../crates/tze_hud_validation/src/layer4.rs) | Partial |
-| 7 | MCP is not the primary high-rate path for this benchmark | Non-goal | [architecture.md](../../about/heart-and-soul/architecture.md) | N/A |
-| 8 | Multi-target orchestration, dashboards, and broad transport coverage are not v1 requirements | Non-goal | [development.md](../../about/heart-and-soul/development.md), [.claude skill](../../.claude/skills/user-test-performance/SKILL.md) | N/A |
-| 9 | Full wire-byte accounting for gRPC is required in v1 | Unknown | [grpc_widget_publish_perf.py](../../.claude/skills/user-test-performance/scripts/grpc_widget_publish_perf.py) | Unknown |
-| 10 | Remote publish-load benchmarks can be formally normalized with the current calibration model | Unknown | [validation.rs](../../crates/tze_hud_telemetry/src/validation.rs) | Unknown |
+| 1 | Resident hot-path benchmarks use one bidirectional gRPC session stream, not many ad hoc connections | Hard | [architecture.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/architecture.md:35), [session-protocol spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:20) | Partial |
+| 2 | Durable widget publishes must be measurable with request-level correlation | Hard | [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/law-and-lore/rfcs/0005-session-protocol.md:600), [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563) | Unmet |
+| 3 | Performance evidence must be structured, trendable, and machine-readable | Hard | [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md:29), [validation-framework spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md:125) | Partial |
+| 4 | Formal pass/fail performance claims require calibrated or explicitly `uncalibrated` semantics | Hard | [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md:33), [validation-framework spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md:137) | Partial |
+| 5 | Initial scope stays on the same primary target as `/user-test-performance`, with future targets deferred | Soft | [.claude skill](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/SKILL.md:61) | Met |
+| 6 | The harness should reuse existing validation/artifact infrastructure instead of inventing a second benchmark universe | Soft | [examples/benchmark/src/main.rs](/home/tze/gt/tze_hud/mayor/rig/examples/benchmark/src/main.rs:84), [layer4.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_validation/src/layer4.rs:174) | Partial |
+| 7 | MCP is not the primary high-rate path for this benchmark | Non-goal | [architecture.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/architecture.md:31) | N/A |
+| 8 | Multi-target orchestration, dashboards, and broad transport coverage are not v1 requirements | Non-goal | [development.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/development.md:153), [.claude skill](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/SKILL.md:83) | N/A |
+| 9 | Full wire-byte accounting for gRPC is required in v1 | Unknown | [grpc_widget_publish_perf.py](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/scripts/grpc_widget_publish_perf.py:338) | Unknown |
+| 10 | Remote publish-load benchmarks can be formally normalized with the current calibration model | Unknown | [validation.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_telemetry/src/validation.rs:51) | Unknown |
 
 ### Contradictions
 
-[Observed] RFC 0005 already says `WidgetPublishResult` is correlated by `request_sequence`, but the current proto and runtime-facing v1 spec omit that field from the widget publish acknowledgement contract. See [0005-session-protocol.md](../../about/law-and-lore/rfcs/0005-session-protocol.md), [v1 session-protocol spec](../../openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md), and [session.proto](../../crates/tze_hud_protocol/proto/session.proto).
+[Observed] RFC 0005 already says `WidgetPublishResult` is correlated by `request_sequence`, but the current proto and runtime-facing v1 spec omit that field from the widget publish acknowledgement contract. See [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/law-and-lore/rfcs/0005-session-protocol.md:600), [v1 session-protocol spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:743), and [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563).
 
-[Observed] The Python performance tooling records historical rows and thresholds, but the current validation framework does not yet define publish-load artifacts or calibrated verdict semantics for that benchmark class. See [.claude perf_common.py](../../.claude/skills/user-test-performance/scripts/perf_common.py) and [validation-framework spec](../../openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md).
+[Observed] The Python performance tooling records historical rows and thresholds, but the current validation framework does not yet define publish-load artifacts or calibrated verdict semantics for that benchmark class. See [.claude perf_common.py](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/scripts/perf_common.py:30) and [validation-framework spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md:137).
 
 ## Current State
 
 | Dimension | Status | Summary | Key Evidence |
 |-----------|--------|---------|-------------|
-| Spec adherence | Adequate | Core transport and widget publish semantics exist, but the benchmark contract and request correlation are incomplete | [widget-system spec](../../openspec/changes/widget-system/specs/widget-system/spec.md) |
-| Core workflows | Adequate | Python already proves the bootstrap/publish loop, but honest per-request measurement is missing | [grpc_widget_publish_perf.py](../../.claude/skills/user-test-performance/scripts/grpc_widget_publish_perf.py) |
-| Test confidence | Adequate | Session server already tests widget publish success/failure paths, but not request-sequence correlation | [session_server.rs](../../crates/tze_hud_protocol/src/session_server.rs) |
-| Observability | Adequate | Layer 4 artifact plumbing exists, but publish-load-specific artifacts are not yet modeled | [layer4.rs](../../crates/tze_hud_validation/src/layer4.rs) |
-| Delivery readiness | Adequate | The workspace can host a Rust benchmark crate now; the missing work is contract and integration, not foundational infra | [Cargo.toml](../../Cargo.toml) |
-| Architectural fitness | Strong | The repo already has the right hot path, proto tooling, and benchmark precedent for a narrow Rust harness | [build.rs](../../crates/tze_hud_protocol/build.rs) |
+| Spec adherence | Adequate | Core transport and widget publish semantics exist, but the benchmark contract and request correlation are incomplete | [widget-system spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/widget-system/specs/widget-system/spec.md:193) |
+| Core workflows | Adequate | Python already proves the bootstrap/publish loop, but honest per-request measurement is missing | [grpc_widget_publish_perf.py](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/scripts/grpc_widget_publish_perf.py:166) |
+| Test confidence | Adequate | Session server already tests widget publish success/failure paths, but not request-sequence correlation | [session_server.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/src/session_server.rs:10091) |
+| Observability | Adequate | Layer 4 artifact plumbing exists, but publish-load-specific artifacts are not yet modeled | [layer4.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_validation/src/layer4.rs:446) |
+| Delivery readiness | Adequate | The workspace can host a Rust benchmark crate now; the missing work is contract and integration, not foundational infra | [Cargo.toml](/home/tze/gt/tze_hud/mayor/rig/Cargo.toml:18) |
+| Architectural fitness | Strong | The repo already has the right hot path, proto tooling, and benchmark precedent for a narrow Rust harness | [build.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/build.rs:1) |
 
 [Observed] Architectural fitness is the biggest strength. The harness does not require inventing new transport infrastructure, a new proto toolchain, or a new benchmark entry pattern. The repo already supports the one-stream resident control path and already has benchmark artifact conventions.
 
@@ -94,23 +93,23 @@ Status: Planned and locally validated; captured in repo via PR
 
 | Gap | Why it matters | Who | Evidence | Response | Effort |
 |-----|---------------|-----|---------|----------|--------|
-| Durable widget ack lacks request correlation in the implementation-facing contract | Prevents honest per-request RTT on repeated publishes | Protocol/runtime | [session.proto](../../crates/tze_hud_protocol/proto/session.proto) | Modify `session-protocol` and runtime to add `request_sequence` | M |
-| No spec for the harness itself | Any implementation would invent its own contract | Spec | [mcp-stress-testing spec](../../openspec/changes/mcp-stress-testing/specs/mcp-stress-testing/spec.md) | Add `publish-load-harness` capability spec | M |
-| No publish-load artifact / verdict semantics in validation framework | Results cannot be classified honestly | Validation | [validation-framework spec](../../openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md) | Add publish-load benchmark evidence requirement | M |
+| Durable widget ack lacks request correlation in the implementation-facing contract | Prevents honest per-request RTT on repeated publishes | Protocol/runtime | [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563) | Modify `session-protocol` and runtime to add `request_sequence` | M |
+| No spec for the harness itself | Any implementation would invent its own contract | Spec | [mcp-stress-testing spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/mcp-stress-testing/specs/mcp-stress-testing/spec.md:3) | Add `publish-load-harness` capability spec | M |
+| No publish-load artifact / verdict semantics in validation framework | Results cannot be classified honestly | Validation | [validation-framework spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md:137) | Add publish-load benchmark evidence requirement | M |
 
 ### Important Enhancements
 
 | Gap | Why it matters | Who | Evidence | Response | Effort |
 |-----|---------------|-----|---------|----------|--------|
-| Canonical artifact vs CSV history is undefined | Risks two competing sources of truth | Validation/tooling | [.claude perf_common.py](../../.claude/skills/user-test-performance/scripts/perf_common.py) | Make JSON canonical and CSV derived | S |
-| Target/auth contract is underspecified for Rust | Multi-run auditability depends on stable target ids | Tooling | [.claude skill](../../.claude/skills/user-test-performance/SKILL.md) | Reuse target registry and env-based auth contract | S |
+| Canonical artifact vs CSV history is undefined | Risks two competing sources of truth | Validation/tooling | [.claude perf_common.py](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/scripts/perf_common.py:30) | Make JSON canonical and CSV derived | S |
+| Target/auth contract is underspecified for Rust | Multi-run auditability depends on stable target ids | Tooling | [.claude skill](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/SKILL.md:61) | Reuse target registry and env-based auth contract | S |
 
 ### Strategic Gaps
 
 | Gap | Why it matters | Who | Evidence | Response | Effort |
 |-----|---------------|-----|---------|----------|--------|
-| Remote publish normalization model is unresolved | Formal pass/fail status cannot be honest yet | Validation | [validation.rs](../../crates/tze_hud_telemetry/src/validation.rs) | Keep remote results `uncalibrated` until approved mapping exists | M |
-| Wire-byte accounting remains ambiguous | “bytes in/out” could drift in meaning across runs | Tooling | [grpc_widget_publish_perf.py](../../.claude/skills/user-test-performance/scripts/grpc_widget_publish_perf.py) | Require explicit `byte_accounting_mode` | S |
+| Remote publish normalization model is unresolved | Formal pass/fail status cannot be honest yet | Validation | [validation.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_telemetry/src/validation.rs:51) | Keep remote results `uncalibrated` until approved mapping exists | M |
+| Wire-byte accounting remains ambiguous | “bytes in/out” could drift in meaning across runs | Tooling | [grpc_widget_publish_perf.py](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/scripts/grpc_widget_publish_perf.py:338) | Require explicit `byte_accounting_mode` | S |
 
 ## Work Plan
 
@@ -119,7 +118,7 @@ Status: Planned and locally validated; captured in repo via PR
 ### Chunk 1: Repair Widget Publish Result Correlation
 
 **Objective**: Make durable widget publish acknowledgements correlate to their originating request sequence.
-**Spec reference**: `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
+**Spec reference**: `openspec/changes/rust-widget-publish-load-harness/specs/session-protocol/spec.md`
 **Dependencies**: None
 **Why ordered here**: The harness cannot measure repeated publishes honestly without this.
 **Scope**: M
@@ -135,7 +134,7 @@ Status: Planned and locally validated; captured in repo via PR
 ### Chunk 2: Define Publish-Load Artifact and Verdict Semantics
 
 **Objective**: Make publish-load benchmark outputs auditable and validation-honest.
-**Spec reference**: `openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md` (planned delta: `openspec/changes/rust-widget-publish-load-harness/specs/publish-load-harness/spec.md`, not yet materialized)
+**Spec reference**: `openspec/changes/rust-widget-publish-load-harness/specs/publish-load-harness/spec.md`, `openspec/changes/rust-widget-publish-load-harness/specs/validation-framework/spec.md`
 **Dependencies**: Chunk 1
 **Why ordered here**: Artifact and verdict semantics determine what the Rust binary must emit.
 **Scope**: M
@@ -152,7 +151,7 @@ Status: Planned and locally validated; captured in repo via PR
 ### Chunk 3: Build the Rust Harness Crate
 
 **Objective**: Add a Rust example crate that runs single-stream durable widget publish benchmarks.
-**Spec reference**: `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md` (planned delta: `openspec/changes/rust-widget-publish-load-harness/specs/publish-load-harness/spec.md`, not yet materialized)
+**Spec reference**: `openspec/changes/rust-widget-publish-load-harness/specs/publish-load-harness/spec.md`
 **Dependencies**: Chunks 1-2
 **Why ordered here**: The contract must exist before the binary is written.
 **Scope**: L
@@ -169,7 +168,7 @@ Status: Planned and locally validated; captured in repo via PR
 ### Chunk 4: Integrate `/user-test-performance` and Historical Comparison
 
 **Objective**: Preserve the existing audit workflow while switching the gRPC widget path to the Rust harness.
-**Spec reference**: `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md` and `openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md` (planned delta: `openspec/changes/rust-widget-publish-load-harness/specs/publish-load-harness/spec.md`, not yet materialized)
+**Spec reference**: `openspec/changes/rust-widget-publish-load-harness/specs/publish-load-harness/spec.md`
 **Dependencies**: Chunk 3
 **Why ordered here**: The wrapper should not change until the binary contract is stable.
 **Scope**: M
@@ -244,20 +243,20 @@ Execution note:
 - `openspec/changes/widget-system/specs/widget-system/spec.md`: widget publish semantics
 - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`: resident session stream contract
 - `openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md`: validation layers and calibration doctrine
-- Planned OpenSpec change: `openspec/changes/rust-widget-publish-load-harness/` (not yet materialized in repo as of 2026-04-10)
+- `openspec/changes/rust-widget-publish-load-harness/`: new planning change for this work
 
 ### D. Evidence Index
-- [architecture.md](../../about/heart-and-soul/architecture.md)
-- [validation.md](../../about/heart-and-soul/validation.md)
-- [development.md](../../about/heart-and-soul/development.md)
-- [0005-session-protocol.md](../../about/law-and-lore/rfcs/0005-session-protocol.md)
-- [session.proto](../../crates/tze_hud_protocol/proto/session.proto)
-- [session_server.rs](../../crates/tze_hud_protocol/src/session_server.rs)
-- [examples/benchmark/src/main.rs](../../examples/benchmark/src/main.rs)
-- [layer4.rs](../../crates/tze_hud_validation/src/layer4.rs)
-- [.claude user-test-performance skill](../../.claude/skills/user-test-performance/SKILL.md)
-- Planned OpenSpec artifact: `openspec/changes/rust-widget-publish-load-harness/proposal.md` (not yet materialized in repo as of 2026-04-10)
-- Planned OpenSpec artifact: `openspec/changes/rust-widget-publish-load-harness/design.md` (not yet materialized in repo as of 2026-04-10)
+- [architecture.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/architecture.md)
+- [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md)
+- [development.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/development.md)
+- [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/law-and-lore/rfcs/0005-session-protocol.md)
+- [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto)
+- [session_server.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/src/session_server.rs)
+- [examples/benchmark/src/main.rs](/home/tze/gt/tze_hud/mayor/rig/examples/benchmark/src/main.rs)
+- [layer4.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_validation/src/layer4.rs)
+- [.claude user-test-performance skill](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/SKILL.md)
+- [rust-widget-publish-load-harness proposal](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/rust-widget-publish-load-harness/proposal.md)
+- [rust-widget-publish-load-harness design](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/rust-widget-publish-load-harness/design.md)
 
 ---
 

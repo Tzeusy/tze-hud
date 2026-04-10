@@ -1,7 +1,7 @@
 # Exemplar Manual Review Checklist
 
 Manual UX/design review of all tze_hud exemplars.
-Reviewed: 2026-04-06
+Reviewed: 2026-04-09
 
 ## Exemplars
 
@@ -13,10 +13,10 @@ Reviewed: 2026-04-06
 | 4 | [Status Bar](#4-status-bar) | **deferred** | Repositioned to right edge, compact value-only format. Needs SVG widget redesign (hud-x2v1) |
 | 5 | [Ambient Background](#5-ambient-background) | **deferred** | Fixed exemplar alpha 1.0→0.15; StaticImage rendering blocked on hud-4sk5 |
 | 6 | [Dashboard Tile](#6-dashboard-tile) | pending | gRPC test client built; ready for visual review |
-| 7 | [Presence Card](#7-presence-card) | pending | Integration tests landed; live `/user-test` resident run + manual visual sign-off still open |
-| 8 | [Gauge Widget](#8-gauge-widget) | pending | |
-| 9 | [Progress Bar](#9-progress-bar) | pending | |
-| 10 | [Status Indicator](#10-status-indicator) | pending | |
+| 7 | [Presence Card](#7-presence-card) | pending | Integration tests landed; executable `/user-test` scenario exists, but live resident run + manual visual sign-off still open |
+| 8 | [Gauge Widget](#8-gauge-widget) | **done** | Automation batch + manual visual sign-off completed on 2026-04-09 (ultra-minimal track, hover-only readout/label, tuned spacing/colors) |
+| 9 | [Progress Bar](#9-progress-bar) | **automation-pass** | Step + color-sweep batches passed on 2026-04-09; manual visual sign-off pending |
+| 10 | [Status Indicator](#10-status-indicator) | **automation-pass** | Enum/theme/label/validation batches passed on 2026-04-09; manual visual sign-off pending |
 
 ---
 
@@ -129,7 +129,21 @@ Basic rendering confirmed working (colored backdrops, text, stacking, TTL expiry
 
 ### UX Tweaks
 
-_(to be filled during review)_
+1. **Visual reset (2026-04-09)** — moved to an ultra-minimal gauge face:
+   - single-track body (no wrapper rectangle, no tick ladder)
+   - flat fill treatment (no reflective highlights)
+   - compact severity pod and restrained label typography
+2. **Interaction update** — added declarative hover tooltip support (`tooltip_visible` + `readout`) and a `level -> bar.y` binding so level transitions visibly move up/down.
+3. **Regression verification** — reran gauge widget test suites plus live Windows publish cycle; publish path and bindings remain healthy after redesign.
+
+**Files changed:**
+- `assets/widgets/gauge/background.svg`
+- `assets/widgets/gauge/fill.svg`
+- `assets/widgets/gauge/widget.toml`
+- `crates/tze_hud_widget/tests/gauge_param_validation.rs`
+- `crates/tze_hud_widget/tests/gauge_interpolation.rs`
+- `crates/tze_hud_widget/tests/gauge_perf_and_cache.rs`
+- `crates/tze_hud_compositor/tests/gauge_binding_rendering.rs`
 
 ---
 
@@ -227,16 +241,24 @@ Spec sections awaiting live proof:
 
 ### Design Review
 
-- [ ] Fill bar animation smoothness (linear interp)
-- [ ] Severity color mapping clarity
-- [ ] Label text placement and size
-- [ ] Background track contrast
-- [ ] Widget dimensions
-- [ ] Boundary behavior at 0% and 100%
+- [x] Fill bar animation smoothness (linear interp)
+- [x] Severity color mapping clarity
+- [x] Label text placement and size
+- [x] Background track contrast
+- [x] Widget dimensions
+- [x] Boundary behavior at 0% and 100%
+
+### Automation + Manual Checkpoint (2026-04-09)
+
+- `publish_widget_batch.py` with `gauge_cycle_test.json` completed successfully against Windows MCP endpoint (`:9090`) with no RPC transport failures.
+- Published states applied in sequence on `main-gauge` with updated readout payloads and muted color set.
+- Manual visual sign-off completed: no tick ladder/wrapper rectangle, hover tooltip carries label + `current/max (%)`, and level movement is visibly animated between states.
 
 ### UX Tweaks
 
-_(to be filled during review)_
+1. Shifted to ultra-minimal gauge face and removed reflective treatment.
+2. Moved label text into hover tooltip (no always-on face label).
+3. Tuned tooltip spacing (top margin for label) and reduced fill color saturation.
 
 ---
 
@@ -246,7 +268,7 @@ _(to be filled during review)_
 
 **Spec:** `openspec/changes/exemplar-progress-bar/`
 
-> **Note:** Asset bundle (widget.toml, track.svg, fill.svg) not yet created.
+> **Note:** Asset bundle exists and is deployed (`widget.toml`, `track.svg`, `fill.svg`); remaining work is visual/manual acceptance.
 
 ### Design Review
 
@@ -256,6 +278,12 @@ _(to be filled during review)_
 - [ ] Fill color customization
 - [ ] Empty vs full visual distinction
 - [ ] Corner radius treatment
+
+### Automation Checkpoint (2026-04-09)
+
+- `publish_widget_batch.py` with `progress-bar-step.json` passed all 7 scripted updates on `main-progress` (0% -> 25% -> 50% -> 75% -> 100% -> green fill override -> clear/reset).
+- `publish_widget_batch.py` with `progress-bar-color-sweep.json` passed scripted color transitions on `main-progress`.
+- This confirms publish-path and parameter updates are healthy; animation/shape/readability criteria above still require manual sign-off.
 
 ### UX Tweaks
 
@@ -277,6 +305,14 @@ _(to be filled during review)_
 - [ ] Optional label text placement
 - [ ] Transition between states
 - [ ] Visibility at small sizes
+
+### Automation Checkpoint (2026-04-09)
+
+- `publish_widget_batch.py` with `status-indicator-enum-cycle-test.json` passed for `online/away/busy/offline` on `main-status`.
+- `publish_widget_batch.py` with `status-indicator-theme-cycle-test.json` and `status-indicator-theme-status-matrix-test.json` passed theme+state combinations.
+- `publish_widget_batch.py` with `status-indicator-label-update-test.json` passed label changes.
+- Validation fixture `status-indicator-validation-test.json` returned expected MCP error `WIDGET_PARAMETER_INVALID_VALUE` for `status=do-not-disturb`.
+- This confirms publish-path, enum handling, and validation behavior; visual/accessibility criteria above still require manual sign-off.
 
 ### UX Tweaks
 

@@ -28,7 +28,6 @@ Beads (`bd`) is the dependency-aware issue tracker backed by Dolt. It replaces m
 - **Dependencies** — Explicit blockers between beads. `bd ready` returns only unblocked work. `discovered-from` links trace how new issues were found during implementation.
 - **Epics** — Parent beads with children. Non-trivial epics (>=3 children) require a reconciliation bead and an epic report bead.
 - **Atomic claiming** — `bd update <id> --claim` prevents two agents from working the same bead.
-- **Epic report scaffold helper** — Use `bash scripts/epic-report-scaffold.sh <epic-id> [repo_root]` to create a report template from Beads metadata.
 
 **Principle:** `bd ready` is the single source of truth for "what should I work on next." All discovered work becomes a linked bead, not a TODO comment.
 

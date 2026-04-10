@@ -45,18 +45,3 @@ The mobile/glasses story only becomes real when the repo can validate and operat
 1. Scope inflation if bounded ingress and bidirectional AV are collapsed into one tranche.
 2. Validation debt if real-decode/device paths are planned without runner strategy and artifact contracts.
 3. Governance drift if media/device implementation bypasses existing operator/privacy/failure doctrine.
-
-## Reconciled Constraints
-
-The following constraints are normative for this v2 design and come directly from existing doctrine/contracts:
-
-1. **Do not widen v1 promises.** No v1 capability claim changes are implied by this change.
-   Source: `about/heart-and-soul/v1.md`
-2. **Phase 1 stays bounded.** No audio, no bidirectional AV session semantics, no multi-feed orchestration in bounded-ingress activation.
-   Source: `openspec/specs/media-webrtc-bounded-ingress/spec.md`
-3. **Admission precedence is preserved.** Explicit enablement and operator disable checks remain ahead of viewer/privacy and transport checks.
-   Source: `openspec/specs/media-webrtc-privacy-operator-policy/spec.md`
-4. **Runtime remains sovereign.** Agents never bypass leases/capabilities/policy gates to control presentation directly.
-   Source: `about/heart-and-soul/architecture.md`, `about/heart-and-soul/presence.md`
-5. **Validation is release-gating, not aspirational.** Later phases remain blocked unless phase-specific deterministic and higher-fidelity evidence both exist.
-   Source: `about/heart-and-soul/validation.md`

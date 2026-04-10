@@ -388,11 +388,12 @@ Scope: post-v1
 - **WHEN** the v1 runtime starts
 - **THEN** no GStreamer or WebRTC threads SHALL be created; the DecodedFrameReady channel slot MUST remain empty
 
-### Closeout Note: Policy Hot-Path Deferral
-Centralized `tze_hud_policy` hot-path execution across Stages 1-7 is deferred beyond v1. Runtime-kernel v1 requirements in this spec describe shipped runtime-owned behavior; unified policy-path integration is post-v1 work and MUST NOT be implied as active in v1.
+### Spec-First Handoff Notes
+- `hud-iq2x.7`: define the runtime-policy-scene seam contract before introducing any runtime-kernel requirement that implies centralized policy-crate execution in Stages 1-7.
+- `hud-iq2x.8`: align capability-escalation authority semantics with session-protocol before changing Stage 3 admission or lease-governance ownership claims.
 
 ### Requirement: Parallel Render Encoding (Deferred)
-Parallel render encoding (multiple CommandEncoder instances recorded in parallel for Stage 6) is deferred to post-v1 based on profiling data, and v1 render encoding MUST remain single-threaded.
+Parallel render encoding (multiple CommandEncoder instances recorded in parallel for Stage 6) is deferred to post-v1 based on profiling data.
 Source: RFC 0002 §10
 Scope: post-v1
 

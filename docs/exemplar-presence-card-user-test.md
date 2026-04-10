@@ -1,7 +1,9 @@
-# Exemplar Presence Card — User-Test Scenario and Live-Proof Gap
+# Exemplar Presence Card — User-Test Script and Live-Proof Gap
 
-**Issue**: `hud-sx7q.1`
+**Issue**: hud-sx7q.3
+**Date**: 2026-04-10
 **Spec**: `openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md`
+**Tasks ref**: `openspec/changes/exemplar-presence-card/tasks.md` §7
 
 ---
 
@@ -9,9 +11,46 @@
 
 This document now serves two purposes:
 - Defines the manual 7-step visual validation scenario for Presence Card.
-- Explicitly records the remaining gap: this flow is **not yet integrated into `/user-test` as a resident scenario**.
+- Records the remaining gap: the repo-native `/user-test` scenario exists, but live resident proof execution and manual closeout are still open.
 
 Implemented coverage already exists in automated tests (tile/node/lease/disconnect/coexistence). The unresolved work is live resident proof execution and manual closeout.
+
+## Executable Scenario
+
+The repo-native `/user-test` automation for this flow lives at
+`.claude/skills/user-test/scripts/presence_card_exemplar.py`.
+
+Run it with:
+
+```bash
+python3 .claude/skills/user-test/scripts/presence_card_exemplar.py \
+  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --psk-env TZE_HUD_PSK \
+  --tab-height 1080 \
+  --transcript-out test_results/presence-card-latest.json
+```
+
+The script emits structured JSON step events to stdout and writes a transcript
+artifact by default. The operator should follow the `expected_visual` field for
+each emitted step while performing the manual checks below.
+
+Current branch note:
+the executable `/user-test` scenario validates the live operator-visible
+sequence for stacking, content refresh, disconnect/orphan observation, and
+cleanup. Because the resident session stream in this branch does not yet expose
+the RFC 0011 resource-upload messages, the executable scenario uses 32x32
+solid-color avatar squares rather than uploaded `StaticImageNode` avatars.
+
+**Prerequisites:**
+
+- Runtime is running with a default tab open (1920x1080 or equivalent).
+- Three agent processes (alpha, beta, gamma) can be launched independently.
+- Each agent uses the canonical gRPC test sequence defined in the spec
+  (SessionInit → LeaseRequest → UploadResource → MutationBatch → periodic
+  SetTileRoot).
+- Agent alpha uses the blue avatar (RGB 66, 133, 244).
+- Agent beta uses the green avatar (RGB 52, 168, 83).
+- Agent gamma uses the orange avatar (RGB 251, 188, 4).
 
 Exact spec sections still awaiting live proof:
 1. `Requirement: gRPC Test Sequence`

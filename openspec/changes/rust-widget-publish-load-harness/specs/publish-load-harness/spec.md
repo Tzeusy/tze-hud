@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Rust Resident Publish Harness
-The repository SHALL provide a Rust benchmark executable for resident-agent publish-load measurement. The executable SHALL connect to a configured target over one bidirectional gRPC session stream, perform the same session bootstrap, authentication, and capability-grant flow used by resident agents, and exercise durable widget publishing using `WidgetPublish` on that stream. The initial v1 scope SHALL support only gRPC widget publishing against the same primary target class used by `/user-test`; MCP, zones, tiles, and multi-target orchestration SHALL remain out of scope.
+The repository SHALL provide a Rust benchmark executable for resident-agent publish-load measurement. The executable SHALL connect to a configured target over one bidirectional gRPC session stream, perform the same session bootstrap, authentication, and capability-grant flow used by resident agents, and exercise durable widget publishing using `WidgetPublish` on that stream. The initial v1 scope SHALL support only gRPC widget publishing against the same primary target class used by `/user-test-performance`; MCP, zones, tiles, and multi-target orchestration SHALL remain out of scope.
 
 #### Scenario: Single-stream durable widget publish run
 - **WHEN** an operator runs the harness against a valid target and widget instance
@@ -73,7 +73,7 @@ The harness SHALL label byte measurements with an explicit accounting mode. `pay
 - **THEN** the artifact SHALL also state a byte-accounting mode that distinguishes those totals from protobuf payload bytes
 
 ### Requirement: Artifact Output and CSV Compatibility
-The harness SHALL emit a canonical machine-readable JSON result artifact for each run. The artifact SHALL be suitable for inclusion in Layer 4 benchmark directories and SHALL contain: benchmark identity, raw metrics, byte-accounting mode, threshold fields, traceability fields, calibration status, warnings, and links or paths to any auxiliary histogram data. The harness SHALL also support emitting or appending a summary row compatible with the historical CSV ledger used by `/user-test`.
+The harness SHALL emit a canonical machine-readable JSON result artifact for each run. The artifact SHALL be suitable for inclusion in Layer 4 benchmark directories and SHALL contain: benchmark identity, raw metrics, byte-accounting mode, threshold fields, traceability fields, calibration status, warnings, and links or paths to any auxiliary histogram data. The harness SHALL also support emitting or appending a summary row compatible with the historical CSV ledger used by `/user-test-performance`.
 
 #### Scenario: Canonical JSON artifact emitted
 - **WHEN** a harness run completes
@@ -81,7 +81,7 @@ The harness SHALL emit a canonical machine-readable JSON result artifact for eac
 
 #### Scenario: Historical ledger compatibility
 - **WHEN** CSV output is requested
-- **THEN** the harness SHALL append a row whose identity and summary fields are compatible with the established `/user-test` historical ledger
+- **THEN** the harness SHALL append a row whose identity and summary fields are compatible with the established `/user-test-performance` historical ledger
 
 ### Requirement: Calibration Status and Verdict Semantics
 Every run SHALL report both raw metrics and calibration status. Formal pass/fail verdicts SHALL only be emitted when an approved normalization mapping exists for the measured publish benchmark. Until then, remote publish-load runs SHALL be marked `uncalibrated`, and any threshold comparisons SHALL be informational rather than authoritative validation outcomes.

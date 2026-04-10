@@ -46,30 +46,12 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
-use tze_hud_policy::types::{
-    AttentionContext as PolicyAttentionContext, ContentContext as PolicyContentContext,
-    InterruptionClass as PolicyInterruptionClass, MutationKind as PolicyMutationKind,
-    OverrideState as PolicyOverrideState, PolicyContext as PolicyContextSnapshot,
-    PrivacyContext as PolicyPrivacyContext, RedactionStyle as PolicyRedactionStyle,
-    ResourceContext as PolicyResourceContext, SafetyState as PolicySafetyState,
-    SecurityContext as PolicySecurityContext, ViewerClass as PolicyViewerClass,
-    VisibilityClassification as PolicyVisibilityClassification,
-};
-use tze_hud_policy::{
-    ArbitrationOutcome as PolicyArbitrationOutcome, ArbitrationTelemetryEvent,
-    MutationEvalInput as PolicyMutationEvalInput, MutationLatencyAccumulator, PolicyTelemetry,
-    evaluate_mutation as evaluate_policy_mutation,
-};
 use tze_hud_resource::{
     RuntimeWidgetStoreError, RuntimeWidgetStorePutOutcome as DurablePutOutcome,
 };
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
 use tze_hud_scene::types::*;
-use tze_hud_telemetry::{
-    MutationPathLatencyConformance, POLICY_MUTATION_EVAL_BUDGET_US,
-    evaluate_policy_mutation_latency_conformance,
-};
 use tze_hud_widget::{RuntimeWidgetAssetError, register_runtime_widget_svg_asset};
 
 // ─── Session Configuration ───────────────────────────────────────────────────
@@ -576,22 +558,6 @@ fn now_wall_us() -> u64 {
         .as_micros() as u64
 }
 
-fn capability_audit_record(
-    kind: CapabilityAuditKind,
-    agent_id: impl Into<String>,
-    capability: impl Into<String>,
-    timestamp_wall_us: u64,
-    source: impl Into<String>,
-) -> CapabilityAuditRecord {
-    CapabilityAuditRecord {
-        kind: kind as i32,
-        agent_id: agent_id.into(),
-        capability: capability.into(),
-        timestamp_wall_us,
-        granted_by: source.into(),
-    }
-}
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -799,10 +765,6 @@ pub struct CapabilityRevocationEvent {
     pub lease_id: tze_hud_scene::SceneId,
     /// Canonical name of the capability to remove (e.g. `"create_tiles"`, `"publish_zone:subtitle"`).
     pub capability_name: String,
-    /// Source of the revocation for audit records (e.g. `admin_action`).
-    pub revocation_source: String,
-    /// Timestamp of revocation command creation (UTC us since epoch).
-    pub timestamp_wall_us: u64,
 }
 
 // ─── Service implementation ─────────────────────────────────────────────────
@@ -1003,8 +965,6 @@ impl HudSessionImpl {
         let event = CapabilityRevocationEvent {
             lease_id,
             capability_name: capability_name.into(),
-            revocation_source: "admin_action".to_string(),
-            timestamp_wall_us: now_wall_us(),
         };
         self.capability_revocation_tx
             .send(event)
@@ -1689,18 +1649,6 @@ async fn handle_session_init(
     };
 
     let seq = session.next_server_seq();
-    let capability_audit_records = granted_capabilities
-        .iter()
-        .map(|cap| {
-            capability_audit_record(
-                CapabilityAuditKind::Grant,
-                &init.agent_id,
-                cap,
-                compositor_ts,
-                "session_handshake",
-            )
-        })
-        .collect();
     let _ = tx
         .send(Ok(ServerMessage {
             sequence: seq,
@@ -1720,7 +1668,6 @@ async fn handle_session_init(
                 active_subscriptions: sub_result.active,
                 denied_subscriptions: sub_result.denied,
                 negotiated_protocol_version: negotiated_version,
-                capability_audit_records,
             })),
         }))
         .await;
@@ -2023,432 +1970,6 @@ fn validate_timing_hints(
     }
 
     Ok(())
-}
-
-fn degradation_to_policy_level(level: crate::session::RuntimeDegradationLevel) -> u32 {
-    match level {
-        crate::session::RuntimeDegradationLevel::Normal => 0,
-        crate::session::RuntimeDegradationLevel::CoalescingMore => 1,
-        crate::session::RuntimeDegradationLevel::MediaQualityReduced => 2,
-        crate::session::RuntimeDegradationLevel::StreamsReduced => 3,
-        crate::session::RuntimeDegradationLevel::RenderingSimplified => 4,
-        crate::session::RuntimeDegradationLevel::SheddingTiles => 5,
-        crate::session::RuntimeDegradationLevel::AudioOnlyFallback => 6,
-    }
-}
-
-fn parse_visibility_classification(
-    content_classification: Option<&str>,
-) -> PolicyVisibilityClassification {
-    match content_classification
-        .map(|s| s.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("household") => PolicyVisibilityClassification::Household,
-        Some("private") => PolicyVisibilityClassification::Private,
-        Some("sensitive") => PolicyVisibilityClassification::Sensitive,
-        _ => PolicyVisibilityClassification::Public,
-    }
-}
-
-fn mutation_required_capabilities(mutation: &SceneMutation) -> Vec<String> {
-    match mutation {
-        SceneMutation::CreateTile { .. } => vec!["create_tiles".to_string()],
-        SceneMutation::UpdateTileBounds { .. }
-        | SceneMutation::UpdateTileZOrder { .. }
-        | SceneMutation::UpdateTileOpacity { .. }
-        | SceneMutation::UpdateTileInputMode { .. }
-        | SceneMutation::UpdateTileSyncGroup { .. }
-        | SceneMutation::UpdateTileExpiry { .. }
-        | SceneMutation::DeleteTile { .. }
-        | SceneMutation::SetTileRoot { .. }
-        | SceneMutation::AddNode { .. }
-        | SceneMutation::UpdateNodeContent { .. } => vec!["modify_own_tiles".to_string()],
-        SceneMutation::PublishToZone { zone_name, .. }
-        | SceneMutation::ClearZone { zone_name, .. } => {
-            vec![format!("publish_zone:{zone_name}")]
-        }
-        _ => Vec::new(),
-    }
-}
-
-fn mutation_kind_for_policy(mutation: &SceneMutation) -> PolicyMutationKind {
-    match mutation {
-        SceneMutation::PublishToZone { .. } | SceneMutation::ClearZone { .. } => {
-            PolicyMutationKind::ZonePublication
-        }
-        SceneMutation::CreateTile { .. } | SceneMutation::DeleteTile { .. } => {
-            PolicyMutationKind::Transactional
-        }
-        _ => PolicyMutationKind::TileMutation,
-    }
-}
-
-fn active_lease_priority_for_namespace(scene: &SceneGraph, namespace: &str) -> Option<u32> {
-    scene
-        .leases
-        .values()
-        .filter(|lease| lease.namespace == namespace && lease.state == LeaseState::Active)
-        .map(|lease| lease.priority as u32)
-        .min()
-}
-
-#[derive(Debug, Clone, Default)]
-struct PolicyAdmissionReport {
-    telemetry: PolicyTelemetry,
-    diagnostics: Vec<ArbitrationTelemetryEvent>,
-    evaluated_mutations: u32,
-    over_budget_mutations: u32,
-    max_eval_us: u64,
-    latency_conformance: Option<MutationPathLatencyConformance>,
-}
-
-impl PolicyAdmissionReport {
-    fn record_eval_latency(&mut self, eval_us: u64, latencies: &mut MutationLatencyAccumulator) {
-        latencies.record(eval_us);
-        self.evaluated_mutations = self.evaluated_mutations.saturating_add(1);
-        self.max_eval_us = self.max_eval_us.max(eval_us);
-        if eval_us >= POLICY_MUTATION_EVAL_BUDGET_US {
-            self.over_budget_mutations = self.over_budget_mutations.saturating_add(1);
-        }
-    }
-
-    fn record_outcome(&mut self, outcome: &PolicyArbitrationOutcome) {
-        match outcome {
-            PolicyArbitrationOutcome::Commit => {}
-            PolicyArbitrationOutcome::CommitRedacted { .. } => {
-                self.telemetry.mutations_redacted =
-                    self.telemetry.mutations_redacted.saturating_add(1)
-            }
-            PolicyArbitrationOutcome::Queue { .. } => {
-                self.telemetry.mutations_queued = self.telemetry.mutations_queued.saturating_add(1)
-            }
-            PolicyArbitrationOutcome::Shed { .. } => {
-                self.telemetry.mutations_shed = self.telemetry.mutations_shed.saturating_add(1)
-            }
-            PolicyArbitrationOutcome::Reject(_) => {
-                self.telemetry.mutations_rejected =
-                    self.telemetry.mutations_rejected.saturating_add(1)
-            }
-            PolicyArbitrationOutcome::Blocked { .. } => {}
-        }
-    }
-
-    fn finalize(
-        mut self,
-        eval_started_at: std::time::Instant,
-        latencies: &mut MutationLatencyAccumulator,
-    ) -> Self {
-        self.telemetry.per_frame_eval_us = eval_started_at.elapsed().as_micros() as u64;
-        self.telemetry.per_mutation_eval_us_p99 = latencies.p99_us();
-        self.latency_conformance = Some(evaluate_policy_mutation_latency_conformance(
-            self.evaluated_mutations,
-            self.telemetry.per_mutation_eval_us_p99,
-            self.max_eval_us,
-            self.over_budget_mutations,
-        ));
-        self
-    }
-
-    fn over_budget(&self) -> bool {
-        self.latency_conformance
-            .as_ref()
-            .is_some_and(|conformance| !conformance.within_budget())
-    }
-
-    fn diagnostics_by_level(&self) -> Vec<(u8, usize)> {
-        let mut counts: HashMap<u8, usize> = HashMap::new();
-        for event in &self.diagnostics {
-            *counts.entry(event.level).or_insert(0) += 1;
-        }
-        let mut sorted: Vec<(u8, usize)> = counts.into_iter().collect();
-        sorted.sort_unstable_by_key(|(level, _)| *level);
-        sorted
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PolicyAdmissionError {
-    message: String,
-    report: PolicyAdmissionReport,
-}
-
-fn log_policy_admission_report(
-    namespace: &str,
-    batch_id_len: usize,
-    phase: &'static str,
-    report: &PolicyAdmissionReport,
-    accepted: bool,
-) {
-    const DIAGNOSTICS_PREVIEW_LIMIT: usize = 8;
-    let diagnostics_by_level = report.diagnostics_by_level();
-    let latency_conformance = report.latency_conformance.as_ref();
-    if report.over_budget() {
-        tracing::warn!(
-            namespace = %namespace,
-            phase,
-            batch_id_len,
-            accepted,
-            mutation_count = report.evaluated_mutations,
-            p99_eval_us = report.telemetry.per_mutation_eval_us_p99,
-            max_eval_us = report.max_eval_us,
-            over_budget_mutations = report.over_budget_mutations,
-            rejected = report.telemetry.mutations_rejected,
-            redacted = report.telemetry.mutations_redacted,
-            queued = report.telemetry.mutations_queued,
-            shed = report.telemetry.mutations_shed,
-            diagnostics_count = report.diagnostics.len(),
-            diagnostics_by_level = ?diagnostics_by_level,
-            latency_conformance = ?latency_conformance,
-            "Policy admission latency exceeded budget"
-        );
-    } else {
-        tracing::debug!(
-            namespace = %namespace,
-            phase,
-            batch_id_len,
-            accepted,
-            mutation_count = report.evaluated_mutations,
-            p99_eval_us = report.telemetry.per_mutation_eval_us_p99,
-            max_eval_us = report.max_eval_us,
-            over_budget_mutations = report.over_budget_mutations,
-            rejected = report.telemetry.mutations_rejected,
-            redacted = report.telemetry.mutations_redacted,
-            queued = report.telemetry.mutations_queued,
-            shed = report.telemetry.mutations_shed,
-            diagnostics_count = report.diagnostics.len(),
-            latency_conformance = ?latency_conformance,
-            "Policy admission telemetry"
-        );
-    }
-
-    if !report.diagnostics.is_empty() {
-        let diagnostics_preview: Vec<_> = report
-            .diagnostics
-            .iter()
-            .take(DIAGNOSTICS_PREVIEW_LIMIT)
-            .collect();
-        let diagnostics_truncated = report
-            .diagnostics
-            .len()
-            .saturating_sub(diagnostics_preview.len());
-
-        tracing::debug!(
-            namespace = %namespace,
-            phase,
-            batch_id_len,
-            diagnostics_by_level = ?diagnostics_by_level,
-            diagnostics_preview = ?diagnostics_preview,
-            diagnostics_truncated,
-            "Policy admission diagnostics"
-        );
-    }
-}
-
-fn evaluate_policy_admission_for_batch(
-    shared: &SharedState,
-    scene: &SceneGraph,
-    session: &StreamSession,
-    lease_id: SceneId,
-    mutations: &[SceneMutation],
-) -> Result<PolicyAdmissionReport, PolicyAdmissionError> {
-    let eval_started_at = std::time::Instant::now();
-    let mut latencies = MutationLatencyAccumulator::default();
-    let mut report = PolicyAdmissionReport::default();
-    let (lease_valid, agent_lease_priority, tiles_limit, mut projected_tiles) =
-        if let Some(lease) = scene.leases.get(&lease_id) {
-            let usage = scene.lease_resource_usage(&lease_id);
-            (
-                lease.state == LeaseState::Active,
-                lease.priority as u32,
-                lease.resource_budget.max_tiles.max(1),
-                usage.tiles,
-            )
-        } else {
-            (false, 2, 1, 0)
-        };
-
-    let base_ctx = PolicyContextSnapshot {
-        override_state: PolicyOverrideState {
-            freeze_active: shared.freeze_active,
-            safe_mode_active: shared.safe_mode_active,
-            freeze_duration_ms: 0,
-            max_freeze_duration_ms: 300_000,
-        },
-        safety_state: PolicySafetyState {
-            gpu_healthy: true,
-            scene_graph_intact: true,
-            frame_time_p95_us: 0,
-            emergency_threshold_us: 14_000,
-        },
-        privacy_context: PolicyPrivacyContext {
-            effective_viewer_class: PolicyViewerClass::Owner,
-            viewer_classes: vec![PolicyViewerClass::Owner],
-            redaction_style: PolicyRedactionStyle::Pattern,
-        },
-        security_context: PolicySecurityContext {
-            granted_capabilities: session.capabilities.clone(),
-            agent_namespace: session.namespace.clone(),
-            lease_valid,
-            lease_id: Some(lease_id),
-        },
-        attention_context: PolicyAttentionContext {
-            quiet_hours_active: false,
-            quiet_hours_end_us: None,
-            per_agent_interruptions_last_60s: 0,
-            per_agent_limit: 20,
-            per_zone_interruptions_last_60s: 0,
-            per_zone_limit: 10,
-            pass_through_class: PolicyInterruptionClass::High,
-            interruption_class: PolicyInterruptionClass::Normal,
-            budget_refill_us: None,
-        },
-        resource_context: PolicyResourceContext {
-            degradation_level: degradation_to_policy_level(shared.degradation_level),
-            tiles_used: projected_tiles,
-            tiles_limit,
-            should_shed: false,
-            is_transactional: false,
-            budget_exceeded: false,
-            budgets_paused: shared.freeze_active,
-        },
-        content_context: PolicyContentContext {
-            zone_name: None,
-            contention_policy: None,
-            agent_lease_priority,
-            occupant_lease_priority: None,
-            stack_depth: 0,
-            max_stack_depth: 0,
-        },
-    };
-
-    for mutation in mutations {
-        let mut ctx = base_ctx.clone();
-        let required_capabilities = mutation_required_capabilities(mutation);
-        let required_capability_refs: Vec<&str> = required_capabilities
-            .iter()
-            .map(|cap| cap.as_str())
-            .collect();
-        let kind = mutation_kind_for_policy(mutation);
-
-        let target_namespace = match mutation {
-            SceneMutation::CreateTile { namespace, .. } => namespace.clone(),
-            SceneMutation::UpdateTileBounds { tile_id, .. }
-            | SceneMutation::UpdateTileZOrder { tile_id, .. }
-            | SceneMutation::UpdateTileOpacity { tile_id, .. }
-            | SceneMutation::UpdateTileInputMode { tile_id, .. }
-            | SceneMutation::UpdateTileSyncGroup { tile_id, .. }
-            | SceneMutation::UpdateTileExpiry { tile_id, .. }
-            | SceneMutation::DeleteTile { tile_id }
-            | SceneMutation::SetTileRoot { tile_id, .. }
-            | SceneMutation::AddNode { tile_id, .. }
-            | SceneMutation::UpdateNodeContent { tile_id, .. }
-            | SceneMutation::JoinSyncGroup { tile_id, .. }
-            | SceneMutation::LeaveSyncGroup { tile_id } => scene
-                .tiles
-                .get(tile_id)
-                .map(|tile| tile.namespace.clone())
-                .unwrap_or_else(|| session.namespace.clone()),
-            _ => session.namespace.clone(),
-        };
-
-        let agent_declared_classification = match mutation {
-            SceneMutation::PublishToZone {
-                content_classification,
-                ..
-            } => parse_visibility_classification(content_classification.as_deref()),
-            _ => PolicyVisibilityClassification::Public,
-        };
-
-        if kind == PolicyMutationKind::ZonePublication
-            && let SceneMutation::PublishToZone { zone_name, .. }
-            | SceneMutation::ClearZone { zone_name, .. } = mutation
-        {
-            let contention_policy = scene
-                .zone_registry
-                .get_by_name(zone_name)
-                .map(|zone| zone.contention_policy);
-            let active_publishes = scene.zone_registry.active_publishes.get(zone_name);
-            let stack_depth = active_publishes.map_or(0, |publishes| publishes.len() as u32);
-            let max_stack_depth = match contention_policy {
-                Some(ContentionPolicy::Stack { max_depth }) => u32::from(max_depth),
-                _ => 0,
-            };
-            let occupant_lease_priority = active_publishes
-                .and_then(|publishes| publishes.last())
-                .and_then(|record| {
-                    active_lease_priority_for_namespace(scene, &record.publisher_namespace)
-                });
-
-            ctx.content_context = PolicyContentContext {
-                zone_name: Some(zone_name.clone()),
-                contention_policy,
-                agent_lease_priority,
-                occupant_lease_priority,
-                stack_depth,
-                max_stack_depth,
-            };
-        }
-
-        let budget_exceeded = matches!(mutation, SceneMutation::CreateTile { .. })
-            && projected_tiles.saturating_add(1) > tiles_limit;
-        ctx.resource_context.tiles_used = projected_tiles;
-        ctx.resource_context.budget_exceeded = budget_exceeded;
-        ctx.resource_context.is_transactional = kind == PolicyMutationKind::Transactional;
-
-        let mutation_started_at = std::time::Instant::now();
-        let eval = evaluate_policy_mutation(&PolicyMutationEvalInput {
-            ctx: &ctx,
-            mutation_ref: SceneId::new(),
-            agent_declared_classification,
-            zone_default_classification: None,
-            required_capabilities: &required_capability_refs,
-            target_namespace: &target_namespace,
-            agent_id: &session.namespace,
-            kind,
-            timestamp_us: now_mono_us(),
-        });
-        report.record_eval_latency(
-            mutation_started_at.elapsed().as_micros() as u64,
-            &mut latencies,
-        );
-        report.record_outcome(&eval.outcome);
-        report.diagnostics.extend(eval.events);
-
-        match eval.outcome {
-            PolicyArbitrationOutcome::Commit
-            | PolicyArbitrationOutcome::CommitRedacted { .. }
-            | PolicyArbitrationOutcome::Queue { .. }
-            | PolicyArbitrationOutcome::Shed { .. } => {
-                if matches!(mutation, SceneMutation::CreateTile { .. }) && !budget_exceeded {
-                    projected_tiles = projected_tiles.saturating_add(1);
-                }
-                if matches!(mutation, SceneMutation::DeleteTile { .. }) {
-                    projected_tiles = projected_tiles.saturating_sub(1);
-                }
-            }
-            PolicyArbitrationOutcome::Blocked { block_reason } => {
-                return Err(PolicyAdmissionError {
-                    message: format!(
-                        "policy admission blocked ({block_reason:?}) for namespace '{}'",
-                        session.namespace
-                    ),
-                    report: report.finalize(eval_started_at, &mut latencies),
-                });
-            }
-            PolicyArbitrationOutcome::Reject(err) => {
-                return Err(PolicyAdmissionError {
-                    message: format!(
-                        "policy admission rejected at level {} ({:?}): {}",
-                        err.level, err.code, err.message
-                    ),
-                    report: report.finalize(eval_started_at, &mut latencies),
-                });
-            }
-        }
-    }
-
-    Ok(report.finalize(eval_started_at, &mut latencies))
 }
 
 async fn handle_mutation_batch(
@@ -2967,61 +2488,6 @@ async fn handle_mutation_batch(
         }
     }
 
-    // Bounded mutation-path policy pilot:
-    // evaluate pure policy decisions at admission time before scene commit.
-    let policy_gate = {
-        let scene = st.scene.lock().await;
-        evaluate_policy_admission_for_batch(&st, &scene, session, lease_id, &scene_mutations)
-    };
-    match policy_gate {
-        Ok(report) => {
-            log_policy_admission_report(
-                &session.namespace,
-                batch.batch_id.len(),
-                "live",
-                &report,
-                true,
-            );
-        }
-        Err(error) => {
-            log_policy_admission_report(
-                &session.namespace,
-                batch.batch_id.len(),
-                "live",
-                &error.report,
-                false,
-            );
-            let error_message = error.message;
-            if !batch.batch_id.is_empty() {
-                session.dedup_window.insert(
-                    batch.batch_id.clone(),
-                    CachedResult {
-                        accepted: false,
-                        created_ids: Vec::new(),
-                        error_code: "MUTATION_REJECTED".to_string(),
-                        error_message: error_message.clone(),
-                    },
-                );
-            }
-            let seq = session.next_server_seq();
-            drop(st);
-            let _ = tx
-                .send(Ok(ServerMessage {
-                    sequence: seq,
-                    timestamp_wall_us: now_wall_us(),
-                    payload: Some(ServerPayload::MutationResult(MutationResult {
-                        batch_id: batch.batch_id,
-                        accepted: false,
-                        created_ids: Vec::new(),
-                        error_code: "MUTATION_REJECTED".to_string(),
-                        error_message,
-                    })),
-                }))
-                .await;
-            return;
-        }
-    }
-
     // Map the proto batch_id bytes to a SceneId for rejection-correlation.
     // Falls back (with a debug log) when the field is absent or malformed.
     let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
@@ -3332,41 +2798,6 @@ async fn apply_queued_batch_to_scene(
                 }
             }
             None => {}
-        }
-    }
-
-    // Re-validate queued batches against current policy admission state.
-    // If policy now rejects (for example capability scope narrowed while frozen),
-    // drop the queued batch silently: the enqueue path already sent accepted=true.
-    let policy_gate = {
-        let scene = st.scene.lock().await;
-        evaluate_policy_admission_for_batch(&st, &scene, session, lease_id, &scene_mutations)
-    };
-    match policy_gate {
-        Ok(report) => {
-            log_policy_admission_report(
-                &session.namespace,
-                batch.batch_id.len(),
-                "queued",
-                &report,
-                true,
-            );
-        }
-        Err(error) => {
-            log_policy_admission_report(
-                &session.namespace,
-                batch.batch_id.len(),
-                "queued",
-                &error.report,
-                false,
-            );
-            tracing::warn!(
-                namespace = %session.namespace,
-                batch_id_len = batch.batch_id.len(),
-                "Dropping queued batch after policy admission reject: {}",
-                error.message
-            );
-            return;
         }
     }
 
@@ -4127,29 +3558,15 @@ async fn handle_capability_request(
                     newly_granted.push(cap.clone());
                 }
             }
-            let audit_timestamp = now_wall_us();
-            let capability_audit_records = newly_granted
-                .iter()
-                .map(|cap| {
-                    capability_audit_record(
-                        CapabilityAuditKind::Grant,
-                        &session.agent_name,
-                        cap,
-                        audit_timestamp,
-                        "capability_request",
-                    )
-                })
-                .collect();
             let _ = tx
                 .send(Ok(ServerMessage {
                     sequence: seq,
-                    timestamp_wall_us: audit_timestamp,
+                    timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::CapabilityNotice(CapabilityNotice {
                         granted: newly_granted,
                         revoked: Vec::new(),
                         reason: req.reason.clone(),
                         effective_at_server_seq: seq,
-                        capability_audit_records,
                     })),
                 }))
                 .await;
@@ -4251,11 +3668,6 @@ async fn handle_capability_revocation(
 
             let lease_id_bytes = scene_id_to_bytes(event.lease_id);
             let reason = format!("CAPABILITY_REVOKED:{cap_name}");
-            let audit_timestamp = if event.timestamp_wall_us > 0 {
-                event.timestamp_wall_us
-            } else {
-                revoked_at_us
-            };
 
             // ── CapabilityNotice (transactional, RFC 0005 §5.3) ──────────────
             // Tells the agent which capability was revoked so it can update its
@@ -4270,13 +3682,6 @@ async fn handle_capability_revocation(
                         revoked: vec![event.capability_name.clone()],
                         reason: reason.clone(),
                         effective_at_server_seq: seq,
-                        capability_audit_records: vec![capability_audit_record(
-                            CapabilityAuditKind::Revoke,
-                            &session.agent_name,
-                            &event.capability_name,
-                            audit_timestamp,
-                            &event.revocation_source,
-                        )],
                     })),
                 }))
                 .await;
@@ -5073,7 +4478,7 @@ async fn handle_widget_publish(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
-    request_sequence: u64,
+    _request_sequence: u64,
     publish: WidgetPublish,
 ) {
     let widget_name = &publish.widget_name;
@@ -5094,7 +4499,6 @@ async fn handle_widget_publish(
                     sequence: seq,
                     timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
-                        request_sequence,
                         accepted: false,
                         widget_name: widget_name.clone(),
                         error_code: "WIDGET_CAPABILITY_MISSING".to_string(),
@@ -5158,7 +4562,6 @@ async fn handle_widget_publish(
                         sequence: seq,
                         timestamp_wall_us: now_wall_us(),
                         payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
-                            request_sequence,
                             accepted: true,
                             widget_name: widget_name.clone(),
                             error_code: String::new(),
@@ -5211,7 +4614,6 @@ async fn handle_widget_publish(
                         sequence: seq,
                         timestamp_wall_us: now_wall_us(),
                         payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
-                            request_sequence,
                             accepted: false,
                             widget_name: widget_name.clone(),
                             error_code,
@@ -8001,22 +7403,6 @@ mod tests {
                     notice.effective_at_server_seq > 0,
                     "effective_at_server_seq must be non-zero"
                 );
-                assert_eq!(
-                    notice.capability_audit_records.len(),
-                    1,
-                    "grant notice should carry one structured audit record"
-                );
-                let audit = &notice.capability_audit_records[0];
-                assert_eq!(
-                    audit.kind,
-                    CapabilityAuditKind::Grant as i32
-                );
-                assert_eq!(audit.capability, "read_telemetry");
-                assert_eq!(audit.granted_by, "capability_request");
-                assert!(
-                    audit.timestamp_wall_us > 0,
-                    "capability audit record timestamp must be set"
-                );
             }
             other => panic!("Expected CapabilityNotice, got: {other:?}"),
         }
@@ -8338,22 +7724,6 @@ mod tests {
                         .contains(&"read_telemetry".to_string()),
                     "read_telemetry should not be initially granted when not requested"
                 );
-                assert_eq!(
-                    established.capability_audit_records.len(),
-                    established.granted_capabilities.len(),
-                    "handshake should emit one capability audit record per granted capability"
-                );
-                for audit in &established.capability_audit_records {
-                    assert_eq!(
-                        audit.kind,
-                        CapabilityAuditKind::Grant as i32
-                    );
-                    assert_eq!(audit.granted_by, "session_handshake");
-                    assert!(
-                        audit.timestamp_wall_us > 0,
-                        "handshake capability audit timestamp must be populated"
-                    );
-                }
                 established.resume_token.clone()
             }
             other => panic!("Expected SessionEstablished, got: {other:?}"),
@@ -10372,8 +9742,6 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "publish_zone:subtitle".to_string(),
-            revocation_source: "admin_action".to_string(),
-            timestamp_wall_us: now_wall_us(),
         });
 
         // The agent should receive a CapabilityNotice with revoked=[publish_zone:subtitle]
@@ -10389,22 +9757,6 @@ mod tests {
                 assert!(
                     notice.granted.is_empty(),
                     "CapabilityNotice.granted must be empty for a revocation"
-                );
-                assert_eq!(
-                    notice.capability_audit_records.len(),
-                    1,
-                    "revocation notice should carry one structured audit record"
-                );
-                let audit = &notice.capability_audit_records[0];
-                assert_eq!(
-                    audit.kind,
-                    CapabilityAuditKind::Revoke as i32
-                );
-                assert_eq!(audit.capability, "publish_zone:subtitle");
-                assert_eq!(audit.granted_by, "admin_action");
-                assert!(
-                    audit.timestamp_wall_us > 0,
-                    "capability audit record timestamp must be set"
                 );
             }
             other => panic!("Expected CapabilityNotice, got: {other:?}"),
@@ -10424,8 +9776,6 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "create_tiles".to_string(),
-            revocation_source: "admin_action".to_string(),
-            timestamp_wall_us: now_wall_us(),
         });
 
         // CapabilityNotice first
@@ -10475,8 +9825,6 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "publish_zone:subtitle".to_string(),
-            revocation_source: "admin_action".to_string(),
-            timestamp_wall_us: now_wall_us(),
         });
 
         // Drain protocol messages
@@ -10509,8 +9857,6 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "create_tiles".to_string(),
-            revocation_source: "admin_action".to_string(),
-            timestamp_wall_us: now_wall_us(),
         });
         let _notice = stream.next().await.unwrap().unwrap();
         let _sc = stream.next().await.unwrap().unwrap();
@@ -10542,8 +9888,6 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "totally_unknown_capability".to_string(),
-            revocation_source: "admin_action".to_string(),
-            timestamp_wall_us: now_wall_us(),
         });
 
         // Should get a RuntimeError
@@ -10581,8 +9925,6 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "manage_tabs".to_string(),
-            revocation_source: "admin_action".to_string(),
-            timestamp_wall_us: now_wall_us(),
         });
 
         // Should get a RuntimeError for capability not present
@@ -10593,266 +9935,6 @@ mod tests {
             }
             other => panic!("Expected RuntimeError for absent capability, got: {other:?}"),
         }
-    }
-
-    /// Policy admission pilot regression:
-    /// WHEN session capability scope does not include create_tiles
-    /// BUT scene lease capability is manually broadened to include CreateTiles
-    /// THEN mutation admission must reject CreateTile using session-held grants.
-    #[tokio::test]
-    async fn test_mutation_admission_rejects_when_session_scope_lacks_capability() {
-        let (mut client, _server, shared_state) = setup_test_with_state().await;
-
-        // Handshake with no requested capabilities.
-        let (tx, _init_messages, mut stream) = handshake_with_requested_capabilities(
-            &mut client,
-            "policy-scope-agent",
-            "test-key",
-            Vec::new(),
-        )
-        .await;
-
-        // Create an active tab so mutation admission can proceed to scene apply path.
-        let forged_lease_id = {
-            let st = shared_state.lock().await;
-            let mut scene = st.scene.lock().await;
-            let _tab_id = scene.create_tab("policy-scope-tab", 0).expect("create tab");
-
-            // Manually forge a lease capability set in scene state only.
-            // This intentionally diverges scene lease scope from session-held grants.
-            scene.grant_lease(
-                "policy-scope-agent",
-                60_000,
-                vec![
-                    tze_hud_scene::types::Capability::CreateTiles,
-                    tze_hud_scene::types::Capability::ModifyOwnTiles,
-                ],
-            )
-        };
-
-        let forged_lease_bytes = scene_id_to_bytes(forged_lease_id);
-        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
-
-        tx.send(ClientMessage {
-            sequence: 2,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::MutationBatch(MutationBatch {
-                batch_id: batch_id.clone(),
-                lease_id: forged_lease_bytes,
-                mutations: vec![crate::proto::MutationProto {
-                    mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
-                        crate::proto::CreateTileMutation {
-                            tab_id: Vec::new(),
-                            bounds: Some(crate::proto::Rect {
-                                x: 8.0,
-                                y: 8.0,
-                                width: 120.0,
-                                height: 90.0,
-                                ..Default::default()
-                            }),
-                            z_order: 1,
-                        },
-                    )),
-                }],
-                timing: None,
-            })),
-        })
-        .await
-        .expect("send mutation batch");
-
-        let msg = next_non_state_change(&mut stream).await;
-        match &msg.payload {
-            Some(ServerPayload::MutationResult(result)) => {
-                assert!(
-                    !result.accepted,
-                    "CreateTile must be rejected when session scope lacks create_tiles"
-                );
-                assert_eq!(result.batch_id, batch_id, "batch_id must echo request");
-            }
-            other => panic!("Expected MutationResult rejection, got: {other:?}"),
-        }
-    }
-
-    /// Policy admission pilot regression:
-    /// WHEN session capability scope does not include modify_own_tiles
-    /// BUT scene lease capability is manually broadened to include ModifyOwnTiles
-    /// THEN mutation admission must reject tile-modification mutations.
-    #[tokio::test]
-    async fn test_mutation_admission_rejects_modify_when_session_scope_lacks_capability() {
-        let (mut client, _server, shared_state) = setup_test_with_state().await;
-
-        // Handshake with no requested capabilities.
-        let (tx, _init_messages, mut stream) = handshake_with_requested_capabilities(
-            &mut client,
-            "policy-scope-agent",
-            "test-key",
-            Vec::new(),
-        )
-        .await;
-
-        // Create an active tab and a tile whose lease is forged with ModifyOwnTiles only.
-        let (forged_lease_id, tile_id) = {
-            let st = shared_state.lock().await;
-            let mut scene = st.scene.lock().await;
-            let tab_id = scene
-                .create_tab("policy-scope-tab-modify", 0)
-                .expect("create tab");
-
-            // Manually forge a lease capability set that is broader than session-held grants.
-            let lease_id = scene.grant_lease(
-                "policy-scope-agent",
-                60_000,
-                vec![tze_hud_scene::types::Capability::ModifyOwnTiles],
-            );
-            let tile_id = scene
-                .create_tile(
-                    tab_id,
-                    "policy-scope-agent",
-                    lease_id,
-                    tze_hud_scene::Rect::new(4.0, 4.0, 100.0, 80.0),
-                    1,
-                )
-                .expect("create tile with forged lease");
-            (lease_id, tile_id)
-        };
-
-        let forged_lease_bytes = scene_id_to_bytes(forged_lease_id);
-        let tile_id_bytes = scene_id_to_bytes(tile_id);
-        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
-
-        tx.send(ClientMessage {
-            sequence: 2,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::MutationBatch(MutationBatch {
-                batch_id: batch_id.clone(),
-                lease_id: forged_lease_bytes,
-                mutations: vec![crate::proto::MutationProto {
-                    mutation: Some(crate::proto::mutation_proto::Mutation::UpdateTileOpacity(
-                        crate::proto::UpdateTileOpacityMutation {
-                            tile_id: tile_id_bytes,
-                            opacity: 0.5,
-                        },
-                    )),
-                }],
-                timing: None,
-            })),
-        })
-        .await
-        .expect("send mutation batch");
-
-        let msg = next_non_state_change(&mut stream).await;
-        match &msg.payload {
-            Some(ServerPayload::MutationResult(result)) => {
-                assert!(
-                    !result.accepted,
-                    "UpdateTileOpacity must be rejected when session scope lacks modify_own_tiles"
-                );
-                assert_eq!(result.batch_id, batch_id, "batch_id must echo request");
-            }
-            other => panic!("Expected MutationResult rejection, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_policy_admission_report_tracks_outcomes_and_latency_conformance() {
-        let mut report = PolicyAdmissionReport::default();
-        let mut latencies = MutationLatencyAccumulator::default();
-
-        report.record_eval_latency(12, &mut latencies);
-        report.record_eval_latency(70, &mut latencies);
-
-        report.record_outcome(&PolicyArbitrationOutcome::Commit);
-        report.record_outcome(&PolicyArbitrationOutcome::CommitRedacted {
-            redaction_reason: tze_hud_policy::RedactionReason::MultiViewerRestriction,
-        });
-        report.record_outcome(&PolicyArbitrationOutcome::Queue {
-            queue_reason: tze_hud_policy::QueueReason::AttentionBudgetExhausted {
-                per_agent: true,
-                per_zone: false,
-            },
-            earliest_present_us: Some(42),
-            redacted: false,
-        });
-        report.record_outcome(&PolicyArbitrationOutcome::Shed {
-            degradation_level: 5,
-        });
-        report.record_outcome(&PolicyArbitrationOutcome::Reject(
-            tze_hud_policy::ArbitrationError {
-                code: tze_hud_policy::ArbitrationErrorCode::CapabilityDenied,
-                agent_id: "policy-agent".to_string(),
-                mutation_ref: SceneId::new(),
-                message: "capability denied".to_string(),
-                hint: None,
-                level: 3,
-            },
-        ));
-
-        report.diagnostics.push(ArbitrationTelemetryEvent::reject(
-            3,
-            "CAPABILITY_DENIED",
-            "policy-agent",
-            SceneId::new(),
-            1,
-        ));
-        report.diagnostics.push(ArbitrationTelemetryEvent::queue(
-            "policy-agent",
-            SceneId::new(),
-            2,
-        ));
-
-        let finalized = report.finalize(std::time::Instant::now(), &mut latencies);
-        assert_eq!(finalized.telemetry.mutations_rejected, 1);
-        assert_eq!(finalized.telemetry.mutations_redacted, 1);
-        assert_eq!(finalized.telemetry.mutations_queued, 1);
-        assert_eq!(finalized.telemetry.mutations_shed, 1);
-        assert_eq!(finalized.evaluated_mutations, 2);
-        assert_eq!(finalized.over_budget_mutations, 1);
-        assert_eq!(finalized.max_eval_us, 70);
-        assert_eq!(finalized.telemetry.per_mutation_eval_us_p99, 70);
-        assert!(
-            finalized.over_budget(),
-            "p99 over budget must be marked as non-conformant"
-        );
-        assert_eq!(finalized.diagnostics_by_level(), vec![(3, 1), (4, 1)]);
-    }
-
-    #[test]
-    fn test_policy_admission_report_marks_within_budget_latency() {
-        let mut report = PolicyAdmissionReport::default();
-        let mut latencies = MutationLatencyAccumulator::default();
-        report.record_eval_latency(8, &mut latencies);
-        report.record_eval_latency(14, &mut latencies);
-
-        let finalized = report.finalize(std::time::Instant::now(), &mut latencies);
-        assert_eq!(finalized.telemetry.per_mutation_eval_us_p99, 14);
-        assert_eq!(finalized.over_budget_mutations, 0);
-        assert!(
-            !finalized.over_budget(),
-            "all samples under budget should pass conformance"
-        );
-        let conformance = finalized
-            .latency_conformance
-            .expect("conformance should be attached during finalize");
-        assert_eq!(conformance.budget_us, POLICY_MUTATION_EVAL_BUDGET_US);
-        assert!(conformance.within_budget());
-    }
-
-    #[test]
-    fn test_policy_admission_report_treats_budget_boundary_as_over_budget() {
-        let mut report = PolicyAdmissionReport::default();
-        let mut latencies = MutationLatencyAccumulator::default();
-        report.record_eval_latency(POLICY_MUTATION_EVAL_BUDGET_US, &mut latencies);
-
-        let finalized = report.finalize(std::time::Instant::now(), &mut latencies);
-        assert_eq!(
-            finalized.telemetry.per_mutation_eval_us_p99,
-            POLICY_MUTATION_EVAL_BUDGET_US
-        );
-        assert_eq!(finalized.over_budget_mutations, 1);
-        assert!(
-            finalized.over_budget(),
-            "p99 at strict budget boundary must be marked as non-conformant"
-        );
     }
 
     /// WHEN revoke_capability_on_lease is called for a lease not owned by any session,
@@ -11043,7 +10125,6 @@ mod tests {
         let result_msg = next_non_state_change(&mut stream).await;
         match &result_msg.payload {
             Some(ServerPayload::WidgetPublishResult(result)) => {
-                assert_eq!(result.request_sequence, 2);
                 assert!(
                     result.accepted,
                     "Durable widget publish must be accepted, got error: {}",
@@ -11085,7 +10166,6 @@ mod tests {
         let result_msg = next_non_state_change(&mut stream).await;
         match &result_msg.payload {
             Some(ServerPayload::WidgetPublishResult(result)) => {
-                assert_eq!(result.request_sequence, 2);
                 assert!(!result.accepted, "Expected rejection");
                 assert_eq!(
                     result.error_code, "WIDGET_CAPABILITY_MISSING",
@@ -11130,7 +10210,6 @@ mod tests {
         let result_msg = next_non_state_change(&mut stream).await;
         match &result_msg.payload {
             Some(ServerPayload::WidgetPublishResult(result)) => {
-                assert_eq!(result.request_sequence, 2);
                 assert!(
                     result.accepted,
                     "Expected wildcard capability to authorize publish"
@@ -11174,7 +10253,6 @@ mod tests {
         let result_msg = next_non_state_change(&mut stream).await;
         match &result_msg.payload {
             Some(ServerPayload::WidgetPublishResult(result)) => {
-                assert_eq!(result.request_sequence, 2);
                 assert!(!result.accepted, "Expected rejection");
                 assert_eq!(
                     result.error_code, "WIDGET_NOT_FOUND",
@@ -11224,7 +10302,6 @@ mod tests {
         let result_msg = next_non_state_change(&mut stream).await;
         match &result_msg.payload {
             Some(ServerPayload::WidgetPublishResult(result)) => {
-                assert_eq!(result.request_sequence, 2);
                 assert!(!result.accepted, "Expected rejection");
                 assert_eq!(
                     result.error_code, "WIDGET_UNKNOWN_PARAMETER",
@@ -11234,57 +10311,6 @@ mod tests {
             }
             other => {
                 panic!("Expected WidgetPublishResult(WIDGET_UNKNOWN_PARAMETER), got: {other:?}")
-            }
-        }
-
-        drop(tx);
-    }
-
-    /// Scenario: repeated durable WidgetPublish requests to the same widget are
-    /// unambiguously correlated by request_sequence.
-    #[tokio::test]
-    async fn test_durable_widget_publish_repeated_requests_are_correlated() {
-        let (mut client, _handle) = setup_widget_test().await;
-
-        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
-            &mut client,
-            "widget-correlation-agent",
-            "test-key",
-            &["publish_widget:gauge"],
-        )
-        .await;
-
-        for (sequence, level) in [(2u64, 0.25f32), (3u64, 0.75f32)] {
-            tx.send(ClientMessage {
-                sequence,
-                timestamp_wall_us: now_wall_us(),
-                payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
-                    widget_name: "gauge".to_string(),
-                    instance_id: String::new(),
-                    params: vec![crate::proto::WidgetParameterValueProto {
-                        param_name: "level".to_string(),
-                        value: Some(crate::proto::widget_parameter_value_proto::Value::F32Value(
-                            level,
-                        )),
-                    }],
-                    transition_ms: 0,
-                    ttl_us: 0,
-                    merge_key: String::new(),
-                })),
-            })
-            .await
-            .unwrap();
-
-            let result_msg = next_non_state_change(&mut stream).await;
-            match &result_msg.payload {
-                Some(ServerPayload::WidgetPublishResult(result)) => {
-                    assert_eq!(result.request_sequence, sequence);
-                    assert!(result.accepted, "expected durable publish to be accepted");
-                    assert_eq!(result.widget_name, "gauge");
-                    assert!(result.error_code.is_empty());
-                    assert!(result.error_message.is_empty());
-                }
-                other => panic!("Expected WidgetPublishResult, got: {other:?}"),
             }
         }
 
@@ -11883,7 +10909,6 @@ mod tests {
         let publish_msg = next_non_state_change(&mut stream).await;
         match &publish_msg.payload {
             Some(ServerPayload::WidgetPublishResult(result)) => {
-                assert_eq!(result.request_sequence, 3);
                 assert!(
                     result.accepted,
                     "publish should remain usable after registration"

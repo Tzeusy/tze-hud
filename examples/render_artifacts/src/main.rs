@@ -366,7 +366,6 @@ fn load_benchmark_artifacts(
             name: session.name.clone(),
             session_telemetry_json: telemetry_json,
             histogram_json,
-            publish_load_json: None,
             calibration_json: None,
             hardware_info_json: None,
         };

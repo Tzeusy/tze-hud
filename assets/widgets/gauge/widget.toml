@@ -1,8 +1,9 @@
 # Production gauge widget bundle — token-driven exemplar.
 #
 # This is the canonical production-quality gauge widget, demonstrating:
-# - All four binding types: linear (level→height), direct (fill_color→fill,
-#   label→text-content), discrete (severity→fill indicator)
+# - All four binding types: linear (level→height/y, tooltip_visible→opacity),
+#   direct (fill_color→fill, label/readout→text-content), discrete
+#   (severity→fill indicator)
 # - All colors via {{token.key}} placeholders — zero hardcoded hex values
 # - data-role attributes for DualLayer readability profile compatibility
 # - 100x240 viewBox providing extra clearance for the label below the track
@@ -18,13 +19,15 @@
 #   label      - Display label below the gauge track (string)
 #   fill_color - Override fill color for the bar (color param)
 #   severity   - Severity indicator state; drives indicator color (enum)
+#   tooltip_visible - Runtime hover visibility toggle for the tooltip (f32 0..1)
+#   readout    - Tooltip readout text (e.g. "42/100 (42%)")
 #
 # Token placeholders ({{token.key}}) in layer SVGs are resolved against the
 # global token map at bundle load time — never at render time.
 
 name        = "gauge"
 version     = "1.0.0"
-description = "Vertical fill gauge: token-driven exemplar with severity indicator and label"
+description = "Vertical fill gauge: instrument-style HUD meter with severity pod and label"
 
 [[parameter_schema]]
 name    = "level"
@@ -53,6 +56,35 @@ default = "info"
 [parameter_schema.constraints]
 enum_allowed_values = ["info", "warning", "error"]
 
+[[parameter_schema]]
+name    = "tooltip_visible"
+type    = "f32"
+default = 0.0
+
+[parameter_schema.constraints]
+f32_min = 0.0
+f32_max = 1.0
+
+[[parameter_schema]]
+name    = "readout"
+type    = "string"
+default = "0/100 (0%)"
+
+[parameter_schema.constraints]
+string_max_bytes = 48
+
+[hover_behavior]
+delay_ms = 180
+visibility_param = "tooltip_visible"
+hidden_value = 0.0
+visible_value = 1.0
+
+[hover_behavior.trigger_rect]
+x_pct = 0.0
+y_pct = 0.0
+width_pct = 1.0
+height_pct = 0.88
+
 # Background layer: static SVG frame with inner track. Zero bindings.
 # Must appear first (painter's model) so fill layer renders on top.
 [[layers]]
@@ -70,6 +102,14 @@ target_attribute = "height"
 mapping          = "linear"
 attr_min         = 0.0
 attr_max         = 200.0
+
+[[layers.bindings]]
+param            = "level"
+target_element   = "bar"
+target_attribute = "y"
+mapping          = "linear"
+attr_min         = 210.0
+attr_max         = 10.0
 
 [[layers.bindings]]
 param            = "fill_color"
@@ -93,3 +133,17 @@ mapping          = "discrete"
 info    = "#4A9EFF"
 warning = "#FFB800"
 error   = "#FF4444"
+
+[[layers.bindings]]
+param            = "tooltip_visible"
+target_element   = "tooltip-group"
+target_attribute = "opacity"
+mapping          = "linear"
+attr_min         = 0.0
+attr_max         = 1.0
+
+[[layers.bindings]]
+param            = "readout"
+target_element   = "tooltip-readout"
+target_attribute = "text-content"
+mapping          = "direct"

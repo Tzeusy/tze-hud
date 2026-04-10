@@ -64,35 +64,22 @@ paths = [
 # Widget instances declared on the Main tab.
 #
 # Instance names used by user-test fixtures (see .claude/skills/user-test/):
-#   main-gauge     → gauge widget
 #   main-progress  → progress-bar widget
 #   main-status    → status-indicator widget
 #
 # IMPORTANT: widget_name in publish_to_widget refers to instance_id (not widget_type).
 
-# Gauge: vertical fill gauge at right edge of display.
-# MCP widget_name: "main-gauge"
-[[tabs.widgets]]
-widget_type = "gauge"
-instance_id  = "main-gauge"
-
-[tabs.widgets.geometry]
-x      = 1740
-y      = 420
-width  = 100
-height = 240
-
-# Progress bar: horizontal progress bar near bottom of display.
+# Progress bar: horizontal progress bar in a clearly visible lower-left position.
 # MCP widget_name: "main-progress"
 [[tabs.widgets]]
 widget_type = "progress-bar"
 instance_id  = "main-progress"
 
 [tabs.widgets.geometry]
-x      = 10
-y      = 1040
-width  = 300
-height = 20
+x_pct      = 0.421875
+y_pct      = 0.9074074
+width_pct  = 0.15625
+height_pct = 0.0185185
 
 # Status indicator: small status circle at top-right corner.
 # MCP widget_name: "main-status"

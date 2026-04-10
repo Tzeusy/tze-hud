@@ -9,7 +9,7 @@ Depends on: scene-graph, runtime-kernel, timing-model, input-model
 ## ADDED Requirements
 
 ### Requirement: Session Authorization Authority Boundary (v1)
-In v1, session authorization authority is runtime-owned: handshake authentication establishes an agent's policy capability set, mutation/lease checks MUST enforce that set, and mid-session capability requests are evaluated against that established authorization policy. This surface is authoritative even while broader policy wiring remains a separate follow-on track.
+In v1, session authorization authority is runtime-owned: handshake authentication establishes an agent's policy capability set, mutation/lease checks enforce that set, and mid-session capability requests are evaluated against that established authorization policy. This surface is authoritative even while broader policy wiring remains a separate follow-on track.
 Source: RFC 0005 §1.4, §5.3, crates/tze_hud_protocol/src/session_server.rs
 Scope: v1-mandatory
 
@@ -700,8 +700,9 @@ Scope: v1-mandatory
 
 ---
 
-### Closeout Note: Session Authority in Shrunk v1 Scope
-Session-protocol v1 authority semantics are runtime-owned and remain normative for shipped behavior. Unified policy hot-path wiring and any operator/dynamic escalation orchestration beyond these semantics are deferred to post-v1 and MUST NOT be implied as active v1 requirements.
+### Spec-First Handoff Notes
+- `hud-iq2x.8`: finalize source-of-truth semantics for mid-session escalation (session grant set vs lease scope vs operator/dynamic policy path), then promote any deferred escalation language from this spec into executable requirements.
+- `hud-iq2x.7`: align this session authority boundary with the runtime-policy-scene ownership matrix so policy-wiring work does not duplicate stateful enforcement already owned by runtime/session modules.
 
 ---
 
@@ -818,7 +819,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Promoted Guest Pattern (Post-v1)
-Promoting an MCP guest session to resident-level presence by pairing it with a backing gRPC session is explicitly deferred to post-v1, and v1 deployments MUST NOT expose this promotion path.
+Promoting an MCP guest session to resident-level presence by pairing it with a backing gRPC session is explicitly deferred to post-v1.
 Source: RFC 0005 §8.3
 Scope: post-v1
 

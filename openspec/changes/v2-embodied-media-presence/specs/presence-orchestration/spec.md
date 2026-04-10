@@ -3,8 +3,6 @@
 ### Requirement: Embodied Presence Level
 
 V2 SHALL introduce an embodied presence level beyond guest and resident. Embodied presence MUST carry stronger identity, operator visibility, and transport/governance requirements than resident presence.
-Source: `about/heart-and-soul/presence.md`, `about/heart-and-soul/v1.md`, `about/law-and-lore/rfcs/0005-session-protocol.md`
-Scope: post-v1
 
 #### Scenario: embodied session is distinguishable
 
@@ -14,8 +12,6 @@ Scope: post-v1
 ### Requirement: Presence-Orchestrated Media Ownership
 
 Live media ownership SHALL be bound to explicit presence/session state rather than unmanaged stream handles. The runtime MUST be able to revoke, suspend, or downgrade media behavior through the same sovereign control model that governs other presence.
-Source: `about/heart-and-soul/architecture.md`, `about/heart-and-soul/presence.md`, `about/law-and-lore/rfcs/0008-lease-governance.md`
-Scope: post-v1
 
 #### Scenario: embodied media tears down on presence revocation
 
@@ -25,8 +21,6 @@ Scope: post-v1
 ### Requirement: Multi-Agent Orchestration Remains Explicit
 
 Any v2 orchestration across multiple agents, feeds, or presence states MUST be explicit and policy-governed. The runtime MUST NOT infer cross-agent control or feed ownership from transport activity alone.
-Source: `about/heart-and-soul/presence.md`, `about/heart-and-soul/architecture.md`, `about/law-and-lore/rfcs/0009-policy-arbitration.md`
-Scope: post-v1
 
 #### Scenario: media ownership conflict is policy-resolved
 

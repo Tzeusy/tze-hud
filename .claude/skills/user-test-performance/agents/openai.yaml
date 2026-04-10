@@ -1,0 +1,4 @@
+interface:
+  display_name: "User Test Performance"
+  short_description: "Run reproducible MCP/gRPC publish benchmarks with auditable metrics and historical CSV logging"
+  default_prompt: "Run user-test-performance benchmarks against a selected target_id, capture e2e latency/throughput/bytes in and out with traceability tags and thresholds, write deterministic-primary-key rows to reference/results.csv, then compare candidate vs baseline for regressions."

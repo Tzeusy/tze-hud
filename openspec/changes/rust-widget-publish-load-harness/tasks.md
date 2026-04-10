@@ -13,10 +13,10 @@
 
 - [ ] 3.1 Emit canonical JSON artifacts plus any companion histogram/calibration files through the existing Layer 4 benchmark artifact path
 - [ ] 3.2 Add raw metric reporting, `uncalibrated` status handling, informational-threshold reporting, and explicit byte-accounting mode fields
-- [ ] 3.3 Support derived historical CSV summary emission compatible with the benchmark-history ledger schema consumed by `/user-test`
+- [ ] 3.3 Support derived historical CSV summary emission compatible with `.claude/skills/user-test-performance/reference/results.csv`
 
 ## 4. Integration and Verification
 
-- [ ] 4.1 Update `/user-test` so its gRPC widget benchmark path invokes the Rust harness and preserves the existing target registry and comparison workflow
+- [ ] 4.1 Update `/user-test-performance` so its gRPC widget benchmark path invokes the Rust harness and preserves the existing target registry and comparison workflow
 - [ ] 4.2 Add automated verification for request-correlation correctness, artifact generation, and CSV compatibility
 - [ ] 4.3 Reconcile the implemented harness against doctrine, OpenSpec, and benchmark-history expectations before widening scope

@@ -1,38 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Background layer for the production gauge widget exemplar.
-     Renders a static outer frame and inner fill track. Contains no bindings —
-     this layer is resolved once at bundle load time.
-
-     100x240 viewBox provides extra 20px below the track for label clearance.
-
-     data-role="backdrop" marks the frame rect for readability validation.
-     Token placeholders ({{...}}) are resolved at bundle load time against
-     the global token map — never at render time. Zero hardcoded hex colors.
-
-     IMPORTANT: This layer MUST appear before fill.svg in widget.toml layer
-     order (painter's model) so the dynamic fill layer renders on top. -->
+<!-- Background layer (ultra-minimal, single-track). -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 240" width="100" height="240">
-  <!-- Outer frame: rounded rectangle spanning the full gauge area.
-       data-role="backdrop" satisfies DualLayer readability profile validation. -->
-  <rect
-    id="frame"
-    data-role="backdrop"
-    x="0" y="0"
-    width="100" height="240"
-    rx="6" ry="6"
-    fill="{{token.color.backdrop.default}}"
-    stroke="{{token.color.border.default}}"
-    stroke-width="2"/>
-  <!-- Inner track: narrower rect defining the fill bar's container.
-       fill-opacity="0.3" gives a lighter appearance so the fill bar reads clearly.
-       Positioned at x=30, y=10, width=40, height=200 — matches clipPath in fill.svg. -->
+  <!-- Single track only: no outer wrapper, no ladder ticks. -->
   <rect
     id="track"
-    x="30" y="10"
-    width="40" height="200"
-    rx="3" ry="3"
+    data-role="backdrop"
+    x="31" y="10"
+    width="38" height="200"
+    rx="{{token.border.radius.large}}"
+    ry="{{token.border.radius.large}}"
     fill="{{token.color.backdrop.default}}"
-    fill-opacity="0.3"
+    fill-opacity="0.30"
     stroke="{{token.color.border.default}}"
-    stroke-width="1"/>
+    stroke-opacity="0.70"
+    stroke-width="{{token.stroke.border.width}}"/>
 </svg>

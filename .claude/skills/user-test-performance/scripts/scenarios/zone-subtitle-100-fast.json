@@ -1,0 +1,10 @@
+{
+  "benchmark_name": "zone-subtitle-100-fast",
+  "target_id": "user-test-windows-tailnet",
+  "transport": "mcp_http",
+  "mode": "zone",
+  "zone_name": "subtitle",
+  "count": 100,
+  "concurrency": 1,
+  "duration_ms": 0
+}

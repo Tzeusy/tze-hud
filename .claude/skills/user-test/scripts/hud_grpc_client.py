@@ -322,8 +322,11 @@ def _make_node(data: dict) -> types_pb2.NodeProto:
       {"solid_color": {"r": f, "g": f, "b": f, "a": f}, "bounds": [x,y,w,h]}
       {"text_markdown": {"content": str, "font_size_px": f, "color": [r,g,b,a]}, "bounds": [x,y,w,h]}
       {"hit_region": {"interaction_id": str, "accepts_focus": bool, "accepts_pointer": bool}, "bounds": [x,y,w,h]}
+
+    Optional fields:
+      {"id": bytes}  # explicit NodeProto.id (otherwise a random UUID is assigned)
     """
-    node = types_pb2.NodeProto(id=_uuid_bytes())
+    node = types_pb2.NodeProto(id=data.get("id", _uuid_bytes()))
 
     bounds = data.get("bounds", [0, 0, 100, 100])
     rect = types_pb2.Rect(x=bounds[0], y=bounds[1], width=bounds[2], height=bounds[3])
@@ -399,6 +402,7 @@ class HudClient:
         self._server_seq = 0
         self.session_id: Optional[bytes] = None
         self.namespace: Optional[str] = None
+        self.heartbeat_interval_ms: Optional[int] = None
         self.granted_capabilities: list[str] = []
         self._response_queue: asyncio.Queue = asyncio.Queue()
         self._reader_task: Optional[asyncio.Task] = None
@@ -456,6 +460,7 @@ class HudClient:
         est = resp.session_established
         self.session_id = est.session_id
         self.namespace = est.namespace
+        self.heartbeat_interval_ms = est.heartbeat_interval_ms
         self.granted_capabilities = list(est.granted_capabilities)
         print(f"  [grpc] Session established: namespace={self.namespace}, "
               f"caps={self.granted_capabilities}", flush=True)
@@ -572,11 +577,11 @@ class HudClient:
         resp = await self._wait_for("lease_response", timeout=5.0)
         print(f"  [grpc] Lease released", flush=True)
 
-    async def close(self):
+    async def close(self, reason: str = "test complete", expect_resume: bool = False):
         """Gracefully close the session."""
         try:
             if not self._session_close_sent and not self._transport_closed:
-                await self.session_close()
+                await self.session_close(reason=reason, expect_resume=expect_resume)
         except Exception:
             pass
         await self._shutdown_transport()
@@ -601,6 +606,28 @@ class HudClient:
         print(f"  [grpc] Lease granted: ttl={lr.granted_ttl_ms}ms, "
               f"priority={lr.granted_priority}", flush=True)
         return lr.lease_id
+
+    async def apply_mutations(
+        self,
+        lease_id: bytes,
+        mutations: list[types_pb2.MutationProto],
+    ) -> session_pb2.MutationResult:
+        """Submit a raw mutation batch and return the acknowledged result."""
+        batch_id = _uuid_bytes()
+        await self._send(
+            mutation_batch=session_pb2.MutationBatch(
+                batch_id=batch_id,
+                lease_id=lease_id,
+                mutations=mutations,
+            )
+        )
+        resp = await self._wait_for("mutation_result", timeout=5.0)
+        mr = resp.mutation_result
+        if not mr.accepted:
+            raise RuntimeError(
+                f"Mutation batch rejected: {mr.error_code} — {mr.error_message}"
+            )
+        return mr
 
     # ─── Tile operations ──────────────────────────────────────────────────
 

@@ -514,8 +514,14 @@ mod contention {
             ("color.border.default", "#2a2a4e"),
             ("color.outline.default", "#3a3a5e"),
             ("color.severity.info", "#4a9eff"),
+            ("color.text.secondary", "#8f96a3"),
             ("color.text.accent", "#4a9eff"),
             ("color.text.primary", "#cccccc"),
+            ("opacity.backdrop.opaque", "0.9"),
+            ("border.radius.small", "4"),
+            ("border.radius.medium", "8"),
+            ("border.radius.large", "16"),
+            ("stroke.border.width", "1"),
             ("stroke.outline.width", "1"),
         ]
         .into_iter()

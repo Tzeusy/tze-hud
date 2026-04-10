@@ -125,7 +125,6 @@ fn test_pr_ci_artifact_generation_full_set() {
             name: "max_tiles_stress".to_string(),
             session_telemetry_json: br#"{"fps": 62.4}"#.to_vec(),
             histogram_json: br#"{"p99_us": 14200}"#.to_vec(),
-            publish_load_json: None,
             calibration_json: Some(br#"{"cpu": 1.0, "gpu": 1.0}"#.to_vec()),
             hardware_info_json: Some(br#"{"vendor": "llvmpipe"}"#.to_vec()),
         })
@@ -287,10 +286,7 @@ fn test_manifest_schema_version_and_spec_ids() {
     let json_bytes = fs::read(run_dir.join("manifest.json")).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
 
-    assert_eq!(
-        parsed["schema_version"],
-        tze_hud_validation::layer4::ARTIFACT_MANIFEST_SCHEMA_VERSION
-    );
+    assert_eq!(parsed["schema_version"], 1);
     let spec_ids = parsed["spec_ids"]
         .as_array()
         .expect("spec_ids must be array");
@@ -754,7 +750,6 @@ fn test_benchmark_artifacts_include_calibration_and_hardware() {
             session_telemetry_json: br#"{"total_frames": 300, "fps": 60.1}"#.to_vec(),
             histogram_json: br#"{"frame_time": {"p50": 12000, "p95": 14500, "p99": 16000}}"#
                 .to_vec(),
-            publish_load_json: None,
             calibration_json: Some(serde_json::to_vec_pretty(&calibration_json).unwrap()),
             hardware_info_json: Some(serde_json::to_vec_pretty(&hardware_json).unwrap()),
         })
@@ -786,59 +781,6 @@ fn test_benchmark_artifacts_include_calibration_and_hardware() {
     assert!(
         manifest.benchmarks[0].paths.hardware_info_json.is_some(),
         "manifest must include hardware_info path"
-    );
-
-    let _ = fs::remove_dir_all(&tmp);
-}
-
-/// Publish-load benchmark directory and manifest include canonical artifact path.
-#[test]
-fn test_benchmark_artifacts_include_publish_load_json() {
-    let tmp = temp_dir("bench_publish_load");
-    let _ = fs::remove_dir_all(&tmp);
-
-    let mut builder = make_builder(&tmp, "main");
-    let run_dir = builder.run_dir().to_path_buf();
-
-    let publish_load_json = serde_json::json!({
-        "benchmark_key": "tailnet|grpc|burst|gauge|default|1000",
-        "metrics": {
-            "request_count": 1000,
-            "rtt_p99_us": 25000
-        },
-        "verdict": "uncalibrated"
-    });
-
-    builder
-        .add_benchmark(BenchmarkArtifactInput {
-            name: "publish_load_tailnet".to_string(),
-            session_telemetry_json: br#"{"request_count":1000}"#.to_vec(),
-            histogram_json: br#"{"rtt_us":{"p50":12000,"p95":21000,"p99":25000}}"#.to_vec(),
-            publish_load_json: Some(serde_json::to_vec_pretty(&publish_load_json).unwrap()),
-            calibration_json: None,
-            hardware_info_json: None,
-        })
-        .unwrap();
-
-    let manifest = builder.finalise().unwrap();
-    let bench_dir = run_dir.join("benchmarks").join("publish_load_tailnet");
-
-    assert!(
-        bench_dir.join("publish_load.json").exists(),
-        "publish_load.json must exist"
-    );
-    let payload = fs::read(bench_dir.join("publish_load.json")).unwrap();
-    let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-    assert_eq!(parsed["verdict"], "uncalibrated");
-    assert!(
-        manifest.benchmarks[0].paths.publish_load_json.is_some(),
-        "manifest must include publish_load path"
-    );
-
-    let html = fs::read_to_string(run_dir.join("index.html")).unwrap();
-    assert!(
-        html.contains("publish_load.json"),
-        "index html should link publish_load artifact"
     );
 
     let _ = fs::remove_dir_all(&tmp);

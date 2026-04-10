@@ -4,14 +4,16 @@
     "params": {
       "level": 0.25,
       "label": "Low",
+      "readout": "25/100 (25%)",
       "fill_color": {
-        "r": 0.2,
-        "g": 0.6,
-        "b": 1.0,
+        "r": 0.46,
+        "g": 0.60,
+        "b": 0.78,
         "a": 1.0
       },
       "severity": "info"
     },
+    "transition_ms": 650,
     "ttl_us": 10000000,
     "namespace": "user-test"
   },
@@ -20,14 +22,16 @@
     "params": {
       "level": 0.5,
       "label": "Medium",
+      "readout": "50/100 (50%)",
       "fill_color": {
-        "r": 1.0,
-        "g": 0.8,
-        "b": 0.0,
+        "r": 0.74,
+        "g": 0.64,
+        "b": 0.42,
         "a": 1.0
       },
       "severity": "warning"
     },
+    "transition_ms": 650,
     "ttl_us": 10000000,
     "namespace": "user-test"
   },
@@ -36,14 +40,16 @@
     "params": {
       "level": 0.95,
       "label": "Critical!",
+      "readout": "95/100 (95%)",
       "fill_color": {
-        "r": 1.0,
-        "g": 0.15,
-        "b": 0.1,
+        "r": 0.72,
+        "g": 0.42,
+        "b": 0.43,
         "a": 1.0
       },
       "severity": "error"
     },
+    "transition_ms": 650,
     "ttl_us": 10000000,
     "namespace": "user-test"
   },
@@ -52,14 +58,16 @@
     "params": {
       "level": 0.42,
       "label": "Normal",
+      "readout": "42/100 (42%)",
       "fill_color": {
-        "r": 0.1,
-        "g": 0.85,
-        "b": 0.3,
+        "r": 0.43,
+        "g": 0.67,
+        "b": 0.53,
         "a": 1.0
       },
       "severity": "info"
     },
+    "transition_ms": 650,
     "ttl_us": 60000000,
     "namespace": "user-test"
   }

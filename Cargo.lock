@@ -3573,7 +3573,6 @@ dependencies = [
  "tonic",
  "tonic-build",
  "tracing",
- "tze_hud_policy",
  "tze_hud_resource",
  "tze_hud_scene",
  "tze_hud_telemetry",
@@ -4233,22 +4232,6 @@ dependencies = [
  "js-sys",
  "log",
  "web-sys",
-]
-
-[[package]]
-name = "widget_publish_load_harness"
-version = "0.1.0"
-dependencies = [
- "prost",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "toml 0.8.23",
- "tonic",
- "tze_hud_protocol",
- "tze_hud_telemetry",
- "tze_hud_validation",
 ]
 
 [[package]]

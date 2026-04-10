@@ -3,8 +3,6 @@
 ### Requirement: Governed Media Plane Activation
 
 V2 SHALL treat live media as a governed runtime capability rather than an ad hoc extension. Media activation MUST remain tied to explicit capability, lease, operator-policy, and budget gates.
-Source: `about/heart-and-soul/architecture.md`, `about/heart-and-soul/v1.md`, `openspec/specs/media-webrtc-bounded-ingress/spec.md`
-Scope: post-v1
 
 #### Scenario: bounded ingress activation remains governed
 
@@ -14,8 +12,6 @@ Scope: post-v1
 ### Requirement: Bidirectional AV Is A Later Phase
 
 Bidirectional AV/session semantics MUST NOT be admitted merely because bounded ingress exists. Any bidirectional media session MUST satisfy explicit audio, operator, failure, and validation contracts beyond the bounded-ingress tranche.
-Source: `about/heart-and-soul/v1.md`, `openspec/specs/media-webrtc-bounded-ingress/spec.md`, `openspec/specs/media-webrtc-privacy-operator-policy/spec.md`
-Scope: post-v1
 
 #### Scenario: bounded ingress does not imply two-way AV
 
@@ -25,8 +21,6 @@ Scope: post-v1
 ### Requirement: Media Timing Is First-Class
 
 Media publications and cues SHALL carry presentation-time semantics that remain distinct from arrival time. The runtime MUST preserve deterministic timing, expiry, and reconnect behavior for media surfaces and related overlays.
-Source: `about/heart-and-soul/architecture.md`, `openspec/specs/media-webrtc-bounded-ingress/spec.md`
-Scope: post-v1
 
 #### Scenario: timed media cue survives governance checks
 

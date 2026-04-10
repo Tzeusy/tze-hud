@@ -18,7 +18,6 @@ members = [
     "examples/vertical_slice",
     "examples/dashboard_tile_agent",
     "examples/benchmark",
-    "examples/widget_publish_load_harness",
     "examples/render_artifacts",
     "tests/integration",
 ]

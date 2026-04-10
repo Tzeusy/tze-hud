@@ -7,7 +7,7 @@ Scope: `/project-direction` completion package for policy wiring after governanc
 
 [Observed] Recent policy work fixed the live lease/session authority seam, aligned mid-session capability escalation semantics, and reconciled the runtime/policy/scene ownership model. See `crates/tze_hud_protocol/src/session_server.rs`, `docs/reconciliations/policy_wiring_seam_contract.md`, and `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`.
 
-[Observed] The bounded mutation-path pilot is now wired in protocol admission (`crates/tze_hud_protocol/src/session_server.rs`) while runtime frame/event hot paths remain runtime-owned and outside policy evaluation (`crates/tze_hud_runtime/src/lib.rs`).
+[Observed] The runtime still explicitly says `tze_hud_policy` is not wired into v1 hot paths. See `crates/tze_hud_runtime/src/lib.rs`.
 
 [Inferred] Honest "completion" no longer means "finish full seven-level policy wiring everywhere in v1." It means:
 
@@ -21,8 +21,7 @@ Scope: `/project-direction` completion package for policy wiring after governanc
 2. [Observed] The live authority bug for lease scope is fixed; lease requests outside session-granted capabilities are denied.
 3. [Observed] `CapabilityRequest` semantics are now explicit and all-or-nothing against configured policy scope.
 4. [Observed] The seam contract now defines `tze_hud_runtime` as the mutable authority owner, `tze_hud_policy` as the pure evaluator target, and `tze_hud_scene::policy` as transitional.
-5. [Observed] Mutation-path telemetry budget conformance is now encoded and test-backed (`crates/tze_hud_telemetry/src/validation.rs`, `crates/tze_hud_protocol/src/session_server.rs`).
-6. [Unknown] End-to-end hardware-specific p99 behavior for all runtime workloads still depends on live telemetry sampling, not unit tests alone.
+5. [Unknown] Whether mutation-path pilot wiring can land within the policy-path latency budget without reopening v1 churn remains unproven.
 
 ## What Completion Means Now
 
@@ -76,11 +75,6 @@ Required outputs:
 2. Per-level diagnostics
 3. Budget percentile reporting suitable for CI
 
-Implementation note (hud-s98v.2):
-
-1. `crates/tze_hud_protocol/src/session_server.rs` emits mutation-path admission telemetry logs for live and queued paths, including per-outcome counters, per-level diagnostic summaries, and structured latency conformance payloads.
-2. `crates/tze_hud_telemetry/src/validation.rs` defines `policy_mutation_eval_p99` conformance (`POLICY_MUTATION_EVAL_BUDGET_US = 50`) and unit-test-backed pass/fail/no-samples outcomes for CI-visible budget evidence.
-
 ### Workstream C: V1 scope decision
 
 Goal: explicitly choose one of:
@@ -89,13 +83,6 @@ Goal: explicitly choose one of:
 2. `shrink-v1-claims`: even mutation-path policy wiring is not a v1 requirement
 
 [Inferred] This decision is the real closeout gate for the policy program.
-
-Decision outcome (hud-s98v.3, 2026-04-10):
-
-1. [Observed] `keep-v1-bounded` is selected.
-2. [Observed] The bounded mutation-path pilot plus conformance harness is retained as the v1 closeout floor.
-3. [Observed] Frame/event unified hot-path policy wiring remains explicitly deferred to v2.
-4. [Observed] The detailed decision record is captured in `docs/reconciliations/policy_wiring_closeout_decision_20260410.md`.
 
 ### Workstream D: Final reconciliation and signoff
 

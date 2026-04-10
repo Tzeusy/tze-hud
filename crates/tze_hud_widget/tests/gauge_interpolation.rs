@@ -43,9 +43,15 @@ fn gauge_test_tokens() -> HashMap<String, String> {
         ("color.border.default".to_string(), "#2a2a4e".to_string()),
         ("color.outline.default".to_string(), "#3a3a5e".to_string()),
         ("color.severity.info".to_string(), "#4a9eff".to_string()),
+        ("color.text.secondary".to_string(), "#8f96a3".to_string()),
         ("color.text.accent".to_string(), "#ffffff".to_string()),
         ("color.text.primary".to_string(), "#cccccc".to_string()),
+        ("opacity.backdrop.opaque".to_string(), "0.9".to_string()),
+        ("border.radius.small".to_string(), "4".to_string()),
+        ("border.radius.medium".to_string(), "8".to_string()),
+        ("border.radius.large".to_string(), "16".to_string()),
         ("key".to_string(), "test-key".to_string()),
+        ("stroke.border.width".to_string(), "1".to_string()),
         ("stroke.outline.width".to_string(), "1".to_string()),
     ])
 }

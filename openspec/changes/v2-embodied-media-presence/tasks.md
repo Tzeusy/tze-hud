@@ -36,7 +36,6 @@
 
 ## 6. Planning and Reconciliation
 
-- [x] 6.1 Produce an end-to-end v2 execution plan with phase gates, dependencies, and explicit non-goals (`execution-plan.md`)
-- [x] 6.2 Reconcile v2 specs against doctrine, RFCs, and the current bounded-ingress tranche (`reconciliation.md`)
-- [x] 6.3 Generate a beads graph for the approved v2 program after signoff (`beads-graph.md`)
-- [x] 6.4 Reconcile the full v2 planning package (proposal, design, specs, tasks, execution plan, beads graph) before execution-readiness claims (`final-reconciliation.md`)
+- [ ] 6.1 Produce an end-to-end v2 execution plan with phase gates, dependencies, and explicit non-goals
+- [ ] 6.2 Reconcile v2 specs against doctrine, RFCs, and the current bounded-ingress tranche
+- [ ] 6.3 Generate a beads graph for the approved v2 program after signoff
