@@ -214,6 +214,7 @@ git push                # Push to remote
 
 # Notes to self
 
+- `.codex/skills` should remain a symlink to `../.claude/skills`; `.claude/skills` is the canonical tracked tree and currently strictly supersets the Codex mirror.
 - `crates/tze_hud_protocol/src/session_server.rs` test helper `handshake()` always requests `create_tiles`, `access_input_events`, and `read_scene_topology`; tests that need zero-capability sessions must use `handshake_with_requested_capabilities(..., Vec::new())`.
 - `size_of::<Node>()` is tested against a 150-byte limit (scene-graph/spec.md line 302). Adding heap-allocated fields to `HitRegionNode` (which is a variant of `NodeData`) inflates `Node` inline. Box large optional structs (`AccessibilityMeta`, `LocalStyle`) to stay under budget.
 - `gh pr merge <N> --squash --delete-branch` fails with "already checked out" when a worktree has the base branch checked out. The merge still succeeds via the API; the error is only about the local git cleanup. Verify with `gh pr view <N> --json state,mergedAt`.
