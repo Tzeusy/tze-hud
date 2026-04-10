@@ -9,7 +9,7 @@ Depends on: scene-graph, input-model, session-protocol, system-shell, lease-gove
 ## ADDED Requirements
 
 ### Requirement: Transport-Agnostic Stream Boundary
-The text stream portal capability SHALL be defined in terms of generic output text streams, bounded input submission, session identity, and session status metadata. The runtime-facing contract MUST NOT depend on tmux-specific, PTY-specific, terminal-emulator-specific, or chat-provider-specific semantics. Resident portal traffic MUST continue to ride the existing primary bidirectional session stream rather than introducing a second long-lived portal stream per agent.
+The text stream portal capability SHALL be defined in terms of generic output text streams, bounded input submission, session identity, and session status metadata. The runtime-facing contract MUST NOT depend on tmux-specific, PTY-specific, terminal-emulator-specific, or chat-provider-specific semantics. Resident portal traffic MUST continue to ride the existing primary bidirectional session stream rather than introducing a second long-lived portal stream per agent. If portal payloads carry ordering, expiry, unread-window, or latency metadata, those fields MUST follow the existing clock-domain contract: wall-clock fields end in `_wall_us`, monotonic fields end in `_mono_us`, and arrival timestamps remain advisory rather than presentation-authoritative.
 Source: RFC 0013 §2.1, RFC 0005 §2.5
 Scope: v1-mandatory
 
@@ -20,6 +20,10 @@ Scope: v1-mandatory
 #### Scenario: resident portal does not create a second stream
 - **WHEN** a resident adapter drives a text stream portal
 - **THEN** all portal-related publication, control, and lease traffic SHALL remain on the existing primary session stream
+
+#### Scenario: portal timing metadata uses typed clock domains
+- **WHEN** a portal adapter supplies expiry, unread-window, scheduling, or latency metadata
+- **THEN** wall-clock semantics SHALL use `_wall_us`, monotonic semantics SHALL use `_mono_us`, and those fields SHALL NOT override runtime presentation control
 
 ### Requirement: Content-Layer Portal Surface
 Text stream portals SHALL render as content-layer surfaces in the pilot phase. Portal affordances, transcript state, and portal identity MUST NOT live in the chrome layer.
@@ -104,9 +108,34 @@ Scope: v1-mandatory
 - **WHEN** portal content exceeds the current viewer's permitted classification
 - **THEN** the portal SHALL be redacted under the runtime's existing privacy policy rather than exposing the transcript content
 
+#### Scenario: collapsed portal preserves geometry while redacted
+- **WHEN** the current viewer is not permitted to see a portal's identity or transcript state
+- **THEN** the portal SHALL preserve its geometry, suppress transcript previews and activity details, and replace visible content with the runtime's neutral redaction treatment
+
 #### Scenario: portal suspends under safe mode
 - **WHEN** the runtime enters safe mode while a portal is active
 - **THEN** portal updates SHALL suspend under the same shell and lease rules as other content-layer surfaces
+
+#### Scenario: disconnected portal follows orphan path
+- **WHEN** the owning resident portal session disconnects unexpectedly
+- **THEN** the lease SHALL transition through the normal orphan lifecycle, the visible portal SHALL freeze at its last coherent state or runtime placeholder policy, and grace expiry SHALL remove the governed surface under the existing lease rules
+
+#### Scenario: freeze does not disclose viewer intent
+- **WHEN** a portal is active while the runtime freezes visible scene mutation
+- **THEN** adapters SHALL observe only the existing generic queue-pressure or dropped-mutation semantics rather than a portal-specific freeze signal
+
+### Requirement: Ambient Portal Attention Defaults
+Text stream portal activity indicators, unread state, and transcript churn SHALL default to ambient or gentle presentation. Portal activity MUST NOT self-escalate interruption class merely because a stream is active, a backlog is growing, or new transcript units continue to arrive.
+Source: RFC 0013 §6.5
+Scope: v1-mandatory
+
+#### Scenario: unread backlog does not auto-upgrade urgency
+- **WHEN** a portal accumulates unread transcript updates without explicit higher-priority content policy
+- **THEN** the runtime SHALL keep the portal's activity presentation ambient or gentle rather than upgrading it to a stronger interruption class solely because of backlog growth
+
+#### Scenario: typing indicator remains ambient
+- **WHEN** a live portal exposes typing or activity indicators
+- **THEN** those indicators SHALL remain subordinate to the runtime's existing attention model and SHALL NOT behave like repeated notifications
 
 ### Requirement: External Adapter Isolation
 Any adapter that emits portal output, accepts viewer input, or requests portal visibility SHALL remain external to the runtime core and SHALL pass through existing authentication and capability boundaries. The runtime core MUST NOT gain implicit authority over external process or transport lifecycles as a side effect of supporting text stream portals.
