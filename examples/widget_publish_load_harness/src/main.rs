@@ -813,11 +813,14 @@ fn load_optional_json_companion(
     let resolved = if requested.is_absolute() {
         requested
     } else {
-        let from_artifact_parent = canonical_artifact_path
-            .parent()
-            .map(|parent| parent.join(&requested))
-            .filter(|candidate| candidate.exists());
-        from_artifact_parent.unwrap_or(requested)
+        let artifact_parent = canonical_artifact_path.parent().ok_or_else(|| {
+            format!(
+                "failed to resolve {label} companion '{}' relative to artifact '{}': artifact has no parent directory",
+                requested.display(),
+                canonical_artifact_path.display()
+            )
+        })?;
+        artifact_parent.join(&requested)
     };
 
     fs::read(&resolved).map(Some).map_err(|e| {
@@ -1119,5 +1122,39 @@ mod tests {
                 .any(|target| target.target_id == "user-test-windows-tailnet"),
             "default publish-load targets registry should include user-test-windows-tailnet",
         );
+    }
+
+    #[test]
+    fn load_optional_json_companion_resolves_relative_to_artifact_parent() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_root = env::temp_dir().join(format!("publish-load-companion-{unique}"));
+        let artifact_dir = tmp_root.join("artifact");
+        fs::create_dir_all(&artifact_dir).expect("create artifact dir");
+
+        let artifact_path = artifact_dir.join("run.json");
+        fs::write(&artifact_path, br#"{"ok":true}"#).expect("write artifact");
+        fs::write(artifact_dir.join("histogram.json"), br#"{"p99":123}"#).expect("write companion");
+
+        let payload = load_optional_json_companion(
+            Some("histogram.json"),
+            artifact_path.as_path(),
+            "histogram",
+        )
+        .expect("load companion")
+        .expect("companion payload present");
+
+        assert_eq!(payload, br#"{"p99":123}"#);
+
+        let _ = fs::remove_dir_all(tmp_root);
+    }
+
+    #[test]
+    fn load_optional_json_companion_requires_parent_for_relative_paths() {
+        let err = load_optional_json_companion(Some("histogram.json"), Path::new("/"), "histogram")
+            .expect_err("relative companion should fail when artifact has no parent");
+        assert!(err.to_string().contains("artifact has no parent directory"));
     }
 }

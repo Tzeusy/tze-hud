@@ -51,6 +51,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub const ARTIFACT_MANIFEST_SCHEMA_VERSION: u32 = 2;
+
 // ─── Public options ───────────────────────────────────────────────────────────
 
 /// Configuration for artifact generation.
@@ -535,7 +537,7 @@ impl ArtifactBuilder {
         };
 
         let manifest = ArtifactManifest {
-            schema_version: 1,
+            schema_version: ARTIFACT_MANIFEST_SCHEMA_VERSION,
             timestamp: self.timestamp.clone(),
             branch: self.branch.clone(),
             run_id: self.run_id.clone(),
@@ -1397,7 +1399,7 @@ mod tests {
         );
         assert!(run_dir.join("index.html").exists(), "index.html must exist");
         assert_eq!(manifest.branch, "test-branch");
-        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.schema_version, ARTIFACT_MANIFEST_SCHEMA_VERSION);
         assert!(manifest.run_id.contains("test-branch"));
 
         let _ = fs::remove_dir_all(&tmp);
@@ -1616,7 +1618,7 @@ mod tests {
     #[test]
     fn test_llm_summary_json_is_parseable() {
         let manifest = ArtifactManifest {
-            schema_version: 1,
+            schema_version: ARTIFACT_MANIFEST_SCHEMA_VERSION,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             branch: "main".to_string(),
             run_id: "20260101-000000-main".to_string(),

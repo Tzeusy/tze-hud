@@ -287,7 +287,10 @@ fn test_manifest_schema_version_and_spec_ids() {
     let json_bytes = fs::read(run_dir.join("manifest.json")).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
 
-    assert_eq!(parsed["schema_version"], 1);
+    assert_eq!(
+        parsed["schema_version"],
+        tze_hud_validation::layer4::ARTIFACT_MANIFEST_SCHEMA_VERSION
+    );
     let spec_ids = parsed["spec_ids"]
         .as_array()
         .expect("spec_ids must be array");
