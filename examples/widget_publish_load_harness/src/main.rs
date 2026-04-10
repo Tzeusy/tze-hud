@@ -8,13 +8,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use prost::Message;
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use tokio::time::{Instant as TokioInstant, sleep_until, timeout};
+use tokio::time::{sleep_until, timeout, Instant as TokioInstant};
 use tokio_stream::wrappers::ReceiverStream;
-use tze_hud_protocol::proto::WidgetParameterValueProto;
 use tze_hud_protocol::proto::session as session_proto;
 use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
+use tze_hud_protocol::proto::WidgetParameterValueProto;
 use tze_hud_telemetry::{
     ByteAccountingMode, PublishLoadArtifact, PublishLoadCalibrationStatus, PublishLoadIdentity,
     PublishLoadMetrics, PublishLoadMode, PublishLoadThresholds, PublishLoadTraceability,
@@ -73,10 +73,17 @@ struct Cli {
 
 impl Cli {
     fn parse() -> Result<Self, String> {
+        Self::parse_from(env::args().skip(1))
+    }
+
+    fn parse_from<I>(args: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = String>,
+    {
         let mut kv = BTreeMap::<String, String>::new();
         let mut flags = Vec::<String>::new();
 
-        let mut args = env::args().skip(1).peekable();
+        let mut args = args.into_iter().peekable();
         while let Some(arg) = args.next() {
             if !arg.starts_with("--") {
                 return Err(format!("unexpected positional argument: {arg}"));
@@ -95,6 +102,14 @@ impl Cli {
                 _ => flags.push(key),
             }
         }
+
+        validate_known_args(&kv, &flags)?;
+        validate_transport_intent(kv.get("transport").map(String::as_str).unwrap_or("grpc"))?;
+        validate_publish_intent(
+            kv.get("publish-intent")
+                .map(String::as_str)
+                .unwrap_or("widget"),
+        )?;
 
         let mode = WorkloadMode::parse(kv.get("mode").map(String::as_str).unwrap_or("burst"))?;
 
@@ -207,6 +222,74 @@ impl Cli {
             target_p99_rtt_us: parse_opt_u64(&kv, "target-p99-rtt-us")?,
             target_throughput_rps: parse_opt_f64(&kv, "target-throughput-rps")?,
         })
+    }
+}
+
+const SUPPORTED_KV_ARGS: &[&str] = &[
+    "target-id",
+    "targets-file",
+    "mode",
+    "publish-count",
+    "duration-s",
+    "target-rate-rps",
+    "widget-name",
+    "instance-id",
+    "payload-profile",
+    "param-name",
+    "param-start",
+    "param-step",
+    "transition-ms",
+    "ttl-us",
+    "timeout-s",
+    "output",
+    "agent-id",
+    "psk",
+    "target-p99-rtt-us",
+    "target-throughput-rps",
+    "transport",
+    "publish-intent",
+];
+
+const SUPPORTED_FLAGS: &[&str] = &["normalization-mapping-approved"];
+
+fn validate_known_args(kv: &BTreeMap<String, String>, flags: &[String]) -> Result<(), String> {
+    for key in kv.keys() {
+        if !SUPPORTED_KV_ARGS.contains(&key.as_str()) {
+            return Err(format!("unsupported argument --{key}"));
+        }
+    }
+
+    for flag in flags {
+        if !SUPPORTED_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unsupported flag --{flag}"));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_transport_intent(raw: &str) -> Result<(), String> {
+    match raw {
+        "grpc" => Ok(()),
+        "mcp" => Err(
+            "unsupported transport intent 'mcp' (initial release supports only --transport grpc)"
+                .to_string(),
+        ),
+        other => Err(format!(
+            "invalid --transport '{other}' (expected grpc; mcp is not yet supported)"
+        )),
+    }
+}
+
+fn validate_publish_intent(raw: &str) -> Result<(), String> {
+    match raw {
+        "widget" => Ok(()),
+        "zone" | "tile" => Err(format!(
+            "unsupported publish intent '{raw}' (initial release supports only --publish-intent widget)"
+        )),
+        other => Err(format!(
+            "invalid --publish-intent '{other}' (expected widget; zone/tile are not yet supported)"
+        )),
     }
 }
 
@@ -743,6 +826,8 @@ fn print_usage() {
            --publish-count <n>                       (burst default: 1000)\n\
            --duration-s <seconds>                    (paced bound)\n\
            --target-rate-rps <rps>                   (required for paced)\n\
+           --transport <grpc>                        (default: grpc)\n\
+           --publish-intent <widget>                 (default: widget)\n\
            --widget-name <name>                      (default: gauge)\n\
            --instance-id <id>                        (default: publish-load-harness)\n\
            --payload-profile <name>                  (default: gauge_default)\n\
@@ -805,5 +890,74 @@ mod tests {
         assert_eq!(t.target_host, "localhost");
         assert_eq!(t.network_scope, "tailnet");
         assert_eq!(t.psk_env, "MCP_TEST_PSK");
+    }
+
+    #[test]
+    fn cli_parse_rejects_unsupported_transport_intent() {
+        let args = vec![
+            "--target-id".to_string(),
+            "local".to_string(),
+            "--transport".to_string(),
+            "mcp".to_string(),
+        ];
+
+        let err = Cli::parse_from(args).expect_err("mcp transport must fail fast");
+        assert!(err.contains("unsupported transport intent 'mcp'"));
+    }
+
+    #[test]
+    fn cli_parse_rejects_unsupported_zone_intent() {
+        let args = vec![
+            "--target-id".to_string(),
+            "local".to_string(),
+            "--publish-intent".to_string(),
+            "zone".to_string(),
+        ];
+
+        let err = Cli::parse_from(args).expect_err("zone intent must fail fast");
+        assert!(err.contains("unsupported publish intent 'zone'"));
+    }
+
+    #[test]
+    fn cli_parse_rejects_unsupported_tile_intent() {
+        let args = vec![
+            "--target-id".to_string(),
+            "local".to_string(),
+            "--publish-intent".to_string(),
+            "tile".to_string(),
+        ];
+
+        let err = Cli::parse_from(args).expect_err("tile intent must fail fast");
+        assert!(err.contains("unsupported publish intent 'tile'"));
+    }
+
+    #[test]
+    fn cli_parse_rejects_unknown_argument() {
+        let args = vec![
+            "--target-id".to_string(),
+            "local".to_string(),
+            "--zone-name".to_string(),
+            "status-bar".to_string(),
+        ];
+
+        let err = Cli::parse_from(args).expect_err("unknown args must be rejected");
+        assert!(err.contains("unsupported argument --zone-name"));
+    }
+
+    #[test]
+    fn cli_parse_accepts_explicit_supported_transport_and_intent() {
+        let args = vec![
+            "--target-id".to_string(),
+            "local".to_string(),
+            "--transport".to_string(),
+            "grpc".to_string(),
+            "--publish-intent".to_string(),
+            "widget".to_string(),
+        ];
+
+        let cli = Cli::parse_from(args).expect("supported intent should parse");
+        assert_eq!(cli.target_id, "local");
+        assert_eq!(cli.mode, WorkloadMode::Burst);
+        assert_eq!(cli.publish_count, Some(1000));
     }
 }
