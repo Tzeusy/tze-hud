@@ -2,7 +2,7 @@
 name: law-and-lore
 description: >
   Load tze_hud RFC design contracts to contextualize implementation work. The
-  about/law-and-lore/ directory contains 12 RFCs that define the wire-level contracts,
+  about/law-and-lore/ directory contains 13 RFCs that define the wire-level contracts,
   data models, state machines, protobuf schemas, and quantitative budgets for the tze_hud
   presence engine. Consult relevant RFCs before implementing features, writing protobuf
   definitions, designing state machines, choosing field numbers, setting performance
@@ -10,7 +10,7 @@ description: >
   when the task touches: scene graph, runtime kernel, timing/clocks, input handling,
   session protocol, configuration, system shell/chrome, leases, policy arbitration,
   events, or resource storage. Selectively load ONLY the RFCs relevant to your current
-  task — do not load all 11 at once.
+  task — do not load all 13 at once.
 ---
 
 # tze_hud Law and Lore — Design Contracts
@@ -65,6 +65,7 @@ The `about/law-and-lore/rfcs/` directory contains the authoritative design contr
 | RFC | File | Read when... | Key content |
 |-----|------|-------------|-------------|
 | **0012** | `openspec/changes/component-shape-language/` | Touching design tokens, rendering policies, visual styling, component profiles, SVG token placeholders, readability enforcement | Design token system, canonical token schema, RenderingPolicy extension, component type contracts, component profile format, zone/widget rendering with tokens, readability validation, error catalog |
+| **0013** | `about/law-and-lore/rfcs/0013-text-stream-portals.md` | Touching stream-backed portal surfaces, transcript interaction, adapter boundaries, terminal-vs-portal questions | Portal ontology, transport-agnostic text stream boundary, content-layer constraints, phase-0 raw-tile pilot, governance rules |
 
 ## How to load
 

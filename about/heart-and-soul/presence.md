@@ -19,7 +19,7 @@ Tiles are not just containers. They are territories with:
 - ownership or lease
 - resource budget
 
-Inside tiles live nodes. V1 ships: solid color, text/markdown, static image, and interactive hit region. Future node types include: live video surfaces, camera feeds, transcript strips, subtitle overlays, canvases, browser surfaces, charts, and agent avatars. The architecture supports adding node types without restructuring (see architecture.md).
+Inside tiles live nodes. V1 ships: solid color, text/markdown, static image, and interactive hit region. Future node types include: live video surfaces, camera feeds, transcript strips, text-stream portals, subtitle overlays, canvases, browser surfaces, charts, and agent avatars. The architecture supports adding node types without restructuring (see architecture.md).
 
 The point is not to let an LLM generate pages. The point is to let it hold and negotiate territory on a living surface.
 
@@ -145,6 +145,8 @@ This is the mechanism by which "same scene model, different budgets" becomes con
 Zones do not replace tiles. They are the easy path for common patterns. An agent that needs custom layout, unusual geometry, or content types that no zone supports still uses the full tile API: request lease, specify geometry, create nodes, manage content.
 
 The expectation is that most agents use zones for most of their output, and only drop to raw tiles for genuinely custom layouts. If an agent frequently needs raw tiles for something that should be a zone, that is a signal to define a new zone type — not to accept API complexity as the default.
+
+A low-latency text interaction portal is a valid example of this escape-hatch path. If the system needs a governed surface for streamed text interaction with humans or LLMs, and no existing zone or widget contract fits, the first correct move is a raw-tile proof under lease governance. The second move, if the pattern proves stable, is a dedicated runtime contract. The incorrect move is to smuggle a generic terminal or chat app host into the compositor.
 
 ### Example zones
 

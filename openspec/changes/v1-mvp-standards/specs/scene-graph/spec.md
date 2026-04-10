@@ -340,7 +340,7 @@ Scope: v1-mandatory
 - **THEN** the runtime MUST send a full SceneSnapshot; incremental diff is not available in v1
 
 ### Requirement: Incremental Diff (Deferred)
-Incremental diff (WAL-backed delta sync for reconnecting agents), including SceneDiff, DiffOp, and branching reconnect logic, is deferred to post-v1. V1 MUST ship snapshot-only reconnection.
+Incremental diff (WAL-backed delta sync for reconnecting agents), including SceneDiff, DiffOp, and branching reconnect logic, is deferred to post-v1. V1 ships snapshot-only reconnection.
 Source: RFC 0001 §4.2
 Scope: post-v1
 
@@ -349,7 +349,7 @@ Scope: post-v1
 - **THEN** the runtime MUST provide a full snapshot instead
 
 ### Requirement: VideoSurfaceRef and WebRtcRequired (Deferred)
-The VideoSurfaceRef zone media type and the WebRtcRequired transport constraint are deferred to the post-v1 media layer, and v1 MUST NOT require this transport/media path.
+The VideoSurfaceRef zone media type and the WebRtcRequired transport constraint are deferred to the post-v1 media layer.
 Source: RFC 0001 §2.5
 Scope: post-v1
 
@@ -358,10 +358,19 @@ Scope: post-v1
 - **THEN** the runtime MAY accept the configuration but MUST NOT attempt to render video surface content
 
 ### Requirement: Zone Occupancy Query API (Deferred)
-The ZoneOccupancy effective_geometry field and the occupancy query API are deferred to post-v1. In v1, the runtime MUST maintain occupancy state internally; snapshots include active publications per instance but do not expose effective_geometry.
+The ZoneOccupancy effective_geometry field and the occupancy query API are deferred to post-v1. In v1, the runtime maintains occupancy state internally; snapshots include active publications per instance but do not expose effective_geometry.
 Source: RFC 0001 §2.5
 Scope: post-v1
 
 #### Scenario: Effective geometry not in v1 snapshot
 - **WHEN** a scene snapshot is serialized in v1
 - **THEN** the snapshot MUST include active zone publications but MUST NOT include effective_geometry data
+
+### Requirement: Text Stream Portal Phase-0 Uses Raw Tiles
+The `text-stream-portals` phase-0 pilot SHALL use agent-owned content-layer raw tiles with existing V1 node types. The pilot MUST NOT require a new scene node type before the capability is proven.
+Source: RFC 0013 §3.4
+Scope: v1-mandatory
+
+#### Scenario: portal pilot tile stays below runtime-managed bands
+- **WHEN** a resident portal pilot creates its surface as a raw tile
+- **THEN** the tile SHALL use the normal agent-owned z-order band and remain below zone-reserved and widget-reserved runtime-managed tiles

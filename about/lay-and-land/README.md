@@ -2,6 +2,8 @@
 
 Maps of where components live, how they connect, and what boundaries exist.
 
+One topology seam worth tracking explicitly is low-latency streamed text interaction. The intended use case is a governed text portal backed by authenticated runtime sessions and external adapters. Those adapters may represent anything from human chat transports to LLM interactions, but the runtime boundary remains transport-agnostic text input/output streams rather than tmux- or provider-specific semantics.
+
 ## Maps
 
 | Map | Description |

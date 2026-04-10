@@ -16,6 +16,8 @@ All three are useful, and all three are incomplete.
 
 A CLI gives a model command execution, but almost no ambient or visual presence. A chat UI gives a model conversation, but weak spatial state and weak persistence. A generated webpage gives a model an artifact, but not a live, shared environment.
 
+One concrete target is low-latency text interaction streams: a persistent on-screen portal where a person can converse with another human through a chat transport, or with an LLM through an agent session, without the whole product collapsing into a generic chat app.
+
 What is missing is a way for an LLM to have presence:
 
 - to hold a region of a screen over time
@@ -81,6 +83,8 @@ These are things tze_hud is explicitly not, and must not drift toward:
 **Not a general-purpose UI framework.** The system provides a fixed set of node types, a fixed scene model, and a fixed composition pipeline. It is not a toolkit for building arbitrary applications. Agents work within the scene model's constraints; they do not extend the renderer.
 
 **Not a chatbot with a screen.** If the dominant interaction pattern is "user types, agent responds, text scrolls," the product has failed to deliver on its thesis. The point is spatial, temporal, media-rich presence — not a fancier chat window.
+
+This does not forbid text interaction. It forbids reducing the system to text interaction. A governed text portal may be a valid surface when it serves presence rather than replacing it.
 
 ## One-sentence definition
 

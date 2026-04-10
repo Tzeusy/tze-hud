@@ -530,7 +530,7 @@ Scope: post-v1
 ---
 
 ### Requirement: Stylus and Pressure Input (Post-v1)
-Stylus-specific properties (pressure, tilt, twist) are explicitly deferred post-v1, and v1 pointer events MUST carry basic coordinates only.
+Stylus-specific properties (pressure, tilt, twist) are explicitly deferred post-v1. Pointer events in v1 carry basic coordinates only.
 Source: RFC 0004 §12.4, §14
 Scope: post-v1
 
@@ -548,3 +548,18 @@ Scope: post-v1
 #### Scenario: Deferred marker
 - **WHEN** v1 ships
 - **THEN** focus cycling SHALL use z-ascending tree order only; tab_index fields on HitRegionNode SHALL be ignored if present
+
+---
+
+### Requirement: Text Stream Portal Interaction Reuses Local-First Input
+Expanded text stream portals SHALL reuse the existing local-first input model for focus, activation, command input, and scroll. Portal affordances MUST NOT require a slower special-case input path.
+Source: RFC 0013 §4.1, §4.2, §4.3
+Scope: v1-mandatory
+
+#### Scenario: portal reply affordance gets local feedback
+- **WHEN** the viewer activates a portal reply affordance
+- **THEN** the runtime SHALL provide local visual acknowledgement before any adapter roundtrip completes
+
+#### Scenario: transcript scroll remains local-first
+- **WHEN** the viewer scrolls an expanded transcript portal
+- **THEN** the transcript viewport SHALL respond through the runtime-owned scroll path rather than adapter-latency-driven repaint

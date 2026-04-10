@@ -30,6 +30,7 @@ The **canonical runtime application binary** (`tze_hud`, from the `tze_hud_app` 
 **Use cases**:
 - Remote deployment to Windows for cross-machine validation
 - Automated zone publishing workflows
+- Low-latency streamed text interaction surfaces backed by authenticated external adapters, including human chat transports and LLM sessions
 - Operator testing and integration scenarios
 - Production-like environment simulation
 
