@@ -147,12 +147,11 @@ def migrate_results_csv(csv_path: Path) -> None:
     with csv_path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         existing_header = reader.fieldnames or []
+        if existing_header == RESULTS_CSV_COLUMNS:
+            return
         existing_rows = list(reader)
 
     normalized_rows = [_normalize_row_keys(r) for r in existing_rows]
-
-    if existing_header == RESULTS_CSV_COLUMNS:
-        return
 
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=RESULTS_CSV_COLUMNS)

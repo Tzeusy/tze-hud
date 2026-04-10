@@ -119,9 +119,23 @@ def run_harness(args: argparse.Namespace, artifact_path: Path) -> int:
         cmd.append("--normalization-mapping-approved")
 
     print("[user-test-performance] running Rust harness:")
-    print(" ", " ".join(cmd))
+    print(" ", " ".join(_redacted_command_for_log(cmd)))
     proc = subprocess.run(cmd, cwd=REPO_ROOT)
     return proc.returncode
+
+
+def _redacted_command_for_log(cmd: list[str]) -> list[str]:
+    redacted: list[str] = []
+    i = 0
+    while i < len(cmd):
+        token = cmd[i]
+        if token == "--psk" and (i + 1) < len(cmd):
+            redacted.extend([token, "<redacted>"])
+            i += 2
+            continue
+        redacted.append(token)
+        i += 1
+    return redacted
 
 
 def _parse_float(field: str, row: dict) -> float | None:
