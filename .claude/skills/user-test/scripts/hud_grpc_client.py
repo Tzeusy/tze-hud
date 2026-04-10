@@ -89,9 +89,22 @@ def make_avatar_png(rgb: tuple[int, int, int]) -> bytes:
 @lru_cache(maxsize=1)
 def _blake3_helper_path() -> str:
     """Build a tiny cached cargo helper that prints a BLAKE3 digest in hex."""
+    helper_override = os.getenv("HUD_GRPC_BLAKE3_HELPER")
+    if helper_override:
+        helper_path = Path(helper_override)
+        if not helper_path.exists():
+            raise RuntimeError(
+                f"HUD_GRPC_BLAKE3_HELPER is set but file does not exist: {helper_path}"
+            )
+        return str(helper_path)
+
     cargo = shutil.which("cargo")
     if cargo is None:
-        raise RuntimeError("cargo is required to compute BLAKE3 digests here")
+        raise RuntimeError(
+            "Could not compute BLAKE3 digest: install Python package 'blake3', "
+            "or set HUD_GRPC_BLAKE3_HELPER to a prebuilt helper binary, "
+            "or install cargo for on-demand helper compilation."
+        )
 
     helper_dir = Path(tempfile.mkdtemp(prefix="hud-grpc-blake3-"))
     (helper_dir / "src").mkdir(parents=True, exist_ok=True)
@@ -143,7 +156,12 @@ def _blake3_digest_bytes(data: bytes) -> bytes:
     except ModuleNotFoundError:
         pass
 
-    helper = _blake3_helper_path()
+    try:
+        helper = _blake3_helper_path()
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"{exc} (input size={len(data)} bytes)"
+        ) from exc
     proc = subprocess.run(
         [helper],
         input=data,
@@ -162,14 +180,17 @@ def avatar_resource_id_from_png(png_bytes: bytes) -> bytes:
 
 
 def upload_avatar_png(png_bytes: bytes) -> bytes:
-    """Alias for avatar_resource_id_from_png() for resident-flow scripts."""
+    """Alias for avatar_resource_id_from_png(); no network upload is performed."""
     return avatar_resource_id_from_png(png_bytes)
 
 
 def _resource_id_bytes(resource_id: Any) -> bytes:
     """Normalize a raw resource id or ResourceIdProto into 32 bytes."""
     if isinstance(resource_id, types_pb2.ResourceIdProto):
-        return resource_id.bytes
+        raw = resource_id.bytes
+        if len(raw) != 32:
+            raise ValueError("resource id proto bytes must be 32 bytes")
+        return raw
     if isinstance(resource_id, (bytes, bytearray)):
         raw = bytes(resource_id)
         if len(raw) != 32:
@@ -178,7 +199,10 @@ def _resource_id_bytes(resource_id: Any) -> bytes:
     raise TypeError(f"unsupported resource id type: {type(resource_id)!r}")
 
 
-def build_presence_card_root_node() -> types_pb2.NodeProto:
+def build_presence_card_root_node(
+    width: float = 200.0,
+    height: float = 80.0,
+) -> types_pb2.NodeProto:
     """Build the presence card background root node."""
     return _make_node(
         {
@@ -188,7 +212,7 @@ def build_presence_card_root_node() -> types_pb2.NodeProto:
                 "b": 0.08,
                 "a": 0.78,
             },
-            "bounds": [0, 0, 200, 80],
+            "bounds": [0, 0, width, height],
         }
     )
 
@@ -212,8 +236,12 @@ def build_presence_card_avatar_node(resource_id: Any) -> types_pb2.NodeProto:
 def build_presence_card_text_node(
     agent_name: str,
     last_active_label: str = "now",
+    width: float = 200.0,
+    height: float = 80.0,
 ) -> types_pb2.NodeProto:
     """Build the agent label/status text node used by Presence Card."""
+    text_width = max(width - 56.0, 0.0)
+    text_height = max(height - 16.0, 0.0)
     return _make_node(
         {
             "text_markdown": {
@@ -221,7 +249,7 @@ def build_presence_card_text_node(
                 "font_size_px": 14.0,
                 "color": [0.94, 0.94, 0.94, 1.0],
             },
-            "bounds": [48, 8, 144, 64],
+            "bounds": [48, 8, text_width, text_height],
         }
     )
 
@@ -231,11 +259,18 @@ def build_presence_card_add_node_mutations(
     resource_id: Any,
     agent_name: str,
     last_active_label: str = "now",
+    card_width: float = 200.0,
+    card_height: float = 80.0,
 ) -> tuple[types_pb2.NodeProto, types_pb2.NodeProto, types_pb2.NodeProto, list[types_pb2.MutationProto]]:
     """Build the 3-node Presence Card tree and its AddNode mutations."""
-    root = build_presence_card_root_node()
+    root = build_presence_card_root_node(width=card_width, height=card_height)
     avatar = build_presence_card_avatar_node(resource_id)
-    text = build_presence_card_text_node(agent_name, last_active_label)
+    text = build_presence_card_text_node(
+        agent_name,
+        last_active_label,
+        width=card_width,
+        height=card_height,
+    )
     mutations = [
         types_pb2.MutationProto(
             set_tile_root=types_pb2.SetTileRootMutation(
@@ -266,6 +301,8 @@ def build_presence_card_tree_mutations(
     resource_id: Any,
     agent_name: str,
     last_active_label: str = "now",
+    card_width: float = 200.0,
+    card_height: float = 80.0,
 ) -> tuple[types_pb2.NodeProto, types_pb2.NodeProto, types_pb2.NodeProto, list[types_pb2.MutationProto]]:
     """Alias for build_presence_card_add_node_mutations()."""
     return build_presence_card_add_node_mutations(
@@ -273,6 +310,8 @@ def build_presence_card_tree_mutations(
         resource_id=resource_id,
         agent_name=agent_name,
         last_active_label=last_active_label,
+        card_width=card_width,
+        card_height=card_height,
     )
 
 
@@ -518,11 +557,12 @@ class HudClient:
         reason: str = "test complete",
         expect_resume: bool = False,
     ):
-        """Disconnect the session, either gracefully or by dropping transport."""
+        """Disconnect the session by graceful close or by dropping transport."""
         if graceful:
             await self.session_close(reason=reason, expect_resume=expect_resume)
-            return
-        await self.drop_connection()
+            await self._shutdown_transport()
+        else:
+            await self.drop_connection()
 
     async def release_lease(self, lease_id: bytes):
         """Release a lease, removing all its tiles immediately."""
@@ -579,13 +619,22 @@ class HudClient:
                 mutations=mutations,
             )
         )
-        resp = await self._wait_for("mutation_result", timeout=timeout)
-        mr = resp.mutation_result
-        if not mr.accepted:
-            raise RuntimeError(
-                f"Mutation batch rejected: {mr.error_code} — {mr.error_message}"
-            )
-        return mr
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Timed out waiting for mutation_result for submitted batch"
+                )
+            resp = await self._wait_for("mutation_result", timeout=remaining)
+            mr = resp.mutation_result
+            if mr.batch_id != batch_id:
+                continue
+            if not mr.accepted:
+                raise RuntimeError(
+                    f"Mutation batch rejected: {mr.error_code} — {mr.error_message}"
+                )
+            return mr
 
     async def create_tile(
         self,
@@ -756,6 +805,8 @@ class HudClient:
             tile_id=tile_id,
             resource_id=avatar_resource_id,
             agent_name=agent_name,
+            card_width=w,
+            card_height=h,
         )
         await self.set_tile_root(lease_id, tile_id, root)
         await self.add_node(lease_id, tile_id, avatar, parent_id=root.id)
