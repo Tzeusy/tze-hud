@@ -20,7 +20,9 @@ class EpicReportScaffoldTests(unittest.TestCase):
         path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     def _run_scaffold(self, show_json: str, children_json: str) -> Tuple[subprocess.CompletedProcess, Path]:
-        temp_dir = Path(tempfile.mkdtemp(prefix="epic-report-scaffold-"))
+        temp_dir_obj = tempfile.TemporaryDirectory(prefix="epic-report-scaffold-")
+        self.addCleanup(temp_dir_obj.cleanup)
+        temp_dir = Path(temp_dir_obj.name)
         repo_dir = temp_dir / "repo"
         repo_dir.mkdir(parents=True, exist_ok=True)
 
@@ -64,7 +66,7 @@ class EpicReportScaffoldTests(unittest.TestCase):
         env["BD_CHILDREN_JSON_FILE"] = str(children_json_file)
 
         proc = subprocess.run(
-            [str(SCRIPT_PATH), "hud-test", str(repo_dir)],
+            ["bash", str(SCRIPT_PATH), "hud-test", str(repo_dir)],
             capture_output=True,
             text=True,
             env=env,
@@ -101,6 +103,44 @@ class EpicReportScaffoldTests(unittest.TestCase):
         proc, _ = self._run_scaffold(show_json, children_json)
         self.assertNotEqual(proc.returncode, 0, "expected failure for empty bd show array root")
         self.assertIn("ERROR: Could not parse epic payload for hud-test", proc.stdout + proc.stderr)
+
+    def test_escapes_markdown_table_cells(self) -> None:
+        show_json = '{"id":"hud-test","title":"Escape Check","status":"open","description":"desc","issue_type":"epic","priority":1}'
+        children_json = '[{"id":"hud|test.1","title":"line1\\nline2|x","status":"open","issue_type":"task"}]'
+        proc, repo_dir = self._run_scaffold(show_json, children_json)
+
+        self.assertEqual(proc.returncode, 0, msg=f"stderr:\n{proc.stderr}\nstdout:\n{proc.stdout}")
+        report_file = repo_dir / "docs" / "reports" / "hud-test-escape-check.md"
+        report_content = report_file.read_text(encoding="utf-8")
+        self.assertIn("| hud\\|test.1 | line1 line2\\|x | open | - | task |", report_content)
+
+    def test_rejects_overwrite_of_existing_report(self) -> None:
+        show_json = '{"id":"hud-test","title":"Repeat Run","status":"open","description":"desc","issue_type":"epic","priority":1}'
+        children_json = "[]"
+        first_proc, repo_dir = self._run_scaffold(show_json, children_json)
+        self.assertEqual(first_proc.returncode, 0, msg=f"stderr:\n{first_proc.stderr}\nstdout:\n{first_proc.stdout}")
+        temp_dir = repo_dir.parent
+        env = os.environ.copy()
+        env["PATH"] = f"{temp_dir / 'bin'}:{env['PATH']}"
+        env["BD_SHOW_JSON_FILE"] = str(temp_dir / "show.json")
+        env["BD_CHILDREN_JSON_FILE"] = str(temp_dir / "children.json")
+
+        second_proc = subprocess.run(
+            ["bash", str(SCRIPT_PATH), "hud-test", str(repo_dir)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertNotEqual(second_proc.returncode, 0)
+        self.assertIn("ERROR: Report file already exists", second_proc.stdout + second_proc.stderr)
+
+    def test_falls_back_to_epic_id_when_slug_is_empty(self) -> None:
+        show_json = '{"id":"hud-test","title":"!!!","status":"open","description":"desc","issue_type":"epic","priority":1}'
+        children_json = "[]"
+        proc, repo_dir = self._run_scaffold(show_json, children_json)
+        self.assertEqual(proc.returncode, 0, msg=f"stderr:\n{proc.stderr}\nstdout:\n{proc.stdout}")
+        report_file = repo_dir / "docs" / "reports" / "hud-test-hud-test.md"
+        self.assertTrue(report_file.exists(), "expected slug fallback to use epic ID")
 
 
 if __name__ == "__main__":
