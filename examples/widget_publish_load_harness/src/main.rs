@@ -8,13 +8,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use prost::Message;
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use tokio::time::{sleep_until, timeout, Instant as TokioInstant};
+use tokio::time::{Instant as TokioInstant, sleep_until, timeout};
 use tokio_stream::wrappers::ReceiverStream;
+use tze_hud_protocol::proto::WidgetParameterValueProto;
 use tze_hud_protocol::proto::session as session_proto;
 use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
-use tze_hud_protocol::proto::WidgetParameterValueProto;
 use tze_hud_telemetry::{
     ByteAccountingMode, PublishLoadArtifact, PublishLoadCalibrationStatus, PublishLoadIdentity,
     PublishLoadMetrics, PublishLoadMode, PublishLoadThresholds, PublishLoadTraceability,
@@ -959,5 +959,26 @@ mod tests {
         assert_eq!(cli.target_id, "local");
         assert_eq!(cli.mode, WorkloadMode::Burst);
         assert_eq!(cli.publish_count, Some(1000));
+    }
+
+    #[test]
+    fn default_registry_includes_user_test_windows_tailnet_target() {
+        let raw = include_str!("../../../targets/publish_load_targets.toml");
+        let registry: TargetRegistry = toml::from_str(raw).expect("default registry parses");
+
+        assert!(
+            registry
+                .targets
+                .iter()
+                .any(|target| target.target_id == "local-dev"),
+            "default publish-load targets registry should retain local-dev",
+        );
+        assert!(
+            registry
+                .targets
+                .iter()
+                .any(|target| target.target_id == "user-test-windows-tailnet"),
+            "default publish-load targets registry should include user-test-windows-tailnet",
+        );
     }
 }

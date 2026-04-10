@@ -7,3 +7,10 @@ grpc_endpoint = "127.0.0.1:50051"
 target_host = "localhost"
 network_scope = "local"
 psk_env = "MCP_TEST_PSK"
+
+[[targets]]
+target_id = "user-test-windows-tailnet"
+grpc_endpoint = "tzehouse-windows.parrot-hen.ts.net:50051"
+target_host = "tzehouse-windows.parrot-hen.ts.net"
+network_scope = "tailnet"
+psk_env = "MCP_TEST_PSK"
