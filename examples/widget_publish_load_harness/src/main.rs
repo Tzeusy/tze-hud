@@ -960,4 +960,25 @@ mod tests {
         assert_eq!(cli.mode, WorkloadMode::Burst);
         assert_eq!(cli.publish_count, Some(1000));
     }
+
+    #[test]
+    fn default_registry_includes_user_test_windows_tailnet_target() {
+        let raw = include_str!("../../../targets/publish_load_targets.toml");
+        let registry: TargetRegistry = toml::from_str(raw).expect("default registry parses");
+
+        assert!(
+            registry
+                .targets
+                .iter()
+                .any(|target| target.target_id == "local-dev"),
+            "default publish-load targets registry should retain local-dev",
+        );
+        assert!(
+            registry
+                .targets
+                .iter()
+                .any(|target| target.target_id == "user-test-windows-tailnet"),
+            "default publish-load targets registry should include user-test-windows-tailnet",
+        );
+    }
 }
