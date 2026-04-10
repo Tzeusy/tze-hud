@@ -8,13 +8,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use prost::Message;
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use tokio::time::{sleep_until, timeout, Instant as TokioInstant};
+use tokio::time::{Instant as TokioInstant, sleep_until, timeout};
 use tokio_stream::wrappers::ReceiverStream;
+use tze_hud_protocol::proto::WidgetParameterValueProto;
 use tze_hud_protocol::proto::session as session_proto;
 use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
-use tze_hud_protocol::proto::WidgetParameterValueProto;
 use tze_hud_telemetry::{
     ByteAccountingMode, PublishLoadArtifact, PublishLoadCalibrationStatus, PublishLoadIdentity,
     PublishLoadMetrics, PublishLoadMode, PublishLoadThresholds, PublishLoadTraceability,
