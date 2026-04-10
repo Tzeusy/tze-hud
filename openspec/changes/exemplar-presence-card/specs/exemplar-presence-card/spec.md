@@ -169,6 +169,8 @@ Source: proposal (test integration), session-protocol spec (ClientMessage/Server
 - **WHEN** three instances of the test sequence run concurrently with namespaces "agent-alpha", "agent-beta", "agent-gamma"
 - **THEN** three non-overlapping presence card tiles MUST be visible in the bottom-left corner, each with its own avatar color and agent name
 
+> **Live proof status (2026-04-10):** automated integration coverage exists; resident `/user-test` execution evidence is still required for production-like live validation.
+
 ### Requirement: User-Test Scenario
 The exemplar SHALL define a user-test scenario with the following steps:
 1. Launch 3 agent sessions that each create a presence card
@@ -184,3 +186,5 @@ Source: proposal (user-test integration)
 #### Scenario: User-test visual verification sequence
 - **WHEN** the user-test scenario executes all 7 steps
 - **THEN** the tester MUST observe: 3 cards visible → content updates → disconnection badge → tile removal → 2 remaining cards
+
+> **Live proof status (2026-04-10):** scenario contract is specified, but closure still requires resident `/user-test` integration and a completed manual-review checklist verdict.

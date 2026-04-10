@@ -13,7 +13,7 @@ Reviewed: 2026-04-06
 | 4 | [Status Bar](#4-status-bar) | **deferred** | Repositioned to right edge, compact value-only format. Needs SVG widget redesign (hud-x2v1) |
 | 5 | [Ambient Background](#5-ambient-background) | **deferred** | Fixed exemplar alpha 1.0→0.15; StaticImage rendering blocked on hud-4sk5 |
 | 6 | [Dashboard Tile](#6-dashboard-tile) | pending | gRPC test client built; ready for visual review |
-| 7 | [Presence Card](#7-presence-card) | pending | |
+| 7 | [Presence Card](#7-presence-card) | pending | Integration tests landed; live `/user-test` resident run + manual visual sign-off still open |
 | 8 | [Gauge Widget](#8-gauge-widget) | pending | |
 | 9 | [Progress Bar](#9-progress-bar) | pending | |
 | 10 | [Status Indicator](#10-status-indicator) | pending | |
@@ -205,7 +205,17 @@ _(to be filled during review)_
 
 ### UX Tweaks
 
-_(to be filled during review)_
+Open closeout items:
+1. Run the resident Presence Card flow through `/user-test` on a live target and archive evidence.
+2. Confirm manual visual verdict against spec timing/appearance constraints.
+3. Move status to `done` only after evidence is recorded.
+
+Spec sections awaiting live proof:
+- `Requirement: gRPC Test Sequence`
+  - `Scenario: Full single-agent lifecycle`
+  - `Scenario: Three-agent concurrent lifecycle`
+- `Requirement: User-Test Scenario`
+  - `Scenario: User-test visual verification sequence`
 
 ---
 
