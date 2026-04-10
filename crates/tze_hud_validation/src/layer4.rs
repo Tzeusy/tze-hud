@@ -20,6 +20,7 @@
 //!     {bench_name}/
 //!       telemetry.json    — session telemetry JSON
 //!       histogram.json    — latency histograms
+//!       publish_load.json — canonical publish-load artifact (optional)
 //! ```
 //!
 //! ## Usage
@@ -179,6 +180,8 @@ pub struct BenchmarkArtifactInput {
     pub session_telemetry_json: Vec<u8>,
     /// Histogram data as JSON bytes (latency distributions).
     pub histogram_json: Vec<u8>,
+    /// Canonical publish-load benchmark artifact JSON bytes.
+    pub publish_load_json: Option<Vec<u8>>,
     /// Calibration vector used for this benchmark (JSON bytes).
     pub calibration_json: Option<Vec<u8>>,
     /// Hardware info (JSON bytes).
@@ -219,6 +222,7 @@ pub struct BenchmarkManifestEntry {
 pub struct BenchmarkArtifactPaths {
     pub telemetry_json: String,
     pub histogram_json: String,
+    pub publish_load_json: Option<String>,
     pub calibration_json: Option<String>,
     pub hardware_info_json: Option<String>,
 }
@@ -459,9 +463,16 @@ impl ArtifactBuilder {
         let mut paths = BenchmarkArtifactPaths {
             telemetry_json: tel_rel,
             histogram_json: hist_rel,
+            publish_load_json: None,
             calibration_json: None,
             hardware_info_json: None,
         };
+
+        if let Some(publish_load) = input.publish_load_json {
+            let rel = format!("benchmarks/{safe_name}/publish_load.json");
+            self.pending_files.push((PathBuf::from(&rel), publish_load));
+            paths.publish_load_json = Some(rel);
+        }
 
         if let Some(cal) = input.calibration_json {
             let rel = format!("benchmarks/{safe_name}/calibration.json");
@@ -827,15 +838,41 @@ pub fn generate_index_html(manifest: &ArtifactManifest) -> String {
         html.push_str("<h2>Benchmarks</h2>\n");
         html.push_str("<div class=\"bench-list\">\n");
         for bench in &manifest.benchmarks {
+            let mut links = Vec::new();
+            links.push(format!(
+                "<a href=\"{}\">telemetry.json</a>",
+                html_escape(&bench.paths.telemetry_json)
+            ));
+            links.push(format!(
+                "<a href=\"{}\">histogram.json</a>",
+                html_escape(&bench.paths.histogram_json)
+            ));
+            if let Some(path) = &bench.paths.publish_load_json {
+                links.push(format!(
+                    "<a href=\"{}\">publish_load.json</a>",
+                    html_escape(path)
+                ));
+            }
+            if let Some(path) = &bench.paths.calibration_json {
+                links.push(format!(
+                    "<a href=\"{}\">calibration.json</a>",
+                    html_escape(path)
+                ));
+            }
+            if let Some(path) = &bench.paths.hardware_info_json {
+                links.push(format!(
+                    "<a href=\"{}\">hardware_info.json</a>",
+                    html_escape(path)
+                ));
+            }
+
             html.push_str(&format!(
                 "<div class=\"bench-card\">\
                  <h3>{}</h3>\
-                 <p><a href=\"{}\">telemetry.json</a> | \
-                 <a href=\"{}\">histogram.json</a></p>\
+                 <p>{}</p>\
                  </div>\n",
                 html_escape(&bench.name),
-                html_escape(&bench.paths.telemetry_json),
-                html_escape(&bench.paths.histogram_json),
+                links.join(" | "),
             ));
         }
         html.push_str("</div>\n");
@@ -1454,6 +1491,7 @@ mod tests {
                 name: "max_tiles_stress".to_string(),
                 session_telemetry_json: br#"{"frames":300}"#.to_vec(),
                 histogram_json: br#"{"p99":14000}"#.to_vec(),
+                publish_load_json: None,
                 calibration_json: Some(br#"{"cpu":1.0,"gpu":1.0}"#.to_vec()),
                 hardware_info_json: None,
             })

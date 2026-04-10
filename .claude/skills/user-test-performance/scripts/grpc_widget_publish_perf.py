@@ -14,6 +14,7 @@ import perf_common
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_RESULTS_CSV = REPO_ROOT / "test_results" / "benchmark_history" / "results.csv"
 DEFAULT_ARTIFACT_DIR = REPO_ROOT / "test_results" / "publish_load"
+DEFAULT_LAYER4_ROOT = REPO_ROOT / "test_results"
 
 
 def _float(value: str) -> float:
@@ -58,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-p99-rtt-us", type=int)
     parser.add_argument("--target-throughput-rps", type=float)
     parser.add_argument("--output-json")
+    parser.add_argument("--layer4-output-root", default=str(DEFAULT_LAYER4_ROOT))
     parser.add_argument("--results-csv", default=str(DEFAULT_RESULTS_CSV))
     parser.add_argument("--cargo-profile", choices=["release", "debug"], default="release")
     parser.add_argument("--no-history-compare", action="store_true")
@@ -97,6 +99,8 @@ def run_harness(args: argparse.Namespace, artifact_path: Path) -> int:
             str(args.timeout_s),
             "--output",
             str(artifact_path),
+            "--layer4-output-root",
+            args.layer4_output_root,
             "--agent-id",
             args.agent_id,
         ]

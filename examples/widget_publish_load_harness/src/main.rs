@@ -3,6 +3,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use prost::Message;
@@ -20,6 +21,7 @@ use tze_hud_telemetry::{
     PublishLoadMetrics, PublishLoadMode, PublishLoadThresholds, PublishLoadTraceability,
     PublishLoadTransport, PublishLoadVerdict,
 };
+use tze_hud_validation::layer4::{ArtifactBuilder, ArtifactOptions, BenchmarkArtifactInput};
 
 type DynError = Box<dyn Error + Send + Sync + 'static>;
 
@@ -64,6 +66,7 @@ struct Cli {
     ttl_us: u64,
     timeout_s: f64,
     output: PathBuf,
+    layer4_output_root: Option<PathBuf>,
     agent_id: String,
     psk_override: Option<String>,
     normalization_mapping_approved: bool,
@@ -211,6 +214,7 @@ impl Cli {
                 .unwrap_or(0),
             timeout_s,
             output,
+            layer4_output_root: kv.get("layer4-output-root").map(PathBuf::from),
             agent_id: kv
                 .get("agent-id")
                 .cloned()
@@ -539,6 +543,12 @@ async fn main() -> Result<(), DynError> {
 
     write_artifact(&cli.output, &artifact)?;
 
+    if let Some(layer4_output_root) = &cli.layer4_output_root {
+        let layer4_run_dir =
+            emit_layer4_publish_load_artifacts(layer4_output_root, &cli.output, &artifact)?;
+        println!("layer4-artifacts: {}", layer4_run_dir.display());
+    }
+
     println!(
         "completed: target_id={} mode={:?} requests={} success={} errors={} p99_us={} throughput_rps={:.2} output={}",
         target.target_id,
@@ -731,6 +741,134 @@ fn write_artifact(path: &Path, artifact: &PublishLoadArtifact) -> Result<(), Dyn
     Ok(())
 }
 
+fn emit_layer4_publish_load_artifacts(
+    output_root: &Path,
+    canonical_artifact_path: &Path,
+    artifact: &PublishLoadArtifact,
+) -> Result<PathBuf, DynError> {
+    let mut opts = ArtifactOptions::default();
+    opts.spec_ids.push("publish-load-harness".to_string());
+    opts.spec_ids
+        .push("validation-framework-publish-load".to_string());
+
+    let branch = detect_git_branch();
+    let mut builder = ArtifactBuilder::new(output_root, branch, opts)
+        .map_err(|e| format!("layer4 builder init failed: {e}"))?;
+    let run_dir = builder.run_dir().to_path_buf();
+
+    let publish_load_json = fs::read(canonical_artifact_path).map_err(|e| {
+        format!(
+            "failed to read canonical publish artifact '{}': {e}",
+            canonical_artifact_path.display()
+        )
+    })?;
+    let session_telemetry_json = serde_json::to_vec_pretty(&artifact.metrics)
+        .map_err(|e| format!("serialise publish metrics for layer4: {e}"))?;
+    let histogram_json = load_optional_json_companion(
+        artifact.histogram_path.as_deref(),
+        canonical_artifact_path,
+        "histogram",
+    )?
+    .unwrap_or_else(|| fallback_histogram_json(artifact));
+    let calibration_json = load_optional_json_companion(
+        artifact.calibration_path.as_deref(),
+        canonical_artifact_path,
+        "calibration",
+    )?;
+
+    let bench_name = format!(
+        "publish_load_{}_{}",
+        artifact.identity.target_id,
+        mode_label(artifact.identity.mode)
+    );
+
+    builder
+        .add_benchmark(BenchmarkArtifactInput {
+            name: bench_name,
+            session_telemetry_json,
+            histogram_json,
+            publish_load_json: Some(publish_load_json),
+            calibration_json,
+            hardware_info_json: None,
+        })
+        .map_err(|e| format!("layer4 add_benchmark failed: {e}"))?;
+
+    builder
+        .finalise()
+        .map_err(|e| format!("layer4 finalise failed: {e}"))?;
+
+    Ok(run_dir)
+}
+
+fn load_optional_json_companion(
+    relative_or_absolute_path: Option<&str>,
+    canonical_artifact_path: &Path,
+    label: &str,
+) -> Result<Option<Vec<u8>>, DynError> {
+    let Some(raw) = relative_or_absolute_path else {
+        return Ok(None);
+    };
+
+    let requested = PathBuf::from(raw);
+    let resolved = if requested.is_absolute() {
+        requested
+    } else {
+        let from_artifact_parent = canonical_artifact_path
+            .parent()
+            .map(|parent| parent.join(&requested))
+            .filter(|candidate| candidate.exists());
+        from_artifact_parent.unwrap_or(requested)
+    };
+
+    fs::read(&resolved).map(Some).map_err(|e| {
+        format!(
+            "failed to read {label} companion '{}': {e}",
+            resolved.display()
+        )
+        .into()
+    })
+}
+
+fn fallback_histogram_json(artifact: &PublishLoadArtifact) -> Vec<u8> {
+    let histogram = serde_json::json!({
+        "rtt_us": {
+            "p50": artifact.metrics.rtt_p50_us,
+            "p95": artifact.metrics.rtt_p95_us,
+            "p99": artifact.metrics.rtt_p99_us,
+            "max": artifact.metrics.rtt_max_us
+        },
+        "throughput_rps": artifact.metrics.throughput_rps,
+        "request_count": artifact.metrics.request_count,
+        "success_count": artifact.metrics.success_count,
+        "error_count": artifact.metrics.error_count
+    });
+    serde_json::to_vec_pretty(&histogram).unwrap_or_else(|_| br#"{}"#.to_vec())
+}
+
+fn mode_label(mode: PublishLoadMode) -> &'static str {
+    match mode {
+        PublishLoadMode::Burst => "burst",
+        PublishLoadMode::Paced => "paced",
+    }
+}
+
+fn detect_git_branch() -> String {
+    let output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if branch.is_empty() {
+                "unknown".to_string()
+            } else {
+                branch
+            }
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
 fn percentile_summary(samples: &[u64]) -> (u64, u64, u64, u64) {
     if samples.is_empty() {
         return (0, 0, 0, 0);
@@ -842,7 +980,8 @@ fn print_usage() {
            --normalization-mapping-approved          (flag)\n\
            --psk <value>                             (defaults to target's psk_env)\n\
            --agent-id <id>                           (default: widget-publish-load-harness)\n\
-           --output <path>                           (default: benchmarks/publish-load/widget_publish_load_<ts>.json)"
+           --output <path>                           (default: benchmarks/publish-load/widget_publish_load_<ts>.json)\n\
+           --layer4-output-root <path>               (optional: emit Layer 4 artifact run under this root)"
     );
 }
 

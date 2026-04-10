@@ -32,6 +32,7 @@ Common options:
 - `--publish-count`, `--duration-s`, `--target-rate-rps`
 - `--widget-name`, `--instance-id`, `--payload-profile`
 - `--output-json` (artifact path)
+- `--layer4-output-root` (default: `test_results/`, writes Layer 4 manifest run)
 - `--results-csv` (default: `test_results/benchmark_history/results.csv`)
 - `--cargo-profile release|debug`
 
@@ -42,5 +43,6 @@ cargo run -p widget_publish_load_harness --release -- ...
 ```
 
 Then it appends a stable summary row derived from the JSON artifact into the
-historical CSV and prints deltas vs the latest prior row with the same
+historical CSV, emits a Layer 4 artifact run (`manifest.json` benchmark entry
+includes `publish_load.json`), and prints deltas vs the latest prior row with the same
 `benchmark_key`.

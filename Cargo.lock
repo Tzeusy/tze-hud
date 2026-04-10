@@ -4248,6 +4248,7 @@ dependencies = [
  "tonic",
  "tze_hud_protocol",
  "tze_hud_telemetry",
+ "tze_hud_validation",
 ]
 
 [[package]]
