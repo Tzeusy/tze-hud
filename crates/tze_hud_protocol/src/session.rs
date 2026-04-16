@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tonic::Status;
-use tze_hud_resource::RuntimeWidgetStore;
+use tze_hud_resource::{ResourceStore, RuntimeWidgetStore};
 use tze_hud_scene::SceneId;
 use tze_hud_scene::graph::SceneGraph;
 
@@ -98,6 +98,8 @@ impl Default for WidgetAssetStore {
 pub struct SharedState {
     pub scene: Arc<Mutex<SceneGraph>>,
     pub sessions: SessionRegistry,
+    /// Resident scene-resource upload store (RFC 0011 on HudSession stream).
+    pub resource_store: ResourceStore,
     pub widget_asset_store: WidgetAssetStore,
     /// Durable runtime widget asset store (v1 scoped durability exception).
     /// When `None`, widget asset registration uses in-memory fallback semantics.

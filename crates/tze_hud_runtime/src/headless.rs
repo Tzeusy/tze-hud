@@ -55,7 +55,9 @@ use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
-use tze_hud_resource::{RuntimeWidgetStore, RuntimeWidgetStoreConfig};
+use tze_hud_resource::{
+    ResourceStore, ResourceStoreConfig, RuntimeWidgetStore, RuntimeWidgetStoreConfig,
+};
 use tze_hud_scene::HitResult;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
@@ -324,6 +326,7 @@ impl HeadlessRuntime {
         let state = Arc::new(Mutex::new(SharedState {
             scene,
             sessions,
+            resource_store: ResourceStore::new(ResourceStoreConfig::default()),
             widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
             runtime_widget_store: runtime_widget_store.clone(),
             safe_mode_active: false,
