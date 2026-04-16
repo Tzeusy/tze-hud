@@ -227,10 +227,8 @@ pub struct ResourceStoreConfig {
     pub max_concurrent_resources: usize,
     /// Per-agent upload rate limit in bytes/second (default 1 MiB/s).
     ///
-    /// TODO: enforcement is deferred to the session transport layer (gRPC
-    /// flow-control back-pressure, spec lines 313-314). This field is stored
-    /// here so callers can configure the limit at construction; the resource
-    /// crate itself does not enforce it.
+    /// Enforced by the session transport layer, which applies stream-level
+    /// backpressure to resident upload intake.
     pub upload_rate_limit_bytes_per_sec: usize,
 }
 

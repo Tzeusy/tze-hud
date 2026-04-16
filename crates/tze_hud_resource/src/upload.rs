@@ -164,6 +164,14 @@ impl ResourceStore {
         &self.font_bytes
     }
 
+    /// Configured per-session upload rate limit in bytes/second.
+    ///
+    /// Enforcement is performed by the session transport layer to apply
+    /// stream-level backpressure semantics.
+    pub fn upload_rate_limit_bytes_per_sec(&self) -> usize {
+        self.config.upload_rate_limit_bytes_per_sec
+    }
+
     // ─── Handle upload start ─────────────────────────────────────────────────
 
     /// Process a `ResourceUploadStart` message.
