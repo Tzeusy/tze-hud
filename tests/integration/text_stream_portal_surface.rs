@@ -22,7 +22,8 @@ use tze_hud_scene::{
         FontFamily, HitRegionNode, ImageFitMode, InputMode, Node, NodeData, Rect, SceneId,
         SolidColorNode, TextAlign, TextMarkdownNode, TextOverflow, TileScrollConfig,
     },
-    Capability, MAX_MARKDOWN_BYTES, ZONE_TILE_Z_MIN,
+    Capability, DeliveryPolicy, MessageClass, TimestampValidationInput, TimingError, TimingHints,
+    WallUs, MAX_MARKDOWN_BYTES, ZONE_TILE_Z_MIN,
 };
 
 const DISPLAY_W: f32 = 1920.0;
@@ -47,6 +48,7 @@ struct PortalSurfaceState {
     session_title: String,
     history: Vec<String>,
     unread_count: usize,
+    typing_active: bool,
     expanded: bool,
     viewport_start_line: usize,
     viewport_max_lines: usize,
@@ -67,7 +69,9 @@ impl PortalSurfaceState {
     }
 
     fn activity_text(&self) -> String {
-        if self.unread_count == 0 {
+        if self.typing_active {
+            "typing...".to_string()
+        } else if self.unread_count == 0 {
             "idle".to_string()
         } else {
             format!("{} unread", self.unread_count)
@@ -400,6 +404,7 @@ fn expand_and_collapse_toggle_transcript_visibility() {
             "line three".to_string(),
         ],
         unread_count: 3,
+        typing_active: false,
         expanded: false,
         viewport_start_line: 0,
         viewport_max_lines: 16,
@@ -540,6 +545,48 @@ fn user_scroll_offset_remains_authoritative_after_append_update() {
     assert_eq!((sx, sy), (0.0, 100.0));
 }
 
+fn collapsed_activity_node(nodes: &[Node]) -> &TextMarkdownNode {
+    nodes
+        .iter()
+        .find_map(|node| match &node.data {
+            NodeData::TextMarkdown(text)
+                if text.bounds == Rect::new(COLLAPSED_W - 130.0, 64.0, 80.0, 18.0) =>
+            {
+                Some(text)
+            }
+            _ => None,
+        })
+        .expect("collapsed portal nodes must include activity indicator text")
+}
+
+fn find_text_node_in_tile(scene: &SceneGraph, tile_id: SceneId, content: &str) -> SceneId {
+    let tile = scene.tiles.get(&tile_id).expect("tile must exist");
+    let root = tile.root_node.expect("tile must have root node");
+    let root_node = scene.nodes.get(&root).expect("root node must exist");
+    root_node
+        .children
+        .iter()
+        .copied()
+        .find(|child_id| {
+            scene
+                .nodes
+                .get(child_id)
+                .and_then(|node| match &node.data {
+                    NodeData::TextMarkdown(text) => Some(text.content.as_str() == content),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        })
+        .expect("tile must contain requested text node")
+}
+
+fn text_markdown_from_node(scene: &SceneGraph, node_id: SceneId) -> TextMarkdownNode {
+    let node = scene.nodes.get(&node_id).expect("node must exist");
+    match &node.data {
+        NodeData::TextMarkdown(text) => text.clone(),
+        other => panic!("expected text markdown node, got: {other:?}"),
+    }
+}
 #[tokio::test]
 async fn collapsed_and_expanded_portal_surface_use_only_v1_node_types() {
     let namespace = "portal-agent";
@@ -583,6 +630,7 @@ async fn collapsed_and_expanded_portal_surface_use_only_v1_node_types() {
         session_title: "Resident Text Stream".to_string(),
         history: vec!["warmup output".to_string(), "portal ready".to_string()],
         unread_count: 1,
+        typing_active: false,
         expanded: false,
         viewport_start_line: 0,
         viewport_max_lines: 12,
@@ -664,6 +712,7 @@ fn expanded_transcript_materialization_is_bounded_to_viewport_and_budget() {
         session_title: "Budget Window".to_string(),
         history,
         unread_count: 0,
+        typing_active: false,
         expanded: true,
         viewport_start_line: 120,
         viewport_max_lines: 80,
@@ -789,6 +838,7 @@ async fn portal_surface_state_remains_governed_by_existing_privacy_and_orphan_ru
         session_title: "Governed".to_string(),
         history: vec!["sensitive response".to_string()],
         unread_count: 2,
+        typing_active: false,
         expanded: false,
         viewport_start_line: 0,
         viewport_max_lines: 8,
@@ -852,4 +902,171 @@ async fn portal_surface_state_remains_governed_by_existing_privacy_and_orphan_ru
         !rejected.applied,
         "portal tile must not bypass existing lease/orphan governance after disconnect"
     );
+}
+
+#[test]
+fn portal_activity_indicators_remain_ambient_under_backlog_and_typing() {
+    let icon_id = tze_hud_scene::ResourceId::from_bytes([0xAB; 32]);
+    let base = PortalSurfaceState {
+        portal_id: "portal://ambient/1".to_string(),
+        session_title: "Ambient".to_string(),
+        history: vec!["stream active".to_string()],
+        unread_count: 1,
+        typing_active: false,
+        expanded: false,
+        viewport_start_line: 0,
+        viewport_max_lines: 8,
+    };
+
+    let low_backlog_nodes = build_collapsed_nodes(&base, icon_id);
+    let high_backlog_nodes = build_collapsed_nodes(
+        &PortalSurfaceState {
+            unread_count: 500,
+            ..base.clone()
+        },
+        icon_id,
+    );
+    let typing_nodes = build_collapsed_nodes(
+        &PortalSurfaceState {
+            unread_count: 500,
+            typing_active: true,
+            ..base.clone()
+        },
+        icon_id,
+    );
+
+    let low_activity = collapsed_activity_node(&low_backlog_nodes);
+    let high_activity = collapsed_activity_node(&high_backlog_nodes);
+    let typing_activity = collapsed_activity_node(&typing_nodes);
+
+    assert_eq!(
+        low_activity.color, high_activity.color,
+        "backlog growth must not auto-upgrade portal activity indicator styling"
+    );
+    assert_eq!(
+        typing_activity.color, low_activity.color,
+        "typing indicator must stay ambient and not switch to urgency-escalated styling"
+    );
+    assert_eq!(
+        typing_activity.content, "typing...",
+        "typing indicator should be transient status text, not notification-style urgency text"
+    );
+}
+
+#[test]
+fn portal_typing_indicator_updates_use_transient_in_place_path() {
+    let namespace = "portal-agent-typing";
+    let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let tab_id = scene.create_tab("Main", 0).expect("must create tab");
+    scene.active_tab = Some(tab_id);
+    let icon_id = tze_hud_scene::ResourceId::from_bytes([0xCD; 32]);
+    scene.register_resource(icon_id);
+    let lease_id = scene.grant_lease(
+        namespace,
+        120_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let create = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: namespace.to_string(),
+            lease_id,
+            bounds: portal_bounds(false),
+            z_order: PORTAL_Z_ORDER,
+        }],
+    ));
+    assert!(create.applied);
+    let tile_id = create.created_ids[0];
+
+    let state = PortalSurfaceState {
+        portal_id: "portal://typing/1".to_string(),
+        session_title: "Typing".to_string(),
+        history: vec!["hello".to_string()],
+        unread_count: 2,
+        typing_active: true,
+        expanded: false,
+        viewport_start_line: 0,
+        viewport_max_lines: 8,
+    };
+    let mut nodes = build_collapsed_nodes(&state, icon_id);
+    let root = nodes.remove(0);
+    let apply = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        root_batch_for_tile(tile_id, root, nodes),
+    ));
+    assert!(apply.applied);
+    let activity_node_id = find_text_node_in_tile(&scene, tile_id, "typing...");
+    let nodes_before = scene
+        .lease_resource_usage(&lease_id)
+        .nodes_per_tile
+        .get(&tile_id)
+        .copied()
+        .unwrap_or(0);
+
+    for content in ["typing...", "57 unread", "idle"] {
+        let mut text = text_markdown_from_node(&scene, activity_node_id);
+        text.content = content.to_string();
+        let update = scene.apply_batch(&make_batch(
+            namespace,
+            lease_id,
+            vec![SceneMutation::UpdateNodeContent {
+                tile_id,
+                node_id: activity_node_id,
+                data: NodeData::TextMarkdown(text),
+            }],
+        ));
+        assert!(
+            update.applied,
+            "activity update must succeed as transient in-place content refresh"
+        );
+        assert!(
+            update.created_ids.is_empty(),
+            "typing/activity refresh must not allocate new scene nodes"
+        );
+    }
+
+    let nodes_after = scene
+        .lease_resource_usage(&lease_id)
+        .nodes_per_tile
+        .get(&tile_id)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        nodes_after, nodes_before,
+        "typing/activity indicator updates should not take a transactional structural path"
+    );
+    let final_text = text_markdown_from_node(&scene, activity_node_id);
+    assert_eq!(final_text.content, "idle");
+    assert!(
+        scene.zone_registry.active_publishes.is_empty(),
+        "typing indicator path must remain raw-tile ambient state, not notification publishes"
+    );
+}
+
+#[test]
+fn portal_typing_indicator_timing_profile_is_ephemeral_realtime() {
+    let mut typing_hints = TimingHints::new();
+    typing_hints.message_class = MessageClass::EphemeralRealtime;
+    typing_hints.delivery_policy = DeliveryPolicy::DropIfLate;
+
+    let now = 2_000_000_000_u64;
+    let ctx = TimestampValidationInput {
+        session_open_wall_us: WallUs(now),
+        now_wall_us: WallUs(now),
+        max_future_schedule_us: 300_000_000,
+        estimated_skew_us: 0,
+    };
+    assert!(
+        tze_hud_scene::validate_timing_hints(&typing_hints, &ctx).is_ok(),
+        "portal typing indicators should use valid ephemeral-realtime timing semantics"
+    );
+
+    let mut transactional = typing_hints.clone();
+    transactional.message_class = MessageClass::Transactional;
+    let err = tze_hud_scene::validate_timing_hints(&transactional, &ctx)
+        .expect_err("drop-if-late must reject transactional message class");
+    assert_eq!(err, TimingError::InvalidDeliveryPolicy);
 }
