@@ -1,7 +1,7 @@
-# Exemplar Presence Card — User-Test Script and Live-Proof Gap
+# Exemplar Presence Card — User-Test Script and Live-Proof Status
 
-**Issue**: hud-sx7q.3
-**Date**: 2026-04-10
+**Issue**: hud-sx7q.4
+**Date**: 2026-04-16
 **Spec**: `openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md`
 **Tasks ref**: `openspec/changes/exemplar-presence-card/tasks.md` §7
 
@@ -33,6 +33,33 @@ python3 .claude/skills/user-test/scripts/presence_card_exemplar.py \
 The script emits structured JSON step events to stdout and writes a transcript
 artifact by default. The operator should follow the `expected_visual` field for
 each emitted step while performing the manual checks below.
+
+### Latest Live Run Attempt (2026-04-16)
+
+Runtime target reachability checks passed:
+- `tzehouse-windows.parrot-hen.ts.net:50051` reachable
+- `tzehouse-windows.parrot-hen.ts.net:9090` reachable
+
+Scenario execution command:
+
+```bash
+python3 .claude/skills/user-test/scripts/presence_card_exemplar.py \
+  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --psk-env TZE_HUD_PSK \
+  --tab-height 1080 \
+  --transcript-out test_results/presence-card-latest.json
+```
+
+Observed result:
+
+```json
+{"error": "missing_psk", "psk_env": "TZE_HUD_PSK"}
+```
+
+Current blocker:
+- No `TZE_HUD_PSK` value is available in the worker shell, so the resident
+  scenario cannot authenticate to the live HUD runtime and cannot advance to
+  visual step validation.
 
 Current branch note:
 the executable `/user-test` scenario validates the live operator-visible
@@ -127,6 +154,21 @@ Pass criteria:
 
 Overall: PASS only if all steps pass.
 
+## Scenario Verdict (2026-04-16)
+
+| Step | Result | Notes |
+|---|---|---|
+| 1 | BLOCKED | Scenario did not start due to missing `TZE_HUD_PSK`. |
+| 2 | BLOCKED | Not reachable without authenticated session. |
+| 3 | BLOCKED | Not reachable without authenticated session. |
+| 4 | BLOCKED | Not reachable without authenticated session. |
+| 5 | BLOCKED | Not reachable without authenticated session. |
+| 6 | BLOCKED | Not reachable without authenticated session. |
+| 7 | BLOCKED | Not reachable without authenticated session. |
+
+Overall: **BLOCKED** pending authenticated `TZE_HUD_PSK` provisioning in the
+operator environment.
+
 ---
 
 ## Automation Reality Check
@@ -137,4 +179,7 @@ Automated coverage exists for most behavior:
 - `tests/integration/disconnect_orphan.rs`
 - `crates/tze_hud_scene/tests/lease_lifecycle_presence_card.rs`
 
-But the `/user-test` skill currently has no Presence Card resident scenario entry. That is the primary tooling gap before this can be considered live-proven in the same way as other exemplars.
+The `/user-test` skill now includes a Presence Card resident scenario entry.
+The remaining gap is operator auth/bootstrap in the live environment
+(`TZE_HUD_PSK`) so the scenario can execute and manual visual outcomes can be
+recorded as PASS/FAIL instead of BLOCKED.

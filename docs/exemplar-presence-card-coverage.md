@@ -1,6 +1,6 @@
-# Exemplar Presence Card — Coverage Reconciliation (2026-04-10)
+# Exemplar Presence Card — Coverage Reconciliation (2026-04-16)
 
-**Issue**: `hud-sx7q.1`
+**Issue**: `hud-sx7q.4`
 **Spec**: `openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md`
 **Scope**: Reconcile Presence Card planning/review artifacts to current code reality.
 
@@ -17,8 +17,10 @@ What is implemented and test-backed:
 - Headless/runtime gRPC integration coverage for concurrent agents and updates.
 
 What is still missing:
-- A repo-native **live resident** Presence Card scenario in `/user-test`.
-- A completed manual-review closeout entry showing Windows/live proof results.
+- Successful authenticated execution evidence from the live resident Presence
+  Card scenario run on the Windows overlay target.
+- A completed manual-review closeout entry showing PASS/FAIL outcomes from that
+  run.
 
 This narrows remaining work to live validation tooling + manual-review closure, not core implementation gaps.
 
@@ -36,8 +38,8 @@ This narrows remaining work to live validation tooling + manual-review closure, 
 | Agent Disconnect and Orphan Handling | Implemented + automated | `tests/integration/disconnect_orphan.rs` |
 | Multi-Agent Isolation During Disconnect | Implemented + automated | `tests/integration/disconnect_orphan.rs` |
 | Resource Upload for Avatar Icons | Implemented + automated | `tests/integration/presence_card_tile.rs` |
-| gRPC Test Sequence | Implemented + integration-tested; live resident proof pending | `tests/integration/presence_card_coexistence.rs` |
-| User-Test Scenario | Documented; live resident proof pending | `docs/exemplar-presence-card-user-test.md` |
+| gRPC Test Sequence | Implemented + integration-tested; live resident run attempted but blocked by missing auth secret in operator env | `tests/integration/presence_card_coexistence.rs`, `docs/exemplar-presence-card-user-test.md` |
+| User-Test Scenario | Implemented in `/user-test`; live visual proof currently blocked by missing `TZE_HUD_PSK` at execution time | `.claude/skills/user-test/scripts/presence_card_exemplar.py`, `docs/exemplar-presence-card-user-test.md` |
 
 ---
 
@@ -48,11 +50,24 @@ The remaining unresolved proof is explicitly limited to these spec sections:
 1. `Requirement: gRPC Test Sequence`
 - `Scenario: Full single-agent lifecycle`
 - `Scenario: Three-agent concurrent lifecycle`
-- Remaining proof needed: execution evidence through the resident `/user-test` workflow on a live runtime target.
+- Remaining proof needed: successful authenticated execution evidence through
+  the resident `/user-test` workflow on a live runtime target.
 
 2. `Requirement: User-Test Scenario`
 - `Scenario: User-test visual verification sequence`
-- Remaining proof needed: completed manual visual run and documented pass/fail outcomes in the manual review checklist.
+- Remaining proof needed: completed manual visual run and documented pass/fail
+  outcomes in the manual review checklist after environment auth unblock.
+
+---
+
+## 2026-04-16 Live Validation Attempt
+
+- Attempted to run the canonical resident scenario against
+  `tzehouse-windows.parrot-hen.ts.net:50051`.
+- Host/port reachability checks passed for gRPC (`50051`) and MCP (`9090`).
+- Scenario exited immediately with `{"error":"missing_psk","psk_env":"TZE_HUD_PSK"}`.
+- Outcome: live proof remains blocked on missing `TZE_HUD_PSK` in the operator
+  shell.
 
 ---
 
