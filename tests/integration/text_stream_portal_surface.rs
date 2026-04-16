@@ -53,6 +53,19 @@ struct PortalSurfaceState {
 }
 
 impl PortalSurfaceState {
+    fn clamp_markdown_to_budget(mut markdown: String) -> String {
+        if markdown.len() <= MAX_MARKDOWN_BYTES {
+            return markdown;
+        }
+
+        let mut clamp_at = MAX_MARKDOWN_BYTES;
+        while clamp_at > 0 && !markdown.is_char_boundary(clamp_at) {
+            clamp_at -= 1;
+        }
+        markdown.truncate(clamp_at);
+        markdown
+    }
+
     fn activity_text(&self) -> String {
         if self.unread_count == 0 {
             "idle".to_string()
@@ -66,8 +79,11 @@ impl PortalSurfaceState {
         let mut start = self.viewport_start_line.min(end);
         loop {
             let joined = self.history[start..end].join("\n");
-            if joined.len() <= MAX_MARKDOWN_BYTES || start + 1 >= end {
+            if joined.len() <= MAX_MARKDOWN_BYTES {
                 return joined;
+            }
+            if start + 1 >= end {
+                return Self::clamp_markdown_to_budget(joined);
             }
             start += 1;
         }
@@ -446,7 +462,7 @@ async fn collapsed_and_expanded_portal_surface_use_only_v1_node_types() {
     let root_node = scene.nodes.get(&root).expect("expanded root must exist");
     for child in &root_node.children {
         let node = scene.nodes.get(child).expect("child must exist");
-        match node.data {
+        match &node.data {
             NodeData::SolidColor(_)
             | NodeData::TextMarkdown(_)
             | NodeData::StaticImage(_)
@@ -549,8 +565,10 @@ fn expanded_transcript_materialization_is_bounded_to_viewport_and_budget() {
         apply.applied,
         "bounded expanded transcript batch must apply"
     );
+    let usage = scene.lease_resource_usage(&lease_id);
+    let tile_nodes = usage.nodes_per_tile.get(&tile_id).copied().unwrap_or(0);
     assert!(
-        scene.node_count() <= MAX_NODES_PER_TILE,
+        (tile_nodes as usize) <= MAX_NODES_PER_TILE,
         "expanded pilot node count must stay under per-tile node budget"
     );
 }
