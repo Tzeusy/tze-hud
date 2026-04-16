@@ -67,3 +67,10 @@ No parallelism is recommended in this tranche. The surfaces are small but tightl
 ## Recorded Beads Payload
 
 See `docs/reconciliations/presence_card_backlog_materialization_20260410.proposed_beads.json`.
+
+## Closeout Path
+
+- Reconciliation artifact (`hud-sx7q.5`):
+  `docs/reconciliations/presence_card_live_user_test_reconciliation_gen1_20260416.md`
+- Epic report (`hud-sx7q.6`):
+  `docs/reconciliations/presence_card_live_user_test_epic_report_20260416.md`
