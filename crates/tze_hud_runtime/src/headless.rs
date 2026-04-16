@@ -41,6 +41,7 @@
 //! Tests that don't exercise the session layer use this to skip server startup.
 
 use crate::component_startup::{register_profile_widgets, run_component_startup};
+use crate::element_store::bootstrap_scene_element_store;
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
 use crate::reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
 use crate::runtime_context::{FallbackPolicy, RuntimeContext};
@@ -321,6 +322,7 @@ impl HeadlessRuntime {
         compositor.set_token_map(compositor_token_map);
         tracing::debug!("headless: compositor token map applied");
 
+        let element_store_bootstrap = bootstrap_scene_element_store(&mut scene);
         let scene = Arc::new(Mutex::new(scene));
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&config.psk);
         let state = Arc::new(Mutex::new(SharedState {
@@ -329,6 +331,8 @@ impl HeadlessRuntime {
             resource_store: ResourceStore::new(ResourceStoreConfig::default()),
             widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
             runtime_widget_store: runtime_widget_store.clone(),
+            element_store: element_store_bootstrap.store,
+            element_store_path: Some(element_store_bootstrap.path),
             safe_mode_active: false,
             token_store: tze_hud_protocol::token::TokenStore::new(),
             freeze_active: false,

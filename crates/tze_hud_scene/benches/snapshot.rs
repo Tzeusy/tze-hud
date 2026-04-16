@@ -211,6 +211,7 @@ fn build_scene_with_widgets(tile_count: usize, widget_count: usize) -> SceneGrap
     for i in 0..widget_count {
         let instance_name = format!("gauge-{i}");
         scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "gauge".to_string(),
             tab_id,
             geometry_override: None,

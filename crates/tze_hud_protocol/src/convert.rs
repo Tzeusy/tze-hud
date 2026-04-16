@@ -1170,6 +1170,7 @@ pub fn proto_to_widget_instance(p: &proto::WidgetInstanceProto) -> Option<Widget
         .collect();
 
     Some(WidgetInstance {
+        id: SceneId::null(),
         widget_type_name: p.widget_type_name.clone(),
         tab_id,
         geometry_override,
@@ -1751,6 +1752,7 @@ mod tests {
         let def = make_widget_definition();
         let tab_id = SceneId::new();
         let instance = WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "gauge".to_string(),
             tab_id,
             geometry_override: None,

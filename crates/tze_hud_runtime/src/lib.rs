@@ -87,6 +87,7 @@ pub mod budget;
 pub mod channels;
 pub mod component_startup;
 pub mod degradation;
+pub mod element_store;
 pub mod event_bus;
 pub mod font_loader;
 pub mod headless;

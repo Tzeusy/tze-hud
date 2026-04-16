@@ -10,6 +10,7 @@
 pub mod calibration;
 pub mod clock;
 pub mod diff;
+pub mod element_store;
 pub mod graph;
 pub mod invariants;
 pub mod mutation;
@@ -34,6 +35,7 @@ pub use calibration::{
 };
 pub use clock::{Clock, SimulatedClock, SystemClock, TestClock};
 pub use diff::{DiffEntry, SceneDiff};
+pub use element_store::{ElementStore, ElementStoreEntry, ElementType};
 pub use graph::{
     MAX_MARKDOWN_BYTES,
     MAX_NODES_PER_TILE,

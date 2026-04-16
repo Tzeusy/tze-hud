@@ -1999,6 +1999,9 @@ pub struct WidgetDefinition {
 /// Widget instances are static in v1 (loaded from config; not agent-created).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WidgetInstance {
+    /// Stable element ID for this widget instance.
+    #[serde(default)]
+    pub id: SceneId,
     /// References `WidgetDefinition.id`.
     pub widget_type_name: std::string::String,
     /// The tab this instance is bound to.

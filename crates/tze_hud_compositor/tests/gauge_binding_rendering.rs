@@ -492,6 +492,7 @@ mod contention {
 
     use std::path::PathBuf;
     use tze_hud_scene::SceneGraph;
+    use tze_hud_scene::SceneId;
     use tze_hud_scene::types::WidgetInstance;
     use tze_hud_widget::loader::{BundleScanResult, load_bundle_dir_with_tokens};
 
@@ -570,6 +571,7 @@ mod contention {
             .collect();
 
         scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "gauge".to_string(),
             tab_id,
             geometry_override: None,

@@ -107,6 +107,7 @@ use crate::channels::{
     FrameReadyRx, FrameReadyTx, INPUT_EVENT_CAPACITY, InputEvent, InputEventKind,
     frame_ready_channel,
 };
+use crate::element_store::bootstrap_scene_element_store;
 use crate::mcp::{McpServerConfig, start_mcp_http_server};
 use crate::pipeline::FramePipeline;
 use crate::reload_triggers::RuntimeServiceImpl;
@@ -1381,7 +1382,13 @@ impl WindowedRuntime {
             .and_then(|toml| toml::from_str(toml).ok());
 
         let mut pending_widget_svgs: Vec<crate::widget_startup::WidgetSvgAsset> = Vec::new();
-        let (shared_scene, startup_compositor_tokens, runtime_widget_store) = {
+        let (
+            shared_scene,
+            startup_compositor_tokens,
+            runtime_widget_store,
+            startup_element_store,
+            startup_element_store_path,
+        ) = {
             let mut scene = SceneGraph::new(width, height);
 
             // Resolve config file parent directory for path resolution.
@@ -1454,10 +1461,13 @@ impl WindowedRuntime {
                     }
                 }
             }
+            let element_store_bootstrap = bootstrap_scene_element_store(&mut scene);
             (
                 Arc::new(Mutex::new(scene)),
                 compositor_tokens,
                 runtime_widget_store,
+                element_store_bootstrap.store,
+                element_store_bootstrap.path,
             )
         };
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&cfg.psk);
@@ -1469,6 +1479,8 @@ impl WindowedRuntime {
             ),
             widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
             runtime_widget_store: runtime_widget_store.clone(),
+            element_store: startup_element_store,
+            element_store_path: Some(startup_element_store_path),
             safe_mode_active: false,
             token_store: TokenStore::new(),
             freeze_active: false,
@@ -2283,6 +2295,7 @@ mod tests {
         scene
             .widget_registry
             .register_instance(tze_hud_scene::types::WidgetInstance {
+                id: tze_hud_scene::SceneId::new(),
                 widget_type_name: "status-indicator".to_string(),
                 tab_id,
                 geometry_override: Some(tze_hud_scene::types::GeometryPolicy::Relative {
@@ -2340,6 +2353,8 @@ mod tests {
             ),
             widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
             runtime_widget_store: None,
+            element_store: tze_hud_scene::element_store::ElementStore::default(),
+            element_store_path: None,
             safe_mode_active: false,
             token_store: TokenStore::new(),
             freeze_active: false,

@@ -29,6 +29,7 @@ use std::path::PathBuf;
 
 use tze_hud_compositor::widget::{apply_svg_attribute, resolve_binding_value};
 use tze_hud_scene::SceneGraph;
+use tze_hud_scene::SceneId;
 use tze_hud_scene::types::{
     ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetBindingMapping, WidgetInstance,
     WidgetParameterValue,
@@ -107,6 +108,7 @@ fn scene_with_status_indicator(
         .collect();
 
     scene.widget_registry.register_instance(WidgetInstance {
+        id: SceneId::new(),
         widget_type_name: "status-indicator".to_string(),
         tab_id,
         geometry_override: None,
