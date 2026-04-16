@@ -266,7 +266,10 @@ fn format_last_active(elapsed_seconds: u64) -> String {
 }
 
 fn build_status_content(elapsed_seconds: u64) -> String {
-    format!("Connected • last active {}", format_last_active(elapsed_seconds))
+    format!(
+        "Connected • last active {}",
+        format_last_active(elapsed_seconds)
+    )
 }
 
 fn build_chip_content(elapsed_seconds: u64) -> String {
@@ -593,7 +596,11 @@ async fn three_avatar_uploads_distinct_resource_ids() {
 fn presence_card_y_offsets_match_spec() {
     let h = DISPLAY_H;
 
-    assert_eq!(card_y_offset(0, h), h - 136.0, "agent 0 y = tab_height - 136");
+    assert_eq!(
+        card_y_offset(0, h),
+        h - 136.0,
+        "agent 0 y = tab_height - 136"
+    );
     assert_eq!(
         card_y_offset(1, h),
         h - 260.0,
@@ -913,7 +920,10 @@ async fn node_tree_builder_glass_card_nodes() {
             txt.content.contains("**AgentAlpha**"),
             "glass-card layout must include the bold agent name"
         );
-        assert_eq!(txt.font_size_px, NAME_FONT_SIZE_PX, "name font size must match spec");
+        assert_eq!(
+            txt.font_size_px, NAME_FONT_SIZE_PX,
+            "name font size must match spec"
+        );
         assert!(
             (txt.color.r - NAME_RGBA.r).abs() < 1e-5,
             "glass-card name tint must match spec"
@@ -927,7 +937,10 @@ async fn node_tree_builder_glass_card_nodes() {
 
     if let NodeData::HitRegion(hr) = &child11.data {
         assert_eq!(hr.interaction_id, DISMISS_INTERACTION_ID);
-        assert!(hr.accepts_pointer, "dismiss affordance must accept pointer input");
+        assert!(
+            hr.accepts_pointer,
+            "dismiss affordance must accept pointer input"
+        );
     }
 
     // Verify total node count

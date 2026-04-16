@@ -5524,9 +5524,7 @@ impl Compositor {
                     vertices.extend_from_slice(&verts);
 
                     let text_margin = 8.0;
-                    if tm.bounds.width > text_margin * 2.0
-                        && tm.bounds.height > text_margin * 2.0
-                    {
+                    if tm.bounds.width > text_margin * 2.0 && tm.bounds.height > text_margin * 2.0 {
                         let verts = rect_vertices(
                             tile.bounds.x + tm.bounds.x + text_margin - scroll_x,
                             tile.bounds.y + tm.bounds.y + text_margin - scroll_y,

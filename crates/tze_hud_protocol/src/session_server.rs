@@ -4199,6 +4199,16 @@ async fn send_resource_stored(
         .await;
 }
 
+async fn register_uploaded_scene_resource(
+    state: &Arc<Mutex<SharedState>>,
+    resource_id: &tze_hud_resource::ResourceId,
+) {
+    let scene_resource_id = ResourceId::from_bytes(*resource_id.as_bytes());
+    let st = state.lock().await;
+    let mut scene = st.scene.lock().await;
+    scene.register_resource(scene_resource_id);
+}
+
 async fn send_resource_error_response(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
@@ -4316,6 +4326,7 @@ async fn handle_resource_upload_start(
 
     match store.handle_upload_start(request).await {
         Ok(Some(stored)) => {
+            register_uploaded_scene_resource(state, &stored.resource_id).await;
             send_resource_stored(
                 session,
                 tx,
@@ -4475,6 +4486,7 @@ async fn handle_resource_upload_complete(
     {
         Ok(stored) => {
             session.resource_uploads.remove(&upload_id_bytes);
+            register_uploaded_scene_resource(state, &stored.resource_id).await;
             send_resource_stored(
                 session,
                 tx,
@@ -7392,6 +7404,22 @@ mod tests {
         );
         assert_eq!(
             classify_server_payload(&ServerPayload::RuntimeError(RuntimeError::default())),
+            TrafficClass::Transactional,
+        );
+        assert_eq!(
+            classify_server_payload(&ServerPayload::ResourceUploadAccepted(
+                ResourceUploadAccepted::default(),
+            )),
+            TrafficClass::Transactional,
+        );
+        assert_eq!(
+            classify_server_payload(&ServerPayload::ResourceStored(ResourceStored::default())),
+            TrafficClass::Transactional,
+        );
+        assert_eq!(
+            classify_server_payload(&ServerPayload::ResourceErrorResponse(
+                ResourceErrorResponse::default(),
+            )),
             TrafficClass::Transactional,
         );
 
@@ -11687,6 +11715,10 @@ mod tests {
         ]
     }
 
+    fn tiny_rgba_1x1(pixel: [u8; 4]) -> Vec<u8> {
+        pixel.to_vec()
+    }
+
     #[tokio::test]
     async fn test_resource_upload_start_requires_upload_resource_capability() {
         let (mut client, handle) = setup_widget_test().await;
@@ -11863,6 +11895,218 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resource_upload_chunked_concurrent_limit_rejected() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-concurrent-limit",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        // ResourceStore allows at most 4 in-flight uploads per agent namespace.
+        for offset in 0..5u8 {
+            let seq = u64::from(offset) + 2;
+            let payload = tiny_rgba_1x1([offset, 0, 0, 0xFF]);
+            tx.send(ClientMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                    expected_hash: blake3::hash(&payload).as_bytes().to_vec(),
+                    resource_type: 1, // IMAGE_RGBA8
+                    total_size_bytes: payload.len() as u64,
+                    metadata: Some(ResourceMetadata {
+                        width: 1,
+                        height: 1,
+                        ..Default::default()
+                    }),
+                    inline_data: Vec::new(),
+                })),
+            })
+            .await
+            .unwrap();
+
+            let msg = next_non_state_change(&mut stream).await;
+            if offset < 4 {
+                match &msg.payload {
+                    Some(ServerPayload::ResourceUploadAccepted(accepted)) => {
+                        assert_eq!(accepted.request_sequence, seq);
+                        assert_eq!(accepted.upload_id.len(), 16);
+                    }
+                    other => panic!("expected ResourceUploadAccepted, got: {other:?}"),
+                }
+            } else {
+                match &msg.payload {
+                    Some(ServerPayload::ResourceErrorResponse(err)) => {
+                        assert_eq!(err.request_sequence, seq);
+                        assert_eq!(err.error_code, 8);
+                        assert!(err.upload_id.is_empty());
+                    }
+                    other => panic!("expected ResourceErrorResponse, got: {other:?}"),
+                }
+            }
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_resource_upload_chunked_success_correlates_by_request_sequence() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-correlation",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        let payload_a = tiny_rgba_1x1([0, 0, 0, 0xFF]);
+        let payload_b = tiny_rgba_1x1([0xFF, 0, 0, 0xFF]);
+        let expected_a = blake3::hash(&payload_a).as_bytes().to_vec();
+        let expected_b = blake3::hash(&payload_b).as_bytes().to_vec();
+
+        for (seq, expected_hash) in [(2u64, expected_a.clone()), (3u64, expected_b.clone())] {
+            tx.send(ClientMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                    expected_hash,
+                    resource_type: 1, // IMAGE_RGBA8
+                    total_size_bytes: 4,
+                    metadata: Some(ResourceMetadata {
+                        width: 1,
+                        height: 1,
+                        ..Default::default()
+                    }),
+                    inline_data: Vec::new(),
+                })),
+            })
+            .await
+            .unwrap();
+        }
+
+        let mut upload_id_by_request = HashMap::new();
+        for _ in 0..2 {
+            let msg = next_non_state_change(&mut stream).await;
+            match &msg.payload {
+                Some(ServerPayload::ResourceUploadAccepted(accepted)) => {
+                    upload_id_by_request
+                        .insert(accepted.request_sequence, accepted.upload_id.clone());
+                }
+                other => panic!("expected ResourceUploadAccepted, got: {other:?}"),
+            }
+        }
+        assert_eq!(upload_id_by_request.len(), 2);
+        let upload_a = upload_id_by_request
+            .get(&2)
+            .expect("request 2 must have upload_id")
+            .clone();
+        let upload_b = upload_id_by_request
+            .get(&3)
+            .expect("request 3 must have upload_id")
+            .clone();
+
+        // Complete request 3 before request 2 to assert correlation semantics.
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_b.clone(),
+                chunk_index: 0,
+                data: payload_b.clone(),
+            })),
+        })
+        .await
+        .unwrap();
+        tx.send(ClientMessage {
+            sequence: 5,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadComplete(
+                ResourceUploadComplete {
+                    upload_id: upload_b.clone(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 6,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_a.clone(),
+                chunk_index: 0,
+                data: payload_a.clone(),
+            })),
+        })
+        .await
+        .unwrap();
+        tx.send(ClientMessage {
+            sequence: 7,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadComplete(
+                ResourceUploadComplete {
+                    upload_id: upload_a.clone(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        let mut stored_by_request = HashMap::new();
+        for _ in 0..2 {
+            let msg = next_non_state_change(&mut stream).await;
+            match &msg.payload {
+                Some(ServerPayload::ResourceStored(stored)) => {
+                    let bytes = stored
+                        .resource_id
+                        .as_ref()
+                        .expect("resource_id must be present")
+                        .bytes
+                        .clone();
+                    stored_by_request
+                        .insert(stored.request_sequence, (stored.upload_id.clone(), bytes));
+                }
+                other => panic!("expected ResourceStored, got: {other:?}"),
+            }
+        }
+
+        assert_eq!(stored_by_request.len(), 2);
+        assert_eq!(
+            stored_by_request
+                .get(&2)
+                .expect("request 2 stored result must exist")
+                .0,
+            upload_a
+        );
+        assert_eq!(
+            stored_by_request
+                .get(&3)
+                .expect("request 3 stored result must exist")
+                .0,
+            upload_b
+        );
+        assert_eq!(
+            stored_by_request
+                .get(&2)
+                .expect("request 2 stored result must exist")
+                .1,
+            expected_a
+        );
+        assert_eq!(
+            stored_by_request
+                .get(&3)
+                .expect("request 3 stored result must exist")
+                .1,
+            expected_b
+        );
+
+        drop(handle);
+    }
+
+    #[tokio::test]
     async fn test_resource_upload_chunked_zero_size_rejected() {
         let (mut client, handle) = setup_widget_test().await;
         let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
@@ -11956,6 +12200,7 @@ mod tests {
             Some(ServerPayload::ResourceErrorResponse(err)) => {
                 assert_eq!(err.request_sequence, 2);
                 assert_eq!(err.error_code, 7);
+                assert_eq!(err.upload_id, upload_id);
             }
             other => panic!("expected ResourceErrorResponse after bad chunk, got: {other:?}"),
         }
@@ -11977,6 +12222,184 @@ mod tests {
                 assert_eq!(err.error_code, 9);
             }
             other => panic!("expected ResourceErrorResponse after aborted upload, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_resident_upload_then_static_image_references_uploaded_resource_id() {
+        let service = setup_widget_service().await;
+        let shared_state = service.state.clone();
+        let (mut client, handle) = setup_widget_test_with_service(service).await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-scene-node",
+            "test-key",
+            &["upload_resource", "modify_own_tiles"],
+        )
+        .await;
+
+        let payload = tiny_png_1x1_rgba();
+        let hash = blake3::hash(&payload).as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash,
+                resource_type: 2, // IMAGE_PNG
+                total_size_bytes: payload.len() as u64,
+                metadata: Some(ResourceMetadata::default()),
+                inline_data: payload,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let stored = next_non_state_change(&mut stream).await;
+        let resource_id_bytes = match stored.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                stored
+                    .resource_id
+                    .expect("resource_id must be present on success")
+                    .bytes
+            }
+            other => panic!("expected ResourceStored, got: {other:?}"),
+        };
+        let resource_id = ResourceId::from_bytes(
+            resource_id_bytes
+                .as_slice()
+                .try_into()
+                .expect("resource_id must be 32 bytes"),
+        );
+        {
+            let st = shared_state.lock().await;
+            let scene = st.scene.lock().await;
+            assert!(
+                scene.is_resource_registered(&resource_id),
+                "uploaded resources must be registered for scene mutation validation"
+            );
+        }
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let lease_msg = next_non_state_change(&mut stream).await;
+        let lease_id = match lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id,
+            other => panic!("expected granted LeaseResponse, got: {other:?}"),
+        };
+
+        let create_batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: create_batch_id.clone(),
+                lease_id: lease_id.clone(),
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
+                        crate::proto::CreateTileMutation {
+                            tab_id: vec![],
+                            bounds: Some(crate::proto::Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 120.0,
+                                height: 120.0,
+                                ..Default::default()
+                            }),
+                            z_order: 1,
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let create_result = next_non_state_change(&mut stream).await;
+        let tile_id_bytes = match create_result.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(result.accepted, "create tile mutation should be accepted");
+                assert_eq!(result.batch_id, create_batch_id);
+                result
+                    .created_ids
+                    .first()
+                    .cloned()
+                    .expect("create tile should return one created tile id")
+            }
+            other => panic!("expected MutationResult for create tile, got: {other:?}"),
+        };
+
+        let root_node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                resource_id,
+                width: 1,
+                height: 1,
+                decoded_bytes: 4,
+                fit_mode: ImageFitMode::Contain,
+                bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+            }),
+        };
+
+        let set_root_batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 5,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: set_root_batch_id.clone(),
+                lease_id,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::SetTileRoot(
+                        crate::proto::SetTileRootMutation {
+                            tile_id: tile_id_bytes.clone(),
+                            node: Some(crate::convert::scene_node_to_proto(&root_node)),
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let set_root_result = next_non_state_change(&mut stream).await;
+        match set_root_result.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(result.accepted, "set_tile_root should be accepted");
+                assert_eq!(result.batch_id, set_root_batch_id);
+            }
+            other => panic!("expected MutationResult for set_tile_root, got: {other:?}"),
+        }
+
+        let tile_id = bytes_to_scene_id(&tile_id_bytes).expect("tile id from mutation must decode");
+        {
+            let st = shared_state.lock().await;
+            let scene = st.scene.lock().await;
+            let tile = scene.tiles.get(&tile_id).expect("tile must exist");
+            let root_id = tile.root_node.expect("tile must have root node");
+            let root = scene.nodes.get(&root_id).expect("root node must exist");
+            match &root.data {
+                NodeData::StaticImage(static_image) => {
+                    assert_eq!(
+                        static_image.resource_id, resource_id,
+                        "scene node must reference uploaded ResourceId"
+                    );
+                }
+                other => panic!("expected StaticImage root node, got: {other:?}"),
+            }
         }
 
         drop(handle);

@@ -110,7 +110,10 @@ pub fn format_elapsed_secs(elapsed_secs: u64) -> String {
 /// Build the TextMarkdownNode content string for the given agent name and elapsed time.
 pub fn build_text_content(agent_name: &str, elapsed_secs: u64) -> String {
     let _ = agent_name;
-    format!("Connected • last active {}", format_elapsed_secs(elapsed_secs))
+    format!(
+        "Connected • last active {}",
+        format_elapsed_secs(elapsed_secs)
+    )
 }
 
 // ─── Tile geometry helpers ────────────────────────────────────────────────────
