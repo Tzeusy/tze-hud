@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tze_hud_runtime::{
     build_redaction_cmds, collect_diagnostic, hit_regions_enabled, is_tile_redacted,
     AttentionBudgetOutcome, AttentionBudgetTracker, ChromeState, ContentClassification,
-    EnqueueResult, FreezeQueue, MutationTrafficClass, QueuedMutation, RedactionStyle,
-    TileRedactionState, ViewerClass,
+    EnqueueResult, FreezeQueue, MutationTrafficClass, QueuedMutation, RedactionFrame,
+    RedactionStyle, TileRedactionState, ViewerClass,
 };
 use tze_hud_scene::{
     events::InterruptionClass,
@@ -250,16 +250,25 @@ fn redaction_preserves_geometry_and_hides_portal_content() {
         "redaction overlay must preserve tile geometry"
     );
 
-    // Rendered content is replaced by neutral redaction treatment.
-    let visible_text = if is_tile_redacted(ViewerClass::KnownGuest, ContentClassification::Private)
-    {
-        "<redacted>".to_string()
-    } else {
-        raw_text.clone()
-    };
-    assert_ne!(
-        visible_text, raw_text,
-        "redacted viewer must not receive transcript content"
+    let frame = RedactionFrame::build(
+        ViewerClass::KnownGuest,
+        RedactionStyle::Pattern,
+        1,
+        &[(0, ContentClassification::Private)],
+    );
+    assert!(
+        frame.is_redacted(0),
+        "redaction frame must mark private tile as redacted for known guest viewer"
+    );
+    assert_eq!(
+        portal_text(&scene, tile_id),
+        raw_text,
+        "redaction must not mutate the underlying scene transcript data"
+    );
+    let overlay_debug = format!("{cmds:?}");
+    assert!(
+        !overlay_debug.contains(&raw_text),
+        "redaction overlay commands must not carry transcript content"
     );
 }
 
@@ -376,12 +385,23 @@ fn unread_backlog_defaults_to_ambient_attention_class() {
 
 #[test]
 fn shell_status_snapshot_exposes_no_portal_identity_or_transcript() {
-    let (scene, _clock, _tab_id, _lease_id, _tile_id) = create_portal_scene(120_000);
+    let (scene, _clock, _tab_id, _lease_id, tile_id) = create_portal_scene(120_000);
+    let transcript = portal_text(&scene, tile_id);
     let mut chrome = ChromeState::new();
     chrome.connected_agent_count = 1;
-    chrome.add_tab(1, "Main".to_string());
+    chrome.add_tab(1, "portal://agent/session".to_string());
+    chrome.add_tab(2, format!("preview:{transcript}"));
+    assert!(
+        chrome.tabs.iter().any(|tab| tab.name.contains("portal://")),
+        "test setup must include portal identity in chrome input state"
+    );
+    assert!(
+        chrome.tabs.iter().any(|tab| tab.name.contains(&transcript)),
+        "test setup must include transcript-like content in chrome input state"
+    );
 
     let snapshot = collect_diagnostic(&chrome, 123_456, scene.leases.len());
+    assert_eq!(snapshot.tab_count, 2, "snapshot should still report tab count");
     let text = snapshot.to_string();
 
     assert!(
@@ -389,8 +409,8 @@ fn shell_status_snapshot_exposes_no_portal_identity_or_transcript() {
         "shell diagnostics must not expose portal identity"
     );
     assert!(
-        !text.contains("line 0"),
-        "shell diagnostics must not expose transcript previews"
+        !text.contains(&transcript),
+        "shell diagnostics must not expose transcript-derived content"
     );
 }
 
