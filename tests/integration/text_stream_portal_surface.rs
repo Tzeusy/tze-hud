@@ -404,6 +404,7 @@ fn expand_and_collapse_toggle_transcript_visibility() {
             "line three".to_string(),
         ],
         unread_count: 3,
+        typing_active: false,
         expanded: false,
         viewport_start_line: 0,
         viewport_max_lines: 16,
@@ -929,7 +930,7 @@ fn portal_activity_indicators_remain_ambient_under_backlog_and_typing() {
         &PortalSurfaceState {
             unread_count: 500,
             typing_active: true,
-            ..base
+            ..base.clone()
         },
         icon_id,
     );
