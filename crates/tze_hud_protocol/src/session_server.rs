@@ -45,6 +45,7 @@ use quick_xml::events::Event;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tze_hud_resource::{
@@ -809,6 +810,456 @@ struct ResidentUploadState {
     total_size_bytes: u64,
 }
 
+/// Sliding-window byte limiter for resident upload payload intake.
+///
+/// Tracks accepted upload bytes in a 1-second window. The session handler
+/// uses this to apply transport backpressure by delaying additional read
+/// processing until enough bytes leave the active window.
+#[derive(Debug)]
+struct UploadByteRateLimiter {
+    limit_bytes_per_second: usize,
+    window: VecDeque<(Instant, usize)>,
+    bytes_in_window: usize,
+}
+
+impl UploadByteRateLimiter {
+    fn with_limit(limit_bytes_per_second: usize) -> Self {
+        Self {
+            limit_bytes_per_second,
+            window: VecDeque::new(),
+            bytes_in_window: 0,
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        while let Some(&(ts, bytes)) = self.window.front() {
+            if now.duration_since(ts) >= Duration::from_secs(1) {
+                self.window.pop_front();
+                self.bytes_in_window = self.bytes_in_window.saturating_sub(bytes);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn available_bytes(&mut self, now: Instant) -> usize {
+        if self.limit_bytes_per_second == 0 {
+            return usize::MAX;
+        }
+        self.prune(now);
+        self.limit_bytes_per_second
+            .saturating_sub(self.bytes_in_window)
+    }
+
+    fn reserve_bytes(&mut self, now: Instant, bytes: usize) {
+        if self.limit_bytes_per_second == 0 || bytes == 0 {
+            return;
+        }
+        self.window.push_back((now, bytes));
+        self.bytes_in_window = self.bytes_in_window.saturating_add(bytes);
+    }
+
+    fn next_delay(&mut self, now: Instant) -> Duration {
+        if self.limit_bytes_per_second == 0 {
+            return Duration::ZERO;
+        }
+        self.prune(now);
+        match self.window.front() {
+            Some((ts, _)) => Duration::from_secs(1).saturating_sub(now.duration_since(*ts)),
+            None => Duration::ZERO,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum UploadWorkerCommand {
+    Start {
+        request_sequence: u64,
+        capabilities: Vec<String>,
+        start: ResourceUploadStart,
+    },
+    Chunk {
+        request_sequence: u64,
+        chunk: ResourceUploadChunk,
+    },
+    Complete {
+        request_sequence: u64,
+        capabilities: Vec<String>,
+        complete: ResourceUploadComplete,
+    },
+}
+
+#[derive(Debug)]
+enum UploadWorkerEvent {
+    UploadAccepted {
+        request_sequence: u64,
+        upload_id: [u8; 16],
+    },
+    Stored {
+        request_sequence: u64,
+        stored: StoreResourceStored,
+        stored_bytes: u64,
+        metadata: ResourceMetadata,
+        upload_id: Option<[u8; 16]>,
+    },
+    Error {
+        request_sequence: u64,
+        upload_id: Option<Vec<u8>>,
+        err: StoreResourceError,
+    },
+}
+
+async fn run_upload_worker(
+    state: Arc<Mutex<SharedState>>,
+    namespace: String,
+    mut command_rx: tokio::sync::mpsc::Receiver<UploadWorkerCommand>,
+    event_tx: tokio::sync::mpsc::Sender<UploadWorkerEvent>,
+    upload_rate_limit_bytes_per_sec: usize,
+) {
+    let store = {
+        let st = state.lock().await;
+        st.resource_store.clone()
+    };
+    let mut in_flight_uploads: HashMap<[u8; 16], ResidentUploadState> = HashMap::new();
+    let mut upload_rate_limiter =
+        UploadByteRateLimiter::with_limit(upload_rate_limit_bytes_per_sec);
+
+    while let Some(command) = command_rx.recv().await {
+        match command {
+            UploadWorkerCommand::Start {
+                request_sequence,
+                capabilities,
+                start,
+            } => {
+                let resource_type = match proto_resource_type_to_store(start.resource_type) {
+                    Some(v) => v,
+                    None => {
+                        let err = StoreResourceError::UnsupportedType(format!(
+                            "unknown resource_type enum value {}",
+                            start.resource_type
+                        ));
+                        if event_tx
+                            .send(UploadWorkerEvent::Error {
+                                request_sequence,
+                                upload_id: None,
+                                err,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+
+                let expected_hash: [u8; 32] = match start.expected_hash.as_slice().try_into() {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        let err = StoreResourceError::HashMismatch {
+                            computed: "invalid".to_string(),
+                            expected: format!("len={} (expected 32)", start.expected_hash.len()),
+                        };
+                        if event_tx
+                            .send(UploadWorkerEvent::Error {
+                                request_sequence,
+                                upload_id: None,
+                                err,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+
+                let metadata = start.metadata.unwrap_or_default();
+                if start.inline_data.is_empty() && start.total_size_bytes == 0 {
+                    let err = StoreResourceError::SizeExceeded {
+                        detail: "total_size_bytes must be > 0 for chunked uploads".to_string(),
+                    };
+                    if event_tx
+                        .send(UploadWorkerEvent::Error {
+                            request_sequence,
+                            upload_id: None,
+                            err,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+
+                let total_size = match usize::try_from(start.total_size_bytes) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let err = StoreResourceError::SizeExceeded {
+                            detail: format!(
+                                "total_size_bytes {} exceeds platform limit {}",
+                                start.total_size_bytes,
+                                usize::MAX
+                            ),
+                        };
+                        if event_tx
+                            .send(UploadWorkerEvent::Error {
+                                request_sequence,
+                                upload_id: None,
+                                err,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+
+                let upload_id_bytes = *uuid::Uuid::now_v7().as_bytes();
+                let inline_bytes = start.inline_data.len();
+                let request = UploadStartRequest {
+                    agent_namespace: namespace.clone(),
+                    agent_capabilities: capabilities,
+                    agent_budget: AgentBudget {
+                        texture_bytes_total_limit: 0,
+                        texture_bytes_total_used: 0,
+                    },
+                    upload_id: UploadId::from_bytes(upload_id_bytes),
+                    resource_type,
+                    expected_hash,
+                    total_size,
+                    inline_data: start.inline_data,
+                    width: metadata.width,
+                    height: metadata.height,
+                };
+
+                if inline_bytes > 0 {
+                    apply_upload_transport_backpressure(&mut upload_rate_limiter, inline_bytes)
+                        .await;
+                }
+
+                match store.handle_upload_start(request).await {
+                    Ok(Some(stored)) => {
+                        register_uploaded_scene_resource(&state, &stored.resource_id).await;
+                        if event_tx
+                            .send(UploadWorkerEvent::Stored {
+                                request_sequence,
+                                stored,
+                                stored_bytes: start.total_size_bytes,
+                                metadata,
+                                upload_id: None,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(None) => {
+                        in_flight_uploads.insert(
+                            upload_id_bytes,
+                            ResidentUploadState {
+                                request_sequence,
+                                metadata,
+                                total_size_bytes: start.total_size_bytes,
+                            },
+                        );
+                        if event_tx
+                            .send(UploadWorkerEvent::UploadAccepted {
+                                request_sequence,
+                                upload_id: upload_id_bytes,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        if event_tx
+                            .send(UploadWorkerEvent::Error {
+                                request_sequence,
+                                upload_id: None,
+                                err,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            UploadWorkerCommand::Chunk {
+                request_sequence,
+                chunk,
+            } => {
+                let upload_id_bytes = match upload_id_bytes_from_slice(&chunk.upload_id) {
+                    Some(id) => id,
+                    None => {
+                        let err = StoreResourceError::InvalidChunk(format!(
+                            "upload_id length={} (must be 16)",
+                            chunk.upload_id.len()
+                        ));
+                        if event_tx
+                            .send(UploadWorkerEvent::Error {
+                                request_sequence,
+                                upload_id: Some(chunk.upload_id.clone()),
+                                err,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+
+                let Some(tracked) = in_flight_uploads.get(&upload_id_bytes).cloned() else {
+                    let err = StoreResourceError::InvalidChunk(
+                        "upload_id is not in-flight for this session".to_string(),
+                    );
+                    if event_tx
+                        .send(UploadWorkerEvent::Error {
+                            request_sequence,
+                            upload_id: Some(chunk.upload_id.clone()),
+                            err,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                };
+
+                if !chunk.data.is_empty() {
+                    apply_upload_transport_backpressure(&mut upload_rate_limiter, chunk.data.len())
+                        .await;
+                }
+
+                if let Err(err) = store
+                    .handle_upload_chunk(
+                        &namespace,
+                        UploadId::from_bytes(upload_id_bytes),
+                        chunk.chunk_index,
+                        chunk.data,
+                    )
+                    .await
+                {
+                    in_flight_uploads.remove(&upload_id_bytes);
+                    if event_tx
+                        .send(UploadWorkerEvent::Error {
+                            request_sequence: tracked.request_sequence,
+                            upload_id: Some(upload_id_bytes.to_vec()),
+                            err,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            UploadWorkerCommand::Complete {
+                request_sequence,
+                capabilities,
+                complete,
+            } => {
+                let upload_id_bytes = match upload_id_bytes_from_slice(&complete.upload_id) {
+                    Some(id) => id,
+                    None => {
+                        let err = StoreResourceError::InvalidChunk(format!(
+                            "upload_id length={} (must be 16)",
+                            complete.upload_id.len()
+                        ));
+                        if event_tx
+                            .send(UploadWorkerEvent::Error {
+                                request_sequence,
+                                upload_id: Some(complete.upload_id.clone()),
+                                err,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+
+                let Some(tracked) = in_flight_uploads.get(&upload_id_bytes).cloned() else {
+                    let err = StoreResourceError::InvalidChunk(
+                        "upload_id is not in-flight for this session".to_string(),
+                    );
+                    if event_tx
+                        .send(UploadWorkerEvent::Error {
+                            request_sequence,
+                            upload_id: Some(complete.upload_id.clone()),
+                            err,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                };
+
+                match store
+                    .handle_upload_complete(
+                        &namespace,
+                        UploadId::from_bytes(upload_id_bytes),
+                        &capabilities,
+                        &AgentBudget {
+                            texture_bytes_total_limit: 0,
+                            texture_bytes_total_used: 0,
+                        },
+                    )
+                    .await
+                {
+                    Ok(stored) => {
+                        in_flight_uploads.remove(&upload_id_bytes);
+                        register_uploaded_scene_resource(&state, &stored.resource_id).await;
+                        if event_tx
+                            .send(UploadWorkerEvent::Stored {
+                                request_sequence: tracked.request_sequence,
+                                stored,
+                                stored_bytes: tracked.total_size_bytes,
+                                metadata: tracked.metadata,
+                                upload_id: Some(upload_id_bytes),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        in_flight_uploads.remove(&upload_id_bytes);
+                        if event_tx
+                            .send(UploadWorkerEvent::Error {
+                                request_sequence: tracked.request_sequence,
+                                upload_id: Some(upload_id_bytes.to_vec()),
+                                err,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ─── Session state ──────────────────────────────────────────────────────────
 
 /// Per-session state tracked by the streaming server.
@@ -883,8 +1334,8 @@ struct StreamSession {
     /// idempotent handling.
     lease_correlation_cache: LeaseCorrelationCache,
 
-    /// In-flight resident scene-resource uploads keyed by assigned upload ID bytes.
-    resource_uploads: HashMap<[u8; 16], ResidentUploadState>,
+    /// Per-session upload-byte limiter for resident resource transport.
+    resource_upload_rate_limiter: UploadByteRateLimiter,
 }
 
 impl StreamSession {
@@ -1366,6 +1817,20 @@ impl HudSession for HudSessionImpl {
                     .await;
             }
 
+            let upload_rate_limit_bytes_per_sec =
+                session.resource_upload_rate_limiter.limit_bytes_per_second;
+            let (upload_command_tx, upload_command_rx) =
+                tokio::sync::mpsc::channel::<UploadWorkerCommand>(64);
+            let (upload_event_tx, mut upload_event_rx) =
+                tokio::sync::mpsc::channel::<UploadWorkerEvent>(64);
+            tokio::spawn(run_upload_worker(
+                state.clone(),
+                session.namespace.clone(),
+                upload_command_rx,
+                upload_event_tx,
+                upload_rate_limit_bytes_per_sec,
+            ));
+
             // Main message loop
             //
             // The loop exits for one of three reasons:
@@ -1436,7 +1901,14 @@ impl HudSession for HudSessionImpl {
                                     // This is a retransmit: dispatch to the lease handler which
                                     // will replay the cached response.  Skip sequence validation
                                     // so the duplicate sequence does not terminate the session.
-                                    handle_client_message(&state, session, &tx, msg).await;
+                                    handle_client_message(
+                                        &state,
+                                        session,
+                                        &tx,
+                                        &upload_command_tx,
+                                        msg,
+                                    )
+                                    .await;
                                     continue;
                                 }
 
@@ -1478,7 +1950,14 @@ impl HudSession for HudSessionImpl {
                                     Some(ClientPayload::SessionClose(_))
                                 );
 
-                                handle_client_message(&state, session, &tx, msg).await;
+                                handle_client_message(
+                                    &state,
+                                    session,
+                                    &tx,
+                                    &upload_command_tx,
+                                    msg,
+                                )
+                                .await;
 
                                 // After handling SessionClose, transition to Disconnecting then Closed
                                 if is_close {
@@ -1499,6 +1978,65 @@ impl HudSession for HudSessionImpl {
                             }
                             Err(_) => {
                                 // Heartbeat timeout (RFC 0005 §1.6, §3.6)
+                                session.transition(SessionState::Closed);
+                                break;
+                            }
+                        }
+                    }
+
+                    upload_event = upload_event_rx.recv() => {
+                        match upload_event {
+                            Some(UploadWorkerEvent::UploadAccepted {
+                                request_sequence,
+                                upload_id,
+                            }) => {
+                                let seq = session.next_server_seq();
+                                let _ = tx
+                                    .send(Ok(ServerMessage {
+                                        sequence: seq,
+                                        timestamp_wall_us: now_wall_us(),
+                                        payload: Some(ServerPayload::ResourceUploadAccepted(
+                                            ResourceUploadAccepted {
+                                                request_sequence,
+                                                upload_id: upload_id.to_vec(),
+                                            },
+                                        )),
+                                    }))
+                                    .await;
+                            }
+                            Some(UploadWorkerEvent::Stored {
+                                request_sequence,
+                                stored,
+                                stored_bytes,
+                                metadata,
+                                upload_id,
+                            }) => {
+                                send_resource_stored(
+                                    session,
+                                    &tx,
+                                    request_sequence,
+                                    &stored,
+                                    stored_bytes,
+                                    metadata,
+                                    upload_id.as_ref(),
+                                )
+                                .await;
+                            }
+                            Some(UploadWorkerEvent::Error {
+                                request_sequence,
+                                upload_id,
+                                err,
+                            }) => {
+                                send_resource_error_response(
+                                    session,
+                                    &tx,
+                                    request_sequence,
+                                    upload_id.as_deref(),
+                                    &err,
+                                )
+                                .await;
+                            }
+                            None => {
                                 session.transition(SessionState::Closed);
                                 break;
                             }
@@ -1809,13 +2347,14 @@ async fn handle_session_init(
     let namespace = init.agent_id.clone();
     let resume_token = uuid::Uuid::now_v7().as_bytes().to_vec();
 
-    // Register session in the session registry
-    {
+    // Register session in the session registry and capture upload rate config.
+    let upload_rate_limit_bytes_per_sec = {
         let mut st = state.lock().await;
         let _ = st
             .sessions
             .authenticate(&init.agent_id, psk, &granted_capabilities);
-    }
+        st.resource_store.upload_rate_limit_bytes_per_sec()
+    };
 
     let session_open_at = now_wall_us();
     let mut session = StreamSession {
@@ -1841,7 +2380,9 @@ async fn handle_session_init(
         lease_correlation_cache: LeaseCorrelationCache::new(
             DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
         ),
-        resource_uploads: HashMap::new(),
+        resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
+            upload_rate_limit_bytes_per_sec,
+        ),
     };
 
     // ── Step 5: Clock skew estimation (RFC 0003 §1.3) ────────────────────────
@@ -1955,13 +2496,15 @@ async fn handle_session_resume(
     let new_resume_token = uuid::Uuid::now_v7().as_bytes().to_vec();
 
     // Register the resumed agent in the session registry so shared-state
-    // operations (e.g. lease grant, broadcast) can find it.
-    {
+    // operations (e.g. lease grant, broadcast) can find it, and capture the
+    // current upload-rate configuration for this session.
+    let upload_rate_limit_bytes_per_sec = {
         let mut st = state.lock().await;
         let _ = st
             .sessions
             .authenticate(&resume.agent_id, psk, &prior_entry.capabilities);
-    }
+        st.resource_store.upload_rate_limit_bytes_per_sec()
+    };
 
     // Reconstruct policy_caps for the resumed session using the same config-driven
     // lookup as new sessions.  `capabilities` (restored from TokenStore) holds the
@@ -1999,7 +2542,9 @@ async fn handle_session_resume(
         lease_correlation_cache: LeaseCorrelationCache::new(
             DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
         ),
-        resource_uploads: HashMap::new(),
+        resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
+            upload_rate_limit_bytes_per_sec,
+        ),
     };
 
     let compositor_ts = now_wall_us();
@@ -2033,6 +2578,7 @@ async fn handle_client_message(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    upload_command_tx: &tokio::sync::mpsc::Sender<UploadWorkerCommand>,
     msg: ClientMessage,
 ) {
     let client_sequence = msg.sequence;
@@ -2110,13 +2656,30 @@ async fn handle_client_message(
             handle_widget_asset_register(state, session, tx, client_sequence, register).await;
         }
         ClientPayload::ResourceUploadStart(start) => {
-            handle_resource_upload_start(state, session, tx, client_sequence, start).await;
+            let _ = upload_command_tx
+                .send(UploadWorkerCommand::Start {
+                    request_sequence: client_sequence,
+                    capabilities: session.capabilities.clone(),
+                    start,
+                })
+                .await;
         }
         ClientPayload::ResourceUploadChunk(chunk) => {
-            handle_resource_upload_chunk(state, session, tx, client_sequence, chunk).await;
+            let _ = upload_command_tx
+                .send(UploadWorkerCommand::Chunk {
+                    request_sequence: client_sequence,
+                    chunk,
+                })
+                .await;
         }
         ClientPayload::ResourceUploadComplete(complete) => {
-            handle_resource_upload_complete(state, session, tx, client_sequence, complete).await;
+            let _ = upload_command_tx
+                .send(UploadWorkerCommand::Complete {
+                    request_sequence: client_sequence,
+                    capabilities: session.capabilities.clone(),
+                    complete,
+                })
+                .await;
         }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {
@@ -4734,6 +5297,29 @@ fn upload_id_bytes_from_slice(upload_id: &[u8]) -> Option<[u8; 16]> {
     Some(arr)
 }
 
+async fn apply_upload_transport_backpressure(
+    limiter: &mut UploadByteRateLimiter,
+    mut bytes: usize,
+) {
+    while bytes > 0 {
+        let now = Instant::now();
+        let available = limiter.available_bytes(now);
+        if available > 0 {
+            let consumed = bytes.min(available);
+            limiter.reserve_bytes(now, consumed);
+            bytes -= consumed;
+            continue;
+        }
+
+        let delay = limiter.next_delay(now);
+        if delay.is_zero() {
+            tokio::task::yield_now().await;
+        } else {
+            tokio::time::sleep(delay).await;
+        }
+    }
+}
+
 async fn send_resource_stored(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
@@ -4806,274 +5392,6 @@ async fn send_resource_error_response(
             )),
         }))
         .await;
-}
-
-async fn handle_resource_upload_start(
-    state: &Arc<Mutex<SharedState>>,
-    session: &mut StreamSession,
-    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
-    request_sequence: u64,
-    start: ResourceUploadStart,
-) {
-    let resource_type = match proto_resource_type_to_store(start.resource_type) {
-        Some(v) => v,
-        None => {
-            let err = StoreResourceError::UnsupportedType(format!(
-                "unknown resource_type enum value {}",
-                start.resource_type
-            ));
-            send_resource_error_response(session, tx, request_sequence, None, &err).await;
-            return;
-        }
-    };
-
-    let expected_hash: [u8; 32] = match start.expected_hash.as_slice().try_into() {
-        Ok(hash) => hash,
-        Err(_) => {
-            let err = StoreResourceError::HashMismatch {
-                computed: "n/a".to_string(),
-                expected: format!(
-                    "expected_hash length={} (must be 32)",
-                    start.expected_hash.len()
-                ),
-            };
-            send_resource_error_response(session, tx, request_sequence, None, &err).await;
-            return;
-        }
-    };
-
-    let metadata = start.metadata.unwrap_or_default();
-    if start.inline_data.is_empty() && start.total_size_bytes == 0 {
-        let err = StoreResourceError::SizeExceeded {
-            detail: "total_size_bytes must be > 0 for chunked uploads".to_string(),
-        };
-        send_resource_error_response(session, tx, request_sequence, None, &err).await;
-        return;
-    }
-
-    let total_size = match usize::try_from(start.total_size_bytes) {
-        Ok(v) => v,
-        Err(_) => {
-            let err = StoreResourceError::SizeExceeded {
-                detail: format!(
-                    "total_size_bytes {} exceeds platform limit {}",
-                    start.total_size_bytes,
-                    usize::MAX
-                ),
-            };
-            send_resource_error_response(session, tx, request_sequence, None, &err).await;
-            return;
-        }
-    };
-    let upload_id_bytes = *uuid::Uuid::now_v7().as_bytes();
-    let request = UploadStartRequest {
-        agent_namespace: session.namespace.clone(),
-        agent_capabilities: session.capabilities.clone(),
-        // Upload admission should not enforce decoded texture budget at storage time.
-        agent_budget: AgentBudget {
-            texture_bytes_total_limit: 0,
-            texture_bytes_total_used: 0,
-        },
-        upload_id: UploadId::from_bytes(upload_id_bytes),
-        resource_type,
-        expected_hash,
-        total_size,
-        inline_data: start.inline_data,
-        width: metadata.width,
-        height: metadata.height,
-    };
-
-    let store = {
-        let st = state.lock().await;
-        st.resource_store.clone()
-    };
-
-    match store.handle_upload_start(request).await {
-        Ok(Some(stored)) => {
-            register_uploaded_scene_resource(state, &stored.resource_id).await;
-            send_resource_stored(
-                session,
-                tx,
-                request_sequence,
-                &stored,
-                start.total_size_bytes,
-                metadata,
-                None,
-            )
-            .await;
-        }
-        Ok(None) => {
-            session.resource_uploads.insert(
-                upload_id_bytes,
-                ResidentUploadState {
-                    request_sequence,
-                    metadata,
-                    total_size_bytes: start.total_size_bytes,
-                },
-            );
-            let seq = session.next_server_seq();
-            let _ = tx
-                .send(Ok(ServerMessage {
-                    sequence: seq,
-                    timestamp_wall_us: now_wall_us(),
-                    payload: Some(ServerPayload::ResourceUploadAccepted(
-                        ResourceUploadAccepted {
-                            request_sequence,
-                            upload_id: upload_id_bytes.to_vec(),
-                        },
-                    )),
-                }))
-                .await;
-        }
-        Err(err) => {
-            send_resource_error_response(session, tx, request_sequence, None, &err).await;
-        }
-    }
-}
-
-async fn handle_resource_upload_chunk(
-    state: &Arc<Mutex<SharedState>>,
-    session: &mut StreamSession,
-    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
-    request_sequence: u64,
-    chunk: ResourceUploadChunk,
-) {
-    let upload_id_bytes = match upload_id_bytes_from_slice(&chunk.upload_id) {
-        Some(id) => id,
-        None => {
-            let err = StoreResourceError::InvalidChunk(format!(
-                "upload_id length={} (must be 16)",
-                chunk.upload_id.len()
-            ));
-            send_resource_error_response(
-                session,
-                tx,
-                request_sequence,
-                Some(&chunk.upload_id),
-                &err,
-            )
-            .await;
-            return;
-        }
-    };
-
-    let Some(tracked) = session.resource_uploads.get(&upload_id_bytes).cloned() else {
-        let err = StoreResourceError::InvalidChunk(
-            "upload_id is not in-flight for this session".to_string(),
-        );
-        send_resource_error_response(session, tx, request_sequence, Some(&chunk.upload_id), &err)
-            .await;
-        return;
-    };
-
-    let store = {
-        let st = state.lock().await;
-        st.resource_store.clone()
-    };
-    if let Err(err) = store
-        .handle_upload_chunk(
-            &session.namespace,
-            UploadId::from_bytes(upload_id_bytes),
-            chunk.chunk_index,
-            chunk.data,
-        )
-        .await
-    {
-        session.resource_uploads.remove(&upload_id_bytes);
-        send_resource_error_response(
-            session,
-            tx,
-            tracked.request_sequence,
-            Some(&upload_id_bytes),
-            &err,
-        )
-        .await;
-    }
-}
-
-async fn handle_resource_upload_complete(
-    state: &Arc<Mutex<SharedState>>,
-    session: &mut StreamSession,
-    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
-    request_sequence: u64,
-    complete: ResourceUploadComplete,
-) {
-    let upload_id_bytes = match upload_id_bytes_from_slice(&complete.upload_id) {
-        Some(id) => id,
-        None => {
-            let err = StoreResourceError::InvalidChunk(format!(
-                "upload_id length={} (must be 16)",
-                complete.upload_id.len()
-            ));
-            send_resource_error_response(
-                session,
-                tx,
-                request_sequence,
-                Some(&complete.upload_id),
-                &err,
-            )
-            .await;
-            return;
-        }
-    };
-
-    let Some(tracked) = session.resource_uploads.get(&upload_id_bytes).cloned() else {
-        let err = StoreResourceError::InvalidChunk(
-            "upload_id is not in-flight for this session".to_string(),
-        );
-        send_resource_error_response(
-            session,
-            tx,
-            request_sequence,
-            Some(&complete.upload_id),
-            &err,
-        )
-        .await;
-        return;
-    };
-
-    let store = {
-        let st = state.lock().await;
-        st.resource_store.clone()
-    };
-    match store
-        .handle_upload_complete(
-            &session.namespace,
-            UploadId::from_bytes(upload_id_bytes),
-            &session.capabilities,
-            &AgentBudget {
-                texture_bytes_total_limit: 0,
-                texture_bytes_total_used: 0,
-            },
-        )
-        .await
-    {
-        Ok(stored) => {
-            session.resource_uploads.remove(&upload_id_bytes);
-            register_uploaded_scene_resource(state, &stored.resource_id).await;
-            send_resource_stored(
-                session,
-                tx,
-                tracked.request_sequence,
-                &stored,
-                tracked.total_size_bytes,
-                tracked.metadata,
-                Some(&upload_id_bytes),
-            )
-            .await;
-        }
-        Err(err) => {
-            session.resource_uploads.remove(&upload_id_bytes);
-            send_resource_error_response(
-                session,
-                tx,
-                tracked.request_sequence,
-                Some(&upload_id_bytes),
-                &err,
-            )
-            .await;
-        }
-    }
 }
 
 /// Handle a WidgetAssetRegister from the client (session-protocol spec
@@ -8768,7 +9086,9 @@ mod tests {
             lease_correlation_cache: LeaseCorrelationCache::new(
                 DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
             ),
-            resource_uploads: HashMap::new(),
+            resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
+                tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+            ),
         };
 
         // seq=2 (gap=1): OK
@@ -9471,7 +9791,9 @@ mod tests {
             lease_correlation_cache: LeaseCorrelationCache::new(
                 DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
             ),
-            resource_uploads: HashMap::new(),
+            resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
+                tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+            ),
         };
 
         handle_capability_request(
@@ -9535,7 +9857,9 @@ mod tests {
             lease_correlation_cache: LeaseCorrelationCache::new(
                 DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
             ),
-            resource_uploads: HashMap::new(),
+            resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
+                tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+            ),
         };
 
         // Request both an authorized and an unauthorized capability
@@ -9844,7 +10168,9 @@ mod tests {
             lease_correlation_cache: LeaseCorrelationCache::new(
                 DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
             ),
-            resource_uploads: HashMap::new(),
+            resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
+                tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+            ),
         };
 
         handle_capability_request(
@@ -12010,6 +12336,25 @@ mod tests {
         setup_widget_test_with_service(service).await
     }
 
+    /// Helper: start a server with a widget service and explicit resident upload rate limit.
+    async fn setup_widget_test_with_upload_rate_limit(
+        upload_rate_limit_bytes_per_sec: usize,
+    ) -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let service = setup_widget_service().await;
+        {
+            let mut st = service.state.lock().await;
+            st.resource_store =
+                tze_hud_resource::ResourceStore::new(tze_hud_resource::ResourceStoreConfig {
+                    upload_rate_limit_bytes_per_sec,
+                    ..tze_hud_resource::ResourceStoreConfig::default()
+                });
+        }
+        setup_widget_test_with_service(service).await
+    }
+
     /// Helper: start a server with a widget service using explicit asset-store limits.
     async fn setup_widget_test_with_asset_limits(
         max_total_bytes: u64,
@@ -12951,6 +13296,255 @@ mod tests {
 
     fn tiny_rgba_1x1(pixel: [u8; 4]) -> Vec<u8> {
         pixel.to_vec()
+    }
+
+    #[test]
+    fn upload_byte_rate_limiter_enforces_sliding_window() {
+        let base = Instant::now();
+        let mut limiter = UploadByteRateLimiter::with_limit(8);
+
+        assert_eq!(limiter.available_bytes(base), 8);
+        limiter.reserve_bytes(base, 8);
+        assert_eq!(
+            limiter.available_bytes(base + Duration::from_millis(100)),
+            0
+        );
+
+        let delay = limiter.next_delay(base + Duration::from_millis(100));
+        assert!(
+            delay >= Duration::from_millis(850),
+            "expected ~900ms wait, got {delay:?}"
+        );
+
+        assert_eq!(limiter.available_bytes(base + Duration::from_secs(1)), 8);
+    }
+
+    #[tokio::test]
+    async fn test_resource_upload_chunk_transport_backpressure_from_rate_limit() {
+        let (mut client, handle) = setup_widget_test_with_upload_rate_limit(8).await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-rate-limit",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        let chunk_a = vec![0xAB; 8];
+        let chunk_b = vec![0xCD; 8];
+        let payload = [chunk_a.clone(), chunk_b.clone()].concat();
+        let hash = blake3::hash(&payload).as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash,
+                resource_type: 1, // IMAGE_RGBA8
+                total_size_bytes: payload.len() as u64,
+                metadata: Some(ResourceMetadata {
+                    width: 2,
+                    height: 2,
+                    ..ResourceMetadata::default()
+                }),
+                inline_data: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let accepted = next_non_state_change(&mut stream).await;
+        let upload_id = match &accepted.payload {
+            Some(ServerPayload::ResourceUploadAccepted(accepted)) => {
+                assert_eq!(accepted.request_sequence, 2);
+                accepted.upload_id.clone()
+            }
+            other => panic!("expected ResourceUploadAccepted, got: {other:?}"),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_id.clone(),
+                chunk_index: 0,
+                data: chunk_a,
+            })),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_id.clone(),
+                chunk_index: 1,
+                data: chunk_b,
+            })),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 5,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadComplete(
+                ResourceUploadComplete {
+                    upload_id: upload_id.clone(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        let early = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            next_non_state_change(&mut stream),
+        )
+        .await;
+        assert!(
+            early.is_err(),
+            "chunk stream should be back-pressured; completion arrived too quickly"
+        );
+
+        let stored = tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            next_non_state_change(&mut stream),
+        )
+        .await
+        .expect("expected ResourceStored after backpressure interval");
+
+        match &stored.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                assert_eq!(stored.request_sequence, 2);
+                assert_eq!(stored.upload_id, upload_id);
+                assert!(!stored.was_deduplicated);
+            }
+            other => panic!("expected ResourceStored after chunk backpressure, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_resource_upload_backpressure_keeps_heartbeat_responsive() {
+        let (mut client, handle) = setup_widget_test_with_upload_rate_limit(8).await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-heartbeat-backpressure",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        let chunk_a = vec![0xAB; 8];
+        let chunk_b = vec![0xCD; 8];
+        let payload = [chunk_a.clone(), chunk_b.clone()].concat();
+        let hash = blake3::hash(&payload).as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash,
+                resource_type: 1, // IMAGE_RGBA8
+                total_size_bytes: payload.len() as u64,
+                metadata: Some(ResourceMetadata {
+                    width: 2,
+                    height: 2,
+                    ..ResourceMetadata::default()
+                }),
+                inline_data: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let accepted = next_non_state_change(&mut stream).await;
+        let upload_id = match &accepted.payload {
+            Some(ServerPayload::ResourceUploadAccepted(accepted)) => accepted.upload_id.clone(),
+            other => panic!("expected ResourceUploadAccepted, got: {other:?}"),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_id.clone(),
+                chunk_index: 0,
+                data: chunk_a,
+            })),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_id.clone(),
+                chunk_index: 1,
+                data: chunk_b,
+            })),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 5,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadComplete(
+                ResourceUploadComplete {
+                    upload_id: upload_id.clone(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        let heartbeat_ts = 4242u64;
+        tx.send(ClientMessage {
+            sequence: 6,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: heartbeat_ts,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let heartbeat_echo = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            next_non_state_change(&mut stream),
+        )
+        .await
+        .expect("heartbeat should not be blocked by upload backpressure");
+
+        match &heartbeat_echo.payload {
+            Some(ServerPayload::Heartbeat(hb)) => {
+                assert_eq!(hb.timestamp_mono_us, heartbeat_ts);
+            }
+            other => panic!("expected Heartbeat echo, got: {other:?}"),
+        }
+
+        let stored = tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            next_non_state_change(&mut stream),
+        )
+        .await
+        .expect("expected ResourceStored after backpressure interval");
+
+        match &stored.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                assert_eq!(stored.request_sequence, 2);
+                assert_eq!(stored.upload_id, upload_id);
+                assert!(!stored.was_deduplicated);
+            }
+            other => panic!("expected ResourceStored after chunk backpressure, got: {other:?}"),
+        }
+
+        drop(handle);
     }
 
     #[tokio::test]
