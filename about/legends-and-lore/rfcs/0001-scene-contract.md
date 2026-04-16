@@ -567,7 +567,7 @@ In v1, agents do not mutate widget instances directly. They publish parameters/c
 Widgets have the same **four-level ontology** as zones (presence.md §"Widget anatomy"):
 
 1. **Widget type** — the schema and visual assets (parameter declarations, SVG layers with parameter bindings, default geometry/contention/rendering policies). Types are named identifiers introduced via startup bundle load or runtime registration, e.g. `"gauge"`, `"progress-bar"`.
-2. **Widget instance** — a widget type bound into a specific tab with a geometry policy and layer attachment. Declared in configuration under `[[tabs.widgets]]`. Multiple instances of the same type may exist on different tabs or on the same tab when disambiguated by `instance_id`.
+2. **Widget instance** — a widget type bound into a specific tab with a geometry policy and layer attachment. Declared in configuration under `[[tabs.widgets]]`. Each instance has a stable `id: SceneId`; multiple instances of the same type may exist on different tabs or on the same tab when disambiguated by that id (and optional `instance_name`).
 3. **Publication** — one publish event into a widget instance: a set of typed parameter values (f32, string, color, or enum), TTL, optional merge key (for MergeByKey contention), and optional transition duration in milliseconds.
 4. **Occupancy** — the runtime's resolved render state: effective parameter values after contention policy application. The compositor reads `effective_params` to determine current visual property values and re-rasterizes only when effective parameters change.
 
@@ -640,7 +640,7 @@ pub enum WidgetBindingMapping {
 /// Widget instance — a widget type bound into a specific tab.
 pub struct WidgetInstance {
     pub id: SceneId,
-    pub instance_name: String,                          // Addressing key for publish ops (explicit instance_id or widget_type_name)
+    pub instance_name: String,                          // Addressing key for publish ops (explicit instance_name or widget_type_name)
     pub widget_type_name: String,                       // References WidgetDefinition.id
     pub tab_id: SceneId,
     pub geometry_override: Option<GeometryPolicy>,
@@ -787,11 +787,13 @@ Agent submits MutationBatch
 │  Validate: Per-mutation checks (all-or-nothing)             │
 │                                                             │
 │  For each mutation in order:                                │
-│  1. Lease check     — agent holds valid lease for target    │
-│  2. Budget check    — mutation within resource budget       │
-│  3. Bounds check    — new geometry within tab area          │
-│  4. Type check      — field values within valid ranges      │
-│  5. Invariant check — post-mutation state satisfies         │
+│  1. Target resolve  — for PublishToTile, resolve element_id │
+│                       through the element identity store     │
+│  2. Lease check     — agent holds valid lease for target    │
+│  3. Budget check    — mutation within resource budget       │
+│  4. Bounds check    — new geometry within tab area          │
+│  5. Type check      — field values within valid ranges      │
+│  6. Invariant check — post-mutation state satisfies         │
 │                       all scene invariants                  │
 │                                                             │
 │  Any failure → entire batch rejected; no partial apply     │
@@ -801,7 +803,6 @@ Agent submits MutationBatch
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Runtime Override Application                               │
-│  - Resolve element-addressed tile publishes                 │
 │  - Apply user geometry overrides from element identity store│
 │  - Validate override-adjusted geometry/invariants           │
 └───────────────────────────┬─────────────────────────────────┘
@@ -1811,12 +1812,13 @@ message WidgetDefinitionProto {
 }
 
 message WidgetInstanceProto {
-  string              instance_name      = 1;   // Addressing key (explicit instance_id or widget_type_name)
-  string              widget_type_name   = 2;   // References WidgetDefinitionProto.id
-  SceneId             tab_id             = 3;
-  GeometryPolicyProto geometry_override  = 4;   // Absent = use widget type default
-  ContentionPolicyProto contention_override = 5; // Absent = use widget type default
-  map<string, WidgetParameterValueProto> current_params = 6;
+  SceneId             id                 = 1;   // Stable widget instance identity
+  string              instance_name      = 2;   // Addressing key (explicit instance_name or widget_type_name)
+  string              widget_type_name   = 3;   // References WidgetDefinitionProto.id
+  SceneId             tab_id             = 4;
+  GeometryPolicyProto geometry_override  = 5;   // Absent = use widget type default
+  ContentionPolicyProto contention_override = 6; // Absent = use widget type default
+  map<string, WidgetParameterValueProto> current_params = 7;
 }
 
 message WidgetPublishRecordProto {
@@ -1851,7 +1853,7 @@ message WidgetRegistrySnapshotProto {
 // These parallel PublishToZoneMutation and ClearZoneMutation.
 message PublishToWidgetMutation {
   string                                 widget_name   = 1;   // Widget instance name
-  string                                 instance_id   = 2;   // Disambiguation when multiple instances of same type exist on tab
+  SceneId                                instance_id   = 2;   // Optional disambiguation by WidgetInstanceProto.id (zero bytes = unspecified)
   map<string, WidgetParameterValueProto> params        = 3;
   uint32                                 transition_ms = 4;   // 0 = snap immediately
   uint64                                 ttl_us        = 5;   // 0 = use widget instance default
@@ -1860,7 +1862,7 @@ message PublishToWidgetMutation {
 
 message ClearWidgetMutation {
   string widget_name = 1;   // Widget instance name
-  string instance_id = 2;   // Optional disambiguation
+  SceneId instance_id = 2;  // Optional disambiguation by WidgetInstanceProto.id (zero bytes = unspecified)
 }
 
 // Widget registry query types — defined here for use in scene discovery.

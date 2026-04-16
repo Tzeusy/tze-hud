@@ -11,7 +11,9 @@ Scope: v1-mandatory
 
 #### Scenario: PublishToTile validates lease
 - **WHEN** `PublishToTileMutation` targets an element whose resolved tile namespace is not actively leased by the caller
-- **THEN** the runtime MUST reject the mutation with permission/lease denial semantics
+- **THEN** the runtime MUST reject the mutation with `LeaseNotFound` when no lease exists for the resolved tile namespace
+- **AND** the runtime MUST reject the mutation with `LeaseExpired` when a lease exists but is not active
+- **AND** the runtime MUST reject the mutation with `CapabilityMissing` when an active lease exists but is not held by the caller
 
 #### Scenario: Runtime override stage is applied before commit
 - **WHEN** a valid mutation batch includes `PublishToTileMutation`
