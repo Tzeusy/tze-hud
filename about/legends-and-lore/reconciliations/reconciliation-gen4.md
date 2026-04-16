@@ -115,7 +115,7 @@ fallback) as its primary documented path, contradicting sovereignty-by-mechanism
 
 ---
 
-### hud-2f1x: Doc cleanup and law-and-lore sync (PR #224) — CLOSED
+### hud-2f1x: Doc cleanup and legends-and-lore sync (PR #224) — CLOSED
 
 **Finding:** Historical reconciliation docs were unlabeled; no clear entry point to current baseline.
 

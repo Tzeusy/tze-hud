@@ -71,9 +71,9 @@ The execution brief required this minimum evidence set; each item is reconciled 
 | `about/heart-and-soul/validation.md` | Covered | Media validation expectations exist; first-slice rehearsal thresholds must be specified before implementation. |
 | `about/heart-and-soul/failure.md` | Covered | Degradation semantics imply explicit media fallback policy requirements before activation. |
 | `about/heart-and-soul/presence.md` | Covered | Zone media-type and transport ontology requires explicit zone contract/spec seams. |
-| `about/law-and-lore/rfcs/0001-scene-contract.md` | Covered | `VideoSurfaceRef`/`WebRtcRequired` are schema-level post-v1 constructs requiring contract completion for runtime use. |
-| `about/law-and-lore/rfcs/0003-timing.md` | Covered | Arrival-time vs presentation-time invariants and media clock deferment constrain first-slice timing design. |
-| `about/law-and-lore/rfcs/0005-session-protocol.md` | Covered | Embodied/WebRTC signaling remains reserved post-v1; reconnect/snapshot contract must remain coherent. |
+| `about/legends-and-lore/rfcs/0001-scene-contract.md` | Covered | `VideoSurfaceRef`/`WebRtcRequired` are schema-level post-v1 constructs requiring contract completion for runtime use. |
+| `about/legends-and-lore/rfcs/0003-timing.md` | Covered | Arrival-time vs presentation-time invariants and media clock deferment constrain first-slice timing design. |
+| `about/legends-and-lore/rfcs/0005-session-protocol.md` | Covered | Embodied/WebRTC signaling remains reserved post-v1; reconnect/snapshot contract must remain coherent. |
 | `openspec/.../session-protocol/spec.md` | Covered | Embodied media signaling and reserved fields are deferred; explicit signaling-shape decision is required. |
 | `openspec/.../runtime-kernel/spec.md` | Covered | Media worker pool must stay unspawned in v1; activation criteria must be spec-gated. |
 | `openspec/.../validation-framework/spec.md` | Covered | Media SSIM and scene-registry hooks exist, but ingress-specific pass/fail rehearsal contract is still required. |

@@ -26,8 +26,8 @@
     "depends_on_bead_ids": ["hud-sx7q.1"],
     "spec_refs": [
       "openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md",
-      "about/law-and-lore/rfcs/0005-session-protocol.md",
-      "about/law-and-lore/rfcs/0011-resource-store.md"
+      "about/legends-and-lore/rfcs/0005-session-protocol.md",
+      "about/legends-and-lore/rfcs/0011-resource-store.md"
     ]
   },
   {

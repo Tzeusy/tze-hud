@@ -23,7 +23,7 @@ Key properties:
 - **Swappable visual identity.** Design tokens, component types, and component profiles separate visual styling from agent code and runtime logic. An operator changes the look of the entire display by swapping a configuration directory.
 - **Multi-agent coordination.** When agents compete for screen territory, the runtime arbitrates based on space, budgets, priorities, and lease state. Agents negotiate through the runtime, never directly.
 
-~100k lines of Rust across 15 crates. Tokio async runtime, tonic for gRPC, wgpu + winit for cross-platform GPU rendering. See `about/heart-and-soul/` for full doctrine, `about/law-and-lore/` for design contracts (11 RFCs), and `openspec/` for capability specs.
+~100k lines of Rust across 15 crates. Tokio async runtime, tonic for gRPC, wgpu + winit for cross-platform GPU rendering. See `about/heart-and-soul/` for full doctrine, `about/legends-and-lore/` for design contracts (11 RFCs), and `openspec/` for capability specs.
 
 ---
 

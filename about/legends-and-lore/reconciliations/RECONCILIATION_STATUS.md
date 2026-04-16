@@ -19,7 +19,7 @@ runtime app binary, MCP stress testing, input capture, and resource ref-count tr
 - Component shape language (RFC 0012) fully implemented
 - 10 exemplar components with integration tests and user-test scenarios
 - Session-protocol openspec refreshed to match actual 4-file proto layout
-- RFC count in law-and-lore corrected to 12
+- RFC count in legends-and-lore corrected to 12
 
 **Open P1 gaps:**
 - Config contract app/spec alignment decision needed (hud-gxny)

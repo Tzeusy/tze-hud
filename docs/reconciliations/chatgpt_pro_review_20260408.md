@@ -22,7 +22,7 @@ The biggest strengths are architecture boundaries, spec discipline, and unusuall
 | Security posture                              |     3 | Medium     | Real auth/capability machinery exists, but defaults and transport hardening are not production-grade.                     | `crates/tze_hud_protocol/src/auth.rs`, `crates/tze_hud_runtime/src/mcp.rs`, `app/tze_hud_app/src/main.rs`, `crates/tze_hud_runtime/src/windowed.rs` ([GitHub][10]) |
 | Performance and scalability                   |     3 | Medium     | Explicit frame budgets and bounded channels are good signs; proof is not yet fully trustworthy.                           | `crates/tze_hud_runtime/src/lib.rs`, `crates/tze_hud_runtime/src/budget.rs`, `tests/integration/soak.rs`, CI pixel-readback note ([GitHub][8])                     |
 | Data model and API design                     |     4 | High       | The pure scene graph, canonical capability vocabulary, and versioned session flow are well thought out.                   | `crates/tze_hud_scene/src/graph.rs`, `crates/tze_hud_protocol/src/auth.rs`, `crates/tze_hud_protocol/src/session_server.rs` ([GitHub][11])                         |
-| Documentation and developer experience        |     3 | Medium     | Deep docs exist, but they disagree with the code in important places.                                                     | `about/heart-and-soul/`, `about/law-and-lore/`, `about/lay-and-land/operations/*`, `README.md`, missing `CONTRIBUTING.md` ([GitHub][12])                           |
+| Documentation and developer experience        |     3 | Medium     | Deep docs exist, but they disagree with the code in important places.                                                     | `about/heart-and-soul/`, `about/legends-and-lore/`, `about/lay-and-land/operations/*`, `README.md`, missing `CONTRIBUTING.md` ([GitHub][12])                           |
 | Release, operations, and production readiness |     2 | Medium     | There is an operator-facing app and deployment guidance, but not enough release/process rigor for outside production use. | `app/tze_hud_app/Cargo.toml`, operations docs, production-boot CI, Releases page, Issues page, `AGENTS.md` ([GitHub][13])                                          |
 | Maintainability and change safety             |     3 | Medium     | Specs and modularity help, but drift and unstable main-branch contracts are building maintenance drag.                    | `Cargo.toml`, `AGENTS.md`, `README.md`, `crates/tze_hud_policy/src/lib.rs`, `crates/tze_hud_runtime/src/lib.rs` ([GitHub][4])                                      |
 
@@ -166,7 +166,7 @@ The biggest strengths are architecture boundaries, spec discipline, and unusuall
 
 ### 13) Documentation and developer experience — 3/5, confidence: Medium
 
-**What is good.** The docs are unusually rich: doctrine (`heart-and-soul`), RFCs (`law-and-lore`), topology/ops (`lay-and-land`), operator playbooks, and a command-heavy README. For internal alignment, this is a major asset. ([GitHub][12])
+**What is good.** The docs are unusually rich: doctrine (`heart-and-soul`), RFCs (`legends-and-lore`), topology/ops (`lay-and-land`), operator playbooks, and a command-heavy README. For internal alignment, this is a major asset. ([GitHub][12])
 
 **What is weak.** The docs disagree with the code in user-important places: WebRTC scope, config schema, and canonical-app readiness. There is also no public `CONTRIBUTING.md`, no public changelog, and no visible release stream. ([GitHub][2])
 
@@ -278,7 +278,7 @@ The biggest strengths are architecture boundaries, spec discipline, and unusuall
 * **Canonical app:** `app/tze_hud_app` → binary `tze_hud`, described as the production entrypoint. ([GitHub][13])
 * **Core crates:** `tze_hud_runtime`, `tze_hud_scene`, `tze_hud_protocol`, `tze_hud_mcp`, `tze_hud_config`, `tze_hud_policy`, `tze_hud_widget`, `tze_hud_resource`, `tze_hud_validation`, plus compositor/input/a11y/telemetry crates. ([GitHub][4])
 * **Examples and test packages:** `examples/vertical_slice`, benchmark/render-artifact examples, and a dedicated `tests/integration` crate. ([GitHub][4])
-* **Docs/specs:** `about/heart-and-soul` (doctrine), `about/law-and-lore` (RFCs), `about/lay-and-land` (topology/ops), `openspec` (spec/change scaffolding). ([GitHub][12])
+* **Docs/specs:** `about/heart-and-soul` (doctrine), `about/legends-and-lore` (RFCs), `about/lay-and-land` (topology/ops), `openspec` (spec/change scaffolding). ([GitHub][12])
 * **CI/scripts:** `.github/workflows/ci.yml`, plus scripts for vocabulary lint, MCP reachability, Windows build, and smoke flows. ([GitHub][9])
 
 ### Critical user flows

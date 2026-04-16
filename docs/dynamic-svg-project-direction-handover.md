@@ -12,14 +12,14 @@ Context window was running short. This document is for a fresh agent to continue
 - Resume verification completed (current session): revalidated `hud-lviq` bead graph and handover consistency after context compaction.
   - Commands: `bd list --status open --json`, `bd dep cycles --json`.
   - Result: all expected dynamic-svg beads present and dependency cycle check clean (`[]`).
-- Pass 1 completed: evidence-only `/law-and-lore` + `/spec-and-spine` drift inventory.
-- Pass 2 completed: `/law-and-lore` RFC deltas drafted for runtime SVG registration + persistence split.
+- Pass 1 completed: evidence-only `/legends-and-lore` + `/spec-and-spine` drift inventory.
+- Pass 2 completed: `/legends-and-lore` RFC deltas drafted for runtime SVG registration + persistence split.
   - Updated RFCs: `0001-scene-contract`, `0005-session-protocol`, `0006-configuration`, `0011-resource-store`.
   - Key deltas: dual-path widget definition registration, widget asset register/result protocol draft, runtime asset store config section, scoped durable SVG asset exception.
 - Pass 3 completed: `/spec-and-spine` delta specs drafted to align with Pass 2 RFC direction.
   - Updated specs: widget-system, session-protocol, resource-store, configuration, component-shape-language.
   - Key deltas: explicit WidgetAssetRegister/Result fields, runtime widget asset store config requirement, v1 persistence split in spec, runtime ingest token-resolution path.
-- Pass 4 completed: `/law-and-lore` + `/spec-and-spine` consistency cleanup pass.
+- Pass 4 completed: `/legends-and-lore` + `/spec-and-spine` consistency cleanup pass.
   - Updated RFC: `0005-session-protocol` stale field-allocation language cleaned.
   - Key deltas: removed field-34 reserved-buffer wording, removed 47–49 all-reserved wording, aligned EventBatch note to v1 contract.
 - Reconciliation pass completed: `/heart-and-soul` synced against Passes 1-4 deltas.
@@ -76,10 +76,10 @@ Doctrine updates were applied in `about/heart-and-soul/` to relax the static-onl
 - `about/heart-and-soul/presence.md`
 - `about/heart-and-soul/security.md`
 - `about/heart-and-soul/v1.md`
-- `about/law-and-lore/rfcs/0001-scene-contract.md`
-- `about/law-and-lore/rfcs/0005-session-protocol.md`
-- `about/law-and-lore/rfcs/0006-configuration.md`
-- `about/law-and-lore/rfcs/0011-resource-store.md`
+- `about/legends-and-lore/rfcs/0001-scene-contract.md`
+- `about/legends-and-lore/rfcs/0005-session-protocol.md`
+- `about/legends-and-lore/rfcs/0006-configuration.md`
+- `about/legends-and-lore/rfcs/0011-resource-store.md`
 - `openspec/changes/component-shape-language/specs/widget-system/spec.md`
 - `openspec/changes/component-shape-language/specs/configuration/spec.md`
 - `openspec/changes/component-shape-language/specs/component-shape-language/spec.md`
@@ -97,7 +97,7 @@ This section maps status across the four project-shape pillars.
 - Completed: dynamic-SVG doctrine language reconciled across `v1.md`, `presence.md`, `architecture.md`, `security.md`, `failure.md`.
 - Residual note: broader non-feature protocol-document drift remains in RFC 0005 examples, but doctrine no longer contradicts the dynamic-SVG contract.
 
-### 2) Design Contracts (`about/law-and-lore/`) — **Updated For Dynamic-SVG Scope**
+### 2) Design Contracts (`about/legends-and-lore/`) — **Updated For Dynamic-SVG Scope**
 - Status: Pass 2 + Pass 4 complete and reconciled with doctrine direction.
 - Completed:
   - runtime widget register/upload contract in session-protocol RFC
@@ -140,7 +140,7 @@ bash /home/tze/.dotfiles/genai/skills/personal/project-direction/scripts/spec-sc
 ```
 Observed highlights:
 - `openspec/` present and active.
-- `about/` pillar structure present (`heart-and-soul`, `law-and-lore`, `lay-and-land`).
+- `about/` pillar structure present (`heart-and-soul`, `legends-and-lore`, `lay-and-land`).
 - Widget-related work already active in repo history.
 
 ### Phase 2: Targeted Investigation (Next Session)
@@ -154,7 +154,7 @@ Run parallel evidence gathering before editing specs/code:
 ### Phase 3: Work Plan (Spec-First)
 Do not code first. Stage this work as:
 1. Update doctrine leftovers (small cleanup pass).
-2. Update RFC/design contracts (`about/law-and-lore/`).
+2. Update RFC/design contracts (`about/legends-and-lore/`).
 3. Update OpenSpec requirements (`openspec/`).
 4. Reconcile and get signoff on docs/spec direction.
 5. Implement runtime API + storage + dedup + permissions.
@@ -214,7 +214,7 @@ Use this as the baseline proposal to either accept or revise.
 
 ### B. /project-shape Checklist
 - [x] Doctrine: complete consistency cleanup in heart-and-soul.
-- [x] Design contracts: add/update law-and-lore RFC(s) for runtime upload + persistence.
+- [x] Design contracts: add/update legends-and-lore RFC(s) for runtime upload + persistence.
 - [x] Capability specs: update openspec requirements and acceptance criteria.
 - [ ] Topology: document where durable store and index paths live.
 
@@ -254,7 +254,7 @@ Use this as the baseline proposal to either accept or revise.
 6. What is the canonical error-code taxonomy for upload/register failures?
 
 ## Risks
-- Spec drift risk if code starts before law-and-lore + openspec updates.
+- Spec drift risk if code starts before legends-and-lore + openspec updates.
 - Hidden doctrine contradiction risk (resource lifecycle wording still partly static-oriented).
 - Cross-platform path/permissions bugs for durable storage.
 - Budget enforcement ambiguity if store quotas are not defined with exact semantics.
@@ -269,7 +269,7 @@ git diff -- about/heart-and-soul/v1.md about/heart-and-soul/presence.md about/he
 bash /home/tze/.dotfiles/genai/skills/personal/project-direction/scripts/spec-scan.sh /home/tze/gt/tze_hud/mayor/rig
 
 # Scan for stale startup-only language
-rg -n "static in v1|startup-only|bundle load time|cannot create widget|no runtime widget" about/heart-and-soul about/law-and-lore openspec
+rg -n "static in v1|startup-only|bundle load time|cannot create widget|no runtime widget" about/heart-and-soul about/legends-and-lore openspec
 ```
 
 ## Definition Of Done For This Epic (High-Level)

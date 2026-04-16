@@ -29,7 +29,7 @@ act on `ZoneInteraction` hits to trigger `dismiss_notification()`.
 | `openspec/changes/component-shape-language/design.md` | `backdrop_radius` deferral (lines 25, 193), RenderingPolicy extension |
 | `openspec/changes/exemplar-notification/design.md` | Notification exemplar goals and non-goals |
 | `openspec/specs/exemplar-notification/spec.md` | All 10 requirements with scenarios |
-| `about/law-and-lore/rfcs/0004-input.md` | HitRegionNode sole interactive primitive in v1, zone passthrough default |
+| `about/legends-and-lore/rfcs/0004-input.md` | HitRegionNode sole interactive primitive in v1, zone passthrough default |
 
 ---
 

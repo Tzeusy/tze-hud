@@ -11,7 +11,7 @@ Execution brief: `docs/reconciliations/policy_wiring_epic_prompt.md`
 
 [Observed] The tractable path is still incremental and seam-first: (1) spec reconciliation to current truth, (2) explicit runtime-policy-scene ownership contract, (3) mutation-path pilot wiring, (4) telemetry + latency conformance, then (5) scope decision for event/frame wiring (`about/heart-and-soul/architecture.md:1-17`, `about/heart-and-soul/v1.md:11-21`, `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md:59-73`).
 
-[Observed] Immediate blockers are governance seams, not rendering mechanics: lease capability scope authority and capability escalation source semantics must be resolved before broader policy wiring (`crates/tze_hud_protocol/src/session_server.rs:2844-3004`, `crates/tze_hud_protocol/src/session_server.rs:3455-3527`, `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:616-636`, `about/law-and-lore/rfcs/0008-lease-governance.md:101-109`).
+[Observed] Immediate blockers are governance seams, not rendering mechanics: lease capability scope authority and capability escalation source semantics must be resolved before broader policy wiring (`crates/tze_hud_protocol/src/session_server.rs:2844-3004`, `crates/tze_hud_protocol/src/session_server.rs:3455-3527`, `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:616-636`, `about/legends-and-lore/rfcs/0008-lease-governance.md:101-109`).
 
 ## 2. Contradictions and Tractable Path
 
@@ -19,7 +19,7 @@ Execution brief: `docs/reconciliations/policy_wiring_epic_prompt.md`
 
 1. [Observed] **Spec-over-code claim drift:** policy spec requires seven-level v1 stack execution across frame/event/mutation, but runtime module authority notes still state policy crate is not wired (`openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:195-230`, `crates/tze_hud_runtime/src/lib.rs:12-26`).
 2. [Observed] **Authority location drift:** policy spec implies centralized policy decisions; code ownership is split across runtime stateful enforcers, scene validation contracts, and policy pure evaluators (`crates/tze_hud_runtime/src/budget.rs:18-35`, `crates/tze_hud_runtime/src/attention_budget/mod.rs:35-55`, `crates/tze_hud_scene/src/policy/mod.rs:1-7`, `crates/tze_hud_policy/src/lib.rs:31-46`).
-3. [Observed] **Lease scope seam bug surface:** lease request path forwards requested lease capabilities without explicit subset enforcement against session-granted capabilities in the request handler (`crates/tze_hud_protocol/src/session_server.rs:2946-2969`), while governance requirements require lease scope to remain bounded by session-granted authority (`about/law-and-lore/rfcs/0008-lease-governance.md:101-109`).
+3. [Observed] **Lease scope seam bug surface:** lease request path forwards requested lease capabilities without explicit subset enforcement against session-granted capabilities in the request handler (`crates/tze_hud_protocol/src/session_server.rs:2946-2969`), while governance requirements require lease scope to remain bounded by session-granted authority (`about/legends-and-lore/rfcs/0008-lease-governance.md:101-109`).
 
 ### Tractable Path (No Big-Bang Rewrite)
 

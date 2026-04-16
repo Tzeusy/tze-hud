@@ -20,7 +20,7 @@ For the first bounded post-v1 media ingress slice, signaling SHALL use a
 
 1. Topology already converges on one primary stream per agent. The architecture doctrine says session traffic is multiplexed on one stream and warns against proliferating long-lived streams (`about/heart-and-soul/architecture.md:130-134`).
 2. The current protocol/runtime wiring is already centralized in `HudSession.Session` (`crates/tze_hud_protocol/proto/session.proto:22-27`), including zone publish on this stream (`crates/tze_hud_protocol/proto/session.proto:52-55`).
-3. The post-v1 spec/RFC path already reserves envelope space for embodied/media signaling (`openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:712-714`, `about/law-and-lore/rfcs/0005-session-protocol.md:1491`).
+3. The post-v1 spec/RFC path already reserves envelope space for embodied/media signaling (`openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:712-714`, `about/legends-and-lore/rfcs/0005-session-protocol.md:1491`).
 4. `ZonePublish` already compiles into the scene mutation path in one place (`crates/tze_hud_protocol/src/session_server.rs:3737-3801`), and mutation-based publish also already exists (`crates/tze_hud_protocol/proto/types.proto:328-333`). A session-stream envelope-extension decision avoids splitting this seam across two transport APIs before schema/snapshot equivalence is fixed.
 
 Given these constraints, a separate media RPC now would add an additional control-plane seam (new service method, auth/version gating, reconnect semantics, telemetry/backpressure policy) while the bounded slice still targets one-way ingress and keeps embodied/bidirectional session semantics deferred.

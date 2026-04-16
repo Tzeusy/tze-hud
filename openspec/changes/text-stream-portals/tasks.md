@@ -2,7 +2,7 @@
 
 - [ ] 1.1 Update `about/heart-and-soul/` doctrine to name low-latency text interaction portals as a valid use case without collapsing the product into chat or terminal hosting
 - [ ] 1.2 Add RFC 0013 defining text stream portals, adapter boundaries, surface model, governance, and phase boundary
-- [ ] 1.3 Reconcile `about/law-and-lore/README.md` and local law-and-lore skill indexing with RFC 0013
+- [ ] 1.3 Reconcile `about/legends-and-lore/README.md` and local legends-and-lore skill indexing with RFC 0013
 
 ## 2. Capability Specification
 

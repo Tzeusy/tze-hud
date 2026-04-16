@@ -82,7 +82,7 @@ Decision: for this seam, the working envelope authority is the split `ClientMess
 Rationale:
 - In the checked-in main session spec and `session.proto`, client fields 36-38 are free after widget flows, and server fields 41, 42, and 49 are free.
 - This avoids perturbing existing widget allocations and keeps the new family grouped in predictable free space.
-- RFC 0005's older combined-envelope registry is treated as stale law-and-lore that must be reconciled to this split model before implementation begins.
+- RFC 0005's older combined-envelope registry is treated as stale legends-and-lore that must be reconciled to this split model before implementation begins.
 
 Alternative considered:
 - Repack or renumber existing widget/session messages.
@@ -127,13 +127,13 @@ Rationale:
 
 ## Risks / Trade-offs
 
-- [Risk] RFC 0011 itself needs follow-on repair in `about/law-and-lore/` to match the corrected handshake.
+- [Risk] RFC 0011 itself needs follow-on repair in `about/legends-and-lore/` to match the corrected handshake.
   Mitigation: Make contract reconciliation the first bead and do not start implementation before signoff.
 
 - [Risk] Adding multiple new session messages can break generated bindings and helper clients.
   Mitigation: Land protobuf/schema work in its own tranche and add conformance coverage before consumer conversion.
 
-- [Risk] RFC 0005 and RFC 0011 may need law-and-lore updates in addition to main-spec sync.
+- [Risk] RFC 0005 and RFC 0011 may need legends-and-lore updates in addition to main-spec sync.
   Mitigation: Make contract reconciliation the first execution bead and do not present field allocations as final until that closes.
 
 - [Risk] Consumer conversion work could sprawl across many exemplar/helper surfaces.

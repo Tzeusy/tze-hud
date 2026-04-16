@@ -25,6 +25,9 @@ The `about/lay-and-land/` directory contains the spatial understanding of this p
 | Map | Read when... | Key content |
 |-----|-------------|-------------|
 | `about/lay-and-land/README.md` | Quick orientation | Directory overview, what's available |
+| `about/lay-and-land/components.md` | Understanding crate layout, dependencies, boundaries | 13 core crates + app binary, dependency graph, boundary contracts |
+| `about/lay-and-land/data-flow.md` | Tracing how data moves through the system | MCP ingress, gRPC sessions, zone publish, widget assets, events, input |
+| `about/lay-and-land/runtime-widget-asset-topology.md` | Widget SVG asset lifecycle | Register/upload ingress, durable store, startup re-index, budget hooks |
 | `about/lay-and-land/operations/DEPLOYMENT.md` | Deployment topology | Cross-machine deployment, targets, environments |
 | `about/lay-and-land/operations/OPERATOR_CHECKLIST.md` | Operational procedures | Runbooks, playbooks, checklists |
 | `about/lay-and-land/operations/RUNTIME_APP_BINARY.md` | Binary specification | Canonical application binary structure |
@@ -51,5 +54,5 @@ The Rust workspace at project root contains:
 | Need | Skill |
 |------|-------|
 | Why a boundary exists | `/heart-and-soul` |
-| How a boundary communicates | `/law-and-lore` |
+| How a boundary communicates | `/legends-and-lore` |
 | What a component must do | `/spec-and-spine` |

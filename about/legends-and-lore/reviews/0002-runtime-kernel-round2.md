@@ -3,7 +3,7 @@
 
 **Issue:** rig-5vq.16
 **Date:** 2026-03-22
-**RFC reviewed:** about/law-and-lore/rfcs/0002-runtime-kernel.md
+**RFC reviewed:** about/legends-and-lore/rfcs/0002-runtime-kernel.md
 **Doctrine read:** architecture.md, security.md, failure.md, validation.md, v1.md
 
 ---

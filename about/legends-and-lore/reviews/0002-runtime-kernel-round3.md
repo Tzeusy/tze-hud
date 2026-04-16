@@ -3,7 +3,7 @@
 
 **Issue:** rig-5vq.17
 **Date:** 2026-03-22
-**RFC reviewed:** about/law-and-lore/rfcs/0002-runtime-kernel.md
+**RFC reviewed:** about/legends-and-lore/rfcs/0002-runtime-kernel.md
 **Doctrine read:** architecture.md, failure.md, security.md
 **RFCs cross-checked:** RFC 0005 (Session Protocol), RFC 0008 (Lease Governance), RFC 0009 (Policy & Arbitration)
 

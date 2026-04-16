@@ -3,7 +3,7 @@
 
 **Issue:** rig-5vq.18
 **Date:** 2026-03-22
-**RFC reviewed:** about/law-and-lore/rfcs/0002-runtime-kernel.md
+**RFC reviewed:** about/legends-and-lore/rfcs/0002-runtime-kernel.md
 **Doctrine read:** architecture.md, failure.md, security.md, validation.md, v1.md
 **RFCs cross-checked:** RFC 0001, RFC 0003, RFC 0005, RFC 0007, RFC 0008, RFC 0009
 

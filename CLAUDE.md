@@ -10,7 +10,7 @@ This is **not** a dashboard or chatbot UI. It's an operating environment for mod
 
 ## Status
 
-Active development. ~100k lines of Rust across 15 crates. Doctrine is in `about/heart-and-soul/`; design contracts in `about/law-and-lore/` (11 RFCs); capability specs in `openspec/`. See `about/heart-and-soul/v1.md` for scope boundary.
+Active development. ~100k lines of Rust across 15 crates. Doctrine is in `about/heart-and-soul/`; design contracts in `about/legends-and-lore/` (13 RFCs); capability specs in `openspec/`. See `about/heart-and-soul/v1.md` for scope boundary.
 
 ## Locked-In Technology Decisions
 

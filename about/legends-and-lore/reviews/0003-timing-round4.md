@@ -260,7 +260,7 @@ No "TBD", no unresolved design choice, no ambiguous behavior remains.
 
 ## Changes Applied
 
-### RFC 0003 (about/law-and-lore/rfcs/0003-timing.md)
+### RFC 0003 (about/legends-and-lore/rfcs/0003-timing.md)
 
 - §Review History: Added Round 4 summary.
 - §2.3: Added "Joining during an active deferral cycle" (OQ3 → normative).

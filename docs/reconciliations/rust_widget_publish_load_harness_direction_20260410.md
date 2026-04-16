@@ -8,7 +8,7 @@ Status: Planned and locally validated; not pushed
 
 [Observed] The project is trying to prove that an agent-native HUD can be a real-time, resident, hot-path system rather than a loose collection of remote API calls. The architecture centers the resident gRPC session stream and treats validation as a first-class product surface, not an afterthought. See [architecture.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/architecture.md:31) and [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md:3).
 
-[Observed] The current implementation is directionally ready for a Rust harness, but the truth is narrower than the existing Python tooling suggests. The repo already supports the gRPC widget publish path and already has artifact infrastructure, yet the current contract cannot honestly correlate repeated durable widget publishes because `WidgetPublishResult` does not carry `request_sequence` in the implementation-facing spec and proto. See [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563), [session_server.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/src/session_server.rs:4481), and [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/law-and-lore/rfcs/0005-session-protocol.md:600).
+[Observed] The current implementation is directionally ready for a Rust harness, but the truth is narrower than the existing Python tooling suggests. The repo already supports the gRPC widget publish path and already has artifact infrastructure, yet the current contract cannot honestly correlate repeated durable widget publishes because `WidgetPublishResult` does not carry `request_sequence` in the implementation-facing spec and proto. See [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563), [session_server.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/src/session_server.rs:4481), and [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/legends-and-lore/rfcs/0005-session-protocol.md:600).
 
 [Inferred] The highest-priority next work is therefore not “write the Rust harness” in isolation. It is a three-step sequence: repair request correlation in the session contract, define the harness spec and validation semantics, then implement a narrow Rust example crate and route `/user-test-performance` through it. Anything broader before that would be planning theater rather than auditable validation infrastructure.
 
@@ -25,7 +25,7 @@ Status: Planned and locally validated; not pushed
 | # | Requirement | Class | Evidence | Status |
 |---|------------|-------|---------|--------|
 | 1 | Resident hot-path benchmarks use one bidirectional gRPC session stream, not many ad hoc connections | Hard | [architecture.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/architecture.md:35), [session-protocol spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:20) | Partial |
-| 2 | Durable widget publishes must be measurable with request-level correlation | Hard | [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/law-and-lore/rfcs/0005-session-protocol.md:600), [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563) | Unmet |
+| 2 | Durable widget publishes must be measurable with request-level correlation | Hard | [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/legends-and-lore/rfcs/0005-session-protocol.md:600), [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563) | Unmet |
 | 3 | Performance evidence must be structured, trendable, and machine-readable | Hard | [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md:29), [validation-framework spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md:125) | Partial |
 | 4 | Formal pass/fail performance claims require calibrated or explicitly `uncalibrated` semantics | Hard | [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md:33), [validation-framework spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md:137) | Partial |
 | 5 | Initial scope stays on the same primary target as `/user-test-performance`, with future targets deferred | Soft | [.claude skill](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/SKILL.md:61) | Met |
@@ -37,7 +37,7 @@ Status: Planned and locally validated; not pushed
 
 ### Contradictions
 
-[Observed] RFC 0005 already says `WidgetPublishResult` is correlated by `request_sequence`, but the current proto and runtime-facing v1 spec omit that field from the widget publish acknowledgement contract. See [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/law-and-lore/rfcs/0005-session-protocol.md:600), [v1 session-protocol spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:743), and [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563).
+[Observed] RFC 0005 already says `WidgetPublishResult` is correlated by `request_sequence`, but the current proto and runtime-facing v1 spec omit that field from the widget publish acknowledgement contract. See [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/legends-and-lore/rfcs/0005-session-protocol.md:600), [v1 session-protocol spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:743), and [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto:563).
 
 [Observed] The Python performance tooling records historical rows and thresholds, but the current validation framework does not yet define publish-load artifacts or calibrated verdict semantics for that benchmark class. See [.claude perf_common.py](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test-performance/scripts/perf_common.py:30) and [validation-framework spec](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md:137).
 
@@ -249,7 +249,7 @@ Execution note:
 - [architecture.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/architecture.md)
 - [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md)
 - [development.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/development.md)
-- [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/law-and-lore/rfcs/0005-session-protocol.md)
+- [0005-session-protocol.md](/home/tze/gt/tze_hud/mayor/rig/about/legends-and-lore/rfcs/0005-session-protocol.md)
 - [session.proto](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/proto/session.proto)
 - [session_server.rs](/home/tze/gt/tze_hud/mayor/rig/crates/tze_hud_protocol/src/session_server.rs)
 - [examples/benchmark/src/main.rs](/home/tze/gt/tze_hud/mayor/rig/examples/benchmark/src/main.rs)

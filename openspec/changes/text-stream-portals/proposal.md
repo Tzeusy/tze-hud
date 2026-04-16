@@ -26,7 +26,7 @@ The key architectural mistake would be to define this feature around tmux. Tmux 
 
 ## Impact
 
-- Affects doctrine and design-contract documentation across `about/heart-and-soul/` and `about/law-and-lore/`
+- Affects doctrine and design-contract documentation across `about/heart-and-soul/` and `about/legends-and-lore/`
 - Adds a new OpenSpec capability spec and implementation task breakdown
 - Does not yet implement runtime code or allocate beads
 - Creates a reviewable contract for later implementation planning

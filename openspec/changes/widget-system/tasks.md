@@ -93,10 +93,10 @@
 
 ## 11. RFC / Law-and-Lore Updates
 
-- [x] 11.1 Update `about/law-and-lore/rfcs/0001-scene-contract.md`: add widget ontology (type, instance, publication, occupancy) paralleling zone ontology, add WidgetRegistry to scene graph
-- [x] 11.2 Update `about/law-and-lore/rfcs/0005-session-protocol.md`: add WidgetPublish/WidgetPublishResult message definitions, field allocations (35/47), traffic class assignment
-- [x] 11.3 Update `about/law-and-lore/rfcs/0006-configuration.md`: add [widget_bundles] and [[tabs.widgets]] config sections, add publish_widget capability vocabulary
-- [x] 11.4 Update `about/law-and-lore/rfcs/0011-resource-store.md`: add IMAGE_SVG resource type, SVG validation rules, budget accounting
+- [x] 11.1 Update `about/legends-and-lore/rfcs/0001-scene-contract.md`: add widget ontology (type, instance, publication, occupancy) paralleling zone ontology, add WidgetRegistry to scene graph
+- [x] 11.2 Update `about/legends-and-lore/rfcs/0005-session-protocol.md`: add WidgetPublish/WidgetPublishResult message definitions, field allocations (35/47), traffic class assignment
+- [x] 11.3 Update `about/legends-and-lore/rfcs/0006-configuration.md`: add [widget_bundles] and [[tabs.widgets]] config sections, add publish_widget capability vocabulary
+- [x] 11.4 Update `about/legends-and-lore/rfcs/0011-resource-store.md`: add IMAGE_SVG resource type, SVG validation rules, budget accounting
 
 ## 12. Tests
 

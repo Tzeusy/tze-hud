@@ -259,7 +259,7 @@ The filtering rule is: inspect the `InputMessage.event` oneof variant before app
 
 ## Changes Made to RFC 0005
 
-All MUST-FIX and SHOULD-FIX items above have been applied directly to `about/law-and-lore/rfcs/0005-session-protocol.md`:
+All MUST-FIX and SHOULD-FIX items above have been applied directly to `about/legends-and-lore/rfcs/0005-session-protocol.md`:
 
 1. **`SessionInit` dead resume fields removed:** fields 9 (`resume_session_token`) and 10 (`resume_last_seen_server_seq`) removed from `SessionInit` proto definition and prose in §1.2. The resume path is fully served by `SessionResume` (§6.2).
 

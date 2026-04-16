@@ -54,10 +54,10 @@ EXEMPT_PATHS=(
     "docs/prompts/07-configuration.md"
     "docs/reviews/0001-scene-contract-round3.md"
     "docs/reconciliation-gen4.md"
-    "about/law-and-lore/rfcs/0005-session-protocol.md"
-    "about/law-and-lore/prompts/07-configuration.md"
-    "about/law-and-lore/reviews/0001-scene-contract-round3.md"
-    "about/law-and-lore/reconciliations/reconciliation-gen4.md"
+    "about/legends-and-lore/rfcs/0005-session-protocol.md"
+    "about/legends-and-lore/prompts/07-configuration.md"
+    "about/legends-and-lore/reviews/0001-scene-contract-round3.md"
+    "about/legends-and-lore/reconciliations/reconciliation-gen4.md"
 )
 
 # Patterns to search for (ERE)

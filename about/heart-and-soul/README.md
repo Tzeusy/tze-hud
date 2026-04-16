@@ -45,4 +45,4 @@ Without the magnet, you get a flux diagram where every arrow points somewhere di
 
 11. **[v1.md](v1.md)** — What v1 ships and what it defers. Scope boundary for the first working system.
 
-Note: The component shape language (design tokens, component profiles, visual extensibility) is documented in **presence.md** §"Component shape language" and **architecture.md** §"Text rendering policy and design tokens". The detailed specification lives in `openspec/changes/component-shape-language/`. The corresponding RFC is 0012 in `about/law-and-lore/`.
+Note: The component shape language (design tokens, component profiles, visual extensibility) is documented in **presence.md** §"Component shape language" and **architecture.md** §"Text rendering policy and design tokens". The detailed specification lives in `openspec/changes/component-shape-language/`. The corresponding RFC is 0012 in `about/legends-and-lore/`.

@@ -81,7 +81,7 @@ Instantiation note: the `PW-*` backlog below is a full dependency view, not a cr
   - `openspec/changes/v1-mvp-standards/specs/lease-governance/spec.md`
   - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
 - RFC/doctrine citations:
-  - `about/law-and-lore/rfcs/0008-lease-governance.md`
+  - `about/legends-and-lore/rfcs/0008-lease-governance.md`
   - `about/heart-and-soul/security.md`
 - Acceptance:
   - Lease grants MUST deny or clamp requested capabilities that exceed the session-granted authorization set.

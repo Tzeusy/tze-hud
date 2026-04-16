@@ -1,4 +1,4 @@
-# Law and Lore — Design Contracts
+# Legends and Lore — Design Contracts
 
 Authoritative design contracts for tze_hud: wire-level protobuf schemas, state machines, field allocations, latency budgets, and integration contracts.
 

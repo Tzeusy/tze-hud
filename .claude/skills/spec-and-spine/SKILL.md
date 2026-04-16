@@ -20,7 +20,7 @@ OpenSpec capability specifications are the backbone of tze_hud. Every feature, e
 | Layer | Location | Role |
 |-------|----------|------|
 | Doctrine | `about/heart-and-soul/` | WHY — philosophical foundations, seven non-negotiable rules |
-| Design Contracts | `about/law-and-lore/rfcs/0001–0013` | HOW — wire-level protobuf schemas, state machines, field numbers, latency budgets |
+| Design Contracts | `about/legends-and-lore/rfcs/0001–0013` | HOW — wire-level protobuf schemas, state machines, field numbers, latency budgets |
 | Capability Specs | `openspec/changes/v1-mvp-standards/specs/` | WHAT — normative requirements with testable scenarios, RFC traceability, v1 scope tags |
 | Topology | `about/lay-and-land/` | WHERE — component boundaries, data flow, deployment topology |
 
@@ -53,7 +53,7 @@ For the full dependency graph and task-section breakdown, see [references/spec-m
 Before writing code for any feature:
 
 1. **Identify domains** — Determine which spec domain(s) the work touches. Use the domain lookup table above. Most work touches 1–3 specs.
-2. **Load selectively** — Read only the relevant spec(s). Never load all 13. Use `/law-and-lore` if you need the underlying RFC details.
+2. **Load selectively** — Read only the relevant spec(s). Never load all 13. Use `/legends-and-lore` if you need the underlying RFC details.
 3. **Verify coverage** — Confirm requirements exist for the planned behavior. Check `Scope: v1-mandatory` tags.
 4. **No requirement? Spec first.** — If no requirement covers the planned behavior, writing the spec is the first task. Use `/opsx:new` or `/opsx:explore` to create a delta spec.
 5. **Implement against scenarios** — Each requirement's WHEN/THEN scenarios are your acceptance criteria. Implementation must satisfy them.
@@ -141,7 +141,7 @@ When planning what to build next:
 
 | Need | Skill |
 |------|-------|
-| Underlying wire-level contracts | `/law-and-lore` (loads relevant RFCs) |
+| Underlying wire-level contracts | `/legends-and-lore` (loads relevant RFCs) |
 | Philosophical foundations | `/heart-and-soul` (loads relevant doctrine) |
 | System topology and boundaries | `/lay-and-land` (loads component maps) |
 | Create/continue spec changes | `/opsx:new`, `/opsx:continue`, `/opsx:ff` |

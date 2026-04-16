@@ -35,17 +35,17 @@ All spec paths relative to repo root:
 
 | Domain | Spec | RFC | Tasks section |
 |--------|------|-----|---------------|
-| Scene Graph | `openspec/changes/v1-mvp-standards/specs/scene-graph/spec.md` | `about/law-and-lore/rfcs/0001-scene-contract.md` | Section 1 (tasks 1.1–1.11) |
-| Runtime Kernel | `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md` | `about/law-and-lore/rfcs/0002-runtime-kernel.md` | Section 3 (tasks 3.1–3.11) |
-| Timing Model | `openspec/changes/v1-mvp-standards/specs/timing-model/spec.md` | `about/law-and-lore/rfcs/0003-timing.md` | Section 2 (tasks 2.1–2.8) |
-| Input Model | `openspec/changes/v1-mvp-standards/specs/input-model/spec.md` | `about/law-and-lore/rfcs/0004-input.md` | Section 4 (tasks 4.1–4.9) |
-| Session Protocol | `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md` | `about/law-and-lore/rfcs/0005-session-protocol.md` | Section 5 (tasks 5.1–5.12) |
-| Configuration | `openspec/changes/v1-mvp-standards/specs/configuration/spec.md` | `about/law-and-lore/rfcs/0006-configuration.md` | Section 6 (tasks 6.1–6.8) |
-| System Shell | `openspec/changes/v1-mvp-standards/specs/system-shell/spec.md` | `about/law-and-lore/rfcs/0007-system-shell.md` | Section 8 (tasks 8.1–8.8) |
-| Lease Governance | `openspec/changes/v1-mvp-standards/specs/lease-governance/spec.md` | `about/law-and-lore/rfcs/0008-lease-governance.md` | Section 7 (tasks 7.1–7.8) |
-| Policy Arbitration | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md` | `about/law-and-lore/rfcs/0009-policy-arbitration.md` | Section 9 (tasks 9.1–9.10) |
-| Scene Events | `openspec/changes/v1-mvp-standards/specs/scene-events/spec.md` | `about/law-and-lore/rfcs/0010-scene-events.md` | Section 10 (tasks 10.1–10.8) |
-| Resource Store | `openspec/changes/v1-mvp-standards/specs/resource-store/spec.md` | `about/law-and-lore/rfcs/0011-resource-store.md` | Section 11 (tasks 11.1–11.9) |
+| Scene Graph | `openspec/changes/v1-mvp-standards/specs/scene-graph/spec.md` | `about/legends-and-lore/rfcs/0001-scene-contract.md` | Section 1 (tasks 1.1–1.11) |
+| Runtime Kernel | `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md` | `about/legends-and-lore/rfcs/0002-runtime-kernel.md` | Section 3 (tasks 3.1–3.11) |
+| Timing Model | `openspec/changes/v1-mvp-standards/specs/timing-model/spec.md` | `about/legends-and-lore/rfcs/0003-timing.md` | Section 2 (tasks 2.1–2.8) |
+| Input Model | `openspec/changes/v1-mvp-standards/specs/input-model/spec.md` | `about/legends-and-lore/rfcs/0004-input.md` | Section 4 (tasks 4.1–4.9) |
+| Session Protocol | `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md` | `about/legends-and-lore/rfcs/0005-session-protocol.md` | Section 5 (tasks 5.1–5.12) |
+| Configuration | `openspec/changes/v1-mvp-standards/specs/configuration/spec.md` | `about/legends-and-lore/rfcs/0006-configuration.md` | Section 6 (tasks 6.1–6.8) |
+| System Shell | `openspec/changes/v1-mvp-standards/specs/system-shell/spec.md` | `about/legends-and-lore/rfcs/0007-system-shell.md` | Section 8 (tasks 8.1–8.8) |
+| Lease Governance | `openspec/changes/v1-mvp-standards/specs/lease-governance/spec.md` | `about/legends-and-lore/rfcs/0008-lease-governance.md` | Section 7 (tasks 7.1–7.8) |
+| Policy Arbitration | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md` | `about/legends-and-lore/rfcs/0009-policy-arbitration.md` | Section 9 (tasks 9.1–9.10) |
+| Scene Events | `openspec/changes/v1-mvp-standards/specs/scene-events/spec.md` | `about/legends-and-lore/rfcs/0010-scene-events.md` | Section 10 (tasks 10.1–10.8) |
+| Resource Store | `openspec/changes/v1-mvp-standards/specs/resource-store/spec.md` | `about/legends-and-lore/rfcs/0011-resource-store.md` | Section 11 (tasks 11.1–11.9) |
 | Validation Framework | `openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md` | (cross-cutting) | Section 12 (tasks 12.1–12.10) |
 
 **Integration tasks:** Section 13 (tasks 13.1–13.5) covers cross-subsystem convergence — not tied to a single spec.
