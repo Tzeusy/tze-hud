@@ -1464,6 +1464,9 @@ impl WindowedRuntime {
         let shared_state = Arc::new(Mutex::new(SharedState {
             scene: Arc::clone(&shared_scene),
             sessions,
+            resource_store: tze_hud_resource::ResourceStore::new(
+                tze_hud_resource::ResourceStoreConfig::default(),
+            ),
             widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
             runtime_widget_store: runtime_widget_store.clone(),
             safe_mode_active: false,
@@ -2332,6 +2335,9 @@ mod tests {
         Arc::new(TokioMutex::new(SharedState {
             scene,
             sessions,
+            resource_store: tze_hud_resource::ResourceStore::new(
+                tze_hud_resource::ResourceStoreConfig::default(),
+            ),
             widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
             runtime_widget_store: None,
             safe_mode_active: false,

@@ -47,7 +47,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tze_hud_resource::{
-    RuntimeWidgetStoreError, RuntimeWidgetStorePutOutcome as DurablePutOutcome,
+    AgentBudget, ResourceError as StoreResourceError, ResourceStore, ResourceStoreConfig,
+    ResourceStored as StoreResourceStored, ResourceType as StoreResourceType,
+    RuntimeWidgetStoreError, RuntimeWidgetStorePutOutcome as DurablePutOutcome, UploadId,
+    UploadStartRequest,
 };
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
@@ -199,9 +202,7 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
         | ServerPayload::WidgetAssetRegisterResult(_)
         | ServerPayload::ResourceUploadAccepted(_)
         | ServerPayload::ResourceStored(_)
-        | ServerPayload::ResourceErrorResponse(_) => {
-            TrafficClass::Transactional
-        }
+        | ServerPayload::ResourceErrorResponse(_) => TrafficClass::Transactional,
 
         // Backpressure signal — transactional (must not be dropped)
         ServerPayload::BackpressureSignal(_) => TrafficClass::Transactional,
@@ -620,6 +621,13 @@ use tze_hud_scene::events::emission::{
     AgentEventRateLimiter, DEFAULT_MAX_EVENTS_PER_SECOND, MAX_PAYLOAD_BYTES,
 };
 
+#[derive(Clone, Debug)]
+struct ResidentUploadState {
+    request_sequence: u64,
+    metadata: ResourceMetadata,
+    total_size_bytes: u64,
+}
+
 // ─── Session state ──────────────────────────────────────────────────────────
 
 /// Per-session state tracked by the streaming server.
@@ -693,6 +701,9 @@ struct StreamSession {
     /// the lease operation, preserving at-least-once semantics with
     /// idempotent handling.
     lease_correlation_cache: LeaseCorrelationCache,
+
+    /// In-flight resident scene-resource uploads keyed by assigned upload ID bytes.
+    resource_uploads: HashMap<[u8; 16], ResidentUploadState>,
 }
 
 impl StreamSession {
@@ -841,6 +852,7 @@ impl HudSessionImpl {
             state: Arc::new(Mutex::new(SharedState {
                 scene: Arc::new(Mutex::new(scene)),
                 sessions: crate::session::SessionRegistry::new(psk),
+                resource_store: ResourceStore::new(ResourceStoreConfig::default()),
                 widget_asset_store: crate::session::WidgetAssetStore::default(),
                 runtime_widget_store: None,
                 safe_mode_active: false,
@@ -1429,7 +1441,7 @@ impl HudSession for HudSessionImpl {
             // The resume token issued at handshake time is saved to the TokenStore so
             // the agent can reconnect within the grace period using SessionResume.
             // Token is not persisted across process restarts (RFC 0005 §6.6).
-            {
+            let (resource_store, namespace_for_cleanup) = {
                 let mut st = state.lock().await;
                 st.sessions.remove_session(&session.session_id);
 
@@ -1447,7 +1459,11 @@ impl HudSession for HudSessionImpl {
                         now_ms(),
                     );
                 }
-            }
+                (st.resource_store.clone(), session.namespace.clone())
+            };
+            resource_store
+                .abort_all_uploads(&namespace_for_cleanup)
+                .await;
         });
 
         // Return the receiver stream as the response
@@ -1642,6 +1658,7 @@ async fn handle_session_init(
         lease_correlation_cache: LeaseCorrelationCache::new(
             DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
         ),
+        resource_uploads: HashMap::new(),
     };
 
     // ── Step 5: Clock skew estimation (RFC 0003 §1.3) ────────────────────────
@@ -1799,6 +1816,7 @@ async fn handle_session_resume(
         lease_correlation_cache: LeaseCorrelationCache::new(
             DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
         ),
+        resource_uploads: HashMap::new(),
     };
 
     let compositor_ts = now_wall_us();
@@ -1905,43 +1923,14 @@ async fn handle_client_message(
         ClientPayload::WidgetAssetRegister(register) => {
             handle_widget_asset_register(state, session, tx, client_sequence, register).await;
         }
-        // Resident scene-resource upload handling is implemented in hud-ooj1.3.
-        ClientPayload::ResourceUploadStart(_)
-        | ClientPayload::ResourceUploadChunk(_)
-        | ClientPayload::ResourceUploadComplete(_) => {
-            let request_kind = match payload {
-                ClientPayload::ResourceUploadStart(_) => "start",
-                ClientPayload::ResourceUploadChunk(_) => "chunk",
-                ClientPayload::ResourceUploadComplete(_) => "complete",
-                _ => unreachable!("resource upload fallback only handles upload variants"),
-            };
-            let context = serde_json::json!({
-                "domain": "resource_upload",
-                "request_kind": request_kind,
-                "client_sequence": client_sequence,
-            })
-            .to_string();
-            let hint = serde_json::json!({
-                "bead": "hud-ooj1.3",
-                "client_sequence": client_sequence,
-                "request_kind": request_kind,
-            })
-            .to_string();
-            let seq = session.next_server_seq();
-            let _ = tx
-                .send(Ok(ServerMessage {
-                    sequence: seq,
-                    timestamp_wall_us: now_wall_us(),
-                    payload: Some(ServerPayload::RuntimeError(RuntimeError {
-                        error_code: "INVALID_ARGUMENT".to_string(),
-                        message: "Resident scene-resource upload is not implemented yet"
-                            .to_string(),
-                        context,
-                        hint,
-                        error_code_enum: ErrorCode::InvalidArgument as i32,
-                    })),
-                }))
-                .await;
+        ClientPayload::ResourceUploadStart(start) => {
+            handle_resource_upload_start(state, session, tx, client_sequence, start).await;
+        }
+        ClientPayload::ResourceUploadChunk(chunk) => {
+            handle_resource_upload_chunk(state, session, tx, client_sequence, chunk).await;
+        }
+        ClientPayload::ResourceUploadComplete(complete) => {
+            handle_resource_upload_complete(state, session, tx, client_sequence, complete).await;
         }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {
@@ -4015,6 +4004,345 @@ fn register_widget_asset_in_scene(
         asset_handle,
         &HashMap::new(),
     )
+}
+
+fn proto_resource_type_to_store(resource_type: i32) -> Option<StoreResourceType> {
+    match resource_type {
+        1 => Some(StoreResourceType::ImageRgba8),
+        2 => Some(StoreResourceType::ImagePng),
+        3 => Some(StoreResourceType::ImageJpeg),
+        4 => Some(StoreResourceType::FontTtf),
+        5 => Some(StoreResourceType::FontOtf),
+        6 => Some(StoreResourceType::ImageSvg),
+        _ => None,
+    }
+}
+
+fn resource_error_code_i32(err: &StoreResourceError) -> i32 {
+    match err {
+        StoreResourceError::CapabilityDenied => 1,
+        StoreResourceError::BudgetExceeded { .. } => 2,
+        StoreResourceError::SizeExceeded { .. } => 3,
+        StoreResourceError::UnsupportedType(_) => 4,
+        StoreResourceError::DecodeError(_) => 5,
+        StoreResourceError::HashMismatch { .. } => 6,
+        StoreResourceError::TooManyUploads => 8,
+        StoreResourceError::InvalidChunk(_)
+        | StoreResourceError::UploadAborted(_)
+        | StoreResourceError::Internal(_) => 0,
+    }
+}
+
+fn upload_id_bytes_from_slice(upload_id: &[u8]) -> Option<[u8; 16]> {
+    let arr: [u8; 16] = upload_id.try_into().ok()?;
+    Some(arr)
+}
+
+async fn send_resource_stored(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    request_sequence: u64,
+    stored: &StoreResourceStored,
+    stored_bytes: u64,
+    metadata: ResourceMetadata,
+    upload_id: Option<&[u8; 16]>,
+) {
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::ResourceStored(ResourceStored {
+                request_sequence,
+                resource_id: Some(crate::proto::ResourceIdProto {
+                    bytes: stored.resource_id.as_bytes().to_vec(),
+                }),
+                was_deduplicated: stored.was_deduplicated,
+                stored_bytes,
+                decoded_bytes: stored.decoded_bytes as u64,
+                metadata: Some(metadata),
+                upload_id: upload_id.map(|u| u.to_vec()).unwrap_or_default(),
+            })),
+        }))
+        .await;
+}
+
+async fn send_resource_error_response(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    request_sequence: u64,
+    upload_id: Option<&[u8]>,
+    err: &StoreResourceError,
+) {
+    let context = serde_json::json!({
+        "domain": "resource_upload",
+        "wire_code": err.wire_code(),
+    })
+    .to_string();
+    let hint = serde_json::json!({
+        "expected_flow": "ResourceUploadStart -> [ResourceUploadAccepted] -> ResourceUploadChunk* -> ResourceUploadComplete",
+    })
+    .to_string();
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::ResourceErrorResponse(
+                ResourceErrorResponse {
+                    request_sequence,
+                    error_code: resource_error_code_i32(err),
+                    message: err.to_string(),
+                    context,
+                    hint,
+                    upload_id: upload_id.map(|u| u.to_vec()).unwrap_or_default(),
+                },
+            )),
+        }))
+        .await;
+}
+
+async fn handle_resource_upload_start(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    request_sequence: u64,
+    start: ResourceUploadStart,
+) {
+    let resource_type = match proto_resource_type_to_store(start.resource_type) {
+        Some(v) => v,
+        None => {
+            let err = StoreResourceError::UnsupportedType(format!(
+                "unknown resource_type enum value {}",
+                start.resource_type
+            ));
+            send_resource_error_response(session, tx, request_sequence, None, &err).await;
+            return;
+        }
+    };
+
+    let expected_hash: [u8; 32] = match start.expected_hash.as_slice().try_into() {
+        Ok(hash) => hash,
+        Err(_) => {
+            let err = StoreResourceError::HashMismatch {
+                computed: "n/a".to_string(),
+                expected: format!(
+                    "expected_hash length={} (must be 32)",
+                    start.expected_hash.len()
+                ),
+            };
+            send_resource_error_response(session, tx, request_sequence, None, &err).await;
+            return;
+        }
+    };
+
+    let metadata = start.metadata.unwrap_or_default();
+    let upload_id_bytes = *uuid::Uuid::now_v7().as_bytes();
+    let request = UploadStartRequest {
+        agent_namespace: session.namespace.clone(),
+        agent_capabilities: session.capabilities.clone(),
+        // Upload admission should not enforce decoded texture budget at storage time.
+        agent_budget: AgentBudget {
+            texture_bytes_total_limit: 0,
+            texture_bytes_total_used: 0,
+        },
+        upload_id: UploadId::from_bytes(upload_id_bytes),
+        resource_type,
+        expected_hash,
+        total_size: start.total_size_bytes as usize,
+        inline_data: start.inline_data,
+        width: metadata.width,
+        height: metadata.height,
+    };
+
+    let store = {
+        let st = state.lock().await;
+        st.resource_store.clone()
+    };
+
+    match store.handle_upload_start(request).await {
+        Ok(Some(stored)) => {
+            send_resource_stored(
+                session,
+                tx,
+                request_sequence,
+                &stored,
+                start.total_size_bytes,
+                metadata,
+                None,
+            )
+            .await;
+        }
+        Ok(None) => {
+            session.resource_uploads.insert(
+                upload_id_bytes,
+                ResidentUploadState {
+                    request_sequence,
+                    metadata,
+                    total_size_bytes: start.total_size_bytes,
+                },
+            );
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::ResourceUploadAccepted(
+                        ResourceUploadAccepted {
+                            request_sequence,
+                            upload_id: upload_id_bytes.to_vec(),
+                        },
+                    )),
+                }))
+                .await;
+        }
+        Err(err) => {
+            send_resource_error_response(session, tx, request_sequence, None, &err).await;
+        }
+    }
+}
+
+async fn handle_resource_upload_chunk(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    request_sequence: u64,
+    chunk: ResourceUploadChunk,
+) {
+    let upload_id_bytes = match upload_id_bytes_from_slice(&chunk.upload_id) {
+        Some(id) => id,
+        None => {
+            let err = StoreResourceError::InvalidChunk(format!(
+                "upload_id length={} (must be 16)",
+                chunk.upload_id.len()
+            ));
+            send_resource_error_response(
+                session,
+                tx,
+                request_sequence,
+                Some(&chunk.upload_id),
+                &err,
+            )
+            .await;
+            return;
+        }
+    };
+
+    let Some(tracked) = session.resource_uploads.get(&upload_id_bytes).cloned() else {
+        let err = StoreResourceError::InvalidChunk(
+            "upload_id is not in-flight for this session".to_string(),
+        );
+        send_resource_error_response(session, tx, request_sequence, Some(&chunk.upload_id), &err)
+            .await;
+        return;
+    };
+
+    let store = {
+        let st = state.lock().await;
+        st.resource_store.clone()
+    };
+    if let Err(err) = store
+        .handle_upload_chunk(
+            &session.namespace,
+            UploadId::from_bytes(upload_id_bytes),
+            chunk.chunk_index,
+            chunk.data,
+        )
+        .await
+    {
+        send_resource_error_response(
+            session,
+            tx,
+            tracked.request_sequence,
+            Some(&upload_id_bytes),
+            &err,
+        )
+        .await;
+    }
+}
+
+async fn handle_resource_upload_complete(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    request_sequence: u64,
+    complete: ResourceUploadComplete,
+) {
+    let upload_id_bytes = match upload_id_bytes_from_slice(&complete.upload_id) {
+        Some(id) => id,
+        None => {
+            let err = StoreResourceError::InvalidChunk(format!(
+                "upload_id length={} (must be 16)",
+                complete.upload_id.len()
+            ));
+            send_resource_error_response(
+                session,
+                tx,
+                request_sequence,
+                Some(&complete.upload_id),
+                &err,
+            )
+            .await;
+            return;
+        }
+    };
+
+    let Some(tracked) = session.resource_uploads.get(&upload_id_bytes).cloned() else {
+        let err = StoreResourceError::InvalidChunk(
+            "upload_id is not in-flight for this session".to_string(),
+        );
+        send_resource_error_response(
+            session,
+            tx,
+            request_sequence,
+            Some(&complete.upload_id),
+            &err,
+        )
+        .await;
+        return;
+    };
+
+    let store = {
+        let st = state.lock().await;
+        st.resource_store.clone()
+    };
+    match store
+        .handle_upload_complete(
+            &session.namespace,
+            UploadId::from_bytes(upload_id_bytes),
+            &session.capabilities,
+            &AgentBudget {
+                texture_bytes_total_limit: 0,
+                texture_bytes_total_used: 0,
+            },
+        )
+        .await
+    {
+        Ok(stored) => {
+            session.resource_uploads.remove(&upload_id_bytes);
+            send_resource_stored(
+                session,
+                tx,
+                tracked.request_sequence,
+                &stored,
+                tracked.total_size_bytes,
+                tracked.metadata,
+                Some(&upload_id_bytes),
+            )
+            .await;
+        }
+        Err(err) => {
+            session.resource_uploads.remove(&upload_id_bytes);
+            send_resource_error_response(
+                session,
+                tx,
+                tracked.request_sequence,
+                Some(&upload_id_bytes),
+                &err,
+            )
+            .await;
+        }
+    }
 }
 
 /// Handle a WidgetAssetRegister from the client (session-protocol spec
@@ -6823,6 +7151,7 @@ mod tests {
             lease_correlation_cache: LeaseCorrelationCache::new(
                 DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
             ),
+            resource_uploads: HashMap::new(),
         };
 
         // seq=2 (gap=1): OK
@@ -7525,6 +7854,7 @@ mod tests {
             lease_correlation_cache: LeaseCorrelationCache::new(
                 DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
             ),
+            resource_uploads: HashMap::new(),
         };
 
         handle_capability_request(
@@ -7588,6 +7918,7 @@ mod tests {
             lease_correlation_cache: LeaseCorrelationCache::new(
                 DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
             ),
+            resource_uploads: HashMap::new(),
         };
 
         // Request both an authorized and an unauthorized capability
@@ -7896,6 +8227,7 @@ mod tests {
             lease_correlation_cache: LeaseCorrelationCache::new(
                 DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
             ),
+            resource_uploads: HashMap::new(),
         };
 
         handle_capability_request(
@@ -10974,6 +11306,191 @@ mod tests {
             assert_eq!(queued[0].0, "gauge");
             assert_eq!(queued[0].1, "fill.svg");
             assert_eq!(queued[0].2, payload);
+        }
+
+        drop(handle);
+    }
+
+    fn tiny_png_1x1_rgba() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0xda, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x56, 0xc7,
+            0x2f, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_resource_upload_start_requires_upload_resource_capability() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) =
+            handshake_with_capabilities(&mut client, "resource-no-cap", "test-key", &[]).await;
+        let payload = tiny_png_1x1_rgba();
+        let hash = blake3::hash(&payload).as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash,
+                resource_type: 2,
+                total_size_bytes: payload.len() as u64,
+                metadata: Some(ResourceMetadata::default()),
+                inline_data: payload,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = next_non_state_change(&mut stream).await;
+        match &msg.payload {
+            Some(ServerPayload::ResourceErrorResponse(err)) => {
+                assert_eq!(err.request_sequence, 2);
+                assert_eq!(err.error_code, 1);
+                assert!(err.upload_id.is_empty());
+            }
+            other => panic!("expected ResourceErrorResponse, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_resource_upload_inline_and_dedup_short_circuit() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-inline",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        let payload = tiny_png_1x1_rgba();
+        let hash = blake3::hash(&payload).as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash.clone(),
+                resource_type: 2,
+                total_size_bytes: payload.len() as u64,
+                metadata: Some(ResourceMetadata::default()),
+                inline_data: payload.clone(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let first = next_non_state_change(&mut stream).await;
+        match &first.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                assert_eq!(stored.request_sequence, 2);
+                assert!(!stored.was_deduplicated);
+                assert!(stored.upload_id.is_empty());
+            }
+            other => panic!("expected ResourceStored, got: {other:?}"),
+        }
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash,
+                resource_type: 2,
+                total_size_bytes: payload.len() as u64,
+                metadata: Some(ResourceMetadata::default()),
+                inline_data: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let second = next_non_state_change(&mut stream).await;
+        match &second.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                assert_eq!(stored.request_sequence, 3);
+                assert!(stored.was_deduplicated);
+                assert!(stored.upload_id.is_empty());
+            }
+            other => panic!("expected ResourceStored on dedup short-circuit, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_resource_upload_chunked_ack_then_complete() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-chunked",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        let payload = tiny_png_1x1_rgba();
+        let hash = blake3::hash(&payload).as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash,
+                resource_type: 2,
+                total_size_bytes: payload.len() as u64,
+                metadata: Some(ResourceMetadata::default()),
+                inline_data: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let accepted = next_non_state_change(&mut stream).await;
+        let upload_id = match &accepted.payload {
+            Some(ServerPayload::ResourceUploadAccepted(accepted)) => {
+                assert_eq!(accepted.request_sequence, 2);
+                assert_eq!(accepted.upload_id.len(), 16);
+                accepted.upload_id.clone()
+            }
+            other => panic!("expected ResourceUploadAccepted, got: {other:?}"),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_id.clone(),
+                chunk_index: 0,
+                data: payload.clone(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadComplete(
+                ResourceUploadComplete {
+                    upload_id: upload_id.clone(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        let stored = next_non_state_change(&mut stream).await;
+        match &stored.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                assert_eq!(stored.request_sequence, 2);
+                assert_eq!(stored.upload_id, upload_id);
+                assert!(!stored.was_deduplicated);
+            }
+            other => panic!("expected ResourceStored on complete, got: {other:?}"),
         }
 
         drop(handle);
