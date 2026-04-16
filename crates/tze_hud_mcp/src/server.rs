@@ -1305,6 +1305,7 @@ mod tests {
         ]);
 
         scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "gauge".to_string(),
             tab_id,
             geometry_override: None,

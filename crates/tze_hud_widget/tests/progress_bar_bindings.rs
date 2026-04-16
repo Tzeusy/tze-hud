@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tze_hud_scene::SceneGraph;
+use tze_hud_scene::SceneId;
 use tze_hud_scene::types::{
     ContentionPolicy, GeometryPolicy, WidgetBindingMapping, WidgetInstance, WidgetParameterValue,
 };
@@ -120,6 +121,7 @@ fn scene_with_progress_bar() -> (SceneGraph, tze_hud_scene::types::SceneId) {
     });
 
     scene.widget_registry.register_instance(WidgetInstance {
+        id: SceneId::new(),
         widget_type_name: "progress-bar".to_string(),
         tab_id,
         geometry_override,

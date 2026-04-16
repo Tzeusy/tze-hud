@@ -31,6 +31,7 @@ use std::time::Instant;
 
 use tze_hud_compositor::widget::rasterize_svg_layers;
 use tze_hud_scene::SceneGraph;
+use tze_hud_scene::SceneId;
 use tze_hud_scene::types::{
     ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetBinding, WidgetBindingMapping,
     WidgetInstance, WidgetParameterValue,
@@ -114,6 +115,7 @@ fn scene_with_status_indicator(
         .collect();
 
     scene.widget_registry.register_instance(WidgetInstance {
+        id: SceneId::new(),
         widget_type_name: "status-indicator".to_string(),
         tab_id,
         geometry_override: None,

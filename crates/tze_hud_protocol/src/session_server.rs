@@ -52,6 +52,7 @@ use tze_hud_resource::{
     RuntimeWidgetStoreError, RuntimeWidgetStorePutOutcome as DurablePutOutcome, UploadId,
     UploadStartRequest,
 };
+use tze_hud_scene::element_store::{ElementStore, ElementStoreEntry, ElementType};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
 use tze_hud_scene::types::*;
@@ -613,6 +614,120 @@ fn proto_batch_id_to_scene_id(batch_id: &[u8]) -> tze_hud_scene::SceneId {
     }
 }
 
+/// Captures the data needed to persist the element store outside the shared-state lock.
+struct ElementStorePersistRequest {
+    store: ElementStore,
+    path: std::path::PathBuf,
+}
+
+/// Update tile entries in the element store and return an optional persistence request.
+async fn persist_created_tile_entries(
+    st: &mut SharedState,
+    created_ids: &[SceneId],
+) -> Option<ElementStorePersistRequest> {
+    if created_ids.is_empty() {
+        return None;
+    }
+
+    let created_tiles: Vec<(SceneId, String)> = {
+        let scene = st.scene.lock().await;
+        created_ids
+            .iter()
+            .filter_map(|id| {
+                scene
+                    .tiles
+                    .get(id)
+                    .map(|tile| (*id, tile.namespace.clone()))
+            })
+            .collect()
+    };
+
+    if created_tiles.is_empty() {
+        return None;
+    }
+
+    let now = now_ms();
+    let mut changed = false;
+    for (id, namespace) in created_tiles {
+        match st.element_store.entries.get_mut(&id) {
+            Some(entry) => {
+                if entry.element_type != ElementType::Tile {
+                    entry.element_type = ElementType::Tile;
+                    changed = true;
+                }
+                if entry.namespace != namespace {
+                    entry.namespace = namespace;
+                    changed = true;
+                }
+                if entry.created_at == 0 {
+                    entry.created_at = now;
+                    changed = true;
+                }
+                if entry.last_published_at != now {
+                    entry.last_published_at = now;
+                    changed = true;
+                }
+                if entry.geometry_override.is_some() {
+                    entry.geometry_override = None;
+                    changed = true;
+                }
+            }
+            None => {
+                st.element_store.entries.insert(
+                    id,
+                    ElementStoreEntry {
+                        element_type: ElementType::Tile,
+                        namespace,
+                        created_at: now,
+                        last_published_at: now,
+                        geometry_override: None,
+                    },
+                );
+                changed = true;
+            }
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+
+    st.element_store_path
+        .clone()
+        .map(|path| ElementStorePersistRequest {
+            store: st.element_store.clone(),
+            path,
+        })
+}
+
+/// Persist the element store without blocking the async executor worker thread.
+async fn persist_element_store(request: Option<ElementStorePersistRequest>) {
+    let Some(request) = request else {
+        return;
+    };
+
+    let path_for_log = request.path.clone();
+    match tokio::task::spawn_blocking(move || request.store.persist_to_path_atomic(&request.path))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(
+                path = %path_for_log.display(),
+                error = %err,
+                "element_store: failed to persist tile IDs"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                path = %path_for_log.display(),
+                error = %err,
+                "element_store: failed to join tile ID persistence task"
+            );
+        }
+    }
+}
+
 // ─── Shared agent event emission types ───────────────────────────────────────
 
 // AgentEventRateLimiter, MAX_PAYLOAD_BYTES, and DEFAULT_MAX_EVENTS_PER_SECOND
@@ -855,6 +970,8 @@ impl HudSessionImpl {
                 resource_store: ResourceStore::new(ResourceStoreConfig::default()),
                 widget_asset_store: crate::session::WidgetAssetStore::default(),
                 runtime_widget_store: None,
+                element_store: tze_hud_scene::element_store::ElementStore::default(),
+                element_store_path: None,
                 safe_mode_active: false,
                 token_store: TokenStore::new(),
                 freeze_active: false,
@@ -2244,7 +2361,7 @@ async fn handle_mutation_batch(
         }
     }
 
-    let st = state.lock().await;
+    let mut st = state.lock().await;
 
     let lease_id = match bytes_to_scene_id(&batch.lease_id) {
         Ok(id) => id,
@@ -2537,6 +2654,8 @@ async fn handle_mutation_batch(
 
     let seq = session.next_server_seq();
     if result.applied {
+        let persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
+
         let created_ids: Vec<Vec<u8>> = result
             .created_ids
             .iter()
@@ -2558,6 +2677,7 @@ async fn handle_mutation_batch(
 
         // Drop lock before awaiting send to avoid holding mutex across await point.
         drop(st);
+        persist_element_store(persist_request).await;
         let _ = tx
             .send(Ok(ServerMessage {
                 sequence: seq,
@@ -2624,7 +2744,7 @@ async fn apply_queued_batch_to_scene(
     session: &mut StreamSession,
     batch: MutationBatch,
 ) {
-    let st = state.lock().await;
+    let mut st = state.lock().await;
 
     let lease_id = match bytes_to_scene_id(&batch.lease_id) {
         Ok(id) => id,
@@ -2845,8 +2965,13 @@ async fn apply_queued_batch_to_scene(
         lease_id: Some(lease_id),
     };
 
-    // Apply to scene; result is intentionally discarded — response already sent.
-    let _ = st.scene.lock().await.apply_batch(&scene_batch);
+    // Apply to scene; response was already sent when the batch was queued.
+    let result = st.scene.lock().await.apply_batch(&scene_batch);
+    if result.applied {
+        let persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
+        drop(st);
+        persist_element_store(persist_request).await;
+    }
 }
 
 /// Map a canonical v1 capability wire name to the `Capability` enum variant.
@@ -5663,6 +5788,215 @@ mod tests {
             }
             other => panic!("Expected MutationResult, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_create_tile_persists_element_store_entry() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        let path = std::env::temp_dir().join(format!(
+            "tze_hud_element_store_session_server_{}.toml",
+            SceneId::new()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut st = shared_state.lock().await;
+            st.element_store = tze_hud_scene::element_store::ElementStore::default();
+            st.element_store_path = Some(path.clone());
+            st.scene
+                .lock()
+                .await
+                .create_tab("main", 0)
+                .expect("create tab");
+        }
+
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "persist-agent", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .expect("lease request");
+
+        let lease_msg = next_non_state_change(&mut stream).await;
+        let lease_id = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected granted LeaseResponse, got: {other:?}"),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: uuid::Uuid::now_v7().as_bytes().to_vec(),
+                lease_id,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
+                        crate::proto::CreateTileMutation {
+                            tab_id: vec![],
+                            bounds: Some(crate::proto::Rect {
+                                x: 8.0,
+                                y: 8.0,
+                                width: 200.0,
+                                height: 100.0,
+                                ..Default::default()
+                            }),
+                            z_order: 1,
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .expect("mutation batch");
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        let created_tile_id = match &result_msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(result.accepted, "create tile must be accepted");
+                assert_eq!(result.created_ids.len(), 1, "one tile should be created");
+                bytes_to_scene_id(&result.created_ids[0]).expect("valid created tile id bytes")
+            }
+            other => panic!("Expected MutationResult, got: {other:?}"),
+        };
+
+        let store = tze_hud_scene::element_store::ElementStore::load_or_default(&path)
+            .expect("load persisted element store");
+        let entry = store
+            .entries
+            .get(&created_tile_id)
+            .expect("tile id should be persisted");
+        assert_eq!(
+            entry.element_type,
+            tze_hud_scene::element_store::ElementType::Tile
+        );
+        assert_eq!(entry.namespace, "persist-agent");
+        assert!(entry.created_at > 0);
+        assert!(entry.last_published_at >= entry.created_at);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn test_existing_tile_last_published_update_triggers_persist() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        let path = std::env::temp_dir().join(format!(
+            "tze_hud_element_store_last_published_{}.toml",
+            SceneId::new()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut st = shared_state.lock().await;
+            st.element_store = tze_hud_scene::element_store::ElementStore::default();
+            st.element_store_path = Some(path.clone());
+            st.scene
+                .lock()
+                .await
+                .create_tab("main", 0)
+                .expect("create tab");
+        }
+
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "persist-agent", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .expect("lease request");
+
+        let lease_msg = next_non_state_change(&mut stream).await;
+        let lease_id = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected granted LeaseResponse, got: {other:?}"),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: uuid::Uuid::now_v7().as_bytes().to_vec(),
+                lease_id,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
+                        crate::proto::CreateTileMutation {
+                            tab_id: vec![],
+                            bounds: Some(crate::proto::Rect {
+                                x: 8.0,
+                                y: 8.0,
+                                width: 200.0,
+                                height: 100.0,
+                                ..Default::default()
+                            }),
+                            z_order: 1,
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .expect("mutation batch");
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        let created_tile_id = match &result_msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(result.accepted, "create tile must be accepted");
+                assert_eq!(result.created_ids.len(), 1, "one tile should be created");
+                bytes_to_scene_id(&result.created_ids[0]).expect("valid created tile id bytes")
+            }
+            other => panic!("Expected MutationResult, got: {other:?}"),
+        };
+
+        let baseline_store = tze_hud_scene::element_store::ElementStore::load_or_default(&path)
+            .expect("load baseline element store");
+        let baseline_entry = baseline_store
+            .entries
+            .get(&created_tile_id)
+            .expect("baseline tile id should be persisted");
+        let baseline_last_published = baseline_entry.last_published_at;
+
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        let persist_request = {
+            let mut st = shared_state.lock().await;
+            let entry = st
+                .element_store
+                .entries
+                .get_mut(&created_tile_id)
+                .expect("in-memory tile entry should exist");
+            entry.last_published_at = baseline_last_published;
+            persist_created_tile_entries(&mut st, &[created_tile_id]).await
+        };
+        persist_element_store(persist_request).await;
+
+        let updated_store = tze_hud_scene::element_store::ElementStore::load_or_default(&path)
+            .expect("reload element store");
+        let updated_entry = updated_store
+            .entries
+            .get(&created_tile_id)
+            .expect("tile id should remain persisted");
+        assert!(
+            updated_entry.last_published_at > baseline_last_published,
+            "last_published_at update must be persisted when it is the only changed field"
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     // ─── Regression tests for hud-wu32: batch_id correlation + lease_id propagation ──
@@ -10400,6 +10734,7 @@ mod tests {
             // Create a tab and widget instance
             let tab_id = s.create_tab("main", 0).unwrap();
             s.widget_registry.register_instance(WidgetInstance {
+                id: SceneId::new(),
                 widget_type_name: "gauge".to_string(),
                 tab_id,
                 geometry_override: None,
@@ -10761,6 +11096,7 @@ mod tests {
 
             let tab_id = s.create_tab("main", 0).unwrap();
             s.widget_registry.register_instance(WidgetInstance {
+                id: SceneId::new(),
                 widget_type_name: "live-bar".to_string(),
                 tab_id,
                 geometry_override: None,

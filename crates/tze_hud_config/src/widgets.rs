@@ -290,6 +290,7 @@ pub fn build_widget_instance(
     }
 
     Some(WidgetInstance {
+        id: tze_hud_scene::types::SceneId::new(),
         widget_type_name: widget_type,
         tab_id,
         geometry_override,

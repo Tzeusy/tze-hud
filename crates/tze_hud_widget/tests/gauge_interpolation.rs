@@ -26,6 +26,7 @@ use std::path::PathBuf;
 
 use tze_hud_compositor::widget::{compute_transition_t, interpolate_param, resolve_binding_value};
 use tze_hud_scene::DegradationLevel;
+use tze_hud_scene::SceneId;
 use tze_hud_scene::types::{
     ContentionPolicy, GeometryPolicy, RenderingPolicy, Rgba, WidgetInstance, WidgetParameterValue,
 };
@@ -108,6 +109,7 @@ fn scene_with_production_gauge() -> (tze_hud_scene::SceneGraph, tze_hud_scene::t
         .collect();
 
     scene.widget_registry.register_instance(WidgetInstance {
+        id: SceneId::new(),
         widget_type_name: "gauge".to_string(),
         tab_id,
         geometry_override: None,

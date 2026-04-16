@@ -6,11 +6,13 @@
 //! usage here is retained for compatibility until that migration completes.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tonic::Status;
 use tze_hud_resource::{ResourceStore, RuntimeWidgetStore};
 use tze_hud_scene::SceneId;
+use tze_hud_scene::element_store::ElementStore;
 use tze_hud_scene::graph::SceneGraph;
 
 use crate::proto::SceneEvent;
@@ -104,6 +106,10 @@ pub struct SharedState {
     /// Durable runtime widget asset store (v1 scoped durability exception).
     /// When `None`, widget asset registration uses in-memory fallback semantics.
     pub runtime_widget_store: Option<RuntimeWidgetStore>,
+    /// Persistent element identity store (zone/widget/tile Scene IDs).
+    pub element_store: ElementStore,
+    /// On-disk path for `element_store.toml`. When `None`, persistence is disabled.
+    pub element_store_path: Option<PathBuf>,
     /// Whether the runtime is currently in safe mode (RFC 0005 §3.7).
     /// When true, all active sessions reject MutationBatch with SAFE_MODE_ACTIVE.
     pub safe_mode_active: bool,

@@ -8056,6 +8056,7 @@ mod spec_scenarios {
 
         scene.widget_registry.register_definition(def);
         scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "gauge".to_string(),
             tab_id,
             geometry_override: None,
@@ -8284,6 +8285,7 @@ mod spec_scenarios {
             .widget_registry
             .register_definition(make_gauge_definition());
         let instance = WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "gauge".to_string(),
             tab_id,
             geometry_override: None,
@@ -8825,6 +8827,7 @@ mod spec_scenarios {
 
         // Add a second instance
         scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "gauge".to_string(),
             tab_id,
             geometry_override: None,
@@ -9079,6 +9082,7 @@ mod spec_scenarios {
         def.default_contention_policy = contention;
         scene.widget_registry.register_definition(def);
         scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "gauge".to_string(),
             tab_id,
             geometry_override: None,
@@ -9432,6 +9436,7 @@ mod spec_scenarios {
 
         // Register a second widget instance using the same definition
         scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "gauge".to_string(),
             tab_id,
             geometry_override: None,

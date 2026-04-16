@@ -238,8 +238,8 @@ mod tests {
     use super::*;
     use tze_hud_scene::graph::SceneGraph;
     use tze_hud_scene::types::{
-        ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition, WidgetHoverBehavior,
-        WidgetInstance, WidgetNormalizedRect,
+        ContentionPolicy, GeometryPolicy, RenderingPolicy, SceneId, WidgetDefinition,
+        WidgetHoverBehavior, WidgetInstance, WidgetNormalizedRect,
     };
 
     fn build_test_scene() -> SceneGraph {
@@ -274,6 +274,7 @@ mod tests {
             }),
         });
         scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "status-indicator".to_string(),
             tab_id,
             geometry_override: Some(GeometryPolicy::Relative {
