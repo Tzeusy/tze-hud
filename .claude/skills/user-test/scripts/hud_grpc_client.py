@@ -14,7 +14,7 @@ Usage:
                           agent_id="test-agent") as client:
         lease_id = await client.request_lease(ttl_ms=60000)
         avatar_png = make_avatar_png((66, 133, 244))
-        avatar_resource_id = upload_avatar_png(avatar_png)
+        avatar_resource_id = await client.upload_avatar_png(avatar_png)
         tile_id = await client.create_presence_card_tile(
             lease_id,
             tab_id=None,
@@ -178,12 +178,6 @@ def avatar_resource_id_from_png(png_bytes: bytes) -> bytes:
         raise ValueError("avatar PNG must be exactly 32x32 pixels")
     return _blake3_digest_bytes(png_bytes)
 
-
-def upload_avatar_png(png_bytes: bytes) -> bytes:
-    """Alias for avatar_resource_id_from_png(); no network upload is performed."""
-    return avatar_resource_id_from_png(png_bytes)
-
-
 def _resource_id_bytes(resource_id: Any) -> bytes:
     """Normalize a raw resource id or ResourceIdProto into 32 bytes."""
     if isinstance(resource_id, types_pb2.ResourceIdProto):
@@ -197,6 +191,14 @@ def _resource_id_bytes(resource_id: Any) -> bytes:
             raise ValueError("resource id must be 32 bytes")
         return raw
     raise TypeError(f"unsupported resource id type: {type(resource_id)!r}")
+
+
+def _resource_error_code_name(error_code: int) -> str:
+    """Render a stable enum name for resource-upload failures."""
+    try:
+        return session_pb2.ResourceErrorCode.Name(error_code)
+    except ValueError:
+        return f"RESOURCE_ERROR_{error_code}"
 
 
 def build_presence_card_root_node(
@@ -558,6 +560,7 @@ class HudClient:
             "create_tiles",
             "modify_own_tiles",
             "access_input_events",
+            "upload_resource",
         ]
         self.initial_subscriptions = initial_subscriptions or ["SCENE_TOPOLOGY"]
         self._channel: Optional[grpc.aio.Channel] = None
@@ -681,16 +684,18 @@ class HudClient:
         """Public wrapper for waiting on a specific server payload."""
         return await self._wait_for(payload_name, timeout)
 
-    async def _send(self, **payload_kwargs):
-        """Send a ClientMessage with the given payload field."""
+    async def _send(self, **payload_kwargs) -> int:
+        """Send a ClientMessage with the given payload field and return sequence."""
+        sequence = self._next_seq()
         msg = session_pb2.ClientMessage(
-            sequence=self._next_seq(),
+            sequence=sequence,
             timestamp_wall_us=_now_wall_us(),
             **payload_kwargs,
         )
         if self._send_queue is None:
             raise RuntimeError("client transport has not been initialized")
         await self._send_queue.put(msg)
+        return sequence
 
     async def _shutdown_transport(self):
         """Cancel background tasks and close the gRPC channel."""
@@ -778,6 +783,97 @@ class HudClient:
         print(f"  [grpc] Lease granted: ttl={lr.granted_ttl_ms}ms, "
               f"priority={lr.granted_priority}", flush=True)
         return lr.lease_id
+
+    async def _await_resource_upload_result(
+        self,
+        request_sequence: int,
+        timeout: float = 10.0,
+    ) -> session_pb2.ResourceStored:
+        """Wait for ResourceStored/ResourceErrorResponse correlated to a request sequence."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Timed out waiting for resource upload result "
+                    f"(request_sequence={request_sequence})"
+                )
+            try:
+                msg = await asyncio.wait_for(
+                    self._response_queue.get(), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    f"Timed out waiting for resource upload result "
+                    f"(request_sequence={request_sequence})"
+                )
+
+            which = msg.WhichOneof("payload")
+            if which == "resource_stored":
+                stored = msg.resource_stored
+                if stored.request_sequence != request_sequence:
+                    continue
+                return stored
+            if which == "resource_error_response":
+                err = msg.resource_error_response
+                if err.request_sequence != request_sequence:
+                    continue
+                code_name = _resource_error_code_name(err.error_code)
+                raise RuntimeError(
+                    f"Resource upload failed [{code_name}]: {err.message} "
+                    f"(context: {err.context}, hint: {err.hint})"
+                )
+            if which == "session_error":
+                raise RuntimeError(
+                    f"Session error while waiting for upload result: "
+                    f"{msg.session_error.code} — {msg.session_error.message} "
+                    f"(hint: {msg.session_error.hint})"
+                )
+            if which == "runtime_error":
+                raise RuntimeError(
+                    f"Runtime error while waiting for upload result: "
+                    f"{msg.runtime_error.error_code} — {msg.runtime_error.message}"
+                )
+
+    async def upload_png_resource(
+        self,
+        png_bytes: bytes,
+        *,
+        timeout: float = 10.0,
+    ) -> bytes:
+        """Upload a PNG via resident ResourceUploadStart and return ResourceId bytes."""
+        width, height = _png_image_size(png_bytes)
+        request_sequence = await self._send(
+            resource_upload_start=session_pb2.ResourceUploadStart(
+                expected_hash=_blake3_digest_bytes(png_bytes),
+                resource_type=session_pb2.IMAGE_PNG,
+                total_size_bytes=len(png_bytes),
+                metadata=session_pb2.ResourceMetadata(width=width, height=height),
+                inline_data=png_bytes,
+            )
+        )
+        stored = await self._await_resource_upload_result(
+            request_sequence=request_sequence,
+            timeout=timeout,
+        )
+        resource_id = _resource_id_bytes(stored.resource_id)
+        print(
+            f"  [grpc] Resource uploaded: {resource_id.hex()[:16]}... "
+            f"bytes={len(png_bytes)} dedup={stored.was_deduplicated}",
+            flush=True,
+        )
+        return resource_id
+
+    async def upload_avatar_png(
+        self,
+        png_bytes: bytes,
+        *,
+        timeout: float = 10.0,
+    ) -> bytes:
+        """Upload a 32x32 PNG avatar via resident upload flow and return ResourceId."""
+        if _png_image_size(png_bytes) != (32, 32):
+            raise ValueError("avatar PNG must be exactly 32x32 pixels")
+        return await self.upload_png_resource(png_bytes, timeout=timeout)
 
     async def apply_mutations(
         self,
@@ -1052,7 +1148,7 @@ async def _self_test():
     async with HudClient(args.target, psk=args.psk, agent_id="grpc-self-test") as client:
         lease_id = await client.request_lease(ttl_ms=30000)
         avatar_png = make_avatar_png((255, 0, 0))
-        avatar_resource_id = upload_avatar_png(avatar_png)
+        avatar_resource_id = await client.upload_avatar_png(avatar_png)
         tile_id = await client.create_presence_card_tile(
             lease_id,
             tab_id=None,
@@ -1060,8 +1156,8 @@ async def _self_test():
             avatar_resource_id=avatar_resource_id,
             x=500,
             y=300,
-            w=200,
-            h=80,
+            w=320,
+            h=112,
             z_order=100,
         )
         print(

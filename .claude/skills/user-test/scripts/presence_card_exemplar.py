@@ -12,12 +12,6 @@ Presence Card lifecycle the operator needs to observe:
 
 The script emits structured JSON step events to stdout and can also write a
 machine-readable transcript file.
-
-Current branch note: the resident session stream still does not expose the
-RFC 0011 resource-upload messages, so this scenario renders the per-agent
-avatar as a 32x32 solid-color square instead of a StaticImageNode upload.
-That is sufficient for the operator-visible stacking/update/disconnect checks
-that `hud-sx7q.3` covers.
 """
 
 from __future__ import annotations
@@ -33,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from hud_grpc_client import HudClient, _make_node
+from hud_grpc_client import HudClient, _make_node, make_avatar_png
 from proto_gen import types_pb2
 
 
@@ -138,6 +132,7 @@ class AgentRuntime:
     client: HudClient
     lease_id: bytes
     tile_id: bytes
+    avatar_resource_id: bytes
     heartbeat_task: Optional[asyncio.Task] = None
     dismiss_task: Optional[asyncio.Task] = None
     dismissed_by_user: bool = False
@@ -179,6 +174,7 @@ def build_time_chip_content(elapsed_seconds: int) -> str:
 def build_presence_card_mutations(
     tile_id: bytes,
     agent_name: str,
+    avatar_resource_id: bytes,
     avatar_rgba: tuple[float, float, float, float],
     elapsed_seconds: int,
     include_tile_setup: bool,
@@ -233,11 +229,12 @@ def build_presence_card_mutations(
     )
     avatar_node = _make_node(
         {
-            "solid_color": {
-                "r": avatar_rgba[0],
-                "g": avatar_rgba[1],
-                "b": avatar_rgba[2],
-                "a": avatar_rgba[3],
+            "static_image": {
+                "resource_id": avatar_resource_id,
+                "width": 32,
+                "height": 32,
+                "decoded_bytes": 32 * 32 * 4,
+                "fit_mode": types_pb2.IMAGE_FIT_MODE_COVER,
             },
             "bounds": [AVATAR_X, AVATAR_Y, AVATAR_W, AVATAR_H],
         }
@@ -355,84 +352,84 @@ def build_presence_card_mutations(
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=sheen_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=accent_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=avatar_plate_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=avatar_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=eyebrow_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=name_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=status_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=chip_bg_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=chip_text_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=dismiss_bg_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=dismiss_text_node,
                 )
             ),
             types_pb2.MutationProto(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
-                    parent_id=root_uuid.bytes,
+                    parent_id=root_node.id,
                     node=dismiss_hit_region_node,
                 )
             ),
@@ -532,6 +529,14 @@ async def start_agent(
     )
     await client.connect()
     lease_id = await client.request_lease(ttl_ms=120_000)
+    avatar_png = make_avatar_png(
+        (
+            int(round(spec.rgba[0] * 255)),
+            int(round(spec.rgba[1] * 255)),
+            int(round(spec.rgba[2] * 255)),
+        )
+    )
+    avatar_resource_id = await client.upload_avatar_png(avatar_png)
     tile_id = await client.create_tile(
         lease_id=lease_id,
         x=LEFT_MARGIN,
@@ -545,6 +550,7 @@ async def start_agent(
         build_presence_card_mutations(
             tile_id=tile_id,
             agent_name=spec.name,
+            avatar_resource_id=avatar_resource_id,
             avatar_rgba=spec.rgba,
             elapsed_seconds=0,
             include_tile_setup=True,
@@ -557,6 +563,7 @@ async def start_agent(
         client=client,
         lease_id=lease_id,
         tile_id=tile_id,
+        avatar_resource_id=avatar_resource_id,
         heartbeat_task=task,
     )
     runtime.dismiss_task = asyncio.create_task(watch_for_dismiss(runtime))
@@ -569,6 +576,7 @@ async def rebuild_agent_card(agent: AgentRuntime, elapsed_seconds: int) -> None:
         build_presence_card_mutations(
             tile_id=agent.tile_id,
             agent_name=agent.spec.name,
+            avatar_resource_id=agent.avatar_resource_id,
             avatar_rgba=agent.spec.rgba,
             elapsed_seconds=elapsed_seconds,
             include_tile_setup=False,
