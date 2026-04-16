@@ -1909,6 +1909,24 @@ async fn handle_client_message(
         ClientPayload::ResourceUploadStart(_)
         | ClientPayload::ResourceUploadChunk(_)
         | ClientPayload::ResourceUploadComplete(_) => {
+            let request_kind = match payload {
+                ClientPayload::ResourceUploadStart(_) => "start",
+                ClientPayload::ResourceUploadChunk(_) => "chunk",
+                ClientPayload::ResourceUploadComplete(_) => "complete",
+                _ => unreachable!("resource upload fallback only handles upload variants"),
+            };
+            let context = serde_json::json!({
+                "domain": "resource_upload",
+                "request_kind": request_kind,
+                "client_sequence": client_sequence,
+            })
+            .to_string();
+            let hint = serde_json::json!({
+                "bead": "hud-ooj1.3",
+                "client_sequence": client_sequence,
+                "request_kind": request_kind,
+            })
+            .to_string();
             let seq = session.next_server_seq();
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -1918,8 +1936,8 @@ async fn handle_client_message(
                         error_code: "INVALID_ARGUMENT".to_string(),
                         message: "Resident scene-resource upload is not implemented yet"
                             .to_string(),
-                        context: "resource_upload".to_string(),
-                        hint: "{\"bead\":\"hud-ooj1.3\"}".to_string(),
+                        context,
+                        hint,
                         error_code_enum: ErrorCode::InvalidArgument as i32,
                     })),
                 }))
