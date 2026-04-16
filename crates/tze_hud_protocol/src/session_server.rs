@@ -194,8 +194,12 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
         | ServerPayload::InputFocusResponse(_)
         | ServerPayload::InputCaptureResponse(_) => TrafficClass::Transactional,
 
-        // Widget publish result — transactional (only for durable widgets; ephemeral = no result)
-        ServerPayload::WidgetPublishResult(_) | ServerPayload::WidgetAssetRegisterResult(_) => {
+        // Widget and resource-upload responses — transactional.
+        ServerPayload::WidgetPublishResult(_)
+        | ServerPayload::WidgetAssetRegisterResult(_)
+        | ServerPayload::ResourceUploadAccepted(_)
+        | ServerPayload::ResourceStored(_)
+        | ServerPayload::ResourceErrorResponse(_) => {
             TrafficClass::Transactional
         }
 
@@ -1900,6 +1904,26 @@ async fn handle_client_message(
         // Always transactional; every request receives WidgetAssetRegisterResult.
         ClientPayload::WidgetAssetRegister(register) => {
             handle_widget_asset_register(state, session, tx, client_sequence, register).await;
+        }
+        // Resident scene-resource upload handling is implemented in hud-ooj1.3.
+        ClientPayload::ResourceUploadStart(_)
+        | ClientPayload::ResourceUploadChunk(_)
+        | ClientPayload::ResourceUploadComplete(_) => {
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                        error_code: "INVALID_ARGUMENT".to_string(),
+                        message: "Resident scene-resource upload is not implemented yet"
+                            .to_string(),
+                        context: "resource_upload".to_string(),
+                        hint: "{\"bead\":\"hud-ooj1.3\"}".to_string(),
+                        error_code_enum: ErrorCode::InvalidArgument as i32,
+                    })),
+                }))
+                .await;
         }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {
