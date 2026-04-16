@@ -4199,6 +4199,16 @@ async fn send_resource_stored(
         .await;
 }
 
+async fn register_uploaded_scene_resource(
+    state: &Arc<Mutex<SharedState>>,
+    resource_id: &tze_hud_resource::ResourceId,
+) {
+    let scene_resource_id = ResourceId::from_bytes(*resource_id.as_bytes());
+    let st = state.lock().await;
+    let mut scene = st.scene.lock().await;
+    scene.register_resource(scene_resource_id);
+}
+
 async fn send_resource_error_response(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
@@ -4316,6 +4326,7 @@ async fn handle_resource_upload_start(
 
     match store.handle_upload_start(request).await {
         Ok(Some(stored)) => {
+            register_uploaded_scene_resource(state, &stored.resource_id).await;
             send_resource_stored(
                 session,
                 tx,
@@ -4475,6 +4486,7 @@ async fn handle_resource_upload_complete(
     {
         Ok(stored) => {
             session.resource_uploads.remove(&upload_id_bytes);
+            register_uploaded_scene_resource(state, &stored.resource_id).await;
             send_resource_stored(
                 session,
                 tx,
@@ -12262,10 +12274,11 @@ mod tests {
         );
         {
             let st = shared_state.lock().await;
-            let mut scene = st.scene.lock().await;
-            // Resource uploads produce content-addressed IDs; scene mutations can
-            // reference them once they are registered with the scene graph.
-            scene.register_resource(resource_id);
+            let scene = st.scene.lock().await;
+            assert!(
+                scene.is_resource_registered(&resource_id),
+                "uploaded resources must be registered for scene mutation validation"
+            );
         }
 
         tx.send(ClientMessage {
