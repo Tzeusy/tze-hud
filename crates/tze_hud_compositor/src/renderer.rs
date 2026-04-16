@@ -5479,12 +5479,13 @@ impl Compositor {
             Some(n) => n,
             None => return,
         };
+        let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
 
         match &node.data {
             NodeData::SolidColor(sc) => {
                 let verts = rect_vertices(
-                    tile.bounds.x + sc.bounds.x,
-                    tile.bounds.y + sc.bounds.y,
+                    tile.bounds.x + sc.bounds.x - scroll_x,
+                    tile.bounds.y + sc.bounds.y - scroll_y,
                     sc.bounds.width,
                     sc.bounds.height,
                     sw,
@@ -5497,8 +5498,8 @@ impl Compositor {
                 if self.text_rasterizer.is_some() {
                     if let Some(bg) = tm.background {
                         let verts = rect_vertices(
-                            tile.bounds.x + tm.bounds.x,
-                            tile.bounds.y + tm.bounds.y,
+                            tile.bounds.x + tm.bounds.x - scroll_x,
+                            tile.bounds.y + tm.bounds.y - scroll_y,
                             tm.bounds.width,
                             tm.bounds.height,
                             sw,
@@ -5512,8 +5513,8 @@ impl Compositor {
                     // placeholder treatment so text tiles remain visible.
                     let bg = tm.background.unwrap_or(Rgba::new(0.15, 0.15, 0.25, 1.0));
                     let verts = rect_vertices(
-                        tile.bounds.x + tm.bounds.x,
-                        tile.bounds.y + tm.bounds.y,
+                        tile.bounds.x + tm.bounds.x - scroll_x,
+                        tile.bounds.y + tm.bounds.y - scroll_y,
                         tm.bounds.width,
                         tm.bounds.height,
                         sw,
@@ -5527,8 +5528,8 @@ impl Compositor {
                         && tm.bounds.height > text_margin * 2.0
                     {
                         let verts = rect_vertices(
-                            tile.bounds.x + tm.bounds.x + text_margin,
-                            tile.bounds.y + tm.bounds.y + text_margin,
+                            tile.bounds.x + tm.bounds.x + text_margin - scroll_x,
+                            tile.bounds.y + tm.bounds.y + text_margin - scroll_y,
                             tm.bounds.width - text_margin * 2.0,
                             (tm.font_size_px * 1.2).min(tm.bounds.height - text_margin * 2.0),
                             sw,
@@ -5554,8 +5555,8 @@ impl Compositor {
                 };
 
                 let verts = rect_vertices(
-                    tile.bounds.x + hr.bounds.x,
-                    tile.bounds.y + hr.bounds.y,
+                    tile.bounds.x + hr.bounds.x - scroll_x,
+                    tile.bounds.y + hr.bounds.y - scroll_y,
                     hr.bounds.width,
                     hr.bounds.height,
                     sw,
@@ -5570,8 +5571,8 @@ impl Compositor {
                 if let Some(entry) = self.image_texture_cache.get(&img.resource_id) {
                     let (dx, dy, dw, dh, uv_rect) = compute_fit_mode(
                         img.fit_mode,
-                        tile.bounds.x + img.bounds.x,
-                        tile.bounds.y + img.bounds.y,
+                        tile.bounds.x + img.bounds.x - scroll_x,
+                        tile.bounds.y + img.bounds.y - scroll_y,
                         img.bounds.width,
                         img.bounds.height,
                         entry.width,
@@ -5590,8 +5591,8 @@ impl Compositor {
                     // Fallback: warm-gray placeholder when bytes not registered.
                     let outer_color = [0.55_f32, 0.50, 0.45, 1.0];
                     let verts = rect_vertices(
-                        tile.bounds.x + img.bounds.x,
-                        tile.bounds.y + img.bounds.y,
+                        tile.bounds.x + img.bounds.x - scroll_x,
+                        tile.bounds.y + img.bounds.y - scroll_y,
                         img.bounds.width,
                         img.bounds.height,
                         sw,
@@ -5604,8 +5605,8 @@ impl Compositor {
                     if img.bounds.width > margin * 2.0 && img.bounds.height > margin * 2.0 {
                         let accent_color = [0.75_f32, 0.70, 0.65, 1.0];
                         let verts = rect_vertices(
-                            tile.bounds.x + img.bounds.x + margin,
-                            tile.bounds.y + img.bounds.y + margin,
+                            tile.bounds.x + img.bounds.x + margin - scroll_x,
+                            tile.bounds.y + img.bounds.y + margin - scroll_y,
                             img.bounds.width - margin * 2.0,
                             img.bounds.height - margin * 2.0,
                             sw,

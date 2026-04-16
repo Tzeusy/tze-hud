@@ -99,6 +99,18 @@ pub struct SceneGraph {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub pending_widget_svg_assets: Vec<(String, String, Vec<u8>)>,
+    /// Runtime-owned scroll configs for tiles that opt into local-first scroll.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_scroll_configs: HashMap<SceneId, TileScrollConfig>,
+    /// Runtime-owned local scroll offsets per tile.
+    ///
+    /// Offsets are absolute from the tile content origin and are applied by
+    /// the compositor and hit-testing paths for immediate local feedback.
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_scroll_offsets: HashMap<SceneId, (f32, f32)>,
 }
 
 /// Maximum number of tabs in a scene. RFC 0001 §2.1.
@@ -253,6 +265,8 @@ impl SceneGraph {
             registered_resources: HashMap::new(),
             zone_hit_regions: Vec::new(),
             pending_widget_svg_assets: Vec::new(),
+            tile_scroll_configs: HashMap::new(),
+            tile_scroll_offsets: HashMap::new(),
         }
     }
 
@@ -273,6 +287,56 @@ impl SceneGraph {
     /// Drain pending runtime widget SVG assets.
     pub fn drain_pending_widget_svg_assets(&mut self) -> Vec<(String, String, Vec<u8>)> {
         self.pending_widget_svg_assets.drain(..).collect()
+    }
+
+    /// Register local-first scroll config for a tile.
+    pub fn register_tile_scroll_config(
+        &mut self,
+        tile_id: SceneId,
+        config: TileScrollConfig,
+    ) -> Result<(), ValidationError> {
+        if !self.tiles.contains_key(&tile_id) {
+            return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+        self.tile_scroll_configs.insert(tile_id, config);
+        self.tile_scroll_offsets
+            .entry(tile_id)
+            .or_insert((0.0, 0.0));
+        Ok(())
+    }
+
+    /// Remove local-first scroll config and offset state for a tile.
+    pub fn clear_tile_scroll_config(&mut self, tile_id: SceneId) {
+        self.tile_scroll_configs.remove(&tile_id);
+        self.tile_scroll_offsets.remove(&tile_id);
+    }
+
+    /// Get the registered local-first scroll config for a tile.
+    pub fn tile_scroll_config(&self, tile_id: SceneId) -> Option<TileScrollConfig> {
+        self.tile_scroll_configs.get(&tile_id).copied()
+    }
+
+    /// Set the tile-local scroll offset used by runtime local feedback.
+    pub fn set_tile_scroll_offset_local(
+        &mut self,
+        tile_id: SceneId,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<(), ValidationError> {
+        if !self.tiles.contains_key(&tile_id) {
+            return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+        self.tile_scroll_offsets
+            .insert(tile_id, (offset_x, offset_y));
+        Ok(())
+    }
+
+    /// Get the current runtime-local scroll offset for a tile.
+    pub fn tile_scroll_offset_local(&self, tile_id: SceneId) -> (f32, f32) {
+        self.tile_scroll_offsets
+            .get(&tile_id)
+            .copied()
+            .unwrap_or((0.0, 0.0))
     }
 
     // ─── Resource registry ────────────────────────────────────────────────
@@ -2407,6 +2471,8 @@ impl SceneGraph {
         {
             self.remove_node_tree(root_id);
         }
+        self.tile_scroll_configs.remove(&tile_id);
+        self.tile_scroll_offsets.remove(&tile_id);
     }
 
     // ─── Queries ─────────────────────────────────────────────────────────
@@ -2503,8 +2569,9 @@ impl SceneGraph {
             // Chrome tile absorbs the hit.  If it has a HitRegionNode, report
             // its node_id as the element_id for richer routing; otherwise use
             // the tile id.
-            let local_x = x - tile.bounds.x;
-            let local_y = y - tile.bounds.y;
+            let (scroll_x, scroll_y) = self.tile_scroll_offset_local(tile.id);
+            let local_x = x - tile.bounds.x + scroll_x;
+            let local_y = y - tile.bounds.y + scroll_y;
             let element_id = tile
                 .root_node
                 .and_then(|root| self.hit_test_node(root, local_x, local_y))
@@ -2518,8 +2585,9 @@ impl SceneGraph {
             if tile.input_mode == InputMode::Passthrough {
                 continue; // Skip passthrough tiles per spec.
             }
-            let local_x = x - tile.bounds.x;
-            let local_y = y - tile.bounds.y;
+            let (scroll_x, scroll_y) = self.tile_scroll_offset_local(tile.id);
+            let local_x = x - tile.bounds.x + scroll_x;
+            let local_y = y - tile.bounds.y + scroll_y;
 
             // ── Phase 3: Within the tile — reverse tree order ────────────
             if let Some(root_id) = tile.root_node {
@@ -3978,6 +4046,53 @@ mod tests {
         // Miss everything
         let result = scene.hit_test(10.0, 10.0);
         assert_eq!(result, HitResult::Passthrough);
+    }
+
+    #[test]
+    fn test_hit_test_applies_tile_scroll_offset() {
+        let mut scene = SceneGraph::new(800.0, 600.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("scroll-agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "scroll-agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 300.0, 200.0),
+                1,
+            )
+            .unwrap();
+
+        let node_id = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(10.0, 60.0, 120.0, 40.0),
+                        interaction_id: "scroll-hit".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        scene
+            .set_tile_scroll_offset_local(tile_id, 0.0, 50.0)
+            .unwrap();
+
+        assert_eq!(
+            scene.hit_test(120.0, 115.0),
+            HitResult::NodeHit {
+                tile_id,
+                node_id,
+                interaction_id: "scroll-hit".to_string(),
+            }
+        );
     }
 
     #[test]

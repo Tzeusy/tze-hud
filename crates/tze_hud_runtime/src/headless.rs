@@ -50,7 +50,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tze_hud_compositor::{Compositor, HeadlessSurface};
 use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
-use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
+use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind, ScrollEvent};
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
@@ -657,6 +657,15 @@ impl HeadlessRuntime {
                 }
             }
         }
+    }
+
+    /// Process a wheel/trackpad scroll event through the local-first scroll path.
+    pub fn process_scroll_event(
+        &mut self,
+        event: &ScrollEvent,
+        scene: &mut SceneGraph,
+    ) -> Option<tze_hud_input::ScrollOffsetChangedEvent> {
+        self.input_processor.process_scroll_event(event, scene)
     }
 }
 
