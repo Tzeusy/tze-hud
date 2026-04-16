@@ -567,7 +567,7 @@ In v1, agents do not mutate widget instances directly. They publish parameters/c
 Widgets have the same **four-level ontology** as zones (presence.md §"Widget anatomy"):
 
 1. **Widget type** — the schema and visual assets (parameter declarations, SVG layers with parameter bindings, default geometry/contention/rendering policies). Types are named identifiers introduced via startup bundle load or runtime registration, e.g. `"gauge"`, `"progress-bar"`.
-2. **Widget instance** — a widget type bound into a specific tab with a geometry policy and layer attachment. Declared in configuration under `[[tabs.widgets]]`. Multiple instances of the same type may exist on different tabs or on the same tab when disambiguated by `instance_id`.
+2. **Widget instance** — a widget type bound into a specific tab with a geometry policy and layer attachment. Declared in configuration under `[[tabs.widgets]]`. Each instance has a stable `id: SceneId`; multiple instances of the same type may exist on different tabs or on the same tab when disambiguated by that id (and optional `instance_name`).
 3. **Publication** — one publish event into a widget instance: a set of typed parameter values (f32, string, color, or enum), TTL, optional merge key (for MergeByKey contention), and optional transition duration in milliseconds.
 4. **Occupancy** — the runtime's resolved render state: effective parameter values after contention policy application. The compositor reads `effective_params` to determine current visual property values and re-rasterizes only when effective parameters change.
 
@@ -639,7 +639,8 @@ pub enum WidgetBindingMapping {
 
 /// Widget instance — a widget type bound into a specific tab.
 pub struct WidgetInstance {
-    pub instance_name: String,                          // Addressing key for publish ops (explicit instance_id or widget_type_name)
+    pub id: SceneId,
+    pub instance_name: String,                          // Addressing key for publish ops (explicit instance_name or widget_type_name)
     pub widget_type_name: String,                       // References WidgetDefinition.id
     pub tab_id: SceneId,
     pub geometry_override: Option<GeometryPolicy>,
@@ -732,6 +733,9 @@ pub enum SceneMutation {
 
     // Node operations
     SetTileRoot { tile_id: SceneId, node: Node },
+    // Additive with SetTileRoot: direct tile-id path remains valid.
+    // PublishToTile addresses via persistent element identity and allows runtime override application.
+    PublishToTile { element_id: SceneId, node: Node },
     InsertNode { tile_id: SceneId, parent_id: Option<SceneId>, node: Node },
     ReplaceNode { node_id: SceneId, node: Node },
     UpdateNodeBounds { node_id: SceneId, bounds: Rect },
@@ -783,14 +787,24 @@ Agent submits MutationBatch
 │  Validate: Per-mutation checks (all-or-nothing)             │
 │                                                             │
 │  For each mutation in order:                                │
-│  1. Lease check     — agent holds valid lease for target    │
-│  2. Budget check    — mutation within resource budget       │
-│  3. Bounds check    — new geometry within tab area          │
-│  4. Type check      — field values within valid ranges      │
-│  5. Invariant check — post-mutation state satisfies         │
+│  1. Target resolve  — for PublishToTile, resolve element_id │
+│                       through the element identity store     │
+│  2. Lease check     — agent holds valid lease for target    │
+│  3. Budget check    — mutation within resource budget       │
+│  4. Bounds check    — new geometry within tab area          │
+│  5. Type check      — field values within valid ranges      │
+│  6. Invariant check — post-mutation state satisfies         │
 │                       all scene invariants                  │
 │                                                             │
 │  Any failure → entire batch rejected; no partial apply     │
+└───────────────────────────┬─────────────────────────────────┘
+                            │ any fail → BatchRejected(ValidationError)
+                            │ all pass ↓
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Runtime Override Application                               │
+│  - Apply user geometry overrides from element identity store│
+│  - Validate override-adjusted geometry/invariants           │
 └───────────────────────────┬─────────────────────────────────┘
                             │ any fail → BatchRejected(ValidationError)
                             │ all pass ↓
@@ -838,6 +852,18 @@ mutation targets tile T
 `CreateTile` also requires the `create_tiles` capability in addition to `modify_own_tiles`.
 
 Zone publish mutations require `ZonePublishToken` embedded in the mutation; the token is validated against the capability registry. The agent must also hold `publish_zone:<zone_name>` capability (RFC 0006 §6.3). The runtime resolves `zone_name` (a zone type name) to the `ZoneInstance` for the agent's active tab; the mutation is rejected with `ZoneNotFound` if no such instance exists in the active tab.
+
+`PublishToTile` mutations are additive with `SetTileRoot` and are lease-gated:
+
+```
+mutation targets element E (resolved to tile T)
+  → E resolves through the element identity store
+  → T.namespace == session.agent_namespace
+  → lease_registry.get(T.lease_id).is_valid()
+  → agent holds modify_own_tiles capability
+```
+
+`SetTileRoot` remains the direct tile-id mutation path.
 
 Sync group mutations (`CreateSyncGroup`, `DeleteSyncGroup`) require the `manage_sync_groups` capability. A sync group is a scene-level object not tied to a specific tile, so it is capability-gated rather than lease-gated.
 
@@ -1067,6 +1093,7 @@ pub enum HitTestKind {
 pub enum ChromeElement {
     TabBar,
     SystemIndicator,
+    DragHandle,
     OverrideControl,
     DisconnectionBadge { agent_namespace: String },
 }
@@ -1142,6 +1169,7 @@ Durable state is stored on disk and reloaded at runtime startup.
 | User preferences | Quiet hours, safe mode config, display profiles | Config file |
 | Capability grants | Per-agent capability scope definitions | Config file |
 | Runtime widget SVG assets | Runtime-registered widget SVG blobs (content-addressed) | Runtime-managed local asset store (filesystem) |
+| Element identity store | Persistent IDs and user geometry overrides for zones, zone instances, widget instances, and tiles | Runtime-managed local store (filesystem) |
 
 Durable state is written to disk on change; it is not part of the scene graph serialization.
 
@@ -1398,6 +1426,10 @@ message UpdateTileExpiryMutation  { SceneId tile_id = 1; uint64 expires_at_us = 
 message DeleteTileMutation   { SceneId tile_id = 1; }
 
 message SetTileRootMutation  { SceneId tile_id = 1; Node node = 2; }
+// PublishToTileMutation coexists with SetTileRootMutation.
+// SetTileRoot addresses tile_id directly.
+// PublishToTile addresses a stable element identity and allows runtime override application.
+message PublishToTileMutation { SceneId element_id = 1; Node node = 2; }
 // InsertNodeMutation: parent_id zero bytes = "no parent" (node becomes the tile root, equivalent
 // to SetTileRoot). Use SetTileRootMutation if the tile has no existing root; use InsertNode with
 // zero parent_id to atomically replace the root in a batch. Non-zero parent_id = add as child.
@@ -1508,6 +1540,7 @@ message SceneMutation {
     ClearZoneMutation         clear_zone          = 20;
     CreateSyncGroupMutation   create_sync_group   = 21;  // RFC 0003 §7.2
     DeleteSyncGroupMutation   delete_sync_group   = 22;  // RFC 0003 §7.2
+    PublishToTileMutation     publish_to_tile     = 23;  // persistent element-addressed tile publish
   }
 }
 
@@ -1779,12 +1812,13 @@ message WidgetDefinitionProto {
 }
 
 message WidgetInstanceProto {
-  string              instance_name      = 1;   // Addressing key (explicit instance_id or widget_type_name)
-  string              widget_type_name   = 2;   // References WidgetDefinitionProto.id
-  SceneId             tab_id             = 3;
-  GeometryPolicyProto geometry_override  = 4;   // Absent = use widget type default
-  ContentionPolicyProto contention_override = 5; // Absent = use widget type default
-  map<string, WidgetParameterValueProto> current_params = 6;
+  SceneId             id                 = 1;   // Stable widget instance identity
+  string              instance_name      = 2;   // Addressing key (explicit instance_name or widget_type_name)
+  string              widget_type_name   = 3;   // References WidgetDefinitionProto.id
+  SceneId             tab_id             = 4;
+  GeometryPolicyProto geometry_override  = 5;   // Absent = use widget type default
+  ContentionPolicyProto contention_override = 6; // Absent = use widget type default
+  map<string, WidgetParameterValueProto> current_params = 7;
 }
 
 message WidgetPublishRecordProto {
@@ -1819,7 +1853,7 @@ message WidgetRegistrySnapshotProto {
 // These parallel PublishToZoneMutation and ClearZoneMutation.
 message PublishToWidgetMutation {
   string                                 widget_name   = 1;   // Widget instance name
-  string                                 instance_id   = 2;   // Disambiguation when multiple instances of same type exist on tab
+  SceneId                                instance_id   = 2;   // Optional disambiguation by WidgetInstanceProto.id (zero bytes = unspecified)
   map<string, WidgetParameterValueProto> params        = 3;
   uint32                                 transition_ms = 4;   // 0 = snap immediately
   uint64                                 ttl_us        = 5;   // 0 = use widget instance default
@@ -1828,7 +1862,7 @@ message PublishToWidgetMutation {
 
 message ClearWidgetMutation {
   string widget_name = 1;   // Widget instance name
-  string instance_id = 2;   // Optional disambiguation
+  SceneId instance_id = 2;  // Optional disambiguation by WidgetInstanceProto.id (zero bytes = unspecified)
 }
 
 // Widget registry query types — defined here for use in scene discovery.

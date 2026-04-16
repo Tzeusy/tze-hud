@@ -282,6 +282,7 @@ Only one node can hold pointer capture at a time, globally across the entire sce
 ### 2.2 Capture Lifetime
 
 1. **Acquire.** A node acquires capture in response to a `PointerDownEvent`. Capture cannot be acquired on `PointerMove` or `PointerUp`. Capture is acquired via the capture-request RPC (see §2.3) or automatically if the node sets `auto_capture: true` in its `HitRegionNode` definition.
+   - **Scope clarification:** This `PointerDown` acquire restriction applies to agent-requested capture semantics. Runtime-owned chrome interactions may acquire/release runtime capture at other event phases when needed for sovereign chrome UX (for example, drag-handle interactions).
 
 2. **Active.** While capture is active, all pointer events from the captured device are routed to the capturing node, bypassing normal hit-testing. The pointer may leave the node's bounds and the tile's bounds without releasing capture.
 
@@ -349,6 +350,8 @@ When capture is stolen, the runtime sends a `PointerCancelEvent` to the capturin
 ### 3.0 V1 Scope Note
 
 > **V1 fallback:** v1 may ship with tap/click recognition only (Tap, DoubleTap, ContextMenu via right-click). The full gesture pipeline including LongPress, Drag, Pinch, Swipe, and the full arbiter (§3.3–§3.6) is V1-reserved: fully specified here but not required to ship in v1. When the full pipeline is not present, pointer events (§7.3) carry the raw down/up/move events and agents may implement their own gesture logic on top. The `GestureEvent` message types are defined now so the schema is stable when the full pipeline activates.
+>
+> **Chrome interaction carve-out (v1-mandatory for movable chrome handles):** Runtime chrome-layer drag handles may implement LongPress/Drag-like behavior through a compositor-internal state machine outside the agent gesture recognizer pipeline. This carve-out does not activate full agent-facing recognizers (§3.3-§3.6). Recommended activation delays for drag handles: pointer/mouse 250ms, touch 1000ms (longer touch delay reduces accidental activation).
 
 ### 3.1 Overview
 
@@ -369,6 +372,8 @@ Gestures are recognized from raw touch and pointer events by the runtime's gestu
 | `ContextMenu` | Long press or 2-finger tap | Right click | Context menu request | V1-mandatory (pointer); V1-reserved on touch (requires LongPress recognizer) |
 
 > **ContextMenu dispatch note:** `ContextMenu` is listed here for completeness but is **not** dispatched as a `GestureEvent`. It is dispatched as a standalone `ContextMenuEvent` (see `InputEnvelope` field 8 in §9.1). It does not run through the gesture recognizer pipeline and does not appear in the conflict resolution priority list in §3.5. On touch: the LongPress recognizer's RECOGNIZED result triggers a `ContextMenuEvent` directly (rather than a `GestureEvent { long_press }`). On pointer: a right-click is mapped to `ContextMenuEvent` by the event preprocessor, bypassing recognizer arbitration entirely.
+
+> **Drag-handle timing note:** For runtime chrome drag handles, long-press activation delay is intentionally device-sensitive (pointer/mouse 250ms; touch 1000ms). This exception is compositor-internal and does not modify the general-purpose recognizer thresholds in §3.4.
 
 ### 3.3 Gesture Recognizer Pipeline
 
