@@ -37,25 +37,80 @@ from hud_grpc_client import HudClient, _make_node
 from proto_gen import types_pb2
 
 
-CARD_W = 200.0
-CARD_H = 80.0
-CARD_GAP = 8.0
-LEFT_MARGIN = 16.0
-BOTTOM_MARGIN = 16.0
+CARD_W = 320.0
+CARD_H = 112.0
+CARD_GAP = 12.0
+LEFT_MARGIN = 24.0
+BOTTOM_MARGIN = 24.0
 
-BG_RGBA = (0.08, 0.08, 0.08, 0.78)
-TEXT_RGBA = (0.94, 0.94, 0.94, 1.0)
+BG_RGBA = (0.10, 0.14, 0.19, 0.72)
+SHEEN_RGBA = (0.92, 0.96, 1.0, 0.16)
+EYEBROW_RGBA = (0.72, 0.80, 0.90, 0.82)
+NAME_RGBA = (0.97, 0.99, 1.0, 1.0)
+STATUS_RGBA = (0.82, 0.88, 0.94, 0.92)
+CHIP_BG_RGBA = (0.86, 0.92, 1.0, 0.12)
+CHIP_TEXT_RGBA = (0.96, 0.98, 1.0, 0.96)
 
-AVATAR_X = 8.0
-AVATAR_Y = 24.0
-AVATAR_W = 32.0
-AVATAR_H = 32.0
+SHEEN_X = 0.0
+SHEEN_Y = 0.0
+SHEEN_W = CARD_W
+SHEEN_H = 2.0
 
-TEXT_X = 48.0
-TEXT_Y = 8.0
-TEXT_W = 144.0
-TEXT_H = 64.0
-FONT_SIZE_PX = 14.0
+ACCENT_X = 0.0
+ACCENT_Y = 18.0
+ACCENT_W = 4.0
+ACCENT_H = 76.0
+
+AVATAR_PLATE_X = 24.0
+AVATAR_PLATE_Y = 28.0
+AVATAR_PLATE_W = 56.0
+AVATAR_PLATE_H = 56.0
+
+AVATAR_X = 34.0
+AVATAR_Y = 38.0
+AVATAR_W = 36.0
+AVATAR_H = 36.0
+
+EYEBROW_X = 96.0
+EYEBROW_Y = 18.0
+EYEBROW_W = 152.0
+EYEBROW_H = 12.0
+EYEBROW_FONT_SIZE_PX = 11.0
+
+NAME_X = 96.0
+NAME_Y = 34.0
+NAME_W = 152.0
+NAME_H = 26.0
+NAME_FONT_SIZE_PX = 20.0
+
+STATUS_X = 96.0
+STATUS_Y = 68.0
+STATUS_W = 148.0
+STATUS_H = 18.0
+STATUS_FONT_SIZE_PX = 13.0
+
+CHIP_BG_X = 224.0
+CHIP_BG_Y = 20.0
+CHIP_BG_W = 44.0
+CHIP_BG_H = 22.0
+
+CHIP_TEXT_X = CHIP_BG_X
+CHIP_TEXT_Y = CHIP_BG_Y + 1.0
+CHIP_TEXT_W = CHIP_BG_W
+CHIP_TEXT_H = CHIP_BG_H
+CHIP_FONT_SIZE_PX = 10.0
+
+DISMISS_BG_X = 280.0
+DISMISS_BG_Y = 18.0
+DISMISS_BG_W = 24.0
+DISMISS_BG_H = 24.0
+
+DISMISS_TEXT_X = DISMISS_BG_X
+DISMISS_TEXT_Y = DISMISS_BG_Y
+DISMISS_TEXT_W = DISMISS_BG_W
+DISMISS_TEXT_H = DISMISS_BG_H
+DISMISS_FONT_SIZE_PX = 12.0
+DISMISS_INTERACTION_ID = "dismiss-card"
 
 DEFAULT_PSK_ENV = "TZE_HUD_PSK"
 DEFAULT_TARGET = "tzehouse-windows.parrot-hen.ts.net:50051"
@@ -84,6 +139,8 @@ class AgentRuntime:
     lease_id: bytes
     tile_id: bytes
     heartbeat_task: Optional[asyncio.Task] = None
+    dismiss_task: Optional[asyncio.Task] = None
+    dismissed_by_user: bool = False
 
 
 def format_last_active(elapsed_seconds: int) -> str:
@@ -105,7 +162,18 @@ def card_y_offset(agent_index: int, tab_height: float) -> float:
 
 
 def build_text_content(agent_name: str, elapsed_seconds: int) -> str:
-    return f"**{agent_name}**\nLast active: {format_last_active(elapsed_seconds)}"
+    return f"Connected • last active {format_last_active(elapsed_seconds)}"
+
+
+def build_time_chip_content(elapsed_seconds: int) -> str:
+    label = format_last_active(elapsed_seconds)
+    if label == "now":
+        return "NOW"
+    if label.endswith("s ago"):
+        return f"{label[:-5]}S"
+    if label.endswith("m ago"):
+        return f"{label[:-5]}M"
+    return label.upper()
 
 
 def build_presence_card_mutations(
@@ -130,6 +198,39 @@ def build_presence_card_mutations(
             "bounds": [0.0, 0.0, CARD_W, CARD_H],
         }
     )
+    sheen_node = _make_node(
+        {
+            "solid_color": {
+                "r": SHEEN_RGBA[0],
+                "g": SHEEN_RGBA[1],
+                "b": SHEEN_RGBA[2],
+                "a": SHEEN_RGBA[3],
+            },
+            "bounds": [SHEEN_X, SHEEN_Y, SHEEN_W, SHEEN_H],
+        }
+    )
+    accent_node = _make_node(
+        {
+            "solid_color": {
+                "r": avatar_rgba[0],
+                "g": avatar_rgba[1],
+                "b": avatar_rgba[2],
+                "a": 0.78,
+            },
+            "bounds": [ACCENT_X, ACCENT_Y, ACCENT_W, ACCENT_H],
+        }
+    )
+    avatar_plate_node = _make_node(
+        {
+            "solid_color": {
+                "r": avatar_rgba[0],
+                "g": avatar_rgba[1],
+                "b": avatar_rgba[2],
+                "a": 0.22,
+            },
+            "bounds": [AVATAR_PLATE_X, AVATAR_PLATE_Y, AVATAR_PLATE_W, AVATAR_PLATE_H],
+        }
+    )
     avatar_node = _make_node(
         {
             "solid_color": {
@@ -141,14 +242,86 @@ def build_presence_card_mutations(
             "bounds": [AVATAR_X, AVATAR_Y, AVATAR_W, AVATAR_H],
         }
     )
-    text_node = _make_node(
+    eyebrow_node = _make_node(
+        {
+            "text_markdown": {
+                "content": "RESIDENT AGENT",
+                "font_size_px": EYEBROW_FONT_SIZE_PX,
+                "color": list(EYEBROW_RGBA),
+            },
+            "bounds": [EYEBROW_X, EYEBROW_Y, EYEBROW_W, EYEBROW_H],
+        }
+    )
+    name_node = _make_node(
+        {
+            "text_markdown": {
+                "content": f"**{agent_name}**",
+                "font_size_px": NAME_FONT_SIZE_PX,
+                "color": list(NAME_RGBA),
+            },
+            "bounds": [NAME_X, NAME_Y, NAME_W, NAME_H],
+        }
+    )
+    status_node = _make_node(
         {
             "text_markdown": {
                 "content": build_text_content(agent_name, elapsed_seconds),
-                "font_size_px": FONT_SIZE_PX,
-                "color": list(TEXT_RGBA),
+                "font_size_px": STATUS_FONT_SIZE_PX,
+                "color": list(STATUS_RGBA),
             },
-            "bounds": [TEXT_X, TEXT_Y, TEXT_W, TEXT_H],
+            "bounds": [STATUS_X, STATUS_Y, STATUS_W, STATUS_H],
+        }
+    )
+    chip_bg_node = _make_node(
+        {
+            "solid_color": {
+                "r": CHIP_BG_RGBA[0],
+                "g": CHIP_BG_RGBA[1],
+                "b": CHIP_BG_RGBA[2],
+                "a": CHIP_BG_RGBA[3],
+            },
+            "bounds": [CHIP_BG_X, CHIP_BG_Y, CHIP_BG_W, CHIP_BG_H],
+        }
+    )
+    chip_text_node = _make_node(
+        {
+            "text_markdown": {
+                "content": build_time_chip_content(elapsed_seconds),
+                "font_size_px": CHIP_FONT_SIZE_PX,
+                "color": list(CHIP_TEXT_RGBA),
+            },
+            "bounds": [CHIP_TEXT_X, CHIP_TEXT_Y, CHIP_TEXT_W, CHIP_TEXT_H],
+        }
+    )
+    dismiss_bg_node = _make_node(
+        {
+            "solid_color": {
+                "r": 0.94,
+                "g": 0.97,
+                "b": 1.0,
+                "a": 0.14,
+            },
+            "bounds": [DISMISS_BG_X, DISMISS_BG_Y, DISMISS_BG_W, DISMISS_BG_H],
+        }
+    )
+    dismiss_text_node = _make_node(
+        {
+            "text_markdown": {
+                "content": "X",
+                "font_size_px": DISMISS_FONT_SIZE_PX,
+                "color": list(CHIP_TEXT_RGBA),
+            },
+            "bounds": [DISMISS_TEXT_X, DISMISS_TEXT_Y, DISMISS_TEXT_W, DISMISS_TEXT_H],
+        }
+    )
+    dismiss_hit_region_node = _make_node(
+        {
+            "hit_region": {
+                "interaction_id": DISMISS_INTERACTION_ID,
+                "accepts_focus": True,
+                "accepts_pointer": True,
+            },
+            "bounds": [DISMISS_BG_X, DISMISS_BG_Y, DISMISS_BG_W, DISMISS_BG_H],
         }
     )
 
@@ -165,7 +338,7 @@ def build_presence_card_mutations(
                 types_pb2.MutationProto(
                     update_tile_input_mode=types_pb2.UpdateTileInputModeMutation(
                         tile_id=tile_id,
-                        input_mode=types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+                        input_mode=types_pb2.TILE_INPUT_MODE_CAPTURE,
                     )
                 ),
             ]
@@ -183,6 +356,27 @@ def build_presence_card_mutations(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
                     parent_id=root_uuid.bytes,
+                    node=sheen_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
+                    node=accent_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
+                    node=avatar_plate_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
                     node=avatar_node,
                 )
             ),
@@ -190,7 +384,56 @@ def build_presence_card_mutations(
                 add_node=types_pb2.AddNodeMutation(
                     tile_id=tile_id,
                     parent_id=root_uuid.bytes,
-                    node=text_node,
+                    node=eyebrow_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
+                    node=name_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
+                    node=status_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
+                    node=chip_bg_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
+                    node=chip_text_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
+                    node=dismiss_bg_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
+                    node=dismiss_text_node,
+                )
+            ),
+            types_pb2.MutationProto(
+                add_node=types_pb2.AddNodeMutation(
+                    tile_id=tile_id,
+                    parent_id=root_uuid.bytes,
+                    node=dismiss_hit_region_node,
                 )
             ),
         ]
@@ -281,7 +524,12 @@ async def start_agent(
     spec: AgentSpec,
     tab_height: float,
 ) -> AgentRuntime:
-    client = HudClient(target, psk=psk, agent_id=spec.name)
+    client = HudClient(
+        target,
+        psk=psk,
+        agent_id=spec.name,
+        initial_subscriptions=["SCENE_TOPOLOGY", "INPUT_EVENTS"],
+    )
     await client.connect()
     lease_id = await client.request_lease(ttl_ms=120_000)
     tile_id = await client.create_tile(
@@ -304,13 +552,15 @@ async def start_agent(
     )
     heartbeat_interval_ms = client.heartbeat_interval_ms or 5_000
     task = asyncio.create_task(heartbeat_loop(client, heartbeat_interval_ms))
-    return AgentRuntime(
+    runtime = AgentRuntime(
         spec=spec,
         client=client,
         lease_id=lease_id,
         tile_id=tile_id,
         heartbeat_task=task,
     )
+    runtime.dismiss_task = asyncio.create_task(watch_for_dismiss(runtime))
+    return runtime
 
 
 async def rebuild_agent_card(agent: AgentRuntime, elapsed_seconds: int) -> None:
@@ -326,6 +576,17 @@ async def rebuild_agent_card(agent: AgentRuntime, elapsed_seconds: int) -> None:
     )
 
 
+async def watch_for_dismiss(agent: AgentRuntime) -> None:
+    try:
+        await agent.client.wait_for_click(DISMISS_INTERACTION_ID)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return
+    agent.dismissed_by_user = True
+    await stop_agent(agent, "presence-card dismissed by user")
+
+
 async def stop_agent(agent: AgentRuntime, reason: str) -> None:
     if agent.heartbeat_task is not None:
         agent.heartbeat_task.cancel()
@@ -333,6 +594,17 @@ async def stop_agent(agent: AgentRuntime, reason: str) -> None:
             await agent.heartbeat_task
         except asyncio.CancelledError:
             pass
+        agent.heartbeat_task = None
+    if (
+        agent.dismiss_task is not None
+        and agent.dismiss_task is not asyncio.current_task()
+    ):
+        agent.dismiss_task.cancel()
+        try:
+            await agent.dismiss_task
+        except asyncio.CancelledError:
+            pass
+        agent.dismiss_task = None
     await agent.client.close(reason=reason, expect_resume=False)
 
 

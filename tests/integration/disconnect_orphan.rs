@@ -33,11 +33,11 @@ use tze_hud_scene::{
 
 const DISPLAY_W: f32 = 1920.0;
 const DISPLAY_H: f32 = 1080.0;
-const CARD_W: f32 = 200.0;
-const CARD_H: f32 = 80.0;
-const BOTTOM_MARGIN: f32 = 16.0;
-const LEFT_MARGIN: f32 = 16.0;
-const CARD_GAP: f32 = 8.0;
+const CARD_W: f32 = 320.0;
+const CARD_H: f32 = 112.0;
+const BOTTOM_MARGIN: f32 = 24.0;
+const LEFT_MARGIN: f32 = 24.0;
+const CARD_GAP: f32 = 12.0;
 const Z_ORDER_BASE: u32 = 100;
 
 /// Heartbeat interval per spec (session-protocol/spec.md §1.1).
@@ -105,10 +105,10 @@ fn make_card_root_node(_agent_name: &str) -> Node {
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba {
-                r: 0.08,
-                g: 0.08,
-                b: 0.08,
-                a: 0.78,
+                r: 0.10,
+                g: 0.14,
+                b: 0.19,
+                a: 0.72,
             },
             bounds: Rect::new(0.0, 0.0, CARD_W, CARD_H),
         }),
@@ -645,16 +645,16 @@ fn remaining_tiles_not_repositioned_after_agent2_removal() {
         "agent 1 tile bounds must be unchanged after agent 2 removal"
     );
 
-    // Verify expected positions match spec (tab_height - 96 and tab_height - 184)
-    let expected_y0 = DISPLAY_H - 96.0; // agent 0: y = tab_height - 96
-    let expected_y1 = DISPLAY_H - 184.0; // agent 1: y = tab_height - 184
+    // Verify expected positions match spec (tab_height - 136 and tab_height - 260)
+    let expected_y0 = DISPLAY_H - 136.0; // agent 0: y = tab_height - 136
+    let expected_y1 = DISPLAY_H - 260.0; // agent 1: y = tab_height - 260
     assert_eq!(
         bounds0_after.y, expected_y0,
-        "agent 0 tile y must be tab_height - 96 = {expected_y0}"
+        "agent 0 tile y must be tab_height - 136 = {expected_y0}"
     );
     assert_eq!(
         bounds1_after.y, expected_y1,
-        "agent 1 tile y must be tab_height - 184 = {expected_y1}"
+        "agent 1 tile y must be tab_height - 260 = {expected_y1}"
     );
 }
 
@@ -908,7 +908,7 @@ fn agents_0_and_1_updates_continue_after_agent2_removal() {
 }
 
 /// WHEN agent 2 disconnects and later its tile is removed via grace expiry
-/// THEN agents 0 and 1 tiles are at y = tab_height - 96 and y = tab_height - 184.
+/// THEN agents 0 and 1 tiles are at y = tab_height - 136 and y = tab_height - 260.
 ///
 /// Acceptance criterion 6 + 7: correct positions, no repositioning.
 #[test]
@@ -928,20 +928,20 @@ fn agents_0_and_1_tiles_at_correct_positions_after_agent2_expiry() {
     let bounds0 = scene.tiles[&tile_ids[0]].bounds;
     let bounds1 = scene.tiles[&tile_ids[1]].bounds;
 
-    // Agent 0: y = tab_height - 96 (CARD_H=80 + BOTTOM_MARGIN=16 = 96)
+    // Agent 0: y = tab_height - 136 (CARD_H=112 + BOTTOM_MARGIN=24 = 136)
     assert_eq!(
         bounds0.y,
-        DISPLAY_H - 96.0,
-        "agent 0 tile y must be tab_height - 96 (= {}) after agent 2 removal",
-        DISPLAY_H - 96.0
+        DISPLAY_H - 136.0,
+        "agent 0 tile y must be tab_height - 136 (= {}) after agent 2 removal",
+        DISPLAY_H - 136.0
     );
 
-    // Agent 1: y = tab_height - 184 (2×CARD_H + GAP + BOTTOM_MARGIN = 160 + 8 + 16 = 184)
+    // Agent 1: y = tab_height - 260 (2×CARD_H + GAP + BOTTOM_MARGIN = 224 + 12 + 24 = 260)
     assert_eq!(
         bounds1.y,
-        DISPLAY_H - 184.0,
-        "agent 1 tile y must be tab_height - 184 (= {}) after agent 2 removal",
-        DISPLAY_H - 184.0
+        DISPLAY_H - 260.0,
+        "agent 1 tile y must be tab_height - 260 (= {}) after agent 2 removal",
+        DISPLAY_H - 260.0
     );
 }
 
@@ -1136,8 +1136,8 @@ fn full_pipeline_grace_expiry_scenario() {
     // AC7: No repositioning — original positions preserved
     let bounds0 = scene.tiles[&tile_ids[0]].bounds;
     let bounds1 = scene.tiles[&tile_ids[1]].bounds;
-    assert_eq!(bounds0.y, DISPLAY_H - 96.0, "agent 0 y must be unchanged");
-    assert_eq!(bounds1.y, DISPLAY_H - 184.0, "agent 1 y must be unchanged");
+    assert_eq!(bounds0.y, DISPLAY_H - 136.0, "agent 0 y must be unchanged");
+    assert_eq!(bounds1.y, DISPLAY_H - 260.0, "agent 1 y must be unchanged");
 
     // Agents 0 and 1 still accept mutations
     let ok_batch0 = make_batch(
@@ -1145,7 +1145,7 @@ fn full_pipeline_grace_expiry_scenario() {
         Some(lease_ids[0]),
         vec![SceneMutation::UpdateTileInputMode {
             tile_id: tile_ids[0],
-            input_mode: InputMode::Passthrough,
+            input_mode: InputMode::Capture,
         }],
     );
     assert!(
@@ -1157,7 +1157,7 @@ fn full_pipeline_grace_expiry_scenario() {
         Some(lease_ids[1]),
         vec![SceneMutation::UpdateTileInputMode {
             tile_id: tile_ids[1],
-            input_mode: InputMode::Passthrough,
+            input_mode: InputMode::Capture,
         }],
     );
     assert!(

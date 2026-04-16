@@ -46,18 +46,18 @@ use uuid::Uuid;
 const DISPLAY_W: f32 = 1920.0;
 const DISPLAY_H: f32 = 1080.0;
 
-/// Tile dimensions: 200x80 logical pixels per spec.
-const CARD_W: f32 = 200.0;
-const CARD_H: f32 = 80.0;
+/// Tile dimensions: 320x112 logical pixels per spec.
+const CARD_W: f32 = 320.0;
+const CARD_H: f32 = 112.0;
 
-/// Bottom margin from display edge (16px per spec).
-const BOTTOM_MARGIN: f32 = 16.0;
+/// Bottom margin from display edge (24px per spec).
+const BOTTOM_MARGIN: f32 = 24.0;
 
-/// Left margin from display edge (16px per spec).
-const LEFT_MARGIN: f32 = 16.0;
+/// Left margin from display edge (24px per spec).
+const LEFT_MARGIN: f32 = 24.0;
 
-/// Vertical gap between cards (8px per spec).
-const CARD_GAP: f32 = 8.0;
+/// Vertical gap between cards (12px per spec).
+const CARD_GAP: f32 = 12.0;
 
 /// Z-order base for presence cards (100 per spec, + agent index).
 const Z_ORDER_BASE: u32 = 100;
@@ -66,18 +66,20 @@ const Z_ORDER_BASE: u32 = 100;
 const AVATAR_W: u32 = 32;
 const AVATAR_H: u32 = 32;
 
-/// Avatar positions within tile (x=8, y=24 per spec).
-const AVATAR_X: f32 = 8.0;
-const AVATAR_Y: f32 = 24.0;
+/// Avatar display positions within the expanded glass card.
+const AVATAR_X: f32 = 32.0;
+const AVATAR_Y: f32 = 36.0;
+const AVATAR_BOUNDS_W: f32 = 40.0;
+const AVATAR_BOUNDS_H: f32 = 40.0;
 
-/// Text area position and size within tile (x=48, y=8, w=144, h=64 per spec).
-const TEXT_X: f32 = 48.0;
-const TEXT_Y: f32 = 8.0;
-const TEXT_W: f32 = 144.0;
-const TEXT_H: f32 = 64.0;
+/// Status text position and size within the expanded card.
+const TEXT_X: f32 = 96.0;
+const TEXT_Y: f32 = 68.0;
+const TEXT_W: f32 = 148.0;
+const TEXT_H: f32 = 18.0;
 
-/// Text font size (14px per spec).
-const FONT_SIZE_PX: f32 = 14.0;
+/// Status text font size.
+const FONT_SIZE_PX: f32 = 13.0;
 
 // ─── gRPC test constants ──────────────────────────────────────────────────────
 
@@ -107,10 +109,8 @@ pub fn format_elapsed_secs(elapsed_secs: u64) -> String {
 
 /// Build the TextMarkdownNode content string for the given agent name and elapsed time.
 pub fn build_text_content(agent_name: &str, elapsed_secs: u64) -> String {
-    format!(
-        "**{agent_name}**\nLast active: {}",
-        format_elapsed_secs(elapsed_secs)
-    )
+    let _ = agent_name;
+    format!("Connected • last active {}", format_elapsed_secs(elapsed_secs))
 }
 
 // ─── Tile geometry helpers ────────────────────────────────────────────────────
@@ -142,10 +142,10 @@ fn make_bg_node() -> Node {
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba {
-                r: 0.08,
-                g: 0.08,
-                b: 0.08,
-                a: 0.78,
+                r: 0.10,
+                g: 0.14,
+                b: 0.19,
+                a: 0.72,
             },
             bounds: Rect::new(0.0, 0.0, CARD_W, CARD_H),
         }),
@@ -166,7 +166,7 @@ fn make_placeholder_avatar_node() -> Node {
             height: AVATAR_H,
             decoded_bytes: (AVATAR_W * AVATAR_H * 4) as u64,
             fit_mode: tze_hud_scene::types::ImageFitMode::Cover,
-            bounds: Rect::new(AVATAR_X, AVATAR_Y, AVATAR_W as f32, AVATAR_H as f32),
+            bounds: Rect::new(AVATAR_X, AVATAR_Y, AVATAR_BOUNDS_W, AVATAR_BOUNDS_H),
         }),
     }
 }
@@ -182,10 +182,10 @@ fn make_text_node(content: &str) -> Node {
             font_size_px: FONT_SIZE_PX,
             font_family: FontFamily::SystemSansSerif,
             color: Rgba {
-                r: 0.94,
-                g: 0.94,
+                r: 0.82,
+                g: 0.88,
                 b: 0.94,
-                a: 1.0,
+                a: 0.92,
             },
             background: None,
             alignment: TextAlign::Start,
@@ -263,24 +263,20 @@ fn time_format_multi_minute() {
 }
 
 /// WHEN content is built for an agent at various elapsed times
-/// THEN the format is "**AgentName**\nLast active: {time}".
+/// THEN the format is "Connected • last active {time}".
 #[test]
 fn build_text_content_format() {
     let content_0 = build_text_content("agent-alpha", 0);
     assert!(
-        content_0.starts_with("**agent-alpha**"),
-        "agent name must be bold markdown"
-    );
-    assert!(
-        content_0.contains("Last active: now"),
-        "at 0s must say 'Last active: now'"
+        content_0.contains("Connected • last active now"),
+        "at 0s must say 'Connected • last active now'"
     );
 
     let content_30 = build_text_content("agent-beta", 30);
-    assert!(content_30.contains("Last active: 30s ago"));
+    assert!(content_30.contains("Connected • last active 30s ago"));
 
     let content_60 = build_text_content("agent-gamma", 60);
-    assert!(content_60.contains("Last active: 1m ago"));
+    assert!(content_60.contains("Connected • last active 1m ago"));
 }
 
 // ─── Content update loop tests (Task 4.1, 4.2) ───────────────────────────────
@@ -439,8 +435,8 @@ fn content_update_set_tile_root_accepted() {
             txt.content
         );
         assert!(
-            txt.content.contains("AgentZero"),
-            "updated text must still contain the agent name"
+            txt.content.contains("Connected • last active"),
+            "updated text must keep the connected status prefix"
         );
     } else {
         panic!(
@@ -1061,7 +1057,7 @@ async fn set_tile_text_via_grpc(
 /// Acceptance criteria:
 /// - AC 5.1: 3 concurrent agent sessions, each creates a presence card tile
 /// - AC 5.2: All 3 tiles visible in SceneSnapshot after creation
-/// - AC 5.3: No tile bounds overlap (distinct y-offsets with 8px gaps)
+/// - AC 5.3: No tile bounds overlap (distinct y-offsets with 12px gaps)
 /// - AC 5.4: All 3 agents submit concurrent content updates without interference
 #[tokio::test]
 async fn test_three_agents_presence_card_coexistence() -> Result<(), Box<dyn std::error::Error>> {
@@ -1113,12 +1109,12 @@ async fn test_three_agents_presence_card_coexistence() -> Result<(), Box<dyn std
     // ── Phase 2: Each agent creates a presence card tile ─────────────────────
     //
     // Per spec:
-    //   Agent 0 (alpha): y = tab_height - 96,  z_order = 100
-    //   Agent 1 (beta):  y = tab_height - 184, z_order = 101
-    //   Agent 2 (gamma): y = tab_height - 272, z_order = 102
-    let alpha_bounds = [LEFT_MARGIN, DISPLAY_H - 96.0, CARD_W, CARD_H];
-    let beta_bounds = [LEFT_MARGIN, DISPLAY_H - 184.0, CARD_W, CARD_H];
-    let gamma_bounds = [LEFT_MARGIN, DISPLAY_H - 272.0, CARD_W, CARD_H];
+    //   Agent 0 (alpha): y = tab_height - 136, z_order = 100
+    //   Agent 1 (beta):  y = tab_height - 260, z_order = 101
+    //   Agent 2 (gamma): y = tab_height - 384, z_order = 102
+    let alpha_bounds = [LEFT_MARGIN, DISPLAY_H - 136.0, CARD_W, CARD_H];
+    let beta_bounds = [LEFT_MARGIN, DISPLAY_H - 260.0, CARD_W, CARD_H];
+    let gamma_bounds = [LEFT_MARGIN, DISPLAY_H - 384.0, CARD_W, CARD_H];
 
     let (tile_alpha_id, tile_beta_id, tile_gamma_id) = tokio::try_join!(
         create_tile_via_grpc(&mut alpha, alpha_bounds, 100),

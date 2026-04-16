@@ -200,25 +200,74 @@ def _resource_id_bytes(resource_id: Any) -> bytes:
 
 
 def build_presence_card_root_node(
-    width: float = 200.0,
-    height: float = 80.0,
+    width: float = 320.0,
+    height: float = 112.0,
 ) -> types_pb2.NodeProto:
     """Build the presence card background root node."""
     return _make_node(
         {
             "solid_color": {
-                "r": 0.08,
-                "g": 0.08,
-                "b": 0.08,
-                "a": 0.78,
+                "r": 0.10,
+                "g": 0.14,
+                "b": 0.19,
+                "a": 0.72,
             },
             "bounds": [0, 0, width, height],
         }
     )
 
 
+def build_presence_card_sheen_node(width: float = 320.0) -> types_pb2.NodeProto:
+    """Build the top sheen used by the glass presence card."""
+    return _make_node(
+        {
+            "solid_color": {
+                "r": 0.92,
+                "g": 0.96,
+                "b": 1.0,
+                "a": 0.16,
+            },
+            "bounds": [0, 0, width, 2],
+        }
+    )
+
+
+def build_presence_card_accent_node(
+    accent_rgba: tuple[float, float, float, float],
+) -> types_pb2.NodeProto:
+    """Build the left accent rail used by the glass presence card."""
+    return _make_node(
+        {
+            "solid_color": {
+                "r": accent_rgba[0],
+                "g": accent_rgba[1],
+                "b": accent_rgba[2],
+                "a": 0.78,
+            },
+            "bounds": [0, 18, 4, 76],
+        }
+    )
+
+
+def build_presence_card_avatar_plate_node(
+    accent_rgba: tuple[float, float, float, float],
+) -> types_pb2.NodeProto:
+    """Build the translucent plate behind the avatar."""
+    return _make_node(
+        {
+            "solid_color": {
+                "r": accent_rgba[0],
+                "g": accent_rgba[1],
+                "b": accent_rgba[2],
+                "a": 0.22,
+            },
+            "bounds": [24, 28, 56, 56],
+        }
+    )
+
+
 def build_presence_card_avatar_node(resource_id: Any) -> types_pb2.NodeProto:
-    """Build the 32x32 avatar node used by Presence Card."""
+    """Build the avatar node used by Presence Card."""
     return _make_node(
         {
             "static_image": {
@@ -228,7 +277,35 @@ def build_presence_card_avatar_node(resource_id: Any) -> types_pb2.NodeProto:
                 "decoded_bytes": 32 * 32 * 4,
                 "fit_mode": types_pb2.IMAGE_FIT_MODE_COVER,
             },
-            "bounds": [8, 24, 32, 32],
+            "bounds": [34, 38, 36, 36],
+        }
+    )
+
+
+def build_presence_card_eyebrow_node() -> types_pb2.NodeProto:
+    """Build the uppercase metadata label."""
+    return _make_node(
+        {
+            "text_markdown": {
+                "content": "RESIDENT AGENT",
+                "font_size_px": 11.0,
+                "color": [0.72, 0.80, 0.90, 0.82],
+            },
+            "bounds": [96, 18, 152, 12],
+        }
+    )
+
+
+def build_presence_card_name_node(agent_name: str) -> types_pb2.NodeProto:
+    """Build the bold display-name line."""
+    return _make_node(
+        {
+            "text_markdown": {
+                "content": f"**{agent_name}**",
+                "font_size_px": 20.0,
+                "color": [0.97, 0.99, 1.0, 1.0],
+            },
+            "bounds": [96, 34, 152, 26],
         }
     )
 
@@ -236,20 +313,99 @@ def build_presence_card_avatar_node(resource_id: Any) -> types_pb2.NodeProto:
 def build_presence_card_text_node(
     agent_name: str,
     last_active_label: str = "now",
-    width: float = 200.0,
-    height: float = 80.0,
 ) -> types_pb2.NodeProto:
-    """Build the agent label/status text node used by Presence Card."""
-    text_width = max(width - 56.0, 0.0)
-    text_height = max(height - 16.0, 0.0)
+    """Build the status line used by Presence Card."""
+    del agent_name
     return _make_node(
         {
             "text_markdown": {
-                "content": f"**{agent_name}**\nLast active: {last_active_label}",
-                "font_size_px": 14.0,
-                "color": [0.94, 0.94, 0.94, 1.0],
+                "content": f"Connected • last active {last_active_label}",
+                "font_size_px": 13.0,
+                "color": [0.82, 0.88, 0.94, 0.92],
             },
-            "bounds": [48, 8, text_width, text_height],
+            "bounds": [96, 68, 148, 18],
+        }
+    )
+
+
+def build_presence_card_chip_bg_node() -> types_pb2.NodeProto:
+    """Build the compact time-chip background."""
+    return _make_node(
+        {
+            "solid_color": {
+                "r": 0.86,
+                "g": 0.92,
+                "b": 1.0,
+                "a": 0.12,
+            },
+            "bounds": [224, 20, 44, 22],
+        }
+    )
+
+
+def _presence_card_chip_label(last_active_label: str) -> str:
+    if last_active_label == "now":
+        return "NOW"
+    if last_active_label.endswith("s ago"):
+        return f"{last_active_label[:-5]}S"
+    if last_active_label.endswith("m ago"):
+        return f"{last_active_label[:-5]}M"
+    return last_active_label.upper()
+
+
+def build_presence_card_chip_text_node(last_active_label: str = "now") -> types_pb2.NodeProto:
+    """Build the compact time-chip label."""
+    return _make_node(
+        {
+            "text_markdown": {
+                "content": _presence_card_chip_label(last_active_label),
+                "font_size_px": 10.0,
+                "color": [0.96, 0.98, 1.0, 0.96],
+            },
+            "bounds": [224, 21, 44, 20],
+        }
+    )
+
+
+def build_presence_card_dismiss_bg_node() -> types_pb2.NodeProto:
+    """Build the compact dismiss button background."""
+    return _make_node(
+        {
+            "solid_color": {
+                "r": 0.94,
+                "g": 0.97,
+                "b": 1.0,
+                "a": 0.14,
+            },
+            "bounds": [280, 18, 24, 24],
+        }
+    )
+
+
+def build_presence_card_dismiss_text_node() -> types_pb2.NodeProto:
+    """Build the dismiss button label."""
+    return _make_node(
+        {
+            "text_markdown": {
+                "content": "X",
+                "font_size_px": 12.0,
+                "color": [0.97, 0.99, 1.0, 0.98],
+            },
+            "bounds": [280, 18, 24, 24],
+        }
+    )
+
+
+def build_presence_card_dismiss_hit_region_node() -> types_pb2.NodeProto:
+    """Build the dismiss button hit target."""
+    return _make_node(
+        {
+            "hit_region": {
+                "interaction_id": "dismiss-card",
+                "accepts_focus": True,
+                "accepts_pointer": True,
+            },
+            "bounds": [280, 18, 24, 24],
         }
     )
 
@@ -259,41 +415,45 @@ def build_presence_card_add_node_mutations(
     resource_id: Any,
     agent_name: str,
     last_active_label: str = "now",
-    card_width: float = 200.0,
-    card_height: float = 80.0,
-) -> tuple[types_pb2.NodeProto, types_pb2.NodeProto, types_pb2.NodeProto, list[types_pb2.MutationProto]]:
-    """Build the 3-node Presence Card tree and its AddNode mutations."""
+    accent_rgba: tuple[float, float, float, float] = (66 / 255.0, 133 / 255.0, 244 / 255.0, 1.0),
+    card_width: float = 320.0,
+    card_height: float = 112.0,
+) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto], list[types_pb2.MutationProto]]:
+    """Build the glass Presence Card tree and its AddNode mutations."""
     root = build_presence_card_root_node(width=card_width, height=card_height)
-    avatar = build_presence_card_avatar_node(resource_id)
-    text = build_presence_card_text_node(
-        agent_name,
-        last_active_label,
-        width=card_width,
-        height=card_height,
-    )
+    child_nodes = [
+        build_presence_card_sheen_node(width=card_width),
+        build_presence_card_accent_node(accent_rgba),
+        build_presence_card_avatar_plate_node(accent_rgba),
+        build_presence_card_avatar_node(resource_id),
+        build_presence_card_eyebrow_node(),
+        build_presence_card_name_node(agent_name),
+        build_presence_card_text_node(agent_name, last_active_label),
+        build_presence_card_chip_bg_node(),
+        build_presence_card_chip_text_node(last_active_label),
+        build_presence_card_dismiss_bg_node(),
+        build_presence_card_dismiss_text_node(),
+        build_presence_card_dismiss_hit_region_node(),
+    ]
     mutations = [
         types_pb2.MutationProto(
             set_tile_root=types_pb2.SetTileRootMutation(
                 tile_id=tile_id,
                 node=root,
             )
-        ),
-        types_pb2.MutationProto(
-            add_node=types_pb2.AddNodeMutation(
-                tile_id=tile_id,
-                parent_id=root.id,
-                node=avatar,
-            )
-        ),
-        types_pb2.MutationProto(
-            add_node=types_pb2.AddNodeMutation(
-                tile_id=tile_id,
-                parent_id=root.id,
-                node=text,
-            )
-        ),
+        )
     ]
-    return root, avatar, text, mutations
+    mutations.extend(
+        types_pb2.MutationProto(
+            add_node=types_pb2.AddNodeMutation(
+                tile_id=tile_id,
+                parent_id=root.id,
+                node=node,
+            )
+        )
+        for node in child_nodes
+    )
+    return root, child_nodes, mutations
 
 
 def build_presence_card_tree_mutations(
@@ -301,15 +461,17 @@ def build_presence_card_tree_mutations(
     resource_id: Any,
     agent_name: str,
     last_active_label: str = "now",
-    card_width: float = 200.0,
-    card_height: float = 80.0,
-) -> tuple[types_pb2.NodeProto, types_pb2.NodeProto, types_pb2.NodeProto, list[types_pb2.MutationProto]]:
+    accent_rgba: tuple[float, float, float, float] = (66 / 255.0, 133 / 255.0, 244 / 255.0, 1.0),
+    card_width: float = 320.0,
+    card_height: float = 112.0,
+) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto], list[types_pb2.MutationProto]]:
     """Alias for build_presence_card_add_node_mutations()."""
     return build_presence_card_add_node_mutations(
         tile_id=tile_id,
         resource_id=resource_id,
         agent_name=agent_name,
         last_active_label=last_active_label,
+        accent_rgba=accent_rgba,
         card_width=card_width,
         card_height=card_height,
     )
@@ -387,6 +549,7 @@ class HudClient:
         psk: str,
         agent_id: str = "user-test-agent",
         capabilities: Optional[list[str]] = None,
+        initial_subscriptions: Optional[list[str]] = None,
     ):
         self.target = target
         self.psk = psk
@@ -396,6 +559,7 @@ class HudClient:
             "modify_own_tiles",
             "access_input_events",
         ]
+        self.initial_subscriptions = initial_subscriptions or ["SCENE_TOPOLOGY"]
         self._channel: Optional[grpc.aio.Channel] = None
         self._stream = None
         self._seq = 0
@@ -405,6 +569,7 @@ class HudClient:
         self.heartbeat_interval_ms: Optional[int] = None
         self.granted_capabilities: list[str] = []
         self._response_queue: asyncio.Queue = asyncio.Queue()
+        self._event_queue: asyncio.Queue = asyncio.Queue()
         self._reader_task: Optional[asyncio.Task] = None
         self._send_queue: Optional[asyncio.Queue] = None
         self._transport_closed = False
@@ -444,7 +609,7 @@ class HudClient:
                     pre_shared_key=session_pb2.PreSharedKeyCredential(key=self.psk),
                 ),
                 requested_capabilities=self.capabilities,
-                initial_subscriptions=["SCENE_TOPOLOGY"],
+                initial_subscriptions=self.initial_subscriptions,
                 agent_timestamp_wall_us=_now_wall_us(),
                 min_protocol_version=1000,
                 max_protocol_version=1000,
@@ -478,7 +643,10 @@ class HudClient:
         try:
             async for msg in self._stream:
                 self._server_seq = msg.sequence
-                await self._response_queue.put(msg)
+                if msg.WhichOneof("payload") == "event_batch":
+                    await self._event_queue.put(msg.event_batch)
+                else:
+                    await self._response_queue.put(msg)
         except grpc.aio.AioRpcError as e:
             if e.code() != grpc.StatusCode.CANCELLED:
                 print(f"  [grpc] Stream error: {e}", flush=True)
@@ -602,7 +770,11 @@ class HudClient:
         resp = await self._wait_for("lease_response", timeout=5.0)
         lr = resp.lease_response
         if not lr.granted:
-            raise RuntimeError(f"Lease denied: {lr.denial_reason}")
+            deny_reason = getattr(lr, "deny_reason", "") or "unspecified denial"
+            deny_code = getattr(lr, "deny_code", "")
+            if deny_code:
+                raise RuntimeError(f"Lease denied [{deny_code}]: {deny_reason}")
+            raise RuntimeError(f"Lease denied: {deny_reason}")
         print(f"  [grpc] Lease granted: ttl={lr.granted_ttl_ms}ms, "
               f"priority={lr.granted_priority}", flush=True)
         return lr.lease_id
@@ -806,10 +978,11 @@ class HudClient:
         agent_name: str,
         avatar_resource_id: Any,
         *,
-        x: float = 16.0,
+        accent_rgba: tuple[float, float, float, float] = (66 / 255.0, 133 / 255.0, 244 / 255.0, 1.0),
+        x: float = 24.0,
         y: float = 0.0,
-        w: float = 200.0,
-        h: float = 80.0,
+        w: float = 320.0,
+        h: float = 112.0,
         z_order: int = 100,
     ) -> bytes:
         """Create a full Presence Card tile and return the tile id."""
@@ -826,23 +999,41 @@ class HudClient:
         await self.update_tile_input_mode(
             lease_id,
             tile_id,
-            types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+            types_pb2.TILE_INPUT_MODE_CAPTURE,
         )
-        root, avatar, text, _ = build_presence_card_add_node_mutations(
+        root, children, _ = build_presence_card_add_node_mutations(
             tile_id=tile_id,
             resource_id=avatar_resource_id,
             agent_name=agent_name,
+            accent_rgba=accent_rgba,
             card_width=w,
             card_height=h,
         )
         await self.set_tile_root(lease_id, tile_id, root)
-        await self.add_node(lease_id, tile_id, avatar, parent_id=root.id)
-        await self.add_node(lease_id, tile_id, text, parent_id=root.id)
+        for node in children:
+            await self.add_node(lease_id, tile_id, node, parent_id=root.id)
         return tile_id
 
     async def send_heartbeat(self):
         """Send a keepalive heartbeat."""
         await self._send(heartbeat=session_pb2.Heartbeat())
+
+    async def wait_for_click(
+        self,
+        interaction_id: str,
+        timeout: Optional[float] = None,
+    ):
+        """Wait until an INPUT_EVENTS batch carries a matching ClickEvent."""
+        while True:
+            if timeout is None:
+                batch = await self._event_queue.get()
+            else:
+                batch = await asyncio.wait_for(self._event_queue.get(), timeout=timeout)
+            for envelope in batch.events:
+                if envelope.WhichOneof("event") != "click":
+                    continue
+                if envelope.click.interaction_id == interaction_id:
+                    return envelope.click
 
 
 # ---------------------------------------------------------------------------

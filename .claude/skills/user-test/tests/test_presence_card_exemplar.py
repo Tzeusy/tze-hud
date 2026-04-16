@@ -34,20 +34,39 @@ class PresenceCardExemplarTests(unittest.TestCase):
             root_uuid=root_uuid,
         )
 
-        self.assertEqual(len(mutations), 5)
+        self.assertEqual(len(mutations), 15)
         self.assertAlmostEqual(mutations[0].update_tile_opacity.opacity, 1.0)
         self.assertEqual(
             mutations[1].update_tile_input_mode.input_mode,
-            types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+            types_pb2.TILE_INPUT_MODE_CAPTURE,
         )
         self.assertEqual(mutations[2].WhichOneof("mutation"), "set_tile_root")
-        self.assertEqual(mutations[3].WhichOneof("mutation"), "add_node")
-        self.assertEqual(mutations[4].WhichOneof("mutation"), "add_node")
-        self.assertEqual(mutations[3].add_node.parent_id, root_uuid.bytes)
-        self.assertEqual(mutations[4].add_node.parent_id, root_uuid.bytes)
+        for mutation in mutations[3:]:
+            self.assertEqual(mutation.WhichOneof("mutation"), "add_node")
+            self.assertEqual(mutation.add_node.parent_id, root_uuid.bytes)
         self.assertEqual(
-            mutations[4].add_node.node.text_markdown.content,
-            "**agent-alpha**\nLast active: now",
+            mutations[7].add_node.node.text_markdown.content,
+            "RESIDENT AGENT",
+        )
+        self.assertEqual(
+            mutations[8].add_node.node.text_markdown.content,
+            "**agent-alpha**",
+        )
+        self.assertEqual(
+            mutations[9].add_node.node.text_markdown.content,
+            "Connected • last active now",
+        )
+        self.assertEqual(
+            mutations[11].add_node.node.text_markdown.content,
+            "NOW",
+        )
+        self.assertEqual(
+            mutations[13].add_node.node.text_markdown.content,
+            "X",
+        )
+        self.assertEqual(
+            mutations[14].add_node.node.hit_region.interaction_id,
+            "dismiss-card",
         )
 
     def test_build_presence_card_mutations_for_update_rebuilds_full_tree(self) -> None:
@@ -63,13 +82,58 @@ class PresenceCardExemplarTests(unittest.TestCase):
             root_uuid=root_uuid,
         )
 
-        self.assertEqual(len(mutations), 3)
+        self.assertEqual(len(mutations), 13)
         self.assertEqual(mutations[0].WhichOneof("mutation"), "set_tile_root")
-        self.assertEqual(mutations[1].WhichOneof("mutation"), "add_node")
-        self.assertEqual(mutations[2].WhichOneof("mutation"), "add_node")
+        for mutation in mutations[1:]:
+            self.assertEqual(mutation.WhichOneof("mutation"), "add_node")
         self.assertEqual(
-            mutations[2].add_node.node.text_markdown.content,
-            "**agent-gamma**\nLast active: 1m ago",
+            mutations[7].add_node.node.text_markdown.content,
+            "Connected • last active 1m ago",
+        )
+        self.assertEqual(
+            mutations[9].add_node.node.text_markdown.content,
+            "1M",
+        )
+        self.assertEqual(
+            mutations[11].add_node.node.text_markdown.content,
+            "X",
+        )
+        self.assertEqual(
+            mutations[12].add_node.node.hit_region.interaction_id,
+            "dismiss-card",
+        )
+
+    def test_avatar_square_has_even_inset_within_plate(self) -> None:
+        plate_center_x = (
+            presence_card_exemplar.AVATAR_PLATE_X
+            + presence_card_exemplar.AVATAR_PLATE_W / 2.0
+        )
+        plate_center_y = (
+            presence_card_exemplar.AVATAR_PLATE_Y
+            + presence_card_exemplar.AVATAR_PLATE_H / 2.0
+        )
+        avatar_center_x = (
+            presence_card_exemplar.AVATAR_X
+            + presence_card_exemplar.AVATAR_W / 2.0
+        )
+        avatar_center_y = (
+            presence_card_exemplar.AVATAR_Y
+            + presence_card_exemplar.AVATAR_H / 2.0
+        )
+
+        self.assertEqual(plate_center_x, avatar_center_x)
+        self.assertEqual(plate_center_y, avatar_center_y)
+        self.assertEqual(
+            presence_card_exemplar.AVATAR_X - presence_card_exemplar.AVATAR_PLATE_X,
+            presence_card_exemplar.AVATAR_PLATE_W
+            - presence_card_exemplar.AVATAR_W
+            - (presence_card_exemplar.AVATAR_X - presence_card_exemplar.AVATAR_PLATE_X),
+        )
+        self.assertEqual(
+            presence_card_exemplar.AVATAR_Y - presence_card_exemplar.AVATAR_PLATE_Y,
+            presence_card_exemplar.AVATAR_PLATE_H
+            - presence_card_exemplar.AVATAR_H
+            - (presence_card_exemplar.AVATAR_Y - presence_card_exemplar.AVATAR_PLATE_Y),
         )
 
     def test_build_step_plan_tracks_create_update_disconnect_cleanup(self) -> None:

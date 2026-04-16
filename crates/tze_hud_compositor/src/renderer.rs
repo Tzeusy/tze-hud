@@ -5494,34 +5494,49 @@ impl Compositor {
                 vertices.extend_from_slice(&verts);
             }
             NodeData::TextMarkdown(tm) => {
-                // For the vertical slice, render text as a colored rectangle
-                // (actual text rendering deferred to post-vertical-slice)
-                let bg = tm.background.unwrap_or(Rgba::new(0.15, 0.15, 0.25, 1.0));
-                let verts = rect_vertices(
-                    tile.bounds.x + tm.bounds.x,
-                    tile.bounds.y + tm.bounds.y,
-                    tm.bounds.width,
-                    tm.bounds.height,
-                    sw,
-                    sh,
-                    self.gpu_color(bg),
-                );
-                vertices.extend_from_slice(&verts);
-
-                // Render a smaller text area rectangle in the text color
-                // to indicate text content is present
-                let text_margin = 8.0;
-                if tm.bounds.width > text_margin * 2.0 && tm.bounds.height > text_margin * 2.0 {
+                if self.text_rasterizer.is_some() {
+                    if let Some(bg) = tm.background {
+                        let verts = rect_vertices(
+                            tile.bounds.x + tm.bounds.x,
+                            tile.bounds.y + tm.bounds.y,
+                            tm.bounds.width,
+                            tm.bounds.height,
+                            sw,
+                            sh,
+                            self.gpu_color(bg),
+                        );
+                        vertices.extend_from_slice(&verts);
+                    }
+                } else {
+                    // Fallback when glyphon is unavailable: preserve the old
+                    // placeholder treatment so text tiles remain visible.
+                    let bg = tm.background.unwrap_or(Rgba::new(0.15, 0.15, 0.25, 1.0));
                     let verts = rect_vertices(
-                        tile.bounds.x + tm.bounds.x + text_margin,
-                        tile.bounds.y + tm.bounds.y + text_margin,
-                        tm.bounds.width - text_margin * 2.0,
-                        (tm.font_size_px * 1.2).min(tm.bounds.height - text_margin * 2.0),
+                        tile.bounds.x + tm.bounds.x,
+                        tile.bounds.y + tm.bounds.y,
+                        tm.bounds.width,
+                        tm.bounds.height,
                         sw,
                         sh,
-                        self.gpu_color(tm.color),
+                        self.gpu_color(bg),
                     );
                     vertices.extend_from_slice(&verts);
+
+                    let text_margin = 8.0;
+                    if tm.bounds.width > text_margin * 2.0
+                        && tm.bounds.height > text_margin * 2.0
+                    {
+                        let verts = rect_vertices(
+                            tile.bounds.x + tm.bounds.x + text_margin,
+                            tile.bounds.y + tm.bounds.y + text_margin,
+                            tm.bounds.width - text_margin * 2.0,
+                            (tm.font_size_px * 1.2).min(tm.bounds.height - text_margin * 2.0),
+                            sw,
+                            sh,
+                            self.gpu_color(tm.color),
+                        );
+                        vertices.extend_from_slice(&verts);
+                    }
                 }
             }
             NodeData::HitRegion(hr) => {
@@ -6200,6 +6215,50 @@ mod tests {
         assert!(
             any_bright_pixel,
             "expected white text pixels in TextMarkdownNode tile — none found"
+        );
+    }
+
+    /// When the text rasterizer is active, TextMarkdownNode must not fall back
+    /// to the old full-width placeholder bar path.
+    #[tokio::test]
+    async fn test_text_markdown_node_avoids_placeholder_bar_when_text_renderer_active() {
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(160, 80).await);
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "I".to_owned(),
+                bounds: Rect::new(20.0, 16.0, 100.0, 40.0),
+                font_size_px: 28.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: Some(Rgba::new(0.0, 0.0, 0.0, 1.0)),
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        };
+        let mut scene = scene_with_node(node);
+        compositor.render_frame_headless(&mut scene, &surface);
+
+        let pixels = surface.read_pixels(&compositor.device);
+        let width = 160usize;
+        let height = 80usize;
+        let bright = |rgba: &[u8]| rgba[0] > 200 && rgba[1] > 200 && rgba[2] > 200;
+
+        let max_bright_run = (0..height)
+            .map(|row| {
+                (0..width)
+                    .filter(|col| bright(&pixels[(row * width + col) * 4..][..4]))
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+
+        assert!(
+            max_bright_run < 40,
+            "text renderer should not paint a placeholder bar; brightest row had {max_bright_run} bright pixels"
         );
     }
 
