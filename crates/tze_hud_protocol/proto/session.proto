@@ -86,6 +86,12 @@ message ClientMessage {
     // Durable-widget publishes receive WidgetPublishResult; ephemeral are fire-and-forget.
     // Requires publish_widget:<widget_name> capability.
     WidgetPublish widget_publish = 35;
+
+    // Resident scene-resource upload (RFC 0011; session-protocol spec §Resident Upload Handshake).
+    // Scene resources MUST use this family instead of WidgetAssetRegister.
+    ResourceUploadStart    resource_upload_start    = 36;
+    ResourceUploadChunk    resource_upload_chunk    = 37;
+    ResourceUploadComplete resource_upload_complete = 38;
   }
 }
 
@@ -148,6 +154,10 @@ message ServerMessage {
     // Ephemeral-zone publishes are fire-and-forget; no ZonePublishResult is sent.
     ZonePublishResult     zone_publish_result    = 40;
 
+    // Scene-resource upload responses (RFC 0011 resident upload flow).
+    ResourceUploadAccepted resource_upload_accepted = 41;
+    ResourceStored         resource_stored          = 42;
+
     // Input control responses (RFC 0004 §8.3.1, RFC 0005 §3.8)
     InputFocusResponse    input_focus_response    = 43;
     InputCaptureResponse  input_capture_response  = 44;
@@ -168,6 +178,9 @@ message ServerMessage {
     // Widget asset register result (session-protocol spec §Requirement: Widget Asset Registration via Session Stream).
     // Sent for every WidgetAssetRegister request (transactional).
     WidgetAssetRegisterResult widget_asset_register_result = 48;
+
+    // Scene-resource upload-specific semantic errors (RFC 0011 resident upload flow).
+    ResourceErrorResponse resource_error_response = 49;
   }
 
   // Field 22 (lease_denial) was removed in the v1 vocabulary rename.
@@ -593,6 +606,89 @@ message WidgetAssetRegisterResult {
   bool   was_deduplicated = 6;  // True when hash existed and payload transfer was skipped
   string error_code       = 7;  // Machine-readable error code (if accepted=false)
   string error_message    = 8;  // Human-readable reason (if accepted=false)
+}
+
+// ─── Resident scene-resource upload messages ─────────────────────────────────
+
+enum ResourceType {
+  RESOURCE_TYPE_UNSPECIFIED = 0;
+  IMAGE_RGBA8 = 1;  // Raw RGBA8 bytes
+  IMAGE_PNG   = 2;
+  IMAGE_JPEG  = 3;
+  FONT_TTF    = 4;
+  FONT_OTF    = 5;
+  IMAGE_SVG   = 6;
+}
+
+// Metadata for scene-resource uploads and store confirmation.
+message ResourceMetadata {
+  uint32 width      = 1;  // Image width in px (0 when not applicable)
+  uint32 height     = 2;  // Image height in px (0 when not applicable)
+  string font_family = 3; // Font family (empty when not applicable)
+  string font_style  = 4; // Font style, e.g. "Regular" (empty when not applicable)
+}
+
+// Start a scene-resource upload. inline_data supports small fast-path uploads.
+message ResourceUploadStart {
+  bytes            expected_hash     = 1;  // BLAKE3 hash (32 bytes)
+  ResourceType     resource_type     = 2;
+  uint64           total_size_bytes  = 3;
+  ResourceMetadata metadata          = 4;
+  bytes            inline_data       = 5;  // Full payload for small uploads
+}
+
+// Runtime acknowledgement when chunk transfer is required.
+message ResourceUploadAccepted {
+  uint64 request_sequence = 1;  // Initiating ClientMessage.sequence
+  bytes  upload_id        = 2;  // Opaque runtime-assigned upload id
+}
+
+// Chunk payload for an accepted upload.
+message ResourceUploadChunk {
+  bytes  upload_id    = 1;
+  uint32 chunk_index  = 2;  // 0-based chunk index
+  bytes  data         = 3;
+}
+
+// Finalize an accepted chunked upload.
+message ResourceUploadComplete {
+  bytes upload_id = 1;
+}
+
+// Successful upload completion (or dedup short-circuit).
+message ResourceStored {
+  uint64                       request_sequence = 1;  // Initiating ClientMessage.sequence
+  tze_hud.protocol.v1.ResourceIdProto resource_id = 2;  // Confirmed content id
+  bool                         was_deduplicated = 3;
+  uint64                       stored_bytes      = 4;
+  uint64                       decoded_bytes     = 5;
+  ResourceMetadata             metadata          = 6;
+  bytes                        upload_id         = 7;  // Present for accepted chunked uploads
+}
+
+enum ResourceErrorCode {
+  RESOURCE_ERROR_UNSPECIFIED = 0;
+  RESOURCE_CAPABILITY_DENIED = 1;
+  RESOURCE_BUDGET_EXCEEDED = 2;
+  RESOURCE_SIZE_EXCEEDED = 3;
+  RESOURCE_UNSUPPORTED_TYPE = 4;
+  RESOURCE_DECODE_ERROR = 5;
+  RESOURCE_HASH_MISMATCH = 6;
+  RESOURCE_CONFLICT = 7;
+  RESOURCE_TOO_MANY_UPLOADS = 8;
+  RESOURCE_NOT_FOUND = 9;
+  RESOURCE_NOT_RESIDENT = 10;
+  RESOURCE_RATE_LIMITED = 11;
+}
+
+// Upload-specific semantic failure response.
+message ResourceErrorResponse {
+  uint64            request_sequence = 1;  // Initiating ClientMessage.sequence
+  ResourceErrorCode error_code       = 2;  // Stable machine-readable code
+  string            message          = 3;  // Human-readable summary
+  string            context          = 4;  // Structured context (JSON string)
+  string            hint             = 5;  // Structured correction hint (JSON string)
+  bytes             upload_id        = 6;  // Present when failure ties to accepted upload
 }
 
 // ─── Heartbeat ────────────────────────────────────────────────────────────────
