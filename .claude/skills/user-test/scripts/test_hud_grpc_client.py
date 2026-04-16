@@ -171,6 +171,65 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
                 timeout=0.1,
             )
 
+    async def test_wait_for_does_not_drop_unmatched_messages(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        client._response_queue = asyncio.Queue()
+        mutation = session_pb2.ServerMessage(
+            mutation_result=session_pb2.MutationResult(
+                batch_id=b"\x01" * 16,
+                accepted=True,
+            )
+        )
+        lease = session_pb2.ServerMessage(
+            lease_response=session_pb2.LeaseResponse(
+                granted=True,
+                lease_id=b"\x02" * 16,
+                granted_ttl_ms=60_000,
+                granted_priority=2,
+            )
+        )
+        await client._response_queue.put(mutation)
+        await client._response_queue.put(lease)
+
+        lease_resp = await client._wait_for("lease_response", timeout=0.1)
+        self.assertTrue(lease_resp.lease_response.granted)
+        mutation_resp = await client._wait_for("mutation_result", timeout=0.1)
+        self.assertEqual(mutation_resp.mutation_result.batch_id, b"\x01" * 16)
+
+    async def test_await_resource_upload_result_does_not_drop_other_responses(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        client._response_queue = asyncio.Queue()
+        await client._response_queue.put(
+            session_pb2.ServerMessage(
+                mutation_result=session_pb2.MutationResult(
+                    batch_id=b"\x11" * 16,
+                    accepted=True,
+                )
+            )
+        )
+        await client._response_queue.put(
+            session_pb2.ServerMessage(
+                resource_stored=session_pb2.ResourceStored(
+                    request_sequence=5,
+                    resource_id=types_pb2.ResourceIdProto(bytes=b"\x22" * 32),
+                )
+            )
+        )
+
+        stored = await client._await_resource_upload_result(
+            request_sequence=5,
+            timeout=0.1,
+        )
+        self.assertEqual(stored.request_sequence, 5)
+        mutation_resp = await client._wait_for("mutation_result", timeout=0.1)
+        self.assertEqual(mutation_resp.mutation_result.batch_id, b"\x11" * 16)
+
+    async def test_upload_png_resource_rejects_payload_over_inline_limit(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        oversized = b"\x00" * ((64 * 1024) + 1)
+        with self.assertRaisesRegex(ValueError, "chunked upload is not implemented"):
+            await client.upload_png_resource(oversized)
+
     async def test_create_presence_card_tile_sequences_helper_calls(self):
         client = HudClient("example.invalid:50051", psk="test-key")
         client.create_tile = AsyncMock(return_value=b"tile-id")

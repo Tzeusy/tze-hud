@@ -35,6 +35,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -572,6 +573,8 @@ class HudClient:
         self.heartbeat_interval_ms: Optional[int] = None
         self.granted_capabilities: list[str] = []
         self._response_queue: asyncio.Queue = asyncio.Queue()
+        self._deferred_responses: list[Any] = []
+        self._response_wait_lock = asyncio.Lock()
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._reader_task: Optional[asyncio.Task] = None
         self._send_queue: Optional[asyncio.Queue] = None
@@ -594,6 +597,7 @@ class HudClient:
         self._transport_closed = False
         self._session_close_sent = False
         self._response_queue = asyncio.Queue()
+        self._deferred_responses = []
         self._channel = grpc.aio.insecure_channel(self.target)
         stub = session_pb2_grpc.HudSessionStub(self._channel)
 
@@ -659,26 +663,33 @@ class HudClient:
     async def _wait_for(self, payload_name: str, timeout: float = 10.0) -> Any:
         """Wait for a ServerMessage with the given payload type."""
         deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"Timed out waiting for {payload_name}")
-            try:
-                msg = await asyncio.wait_for(
-                    self._response_queue.get(), timeout=remaining
+        async with self._response_wait_lock:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Timed out waiting for {payload_name}")
+                msg = self._pop_deferred_response(
+                    lambda candidate: candidate.WhichOneof("payload")
+                    in {payload_name, "session_error"}
                 )
-            except asyncio.TimeoutError:
-                raise TimeoutError(f"Timed out waiting for {payload_name}")
+                if msg is None:
+                    try:
+                        msg = await asyncio.wait_for(
+                            self._response_queue.get(), timeout=remaining
+                        )
+                    except asyncio.TimeoutError:
+                        raise TimeoutError(f"Timed out waiting for {payload_name}")
 
-            which = msg.WhichOneof("payload")
-            if which == payload_name:
-                return msg
-            elif which == "session_error":
-                raise RuntimeError(
-                    f"Session error: {msg.session_error.code} — "
-                    f"{msg.session_error.message} (hint: {msg.session_error.hint})"
-                )
-            # else: ignore other messages (scene snapshots, deltas, etc.)
+                which = msg.WhichOneof("payload")
+                if which == payload_name:
+                    return msg
+                if which == "session_error":
+                    raise RuntimeError(
+                        f"Session error: {msg.session_error.code} — "
+                        f"{msg.session_error.message} "
+                        f"(hint: {msg.session_error.hint})"
+                    )
+                self._deferred_responses.append(msg)
 
     async def wait_for(self, payload_name: str, timeout: float = 10.0) -> Any:
         """Public wrapper for waiting on a specific server payload."""
@@ -791,49 +802,74 @@ class HudClient:
     ) -> session_pb2.ResourceStored:
         """Wait for ResourceStored/ResourceErrorResponse correlated to a request sequence."""
         deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"Timed out waiting for resource upload result "
-                    f"(request_sequence={request_sequence})"
+        async with self._response_wait_lock:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Timed out waiting for resource upload result "
+                        f"(request_sequence={request_sequence})"
+                    )
+                msg = self._pop_deferred_response(
+                    lambda candidate: self._matches_resource_upload_wait(
+                        candidate, request_sequence
+                    )
                 )
-            try:
-                msg = await asyncio.wait_for(
-                    self._response_queue.get(), timeout=remaining
-                )
-            except asyncio.TimeoutError:
-                raise TimeoutError(
-                    f"Timed out waiting for resource upload result "
-                    f"(request_sequence={request_sequence})"
-                )
+                if msg is None:
+                    try:
+                        msg = await asyncio.wait_for(
+                            self._response_queue.get(), timeout=remaining
+                        )
+                    except asyncio.TimeoutError:
+                        raise TimeoutError(
+                            f"Timed out waiting for resource upload result "
+                            f"(request_sequence={request_sequence})"
+                        )
 
-            which = msg.WhichOneof("payload")
-            if which == "resource_stored":
-                stored = msg.resource_stored
-                if stored.request_sequence != request_sequence:
+                if not self._matches_resource_upload_wait(msg, request_sequence):
+                    self._deferred_responses.append(msg)
                     continue
-                return stored
-            if which == "resource_error_response":
-                err = msg.resource_error_response
-                if err.request_sequence != request_sequence:
-                    continue
-                code_name = _resource_error_code_name(err.error_code)
-                raise RuntimeError(
-                    f"Resource upload failed [{code_name}]: {err.message} "
-                    f"(context: {err.context}, hint: {err.hint})"
-                )
-            if which == "session_error":
-                raise RuntimeError(
-                    f"Session error while waiting for upload result: "
-                    f"{msg.session_error.code} — {msg.session_error.message} "
-                    f"(hint: {msg.session_error.hint})"
-                )
-            if which == "runtime_error":
-                raise RuntimeError(
-                    f"Runtime error while waiting for upload result: "
-                    f"{msg.runtime_error.error_code} — {msg.runtime_error.message}"
-                )
+
+                which = msg.WhichOneof("payload")
+                if which == "resource_stored":
+                    return msg.resource_stored
+                if which == "resource_error_response":
+                    err = msg.resource_error_response
+                    code_name = _resource_error_code_name(err.error_code)
+                    raise RuntimeError(
+                        f"Resource upload failed [{code_name}]: {err.message} "
+                        f"(context: {err.context}, hint: {err.hint})"
+                    )
+                if which == "session_error":
+                    raise RuntimeError(
+                        f"Session error while waiting for upload result: "
+                        f"{msg.session_error.code} — {msg.session_error.message} "
+                        f"(hint: {msg.session_error.hint})"
+                    )
+                if which == "runtime_error":
+                    raise RuntimeError(
+                        f"Runtime error while waiting for upload result: "
+                        f"{msg.runtime_error.error_code} — {msg.runtime_error.message}"
+                    )
+
+    def _pop_deferred_response(
+        self,
+        matcher: Callable[[Any], bool],
+    ) -> Any | None:
+        """Return the first deferred response matching matcher, if any."""
+        for index, msg in enumerate(self._deferred_responses):
+            if matcher(msg):
+                return self._deferred_responses.pop(index)
+        return None
+
+    @staticmethod
+    def _matches_resource_upload_wait(msg: Any, request_sequence: int) -> bool:
+        which = msg.WhichOneof("payload")
+        if which == "resource_stored":
+            return msg.resource_stored.request_sequence == request_sequence
+        if which == "resource_error_response":
+            return msg.resource_error_response.request_sequence == request_sequence
+        return which in {"session_error", "runtime_error"}
 
     async def upload_png_resource(
         self,
@@ -842,6 +878,10 @@ class HudClient:
         timeout: float = 10.0,
     ) -> bytes:
         """Upload a PNG via resident ResourceUploadStart and return ResourceId bytes."""
+        if len(png_bytes) > 64 * 1024:
+            raise ValueError(
+                "PNG exceeds 64 KiB inline upload limit; chunked upload is not implemented"
+            )
         width, height = _png_image_size(png_bytes)
         request_sequence = await self._send(
             resource_upload_start=session_pb2.ResourceUploadStart(
