@@ -4,6 +4,7 @@
 //! tmux/PTY/process lifecycle semantics:
 //! - bridge contract is generic output chunks + bounded input submission + status
 //! - tmux-backed adapter maps into that contract externally
+//! - non-tmux adapter fixtures can use the same unchanged bridge contract
 //! - pilot updates are sent over the existing primary resident session stream
 
 use std::collections::VecDeque;
@@ -198,6 +199,76 @@ impl PortalAdapter for TmuxPilotAdapter {
             out.push(PortalOutputChunk {
                 ordinal: self.next_ordinal,
                 text: line,
+                emitted_wall_us: now_wall_us(),
+                observed_mono_us: now_mono_us(),
+            });
+            self.next_ordinal += 1;
+        }
+        out
+    }
+
+    fn submit_input(&mut self, submission: ViewerInputSubmission) -> Result<(), String> {
+        let _ = (submission.submitted_wall_us, submission.submitted_mono_us);
+        self.submitted_inputs.push(submission.text);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct RelayChatAdapter {
+    // Internal relay selector stays private and never crosses the bridge trait.
+    channel_ref: String,
+    identity: PortalSessionIdentity,
+    status: PortalSessionStatus,
+    next_ordinal: u64,
+    pending_messages: VecDeque<String>,
+    submitted_inputs: Vec<String>,
+}
+
+impl RelayChatAdapter {
+    fn new(portal_id: &str, display_name: &str, channel_ref: &str) -> Self {
+        Self {
+            channel_ref: channel_ref.to_string(),
+            identity: PortalSessionIdentity {
+                portal_id: portal_id.to_string(),
+                display_name: display_name.to_string(),
+            },
+            status: PortalSessionStatus::Connecting,
+            next_ordinal: 1,
+            pending_messages: VecDeque::new(),
+            submitted_inputs: Vec::new(),
+        }
+    }
+
+    fn mark_live(&mut self) {
+        self.status = PortalSessionStatus::Live;
+    }
+
+    fn queue_relay_message(&mut self, message: &str) {
+        let _ = &self.channel_ref;
+        self.pending_messages.push_back(message.to_string());
+    }
+
+    fn submitted_inputs(&self) -> &[String] {
+        &self.submitted_inputs
+    }
+}
+
+impl PortalAdapter for RelayChatAdapter {
+    fn identity(&self) -> &PortalSessionIdentity {
+        &self.identity
+    }
+
+    fn status(&self) -> PortalSessionStatus {
+        self.status.clone()
+    }
+
+    fn drain_output(&mut self) -> Vec<PortalOutputChunk> {
+        let mut out = Vec::new();
+        while let Some(message) = self.pending_messages.pop_front() {
+            out.push(PortalOutputChunk {
+                ordinal: self.next_ordinal,
+                text: message,
                 emitted_wall_us: now_wall_us(),
                 observed_mono_us: now_mono_us(),
             });
@@ -473,6 +544,46 @@ fn tmux_adapter_satisfies_transport_agnostic_bridge_contract() {
     );
 }
 
+#[test]
+fn non_tmux_adapter_satisfies_transport_agnostic_bridge_contract() {
+    let mut adapter = RelayChatAdapter::new(
+        "portal://pilot/non-tmux-1",
+        "Relay Chat Portal",
+        "relay://ops-alerts",
+    );
+    assert_eq!(adapter.status(), PortalSessionStatus::Connecting);
+
+    adapter.mark_live();
+    adapter.queue_relay_message("incident-bot: build queue recovered");
+    adapter.queue_relay_message("operator: monitoring next deploy wave");
+
+    let mut bridge = PortalBridge::new(adapter, 64);
+    assert_eq!(bridge.status(), PortalSessionStatus::Live);
+
+    let appended = bridge.ingest_adapter_output();
+    assert_eq!(appended, 2, "must ingest incremental output chunks");
+
+    let markdown = bridge.visible_markdown(16);
+    assert!(markdown.contains("build queue recovered"));
+    assert!(markdown.contains("monitoring next deploy wave"));
+
+    bridge
+        .submit_bounded_input("acknowledge and continue")
+        .expect("bounded viewer input must pass through bridge");
+
+    assert_eq!(
+        bridge.adapter.submitted_inputs(),
+        &["acknowledge and continue".to_string()],
+        "bridge must forward viewer input transactionally to adapter"
+    );
+
+    assert_eq!(
+        bridge.identity().portal_id,
+        "portal://pilot/non-tmux-1",
+        "bridge identity must stay transport-agnostic"
+    );
+}
+
 #[tokio::test]
 async fn tmux_pilot_drives_portal_over_existing_primary_session_stream()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -588,6 +699,133 @@ async fn tmux_pilot_drives_portal_over_existing_primary_session_stream()
     assert_eq!(
         session_count, 1,
         "tmux pilot path must not open an additional HudSession stream"
+    );
+    assert_eq!(
+        session.sequence, 5,
+        "all portal activity must run through the single primary resident stream"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_tmux_adapter_drives_portal_over_existing_primary_session_stream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("[::1]:0")?;
+    let grpc_port = listener.local_addr()?.port();
+    drop(listener);
+
+    let config = HeadlessConfig {
+        width: DISPLAY_W as u32,
+        height: DISPLAY_H as u32,
+        grpc_port,
+        psk: TEST_PSK.to_string(),
+        config_toml: None,
+    };
+    let runtime = HeadlessRuntime::new(config).await?;
+
+    {
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab_id = scene.create_tab("Portal-Adapter-Test-NonTmux", 0)?;
+        scene.active_tab = Some(tab_id);
+        scene.zone_registry = ZoneRegistry::with_defaults();
+    }
+
+    let _server = runtime.start_grpc_server().await?;
+
+    let mut session = connect_agent("portal-adapter-non-tmux-agent", grpc_port).await?;
+
+    let mut adapter = RelayChatAdapter::new(
+        "portal://pilot/non-tmux-live",
+        "Relay Chat Pilot",
+        "relay://incident-room",
+    );
+    adapter.mark_live();
+    adapter.queue_relay_message("relay> opening non-tmux stream");
+
+    let mut bridge = PortalBridge::new(adapter, 128);
+
+    let tile_id = create_tile(
+        &mut session,
+        proto::Rect {
+            x: 80.0,
+            y: 220.0,
+            width: 720.0,
+            height: 360.0,
+        },
+        150,
+    )
+    .await?;
+
+    bridge.ingest_adapter_output();
+    let first = format!(
+        "**{}** ({:?})\n{}",
+        bridge.identity().display_name,
+        bridge.status(),
+        bridge.visible_markdown(32)
+    );
+    set_tile_root_text(&mut session, tile_id.clone(), first).await?;
+
+    bridge
+        .adapter
+        .queue_relay_message("relay> propagated follow-up update");
+    bridge.ingest_adapter_output();
+    bridge
+        .submit_bounded_input("ack")
+        .expect("viewer input should remain bounded and flow through the adapter contract");
+
+    let second = format!(
+        "**{}** ({:?})\n{}",
+        bridge.identity().display_name,
+        bridge.status(),
+        bridge.visible_markdown(32)
+    );
+    set_tile_root_text(&mut session, tile_id, second).await?;
+
+    let (session_tile_count, contains_incremental, contains_identity, session_count) = {
+        let state = runtime.shared_state().lock().await;
+        let scene = state.scene.lock().await;
+        let mut has_incremental = false;
+        let mut has_identity = false;
+        let mut count = 0;
+        for tile in scene.tiles.values() {
+            if tile.namespace != session.namespace {
+                continue;
+            }
+            count += 1;
+            if let Some(root_id) = tile.root_node {
+                if let Some(node) = scene.nodes.get(&root_id) {
+                    if let NodeData::TextMarkdown(text) = &node.data {
+                        has_incremental |= text.content.contains("follow-up update");
+                        has_identity |= text.content.contains("Relay Chat Pilot");
+                    }
+                }
+            }
+        }
+        (
+            count,
+            has_incremental,
+            has_identity,
+            state.sessions.session_count(),
+        )
+    };
+
+    assert_eq!(
+        session_tile_count, 1,
+        "non-tmux pilot creates one governed content-layer tile"
+    );
+    assert!(
+        contains_incremental,
+        "stream increments must land in portal content"
+    );
+    assert!(
+        contains_identity,
+        "identity text must be rendered from bridge contract"
+    );
+    assert_eq!(
+        session_count, 1,
+        "non-tmux pilot path must not open an additional HudSession stream"
     );
     assert_eq!(
         session.sequence, 5,
