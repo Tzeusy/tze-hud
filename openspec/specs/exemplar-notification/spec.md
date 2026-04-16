@@ -36,33 +36,33 @@ Each notification's backdrop quad MUST be tinted according to the publication's 
 
 | Urgency value | Urgency level | Default backdrop color | Opacity |
 |---|---|---|---|
-| 0 | low | dark gray (#2A2A2A) | 0.9 |
-| 1 | normal | dark blue (#1A1A3A) | 0.9 |
-| 2 | urgent | amber (#8B6914) | 0.9 |
-| 3 | critical | red (#8B1A1A) | 0.9 |
+| 0 | low | smoke black (#000000) | 0.8 |
+| 1 | normal | blue-black (#0C1426) | 0.8 |
+| 2 | urgent | amber-black (#2A1E08) | 0.8 |
+| 3 | critical | red-black (#450612) | 0.8 |
 
-The backdrop MUST be rendered as an opaque quad at 90% opacity (0.9 alpha). When a component profile overrides `color.notification.urgency.low`, `color.notification.urgency.normal`, `color.notification.urgency.urgent`, or `color.notification.urgency.critical`, the profile values MUST take precedence over the defaults. Urgency values outside 0-3 MUST be clamped to 3 (critical).
+The backdrop MUST be rendered as an opaque quad at 80% opacity (0.8 alpha). When a component profile overrides `color.notification.urgency.low`, `color.notification.urgency.normal`, `color.notification.urgency.urgent`, or `color.notification.urgency.critical`, the profile values MUST take precedence over the defaults. Urgency values outside 0-3 MUST be clamped to 3 (critical).
 
 **Implementation note — dynamic urgency color resolution:** At render time, the compositor resolves urgency backdrop colors by looking up `color.notification.urgency.{level}` (where level is `low`, `normal`, `urgent`, or `critical`) from the profile's scoped token map. The scoped token map is resolved at startup (profile overrides -> global -> canonical fallbacks) and stored alongside the profile. The `RenderingPolicy.backdrop` field is NOT used for per-notification urgency coloring; it provides the fallback color when no urgency-specific token is found (e.g., for non-notification content rendered in the same zone type).
 
 This is distinct from the alert-banner urgency-to-severity token mapping. The notification-area zone MUST NOT use `color.severity.*` tokens for backdrop coloring.
 Scope: v1-mandatory
 
-#### Scenario: Low urgency notification renders dark gray backdrop
+#### Scenario: Low urgency notification renders smoke-black backdrop
 - **WHEN** a `NotificationPayload` with `urgency = 0` is published to the notification-area zone
-- **THEN** the backdrop quad MUST be rendered with color #2A2A2A at 0.9 opacity (or the profile-overridden `color.notification.urgency.low` value)
+- **THEN** the backdrop quad MUST be rendered with color #000000 at 0.8 opacity (or the profile-overridden `color.notification.urgency.low` value)
 
-#### Scenario: Normal urgency notification renders dark blue backdrop
+#### Scenario: Normal urgency notification renders blue-black backdrop
 - **WHEN** a `NotificationPayload` with `urgency = 1` is published to the notification-area zone
-- **THEN** the backdrop quad MUST be rendered with color #1A1A3A at 0.9 opacity (or the profile-overridden `color.notification.urgency.normal` value)
+- **THEN** the backdrop quad MUST be rendered with color #0C1426 at 0.8 opacity (or the profile-overridden `color.notification.urgency.normal` value)
 
-#### Scenario: Urgent notification renders amber backdrop
+#### Scenario: Urgent notification renders amber-black backdrop
 - **WHEN** a `NotificationPayload` with `urgency = 2` is published to the notification-area zone
-- **THEN** the backdrop quad MUST be rendered with color #8B6914 at 0.9 opacity (or the profile-overridden `color.notification.urgency.urgent` value)
+- **THEN** the backdrop quad MUST be rendered with color #2A1E08 at 0.8 opacity (or the profile-overridden `color.notification.urgency.urgent` value)
 
-#### Scenario: Critical notification renders red backdrop
+#### Scenario: Critical notification renders red-black backdrop
 - **WHEN** a `NotificationPayload` with `urgency = 3` is published to the notification-area zone
-- **THEN** the backdrop quad MUST be rendered with color #8B1A1A at 0.9 opacity (or the profile-overridden `color.notification.urgency.critical` value)
+- **THEN** the backdrop quad MUST be rendered with color #450612 at 0.8 opacity (or the profile-overridden `color.notification.urgency.critical` value)
 
 #### Scenario: Out-of-range urgency clamped to critical
 - **WHEN** a `NotificationPayload` with `urgency = 5` is published to the notification-area zone
@@ -175,10 +175,10 @@ Scope: v1-mandatory
 An exemplar component profile named `notification-stack-exemplar` MUST be provided at `profiles/notification-stack-exemplar/`. The profile MUST declare `component_type = "notification"` and MUST include a `zones/notification-area.toml` with rendering policy overrides. The profile's `token_overrides` MUST define the four urgency backdrop color tokens:
 
 ```
-color.notification.urgency.low = "#2A2A2A"
-color.notification.urgency.normal = "#1A1A3A"
-color.notification.urgency.urgent = "#8B6914"
-color.notification.urgency.critical = "#8B1A1A"
+color.notification.urgency.low = "#000000"
+color.notification.urgency.normal = "#0C1426"
+color.notification.urgency.urgent = "#2A1E08"
+color.notification.urgency.critical = "#450612"
 ```
 
 The profile MUST pass OpaqueBackdrop readability validation (backdrop_opacity >= 0.8 for all urgency colors).
@@ -190,7 +190,7 @@ Scope: v1-mandatory
 
 #### Scenario: Profile passes OpaqueBackdrop readability
 - **WHEN** the `notification-stack-exemplar` profile is validated at startup
-- **THEN** the OpaqueBackdrop readability check MUST pass (backdrop_opacity = 0.9 >= 0.8)
+- **THEN** the OpaqueBackdrop readability check MUST pass (backdrop_opacity = 0.8 >= 0.8)
 
 ---
 
