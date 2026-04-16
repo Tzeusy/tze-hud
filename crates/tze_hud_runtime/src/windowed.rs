@@ -1003,6 +1003,7 @@ impl WinitApp {
                                     "zone action: callback queued for agent delivery"
                                 );
                             }
+                            ZoneInteractionKind::DragHandle { .. } => {}
                         }
                     }
                 }
@@ -3117,6 +3118,7 @@ redaction_style = "blank"
                 ZoneInteractionKind::Action { .. } => {
                     // Action: just log (no dismiss).
                 }
+                ZoneInteractionKind::DragHandle { .. } => {}
             }
         }
 

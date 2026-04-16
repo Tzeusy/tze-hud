@@ -661,6 +661,7 @@ impl HeadlessRuntime {
                             "zone action: callback queued for agent delivery"
                         );
                     }
+                    ZoneInteractionKind::DragHandle { .. } => {}
                 }
             }
         }

@@ -1544,6 +1544,50 @@ pub enum ZoneMediaType {
     SolidColor,
 }
 
+/// Visual pattern rendered inside a drag handle affordance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DragHandleGripPattern {
+    /// Render three small grip dots.
+    Dots,
+    /// Render a thin horizontal grip bar.
+    Bar,
+    /// Render no interior grip decoration.
+    None,
+}
+
+/// Design-token bundle for runtime drag handle visuals.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DragHandleStyle {
+    /// Base fill color.
+    pub color: Rgba,
+    /// Opacity while idle (no hover/press).
+    pub opacity_idle: f32,
+    /// Opacity while hovered or pressed.
+    pub opacity_active: f32,
+    /// Handle width in density-independent pixels.
+    pub width_dp: f32,
+    /// Handle height in density-independent pixels.
+    pub height_dp: f32,
+    /// Corner radius in pixels.
+    pub border_radius: f32,
+    /// Grip decoration style.
+    pub grip_pattern: DragHandleGripPattern,
+}
+
+impl Default for DragHandleStyle {
+    fn default() -> Self {
+        Self {
+            color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            opacity_idle: 0.4,
+            opacity_active: 1.0,
+            width_dp: 24.0,
+            height_dp: 8.0,
+            border_radius: 4.0,
+            grip_pattern: DragHandleGripPattern::Dots,
+        }
+    }
+}
+
 /// Rendering policy — how content is presented in the zone.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RenderingPolicy {
@@ -1772,6 +1816,21 @@ pub enum ZoneInteractionKind {
     /// pattern
     /// `"zone:{zone_name}:action:{published_at_wall_us}:{publisher_namespace}:{callback_id}"`.
     Action { callback_id: String },
+    /// Runtime chrome drag handle for a movable element.
+    DragHandle {
+        /// Element identity in scene-id wire format.
+        element_id: SceneId,
+        /// Element class this handle belongs to.
+        element_kind: DragHandleElementKind,
+    },
+}
+
+/// Element class for runtime drag handle interactions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DragHandleElementKind {
+    Tile,
+    Zone,
+    Widget,
 }
 
 /// A runtime-managed interactive region derived from zone content layout.
@@ -1823,6 +1882,30 @@ pub struct ZoneHitRegion {
     /// in top-to-bottom, left-to-right reading order (dismiss first, then
     /// actions in order of their `Vec` position).
     pub tab_order: u32,
+}
+
+/// Runtime-managed chrome-layer drag handle region for movable elements.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DragHandleHitRegion {
+    /// Element identity targeted by the drag handle.
+    pub element_id: SceneId,
+    /// Element class for routing and debug surfaces.
+    pub element_kind: DragHandleElementKind,
+    /// Display-space bounds for hit-testing and rendering.
+    pub bounds: Rect,
+    /// Interaction identifier (`drag-handle:<element_id_hex>`).
+    pub interaction_id: String,
+    /// Runtime-internal hit-region node contract for this handle.
+    pub hit_region: HitRegionNode,
+    /// Stable tab-order index across all drag handles.
+    pub tab_order: u32,
+}
+
+/// Local-first hover/press state for chrome drag handles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DragHandleLocalState {
+    pub hovered: bool,
+    pub pressed: bool,
 }
 
 /// Status-bar payload: key → display string map.

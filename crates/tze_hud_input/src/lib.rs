@@ -77,16 +77,15 @@ pub mod pointer;
 pub mod scroll;
 
 // Re-export core dispatch types at the crate root for convenience.
-pub use dispatch::{DispatchOutcome, DispatchProcessor, build_agent_batch};
+pub use dispatch::{build_agent_batch, DispatchOutcome, DispatchProcessor};
 pub use events::{
     EventBatch, HitTestResult, InputEnvelope, LocalStateUpdate, RouteTarget, SceneLocalPatch,
     ScrollOffsetUpdate,
 };
 pub use hit_test::hit_test;
 pub use local_feedback::{
-    DEFAULT_FOCUS_RING_COLOR, DEFAULT_FOCUS_RING_WIDTH_PX, DEFAULT_HOVER_TINT,
-    DEFAULT_PRESS_DARKEN, LocalFeedbackStyle, ROLLBACK_ANIMATION_MS, ResolvedFeedbackStyle,
-    RollbackTracker,
+    LocalFeedbackStyle, ResolvedFeedbackStyle, RollbackTracker, DEFAULT_FOCUS_RING_COLOR,
+    DEFAULT_FOCUS_RING_WIDTH_PX, DEFAULT_HOVER_TINT, DEFAULT_PRESS_DARKEN, ROLLBACK_ANIMATION_MS,
 };
 pub use pointer::{
     CancelReason, ClickEvent, ContextMenuEvent, DoubleClickEvent, Modifiers, PointerButton,
@@ -119,7 +118,7 @@ pub use keyboard::{
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::{HitResult, NodeData, SceneId};
+use tze_hud_scene::{HitResult, NodeData, SceneId, ZoneInteractionKind};
 
 /// Raw pointer input event from the OS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -260,6 +259,10 @@ pub struct InputProcessor {
     current_hover: Option<(SceneId, SceneId)>, // (tile_id, node_id)
     /// Currently pressed node.
     current_press: Option<(SceneId, SceneId)>, // (tile_id, node_id)
+    /// Currently hovered chrome drag handle interaction id.
+    current_drag_handle_hover: Option<String>,
+    /// Currently pressed chrome drag handle interaction id.
+    current_drag_handle_press: Option<String>,
     /// Rollback animation tracker (agent-rejection-triggered).
     rollback_tracker: RollbackTracker,
     /// Pointer capture manager.
@@ -273,6 +276,8 @@ impl InputProcessor {
         Self {
             current_hover: None,
             current_press: None,
+            current_drag_handle_hover: None,
+            current_drag_handle_press: None,
             rollback_tracker: RollbackTracker::new(),
             capture: capture::PointerCaptureManager::new(),
             scroll_state: ScrollState::new(),
@@ -657,6 +662,14 @@ impl InputProcessor {
                 (None, None)
             }
         };
+        let hit_drag_handle_id: Option<String> = match &hit {
+            HitResult::ZoneInteraction {
+                interaction_id: iid,
+                kind: ZoneInteractionKind::DragHandle { .. },
+                ..
+            } => Some(iid.clone()),
+            _ => None,
+        };
 
         // ── Stage 2: Update hover state ───────────────────────────────────
         let prev_hover_node = self.current_hover.map(|(_, n)| n);
@@ -731,9 +744,24 @@ impl InputProcessor {
             self.current_hover = hit_tile_id.and_then(|t| hit_node_id.map(|n| (t, n)));
         }
 
+        // ── Stage 2: Update chrome drag-handle hover state ───────────────
+        if self.current_drag_handle_hover != hit_drag_handle_id {
+            if let Some(old) = self.current_drag_handle_hover.take() {
+                scene.set_drag_handle_hovered(&old, false);
+            }
+            if let Some(new_id) = &hit_drag_handle_id {
+                scene.set_drag_handle_hovered(new_id, true);
+            }
+            self.current_drag_handle_hover = hit_drag_handle_id.clone();
+        }
+
         // ── Stage 2: Handle press/release ─────────────────────────────────
         match event.kind {
             PointerEventKind::Down => {
+                if let Some(ref drag_id) = hit_drag_handle_id {
+                    scene.set_drag_handle_pressed(drag_id, true);
+                    self.current_drag_handle_press = Some(drag_id.clone());
+                }
                 if let (Some(tile_id), Some(node_id)) = (hit_tile_id, hit_node_id) {
                     if let Some(state) = scene.hit_region_states.get_mut(&node_id) {
                         state.pressed = true;
@@ -795,6 +823,9 @@ impl InputProcessor {
                 }
             }
             PointerEventKind::Up => {
+                if let Some(drag_id) = self.current_drag_handle_press.take() {
+                    scene.set_drag_handle_pressed(&drag_id, false);
+                }
                 if let Some((pressed_tile_id, pressed_node_id)) = self.current_press.take() {
                     if let Some(state) = scene.hit_region_states.get_mut(&pressed_node_id) {
                         state.pressed = false;
