@@ -98,6 +98,8 @@ impl ElementStore {
             return Err(err);
         }
 
+        sync_parent_dir(parent)?;
+
         Ok(())
     }
 
@@ -176,6 +178,17 @@ fn replace_file_atomically(src: &Path, dst: &Path) -> io::Result<()> {
         .ok()
         .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{err}")))?;
     }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    OpenOptions::new().read(true).open(path)?.sync_all()
+}
+
+#[cfg(target_os = "windows")]
+fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+    // Windows path replacement uses MoveFileExW with MOVEFILE_WRITE_THROUGH.
     Ok(())
 }
 

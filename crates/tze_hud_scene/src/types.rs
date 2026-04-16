@@ -2000,7 +2000,7 @@ pub struct WidgetDefinition {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WidgetInstance {
     /// Stable element ID for this widget instance.
-    #[serde(default)]
+    #[serde(default = "SceneId::null")]
     pub id: SceneId,
     /// References `WidgetDefinition.id`.
     pub widget_type_name: std::string::String,
@@ -2936,6 +2936,32 @@ mod tests {
         assert!(
             violations.is_empty(),
             "Layer 0 identity violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn widget_instance_missing_id_defaults_to_null() {
+        let tab_id = SceneId::new();
+        let mut value = serde_json::to_value(WidgetInstance {
+            id: SceneId::new(),
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "main".to_string(),
+            current_params: HashMap::new(),
+        })
+        .expect("serialize widget instance");
+        value
+            .as_object_mut()
+            .expect("widget instance encodes as object")
+            .remove("id");
+
+        let restored: WidgetInstance =
+            serde_json::from_value(value).expect("deserialize widget instance without id");
+        assert!(
+            restored.id.is_null(),
+            "missing id must default to SceneId::null()"
         );
     }
 }
