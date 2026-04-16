@@ -1,10 +1,10 @@
 ## 1. Contract Reconciliation
 
-- [ ] 1.1 Reconcile RFC 0011 upload-start acknowledgement and correlation semantics against the main session-protocol and resource-store specs
-- [ ] 1.2 Reconcile RFC 0005 combined-envelope sections against the split-envelope resident session model used by the main v1 spec
-- [ ] 1.3 Reconcile scene-resource budget charging semantics to reference time instead of upload-storage time
-- [ ] 1.4 Decide and document the v1 boundary for agent-uploaded fonts versus runtime-owned zone/component typography
-- [ ] 1.5 Sync the temporary `resident-scene-resource-upload` synthesis slice into its authoritative homes and mark its archive posture
+- [x] 1.1 Reconcile RFC 0011 upload-start acknowledgement and correlation semantics against the main session-protocol and resource-store specs
+- [x] 1.2 Reconcile RFC 0005 combined-envelope sections against the split-envelope resident session model used by the main v1 spec
+- [x] 1.3 Reconcile scene-resource budget charging semantics to reference time instead of upload-storage time
+- [x] 1.4 Decide and document the v1 boundary for agent-uploaded fonts versus runtime-owned zone/component typography
+- [x] 1.5 Sync the temporary `resident-scene-resource-upload` synthesis slice into its authoritative homes and mark its archive posture
 - [ ] 1.6 Sync the resident scene-resource upload delta into the authoritative session-protocol and resource-store specs after signoff
 
 ## 2. Schema
