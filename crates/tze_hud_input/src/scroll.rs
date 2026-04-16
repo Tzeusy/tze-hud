@@ -250,6 +250,7 @@ impl ScrollTileState {
 #[derive(Default)]
 pub struct ScrollState {
     tiles: std::collections::HashMap<SceneId, ScrollTileState>,
+    pending_unregistered_requests: std::collections::HashMap<SceneId, SetScrollOffsetRequest>,
 }
 
 impl ScrollState {
@@ -259,12 +260,17 @@ impl ScrollState {
 
     /// Register a tile as scrollable with the given configuration.
     pub fn register_tile(&mut self, tile_id: SceneId, config: ScrollConfig) {
-        self.tiles.insert(tile_id, ScrollTileState::new(config));
+        let mut state = ScrollTileState::new(config);
+        if let Some(req) = self.pending_unregistered_requests.remove(&tile_id) {
+            state.queue_agent_request(req);
+        }
+        self.tiles.insert(tile_id, state);
     }
 
     /// Unregister a tile (e.g. tile destroyed).
     pub fn unregister_tile(&mut self, tile_id: SceneId) {
         self.tiles.remove(&tile_id);
+        self.pending_unregistered_requests.remove(&tile_id);
     }
 
     /// Returns true if a tile is registered as scrollable.
@@ -296,7 +302,17 @@ impl ScrollState {
     pub fn queue_agent_request(&mut self, req: SetScrollOffsetRequest) {
         if let Some(state) = self.tiles.get_mut(&req.tile_id) {
             state.queue_agent_request(req);
+        } else {
+            self.pending_unregistered_requests.insert(req.tile_id, req);
         }
+    }
+
+    /// Commit a single tile frame and report if its offset changed.
+    pub fn commit_tile_frame(&mut self, tile_id: SceneId) -> bool {
+        self.tiles
+            .get_mut(&tile_id)
+            .map(ScrollTileState::commit_frame)
+            .unwrap_or(false)
     }
 
     /// Commit all pending frames and return a list of tile IDs whose offsets
@@ -485,6 +501,54 @@ mod tests {
             (offset_y - 25.0).abs() < f32::EPSILON,
             "user scroll should win, got {offset_y}"
         );
+    }
+
+    #[test]
+    fn test_queue_request_before_registration_is_applied_after_register() {
+        let tile_id = SceneId::new();
+        let mut scroll = ScrollState::new();
+
+        scroll.queue_agent_request(SetScrollOffsetRequest {
+            tile_id,
+            offset_x: 0.0,
+            offset_y: 120.0,
+        });
+
+        scroll.register_tile(tile_id, ScrollConfig::vertical());
+        let changed = scroll.commit_all_frames();
+        assert!(
+            changed.contains(&tile_id),
+            "tile with queued request should be reported as changed"
+        );
+        let (_, offset_y) = scroll.offset(tile_id);
+        assert!(
+            (offset_y - 120.0).abs() < f32::EPSILON,
+            "queued request should apply after registration, got {offset_y}"
+        );
+    }
+
+    #[test]
+    fn test_commit_tile_frame_does_not_consume_other_tile_updates() {
+        let tile_a = SceneId::new();
+        let tile_b = SceneId::new();
+        let mut scroll = ScrollState::new();
+        scroll.register_tile(tile_a, ScrollConfig::vertical());
+        scroll.register_tile(tile_b, ScrollConfig::vertical());
+        scroll.queue_agent_request(SetScrollOffsetRequest {
+            tile_id: tile_b,
+            offset_x: 0.0,
+            offset_y: 55.0,
+        });
+
+        assert!(!scroll.commit_tile_frame(tile_a));
+
+        let changed = scroll.commit_all_frames();
+        assert!(
+            changed.contains(&tile_b),
+            "tile_b update must remain pending until its frame is committed"
+        );
+        let (_, offset_y) = scroll.offset(tile_b);
+        assert!((offset_y - 55.0).abs() < f32::EPSILON);
     }
 
     #[test]

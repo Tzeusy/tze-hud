@@ -317,10 +317,9 @@ impl InputProcessor {
         self.scroll_state
             .apply_user_scroll(tile_id, event.delta_x, event.delta_y)?;
 
-        // Commit this tile immediately so local feedback is visible without
-        // waiting for adapter acknowledgement.
-        let changed = self.scroll_state.commit_all_frames();
-        if !changed.contains(&tile_id) {
+        // Commit only this tile so local user feedback does not consume
+        // pending adapter requests for other tiles.
+        if !self.scroll_state.commit_tile_frame(tile_id) {
             return None;
         }
         let (offset_x, offset_y) = self.scroll_state.offset(tile_id);
