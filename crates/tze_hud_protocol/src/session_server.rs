@@ -4026,10 +4026,17 @@ fn resource_error_code_i32(err: &StoreResourceError) -> i32 {
         StoreResourceError::UnsupportedType(_) => 4,
         StoreResourceError::DecodeError(_) => 5,
         StoreResourceError::HashMismatch { .. } => 6,
+        StoreResourceError::InvalidChunk(detail)
+            if detail.contains("unknown upload_id")
+                || detail.contains("not in-flight")
+                || detail.contains("no uploads in flight") =>
+        {
+            9
+        }
+        StoreResourceError::InvalidChunk(_) => 7,
         StoreResourceError::TooManyUploads => 8,
-        StoreResourceError::InvalidChunk(_)
-        | StoreResourceError::UploadAborted(_)
-        | StoreResourceError::Internal(_) => 0,
+        StoreResourceError::UploadAborted(_) => 9,
+        StoreResourceError::Internal(_) => 7,
     }
 }
 
@@ -4137,6 +4144,28 @@ async fn handle_resource_upload_start(
     };
 
     let metadata = start.metadata.unwrap_or_default();
+    if start.inline_data.is_empty() && start.total_size_bytes == 0 {
+        let err = StoreResourceError::SizeExceeded {
+            detail: "total_size_bytes must be > 0 for chunked uploads".to_string(),
+        };
+        send_resource_error_response(session, tx, request_sequence, None, &err).await;
+        return;
+    }
+
+    let total_size = match usize::try_from(start.total_size_bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            let err = StoreResourceError::SizeExceeded {
+                detail: format!(
+                    "total_size_bytes {} exceeds platform limit {}",
+                    start.total_size_bytes,
+                    usize::MAX
+                ),
+            };
+            send_resource_error_response(session, tx, request_sequence, None, &err).await;
+            return;
+        }
+    };
     let upload_id_bytes = *uuid::Uuid::now_v7().as_bytes();
     let request = UploadStartRequest {
         agent_namespace: session.namespace.clone(),
@@ -4149,7 +4178,7 @@ async fn handle_resource_upload_start(
         upload_id: UploadId::from_bytes(upload_id_bytes),
         resource_type,
         expected_hash,
-        total_size: start.total_size_bytes as usize,
+        total_size,
         inline_data: start.inline_data,
         width: metadata.width,
         height: metadata.height,
@@ -4250,6 +4279,7 @@ async fn handle_resource_upload_chunk(
         )
         .await
     {
+        session.resource_uploads.remove(&upload_id_bytes);
         send_resource_error_response(
             session,
             tx,
@@ -11491,6 +11521,126 @@ mod tests {
                 assert!(!stored.was_deduplicated);
             }
             other => panic!("expected ResourceStored on complete, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_resource_upload_chunked_zero_size_rejected() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-zero-size",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: vec![0xAB; 32],
+                resource_type: 2,
+                total_size_bytes: 0,
+                metadata: Some(ResourceMetadata::default()),
+                inline_data: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = next_non_state_change(&mut stream).await;
+        match &msg.payload {
+            Some(ServerPayload::ResourceErrorResponse(err)) => {
+                assert_eq!(err.request_sequence, 2);
+                assert_eq!(err.error_code, 3);
+                assert!(err.upload_id.is_empty());
+                assert!(
+                    err.message.contains("total_size_bytes"),
+                    "expected total_size guard message, got: {}",
+                    err.message
+                );
+            }
+            other => panic!("expected ResourceErrorResponse, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_resource_upload_chunk_error_aborts_inflight_tracking() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-chunk-error",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        let payload = tiny_png_1x1_rgba();
+        let hash = blake3::hash(&payload).as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash,
+                resource_type: 2,
+                total_size_bytes: payload.len() as u64,
+                metadata: Some(ResourceMetadata::default()),
+                inline_data: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let accepted = next_non_state_change(&mut stream).await;
+        let upload_id = match &accepted.payload {
+            Some(ServerPayload::ResourceUploadAccepted(accepted)) => accepted.upload_id.clone(),
+            other => panic!("expected ResourceUploadAccepted, got: {other:?}"),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_id.clone(),
+                chunk_index: 1,
+                data: payload.clone(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let first_error = next_non_state_change(&mut stream).await;
+        match &first_error.payload {
+            Some(ServerPayload::ResourceErrorResponse(err)) => {
+                assert_eq!(err.request_sequence, 2);
+                assert_eq!(err.error_code, 7);
+            }
+            other => panic!("expected ResourceErrorResponse after bad chunk, got: {other:?}"),
+        }
+
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadComplete(
+                ResourceUploadComplete { upload_id },
+            )),
+        })
+        .await
+        .unwrap();
+
+        let second_error = next_non_state_change(&mut stream).await;
+        match &second_error.payload {
+            Some(ServerPayload::ResourceErrorResponse(err)) => {
+                assert_eq!(err.request_sequence, 4);
+                assert_eq!(err.error_code, 9);
+            }
+            other => panic!("expected ResourceErrorResponse after aborted upload, got: {other:?}"),
         }
 
         drop(handle);
