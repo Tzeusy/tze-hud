@@ -356,6 +356,7 @@ fn roundtrip_mutation_proto_all_variants() {
                 payload: Some(ZonePayload::StreamText("hello".to_string())),
             }),
             publish_token: None,
+            element_id: Vec::new(),
             merge_key: String::new(),
         })),
     };

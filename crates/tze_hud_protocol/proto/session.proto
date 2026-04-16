@@ -92,6 +92,9 @@ message ClientMessage {
     ResourceUploadStart    resource_upload_start    = 36;
     ResourceUploadChunk    resource_upload_chunk    = 37;
     ResourceUploadComplete resource_upload_complete = 38;
+
+    // Element discovery over session stream (persistent-movable-elements change).
+    tze_hud.protocol.v1.ListElementsRequest list_elements_request = 39;
   }
 }
 
@@ -181,6 +184,9 @@ message ServerMessage {
 
     // Scene-resource upload-specific semantic errors (RFC 0011 resident upload flow).
     ResourceErrorResponse resource_error_response = 49;
+
+    // Element discovery response for ListElementsRequest (field 39).
+    tze_hud.protocol.v1.ListElementsResponse list_elements_response = 50;
   }
 
   // Field 22 (lease_denial) was removed in the v1 vocabulary rename.
@@ -543,6 +549,7 @@ message ZonePublish {
   // Byte-offset breakpoints for StreamText word-by-word reveal (spec §Subtitle Streaming).
   // Only valid for StreamText content. Empty = reveal all at once.
   repeated uint64                breakpoints = 5;
+  bytes                          element_id  = 6;  // Optional zone element ID addressing
 }
 
 // Server response to a durable-zone ZonePublish (RFC 0005 §3.1).
@@ -568,6 +575,7 @@ message WidgetPublish {
   uint32 transition_ms = 4;  // 0 = instant
   uint64 ttl_us        = 5;  // 0 = use widget instance default
   string merge_key     = 6;  // For MergeByKey contention policy; empty otherwise
+  bytes  element_id    = 7;  // Optional widget element ID addressing
 }
 
 // Server response to a durable-widget WidgetPublish (widget-system spec).

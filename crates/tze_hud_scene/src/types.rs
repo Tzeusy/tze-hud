@@ -1437,6 +1437,96 @@ pub enum GeometryPolicy {
     },
 }
 
+/// Resolve geometry with four-tier precedence:
+/// user override > agent-requested > config override > default policy.
+pub fn resolve_geometry_override_chain(
+    user_override: Option<GeometryPolicy>,
+    agent_requested: Option<GeometryPolicy>,
+    config_override: Option<GeometryPolicy>,
+    default_policy: Option<GeometryPolicy>,
+) -> Option<GeometryPolicy> {
+    user_override
+        .or(agent_requested)
+        .or(config_override)
+        .or(default_policy)
+}
+
+/// Convert absolute pixel bounds into a display-relative geometry policy.
+///
+/// When display dimensions are non-positive, this falls back to a zero geometry.
+pub fn rect_to_relative_geometry_policy(
+    bounds: Rect,
+    display_width: f32,
+    display_height: f32,
+) -> GeometryPolicy {
+    if display_width <= 0.0 || display_height <= 0.0 {
+        return GeometryPolicy::Relative {
+            x_pct: 0.0,
+            y_pct: 0.0,
+            width_pct: 0.0,
+            height_pct: 0.0,
+        };
+    }
+
+    GeometryPolicy::Relative {
+        x_pct: bounds.x / display_width,
+        y_pct: bounds.y / display_height,
+        width_pct: bounds.width / display_width,
+        height_pct: bounds.height / display_height,
+    }
+}
+
+/// Resolve a geometry policy into absolute pixel bounds for the given display size.
+pub fn geometry_policy_to_absolute_rect(
+    policy: GeometryPolicy,
+    display_width: f32,
+    display_height: f32,
+) -> Rect {
+    match policy {
+        GeometryPolicy::Relative {
+            x_pct,
+            y_pct,
+            width_pct,
+            height_pct,
+        } => Rect::new(
+            x_pct * display_width,
+            y_pct * display_height,
+            width_pct * display_width,
+            height_pct * display_height,
+        ),
+        GeometryPolicy::EdgeAnchored {
+            edge,
+            height_pct,
+            width_pct,
+            margin_px,
+        } => {
+            let margin = margin_px.max(0.0);
+            match edge {
+                DisplayEdge::Top => {
+                    let h = (height_pct * display_height).max(0.0);
+                    let w = (display_width - 2.0 * margin).max(0.0);
+                    Rect::new(margin, margin, w, h)
+                }
+                DisplayEdge::Bottom => {
+                    let h = (height_pct * display_height).max(0.0);
+                    let w = (display_width - 2.0 * margin).max(0.0);
+                    Rect::new(margin, (display_height - h - margin).max(0.0), w, h)
+                }
+                DisplayEdge::Left => {
+                    let w = (width_pct * display_width).max(0.0);
+                    let h = (display_height - 2.0 * margin).max(0.0);
+                    Rect::new(margin, margin, w, h)
+                }
+                DisplayEdge::Right => {
+                    let w = (width_pct * display_width).max(0.0);
+                    let h = (display_height - 2.0 * margin).max(0.0);
+                    Rect::new((display_width - w - margin).max(0.0), margin, w, h)
+                }
+            }
+        }
+    }
+}
+
 /// Media types that can be published to a zone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ZoneMediaType {
@@ -2127,6 +2217,36 @@ impl WidgetRegistry {
         self.instances.get(instance_name)
     }
 
+    /// Resolve a widget instance geometry policy using override precedence:
+    /// user override > instance geometry override > widget default policy.
+    pub fn resolve_geometry_policy_for_instance(
+        &self,
+        instance_name: &str,
+        user_override: Option<&GeometryPolicy>,
+    ) -> Option<GeometryPolicy> {
+        let instance = self.instances.get(instance_name)?;
+        let definition = self.definitions.get(&instance.widget_type_name)?;
+
+        resolve_geometry_override_chain(
+            user_override.copied(),
+            None,
+            instance.geometry_override,
+            Some(definition.default_geometry_policy),
+        )
+    }
+
+    /// Resolve absolute pixel bounds for a widget instance at the given display size.
+    pub fn resolve_geometry_rect_for_instance(
+        &self,
+        instance_name: &str,
+        user_override: Option<&GeometryPolicy>,
+        display_width: f32,
+        display_height: f32,
+    ) -> Option<Rect> {
+        self.resolve_geometry_policy_for_instance(instance_name, user_override)
+            .map(|policy| geometry_policy_to_absolute_rect(policy, display_width, display_height))
+    }
+
     /// Get the current active publish(es) for a widget instance.
     pub fn active_for_widget(&self, instance_name: &str) -> &[WidgetPublishRecord] {
         self.active_publishes
@@ -2633,6 +2753,39 @@ impl ZoneRegistry {
         self.zones.get(name)
     }
 
+    /// Resolve a zone geometry policy using override precedence:
+    /// user override > config override > zone default policy.
+    ///
+    /// In v1, zone defaults are represented by `ZoneDefinition.geometry_policy`.
+    /// When `config_override` is `None`, the zone default remains the fallback.
+    pub fn resolve_geometry_policy_for_zone(
+        &self,
+        zone_name: &str,
+        user_override: Option<&GeometryPolicy>,
+        config_override: Option<&GeometryPolicy>,
+    ) -> Option<GeometryPolicy> {
+        let zone = self.zones.get(zone_name)?;
+        resolve_geometry_override_chain(
+            user_override.copied(),
+            None,
+            config_override.copied(),
+            Some(zone.geometry_policy),
+        )
+    }
+
+    /// Resolve absolute pixel bounds for a zone at the given display size.
+    pub fn resolve_geometry_rect_for_zone(
+        &self,
+        zone_name: &str,
+        user_override: Option<&GeometryPolicy>,
+        config_override: Option<&GeometryPolicy>,
+        display_width: f32,
+        display_height: f32,
+    ) -> Option<Rect> {
+        self.resolve_geometry_policy_for_zone(zone_name, user_override, config_override)
+            .map(|policy| geometry_policy_to_absolute_rect(policy, display_width, display_height))
+    }
+
     /// Query zones that accept a given media type.
     pub fn zones_accepting(&self, media_type: ZoneMediaType) -> Vec<&ZoneDefinition> {
         self.zones
@@ -2962,6 +3115,179 @@ mod tests {
         assert!(
             restored.id.is_null(),
             "missing id must default to SceneId::null()"
+        );
+    }
+
+    #[test]
+    fn geometry_override_resolution_order_is_user_then_agent_then_config_then_default() {
+        let user = GeometryPolicy::Relative {
+            x_pct: 0.10,
+            y_pct: 0.10,
+            width_pct: 0.20,
+            height_pct: 0.20,
+        };
+        let agent = GeometryPolicy::Relative {
+            x_pct: 0.30,
+            y_pct: 0.30,
+            width_pct: 0.20,
+            height_pct: 0.20,
+        };
+        let config = GeometryPolicy::Relative {
+            x_pct: 0.50,
+            y_pct: 0.50,
+            width_pct: 0.20,
+            height_pct: 0.20,
+        };
+        let default = GeometryPolicy::Relative {
+            x_pct: 0.70,
+            y_pct: 0.70,
+            width_pct: 0.20,
+            height_pct: 0.20,
+        };
+
+        assert_eq!(
+            resolve_geometry_override_chain(Some(user), Some(agent), Some(config), Some(default)),
+            Some(user)
+        );
+        assert_eq!(
+            resolve_geometry_override_chain(None, Some(agent), Some(config), Some(default)),
+            Some(agent)
+        );
+        assert_eq!(
+            resolve_geometry_override_chain(None, None, Some(config), Some(default)),
+            Some(config)
+        );
+        assert_eq!(
+            resolve_geometry_override_chain(None, None, None, Some(default)),
+            Some(default)
+        );
+        assert_eq!(
+            resolve_geometry_override_chain(None, None, None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn rect_to_relative_geometry_policy_converts_expected_percentages() {
+        let rect = Rect::new(192.0, 108.0, 960.0, 540.0);
+        let policy = rect_to_relative_geometry_policy(rect, 1920.0, 1080.0);
+        assert_eq!(
+            policy,
+            GeometryPolicy::Relative {
+                x_pct: 0.10,
+                y_pct: 0.10,
+                width_pct: 0.50,
+                height_pct: 0.50,
+            }
+        );
+    }
+
+    #[test]
+    fn widget_registry_resolves_user_override_before_instance_and_default() {
+        let mut registry = WidgetRegistry::new();
+        let tab_id = SceneId::new();
+        let default_policy = GeometryPolicy::Relative {
+            x_pct: 0.0,
+            y_pct: 0.0,
+            width_pct: 0.3,
+            height_pct: 0.3,
+        };
+        registry.register_definition(WidgetDefinition {
+            id: "gauge".to_string(),
+            name: "Gauge".to_string(),
+            description: "test".to_string(),
+            parameter_schema: vec![],
+            layers: vec![],
+            default_geometry_policy: default_policy,
+            default_rendering_policy: RenderingPolicy::default(),
+            default_contention_policy: ContentionPolicy::LatestWins,
+            ephemeral: false,
+            hover_behavior: None,
+        });
+
+        let config_override = GeometryPolicy::Relative {
+            x_pct: 0.2,
+            y_pct: 0.2,
+            width_pct: 0.4,
+            height_pct: 0.4,
+        };
+        registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: Some(config_override),
+            contention_override: None,
+            instance_name: "gauge-main".to_string(),
+            current_params: HashMap::new(),
+        });
+
+        let user_override = GeometryPolicy::Relative {
+            x_pct: 0.6,
+            y_pct: 0.1,
+            width_pct: 0.2,
+            height_pct: 0.2,
+        };
+        assert_eq!(
+            registry.resolve_geometry_policy_for_instance("gauge-main", Some(&user_override)),
+            Some(user_override)
+        );
+        assert_eq!(
+            registry.resolve_geometry_policy_for_instance("gauge-main", None),
+            Some(config_override)
+        );
+    }
+
+    #[test]
+    fn zone_registry_resolves_user_override_before_config_and_default() {
+        let mut registry = ZoneRegistry::new();
+        let default_policy = GeometryPolicy::Relative {
+            x_pct: 0.0,
+            y_pct: 0.8,
+            width_pct: 1.0,
+            height_pct: 0.2,
+        };
+        registry.register(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_string(),
+            description: "subtitle".to_string(),
+            geometry_policy: default_policy,
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        let config_override = GeometryPolicy::Relative {
+            x_pct: 0.1,
+            y_pct: 0.7,
+            width_pct: 0.8,
+            height_pct: 0.2,
+        };
+        let user_override = GeometryPolicy::Relative {
+            x_pct: 0.2,
+            y_pct: 0.6,
+            width_pct: 0.6,
+            height_pct: 0.2,
+        };
+        assert_eq!(
+            registry.resolve_geometry_policy_for_zone(
+                "subtitle",
+                Some(&user_override),
+                Some(&config_override)
+            ),
+            Some(user_override)
+        );
+        assert_eq!(
+            registry.resolve_geometry_policy_for_zone("subtitle", None, Some(&config_override)),
+            Some(config_override)
+        );
+        assert_eq!(
+            registry.resolve_geometry_policy_for_zone("subtitle", None, None),
+            Some(default_policy)
         );
     }
 }

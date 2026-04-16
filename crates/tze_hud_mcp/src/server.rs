@@ -28,10 +28,12 @@
 //! - `publish_to_zone`
 //! - `list_zones`
 //! - `list_scene`
+//! - `list_elements`
 //! - `publish_to_widget`
 //! - `list_widgets`
 //! - `clear_widget`
 //! - `register_widget_asset`
+//! - `publish_to_element`
 //!
 //! **Resident tools** (require the `resident_mcp` capability):
 //! - `create_tab`
@@ -179,10 +181,12 @@ fn classify_tool(method: &str) -> ToolClass {
         "publish_to_zone"
         | "list_zones"
         | "list_scene"
+        | "list_elements"
         | "publish_to_widget"
         | "list_widgets"
         | "clear_widget"
-        | "register_widget_asset" => ToolClass::Guest,
+        | "register_widget_asset"
+        | "publish_to_element" => ToolClass::Guest,
         // Resident tools — require resident_mcp capability
         "create_tab" | "create_tile" | "set_content" | "dismiss" => ToolClass::Resident,
         _ => ToolClass::Unknown,
@@ -450,6 +454,14 @@ impl McpServer {
                         .map_err(|e| crate::McpError::Internal(e.to_string()))?,
                 )
             }
+            "list_elements" => {
+                let scene = self.scene.lock().await;
+                let r = tools::handle_list_elements(params, &scene)?;
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
+            }
             "publish_to_widget" => {
                 let mut scene = self.scene.lock().await;
                 let r = tools::handle_publish_to_widget(params, &mut scene, caller_capabilities)?;
@@ -481,6 +493,14 @@ impl McpServer {
                     &mut registry,
                     caller_capabilities,
                 )?;
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
+            }
+            "publish_to_element" => {
+                let mut scene = self.scene.lock().await;
+                let r = tools::handle_publish_to_element(params, &mut scene, caller_capabilities)?;
                 Ok(
                     serde_json::to_value(r)
                         .map_err(|e| crate::McpError::Internal(e.to_string()))?,
@@ -586,8 +606,8 @@ mod tests {
         SceneId,
         graph::SceneGraph,
         types::{
-            ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ZoneDefinition,
-            ZoneMediaType,
+            Capability, ContentionPolicy, GeometryPolicy, LayerAttachment, NodeData, Rect,
+            RenderingPolicy, ZoneDefinition, ZoneMediaType,
         },
     };
 
@@ -850,6 +870,103 @@ mod tests {
         assert!(resp["error"].is_null());
         assert_eq!(resp["result"]["count"], 1);
         assert_eq!(resp["result"]["zones"][0]["name"], "hud");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_list_elements_tile_filter() {
+        let (server, tab_id) = server_with_tab().await;
+        let tile_id = {
+            let mut scene = server.scene.lock().await;
+            let lease_id = scene.grant_lease(
+                "agent.list-elements",
+                60_000,
+                vec![
+                    Capability::CreateTile,
+                    Capability::UpdateTile,
+                    Capability::CreateNode,
+                    Capability::UpdateNode,
+                ],
+            );
+            scene
+                .create_tile(
+                    tab_id,
+                    "agent.list-elements",
+                    lease_id,
+                    Rect::new(0.0, 0.0, 200.0, 100.0),
+                    1,
+                )
+                .expect("create tile")
+        };
+
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_elements","params":{"element_type":"tile"},"id":6}"#,
+                &guest(),
+            )
+            .await;
+        let resp = parse_response(&raw);
+        assert!(
+            resp["error"].is_null(),
+            "unexpected error: {}",
+            resp["error"]
+        );
+        assert_eq!(resp["result"]["count"], 1);
+        assert_eq!(resp["result"]["elements"][0]["element_type"], "tile");
+        assert_eq!(
+            resp["result"]["elements"][0]["element_id"],
+            tile_id.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_publish_to_element_tile_id() {
+        let (server, tab_id) = server_with_tab().await;
+        let tile_id = {
+            let mut scene = server.scene.lock().await;
+            let lease_id = scene.grant_lease(
+                "agent.publish-element",
+                60_000,
+                vec![
+                    Capability::CreateTile,
+                    Capability::UpdateTile,
+                    Capability::CreateNode,
+                    Capability::UpdateNode,
+                ],
+            );
+            scene
+                .create_tile(
+                    tab_id,
+                    "agent.publish-element",
+                    lease_id,
+                    Rect::new(10.0, 10.0, 180.0, 90.0),
+                    1,
+                )
+                .expect("create tile")
+        };
+
+        let req = json!({
+            "jsonrpc": "2.0",
+            "method": "publish_to_element",
+            "params": {"element_id": tile_id.to_string(), "content": "hello tile"},
+            "id": 7
+        });
+        let raw = server.dispatch(&req.to_string(), &guest()).await;
+        let resp = parse_response(&raw);
+        assert!(
+            resp["error"].is_null(),
+            "unexpected error: {}",
+            resp["error"]
+        );
+        assert_eq!(resp["result"]["element_type"], "tile");
+
+        let scene = server.scene.lock().await;
+        let tile = scene.tiles.get(&tile_id).expect("tile should exist");
+        let root_id = tile.root_node.expect("tile root should be set");
+        let root = scene.nodes.get(&root_id).expect("root node should exist");
+        match &root.data {
+            NodeData::TextMarkdown(text) => assert_eq!(text.content, "hello tile"),
+            other => panic!("expected markdown node, got {other:?}"),
+        }
     }
 
     // ── Guest / Resident access control (spec §8.1, §8.3) ───────────────────

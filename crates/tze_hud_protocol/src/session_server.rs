@@ -36,6 +36,7 @@ use crate::proto::session::client_message::Payload as ClientPayload;
 use crate::proto::session::hud_session_server::HudSession;
 use crate::proto::session::server_message::Payload as ServerPayload;
 use crate::proto::session::*;
+use crate::proto::{ElementInfo, ListElementsRequest, ListElementsResponse};
 use crate::session::{SESSION_EVENT_CHANNEL_CAPACITY, SharedState};
 use crate::subscriptions;
 use crate::token::{DEFAULT_GRACE_PERIOD_MS, TokenStore};
@@ -221,7 +222,9 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
         ServerPayload::Heartbeat(_) => TrafficClass::Ephemeral,
 
         // Agent event emission result — transactional (always delivered)
-        ServerPayload::EmitSceneEventResult(_) => TrafficClass::Transactional,
+        ServerPayload::EmitSceneEventResult(_) | ServerPayload::ListElementsResponse(_) => {
+            TrafficClass::Transactional
+        }
     }
 }
 
@@ -259,6 +262,7 @@ fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
                 Mutation::UpdateTileOpacity(_) => {}
                 Mutation::UpdateTileInputMode(_) => {}
                 Mutation::PublishToZone(_) => {}
+                Mutation::PublishToTile(_) => {}
                 Mutation::ClearZone(_) => {}
                 Mutation::ClearWidget(_) => {}
                 // UpdateNodeContent is a content update — StateStream
@@ -726,6 +730,68 @@ async fn persist_element_store(request: Option<ElementStorePersistRequest>) {
             );
         }
     }
+}
+
+fn element_type_wire_name(element_type: ElementType) -> &'static str {
+    match element_type {
+        ElementType::Tile => "tile",
+        ElementType::Zone => "zone",
+        ElementType::Widget => "widget",
+    }
+}
+
+fn parse_element_type_filter(filter: &str) -> Option<ElementType> {
+    match filter.trim().to_ascii_lowercase().as_str() {
+        "tile" => Some(ElementType::Tile),
+        "zone" => Some(ElementType::Zone),
+        "widget" => Some(ElementType::Widget),
+        _ => None,
+    }
+}
+
+fn resolve_tile_bounds_with_override(
+    entry: Option<&ElementStoreEntry>,
+    agent_bounds: Option<Rect>,
+    display_area: Rect,
+) -> Option<Rect> {
+    let user_override = entry.and_then(|e| e.geometry_override);
+    let agent_requested = agent_bounds.map(|bounds| {
+        rect_to_relative_geometry_policy(bounds, display_area.width, display_area.height)
+    });
+    resolve_geometry_override_chain(user_override, agent_requested, None, None).map(|policy| {
+        geometry_policy_to_absolute_rect(policy, display_area.width, display_area.height)
+    })
+}
+
+fn touch_element_store_entry_by_id(
+    st: &mut SharedState,
+    element_id: SceneId,
+    element_type: ElementType,
+    now: u64,
+) -> Option<ElementStorePersistRequest> {
+    let entry = st.element_store.entries.get_mut(&element_id)?;
+    if entry.element_type != element_type {
+        return None;
+    }
+    entry.last_published_at = now;
+    st.element_store_path
+        .clone()
+        .map(|path| ElementStorePersistRequest {
+            store: st.element_store.clone(),
+            path,
+        })
+}
+
+fn touch_element_store_entry_by_namespace(
+    st: &mut SharedState,
+    element_type: ElementType,
+    namespace: &str,
+    now: u64,
+) -> Option<ElementStorePersistRequest> {
+    let id = st
+        .element_store
+        .find_id_by_type_namespace(element_type, namespace)?;
+    touch_element_store_entry_by_id(st, id, element_type, now)
 }
 
 // ─── Shared agent event emission types ───────────────────────────────────────
@@ -1990,6 +2056,9 @@ async fn handle_client_message(
         ClientPayload::SubscriptionChange(change) => {
             handle_subscription_change(session, tx, change).await;
         }
+        ClientPayload::ListElementsRequest(request) => {
+            handle_list_elements_request(state, session, tx, request).await;
+        }
         ClientPayload::ZonePublish(publish) => {
             handle_zone_publish(state, session, tx, client_sequence, publish).await;
         }
@@ -2435,15 +2504,22 @@ async fn handle_mutation_batch(
     };
 
     // Convert proto mutations to scene mutations
+    let display_area = { st.scene.lock().await.display_area };
     let mut scene_mutations = Vec::new();
+    let mut pending_touch_ids: Vec<(SceneId, ElementType)> = Vec::new();
+    let mut pending_touch_names: Vec<(ElementType, String)> = Vec::new();
+    let mut mutation_conversion_error: Option<(String, String)> = None;
     for m in &batch.mutations {
         match &m.mutation {
             Some(crate::proto::mutation_proto::Mutation::CreateTile(ct)) => {
-                let bounds = ct
+                let requested_bounds = ct
                     .bounds
                     .as_ref()
                     .map(convert::proto_rect_to_scene)
                     .unwrap_or(tze_hud_scene::Rect::new(0.0, 0.0, 200.0, 150.0));
+                let bounds =
+                    resolve_tile_bounds_with_override(None, Some(requested_bounds), display_area)
+                        .unwrap_or(requested_bounds);
                 scene_mutations.push(SceneMutation::CreateTile {
                     tab_id,
                     namespace: session.namespace.clone(),
@@ -2478,6 +2554,34 @@ async fn handle_mutation_batch(
                     .as_ref()
                     .and_then(convert::proto_zone_content_to_scene);
                 if let Some(content) = content {
+                    let resolved_zone_name = if !pz.element_id.is_empty() {
+                        match bytes_to_scene_id(&pz.element_id) {
+                            Ok(element_id) => match st.element_store.entries.get(&element_id) {
+                                Some(entry) if entry.element_type == ElementType::Zone => {
+                                    pending_touch_ids.push((element_id, ElementType::Zone));
+                                    entry.namespace.clone()
+                                }
+                                _ => {
+                                    mutation_conversion_error = Some((
+                                        "ELEMENT_NOT_FOUND".to_string(),
+                                        "publish_to_zone element_id does not reference a known zone"
+                                            .to_string(),
+                                    ));
+                                    break;
+                                }
+                            },
+                            Err(_) => {
+                                mutation_conversion_error = Some((
+                                    "INVALID_ARGUMENT".to_string(),
+                                    "publish_to_zone element_id must be 16 bytes".to_string(),
+                                ));
+                                break;
+                            }
+                        }
+                    } else {
+                        pending_touch_names.push((ElementType::Zone, pz.zone_name.clone()));
+                        pz.zone_name.clone()
+                    };
                     let token = tze_hud_scene::types::ZonePublishToken {
                         token: pz
                             .publish_token
@@ -2491,7 +2595,7 @@ async fn handle_mutation_batch(
                         Some(pz.merge_key.clone())
                     };
                     scene_mutations.push(SceneMutation::PublishToZone {
-                        zone_name: pz.zone_name.clone(),
+                        zone_name: resolved_zone_name,
                         content,
                         publish_token: token,
                         merge_key,
@@ -2504,6 +2608,61 @@ async fn handle_mutation_batch(
                         breakpoints: Vec::new(),
                     });
                 }
+            }
+            Some(crate::proto::mutation_proto::Mutation::PublishToTile(pt)) => {
+                let element_id = match bytes_to_scene_id(&pt.element_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        mutation_conversion_error = Some((
+                            "INVALID_ARGUMENT".to_string(),
+                            "publish_to_tile element_id must be 16 bytes".to_string(),
+                        ));
+                        break;
+                    }
+                };
+
+                let entry = match st.element_store.entries.get(&element_id) {
+                    Some(entry) if entry.element_type == ElementType::Tile => entry.clone(),
+                    _ => {
+                        mutation_conversion_error = Some((
+                            "ELEMENT_NOT_FOUND".to_string(),
+                            "publish_to_tile element_id does not reference a known tile"
+                                .to_string(),
+                        ));
+                        break;
+                    }
+                };
+
+                let requested_bounds = pt.bounds.as_ref().map(convert::proto_rect_to_scene);
+                if let Some(resolved_bounds) =
+                    resolve_tile_bounds_with_override(Some(&entry), requested_bounds, display_area)
+                {
+                    scene_mutations.push(SceneMutation::UpdateTileBounds {
+                        tile_id: element_id,
+                        bounds: resolved_bounds,
+                    });
+                }
+
+                let mut had_content = false;
+                if let Some(ref node_proto) = pt.node
+                    && let Some(node) = convert::proto_node_to_scene(node_proto)
+                {
+                    scene_mutations.push(SceneMutation::SetTileRoot {
+                        tile_id: element_id,
+                        node,
+                    });
+                    had_content = true;
+                }
+
+                if !had_content && requested_bounds.is_none() {
+                    mutation_conversion_error = Some((
+                        "INVALID_ARGUMENT".to_string(),
+                        "publish_to_tile requires at least one of bounds or node".to_string(),
+                    ));
+                    break;
+                }
+
+                pending_touch_ids.push((element_id, ElementType::Tile));
             }
             Some(crate::proto::mutation_proto::Mutation::ClearZone(cz)) => {
                 let token = tze_hud_scene::types::ZonePublishToken {
@@ -2636,6 +2795,36 @@ async fn handle_mutation_batch(
         }
     }
 
+    if let Some((error_code, error_message)) = mutation_conversion_error {
+        let cached = CachedResult {
+            accepted: false,
+            created_ids: Vec::new(),
+            error_code: error_code.clone(),
+            error_message: error_message.clone(),
+        };
+        if !batch.batch_id.is_empty() {
+            session
+                .dedup_window
+                .insert(batch.batch_id.clone(), cached.clone());
+        }
+        let seq = session.next_server_seq();
+        drop(st);
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::MutationResult(MutationResult {
+                    batch_id: batch.batch_id,
+                    accepted: false,
+                    created_ids: Vec::new(),
+                    error_code: cached.error_code,
+                    error_message: cached.error_message,
+                })),
+            }))
+            .await;
+        return;
+    }
+
     // Map the proto batch_id bytes to a SceneId for rejection-correlation.
     // Falls back (with a debug log) when the field is absent or malformed.
     let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
@@ -2654,7 +2843,37 @@ async fn handle_mutation_batch(
 
     let seq = session.next_server_seq();
     if result.applied {
-        let persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
+        let mut persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
+        let now = now_ms();
+        let mut touched = false;
+        for (element_id, element_type) in pending_touch_ids {
+            if let Some(entry) = st.element_store.entries.get_mut(&element_id)
+                && entry.element_type == element_type
+            {
+                entry.last_published_at = now;
+                touched = true;
+            }
+        }
+        for (element_type, namespace) in pending_touch_names {
+            if let Some(id) = st
+                .element_store
+                .find_id_by_type_namespace(element_type, namespace.as_str())
+                && let Some(entry) = st.element_store.entries.get_mut(&id)
+                && entry.element_type == element_type
+            {
+                entry.last_published_at = now;
+                touched = true;
+            }
+        }
+        if touched {
+            persist_request =
+                st.element_store_path
+                    .clone()
+                    .map(|path| ElementStorePersistRequest {
+                        store: st.element_store.clone(),
+                        path,
+                    });
+        }
 
         let created_ids: Vec<Vec<u8>> = result
             .created_ids
@@ -2757,15 +2976,22 @@ async fn apply_queued_batch_to_scene(
         None => return, // no active tab — skip silently
     };
 
+    let display_area = { st.scene.lock().await.display_area };
     let mut scene_mutations = Vec::new();
+    let mut pending_touch_ids: Vec<(SceneId, ElementType)> = Vec::new();
+    let mut pending_touch_names: Vec<(ElementType, String)> = Vec::new();
+    let mut mutation_conversion_error: Option<(String, String)> = None;
     for m in &batch.mutations {
         match &m.mutation {
             Some(crate::proto::mutation_proto::Mutation::CreateTile(ct)) => {
-                let bounds = ct
+                let requested_bounds = ct
                     .bounds
                     .as_ref()
                     .map(convert::proto_rect_to_scene)
                     .unwrap_or(tze_hud_scene::Rect::new(0.0, 0.0, 200.0, 150.0));
+                let bounds =
+                    resolve_tile_bounds_with_override(None, Some(requested_bounds), display_area)
+                        .unwrap_or(requested_bounds);
                 scene_mutations.push(SceneMutation::CreateTile {
                     tab_id,
                     namespace: session.namespace.clone(),
@@ -2800,6 +3026,34 @@ async fn apply_queued_batch_to_scene(
                     .as_ref()
                     .and_then(convert::proto_zone_content_to_scene);
                 if let Some(content) = content {
+                    let resolved_zone_name = if !pz.element_id.is_empty() {
+                        match bytes_to_scene_id(&pz.element_id) {
+                            Ok(element_id) => match st.element_store.entries.get(&element_id) {
+                                Some(entry) if entry.element_type == ElementType::Zone => {
+                                    pending_touch_ids.push((element_id, ElementType::Zone));
+                                    entry.namespace.clone()
+                                }
+                                _ => {
+                                    mutation_conversion_error = Some((
+                                        "ELEMENT_NOT_FOUND".to_string(),
+                                        "publish_to_zone element_id does not reference a known zone"
+                                            .to_string(),
+                                    ));
+                                    break;
+                                }
+                            },
+                            Err(_) => {
+                                mutation_conversion_error = Some((
+                                    "INVALID_ARGUMENT".to_string(),
+                                    "publish_to_zone element_id must be 16 bytes".to_string(),
+                                ));
+                                break;
+                            }
+                        }
+                    } else {
+                        pending_touch_names.push((ElementType::Zone, pz.zone_name.clone()));
+                        pz.zone_name.clone()
+                    };
                     let token = tze_hud_scene::types::ZonePublishToken {
                         token: pz
                             .publish_token
@@ -2813,7 +3067,7 @@ async fn apply_queued_batch_to_scene(
                         Some(pz.merge_key.clone())
                     };
                     scene_mutations.push(SceneMutation::PublishToZone {
-                        zone_name: pz.zone_name.clone(),
+                        zone_name: resolved_zone_name,
                         content,
                         publish_token: token,
                         merge_key,
@@ -2822,6 +3076,61 @@ async fn apply_queued_batch_to_scene(
                         breakpoints: Vec::new(),
                     });
                 }
+            }
+            Some(crate::proto::mutation_proto::Mutation::PublishToTile(pt)) => {
+                let element_id = match bytes_to_scene_id(&pt.element_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        mutation_conversion_error = Some((
+                            "INVALID_ARGUMENT".to_string(),
+                            "publish_to_tile element_id must be 16 bytes".to_string(),
+                        ));
+                        break;
+                    }
+                };
+
+                let entry = match st.element_store.entries.get(&element_id) {
+                    Some(entry) if entry.element_type == ElementType::Tile => entry.clone(),
+                    _ => {
+                        mutation_conversion_error = Some((
+                            "ELEMENT_NOT_FOUND".to_string(),
+                            "publish_to_tile element_id does not reference a known tile"
+                                .to_string(),
+                        ));
+                        break;
+                    }
+                };
+
+                let requested_bounds = pt.bounds.as_ref().map(convert::proto_rect_to_scene);
+                if let Some(resolved_bounds) =
+                    resolve_tile_bounds_with_override(Some(&entry), requested_bounds, display_area)
+                {
+                    scene_mutations.push(SceneMutation::UpdateTileBounds {
+                        tile_id: element_id,
+                        bounds: resolved_bounds,
+                    });
+                }
+
+                let mut had_content = false;
+                if let Some(ref node_proto) = pt.node
+                    && let Some(node) = convert::proto_node_to_scene(node_proto)
+                {
+                    scene_mutations.push(SceneMutation::SetTileRoot {
+                        tile_id: element_id,
+                        node,
+                    });
+                    had_content = true;
+                }
+
+                if !had_content && requested_bounds.is_none() {
+                    mutation_conversion_error = Some((
+                        "INVALID_ARGUMENT".to_string(),
+                        "publish_to_tile requires at least one of bounds or node".to_string(),
+                    ));
+                    break;
+                }
+
+                pending_touch_ids.push((element_id, ElementType::Tile));
             }
             Some(crate::proto::mutation_proto::Mutation::ClearZone(cz)) => {
                 let token = tze_hud_scene::types::ZonePublishToken {
@@ -2952,6 +3261,15 @@ async fn apply_queued_batch_to_scene(
         }
     }
 
+    if let Some((error_code, error_message)) = mutation_conversion_error {
+        tracing::warn!(
+            error_code,
+            error_message,
+            "queued mutation batch skipped due to conversion error after enqueue"
+        );
+        return;
+    }
+
     // Map the proto batch_id bytes to a SceneId for validation correlation.
     let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
 
@@ -2968,7 +3286,22 @@ async fn apply_queued_batch_to_scene(
     // Apply to scene; response was already sent when the batch was queued.
     let result = st.scene.lock().await.apply_batch(&scene_batch);
     if result.applied {
-        let persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
+        let mut persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
+        let now = now_ms();
+        for (element_id, element_type) in pending_touch_ids {
+            if let Some(request) =
+                touch_element_store_entry_by_id(&mut st, element_id, element_type, now)
+            {
+                persist_request = Some(request);
+            }
+        }
+        for (element_type, namespace) in pending_touch_names {
+            if let Some(request) =
+                touch_element_store_entry_by_namespace(&mut st, element_type, &namespace, now)
+            {
+                persist_request = Some(request);
+            }
+        }
         drop(st);
         persist_element_store(persist_request).await;
     }
@@ -3886,6 +4219,149 @@ async fn handle_capability_revocation(
     }
 }
 
+async fn handle_list_elements_request(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    request: ListElementsRequest,
+) {
+    if !capability_set_covers(&session.capabilities, "read_scene_topology") {
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                    error_code: "PERMISSION_DENIED".to_string(),
+                    message: "Missing capability: read_scene_topology".to_string(),
+                    context: "list_elements_request".to_string(),
+                    hint: r#"{"required_capability":"read_scene_topology"}"#.to_string(),
+                    error_code_enum: ErrorCode::PermissionDenied as i32,
+                })),
+            }))
+            .await;
+        return;
+    }
+
+    let namespace_filter = request.namespace_filter.unwrap_or_default();
+    let element_type_filter = request.element_type.unwrap_or_default();
+    let parsed_type_filter = if element_type_filter.trim().is_empty() {
+        None
+    } else {
+        match parse_element_type_filter(&element_type_filter) {
+            Some(element_type) => Some(element_type),
+            None => {
+                let seq = session.next_server_seq();
+                let _ = tx
+                    .send(Ok(ServerMessage {
+                        sequence: seq,
+                        timestamp_wall_us: now_wall_us(),
+                        payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                            error_code: "INVALID_ARGUMENT".to_string(),
+                            message: format!(
+                                "Unsupported element_type filter {:?}; expected tile|zone|widget",
+                                element_type_filter
+                            ),
+                            context: "list_elements_request.element_type".to_string(),
+                            hint: r#"{"supported":["tile","zone","widget"]}"#.to_string(),
+                            error_code_enum: ErrorCode::InvalidArgument as i32,
+                        })),
+                    }))
+                    .await;
+                return;
+            }
+        }
+    };
+
+    let mut elements = Vec::new();
+    {
+        let st = state.lock().await;
+        let store = st.element_store.clone();
+        let scene = st.scene.lock().await;
+
+        let mut entries: Vec<(SceneId, ElementStoreEntry)> = store
+            .entries
+            .iter()
+            .map(|(id, entry)| (*id, entry.clone()))
+            .collect();
+        entries.sort_by_key(|(id, entry)| (entry.created_at, id.to_bytes_le()));
+
+        for (element_id, entry) in entries {
+            if let Some(filter) = parsed_type_filter
+                && entry.element_type != filter
+            {
+                continue;
+            }
+            if !namespace_filter.is_empty() && !entry.namespace.starts_with(&namespace_filter) {
+                continue;
+            }
+
+            let zero_policy = GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.0,
+                height_pct: 0.0,
+            };
+            let current_geometry = match entry.element_type {
+                ElementType::Tile => {
+                    let agent_policy = scene.tiles.get(&element_id).map(|tile| {
+                        rect_to_relative_geometry_policy(
+                            tile.bounds,
+                            scene.display_area.width,
+                            scene.display_area.height,
+                        )
+                    });
+                    resolve_geometry_override_chain(
+                        entry.geometry_override,
+                        agent_policy,
+                        None,
+                        None,
+                    )
+                    .unwrap_or(zero_policy)
+                }
+                ElementType::Zone => scene
+                    .zone_registry
+                    .resolve_geometry_policy_for_zone(
+                        &entry.namespace,
+                        entry.geometry_override.as_ref(),
+                        None,
+                    )
+                    .or(entry.geometry_override)
+                    .unwrap_or(zero_policy),
+                ElementType::Widget => scene
+                    .widget_registry
+                    .resolve_geometry_policy_for_instance(
+                        &entry.namespace,
+                        entry.geometry_override.as_ref(),
+                    )
+                    .or(entry.geometry_override)
+                    .unwrap_or(zero_policy),
+            };
+
+            elements.push(ElementInfo {
+                element_id: scene_id_to_bytes(element_id),
+                element_type: element_type_wire_name(entry.element_type).to_string(),
+                namespace: entry.namespace,
+                current_geometry: Some(convert::geometry_policy_to_proto(&current_geometry)),
+                has_user_override: entry.geometry_override.is_some(),
+                created_at_ms: entry.created_at,
+                last_published_at_ms: entry.last_published_at,
+            });
+        }
+    }
+
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::ListElementsResponse(ListElementsResponse {
+                elements,
+            })),
+        }))
+        .await;
+}
+
 /// Handle a ZonePublish from the client (RFC 0005 §3.1, §8.6).
 ///
 /// Durable-zone publishes are transactional and receive a ZonePublishResult.
@@ -3903,110 +4379,172 @@ async fn handle_zone_publish(
 ) {
     // Apply the zone publish through the scene graph mutation path.
     // Also determine zone durability (ephemeral vs durable) for ack decision.
-    let (accepted, error_code, error_message, is_ephemeral_zone) = {
-        let st = state.lock().await;
-        let mut scene = st.scene.lock().await;
+    let (accepted, error_code, error_message, is_ephemeral_zone, persist_request) = {
+        let mut st = state.lock().await;
+        let (resolved_zone_name, resolved_element_id, preflight_error) =
+            if !publish.element_id.is_empty() {
+                match bytes_to_scene_id(&publish.element_id) {
+                    Ok(element_id) => match st.element_store.entries.get(&element_id) {
+                        Some(entry) if entry.element_type == ElementType::Zone => {
+                            (entry.namespace.clone(), Some(element_id), None)
+                        }
+                        _ => (
+                            String::new(),
+                            None,
+                            Some((
+                                false,
+                                "ELEMENT_NOT_FOUND".to_string(),
+                                "element_id does not reference a known zone".to_string(),
+                                false,
+                                None,
+                            )),
+                        ),
+                    },
+                    Err(_) => (
+                        String::new(),
+                        None,
+                        Some((
+                            false,
+                            "INVALID_ARGUMENT".to_string(),
+                            "invalid element_id: expected 16 bytes".to_string(),
+                            false,
+                            None,
+                        )),
+                    ),
+                }
+            } else {
+                (publish.zone_name.clone(), None, None)
+            };
 
-        // Check zone durability before applying the mutation
-        let zone_is_ephemeral = scene
-            .zone_registry
-            .get_by_name(&publish.zone_name)
-            .map(|def| def.ephemeral)
-            .unwrap_or(false); // Unknown zones default to durable (will fail below)
+        if let Some(preflight_error) = preflight_error {
+            preflight_error
+        } else {
+            let mut scene = st.scene.lock().await;
 
-        let content = publish
-            .content
-            .as_ref()
-            .and_then(crate::convert::proto_zone_content_to_scene);
+            // Check zone durability before applying the mutation
+            let zone_is_ephemeral = scene
+                .zone_registry
+                .get_by_name(&resolved_zone_name)
+                .map(|def| def.ephemeral)
+                .unwrap_or(false); // Unknown zones default to durable (will fail below)
 
-        if let Some(content) = content {
-            // Validate: breakpoints are only meaningful for StreamText content.
-            // Reject non-StreamText publishes that carry non-empty breakpoints so
-            // gRPC behaves consistently with the MCP path (which also rejects this).
-            if !publish.breakpoints.is_empty()
-                && !matches!(content, tze_hud_scene::types::ZoneContent::StreamText(_))
-            {
+            let content = publish
+                .content
+                .as_ref()
+                .and_then(crate::convert::proto_zone_content_to_scene);
+
+            if let Some(content) = content {
+                // Validate: breakpoints are only meaningful for StreamText content.
+                if !publish.breakpoints.is_empty()
+                    && !matches!(content, tze_hud_scene::types::ZoneContent::StreamText(_))
+                {
+                    (
+                        false,
+                        "INVALID_ARGUMENT".to_string(),
+                        "breakpoints are only valid for StreamText content".to_string(),
+                        zone_is_ephemeral,
+                        None,
+                    )
+                } else {
+                    let merge_key = if publish.merge_key.is_empty() {
+                        None
+                    } else {
+                        Some(publish.merge_key.clone())
+                    };
+
+                    let mutation = tze_hud_scene::mutation::SceneMutation::PublishToZone {
+                        zone_name: resolved_zone_name.clone(),
+                        content,
+                        publish_token: tze_hud_scene::types::ZonePublishToken { token: Vec::new() },
+                        merge_key,
+                        // expires_at_wall_us and content_classification are not yet present in
+                        // the ZonePublish proto message (post-v1 wire extensions).
+                        expires_at_wall_us: None,
+                        content_classification: None,
+                        // Wire breakpoints from the ZonePublish proto for StreamText streaming reveal.
+                        // Per spec §Subtitle Streaming Word-by-Word Reveal.
+                        breakpoints: publish.breakpoints.clone(),
+                    };
+
+                    // Apply as a single-mutation batch.
+                    let zone_publish_lease_id = session.lease_ids.first().copied();
+                    let batch = tze_hud_scene::mutation::MutationBatch {
+                        batch_id: tze_hud_scene::SceneId::new(),
+                        agent_namespace: session.namespace.clone(),
+                        mutations: vec![mutation],
+                        timing_hints: None,
+                        lease_id: zone_publish_lease_id,
+                    };
+                    let result = scene.apply_batch(&batch);
+                    drop(scene);
+                    if result.applied {
+                        let now = now_ms();
+                        let persist_request = if let Some(element_id) = resolved_element_id {
+                            touch_element_store_entry_by_id(
+                                &mut st,
+                                element_id,
+                                ElementType::Zone,
+                                now,
+                            )
+                        } else {
+                            touch_element_store_entry_by_namespace(
+                                &mut st,
+                                ElementType::Zone,
+                                &resolved_zone_name,
+                                now,
+                            )
+                        };
+                        (
+                            true,
+                            String::new(),
+                            String::new(),
+                            zone_is_ephemeral,
+                            persist_request,
+                        )
+                    } else {
+                        let (code, msg) = match &result.error {
+                            Some(tze_hud_scene::ValidationError::ZoneNotFound { name }) => (
+                                "ZONE_NOT_FOUND".to_string(),
+                                format!("Zone not found: {name}"),
+                            ),
+                            Some(tze_hud_scene::ValidationError::ZonePublishTokenInvalid {
+                                zone,
+                            }) => (
+                                "TOKEN_INVALID".to_string(),
+                                format!("Publish token invalid for zone '{zone}'"),
+                            ),
+                            Some(tze_hud_scene::ValidationError::BudgetExceeded { resource }) => (
+                                "BUDGET_EXCEEDED".to_string(),
+                                format!("Budget exceeded: {resource}"),
+                            ),
+                            Some(tze_hud_scene::ValidationError::CapabilityMissing {
+                                capability,
+                            }) => (
+                                "CAPABILITY_MISSING".to_string(),
+                                format!("Capability missing: {capability}"),
+                            ),
+                            Some(err) => ("ZONE_PUBLISH_FAILED".to_string(), err.to_string()),
+                            None => (
+                                "ZONE_PUBLISH_FAILED".to_string(),
+                                "Zone publish failed".to_string(),
+                            ),
+                        };
+                        (false, code, msg, zone_is_ephemeral, None)
+                    }
+                }
+            } else {
                 (
                     false,
-                    "INVALID_ARGUMENT".to_string(),
-                    "breakpoints are only valid for StreamText content".to_string(),
+                    "INVALID_CONTENT".to_string(),
+                    "Missing or invalid zone content".to_string(),
                     zone_is_ephemeral,
+                    None,
                 )
-            } else {
-                let merge_key = if publish.merge_key.is_empty() {
-                    None
-                } else {
-                    Some(publish.merge_key.clone())
-                };
-
-                let mutation = tze_hud_scene::mutation::SceneMutation::PublishToZone {
-                    zone_name: publish.zone_name.clone(),
-                    content,
-                    publish_token: tze_hud_scene::types::ZonePublishToken { token: Vec::new() },
-                    merge_key,
-                    // expires_at_wall_us and content_classification are not yet present in
-                    // the ZonePublish proto message (post-v1 wire extensions).
-                    expires_at_wall_us: None,
-                    content_classification: None,
-                    // Wire breakpoints from the ZonePublish proto for StreamText streaming reveal.
-                    // Per spec §Subtitle Streaming Word-by-Word Reveal.
-                    breakpoints: publish.breakpoints.clone(),
-                };
-
-                // Apply as a single-mutation batch.
-                // Use the session's first active lease for budget validation; if the
-                // session holds no lease yet, lease_id is None and budget checks are
-                // skipped (ZonePublish does not require a lease per RFC 0005 §8.6).
-                let zone_publish_lease_id = session.lease_ids.first().copied();
-                let batch = tze_hud_scene::mutation::MutationBatch {
-                    batch_id: tze_hud_scene::SceneId::new(),
-                    agent_namespace: session.namespace.clone(),
-                    mutations: vec![mutation],
-                    timing_hints: None,
-                    lease_id: zone_publish_lease_id,
-                };
-                let result = scene.apply_batch(&batch);
-                if result.applied {
-                    (true, String::new(), String::new(), zone_is_ephemeral)
-                } else {
-                    let (code, msg) = match &result.error {
-                        Some(tze_hud_scene::ValidationError::ZoneNotFound { name }) => (
-                            "ZONE_NOT_FOUND".to_string(),
-                            format!("Zone not found: {name}"),
-                        ),
-                        Some(tze_hud_scene::ValidationError::ZonePublishTokenInvalid { zone }) => (
-                            "TOKEN_INVALID".to_string(),
-                            format!("Publish token invalid for zone '{zone}'"),
-                        ),
-                        Some(tze_hud_scene::ValidationError::BudgetExceeded { resource }) => (
-                            "BUDGET_EXCEEDED".to_string(),
-                            format!("Budget exceeded: {resource}"),
-                        ),
-                        Some(tze_hud_scene::ValidationError::CapabilityMissing { capability }) => (
-                            "CAPABILITY_MISSING".to_string(),
-                            format!("Capability missing: {capability}"),
-                        ),
-                        Some(err) => ("ZONE_PUBLISH_FAILED".to_string(), err.to_string()),
-                        None => (
-                            "ZONE_PUBLISH_FAILED".to_string(),
-                            "Zone publish failed".to_string(),
-                        ),
-                    };
-                    // On failure, preserve the zone's ephemeral flag for consistent fire-and-forget
-                    // semantics (RFC 0005 §8.6): ephemeral zones never send ZonePublishResult,
-                    // even on failure. The client must not expect a response.
-                    (false, code, msg, zone_is_ephemeral)
-                }
-            } // close else { (breakpoints valid for content type)
-        } else {
-            (
-                false,
-                "INVALID_CONTENT".to_string(),
-                "Missing or invalid zone content".to_string(),
-                zone_is_ephemeral,
-            )
+            }
         }
     };
+
+    persist_element_store(persist_request).await;
 
     // Durable zones: send ZonePublishResult (transactional ack).
     // Ephemeral zones: fire-and-forget — no ZonePublishResult sent, even on failure
@@ -5018,17 +5556,65 @@ async fn handle_widget_publish(
     _request_sequence: u64,
     publish: WidgetPublish,
 ) {
-    let widget_name = &publish.widget_name;
+    let (resolved_widget_name, resolved_element_id) = if !publish.element_id.is_empty() {
+        let st = state.lock().await;
+        match bytes_to_scene_id(&publish.element_id) {
+            Ok(element_id) => match st.element_store.entries.get(&element_id) {
+                Some(entry) if entry.element_type == ElementType::Widget => {
+                    (entry.namespace.clone(), Some(element_id))
+                }
+                _ => {
+                    let seq = session.next_server_seq();
+                    let _ = tx
+                        .send(Ok(ServerMessage {
+                            sequence: seq,
+                            timestamp_wall_us: now_wall_us(),
+                            payload: Some(ServerPayload::WidgetPublishResult(
+                                WidgetPublishResult {
+                                    accepted: false,
+                                    widget_name: publish.widget_name.clone(),
+                                    error_code: "ELEMENT_NOT_FOUND".to_string(),
+                                    error_message: "element_id does not reference a known widget"
+                                        .to_string(),
+                                },
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
+            },
+            Err(_) => {
+                let seq = session.next_server_seq();
+                let _ = tx
+                    .send(Ok(ServerMessage {
+                        sequence: seq,
+                        timestamp_wall_us: now_wall_us(),
+                        payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
+                            accepted: false,
+                            widget_name: publish.widget_name.clone(),
+                            error_code: "INVALID_ARGUMENT".to_string(),
+                            error_message: "invalid element_id: expected 16 bytes".to_string(),
+                        })),
+                    }))
+                    .await;
+                return;
+            }
+        }
+    } else if !publish.instance_id.is_empty() {
+        (publish.instance_id.clone(), None)
+    } else {
+        (publish.widget_name.clone(), None)
+    };
 
     // ── Step 1: Capability check (string-based, matches session.capabilities) ──
-    let required_cap = format!("publish_widget:{widget_name}");
+    let required_cap = format!("publish_widget:{resolved_widget_name}");
     let has_cap = capability_set_covers(&session.capabilities, &required_cap);
 
     if !has_cap {
         // Per spec: WIDGET_CAPABILITY_MISSING. For durable widgets we send a result;
         // since we don't know if it's ephemeral without looking up the registry,
         // we check ephemerality to decide whether to send a result.
-        let transactional = is_widget_transactional(state, widget_name.as_str()).await;
+        let transactional = is_widget_transactional(state, resolved_widget_name.as_str()).await;
         if transactional {
             let seq = session.next_server_seq();
             let _ = tx
@@ -5037,7 +5623,7 @@ async fn handle_widget_publish(
                     timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
                         accepted: false,
-                        widget_name: widget_name.clone(),
+                        widget_name: resolved_widget_name.clone(),
                         error_code: "WIDGET_CAPABILITY_MISSING".to_string(),
                         error_message: format!("Missing capability: {required_cap}"),
                     })),
@@ -5055,18 +5641,6 @@ async fn handle_widget_publish(
             .filter_map(crate::convert::proto_to_widget_param_value)
             .collect();
 
-    // ── Step 3: Resolve instance_id for disambiguation ────────────────────────
-    // widget_name is the instance addressing key. If an explicit instance_id
-    // override is set, use it; the proto's widget_name is already the instance key.
-    // (The instance_id field on WidgetPublish is for future disambiguation when
-    // the same widget type has multiple instances — the session layer uses widget_name.)
-    let resolved_widget_name = if !publish.instance_id.is_empty() {
-        // instance_id overrides widget_name for disambiguation
-        publish.instance_id.clone()
-    } else {
-        widget_name.clone()
-    };
-
     // ── Step 4: Apply through the scene graph ─────────────────────────────────
     let merge_key = if publish.merge_key.is_empty() {
         None
@@ -5074,18 +5648,36 @@ async fn handle_widget_publish(
         Some(publish.merge_key.clone())
     };
 
-    let result = {
-        let st = state.lock().await;
+    let (result, persist_request) = {
+        let mut st = state.lock().await;
         let mut scene = st.scene.lock().await;
-        scene.publish_to_widget(
+        let publish_result = scene.publish_to_widget(
             &resolved_widget_name,
             params,
             &session.namespace,
             merge_key,
             publish.transition_ms,
             None, // expires_at_wall_us not yet in proto
-        )
+        );
+        drop(scene);
+        let persist_request = if publish_result.is_ok() {
+            let now = now_ms();
+            if let Some(element_id) = resolved_element_id {
+                touch_element_store_entry_by_id(&mut st, element_id, ElementType::Widget, now)
+            } else {
+                touch_element_store_entry_by_namespace(
+                    &mut st,
+                    ElementType::Widget,
+                    &resolved_widget_name,
+                    now,
+                )
+            }
+        } else {
+            None
+        };
+        (publish_result, persist_request)
     };
+    persist_element_store(persist_request).await;
 
     // ── Step 5: Send result or fire-and-forget ────────────────────────────────
     match result {
@@ -5100,7 +5692,7 @@ async fn handle_widget_publish(
                         timestamp_wall_us: now_wall_us(),
                         payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
                             accepted: true,
-                            widget_name: widget_name.clone(),
+                            widget_name: resolved_widget_name.clone(),
                             error_code: String::new(),
                             error_message: String::new(),
                         })),
@@ -5152,7 +5744,7 @@ async fn handle_widget_publish(
                         timestamp_wall_us: now_wall_us(),
                         payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
                             accepted: false,
-                            widget_name: widget_name.clone(),
+                            widget_name: resolved_widget_name.clone(),
                             error_code,
                             error_message,
                         })),
@@ -6011,6 +6603,485 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[tokio::test]
+    async fn test_list_elements_request_supports_filters_and_override_metadata() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        let tile_id: SceneId;
+        let zone_id = SceneId::new();
+        let widget_id = SceneId::new();
+
+        {
+            let mut st = shared_state.lock().await;
+            st.element_store = tze_hud_scene::element_store::ElementStore::default();
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene.create_tab("main", 0).expect("create tab");
+
+            let bootstrap_lease = scene.grant_lease(
+                "agent-list",
+                60_000,
+                vec![
+                    Capability::CreateTile,
+                    Capability::UpdateTile,
+                    Capability::CreateNode,
+                    Capability::UpdateNode,
+                    Capability::PublishZone("list-zone".to_string()),
+                ],
+            );
+
+            tile_id = scene
+                .create_tile(
+                    tab_id,
+                    "agent-list",
+                    bootstrap_lease,
+                    Rect::new(40.0, 30.0, 160.0, 120.0),
+                    1,
+                )
+                .expect("create tile");
+
+            scene.zone_registry.register(ZoneDefinition {
+                id: zone_id,
+                name: "list-zone".to_string(),
+                description: "ListElements test zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 1.0,
+                    height_pct: 0.1,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 2,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            });
+
+            scene
+                .publish_to_zone_with_lease(
+                    "list-zone",
+                    ZoneContent::StreamText("hello".to_string()),
+                    "agent-list",
+                    None,
+                )
+                .expect("publish zone");
+
+            scene.widget_registry.register_definition(WidgetDefinition {
+                id: "gauge".to_string(),
+                name: "Gauge".to_string(),
+                description: "Gauge widget".to_string(),
+                parameter_schema: vec![WidgetParameterDeclaration {
+                    name: "level".to_string(),
+                    param_type: WidgetParamType::F32,
+                    default_value: WidgetParameterValue::F32(0.0),
+                    constraints: None,
+                }],
+                layers: vec![],
+                default_geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.2,
+                    y_pct: 0.2,
+                    width_pct: 0.2,
+                    height_pct: 0.1,
+                },
+                default_rendering_policy: RenderingPolicy::default(),
+                default_contention_policy: ContentionPolicy::LatestWins,
+                ephemeral: false,
+                hover_behavior: None,
+            });
+            scene.widget_registry.register_instance(WidgetInstance {
+                id: widget_id,
+                widget_type_name: "gauge".to_string(),
+                tab_id,
+                geometry_override: None,
+                contention_override: None,
+                instance_name: "gauge-main".to_string(),
+                current_params: HashMap::new(),
+            });
+            scene
+                .publish_to_widget(
+                    "gauge-main",
+                    HashMap::from([("level".to_string(), WidgetParameterValue::F32(0.5))]),
+                    "agent-list",
+                    None,
+                    0,
+                    None,
+                )
+                .expect("publish widget");
+            drop(scene);
+
+            st.element_store.entries.insert(
+                tile_id,
+                tze_hud_scene::element_store::ElementStoreEntry {
+                    element_type: tze_hud_scene::element_store::ElementType::Tile,
+                    namespace: "agent-list".to_string(),
+                    created_at: 101,
+                    last_published_at: 202,
+                    geometry_override: Some(GeometryPolicy::Relative {
+                        x_pct: 0.25,
+                        y_pct: 0.1,
+                        width_pct: 0.2,
+                        height_pct: 0.2,
+                    }),
+                },
+            );
+            st.element_store.entries.insert(
+                zone_id,
+                tze_hud_scene::element_store::ElementStoreEntry {
+                    element_type: tze_hud_scene::element_store::ElementType::Zone,
+                    namespace: "list-zone".to_string(),
+                    created_at: 303,
+                    last_published_at: 404,
+                    geometry_override: None,
+                },
+            );
+            st.element_store.entries.insert(
+                widget_id,
+                tze_hud_scene::element_store::ElementStoreEntry {
+                    element_type: tze_hud_scene::element_store::ElementType::Widget,
+                    namespace: "gauge-main".to_string(),
+                    created_at: 505,
+                    last_published_at: 606,
+                    geometry_override: None,
+                },
+            );
+        }
+
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "agent-list", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ListElementsRequest(
+                crate::proto::ListElementsRequest {
+                    namespace_filter: Some("agent-".to_string()),
+                    element_type: Some("tile".to_string()),
+                },
+            )),
+        })
+        .await
+        .expect("send list-elements request");
+
+        let tile_only = next_non_state_change(&mut stream).await;
+        match tile_only.payload {
+            Some(ServerPayload::ListElementsResponse(resp)) => {
+                assert_eq!(
+                    resp.elements.len(),
+                    1,
+                    "tile filter should return one element"
+                );
+                let entry = &resp.elements[0];
+                assert_eq!(entry.element_type, "tile");
+                assert_eq!(entry.namespace, "agent-list");
+                assert_eq!(
+                    bytes_to_scene_id(&entry.element_id).expect("tile entry id must decode"),
+                    tile_id
+                );
+                assert!(entry.has_user_override, "tile should report user override");
+                assert_eq!(entry.created_at_ms, 101);
+                assert_eq!(entry.last_published_at_ms, 202);
+                match entry
+                    .current_geometry
+                    .as_ref()
+                    .and_then(|g| g.policy.as_ref())
+                {
+                    Some(crate::proto::geometry_policy_proto::Policy::Relative(relative)) => {
+                        assert!((relative.x_pct - 0.25).abs() < 1e-6);
+                        assert!((relative.y_pct - 0.1).abs() < 1e-6);
+                        assert!((relative.width_pct - 0.2).abs() < 1e-6);
+                        assert!((relative.height_pct - 0.2).abs() < 1e-6);
+                    }
+                    other => panic!("expected relative geometry policy, got {other:?}"),
+                }
+            }
+            other => panic!("Expected ListElementsResponse, got: {other:?}"),
+        }
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ListElementsRequest(
+                crate::proto::ListElementsRequest {
+                    namespace_filter: Some("list-".to_string()),
+                    element_type: Some("zone".to_string()),
+                },
+            )),
+        })
+        .await
+        .expect("send list-elements zone filter request");
+
+        let zone_only = next_non_state_change(&mut stream).await;
+        match zone_only.payload {
+            Some(ServerPayload::ListElementsResponse(resp)) => {
+                assert_eq!(
+                    resp.elements.len(),
+                    1,
+                    "zone filter should return one element"
+                );
+                assert_eq!(resp.elements[0].element_type, "zone");
+                assert_eq!(resp.elements[0].namespace, "list-zone");
+                assert_eq!(
+                    bytes_to_scene_id(&resp.elements[0].element_id)
+                        .expect("zone entry id must decode"),
+                    zone_id
+                );
+            }
+            other => panic!("Expected ListElementsResponse, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_to_tile_by_element_id_applies_override_and_updates_timestamp() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        let tile_id: SceneId;
+
+        {
+            let mut st = shared_state.lock().await;
+            st.element_store = tze_hud_scene::element_store::ElementStore::default();
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene.create_tab("main", 0).expect("create tab");
+            let bootstrap_lease = scene.grant_lease(
+                "tile-publisher",
+                60_000,
+                vec![
+                    Capability::CreateTile,
+                    Capability::UpdateTile,
+                    Capability::CreateNode,
+                    Capability::UpdateNode,
+                ],
+            );
+            tile_id = scene
+                .create_tile(
+                    tab_id,
+                    "tile-publisher",
+                    bootstrap_lease,
+                    Rect::new(20.0, 20.0, 100.0, 80.0),
+                    1,
+                )
+                .expect("create tile");
+            drop(scene);
+
+            st.element_store.entries.insert(
+                tile_id,
+                tze_hud_scene::element_store::ElementStoreEntry {
+                    element_type: tze_hud_scene::element_store::ElementType::Tile,
+                    namespace: "tile-publisher".to_string(),
+                    created_at: 1,
+                    last_published_at: 1,
+                    geometry_override: Some(GeometryPolicy::Relative {
+                        x_pct: 0.4,
+                        y_pct: 0.25,
+                        width_pct: 0.3,
+                        height_pct: 0.2,
+                    }),
+                },
+            );
+        }
+
+        let (tx, _init_messages, mut stream) = handshake_with_requested_capabilities(
+            &mut client,
+            "tile-publisher",
+            "test-key",
+            vec![
+                "create_tiles".to_string(),
+                "modify_own_tiles".to_string(),
+                "read_scene_topology".to_string(),
+            ],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .expect("lease request");
+
+        let lease_msg = next_non_state_change(&mut stream).await;
+        let lease_id = match lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id,
+            other => panic!("Expected granted lease response, got: {other:?}"),
+        };
+
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "publish-to-tile".to_string(),
+                bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                font_size_px: 16.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: uuid::Uuid::now_v7().as_bytes().to_vec(),
+                lease_id,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::PublishToTile(
+                        crate::proto::PublishToTileMutation {
+                            element_id: scene_id_to_bytes(tile_id),
+                            bounds: Some(crate::proto::Rect {
+                                x: 5.0,
+                                y: 5.0,
+                                width: 20.0,
+                                height: 10.0,
+                                ..Default::default()
+                            }),
+                            node: Some(crate::convert::scene_node_to_proto(&node)),
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .expect("publish-to-tile mutation");
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        match result_msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(result.accepted, "publish_to_tile should be accepted");
+            }
+            other => panic!("Expected MutationResult, got: {other:?}"),
+        }
+
+        {
+            let st = shared_state.lock().await;
+            let scene = st.scene.lock().await;
+            let tile = scene.tiles.get(&tile_id).expect("tile should exist");
+            assert!((tile.bounds.x - 320.0).abs() < 1e-3);
+            assert!((tile.bounds.y - 150.0).abs() < 1e-3);
+            assert!((tile.bounds.width - 240.0).abs() < 1e-3);
+            assert!((tile.bounds.height - 120.0).abs() < 1e-3);
+
+            let root_id = tile.root_node.expect("tile root should be set");
+            let root = scene
+                .nodes
+                .get(&root_id)
+                .expect("tile root node should exist");
+            match &root.data {
+                NodeData::TextMarkdown(markdown) => {
+                    assert_eq!(markdown.content, "publish-to-tile");
+                }
+                other => panic!("expected markdown node, got {other:?}"),
+            }
+
+            let entry = st
+                .element_store
+                .entries
+                .get(&tile_id)
+                .expect("element store entry should exist");
+            assert!(
+                entry.last_published_at > 1,
+                "publish_to_tile should update last_published_at"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_to_tile_by_element_id_returns_element_not_found() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        {
+            let st = shared_state.lock().await;
+            st.scene
+                .lock()
+                .await
+                .create_tab("main", 0)
+                .expect("create tab");
+        }
+        let (tx, _init_messages, mut stream) = handshake_with_requested_capabilities(
+            &mut client,
+            "tile-publisher-missing",
+            "test-key",
+            vec![
+                "create_tiles".to_string(),
+                "modify_own_tiles".to_string(),
+                "read_scene_topology".to_string(),
+            ],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .expect("lease request");
+
+        let lease_msg = next_non_state_change(&mut stream).await;
+        let lease_id = match lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id,
+            other => panic!("Expected granted lease response, got: {other:?}"),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: uuid::Uuid::now_v7().as_bytes().to_vec(),
+                lease_id,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::PublishToTile(
+                        crate::proto::PublishToTileMutation {
+                            element_id: scene_id_to_bytes(SceneId::new()),
+                            bounds: Some(crate::proto::Rect {
+                                x: 10.0,
+                                y: 10.0,
+                                width: 80.0,
+                                height: 40.0,
+                                ..Default::default()
+                            }),
+                            node: None,
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .expect("publish-to-tile missing mutation");
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        match result_msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(!result.accepted, "missing element_id should be rejected");
+                assert_eq!(result.error_code, "ELEMENT_NOT_FOUND");
+                assert!(
+                    result
+                        .error_message
+                        .contains("publish_to_tile element_id does not reference a known tile"),
+                    "unexpected error message: {}",
+                    result.error_message
+                );
+            }
+            other => panic!("Expected MutationResult, got: {other:?}"),
+        }
+    }
+
     // ─── Regression tests for hud-wu32: batch_id correlation + lease_id propagation ──
 
     /// Regression: MutationResult.batch_id MUST echo the client-provided batch_id.
@@ -6340,6 +7411,7 @@ mod tests {
                     )),
                 }),
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
                 breakpoints: Vec::new(),
             })),
@@ -9474,6 +10546,7 @@ mod tests {
                     )),
                 }),
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
                 breakpoints: Vec::new(),
             })),
@@ -9582,6 +10655,7 @@ mod tests {
                     )),
                 }),
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
                 breakpoints: Vec::new(),
             })),
@@ -10883,6 +11957,7 @@ mod tests {
                 }],
                 transition_ms: 0,
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
             })),
         })
@@ -10924,6 +11999,7 @@ mod tests {
                 params: vec![],
                 transition_ms: 0,
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
             })),
         })
@@ -10968,6 +12044,7 @@ mod tests {
                 params: vec![],
                 transition_ms: 0,
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
             })),
         })
@@ -11011,6 +12088,7 @@ mod tests {
                 params: vec![],
                 transition_ms: 0,
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
             })),
         })
@@ -11060,6 +12138,7 @@ mod tests {
                 }],
                 transition_ms: 0,
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
             })),
         })
@@ -11172,6 +12251,7 @@ mod tests {
                 }],
                 transition_ms: 0,
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
             })),
         })
@@ -11668,6 +12748,7 @@ mod tests {
                 }],
                 transition_ms: 0,
                 ttl_us: 0,
+                element_id: Vec::new(),
                 merge_key: String::new(),
             })),
         })
