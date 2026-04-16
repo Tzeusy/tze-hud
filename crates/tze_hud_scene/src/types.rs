@@ -402,6 +402,36 @@ pub struct Tile {
     pub visual_hint: crate::lease::TileVisualHint,
 }
 
+/// Runtime-owned scroll configuration for a tile-local viewport.
+///
+/// This is an ephemeral control surface used by local-first input processing.
+/// It is not part of the durable scene snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TileScrollConfig {
+    /// Whether horizontal scroll input is accepted.
+    pub scrollable_x: bool,
+    /// Whether vertical scroll input is accepted.
+    pub scrollable_y: bool,
+    /// Maximum horizontal offset in pixels from content origin.
+    /// `None` disables x clamping.
+    pub content_width: Option<f32>,
+    /// Maximum vertical offset in pixels from content origin.
+    /// `None` disables y clamping.
+    pub content_height: Option<f32>,
+}
+
+impl TileScrollConfig {
+    /// Convenience constructor for a vertically scrollable tile.
+    pub fn vertical() -> Self {
+        Self {
+            scrollable_x: false,
+            scrollable_y: true,
+            content_width: None,
+            content_height: None,
+        }
+    }
+}
+
 // ─── Nodes ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

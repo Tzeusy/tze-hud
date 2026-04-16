@@ -83,7 +83,7 @@ use std::time::Instant;
 
 use tokio::sync::Mutex;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
@@ -828,6 +828,15 @@ impl ApplicationHandler for WinitApp {
                 }
             }
 
+            // ── Pointer: wheel scroll ────────────────────────────────────────
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (delta_x, delta_y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x * 40.0, y * 40.0),
+                    MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                };
+                self.enqueue_scroll_event(delta_x, delta_y);
+            }
+
             // ── Modifiers ─────────────────────────────────────────────────
             WindowEvent::ModifiersChanged(mods) => {
                 self.state.modifiers = mods.state();
@@ -1003,6 +1012,28 @@ impl WinitApp {
                 // directly on the next frame.
                 let _ = result;
             }
+        }
+    }
+
+    /// Enqueue and process a local-first scroll event.
+    fn enqueue_scroll_event(&mut self, delta_x: f32, delta_y: f32) {
+        self.refresh_widget_hover_tracking();
+        let x = self.state.cursor_x;
+        let y = self.state.cursor_y;
+        self.update_overlay_cursor_hittest();
+
+        if let Ok(state) = self.state.shared_state.try_lock()
+            && let Ok(mut scene) = state.scene.try_lock()
+        {
+            let _ = self.state.input_processor.process_scroll_event(
+                &tze_hud_input::ScrollEvent {
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                },
+                &mut scene,
+            );
         }
     }
 

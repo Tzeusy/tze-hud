@@ -264,6 +264,8 @@ pub struct InputProcessor {
     rollback_tracker: RollbackTracker,
     /// Pointer capture manager.
     pub capture: capture::PointerCaptureManager,
+    /// Local-first tile scroll state.
+    scroll_state: ScrollState,
 }
 
 impl InputProcessor {
@@ -273,7 +275,73 @@ impl InputProcessor {
             current_press: None,
             rollback_tracker: RollbackTracker::new(),
             capture: capture::PointerCaptureManager::new(),
+            scroll_state: ScrollState::new(),
         }
+    }
+
+    /// Queue an adapter-driven absolute scroll offset request.
+    ///
+    /// Requests are applied on `commit_scroll_updates`. If a user scroll for the
+    /// same tile lands in the same frame, the user offset remains authoritative.
+    pub fn queue_set_scroll_offset(&mut self, req: SetScrollOffsetRequest) {
+        self.scroll_state.queue_agent_request(req);
+    }
+
+    /// Process a user-originated scroll event through the runtime-owned scroll path.
+    ///
+    /// Returns the changed tile and absolute offset when the event updates a
+    /// scrollable tile. Returns `None` for passthrough / unscrollable hits.
+    pub fn process_scroll_event(
+        &mut self,
+        event: &ScrollEvent,
+        scene: &mut SceneGraph,
+    ) -> Option<ScrollOffsetChangedEvent> {
+        let hit = scene.hit_test(event.x, event.y);
+        let tile_id = match hit {
+            HitResult::NodeHit { tile_id, .. } | HitResult::TileHit { tile_id } => tile_id,
+            _ => return None,
+        };
+        let config = scene.tile_scroll_config(tile_id)?;
+        if !self.scroll_state.is_scrollable(tile_id) {
+            self.scroll_state.register_tile(
+                tile_id,
+                ScrollConfig {
+                    scrollable_x: config.scrollable_x,
+                    scrollable_y: config.scrollable_y,
+                    content_width: config.content_width,
+                    content_height: config.content_height,
+                },
+            );
+        }
+
+        self.scroll_state
+            .apply_user_scroll(tile_id, event.delta_x, event.delta_y)?;
+
+        // Commit only this tile so local user feedback does not consume
+        // pending adapter requests for other tiles.
+        if !self.scroll_state.commit_tile_frame(tile_id) {
+            return None;
+        }
+        let (offset_x, offset_y) = self.scroll_state.offset(tile_id);
+        let _ = scene.set_tile_scroll_offset_local(tile_id, offset_x, offset_y);
+        self.scroll_state.changed_event(tile_id)
+    }
+
+    /// Commit queued adapter-driven scroll requests and apply local offsets.
+    pub fn commit_scroll_updates(
+        &mut self,
+        scene: &mut SceneGraph,
+    ) -> Vec<ScrollOffsetChangedEvent> {
+        let changed = self.scroll_state.commit_all_frames();
+        let mut events = Vec::with_capacity(changed.len());
+        for tile_id in changed {
+            let (offset_x, offset_y) = self.scroll_state.offset(tile_id);
+            let _ = scene.set_tile_scroll_offset_local(tile_id, offset_x, offset_y);
+            if let Some(ev) = self.scroll_state.changed_event(tile_id) {
+                events.push(ev);
+            }
+        }
+        events
     }
 
     /// Apply an agent rejection for an in-progress interaction.
@@ -1070,6 +1138,77 @@ mod tests {
         scene.set_tile_root(tile_id, hit_node).unwrap();
 
         (scene, tile_id, hr_node_id)
+    }
+
+    fn setup_scrollable_scene() -> (SceneGraph, SceneId) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(tile_id, tze_hud_scene::TileScrollConfig::vertical())
+            .unwrap();
+        (scene, tile_id)
+    }
+
+    #[test]
+    fn test_process_scroll_event_updates_scene_local_offset() {
+        let (mut scene, tile_id) = setup_scrollable_scene();
+        let mut processor = InputProcessor::new();
+
+        let changed = processor.process_scroll_event(
+            &ScrollEvent {
+                x: 150.0,
+                y: 150.0,
+                delta_x: 0.0,
+                delta_y: 24.0,
+            },
+            &mut scene,
+        );
+
+        assert!(changed.is_some(), "scroll on a configured tile must update");
+        let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (offset_y - 24.0).abs() < f32::EPSILON,
+            "expected local offset_y=24.0, got {offset_y}"
+        );
+    }
+
+    #[test]
+    fn test_user_scroll_is_authoritative_over_queued_adapter_offset() {
+        let (mut scene, tile_id) = setup_scrollable_scene();
+        let mut processor = InputProcessor::new();
+
+        processor.queue_set_scroll_offset(SetScrollOffsetRequest {
+            tile_id,
+            offset_x: 0.0,
+            offset_y: 200.0,
+        });
+
+        let changed = processor.process_scroll_event(
+            &ScrollEvent {
+                x: 150.0,
+                y: 150.0,
+                delta_x: 0.0,
+                delta_y: 18.0,
+            },
+            &mut scene,
+        );
+
+        assert!(changed.is_some(), "user scroll should still update offset");
+        let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (offset_y - 18.0).abs() < f32::EPSILON,
+            "user scroll must win over queued adapter request, got {offset_y}"
+        );
     }
 
     #[test]
