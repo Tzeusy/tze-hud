@@ -7,22 +7,22 @@
 
 use image::{ImageBuffer, Rgb};
 use tze_hud_resource::{
-    AgentBudget, CAPABILITY_UPLOAD_RESOURCE, ResourceStore, ResourceStoreConfig, ResourceType,
-    UploadId, UploadStartRequest,
+    AgentBudget, ResourceStore, ResourceStoreConfig, ResourceType, UploadId, UploadStartRequest,
+    CAPABILITY_UPLOAD_RESOURCE,
 };
 use tze_hud_runtime::{
-    ContentClassification, RedactionStyle, TileRedactionState, ViewerClass, build_redaction_cmds,
-    hit_regions_enabled, is_tile_redacted,
+    build_redaction_cmds, hit_regions_enabled, is_tile_redacted, ContentClassification,
+    RedactionStyle, TileRedactionState, ViewerClass,
 };
 use tze_hud_scene::{
-    Capability, MAX_MARKDOWN_BYTES, ZONE_TILE_Z_MIN,
-    graph::{MAX_NODES_PER_TILE, SceneGraph},
+    graph::{SceneGraph, MAX_NODES_PER_TILE},
     lease::LeaseState,
     mutation::{MutationBatch, SceneMutation},
     types::{
         FontFamily, HitRegionNode, ImageFitMode, InputMode, Node, NodeData, Rect, SceneId,
         SolidColorNode, TextAlign, TextMarkdownNode, TextOverflow, TileScrollConfig,
     },
+    Capability, MAX_MARKDOWN_BYTES, ZONE_TILE_Z_MIN,
 };
 
 const DISPLAY_W: f32 = 1920.0;
@@ -355,6 +355,189 @@ fn materialized_text_nodes(scene: &SceneGraph, tile_id: SceneId) -> Vec<String> 
         }
     }
     texts
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PortalEventType {
+    InputReceived,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortalEvent {
+    event_type: PortalEventType,
+    input_text: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LocalReplyController {
+    draft_input: String,
+}
+
+impl LocalReplyController {
+    fn submit(&mut self) -> Option<PortalEvent> {
+        let submitted = self.draft_input.trim().to_string();
+        if submitted.is_empty() {
+            return None;
+        }
+        // Local feedback contract: clear draft immediately on submit.
+        self.draft_input.clear();
+        Some(PortalEvent {
+            event_type: PortalEventType::InputReceived,
+            input_text: submitted,
+        })
+    }
+}
+
+#[test]
+fn expand_and_collapse_toggle_transcript_visibility() {
+    let icon_id = tze_hud_scene::ResourceId::from_bytes([0x11; 32]);
+    let base = PortalSurfaceState {
+        portal_id: "portal://interaction/expand".to_string(),
+        session_title: "Interaction Surface".to_string(),
+        history: vec![
+            "line one".to_string(),
+            "line two".to_string(),
+            "line three".to_string(),
+        ],
+        unread_count: 3,
+        expanded: false,
+        viewport_start_line: 0,
+        viewport_max_lines: 16,
+    };
+
+    let expanded = PortalSurfaceState {
+        expanded: true,
+        ..base.clone()
+    };
+    let expanded_nodes = build_expanded_nodes(&expanded, icon_id);
+    let expanded_texts: Vec<String> = expanded_nodes
+        .iter()
+        .filter_map(|node| {
+            if let NodeData::TextMarkdown(t) = &node.data {
+                Some(t.content.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        expanded_texts.iter().any(|t| t.contains("line one")),
+        "expanded state must show transcript markdown"
+    );
+    assert!(
+        expanded_texts.iter().any(|t| t == "Reply"),
+        "expanded state must show reply affordance label"
+    );
+
+    let collapsed_nodes = build_collapsed_nodes(&base, icon_id);
+    let collapsed_texts: Vec<String> = collapsed_nodes
+        .iter()
+        .filter_map(|node| {
+            if let NodeData::TextMarkdown(t) = &node.data {
+                Some(t.content.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        collapsed_texts.iter().any(|t| t.contains("line three")),
+        "collapsed state keeps latest preview line"
+    );
+    assert!(
+        !collapsed_texts.iter().any(|t| t.contains('\n')),
+        "collapsed state must not show full transcript block"
+    );
+}
+
+#[test]
+fn reply_submit_clears_local_input_before_adapter_roundtrip() {
+    let mut controller = LocalReplyController {
+        draft_input: "test input".to_string(),
+    };
+
+    let event = controller
+        .submit()
+        .expect("submit should produce input-received event");
+    assert!(
+        controller.draft_input.is_empty(),
+        "input field must clear immediately for local visual acknowledgement"
+    );
+    assert_eq!(event.event_type, PortalEventType::InputReceived);
+    assert_eq!(event.input_text, "test input");
+}
+
+#[test]
+fn user_scroll_offset_remains_authoritative_after_append_update() {
+    let namespace = "portal-scroll-authority";
+    let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let tab_id = scene.create_tab("Main", 0).expect("tab create");
+    scene.active_tab = Some(tab_id);
+    let lease_id = scene.grant_lease(
+        namespace,
+        120_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let create = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: namespace.to_string(),
+            lease_id,
+            bounds: portal_bounds(true),
+            z_order: PORTAL_Z_ORDER,
+        }],
+    ));
+    assert!(create.applied, "tile create must apply");
+    let tile_id = create.created_ids[0];
+
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: Some(EXPANDED_W),
+                content_height: Some(EXPANDED_H * 3.0),
+            },
+        )
+        .expect("register scroll config");
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 100.0)
+        .expect("set local scroll offset");
+
+    let root = Node {
+        id: SceneId::new(),
+        children: Vec::new(),
+        data: NodeData::SolidColor(SolidColorNode {
+            color: tze_hud_scene::Rgba::new(0.08, 0.10, 0.13, 0.92),
+            bounds: Rect::new(0.0, 0.0, EXPANDED_W, EXPANDED_H),
+        }),
+    };
+    let transcript = Node {
+        id: SceneId::new(),
+        children: Vec::new(),
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            content: "line 1\nline 2\nline 3".to_string(),
+            bounds: Rect::new(12.0, 44.0, EXPANDED_W - 24.0, EXPANDED_H - 108.0),
+            font_size_px: 13.0,
+            font_family: FontFamily::SystemMonospace,
+            color: tze_hud_scene::Rgba::new(0.90, 0.94, 1.0, 0.98),
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+        }),
+    };
+    let append = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        root_batch_for_tile(tile_id, root, vec![transcript]),
+    ));
+    assert!(append.applied, "append update should apply");
+
+    let (sx, sy) = scene.tile_scroll_offset_local(tile_id);
+    assert_eq!((sx, sy), (0.0, 100.0));
 }
 
 #[tokio::test]
