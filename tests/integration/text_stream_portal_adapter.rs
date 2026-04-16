@@ -39,6 +39,19 @@ fn now_mono_us() -> u64 {
         .as_micros() as u64
 }
 
+#[derive(Clone, Debug)]
+struct AdapterClock;
+
+impl AdapterClock {
+    fn now_wall_us(&self) -> u64 {
+        now_wall_us()
+    }
+
+    fn now_mono_us(&self) -> u64 {
+        now_mono_us()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PortalSessionStatus {
     Connecting,
@@ -218,6 +231,7 @@ impl PortalAdapter for TmuxPilotAdapter {
 struct RelayChatAdapter {
     // Internal relay selector stays private and never crosses the bridge trait.
     channel_ref: String,
+    clock: AdapterClock,
     identity: PortalSessionIdentity,
     status: PortalSessionStatus,
     next_ordinal: u64,
@@ -229,6 +243,7 @@ impl RelayChatAdapter {
     fn new(portal_id: &str, display_name: &str, channel_ref: &str) -> Self {
         Self {
             channel_ref: channel_ref.to_string(),
+            clock: AdapterClock,
             identity: PortalSessionIdentity {
                 portal_id: portal_id.to_string(),
                 display_name: display_name.to_string(),
@@ -265,12 +280,14 @@ impl PortalAdapter for RelayChatAdapter {
 
     fn drain_output(&mut self) -> Vec<PortalOutputChunk> {
         let mut out = Vec::new();
+        let wall = self.clock.now_wall_us();
+        let mono = self.clock.now_mono_us();
         while let Some(message) = self.pending_messages.pop_front() {
             out.push(PortalOutputChunk {
                 ordinal: self.next_ordinal,
                 text: message,
-                emitted_wall_us: now_wall_us(),
-                observed_mono_us: now_mono_us(),
+                emitted_wall_us: wall,
+                observed_mono_us: mono,
             });
             self.next_ordinal += 1;
         }
@@ -312,6 +329,46 @@ impl AgentSession {
             }
             return Ok(msg);
         }
+    }
+}
+
+struct SessionSceneVerification {
+    session_tile_count: usize,
+    contains_incremental: bool,
+    contains_identity: bool,
+    session_count: usize,
+}
+
+async fn verify_scene_for_namespace(
+    runtime: &HeadlessRuntime,
+    namespace: &str,
+    incremental_needle: &str,
+    identity_needle: &str,
+) -> SessionSceneVerification {
+    let state = runtime.shared_state().lock().await;
+    let scene = state.scene.lock().await;
+    let mut has_incremental = false;
+    let mut has_identity = false;
+    let mut count = 0;
+    for tile in scene.tiles.values() {
+        if tile.namespace != namespace {
+            continue;
+        }
+        count += 1;
+        if let Some(root_id) = tile.root_node {
+            if let Some(node) = scene.nodes.get(&root_id) {
+                if let NodeData::TextMarkdown(text) = &node.data {
+                    has_incremental |= text.content.contains(incremental_needle);
+                    has_identity |= text.content.contains(identity_needle);
+                }
+            }
+        }
+    }
+    SessionSceneVerification {
+        session_tile_count: count,
+        contains_incremental: has_incremental,
+        contains_identity: has_identity,
+        session_count: state.sessions.session_count(),
     }
 }
 
@@ -656,48 +713,28 @@ async fn tmux_pilot_drives_portal_over_existing_primary_session_stream()
     );
     set_tile_root_text(&mut session, tile_id, second).await?;
 
-    let (session_tile_count, contains_incremental, contains_identity, session_count) = {
-        let state = runtime.shared_state().lock().await;
-        let scene = state.scene.lock().await;
-        let mut has_incremental = false;
-        let mut has_identity = false;
-        let mut count = 0;
-        for tile in scene.tiles.values() {
-            if tile.namespace != session.namespace {
-                continue;
-            }
-            count += 1;
-            if let Some(root_id) = tile.root_node {
-                if let Some(node) = scene.nodes.get(&root_id) {
-                    if let NodeData::TextMarkdown(text) = &node.data {
-                        has_incremental |= text.content.contains("incremental update");
-                        has_identity |= text.content.contains("TMUX Pilot");
-                    }
-                }
-            }
-        }
-        (
-            count,
-            has_incremental,
-            has_identity,
-            state.sessions.session_count(),
-        )
-    };
+    let scene_verification = verify_scene_for_namespace(
+        &runtime,
+        &session.namespace,
+        "incremental update",
+        "TMUX Pilot",
+    )
+    .await;
 
     assert_eq!(
-        session_tile_count, 1,
+        scene_verification.session_tile_count, 1,
         "pilot creates one governed content-layer tile"
     );
     assert!(
-        contains_incremental,
+        scene_verification.contains_incremental,
         "stream increments must land in portal content"
     );
     assert!(
-        contains_identity,
+        scene_verification.contains_identity,
         "identity text must be rendered from bridge contract"
     );
     assert_eq!(
-        session_count, 1,
+        scene_verification.session_count, 1,
         "tmux pilot path must not open an additional HudSession stream"
     );
     assert_eq!(
@@ -783,48 +820,28 @@ async fn non_tmux_adapter_drives_portal_over_existing_primary_session_stream()
     );
     set_tile_root_text(&mut session, tile_id, second).await?;
 
-    let (session_tile_count, contains_incremental, contains_identity, session_count) = {
-        let state = runtime.shared_state().lock().await;
-        let scene = state.scene.lock().await;
-        let mut has_incremental = false;
-        let mut has_identity = false;
-        let mut count = 0;
-        for tile in scene.tiles.values() {
-            if tile.namespace != session.namespace {
-                continue;
-            }
-            count += 1;
-            if let Some(root_id) = tile.root_node {
-                if let Some(node) = scene.nodes.get(&root_id) {
-                    if let NodeData::TextMarkdown(text) = &node.data {
-                        has_incremental |= text.content.contains("follow-up update");
-                        has_identity |= text.content.contains("Relay Chat Pilot");
-                    }
-                }
-            }
-        }
-        (
-            count,
-            has_incremental,
-            has_identity,
-            state.sessions.session_count(),
-        )
-    };
+    let scene_verification = verify_scene_for_namespace(
+        &runtime,
+        &session.namespace,
+        "follow-up update",
+        "Relay Chat Pilot",
+    )
+    .await;
 
     assert_eq!(
-        session_tile_count, 1,
+        scene_verification.session_tile_count, 1,
         "non-tmux pilot creates one governed content-layer tile"
     );
     assert!(
-        contains_incremental,
+        scene_verification.contains_incremental,
         "stream increments must land in portal content"
     );
     assert!(
-        contains_identity,
+        scene_verification.contains_identity,
         "identity text must be rendered from bridge contract"
     );
     assert_eq!(
-        session_count, 1,
+        scene_verification.session_count, 1,
         "non-tmux pilot path must not open an additional HudSession stream"
     );
     assert_eq!(
