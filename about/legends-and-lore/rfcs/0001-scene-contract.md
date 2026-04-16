@@ -639,6 +639,7 @@ pub enum WidgetBindingMapping {
 
 /// Widget instance — a widget type bound into a specific tab.
 pub struct WidgetInstance {
+    pub id: SceneId,
     pub instance_name: String,                          // Addressing key for publish ops (explicit instance_id or widget_type_name)
     pub widget_type_name: String,                       // References WidgetDefinition.id
     pub tab_id: SceneId,
@@ -732,6 +733,9 @@ pub enum SceneMutation {
 
     // Node operations
     SetTileRoot { tile_id: SceneId, node: Node },
+    // Additive with SetTileRoot: direct tile-id path remains valid.
+    // PublishToTile addresses via persistent element identity and allows runtime override application.
+    PublishToTile { element_id: SceneId, node: Node },
     InsertNode { tile_id: SceneId, parent_id: Option<SceneId>, node: Node },
     ReplaceNode { node_id: SceneId, node: Node },
     UpdateNodeBounds { node_id: SceneId, bounds: Rect },
@@ -796,6 +800,15 @@ Agent submits MutationBatch
                             │ all pass ↓
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
+│  Runtime Override Application                               │
+│  - Resolve element-addressed tile publishes                 │
+│  - Apply user geometry overrides from element identity store│
+│  - Validate override-adjusted geometry/invariants           │
+└───────────────────────────┬─────────────────────────────────┘
+                            │ any fail → BatchRejected(ValidationError)
+                            │ all pass ↓
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
 │  Commit: Atomic application in one frame                    │
 │  - Acquire write lock on scene graph                        │
 │  - Apply all mutations in batch order                       │
@@ -838,6 +851,18 @@ mutation targets tile T
 `CreateTile` also requires the `create_tiles` capability in addition to `modify_own_tiles`.
 
 Zone publish mutations require `ZonePublishToken` embedded in the mutation; the token is validated against the capability registry. The agent must also hold `publish_zone:<zone_name>` capability (RFC 0006 §6.3). The runtime resolves `zone_name` (a zone type name) to the `ZoneInstance` for the agent's active tab; the mutation is rejected with `ZoneNotFound` if no such instance exists in the active tab.
+
+`PublishToTile` mutations are additive with `SetTileRoot` and are lease-gated:
+
+```
+mutation targets element E (resolved to tile T)
+  → E resolves through the element identity store
+  → T.namespace == session.agent_namespace
+  → lease_registry.get(T.lease_id).is_valid()
+  → agent holds modify_own_tiles capability
+```
+
+`SetTileRoot` remains the direct tile-id mutation path.
 
 Sync group mutations (`CreateSyncGroup`, `DeleteSyncGroup`) require the `manage_sync_groups` capability. A sync group is a scene-level object not tied to a specific tile, so it is capability-gated rather than lease-gated.
 
@@ -1067,6 +1092,7 @@ pub enum HitTestKind {
 pub enum ChromeElement {
     TabBar,
     SystemIndicator,
+    DragHandle,
     OverrideControl,
     DisconnectionBadge { agent_namespace: String },
 }
@@ -1142,6 +1168,7 @@ Durable state is stored on disk and reloaded at runtime startup.
 | User preferences | Quiet hours, safe mode config, display profiles | Config file |
 | Capability grants | Per-agent capability scope definitions | Config file |
 | Runtime widget SVG assets | Runtime-registered widget SVG blobs (content-addressed) | Runtime-managed local asset store (filesystem) |
+| Element identity store | Persistent IDs and user geometry overrides for zones, zone instances, widget instances, and tiles | Runtime-managed local store (filesystem) |
 
 Durable state is written to disk on change; it is not part of the scene graph serialization.
 
@@ -1398,6 +1425,10 @@ message UpdateTileExpiryMutation  { SceneId tile_id = 1; uint64 expires_at_us = 
 message DeleteTileMutation   { SceneId tile_id = 1; }
 
 message SetTileRootMutation  { SceneId tile_id = 1; Node node = 2; }
+// PublishToTileMutation coexists with SetTileRootMutation.
+// SetTileRoot addresses tile_id directly.
+// PublishToTile addresses a stable element identity and allows runtime override application.
+message PublishToTileMutation { SceneId element_id = 1; Node node = 2; }
 // InsertNodeMutation: parent_id zero bytes = "no parent" (node becomes the tile root, equivalent
 // to SetTileRoot). Use SetTileRootMutation if the tile has no existing root; use InsertNode with
 // zero parent_id to atomically replace the root in a batch. Non-zero parent_id = add as child.
@@ -1508,6 +1539,7 @@ message SceneMutation {
     ClearZoneMutation         clear_zone          = 20;
     CreateSyncGroupMutation   create_sync_group   = 21;  // RFC 0003 §7.2
     DeleteSyncGroupMutation   delete_sync_group   = 22;  // RFC 0003 §7.2
+    PublishToTileMutation     publish_to_tile     = 23;  // persistent element-addressed tile publish
   }
 }
 
