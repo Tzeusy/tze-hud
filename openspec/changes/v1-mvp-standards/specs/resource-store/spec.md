@@ -48,23 +48,53 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Upload Protocol via Session Stream
-Resource ingress SHALL use the session stream defined in RFC 0005. Scene-node image/font resources SHALL use the ResourceUploadStart/Chunk/Complete flow. Runtime widget SVG assets SHALL use WidgetAssetRegister metadata-first registration on the same stream. There SHALL be no separate upload RPC or service for either path.
-Source: RFC 0011 §3.1, RFC 0005 §3.10
+Resource ingress SHALL use the session stream defined in RFC 0005. Scene-node image/font resources SHALL use the resident scene-resource upload flow on that stream: `ResourceUploadStart`, optional `ResourceUploadAccepted`, zero or more `ResourceUploadChunk` messages, `ResourceUploadComplete` when chunked, `ResourceStored` on success, and `ResourceErrorResponse` on upload-specific failure. Runtime widget SVG assets SHALL use `WidgetAssetRegister` metadata-first registration on the same stream. There SHALL be no separate upload RPC or service for either path.
+Source: RFC 0011 §3.1, RFC 0005 §3.10; session-resource-upload-rfc0011 design
 Scope: v1-mandatory
 
-#### Scenario: Upload on existing stream
-- **WHEN** an agent needs to upload a resource
-- **THEN** it MUST send ResourceUploadStart on its existing session stream, not open a separate connection
+#### Scenario: Scene-resource upload uses resident upload message family
+- **WHEN** an agent needs to upload an image or font for scene-node use
+- **THEN** it MUST use the resident scene-resource upload message family on its existing session stream rather than `WidgetAssetRegister` or a separate RPC
 
-#### Scenario: Widget asset register on existing stream
+#### Scenario: Widget asset registration remains widget-specific
 - **WHEN** an agent needs to register a runtime widget SVG asset
-- **THEN** it MUST send WidgetAssetRegister on its existing session stream, not open a separate upload connection
+- **THEN** it MUST use `WidgetAssetRegister` on the existing session stream
+
+---
+
+### Requirement: Upload Start Acknowledgement
+When the runtime accepts a non-deduplicated scene-resource `ResourceUploadStart` that requires chunk transfer, it SHALL allocate an opaque `upload_id` and return `ResourceUploadAccepted` before the client sends any chunks. `ResourceUploadAccepted` SHALL include the initiating `request_sequence` and the assigned `upload_id`. Inline or deduplicated uploads MAY bypass this acknowledgement and return `ResourceStored` immediately.
+Source: RFC 0011 §3.2, §3.6; session-resource-upload-rfc0011 direction/design
+Scope: v1-mandatory
+
+#### Scenario: Large unknown upload receives acknowledgement
+- **WHEN** an agent starts a large unknown resource upload without `inline_data`
+- **THEN** the runtime MUST return `ResourceUploadAccepted` carrying `request_sequence` and `upload_id`
+
+#### Scenario: Deduplicated upload bypasses acknowledgement
+- **WHEN** an agent starts an upload whose declared hash already exists in the relevant scene-resource store
+- **THEN** the runtime MUST return `ResourceStored` immediately and MUST NOT require `ResourceUploadAccepted`
+
+---
+
+### Requirement: Upload Response Correlation
+Resident scene-resource upload responses SHALL be correlatable without relying on arrival order. `ResourceStored` SHALL include the initiating `request_sequence` and MAY include `upload_id` when a chunked upload was previously accepted. `ResourceErrorResponse` SHALL include the initiating `request_sequence`, stable resource error code, human-readable message, structured context, structured hint, and optional `upload_id` when the failure applies to an accepted upload.
+Source: RFC 0011 §3.5, §3.6, §10; session-resource-upload-rfc0011 direction/design
+Scope: v1-mandatory
+
+#### Scenario: Success response identifies originating start
+- **WHEN** the runtime stores a chunked resource after `ResourceUploadComplete`
+- **THEN** the returned `ResourceStored` MUST identify the originating start request via `request_sequence`
+
+#### Scenario: Error response identifies accepted upload
+- **WHEN** the runtime rejects an upload after it has already issued `ResourceUploadAccepted`
+- **THEN** `ResourceErrorResponse` MUST carry the relevant `upload_id`
 
 ---
 
 ### Requirement: Chunked Upload Flow
-For resources larger than 64 KiB, the upload SHALL follow a three-phase flow: ResourceUploadStart (with expected hash, type, size, metadata), sequential ResourceUploadChunk messages (max 64 KiB per chunk, 0-based sequential index), and ResourceUploadComplete. The runtime SHALL validate the BLAKE3 hash of received bytes against expected_hash after completion.
-Source: RFC 0011 §3.2, §3.4
+For resources larger than 64 KiB, the upload SHALL follow a start/ack/chunk/complete flow: ResourceUploadStart (with expected hash, type, size, metadata), runtime `ResourceUploadAccepted` acknowledgement with `upload_id` when chunk transfer is required, sequential ResourceUploadChunk messages (max 64 KiB per chunk, 0-based sequential index), and ResourceUploadComplete. The runtime SHALL validate the BLAKE3 hash of received bytes against expected_hash after completion.
+Source: RFC 0011 §3.2, §3.4, §3.6
 Scope: v1-mandatory
 
 #### Scenario: Chunked upload success
@@ -89,29 +119,25 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Upload Validation
-Before storing, the runtime SHALL validate: (1) capability (`upload_resource` for scene-node image/font resources, `register_widget_asset` for runtime widget SVG assets), (2) BLAKE3 hash integrity matches expected hash, (3) total bytes are within per-resource limits, (4) budget limits are not exceeded (including dedicated runtime widget-asset durable budgets), (5) resource_type is v1-supported for the selected path, and (6) content decodes/parses successfully (images decode, fonts parse, SVG parses as valid SVG). For widget registrations that provide `transport_crc32c`, the runtime SHALL validate CRC32C as a transport-integrity check and reject mismatches.
-Source: RFC 0011 §3.5, §2.2a, §9.1
+Before storing, the runtime SHALL validate: (1) capability (`upload_resource` for scene-node image/font resources, `register_widget_asset` for runtime widget SVG assets), (2) BLAKE3 hash integrity matches expected hash, (3) total bytes are within per-resource limits, (4) resource_type is v1-supported for the selected path, and (5) content decodes/parses successfully (images decode, fonts parse, SVG parses as valid SVG). For scene-node image/font resources, decoded texture budget SHALL NOT be rejected at upload-storage time; it SHALL be enforced when a mutation creates or updates a node that references the returned `ResourceId`. For widget registrations, dedicated runtime widget-asset durable budgets SHALL still be enforced at registration time. Upload rate limiting and concurrent-upload limits SHALL apply to the upload transport itself. For widget registrations that provide `transport_crc32c`, the runtime SHALL validate CRC32C as a transport-integrity check and reject mismatches.
+Source: RFC 0011 §3.5, §8.4, §9.1, §11.2; session-resource-upload-rfc0011 direction/design
 Scope: v1-mandatory
 
 #### Scenario: Capability check failure
 - **WHEN** a guest agent (without upload_resource capability) attempts to upload a resource
 - **THEN** the upload MUST be rejected with RESOURCE_CAPABILITY_DENIED
 
-#### Scenario: Widget registration capability check failure
-- **WHEN** an agent without register_widget_asset capability attempts runtime widget SVG registration
-- **THEN** the request MUST be rejected with WIDGET_ASSET_CAPABILITY_MISSING
-
 #### Scenario: Decode failure
 - **WHEN** an agent uploads bytes that claim to be IMAGE_PNG but contain corrupted data that cannot decode
 - **THEN** the upload MUST be rejected with RESOURCE_DECODE_ERROR
 
-#### Scenario: Budget exceeded
-- **WHEN** an agent whose texture_bytes_total consumption is at the lease limit attempts to upload another texture
-- **THEN** the upload MUST be rejected with RESOURCE_BUDGET_EXCEEDED
+#### Scenario: Scene-resource upload is not rejected on texture budget alone
+- **WHEN** an uploaded image decodes successfully but is not yet referenced by any scene node
+- **THEN** the upload MUST NOT be rejected solely because it would exceed the agent's `texture_bytes_total` budget if later referenced
 
-#### Scenario: Widget transport checksum mismatch
-- **WHEN** WidgetAssetRegister provides transport_crc32c and payload CRC does not match
-- **THEN** the runtime MUST reject the request with WIDGET_ASSET_CHECKSUM_MISMATCH
+#### Scenario: Widget registration still enforces durable store budget
+- **WHEN** a runtime widget SVG registration would exceed the dedicated widget-asset durable budget
+- **THEN** the request MUST be rejected at registration time
 
 ---
 
@@ -288,6 +314,21 @@ Scope: v1-mandatory
 #### Scenario: Font fallback on missing custom font
 - **WHEN** a TextMarkdownNode references a custom font ResourceId that is not in the store
 - **THEN** the runtime MUST fall back to SystemSansSerif (bundled default) without notifying the agent
+
+---
+
+### Requirement: Uploaded Font Boundary
+If resident font uploads remain enabled in v1, they SHALL be limited to scene-node/tile-local text styling and SHALL NOT override runtime-owned zone or component-profile typography. This seam's first consumer tranche SHALL NOT require proving agent-uploaded font consumers.
+Source: architecture.md §Text rendering; RFC 0011 §7.1, §7.2; session-resource-upload-rfc0011 direction/design
+Scope: v1-mandatory
+
+#### Scenario: Uploaded font does not alter zone typography
+- **WHEN** an agent uploads a custom font resource
+- **THEN** subtitle, notification, and other runtime-owned zone/component typography MUST remain controlled by runtime rendering policy rather than that uploaded font
+
+#### Scenario: First live-proof tranche remains image-led
+- **WHEN** the first resident exemplar/user-test consumers are converted to the repaired upload contract
+- **THEN** successful image-based consumer proof MUST be sufficient even if no agent-uploaded font consumer is exercised yet
 
 ---
 
