@@ -14,13 +14,12 @@ use tze_hud_protocol::proto;
 use tze_hud_protocol::proto::session as session_proto;
 #[allow(deprecated)]
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
-use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_runtime::HeadlessRuntime;
+use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_scene::types::{NodeData, ZoneRegistry};
 
 const DISPLAY_W: f32 = 1920.0;
 const DISPLAY_H: f32 = 1080.0;
-const GRPC_PORT: u16 = 50061;
 const TEST_PSK: &str = "text-portal-adapter-test-key";
 const MAX_VIEWER_INPUT_BYTES: usize = 512;
 
@@ -33,7 +32,10 @@ fn now_wall_us() -> u64 {
 
 fn now_mono_us() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_micros() as u64
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros() as u64
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,8 +244,11 @@ impl AgentSession {
     }
 }
 
-async fn connect_agent(agent_id: &str) -> Result<AgentSession, Box<dyn std::error::Error>> {
-    let mut client = HudSessionClient::connect(format!("http://[::1]:{GRPC_PORT}")).await?;
+async fn connect_agent(
+    agent_id: &str,
+    grpc_port: u16,
+) -> Result<AgentSession, Box<dyn std::error::Error>> {
+    let mut client = HudSessionClient::connect(format!("http://[::1]:{grpc_port}")).await?;
 
     let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
@@ -347,7 +352,11 @@ async fn create_tile(
     let msg = session.next_non_state_change().await?;
     match msg.payload {
         Some(session_proto::server_message::Payload::MutationResult(result)) if result.accepted => {
-            Ok(result.created_ids.first().cloned().unwrap_or_default())
+            Ok(result
+                .created_ids
+                .first()
+                .cloned()
+                .expect("MutationResult accepted but no IDs created"))
         }
         Some(session_proto::server_message::Payload::MutationResult(result)) => Err(format!(
             "CreateTile rejected: {} {}",
@@ -429,11 +438,8 @@ async fn set_tile_root_text(
 
 #[test]
 fn tmux_adapter_satisfies_transport_agnostic_bridge_contract() {
-    let mut adapter = TmuxPilotAdapter::new(
-        "portal://pilot/tmux-1",
-        "TMUX Portal",
-        "session:build.1",
-    );
+    let mut adapter =
+        TmuxPilotAdapter::new("portal://pilot/tmux-1", "TMUX Portal", "session:build.1");
     assert_eq!(adapter.status(), PortalSessionStatus::Connecting);
 
     adapter.mark_live();
@@ -468,12 +474,16 @@ fn tmux_adapter_satisfies_transport_agnostic_bridge_contract() {
 }
 
 #[tokio::test]
-async fn tmux_pilot_drives_portal_over_existing_primary_session_stream(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn tmux_pilot_drives_portal_over_existing_primary_session_stream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("[::1]:0")?;
+    let grpc_port = listener.local_addr()?.port();
+    drop(listener);
+
     let config = HeadlessConfig {
         width: DISPLAY_W as u32,
         height: DISPLAY_H as u32,
-        grpc_port: GRPC_PORT,
+        grpc_port,
         psk: TEST_PSK.to_string(),
         config_toml: None,
     };
@@ -489,13 +499,10 @@ async fn tmux_pilot_drives_portal_over_existing_primary_session_stream(
 
     let _server = runtime.start_grpc_server().await?;
 
-    let mut session = connect_agent("portal-adapter-agent").await?;
+    let mut session = connect_agent("portal-adapter-agent", grpc_port).await?;
 
-    let mut adapter = TmuxPilotAdapter::new(
-        "portal://pilot/tmux-live",
-        "TMUX Pilot",
-        "session:pilot.0",
-    );
+    let mut adapter =
+        TmuxPilotAdapter::new("portal://pilot/tmux-live", "TMUX Pilot", "session:pilot.0");
     adapter.mark_live();
     adapter.queue_tmux_line("agent> starting pilot stream");
 
@@ -522,11 +529,13 @@ async fn tmux_pilot_drives_portal_over_existing_primary_session_stream(
     );
     set_tile_root_text(&mut session, tile_id.clone(), first).await?;
 
-    bridge.adapter.queue_tmux_line("agent> rendered incremental update");
+    bridge
+        .adapter
+        .queue_tmux_line("agent> rendered incremental update");
     bridge.ingest_adapter_output();
-    bridge.submit_bounded_input("interrupt").expect(
-        "viewer input should remain bounded and flow through the adapter contract",
-    );
+    bridge
+        .submit_bounded_input("interrupt")
+        .expect("viewer input should remain bounded and flow through the adapter contract");
 
     let second = format!(
         "**{}** ({:?})\n{}",
@@ -536,15 +545,17 @@ async fn tmux_pilot_drives_portal_over_existing_primary_session_stream(
     );
     set_tile_root_text(&mut session, tile_id, second).await?;
 
-    let (tile_count, contains_incremental, contains_identity) = {
+    let (session_tile_count, contains_incremental, contains_identity, session_count) = {
         let state = runtime.shared_state().lock().await;
         let scene = state.scene.lock().await;
         let mut has_incremental = false;
         let mut has_identity = false;
+        let mut count = 0;
         for tile in scene.tiles.values() {
             if tile.namespace != session.namespace {
                 continue;
             }
+            count += 1;
             if let Some(root_id) = tile.root_node {
                 if let Some(node) = scene.nodes.get(&root_id) {
                     if let NodeData::TextMarkdown(text) = &node.data {
@@ -554,12 +565,30 @@ async fn tmux_pilot_drives_portal_over_existing_primary_session_stream(
                 }
             }
         }
-        (scene.tiles.len(), has_incremental, has_identity)
+        (
+            count,
+            has_incremental,
+            has_identity,
+            state.sessions.session_count(),
+        )
     };
 
-    assert_eq!(tile_count, 1, "pilot creates one governed content-layer tile");
-    assert!(contains_incremental, "stream increments must land in portal content");
-    assert!(contains_identity, "identity text must be rendered from bridge contract");
+    assert_eq!(
+        session_tile_count, 1,
+        "pilot creates one governed content-layer tile"
+    );
+    assert!(
+        contains_incremental,
+        "stream increments must land in portal content"
+    );
+    assert!(
+        contains_identity,
+        "identity text must be rendered from bridge contract"
+    );
+    assert_eq!(
+        session_count, 1,
+        "tmux pilot path must not open an additional HudSession stream"
+    );
     assert_eq!(
         session.sequence, 5,
         "all portal activity must run through the single primary resident stream"
