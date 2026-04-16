@@ -62,7 +62,7 @@ The worker cannot mutate Beads lifecycle state in this lane. Materialize the fol
    `type`: `feature`
    `priority`: `1`
    `depends_on`: `discovered-from:hud-ooj1.6`
-   `rationale`: `Close GAP-1 by enforcing configured per-session upload rate limits on resident upload flow and ensuring `RESOURCE_RATE_LIMITED`/transport shaping behavior is implemented, measured, and documented.`
+   `rationale`: `Close GAP-1 by enforcing configured per-session upload rate limits on resident upload flow (including explicit `RESOURCE_RATE_LIMITED` behavior, currently not implemented) and by documenting/validating transport shaping traffic classes and head-of-line blocking risk per payload variant.`
 
 2. `title`: `Add resident upload rate-limit/backpressure protocol-runtime coverage`
    `type`: `task`
