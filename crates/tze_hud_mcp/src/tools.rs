@@ -16,6 +16,8 @@
 //! - `publish_to_widget` → `handle_publish_to_widget`
 //! - `list_widgets`      → `handle_list_widgets`
 //! - `clear_widget`      → `handle_clear_widget`
+//! - `list_elements`     → `handle_list_elements`
+//! - `publish_to_element`→ `handle_publish_to_element`
 
 use crate::{error::McpError, types::McpResult};
 use serde::{Deserialize, Serialize};
@@ -24,9 +26,10 @@ use std::collections::HashMap;
 use tze_hud_scene::{
     graph::SceneGraph,
     types::{
-        Capability, FontFamily, Node, NodeData, NotificationAction, NotificationPayload, Rect,
-        Rgba, SceneId, StatusBarPayload, TextAlign, TextMarkdownNode, TextOverflow,
-        WidgetParameterValue, ZoneContent,
+        Capability, FontFamily, GeometryPolicy, Node, NodeData, NotificationAction,
+        NotificationPayload, Rect, Rgba, SceneId, StatusBarPayload, TextAlign, TextMarkdownNode,
+        TextOverflow, WidgetParameterValue, ZoneContent, geometry_policy_to_absolute_rect,
+        rect_to_relative_geometry_policy,
     },
 };
 
@@ -850,6 +853,449 @@ pub fn handle_list_scene(params: Value, scene: &SceneGraph) -> McpResult<ListSce
         tabs,
         zones: zones_result.zones,
     })
+}
+
+// ─── list_elements ──────────────────────────────────────────────────────────
+
+/// Parameters for `list_elements`.
+#[derive(Debug, Deserialize, Default)]
+pub struct ListElementsParams {
+    /// Optional namespace prefix filter.
+    #[serde(default)]
+    pub namespace_filter: Option<String>,
+    /// Optional element type filter (`tile`, `zone`, or `widget`).
+    #[serde(default)]
+    pub element_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElementTypeFilter {
+    Tile,
+    Zone,
+    Widget,
+}
+
+/// Relative geometry payload in the MCP list-elements response.
+#[derive(Debug, Serialize)]
+pub struct ElementGeometry {
+    pub x_pct: f32,
+    pub y_pct: f32,
+    pub width_pct: f32,
+    pub height_pct: f32,
+}
+
+/// A single element entry returned by `list_elements`.
+#[derive(Debug, Serialize)]
+pub struct ElementEntry {
+    pub element_id: String,
+    pub element_type: String,
+    pub namespace: String,
+    pub current_geometry: ElementGeometry,
+    pub has_user_override: bool,
+    pub created_at_ms: u64,
+    pub last_published_at_ms: u64,
+}
+
+/// Response payload for `list_elements`.
+#[derive(Debug, Serialize)]
+pub struct ListElementsResult {
+    pub elements: Vec<ElementEntry>,
+    pub count: usize,
+}
+
+fn parse_element_type_filter(filter: Option<&str>) -> McpResult<Option<ElementTypeFilter>> {
+    let Some(raw) = filter else {
+        return Ok(None);
+    };
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    match normalized.to_ascii_lowercase().as_str() {
+        "tile" => Ok(Some(ElementTypeFilter::Tile)),
+        "zone" => Ok(Some(ElementTypeFilter::Zone)),
+        "widget" => Ok(Some(ElementTypeFilter::Widget)),
+        _ => Err(McpError::InvalidParams(
+            "element_type must be one of: tile, zone, widget".to_string(),
+        )),
+    }
+}
+
+fn zero_geometry() -> ElementGeometry {
+    ElementGeometry {
+        x_pct: 0.0,
+        y_pct: 0.0,
+        width_pct: 0.0,
+        height_pct: 0.0,
+    }
+}
+
+fn geometry_policy_to_relative_entry(
+    policy: GeometryPolicy,
+    display_area: Rect,
+) -> ElementGeometry {
+    let relative = match policy {
+        GeometryPolicy::Relative {
+            x_pct,
+            y_pct,
+            width_pct,
+            height_pct,
+        } => {
+            return ElementGeometry {
+                x_pct,
+                y_pct,
+                width_pct,
+                height_pct,
+            };
+        }
+        _ => rect_to_relative_geometry_policy(
+            geometry_policy_to_absolute_rect(policy, display_area.width, display_area.height),
+            display_area.width,
+            display_area.height,
+        ),
+    };
+
+    match relative {
+        GeometryPolicy::Relative {
+            x_pct,
+            y_pct,
+            width_pct,
+            height_pct,
+        } => ElementGeometry {
+            x_pct,
+            y_pct,
+            width_pct,
+            height_pct,
+        },
+        _ => zero_geometry(),
+    }
+}
+
+/// List all known scene elements with optional namespace/type filtering.
+///
+/// This MCP bridge view is scene-derived: it reports IDs and current geometry for
+/// tiles, zone definitions, and widget instances.
+pub fn handle_list_elements(params: Value, scene: &SceneGraph) -> McpResult<ListElementsResult> {
+    let p: ListElementsParams = parse_params(params)?;
+    let namespace_filter = p.namespace_filter.unwrap_or_default();
+    let type_filter = parse_element_type_filter(p.element_type.as_deref())?;
+    let display_area = scene.display_area;
+
+    let mut elements = Vec::new();
+
+    if type_filter.is_none() || type_filter == Some(ElementTypeFilter::Tile) {
+        for tile in scene.tiles.values() {
+            if !namespace_filter.is_empty() && !tile.namespace.starts_with(&namespace_filter) {
+                continue;
+            }
+            let geometry = geometry_policy_to_relative_entry(
+                rect_to_relative_geometry_policy(
+                    tile.bounds,
+                    display_area.width,
+                    display_area.height,
+                ),
+                display_area,
+            );
+            elements.push(ElementEntry {
+                element_id: tile.id.to_string(),
+                element_type: "tile".to_string(),
+                namespace: tile.namespace.clone(),
+                current_geometry: geometry,
+                has_user_override: false,
+                created_at_ms: 0,
+                last_published_at_ms: 0,
+            });
+        }
+    }
+
+    if type_filter.is_none() || type_filter == Some(ElementTypeFilter::Zone) {
+        for zone in scene.zone_registry.zones.values() {
+            if !namespace_filter.is_empty() && !zone.name.starts_with(&namespace_filter) {
+                continue;
+            }
+            let geometry = scene
+                .zone_registry
+                .resolve_geometry_policy_for_zone(&zone.name, None, None)
+                .map(|policy| geometry_policy_to_relative_entry(policy, display_area))
+                .unwrap_or_else(zero_geometry);
+            let last_published_at_ms = scene
+                .zone_registry
+                .active_for_zone(&zone.name)
+                .iter()
+                .map(|record| record.published_at_wall_us / 1_000)
+                .max()
+                .unwrap_or(0);
+            elements.push(ElementEntry {
+                element_id: zone.id.to_string(),
+                element_type: "zone".to_string(),
+                namespace: zone.name.clone(),
+                current_geometry: geometry,
+                has_user_override: false,
+                created_at_ms: 0,
+                last_published_at_ms,
+            });
+        }
+    }
+
+    if type_filter.is_none() || type_filter == Some(ElementTypeFilter::Widget) {
+        for instance in scene.widget_registry.instances.values() {
+            if !namespace_filter.is_empty()
+                && !instance.instance_name.starts_with(&namespace_filter)
+            {
+                continue;
+            }
+            let geometry = scene
+                .widget_registry
+                .resolve_geometry_policy_for_instance(&instance.instance_name, None)
+                .map(|policy| geometry_policy_to_relative_entry(policy, display_area))
+                .unwrap_or_else(zero_geometry);
+            let last_published_at_ms = scene
+                .widget_registry
+                .active_for_widget(&instance.instance_name)
+                .iter()
+                .map(|record| record.published_at_wall_us / 1_000)
+                .max()
+                .unwrap_or(0);
+            elements.push(ElementEntry {
+                element_id: instance.id.to_string(),
+                element_type: "widget".to_string(),
+                namespace: instance.instance_name.clone(),
+                current_geometry: geometry,
+                has_user_override: false,
+                created_at_ms: 0,
+                last_published_at_ms,
+            });
+        }
+    }
+
+    elements.sort_by(|a, b| {
+        a.element_type
+            .cmp(&b.element_type)
+            .then_with(|| a.namespace.cmp(&b.namespace))
+            .then_with(|| a.element_id.cmp(&b.element_id))
+    });
+
+    Ok(ListElementsResult {
+        count: elements.len(),
+        elements,
+    })
+}
+
+// ─── publish_to_element ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+enum ElementTarget {
+    Tile(SceneId),
+    Zone(String),
+    Widget(String),
+}
+
+fn resolve_element_target_by_id(scene: &SceneGraph, element_id: SceneId) -> Option<ElementTarget> {
+    if scene.tiles.contains_key(&element_id) {
+        return Some(ElementTarget::Tile(element_id));
+    }
+    if let Some(zone) = scene
+        .zone_registry
+        .zones
+        .values()
+        .find(|zone| zone.id == element_id)
+    {
+        return Some(ElementTarget::Zone(zone.name.clone()));
+    }
+    scene
+        .widget_registry
+        .instances
+        .values()
+        .find(|instance| instance.id == element_id)
+        .map(|instance| ElementTarget::Widget(instance.instance_name.clone()))
+}
+
+/// Parameters for `publish_to_element`.
+#[derive(Debug, Deserialize)]
+pub struct PublishToElementParams {
+    /// Stable element UUID.
+    pub element_id: String,
+    /// Content payload. For tiles and zones this follows the same content rules
+    /// as `set_content` / `publish_to_zone`. For widgets this may be either an
+    /// object of parameter key/value pairs or `{"params": {...}}`.
+    pub content: Value,
+    /// Optional namespace used for zone/widget publish bookkeeping.
+    #[serde(default = "default_mcp_namespace")]
+    pub namespace: String,
+    /// Optional zone merge key.
+    #[serde(default)]
+    pub merge_key: Option<String>,
+    /// Optional zone breakpoints for stream_text content.
+    #[serde(default)]
+    pub breakpoints: Option<Vec<u64>>,
+    /// Optional zone/widget TTL (microseconds).
+    #[serde(default)]
+    pub ttl_us: Option<u64>,
+    /// Optional widget transition duration.
+    #[serde(default)]
+    pub transition_ms: u32,
+    /// Optional tile text style overrides.
+    #[serde(default)]
+    pub font_size_px: Option<f32>,
+    #[serde(default)]
+    pub color: Option<ColorParams>,
+    #[serde(default)]
+    pub background: Option<ColorParams>,
+    #[serde(default)]
+    pub alignment: Option<String>,
+}
+
+/// Response payload for `publish_to_element`.
+#[derive(Debug, Serialize)]
+pub struct PublishToElementResult {
+    pub element_id: String,
+    pub element_type: String,
+    pub namespace: String,
+    pub details: Value,
+}
+
+/// Publish content to an existing element ID (tile, zone, or widget).
+pub fn handle_publish_to_element(
+    params: Value,
+    scene: &mut SceneGraph,
+    caller_capabilities: &[String],
+) -> McpResult<PublishToElementResult> {
+    let p: PublishToElementParams = parse_params(params)?;
+    let element_id = parse_scene_id(&p.element_id)?;
+    let target = resolve_element_target_by_id(scene, element_id).ok_or_else(|| {
+        McpError::SceneError(format!(
+            "ELEMENT_NOT_FOUND: no tile, zone, or widget for element_id {}",
+            p.element_id
+        ))
+    })?;
+
+    match target {
+        ElementTarget::Tile(tile_id) => {
+            let text = match &p.content {
+                Value::String(s) if !s.is_empty() => s.clone(),
+                Value::Object(obj) => obj
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        McpError::InvalidParams(
+                            "tile publish content must be a non-empty string or object with non-empty text".to_string(),
+                        )
+                    })?,
+                _ => {
+                    return Err(McpError::InvalidParams(
+                        "tile publish content must be a non-empty string or object with non-empty text".to_string(),
+                    ))
+                }
+            };
+
+            let mut set_params = serde_json::Map::new();
+            set_params.insert("tile_id".to_string(), Value::String(tile_id.to_string()));
+            set_params.insert("content".to_string(), Value::String(text));
+            if let Some(font_size_px) = p.font_size_px {
+                set_params.insert("font_size_px".to_string(), serde_json::json!(font_size_px));
+            }
+            if let Some(color) = p.color {
+                set_params.insert(
+                    "color".to_string(),
+                    serde_json::json!({"r": color.r, "g": color.g, "b": color.b, "a": color.a}),
+                );
+            }
+            if let Some(background) = p.background {
+                set_params.insert(
+                    "background".to_string(),
+                    serde_json::json!({"r": background.r, "g": background.g, "b": background.b, "a": background.a}),
+                );
+            }
+            if let Some(alignment) = p.alignment {
+                set_params.insert("alignment".to_string(), Value::String(alignment));
+            }
+
+            let set_result = handle_set_content(Value::Object(set_params), scene)?;
+            let details =
+                serde_json::to_value(set_result).map_err(|e| McpError::Internal(e.to_string()))?;
+            Ok(PublishToElementResult {
+                element_id: p.element_id,
+                element_type: "tile".to_string(),
+                namespace: scene
+                    .tiles
+                    .get(&tile_id)
+                    .map(|tile| tile.namespace.clone())
+                    .unwrap_or_default(),
+                details,
+            })
+        }
+        ElementTarget::Zone(zone_name) => {
+            let mut zone_params = serde_json::Map::new();
+            zone_params.insert("zone_name".to_string(), Value::String(zone_name.clone()));
+            zone_params.insert("content".to_string(), p.content);
+            zone_params.insert("namespace".to_string(), Value::String(p.namespace.clone()));
+            if let Some(ttl_us) = p.ttl_us {
+                zone_params.insert("ttl_us".to_string(), serde_json::json!(ttl_us));
+            }
+            if let Some(merge_key) = p.merge_key.clone() {
+                zone_params.insert("merge_key".to_string(), Value::String(merge_key));
+            }
+            if let Some(breakpoints) = p.breakpoints.clone() {
+                zone_params.insert("breakpoints".to_string(), serde_json::json!(breakpoints));
+            }
+
+            let zone_result = handle_publish_to_zone(Value::Object(zone_params), scene)?;
+            let details =
+                serde_json::to_value(zone_result).map_err(|e| McpError::Internal(e.to_string()))?;
+            Ok(PublishToElementResult {
+                element_id: p.element_id,
+                element_type: "zone".to_string(),
+                namespace: zone_name,
+                details,
+            })
+        }
+        ElementTarget::Widget(widget_name) => {
+            let params_value = match p.content {
+                Value::Object(obj) => obj
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(Value::Object(obj)),
+                _ => {
+                    return Err(McpError::InvalidParams(
+                        "widget publish content must be an object of parameter values or {\"params\": {...}}".to_string(),
+                    ))
+                }
+            };
+            if !params_value.is_object() {
+                return Err(McpError::InvalidParams(
+                    "widget publish content.params must be an object".to_string(),
+                ));
+            }
+
+            let mut widget_params = serde_json::Map::new();
+            widget_params.insert(
+                "widget_name".to_string(),
+                Value::String(widget_name.clone()),
+            );
+            widget_params.insert("params".to_string(), params_value);
+            widget_params.insert("namespace".to_string(), Value::String(p.namespace));
+            widget_params.insert(
+                "transition_ms".to_string(),
+                serde_json::json!(p.transition_ms),
+            );
+            if let Some(ttl_us) = p.ttl_us {
+                widget_params.insert("ttl_us".to_string(), serde_json::json!(ttl_us));
+            }
+
+            let widget_result =
+                handle_publish_to_widget(Value::Object(widget_params), scene, caller_capabilities)?;
+            let details = serde_json::to_value(widget_result)
+                .map_err(|e| McpError::Internal(e.to_string()))?;
+            Ok(PublishToElementResult {
+                element_id: p.element_id,
+                element_type: "widget".to_string(),
+                namespace: widget_name,
+                details,
+            })
+        }
+    }
 }
 
 // ─── publish_to_widget ───────────────────────────────────────────────────────
@@ -4622,6 +5068,236 @@ mod tests {
         assert_eq!(
             zone.auto_clear_ms, None,
             "ambient-background must have auto_clear_ms=None (persistent until replaced)"
+        );
+    }
+
+    #[test]
+    fn test_list_elements_returns_all_types_and_supports_filters() {
+        let (mut scene, tab_id) = scene_with_widget();
+
+        // Add one zone.
+        let zone_name = "list-elements-zone".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "ListElements test zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.1,
+                    y_pct: 0.1,
+                    width_pct: 0.6,
+                    height_pct: 0.2,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 2,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+
+        // Add one tile.
+        let lease_id = scene.grant_lease(
+            "agent.list-elements",
+            60_000,
+            vec![
+                Capability::CreateTile,
+                Capability::UpdateTile,
+                Capability::CreateNode,
+                Capability::UpdateNode,
+            ],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent.list-elements",
+                lease_id,
+                Rect::new(192.0, 108.0, 384.0, 216.0),
+                1,
+            )
+            .expect("create tile");
+
+        // Publish once to zone and widget so last_published_at fields are populated.
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone_name,
+                "content": "zone payload",
+                "namespace": "agent.list-elements"
+            }),
+            &mut scene,
+        )
+        .expect("publish zone");
+        handle_publish_to_widget(
+            json!({
+                "widget_name": "gauge",
+                "params": {"level": 0.42},
+                "namespace": "agent.list-elements"
+            }),
+            &mut scene,
+            &["publish_widget:gauge".to_string()],
+        )
+        .expect("publish widget");
+
+        let all = handle_list_elements(json!({}), &scene).expect("list all elements");
+        assert!(
+            all.elements.iter().any(|e| e.element_type == "tile"
+                && e.element_id == tile_id.to_string()
+                && e.namespace == "agent.list-elements"),
+            "expected tile entry in list_elements result"
+        );
+        assert!(
+            all.elements.iter().any(|e| e.element_type == "zone"
+                && e.namespace == zone_name
+                && e.last_published_at_ms > 0),
+            "expected zone entry with last_published_at_ms > 0"
+        );
+        assert!(
+            all.elements.iter().any(|e| e.element_type == "widget"
+                && e.namespace == "gauge"
+                && e.last_published_at_ms > 0),
+            "expected widget entry with last_published_at_ms > 0"
+        );
+
+        let tile_only = handle_list_elements(json!({"element_type": "tile"}), &scene)
+            .expect("list tile elements");
+        assert_eq!(tile_only.count, 1);
+        assert_eq!(tile_only.elements[0].element_type, "tile");
+
+        let namespace_filtered = handle_list_elements(
+            json!({"namespace_filter": "agent.list-elements", "element_type": "tile"}),
+            &scene,
+        )
+        .expect("list namespace-filtered elements");
+        assert_eq!(namespace_filtered.count, 1);
+        assert_eq!(
+            namespace_filtered.elements[0].namespace,
+            "agent.list-elements"
+        );
+    }
+
+    #[test]
+    fn test_publish_to_element_tile_by_id_sets_markdown_content() {
+        let (mut scene, tab_id) = scene_with_tab();
+        let lease_id = scene.grant_lease(
+            "agent.publish-element",
+            60_000,
+            vec![
+                Capability::CreateTile,
+                Capability::UpdateTile,
+                Capability::CreateNode,
+                Capability::UpdateNode,
+            ],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent.publish-element",
+                lease_id,
+                Rect::new(0.0, 0.0, 320.0, 120.0),
+                1,
+            )
+            .expect("create tile");
+
+        let result = handle_publish_to_element(
+            json!({
+                "element_id": tile_id.to_string(),
+                "content": "tile payload"
+            }),
+            &mut scene,
+            &[],
+        )
+        .expect("publish to tile by element id");
+
+        assert_eq!(result.element_type, "tile");
+        let tile = scene.tiles.get(&tile_id).expect("tile should exist");
+        let root_id = tile.root_node.expect("tile root should be set");
+        let root = scene.nodes.get(&root_id).expect("root node should exist");
+        match &root.data {
+            NodeData::TextMarkdown(markdown) => assert_eq!(markdown.content, "tile payload"),
+            other => panic!("expected markdown node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_publish_to_element_zone_by_id_routes_to_zone_publish() {
+        let (mut scene, _, zone_name) = scene_with_zone();
+        let zone_id = scene
+            .zone_registry
+            .zones
+            .get(&zone_name)
+            .expect("zone exists")
+            .id;
+
+        let result = handle_publish_to_element(
+            json!({
+                "element_id": zone_id.to_string(),
+                "content": "zone payload",
+                "namespace": "agent.zone"
+            }),
+            &mut scene,
+            &[],
+        )
+        .expect("publish to zone by element id");
+
+        assert_eq!(result.element_type, "zone");
+        let publishes = scene
+            .zone_registry
+            .active_publishes
+            .get(&zone_name)
+            .expect("zone publish records should exist");
+        assert_eq!(publishes.len(), 1);
+        assert!(
+            matches!(&publishes[0].content, ZoneContent::StreamText(s) if s == "zone payload"),
+            "zone content must be routed through publish_to_zone path"
+        );
+    }
+
+    #[test]
+    fn test_publish_to_element_widget_by_id_routes_to_widget_publish() {
+        let (mut scene, _) = scene_with_widget();
+        let widget_id = scene
+            .widget_registry
+            .instances
+            .get("gauge")
+            .expect("widget instance should exist")
+            .id;
+
+        let result = handle_publish_to_element(
+            json!({
+                "element_id": widget_id.to_string(),
+                "content": {"level": 0.73},
+                "namespace": "agent.widget"
+            }),
+            &mut scene,
+            &["publish_widget:gauge".to_string()],
+        )
+        .expect("publish to widget by element id");
+
+        assert_eq!(result.element_type, "widget");
+        let publishes = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(publishes.len(), 1);
+        assert_eq!(publishes[0].publisher_namespace, "agent.widget");
+    }
+
+    #[test]
+    fn test_publish_to_element_unknown_id_returns_element_not_found() {
+        let (mut scene, _) = scene_with_tab();
+        let err = handle_publish_to_element(
+            json!({
+                "element_id": SceneId::new().to_string(),
+                "content": "payload"
+            }),
+            &mut scene,
+            &[],
+        )
+        .expect_err("unknown id should fail");
+        assert!(
+            matches!(err, McpError::SceneError(ref msg) if msg.contains("ELEMENT_NOT_FOUND")),
+            "expected ELEMENT_NOT_FOUND scene error, got {err:?}"
         );
     }
 }
