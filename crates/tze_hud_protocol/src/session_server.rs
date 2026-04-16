@@ -2644,14 +2644,20 @@ async fn handle_mutation_batch(
                 }
 
                 let mut had_content = false;
-                if let Some(ref node_proto) = pt.node
-                    && let Some(node) = convert::proto_node_to_scene(node_proto)
-                {
-                    scene_mutations.push(SceneMutation::SetTileRoot {
-                        tile_id: element_id,
-                        node,
-                    });
-                    had_content = true;
+                if let Some(ref node_proto) = pt.node {
+                    if let Some(node) = convert::proto_node_to_scene(node_proto) {
+                        scene_mutations.push(SceneMutation::SetTileRoot {
+                            tile_id: element_id,
+                            node,
+                        });
+                        had_content = true;
+                    } else {
+                        mutation_conversion_error = Some((
+                            "INVALID_ARGUMENT".to_string(),
+                            "publish_to_tile node content is invalid or missing data".to_string(),
+                        ));
+                        break;
+                    }
                 }
 
                 if !had_content && requested_bounds.is_none() {
@@ -2847,22 +2853,24 @@ async fn handle_mutation_batch(
         let now = now_ms();
         let mut touched = false;
         for (element_id, element_type) in pending_touch_ids {
-            if let Some(entry) = st.element_store.entries.get_mut(&element_id)
-                && entry.element_type == element_type
-            {
-                entry.last_published_at = now;
-                touched = true;
+            if let Some(entry) = st.element_store.entries.get_mut(&element_id) {
+                if entry.element_type == element_type {
+                    entry.last_published_at = now;
+                    touched = true;
+                }
             }
         }
         for (element_type, namespace) in pending_touch_names {
             if let Some(id) = st
                 .element_store
                 .find_id_by_type_namespace(element_type, namespace.as_str())
-                && let Some(entry) = st.element_store.entries.get_mut(&id)
-                && entry.element_type == element_type
             {
-                entry.last_published_at = now;
-                touched = true;
+                if let Some(entry) = st.element_store.entries.get_mut(&id) {
+                    if entry.element_type == element_type {
+                        entry.last_published_at = now;
+                        touched = true;
+                    }
+                }
             }
         }
         if touched {
@@ -3112,14 +3120,20 @@ async fn apply_queued_batch_to_scene(
                 }
 
                 let mut had_content = false;
-                if let Some(ref node_proto) = pt.node
-                    && let Some(node) = convert::proto_node_to_scene(node_proto)
-                {
-                    scene_mutations.push(SceneMutation::SetTileRoot {
-                        tile_id: element_id,
-                        node,
-                    });
-                    had_content = true;
+                if let Some(ref node_proto) = pt.node {
+                    if let Some(node) = convert::proto_node_to_scene(node_proto) {
+                        scene_mutations.push(SceneMutation::SetTileRoot {
+                            tile_id: element_id,
+                            node,
+                        });
+                        had_content = true;
+                    } else {
+                        mutation_conversion_error = Some((
+                            "INVALID_ARGUMENT".to_string(),
+                            "publish_to_tile node content is invalid or missing data".to_string(),
+                        ));
+                        break;
+                    }
                 }
 
                 if !had_content && requested_bounds.is_none() {
@@ -3288,19 +3302,36 @@ async fn apply_queued_batch_to_scene(
     if result.applied {
         let mut persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
         let now = now_ms();
+        let mut touched = false;
         for (element_id, element_type) in pending_touch_ids {
-            if let Some(request) =
-                touch_element_store_entry_by_id(&mut st, element_id, element_type, now)
-            {
-                persist_request = Some(request);
+            if let Some(entry) = st.element_store.entries.get_mut(&element_id) {
+                if entry.element_type == element_type {
+                    entry.last_published_at = now;
+                    touched = true;
+                }
             }
         }
         for (element_type, namespace) in pending_touch_names {
-            if let Some(request) =
-                touch_element_store_entry_by_namespace(&mut st, element_type, &namespace, now)
+            if let Some(id) = st
+                .element_store
+                .find_id_by_type_namespace(element_type, namespace.as_str())
             {
-                persist_request = Some(request);
+                if let Some(entry) = st.element_store.entries.get_mut(&id) {
+                    if entry.element_type == element_type {
+                        entry.last_published_at = now;
+                        touched = true;
+                    }
+                }
             }
+        }
+        if touched {
+            persist_request =
+                st.element_store_path
+                    .clone()
+                    .map(|path| ElementStorePersistRequest {
+                        store: st.element_store.clone(),
+                        path,
+                    });
         }
         drop(st);
         persist_element_store(persist_request).await;
@@ -4259,8 +4290,7 @@ async fn handle_list_elements_request(
                         payload: Some(ServerPayload::RuntimeError(RuntimeError {
                             error_code: "INVALID_ARGUMENT".to_string(),
                             message: format!(
-                                "Unsupported element_type filter {:?}; expected tile|zone|widget",
-                                element_type_filter
+                                "Unsupported element_type filter {element_type_filter:?}; expected tile|zone|widget"
                             ),
                             context: "list_elements_request.element_type".to_string(),
                             hint: r#"{"supported":["tile","zone","widget"]}"#.to_string(),
@@ -4273,81 +4303,77 @@ async fn handle_list_elements_request(
         }
     };
 
-    let mut elements = Vec::new();
-    {
+    let (scene_handle, mut entries): (Arc<Mutex<SceneGraph>>, Vec<(SceneId, ElementStoreEntry)>) = {
         let st = state.lock().await;
-        let store = st.element_store.clone();
-        let scene = st.scene.lock().await;
+        (
+            st.scene.clone(),
+            st.element_store
+                .entries
+                .iter()
+                .map(|(id, entry)| (*id, entry.clone()))
+                .collect(),
+        )
+    };
+    entries.sort_by_key(|(id, entry)| (entry.created_at, id.to_bytes_le()));
 
-        let mut entries: Vec<(SceneId, ElementStoreEntry)> = store
-            .entries
-            .iter()
-            .map(|(id, entry)| (*id, entry.clone()))
-            .collect();
-        entries.sort_by_key(|(id, entry)| (entry.created_at, id.to_bytes_le()));
-
-        for (element_id, entry) in entries {
-            if let Some(filter) = parsed_type_filter
-                && entry.element_type != filter
-            {
+    let scene = scene_handle.lock().await;
+    let mut elements = Vec::new();
+    for (element_id, entry) in entries {
+        if let Some(filter) = parsed_type_filter {
+            if entry.element_type != filter {
                 continue;
             }
-            if !namespace_filter.is_empty() && !entry.namespace.starts_with(&namespace_filter) {
-                continue;
-            }
-
-            let zero_policy = GeometryPolicy::Relative {
-                x_pct: 0.0,
-                y_pct: 0.0,
-                width_pct: 0.0,
-                height_pct: 0.0,
-            };
-            let current_geometry = match entry.element_type {
-                ElementType::Tile => {
-                    let agent_policy = scene.tiles.get(&element_id).map(|tile| {
-                        rect_to_relative_geometry_policy(
-                            tile.bounds,
-                            scene.display_area.width,
-                            scene.display_area.height,
-                        )
-                    });
-                    resolve_geometry_override_chain(
-                        entry.geometry_override,
-                        agent_policy,
-                        None,
-                        None,
-                    )
-                    .unwrap_or(zero_policy)
-                }
-                ElementType::Zone => scene
-                    .zone_registry
-                    .resolve_geometry_policy_for_zone(
-                        &entry.namespace,
-                        entry.geometry_override.as_ref(),
-                        None,
-                    )
-                    .or(entry.geometry_override)
-                    .unwrap_or(zero_policy),
-                ElementType::Widget => scene
-                    .widget_registry
-                    .resolve_geometry_policy_for_instance(
-                        &entry.namespace,
-                        entry.geometry_override.as_ref(),
-                    )
-                    .or(entry.geometry_override)
-                    .unwrap_or(zero_policy),
-            };
-
-            elements.push(ElementInfo {
-                element_id: scene_id_to_bytes(element_id),
-                element_type: element_type_wire_name(entry.element_type).to_string(),
-                namespace: entry.namespace,
-                current_geometry: Some(convert::geometry_policy_to_proto(&current_geometry)),
-                has_user_override: entry.geometry_override.is_some(),
-                created_at_ms: entry.created_at,
-                last_published_at_ms: entry.last_published_at,
-            });
         }
+        if !namespace_filter.is_empty() && !entry.namespace.starts_with(&namespace_filter) {
+            continue;
+        }
+
+        let zero_policy = GeometryPolicy::Relative {
+            x_pct: 0.0,
+            y_pct: 0.0,
+            width_pct: 0.0,
+            height_pct: 0.0,
+        };
+        let current_geometry = match entry.element_type {
+            ElementType::Tile => {
+                let agent_policy = scene.tiles.get(&element_id).map(|tile| {
+                    rect_to_relative_geometry_policy(
+                        tile.bounds,
+                        scene.display_area.width,
+                        scene.display_area.height,
+                    )
+                });
+                resolve_geometry_override_chain(entry.geometry_override, agent_policy, None, None)
+                    .unwrap_or(zero_policy)
+            }
+            ElementType::Zone => scene
+                .zone_registry
+                .resolve_geometry_policy_for_zone(
+                    &entry.namespace,
+                    entry.geometry_override.as_ref(),
+                    None,
+                )
+                .or(entry.geometry_override)
+                .unwrap_or(zero_policy),
+            ElementType::Widget => scene
+                .widget_registry
+                .resolve_geometry_policy_for_instance(
+                    &entry.namespace,
+                    entry.geometry_override.as_ref(),
+                )
+                .or(entry.geometry_override)
+                .unwrap_or(zero_policy),
+        };
+
+        elements.push(ElementInfo {
+            element_id: scene_id_to_bytes(element_id),
+            element_type: element_type_wire_name(entry.element_type).to_string(),
+            namespace: entry.namespace,
+            current_geometry: Some(convert::geometry_policy_to_proto(&current_geometry)),
+            has_user_override: entry.geometry_override.is_some(),
+            created_at_ms: entry.created_at,
+            last_published_at_ms: entry.last_published_at,
+        });
     }
 
     let seq = session.next_server_seq();
@@ -6994,6 +7020,133 @@ mod tests {
                 entry.last_published_at > 1,
                 "publish_to_tile should update last_published_at"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_to_tile_by_element_id_rejects_invalid_node_even_with_bounds() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        let tile_id: SceneId;
+
+        {
+            let mut st = shared_state.lock().await;
+            st.element_store = tze_hud_scene::element_store::ElementStore::default();
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene.create_tab("main", 0).expect("create tab");
+            let bootstrap_lease = scene.grant_lease(
+                "tile-publisher-invalid-node",
+                60_000,
+                vec![
+                    Capability::CreateTile,
+                    Capability::UpdateTile,
+                    Capability::CreateNode,
+                    Capability::UpdateNode,
+                ],
+            );
+            tile_id = scene
+                .create_tile(
+                    tab_id,
+                    "tile-publisher-invalid-node",
+                    bootstrap_lease,
+                    Rect::new(20.0, 20.0, 100.0, 80.0),
+                    1,
+                )
+                .expect("create tile");
+            drop(scene);
+
+            st.element_store.entries.insert(
+                tile_id,
+                tze_hud_scene::element_store::ElementStoreEntry {
+                    element_type: tze_hud_scene::element_store::ElementType::Tile,
+                    namespace: "tile-publisher-invalid-node".to_string(),
+                    created_at: 1,
+                    last_published_at: 1,
+                    geometry_override: None,
+                },
+            );
+        }
+
+        let (tx, _init_messages, mut stream) = handshake_with_requested_capabilities(
+            &mut client,
+            "tile-publisher-invalid-node",
+            "test-key",
+            vec![
+                "create_tiles".to_string(),
+                "modify_own_tiles".to_string(),
+                "read_scene_topology".to_string(),
+            ],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .expect("lease request");
+
+        let lease_msg = next_non_state_change(&mut stream).await;
+        let lease_id = match lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id,
+            other => panic!("Expected granted lease response, got: {other:?}"),
+        };
+
+        let mut invalid_node = crate::convert::scene_node_to_proto(&Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::WHITE,
+                bounds: Rect::new(0.0, 0.0, 16.0, 16.0),
+            }),
+        });
+        invalid_node.data = None;
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: uuid::Uuid::now_v7().as_bytes().to_vec(),
+                lease_id,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::PublishToTile(
+                        crate::proto::PublishToTileMutation {
+                            element_id: scene_id_to_bytes(tile_id),
+                            bounds: Some(crate::proto::Rect {
+                                x: 10.0,
+                                y: 10.0,
+                                width: 60.0,
+                                height: 40.0,
+                                ..Default::default()
+                            }),
+                            node: Some(invalid_node),
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .expect("publish-to-tile invalid node mutation");
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        match result_msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(!result.accepted, "invalid node should be rejected");
+                assert_eq!(result.error_code, "INVALID_ARGUMENT");
+                assert!(
+                    result
+                        .error_message
+                        .contains("publish_to_tile node content is invalid or missing data"),
+                    "unexpected error message: {}",
+                    result.error_message
+                );
+            }
+            other => panic!("Expected MutationResult, got: {other:?}"),
         }
     }
 
