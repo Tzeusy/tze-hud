@@ -95,6 +95,10 @@ path = "v1_thesis.rs"
 name = "subtitle_streaming"
 path = "subtitle_streaming.rs"
 
+[[test]]
+name = "text_stream_portal_surface"
+path = "text_stream_portal_surface.rs"
+
 # Integration tests always run headless (no display server required).
 # tze_hud_runtime is built with the headless feature unconditionally so
 # all tests run in CI without a display. The workspace-level `headless`
