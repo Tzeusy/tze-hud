@@ -64,9 +64,8 @@ Current blocker:
 Current branch note:
 the executable `/user-test` scenario validates the live operator-visible
 sequence for stacking, content refresh, disconnect/orphan observation, and
-cleanup. Because the resident session stream in this branch does not yet expose
-the RFC 0011 resource-upload messages, the executable scenario uses 32x32
-solid-color avatar squares rather than uploaded `StaticImageNode` avatars.
+cleanup. It now uploads each 32x32 PNG avatar over the resident session stream
+and uses the returned `ResourceId` in the card's `StaticImageNode`.
 
 **Prerequisites:**
 
@@ -98,15 +97,15 @@ Action:
 
 Pass criteria:
 - All three batches accepted.
-- Three cards visible in bottom-left stack at y offsets `-96`, `-184`, `-272` from tab height.
+- Three cards visible in bottom-left stack at y offsets `-136`, `-260`, `-384` from tab height.
 - Avatars and text render correctly with no overlap.
 
 ### Step 2 — Verify initial visual state
 
 Pass criteria:
-- Each card is 200x80, 16px left/bottom margin.
+- Each card is 320x112, 24px left/bottom margin.
 - Background, avatar placement, and markdown text formatting are correct.
-- Passthrough behavior is observable (card does not capture pointer input).
+- Capture behavior is observable (dismiss hit target is interactive).
 
 ### Step 3 — Wait 30s and verify updates
 

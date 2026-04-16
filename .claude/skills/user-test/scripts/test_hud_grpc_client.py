@@ -1,3 +1,4 @@
+import asyncio
 import io
 import unittest
 from unittest.mock import AsyncMock
@@ -120,6 +121,114 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
         rid = types_pb2.ResourceIdProto(bytes=b"\x01" * 31)
         with self.assertRaises(ValueError):
             _resource_id_bytes(rid)
+
+    @unittest.skipIf(Image is None, "Pillow is required for PNG avatar tests")
+    async def test_upload_avatar_png_sends_resource_upload_start_and_returns_resource_id(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        client._send = AsyncMock(return_value=17)
+        expected_resource_id = b"\x99" * 32
+        client._await_resource_upload_result = AsyncMock(
+            return_value=session_pb2.ResourceStored(
+                request_sequence=17,
+                resource_id=types_pb2.ResourceIdProto(bytes=expected_resource_id),
+            )
+        )
+
+        avatar_png = make_avatar_png((66, 133, 244))
+        resource_id = await client.upload_avatar_png(avatar_png)
+
+        self.assertEqual(resource_id, expected_resource_id)
+        client._await_resource_upload_result.assert_awaited_once_with(
+            request_sequence=17,
+            timeout=10.0,
+        )
+        sent_start = client._send.await_args.kwargs["resource_upload_start"]
+        self.assertEqual(sent_start.resource_type, session_pb2.IMAGE_PNG)
+        self.assertEqual(sent_start.total_size_bytes, len(avatar_png))
+        self.assertEqual(sent_start.inline_data, avatar_png)
+        self.assertEqual(sent_start.metadata.width, 32)
+        self.assertEqual(sent_start.metadata.height, 32)
+        self.assertEqual(len(sent_start.expected_hash), 32)
+
+    async def test_await_resource_upload_result_raises_resource_error(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        client._response_queue = asyncio.Queue()
+        await client._response_queue.put(
+            session_pb2.ServerMessage(
+                resource_error_response=session_pb2.ResourceErrorResponse(
+                    request_sequence=23,
+                    error_code=session_pb2.RESOURCE_HASH_MISMATCH,
+                    message="hash mismatch",
+                    context="expected hash deadbeef",
+                    hint="recompute hash",
+                )
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "RESOURCE_HASH_MISMATCH"):
+            await client._await_resource_upload_result(
+                request_sequence=23,
+                timeout=0.1,
+            )
+
+    async def test_wait_for_does_not_drop_unmatched_messages(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        client._response_queue = asyncio.Queue()
+        mutation = session_pb2.ServerMessage(
+            mutation_result=session_pb2.MutationResult(
+                batch_id=b"\x01" * 16,
+                accepted=True,
+            )
+        )
+        lease = session_pb2.ServerMessage(
+            lease_response=session_pb2.LeaseResponse(
+                granted=True,
+                lease_id=b"\x02" * 16,
+                granted_ttl_ms=60_000,
+                granted_priority=2,
+            )
+        )
+        await client._response_queue.put(mutation)
+        await client._response_queue.put(lease)
+
+        lease_resp = await client._wait_for("lease_response", timeout=0.1)
+        self.assertTrue(lease_resp.lease_response.granted)
+        mutation_resp = await client._wait_for("mutation_result", timeout=0.1)
+        self.assertEqual(mutation_resp.mutation_result.batch_id, b"\x01" * 16)
+
+    async def test_await_resource_upload_result_does_not_drop_other_responses(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        client._response_queue = asyncio.Queue()
+        await client._response_queue.put(
+            session_pb2.ServerMessage(
+                mutation_result=session_pb2.MutationResult(
+                    batch_id=b"\x11" * 16,
+                    accepted=True,
+                )
+            )
+        )
+        await client._response_queue.put(
+            session_pb2.ServerMessage(
+                resource_stored=session_pb2.ResourceStored(
+                    request_sequence=5,
+                    resource_id=types_pb2.ResourceIdProto(bytes=b"\x22" * 32),
+                )
+            )
+        )
+
+        stored = await client._await_resource_upload_result(
+            request_sequence=5,
+            timeout=0.1,
+        )
+        self.assertEqual(stored.request_sequence, 5)
+        mutation_resp = await client._wait_for("mutation_result", timeout=0.1)
+        self.assertEqual(mutation_resp.mutation_result.batch_id, b"\x11" * 16)
+
+    async def test_upload_png_resource_rejects_payload_over_inline_limit(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        oversized = b"\x00" * ((64 * 1024) + 1)
+        with self.assertRaisesRegex(ValueError, "chunked upload is not implemented"):
+            await client.upload_png_resource(oversized)
 
     async def test_create_presence_card_tile_sequences_helper_calls(self):
         client = HudClient("example.invalid:50051", psk="test-key")

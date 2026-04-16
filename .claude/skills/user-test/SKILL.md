@@ -421,11 +421,11 @@ manual proof path:
 7. Finish with 2 remaining cards and a JSON transcript artifact
 
 Implementation note:
-The current resident session surface in this branch does not yet expose the
-RFC 0011 resource-upload messages needed for `StaticImageNode` avatar upload.
-This scenario therefore uses 32x32 solid-color avatar squares for the visual
-proof path. That still exercises the `hud-sx7q.3` target behavior: stacked
-cards, periodic text updates, disconnect/orphan observation, and cleanup.
+This scenario now uploads each 32x32 PNG avatar over the resident
+`HudSession` stream (`ResourceUploadStart`), then applies the returned
+`ResourceId` in the Presence Card `StaticImageNode`. The visual proof path
+therefore covers stacked cards, periodic text updates, disconnect/orphan
+observation, cleanup, and the real resident image-upload consumer contract.
 
 ### CLI
 
