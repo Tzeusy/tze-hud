@@ -588,6 +588,16 @@ mod tests {
     use crate::types::ResourceStoreConfig;
     use crate::validation::AgentBudget;
 
+    #[test]
+    fn upload_rate_limit_bytes_per_sec_uses_configured_value() {
+        let configured = 123_456usize;
+        let store = ResourceStore::new(ResourceStoreConfig {
+            upload_rate_limit_bytes_per_sec: configured,
+            ..ResourceStoreConfig::default()
+        });
+        assert_eq!(store.upload_rate_limit_bytes_per_sec(), configured);
+    }
+
     // ─── Inline fast path ─────────────────────────────────────────────────────
 
     #[tokio::test]

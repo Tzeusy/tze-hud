@@ -13319,6 +13319,21 @@ mod tests {
         assert_eq!(limiter.available_bytes(base + Duration::from_secs(1)), 8);
     }
 
+    #[test]
+    fn upload_byte_rate_limiter_zero_limit_is_unbounded() {
+        let base = Instant::now();
+        let mut limiter = UploadByteRateLimiter::with_limit(0);
+
+        assert_eq!(limiter.available_bytes(base), usize::MAX);
+        assert_eq!(limiter.next_delay(base), Duration::ZERO);
+
+        limiter.reserve_bytes(base, 1024);
+        assert_eq!(
+            limiter.available_bytes(base + Duration::from_millis(500)),
+            usize::MAX
+        );
+    }
+
     #[tokio::test]
     async fn test_resource_upload_chunk_transport_backpressure_from_rate_limit() {
         let (mut client, handle) = setup_widget_test_with_upload_rate_limit(8).await;
@@ -13542,6 +13557,169 @@ mod tests {
                 assert!(!stored.was_deduplicated);
             }
             other => panic!("expected ResourceStored after chunk backpressure, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_resource_upload_backpressure_preserves_transactional_chunk_order() {
+        let (mut client, handle) = setup_widget_test_with_upload_rate_limit(8).await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-transactional-backpressure",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        let payload_a = vec![0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80];
+        let payload_b = tiny_rgba_1x1([0xAA, 0xBB, 0xCC, 0xDD]);
+        let hash_a = blake3::hash(&payload_a).as_bytes().to_vec();
+        let hash_b = blake3::hash(&payload_b).as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash_a,
+                resource_type: 1, // IMAGE_RGBA8
+                total_size_bytes: payload_a.len() as u64,
+                metadata: Some(ResourceMetadata {
+                    width: 1,
+                    height: 2,
+                    ..Default::default()
+                }),
+                inline_data: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash_b,
+                resource_type: 1, // IMAGE_RGBA8
+                total_size_bytes: payload_b.len() as u64,
+                metadata: Some(ResourceMetadata {
+                    width: 1,
+                    height: 1,
+                    ..Default::default()
+                }),
+                inline_data: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let accepted_a = next_non_state_change(&mut stream).await;
+        let upload_a = match &accepted_a.payload {
+            Some(ServerPayload::ResourceUploadAccepted(accepted)) => {
+                assert_eq!(accepted.request_sequence, 2);
+                accepted.upload_id.clone()
+            }
+            other => panic!("expected ResourceUploadAccepted for upload A, got: {other:?}"),
+        };
+
+        let accepted_b = next_non_state_change(&mut stream).await;
+        let upload_b = match &accepted_b.payload {
+            Some(ServerPayload::ResourceUploadAccepted(accepted)) => {
+                assert_eq!(accepted.request_sequence, 3);
+                accepted.upload_id.clone()
+            }
+            other => panic!("expected ResourceUploadAccepted for upload B, got: {other:?}"),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_a.clone(),
+                chunk_index: 0,
+                data: payload_a,
+            })),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 5,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadComplete(
+                ResourceUploadComplete {
+                    upload_id: upload_a.clone(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 6,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadChunk(ResourceUploadChunk {
+                upload_id: upload_b.clone(),
+                chunk_index: 0,
+                data: payload_b,
+            })),
+        })
+        .await
+        .unwrap();
+
+        tx.send(ClientMessage {
+            sequence: 7,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadComplete(
+                ResourceUploadComplete {
+                    upload_id: upload_b.clone(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        let first_stored = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            next_non_state_change(&mut stream),
+        )
+        .await
+        .expect("first upload should complete before rate limiter delays second upload");
+
+        match &first_stored.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                assert_eq!(stored.request_sequence, 2);
+                assert_eq!(stored.upload_id, upload_a);
+                assert!(!stored.was_deduplicated);
+            }
+            other => panic!("expected first ResourceStored for request 2, got: {other:?}"),
+        }
+
+        let early_second = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            next_non_state_change(&mut stream),
+        )
+        .await;
+        assert!(
+            early_second.is_err(),
+            "second upload result should be delayed by upload-rate backpressure"
+        );
+
+        let second_stored = tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            next_non_state_change(&mut stream),
+        )
+        .await
+        .expect("second upload should complete once backpressure window clears");
+
+        match &second_stored.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                assert_eq!(stored.request_sequence, 3);
+                assert_eq!(stored.upload_id, upload_b);
+                assert!(!stored.was_deduplicated);
+            }
+            other => panic!("expected second ResourceStored for request 3, got: {other:?}"),
         }
 
         drop(handle);
