@@ -1024,8 +1024,10 @@ async fn test_tile_static_image_contain_mode_letterboxes() {
         centre
     );
 
-    // Top edge (y=2) should be tile background (dark), not blue.
-    let top = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 2);
+    // Letterbox bar (y=30, below the chrome drag handle at y=0..8) should be
+    // tile background (dark), not blue.  The letterbox region is y=0..64;
+    // y=30 is safely below the drag handle and still in the letterbox zone.
+    let top = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 30);
     assert!(
         top[2] < 100,
         "Contain mode: top letterbox pixel should not be blue; got {:?}",

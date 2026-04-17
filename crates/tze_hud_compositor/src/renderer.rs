@@ -3761,6 +3761,8 @@ impl Compositor {
             sh,
             Some(LayerAttachment::Chrome),
         );
+        // Collect drag handle entries once and reuse for both rendering and hit-region
+        // population, avoiding a redundant second traversal at the end of the frame.
         let drag_handles = self.collect_drag_handle_entries(scene, sw, sh);
         let mut drag_handle_vertices: Vec<RectVertex> = Vec::new();
         self.append_drag_handle_vertices(scene, &drag_handles, &mut drag_handle_vertices, sw, sh);
@@ -3809,7 +3811,8 @@ impl Compositor {
         // computed from the rendered geometry are used for hit-testing on the
         // next input event.
         self.populate_zone_hit_regions(scene, sw, sh);
-        self.populate_drag_handle_hit_regions(scene, sw, sh);
+        // Reuse the pre-computed drag_handles list rather than collecting again.
+        self.populate_drag_handle_hit_regions_from(scene, drag_handles);
 
         telemetry
     }
@@ -5540,6 +5543,19 @@ impl Compositor {
     /// Recompute runtime-internal drag-handle hit regions for the current frame.
     pub fn populate_drag_handle_hit_regions(&self, scene: &mut SceneGraph, sw: f32, sh: f32) {
         let handles = self.collect_drag_handle_entries(scene, sw, sh);
+        self.populate_drag_handle_hit_regions_from(scene, handles);
+    }
+
+    /// Populate drag-handle hit regions from a pre-computed entry list.
+    ///
+    /// Callers that already hold a `collect_drag_handle_entries` result (e.g.
+    /// `render_frame_headless`) should use this variant to avoid a second
+    /// collection pass.
+    fn populate_drag_handle_hit_regions_from(
+        &self,
+        scene: &mut SceneGraph,
+        handles: Vec<DragHandleEntry>,
+    ) {
         scene.drag_handle_hit_regions.clear();
         for (tab_order, entry) in (0_u32..).zip(handles.into_iter()) {
             let hit_region = HitRegionNode {
