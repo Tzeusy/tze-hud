@@ -209,11 +209,11 @@ where
     let dir = match platform {
         StorePlatform::Windows => env_lookup("LOCALAPPDATA")
             .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir())
+            .unwrap_or_else(std::env::temp_dir)
             .join("tze_hud"),
         StorePlatform::MacOs => env_lookup("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir())
+            .unwrap_or_else(std::env::temp_dir)
             .join("Library")
             .join("Application Support")
             .join("tze_hud"),

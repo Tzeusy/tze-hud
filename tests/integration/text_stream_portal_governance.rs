@@ -7,12 +7,13 @@
 use std::sync::Arc;
 
 use tze_hud_runtime::{
-    build_redaction_cmds, collect_diagnostic, hit_regions_enabled, is_tile_redacted,
     AttentionBudgetOutcome, AttentionBudgetTracker, ChromeState, ContentClassification,
     EnqueueResult, FreezeQueue, MutationTrafficClass, QueuedMutation, RedactionFrame,
-    RedactionStyle, TileRedactionState, ViewerClass,
+    RedactionStyle, TileRedactionState, ViewerClass, build_redaction_cmds, collect_diagnostic,
+    hit_regions_enabled, is_tile_redacted,
 };
 use tze_hud_scene::{
+    Capability, Clock, SceneGraph, SceneId, TestClock,
     events::InterruptionClass,
     lease::{LeaseState, ORPHAN_GRACE_PERIOD_MS},
     mutation::{MutationBatch, SceneMutation},
@@ -20,7 +21,6 @@ use tze_hud_scene::{
         FontFamily, Node, NodeData, Rect, Rgba, SolidColorNode, TextAlign, TextMarkdownNode,
         TextOverflow,
     },
-    Capability, Clock, SceneGraph, SceneId, TestClock,
 };
 
 const DISPLAY_W: f32 = 1920.0;
@@ -401,7 +401,10 @@ fn shell_status_snapshot_exposes_no_portal_identity_or_transcript() {
     );
 
     let snapshot = collect_diagnostic(&chrome, 123_456, scene.leases.len());
-    assert_eq!(snapshot.tab_count, 2, "snapshot should still report tab count");
+    assert_eq!(
+        snapshot.tab_count, 2,
+        "snapshot should still report tab count"
+    );
     let text = snapshot.to_string();
 
     assert!(

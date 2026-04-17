@@ -7,23 +7,23 @@
 
 use image::{ImageBuffer, Rgb};
 use tze_hud_resource::{
-    AgentBudget, ResourceStore, ResourceStoreConfig, ResourceType, UploadId, UploadStartRequest,
-    CAPABILITY_UPLOAD_RESOURCE,
+    AgentBudget, CAPABILITY_UPLOAD_RESOURCE, ResourceStore, ResourceStoreConfig, ResourceType,
+    UploadId, UploadStartRequest,
 };
 use tze_hud_runtime::{
-    build_redaction_cmds, hit_regions_enabled, is_tile_redacted, ContentClassification,
-    RedactionStyle, TileRedactionState, ViewerClass,
+    ContentClassification, RedactionStyle, TileRedactionState, ViewerClass, build_redaction_cmds,
+    hit_regions_enabled, is_tile_redacted,
 };
 use tze_hud_scene::{
-    graph::{SceneGraph, MAX_NODES_PER_TILE},
+    Capability, DeliveryPolicy, MAX_MARKDOWN_BYTES, MessageClass, TimestampValidationInput,
+    TimingError, TimingHints, WallUs, ZONE_TILE_Z_MIN,
+    graph::{MAX_NODES_PER_TILE, SceneGraph},
     lease::LeaseState,
     mutation::{MutationBatch, SceneMutation},
     types::{
         FontFamily, HitRegionNode, ImageFitMode, InputMode, Node, NodeData, Rect, SceneId,
         SolidColorNode, TextAlign, TextMarkdownNode, TextOverflow, TileScrollConfig,
     },
-    Capability, DeliveryPolicy, MessageClass, TimestampValidationInput, TimingError, TimingHints,
-    WallUs, MAX_MARKDOWN_BYTES, ZONE_TILE_Z_MIN,
 };
 
 const DISPLAY_W: f32 = 1920.0;

@@ -231,6 +231,7 @@ async fn zone_publish_stream_text(
                         payload: Some(proto::zone_content::Payload::StreamText(text.to_string())),
                     }),
                     ttl_us: 0,
+                    element_id: Vec::new(),
                     merge_key: String::new(),
                     breakpoints,
                 },

@@ -1034,7 +1034,7 @@ impl SceneGraph {
 
         let now_us = self.clock.now_us();
 
-        use crate::lease::capability::{revoke_capability_from_lease, CapabilityRevocationError};
+        use crate::lease::capability::{CapabilityRevocationError, revoke_capability_from_lease};
         match revoke_capability_from_lease(lease, cap) {
             Ok(cap_name) => {
                 self.version += 1;
@@ -2385,7 +2385,7 @@ impl SceneGraph {
         group_id: SceneId,
         tiles_with_pending: &std::collections::BTreeSet<SceneId>,
     ) -> Result<SyncGroupCommitDecision, ValidationError> {
-        use crate::timing::sync_commit::{apply_decision, evaluate_commit, CommitDecision};
+        use crate::timing::sync_commit::{CommitDecision, apply_decision, evaluate_commit};
 
         let group = self
             .sync_groups
@@ -6852,7 +6852,7 @@ mod tests {
     /// tiles with the highest lease_priority values (least important) shed first.
     #[test]
     fn test_grant_lease_with_priority_shedding_order() {
-        use crate::lease::priority::{shed_count_for_level4, shedding_order, TileSheddingEntry};
+        use crate::lease::priority::{TileSheddingEntry, shed_count_for_level4, shedding_order};
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let _l_high = scene.grant_lease_with_priority("chrome", 60_000, 0, vec![]);
@@ -7936,7 +7936,7 @@ mod spec_scenarios {
 
     #[test]
     fn all_25_test_scenes_pass_layer0_invariants() {
-        use crate::test_scenes::{assert_layer0_invariants, ClockMs, TestSceneRegistry};
+        use crate::test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants};
 
         let registry = TestSceneRegistry::new();
         let names = TestSceneRegistry::scene_names();

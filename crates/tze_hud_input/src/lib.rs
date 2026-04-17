@@ -77,15 +77,16 @@ pub mod pointer;
 pub mod scroll;
 
 // Re-export core dispatch types at the crate root for convenience.
-pub use dispatch::{build_agent_batch, DispatchOutcome, DispatchProcessor};
+pub use dispatch::{DispatchOutcome, DispatchProcessor, build_agent_batch};
 pub use events::{
     EventBatch, HitTestResult, InputEnvelope, LocalStateUpdate, RouteTarget, SceneLocalPatch,
     ScrollOffsetUpdate,
 };
 pub use hit_test::hit_test;
 pub use local_feedback::{
-    LocalFeedbackStyle, ResolvedFeedbackStyle, RollbackTracker, DEFAULT_FOCUS_RING_COLOR,
-    DEFAULT_FOCUS_RING_WIDTH_PX, DEFAULT_HOVER_TINT, DEFAULT_PRESS_DARKEN, ROLLBACK_ANIMATION_MS,
+    DEFAULT_FOCUS_RING_COLOR, DEFAULT_FOCUS_RING_WIDTH_PX, DEFAULT_HOVER_TINT,
+    DEFAULT_PRESS_DARKEN, LocalFeedbackStyle, ROLLBACK_ANIMATION_MS, ResolvedFeedbackStyle,
+    RollbackTracker,
 };
 pub use pointer::{
     CancelReason, ClickEvent, ContextMenuEvent, DoubleClickEvent, Modifiers, PointerButton,

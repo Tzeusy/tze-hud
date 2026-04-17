@@ -5394,11 +5394,11 @@ impl Compositor {
         let mut zone_names: Vec<_> = scene.zone_registry.active_publishes.keys().collect();
         zone_names.sort_unstable();
         for zone_name in zone_names {
-            if !scene
+            if scene
                 .zone_registry
                 .active_publishes
                 .get(zone_name)
-                .is_some_and(|p| !p.is_empty())
+                .is_none_or(|p| p.is_empty())
             {
                 continue;
             }
@@ -5422,11 +5422,11 @@ impl Compositor {
         let mut widget_names: Vec<_> = scene.widget_registry.instances.keys().collect();
         widget_names.sort_unstable();
         for instance_name in widget_names {
-            if !scene
+            if scene
                 .widget_registry
                 .active_publishes
                 .get(instance_name)
-                .is_some_and(|p| !p.is_empty())
+                .is_none_or(|p| p.is_empty())
             {
                 continue;
             }
@@ -5541,8 +5541,7 @@ impl Compositor {
     pub fn populate_drag_handle_hit_regions(&self, scene: &mut SceneGraph, sw: f32, sh: f32) {
         let handles = self.collect_drag_handle_entries(scene, sw, sh);
         scene.drag_handle_hit_regions.clear();
-        let mut tab_order: u32 = 0;
-        for entry in handles {
+        for (tab_order, entry) in (0_u32..).zip(handles.into_iter()) {
             let hit_region = HitRegionNode {
                 bounds: entry.bounds,
                 interaction_id: entry.interaction_id.clone(),
@@ -5559,7 +5558,6 @@ impl Compositor {
                 hit_region,
                 tab_order,
             });
-            tab_order += 1;
         }
 
         let live: HashSet<String> = scene
@@ -12554,6 +12552,7 @@ mod tests {
             hover_behavior: None,
         });
         scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
             widget_type_name: "test-widget".to_string(),
             tab_id: tab,
             geometry_override: None,
