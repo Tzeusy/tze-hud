@@ -1341,19 +1341,6 @@ impl Compositor {
             selected_alpha_mode = ?config.alpha_mode,
             "windowed: alpha mode selection"
         );
-        // Write diagnostic to a known file for remote debugging.
-        let diag = format!(
-            "backend: {:?}\ndevice: {}\nrequested_backends: {:?}\noverlay: {}\navailable_alpha_modes: {:?}\nselected_alpha_mode: {:?}\nformat: {:?}\npresent_mode: {:?}\n",
-            adapter_info.backend,
-            adapter_info.name,
-            backends,
-            overlay,
-            surface_caps.alpha_modes,
-            config.alpha_mode,
-            surface_format,
-            present_mode,
-        );
-        let _ = std::fs::write("C:\\tze_hud\\logs\\alpha_diag.txt", &diag);
         surface.configure(&device, &config);
         tracing::info!(
             format = ?surface_format,
@@ -3643,14 +3630,6 @@ impl Compositor {
 
         // In overlay mode, prepend a full-screen quad to zero out alpha.
         if self.overlay_mode {
-            // One-shot diagnostic: log surface dimensions on first frame.
-            if self.frame_number == 1 {
-                let diag = format!(
-                    "render_frame: sw={sw}, sh={sh}, compositor_w={}, compositor_h={}\n",
-                    self.width, self.height,
-                );
-                let _ = std::fs::write("C:\\tze_hud\\logs\\render_diag.txt", &diag);
-            }
             vertices.extend_from_slice(&rect_vertices(
                 0.0,
                 0.0,
