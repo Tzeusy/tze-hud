@@ -93,7 +93,7 @@ Neither spec directory contains any `drag-to-reposition` or
 
 ## Coverage Verdict
 
-1. **6 of 9 requirements/design decisions are fully covered** with shipped, tested
+1. **8 of 9 requirements/design decisions are fully covered** with shipped, tested
    code: R1, R2, R3, D1, D2, D3, D4, D5.
 2. **1 requirement is partially covered (GAP-1):** R4 (reset gesture) — the reset
    path is implemented but two E2E tests remain as `unimplemented!()` stubs and the
