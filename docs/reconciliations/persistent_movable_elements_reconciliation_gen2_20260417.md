@@ -88,7 +88,7 @@ All 9 items (R1–R4, D1–D5) from gen-1 retain their `Covered` status. No regr
 | R3 | V1-Compatible Drag Visual Feedback | Covered (unchanged) |
 | R4 | Reset Gesture conflict-free (v1 pointer path) | **Now fully covered** — Tests 3+4 active |
 | D1 | Chrome drag handles: 250ms pointer / 1000ms touch threshold | Covered (unchanged) |
-| D2 | Capture timing carve-out for chrome chrome drag handles | Covered (unchanged) |
+| D2 | Capture timing carve-out for chrome drag handles | Covered (unchanged) |
 | D3 | RFC 0001 override stage before atomic commit | Covered (unchanged) |
 | D4 | ZoneInstance and WidgetInstance gain persistent SceneId | Covered (unchanged) |
 | D5 | `last_published_at` touched on `PublishToTileMutation` success | Covered (unchanged) |
