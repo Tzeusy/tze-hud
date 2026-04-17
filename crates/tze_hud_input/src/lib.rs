@@ -98,6 +98,7 @@ pub use scroll::{
 };
 
 pub mod command;
+pub mod drag;
 pub mod focus;
 pub mod focus_tree;
 pub mod keyboard;
@@ -117,9 +118,17 @@ pub use keyboard::{
 };
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Instant;
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::{HitResult, NodeData, SceneId, ZoneInteractionKind};
+use tze_hud_scene::{ElementStore, ElementType, HitResult, NodeData, SceneId, ZoneInteractionKind};
+
+pub use drag::{
+    DEFAULT_SNAP_GRID_PCT, DRAG_HIGHLIGHT_BORDER_PX, DRAG_OPACITY_BOOST, DRAG_Z_ORDER_BOOST,
+    DeviceDragState, DragConfig, DragEventOutcome, DragPhase, LONG_PRESS_MOVEMENT_TOLERANCE_DP,
+    LONG_PRESS_POINTER_THRESHOLD_MS, LONG_PRESS_TOUCH_THRESHOLD_MS,
+};
+pub use tze_hud_scene::DragHandleElementKind;
 
 /// Raw pointer input event from the OS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -264,6 +273,13 @@ pub struct InputProcessor {
     current_drag_handle_hover: Option<String>,
     /// Currently pressed chrome drag handle interaction id.
     current_drag_handle_press: Option<String>,
+    /// Per-device long-press drag state.
+    ///
+    /// Keyed by `device_id`.  Each entry is independent so multi-touch devices
+    /// can have simultaneous independent drag interactions on different handles.
+    pub drag_states: HashMap<u32, DeviceDragState>,
+    /// Drag configuration (snap grid, etc.).
+    pub drag_config: DragConfig,
     /// Rollback animation tracker (agent-rejection-triggered).
     rollback_tracker: RollbackTracker,
     /// Pointer capture manager.
@@ -279,6 +295,8 @@ impl InputProcessor {
             current_press: None,
             current_drag_handle_hover: None,
             current_drag_handle_press: None,
+            drag_states: HashMap::new(),
+            drag_config: DragConfig::default(),
             rollback_tracker: RollbackTracker::new(),
             capture: capture::PointerCaptureManager::new(),
             scroll_state: ScrollState::new(),
@@ -1091,6 +1109,204 @@ impl InputProcessor {
                 capture_released_reason: Some(reason),
             },
         ]
+    }
+
+    /// Process a pointer event that hit a chrome drag handle.
+    ///
+    /// This implements the compositor-internal long-press drag state machine
+    /// (RFC 0004 §3.0 carve-out). Returns a [`DragEventOutcome`] that the
+    /// caller MUST act on:
+    ///
+    /// - `Accumulating { progress }` — update visual progress on the handle.
+    /// - `Activated` — apply visual feedback (z-boost, opacity, 2px border);
+    ///   runtime MUST track the element and call `process_drag_move` on
+    ///   subsequent `PointerMove` events for the same `device_id`.
+    /// - `Moved { element_id, new_x, new_y }` — update the element's bounds.
+    /// - `Released { element_id, final_x, final_y }` — persist the geometry.
+    /// - `Cancelled` — clear visual feedback.
+    /// - `Idle` — no action.
+    ///
+    /// ## Touch vs pointer thresholds
+    ///
+    /// `device_id == 0` (primary pointer / mouse) uses the 250 ms threshold.
+    /// Any other `device_id` is treated as a touch contact and uses 1000 ms.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_drag_handle_pointer(
+        &mut self,
+        event: &PointerEvent,
+        hit_interaction_id: &str,
+        element_id: SceneId,
+        element_kind: DragHandleElementKind,
+        element_bounds: tze_hud_scene::Rect,
+        display_width: f32,
+        display_height: f32,
+    ) -> DragEventOutcome {
+        let device_id = event.device_id;
+
+        // Select threshold: primary pointer = 250ms, touch = 1000ms.
+        let threshold_ms = if device_id == 0 {
+            drag::LONG_PRESS_POINTER_THRESHOLD_MS
+        } else {
+            drag::LONG_PRESS_TOUCH_THRESHOLD_MS
+        };
+
+        match event.kind {
+            PointerEventKind::Down => {
+                // Start accumulating for this device.
+                let state = DeviceDragState::new(
+                    hit_interaction_id.to_string(),
+                    element_id,
+                    element_kind,
+                    event.x,
+                    event.y,
+                    threshold_ms,
+                );
+                self.drag_states.insert(device_id, state);
+                DragEventOutcome::Accumulating { progress: 0.0 }
+            }
+            PointerEventKind::Move => {
+                let Some(state) = self.drag_states.get_mut(&device_id) else {
+                    return DragEventOutcome::Idle;
+                };
+                match state.phase {
+                    DragPhase::Idle => DragEventOutcome::Idle,
+                    DragPhase::Accumulating => {
+                        // Check movement cancellation.
+                        if state.has_exceeded_movement_tolerance(event.x, event.y) {
+                            let _ = self.drag_states.remove(&device_id);
+                            return DragEventOutcome::Cancelled;
+                        }
+                        // Check threshold.
+                        if state.is_threshold_met() {
+                            // Activate drag: record grab offset.
+                            state.phase = DragPhase::Activated;
+                            state.grab_offset_x = event.x - element_bounds.x;
+                            state.grab_offset_y = event.y - element_bounds.y;
+                            return DragEventOutcome::Activated {
+                                element_id: state.element_id,
+                                element_kind: state.element_kind,
+                            };
+                        }
+                        // Accumulating — update progress.
+                        let progress = state.progress();
+                        state.last_progress = progress;
+                        DragEventOutcome::Accumulating { progress }
+                    }
+                    DragPhase::Activated => {
+                        // Compute raw new top-left.
+                        let raw_x = event.x - state.grab_offset_x;
+                        let raw_y = event.y - state.grab_offset_y;
+                        let (new_x, new_y) = drag::quantise_and_clamp(
+                            raw_x,
+                            raw_y,
+                            element_bounds.width,
+                            element_bounds.height,
+                            display_width,
+                            display_height,
+                            self.drag_config.snap_grid_pct,
+                        );
+                        DragEventOutcome::Moved {
+                            element_id: state.element_id,
+                            element_kind: state.element_kind,
+                            new_x,
+                            new_y,
+                        }
+                    }
+                }
+            }
+            PointerEventKind::Up => {
+                let Some(state) = self.drag_states.remove(&device_id) else {
+                    return DragEventOutcome::Idle;
+                };
+                match state.phase {
+                    DragPhase::Idle | DragPhase::Accumulating => {
+                        // Short press (tap) — not a drag; no geometry change.
+                        DragEventOutcome::Cancelled
+                    }
+                    DragPhase::Activated => {
+                        let raw_x = event.x - state.grab_offset_x;
+                        let raw_y = event.y - state.grab_offset_y;
+                        let (final_x, final_y) = drag::quantise_and_clamp(
+                            raw_x,
+                            raw_y,
+                            element_bounds.width,
+                            element_bounds.height,
+                            display_width,
+                            display_height,
+                            self.drag_config.snap_grid_pct,
+                        );
+                        DragEventOutcome::Released {
+                            element_id: state.element_id,
+                            element_kind: state.element_kind,
+                            final_x,
+                            final_y,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check the long-press progress for a device during `Accumulating` phase.
+    ///
+    /// Returns the progress value (0.0–1.0) and whether the threshold has been
+    /// met. Returns `None` if there is no drag state for the device.
+    ///
+    /// Called by the compositor or runtime loop to poll accumulation state
+    /// (e.g. to drive a progress indicator on the drag handle).
+    pub fn drag_accumulation_progress(&self, device_id: u32) -> Option<f32> {
+        let state = self.drag_states.get(&device_id)?;
+        if state.phase == DragPhase::Accumulating {
+            Some(state.progress())
+        } else {
+            None
+        }
+    }
+
+    /// Returns the element_id and element_kind of the currently active drag for
+    /// a given device, or `None` if no drag is active.
+    ///
+    /// The compositor uses this to decide whether to apply visual feedback
+    /// (z-order boost, opacity, 2px highlight border) to the element.
+    pub fn active_drag_element(&self, device_id: u32) -> Option<(SceneId, DragHandleElementKind)> {
+        let state = self.drag_states.get(&device_id)?;
+        if state.phase == DragPhase::Activated {
+            Some((state.element_id, state.element_kind))
+        } else {
+            None
+        }
+    }
+
+    /// Persist the final drag geometry to the element store.
+    ///
+    /// This is a thin wrapper around [`drag::persist_geometry_override`] for
+    /// callers that have already resolved the `interaction_key` and know the
+    /// element type.
+    ///
+    /// The caller (windowed/headless runtime) MUST call this on
+    /// [`DragEventOutcome::Released`], then atomically save the element store
+    /// to disk.
+    #[allow(clippy::too_many_arguments)]
+    pub fn persist_drag_geometry(
+        store: &mut ElementStore,
+        element_type: ElementType,
+        interaction_key: &str,
+        final_x: f32,
+        final_y: f32,
+        width: f32,
+        height: f32,
+        display_width: f32,
+        display_height: f32,
+    ) {
+        let geometry = drag::final_position_to_geometry(
+            final_x,
+            final_y,
+            width,
+            height,
+            display_width,
+            display_height,
+        );
+        drag::persist_geometry_override(store, element_type, interaction_key, geometry);
     }
 }
 

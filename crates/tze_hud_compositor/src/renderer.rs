@@ -446,6 +446,68 @@ fn emit_border_quads(
     }
 }
 
+/// Emit a 2px inset highlight border around the given rectangle.
+///
+/// Used for v1-compatible drag visual feedback: a 2px border on the element
+/// being dragged. Two quads are emitted per edge (stacked 1px each) to achieve
+/// the 2px width.
+///
+/// Per the drag-to-reposition spec: MUST NOT require drop shadows, scale
+/// pulses, or animated transitions.
+#[allow(clippy::too_many_arguments)]
+fn emit_drag_highlight_border(
+    vertices: &mut Vec<crate::pipeline::RectVertex>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    sw: f32,
+    sh: f32,
+    color: [f32; 4],
+) {
+    const BORDER_PX: f32 = 2.0;
+    // Top edge.
+    if h >= BORDER_PX && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(x, y, w, BORDER_PX, sw, sh, color));
+    }
+    // Bottom edge.
+    if h >= BORDER_PX * 2.0 && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(
+            x,
+            y + h - BORDER_PX,
+            w,
+            BORDER_PX,
+            sw,
+            sh,
+            color,
+        ));
+    }
+    // Left edge (inset by BORDER_PX top and bottom to avoid corner overlap).
+    if h > BORDER_PX * 2.0 && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(
+            x,
+            y + BORDER_PX,
+            BORDER_PX,
+            h - BORDER_PX * 2.0,
+            sw,
+            sh,
+            color,
+        ));
+    }
+    // Right edge (inset by BORDER_PX top and bottom to avoid corner overlap).
+    if h > BORDER_PX * 2.0 && w >= BORDER_PX * 2.0 {
+        vertices.extend_from_slice(&rect_vertices(
+            x + w - BORDER_PX,
+            y + BORDER_PX,
+            BORDER_PX,
+            h - BORDER_PX * 2.0,
+            sw,
+            sh,
+            color,
+        ));
+    }
+}
+
 // ─── Notification icon helpers ───────────────────────────────────────────────
 
 /// Parse a `NotificationPayload.icon` string as a hex-encoded `ResourceId`.
@@ -489,7 +551,12 @@ struct TexturedDrawCmd {
 struct DragHandleEntry {
     element_id: SceneId,
     element_kind: DragHandleElementKind,
+    /// Bounds of the drag handle affordance itself.
     bounds: Rect,
+    /// Full display-space bounds of the element being dragged.
+    ///
+    /// Used to emit the 2px highlight border during active drag.
+    element_bounds: Rect,
     interaction_id: String,
     style: DragHandleStyle,
 }
@@ -5535,6 +5602,7 @@ impl Compositor {
                 element_id: tile.id,
                 element_kind: DragHandleElementKind::Tile,
                 bounds,
+                element_bounds: tile.bounds,
                 interaction_id,
                 style,
             });
@@ -5556,12 +5624,14 @@ impl Compositor {
                 None => continue,
             };
             let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
-            let bounds = Self::drag_handle_bounds(Rect::new(x, y, w, h), style, sw, sh);
+            let element_bounds_zone = Rect::new(x, y, w, h);
+            let bounds = Self::drag_handle_bounds(element_bounds_zone, style, sw, sh);
             let interaction_id = format!("drag-handle:{}", Self::scene_id_hex(zone_def.id));
             entries.push(DragHandleEntry {
                 element_id: zone_def.id,
                 element_kind: DragHandleElementKind::Zone,
                 bounds,
+                element_bounds: element_bounds_zone,
                 interaction_id,
                 style,
             });
@@ -5597,13 +5667,15 @@ impl Compositor {
                 None => continue,
             };
             let (x, y, w, h) = Self::resolve_widget_geometry(instance, definition, sw, sh);
-            let bounds = Self::drag_handle_bounds(Rect::new(x, y, w, h), style, sw, sh);
+            let element_bounds_widget = Rect::new(x, y, w, h);
+            let bounds = Self::drag_handle_bounds(element_bounds_widget, style, sw, sh);
             let element_id = Self::synthetic_widget_element_id(instance_name);
             let interaction_id = format!("drag-handle:{}", Self::scene_id_hex(element_id));
             entries.push(DragHandleEntry {
                 element_id,
                 element_kind: DragHandleElementKind::Widget,
                 bounds,
+                element_bounds: element_bounds_widget,
                 interaction_id,
                 style,
             });
@@ -5626,12 +5698,32 @@ impl Compositor {
                 .get(&entry.interaction_id)
                 .copied()
                 .unwrap_or_default();
-            let opacity = if local_state.hovered || local_state.pressed {
+            let is_active_drag = scene.is_drag_active(entry.element_id);
+            let opacity = if local_state.hovered || local_state.pressed || is_active_drag {
                 entry.style.opacity_active
             } else {
                 entry.style.opacity_idle
             }
             .clamp(0.0, 1.0);
+
+            // V1-compatible drag visual feedback: 2px highlight border around
+            // the element being dragged. Per spec: no drop shadows, no scale
+            // pulses, no animated transitions.
+            if is_active_drag {
+                // DRAG_HIGHLIGHT_COLOR: white at 0.9 alpha — visible on both
+                // light and dark backgrounds without design-token dependency.
+                let highlight_color = [1.0_f32, 1.0, 1.0, 0.9];
+                emit_drag_highlight_border(
+                    vertices,
+                    entry.element_bounds.x,
+                    entry.element_bounds.y,
+                    entry.element_bounds.width,
+                    entry.element_bounds.height,
+                    sw,
+                    sh,
+                    highlight_color,
+                );
+            }
 
             let mut base = entry.style.color;
             base.a = (base.a * opacity).clamp(0.0, 1.0);
@@ -13039,6 +13131,96 @@ mod tests {
         assert!(
             active_alpha > idle_alpha,
             "hovered handle alpha must be greater than idle alpha"
+        );
+    }
+
+    // ─── Drag visual feedback tests [hud-bs2q.5] ─────────────────────────────
+
+    /// During an active drag, `append_drag_handle_vertices` MUST emit the
+    /// v1-compatible visual feedback:
+    ///
+    /// 1. **Z-order boost** (implicit: caller bumps z via `drag_active_elements`)
+    /// 2. **Opacity increase**: handle alpha must equal `opacity_active` (same as
+    ///    hovered), not `opacity_idle`, when the element is in `drag_active_elements`.
+    /// 3. **2px highlight border**: vertex count must be greater than the idle count
+    ///    (border quads are additional vertices).
+    #[tokio::test]
+    async fn drag_visual_feedback_applied_during_active_drag() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("agent-a", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab,
+                "agent-a",
+                lease,
+                Rect::new(120.0, 140.0, 320.0, 180.0),
+                10,
+            )
+            .unwrap();
+
+        let handles = compositor.collect_drag_handle_entries(&scene, 1920.0, 1080.0);
+        let handle = handles
+            .iter()
+            .find(|h| h.element_id == tile_id)
+            .expect("must have tile drag handle");
+
+        // Idle state — no drag active
+        let mut idle_vertices = Vec::new();
+        compositor.append_drag_handle_vertices(
+            &scene,
+            std::slice::from_ref(handle),
+            &mut idle_vertices,
+            1920.0,
+            1080.0,
+        );
+        let idle_count = idle_vertices.len();
+        let idle_alpha = idle_vertices[0].color[3];
+
+        // Activate drag for this element
+        scene.set_drag_active(tile_id);
+
+        let mut drag_vertices = Vec::new();
+        compositor.append_drag_handle_vertices(
+            &scene,
+            std::slice::from_ref(handle),
+            &mut drag_vertices,
+            1920.0,
+            1080.0,
+        );
+        let drag_alpha = drag_vertices[0].color[3];
+        let drag_count = drag_vertices.len();
+
+        // Opacity must be at the active level (same as hover) — not idle.
+        assert!(
+            drag_alpha > idle_alpha,
+            "drag active handle alpha ({drag_alpha}) must be greater than idle alpha ({idle_alpha})"
+        );
+
+        // The 2px highlight border adds 4 additional quads × 6 vertices each = 24 extra vertices
+        // (min — degenerate small rects may produce fewer).  We just assert more than idle.
+        assert!(
+            drag_count > idle_count,
+            "drag active must emit more vertices than idle (border adds quads); \
+             idle={idle_count}, drag={drag_count}"
+        );
+
+        // Clear and verify feedback is removed
+        scene.clear_drag_active(tile_id);
+        let mut cleared_vertices = Vec::new();
+        compositor.append_drag_handle_vertices(
+            &scene,
+            std::slice::from_ref(handle),
+            &mut cleared_vertices,
+            1920.0,
+            1080.0,
+        );
+        let cleared_count = cleared_vertices.len();
+        assert_eq!(
+            cleared_count, idle_count,
+            "after clearing drag, vertex count must return to idle level"
         );
     }
 
