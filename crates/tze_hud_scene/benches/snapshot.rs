@@ -76,6 +76,7 @@ fn build_dense_scene(tile_count: usize, nodes_per_tile: usize) -> SceneGraph {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(0.5, 0.5, 0.5, 1.0),
                 bounds: Rect::new(0.0, 0.0, 190.0, 106.0),
+                radius: None,
             }),
         };
         scene.set_tile_root(tile_id, root_node).unwrap();
@@ -89,6 +90,7 @@ fn build_dense_scene(tile_count: usize, nodes_per_tile: usize) -> SceneGraph {
                 data: NodeData::SolidColor(SolidColorNode {
                     color: Rgba::new(j as f32 / nodes_per_tile as f32, 0.3, 0.7, 1.0),
                     bounds: Rect::new(j as f32 * node_size, 0.0, node_size - 1.0, 50.0),
+                    radius: None,
                 }),
             };
             // Add as child of root

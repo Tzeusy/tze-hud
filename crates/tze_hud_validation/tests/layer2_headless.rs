@@ -63,6 +63,7 @@ fn solid_color_scene(w: f32, h: f32, color: Rgba) -> SceneGraph {
         data: NodeData::SolidColor(SolidColorNode {
             color,
             bounds: Rect::new(0.0, 0.0, w, h),
+            radius: None,
         }),
     };
     g.set_tile_root(tile, node).unwrap();

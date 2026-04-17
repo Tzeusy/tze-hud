@@ -5577,6 +5577,7 @@ mod tests {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::WHITE,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                radius: None,
             }),
         };
         scene.set_tile_root(tile_id, node2).unwrap();
@@ -7303,6 +7304,7 @@ mod spec_scenarios {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::WHITE,
                 bounds: Rect::new(0.0, 0.0, 400.0, 400.0),
+                radius: None,
             }),
         };
         scene
@@ -7317,6 +7319,7 @@ mod spec_scenarios {
                 data: NodeData::SolidColor(SolidColorNode {
                     color: Rgba::new(0.1 * (i % 10) as f32, 0.0, 0.0, 1.0),
                     bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+                    radius: None,
                 }),
             };
             scene
@@ -7338,6 +7341,7 @@ mod spec_scenarios {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::BLACK,
                 bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+                radius: None,
             }),
         };
         let err = scene
@@ -7375,6 +7379,7 @@ mod spec_scenarios {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::WHITE,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                radius: None,
             }),
         };
         // First insertion succeeds
@@ -7587,6 +7592,7 @@ mod spec_scenarios {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::WHITE,
                         bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                        radius: None,
                     }),
                 },
             )
@@ -7970,6 +7976,7 @@ mod spec_scenarios {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(0.5, 0.5, 0.5, 1.0),
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                radius: None,
             }),
         };
 
@@ -9632,6 +9639,7 @@ mod spec_scenarios {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::WHITE,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                radius: None,
             }),
         }
     }

@@ -72,7 +72,15 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 .as_ref()
                 .map(proto_rect_to_scene)
                 .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
-            NodeData::SolidColor(SolidColorNode { color, bounds })
+            NodeData::SolidColor(SolidColorNode {
+                color,
+                bounds,
+                radius: if sc.radius >= 0.0 {
+                    Some(sc.radius)
+                } else {
+                    None
+                },
+            })
         }
         Some(proto::node_proto::Data::TextMarkdown(tm)) => {
             let color = tm
@@ -173,7 +181,15 @@ pub fn proto_update_node_content_data_to_scene(
                 .as_ref()
                 .map(proto_rect_to_scene)
                 .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
-            Some(NodeData::SolidColor(SolidColorNode { color, bounds }))
+            Some(NodeData::SolidColor(SolidColorNode {
+                color,
+                bounds,
+                radius: if sc.radius >= 0.0 {
+                    Some(sc.radius)
+                } else {
+                    None
+                },
+            }))
         }
         Data::TextMarkdown(tm) => {
             let color = tm
@@ -523,6 +539,7 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
                     width: sc.bounds.width,
                     height: sc.bounds.height,
                 }),
+                radius: sc.radius.unwrap_or(-1.0),
             },
         )),
         NodeData::TextMarkdown(tm) => Some(proto::node_proto::Data::TextMarkdown(

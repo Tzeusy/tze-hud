@@ -232,6 +232,7 @@ mod tests {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::WHITE,
                         bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                        radius: None,
                     }),
                 },
             )
@@ -381,6 +382,7 @@ mod tests {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::TRANSPARENT,
                         bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                        radius: None,
                     }),
                 },
             )
@@ -497,6 +499,7 @@ mod tests {
                 data: NodeData::SolidColor(SolidColorNode {
                     color: Rgba::TRANSPARENT,
                     bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                    radius: None,
                 }),
             },
         );

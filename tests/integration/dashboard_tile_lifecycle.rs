@@ -182,6 +182,7 @@ fn make_bg_node() -> Node {
         data: NodeData::SolidColor(SolidColorNode {
             color: BG_COLOR,
             bounds: Rect::new(0.0, 0.0, TILE_W, TILE_H),
+            radius: None,
         }),
     }
 }
@@ -199,6 +200,7 @@ fn make_bg_root_with_children(
         data: NodeData::SolidColor(SolidColorNode {
             color: BG_COLOR,
             bounds: Rect::new(0.0, 0.0, TILE_W, TILE_H),
+            radius: None,
         }),
     }
 }
@@ -731,6 +733,7 @@ fn disconnect_during_lifecycle_orphans_tile_with_badge() {
         data: NodeData::SolidColor(SolidColorNode {
             color: BG_COLOR,
             bounds: Rect::new(0.0, 0.0, TILE_W, TILE_H),
+            radius: None,
         }),
     };
     let set_result = scene.apply_batch(&make_batch(
@@ -811,6 +814,7 @@ fn grace_period_expiry_removes_tile_after_disconnect() {
         data: NodeData::SolidColor(SolidColorNode {
             color: BG_COLOR,
             bounds: Rect::new(0.0, 0.0, TILE_W, TILE_H),
+            radius: None,
         }),
     };
     scene.apply_batch(&make_batch(
@@ -992,6 +996,7 @@ fn dashboard_agent_cannot_mutate_foreign_namespace_tile() {
                 data: NodeData::SolidColor(SolidColorNode {
                     color: BG_COLOR,
                     bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                    radius: None,
                 }),
             },
         }],

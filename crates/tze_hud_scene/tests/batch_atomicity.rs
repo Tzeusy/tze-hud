@@ -245,6 +245,7 @@ fn spec_post_mutation_cycle_detected() {
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba::WHITE,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            radius: None,
         }),
     };
 
@@ -1015,6 +1016,7 @@ fn stage1_set_tile_root_with_expired_lease_rejected() {
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba::WHITE,
             bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
+            radius: None,
         }),
     };
 
@@ -1061,6 +1063,7 @@ fn stage1_add_node_with_expired_lease_rejected() {
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba::WHITE,
             bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
+            radius: None,
         }),
     };
 
