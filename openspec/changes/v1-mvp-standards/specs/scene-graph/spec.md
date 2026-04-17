@@ -365,12 +365,3 @@ Scope: post-v1
 #### Scenario: Effective geometry not in v1 snapshot
 - **WHEN** a scene snapshot is serialized in v1
 - **THEN** the snapshot MUST include active zone publications but MUST NOT include effective_geometry data
-
-### Requirement: Text Stream Portal Phase-0 Uses Raw Tiles
-The `text-stream-portals` phase-0 pilot SHALL use agent-owned content-layer raw tiles with existing V1 node types. The pilot MUST NOT require a new scene node type before the capability is proven.
-Source: RFC 0013 §3.4
-Scope: v1-mandatory
-
-#### Scenario: portal pilot tile stays below runtime-managed bands
-- **WHEN** a resident portal pilot creates its surface as a raw tile
-- **THEN** the tile SHALL use the normal agent-owned z-order band and remain below zone-reserved and widget-reserved runtime-managed tiles

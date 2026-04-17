@@ -1,8 +1,8 @@
 # RFC 0013: Text Stream Portals
 
-**Status:** Draft
-**Issue:** TBD
-**Date:** 2026-04-10
+**Status:** Implemented
+**Issue:** hud-t98e
+**Date:** 2026-04-10 (implemented 2026-04-17)
 **Authors:** tze_hud architecture team
 **Depends on:** RFC 0001 (Scene Contract), RFC 0004 (Input Model), RFC 0005 (Session Protocol), RFC 0007 (System Shell), RFC 0008 (Lease Governance), RFC 0009 (Policy Arbitration)
 
