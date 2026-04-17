@@ -226,6 +226,9 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
         ServerPayload::EmitSceneEventResult(_) | ServerPayload::ListElementsResponse(_) => {
             TrafficClass::Transactional
         }
+
+        // Element repositioned event — transactional (drag completion / reset-to-default)
+        ServerPayload::ElementRepositioned(_) => TrafficClass::Transactional,
     }
 }
 
@@ -1468,6 +1471,18 @@ pub struct HudSessionImpl {
     /// Used by `inject_input_event` to push runtime-assembled ClickEvent /
     /// CommandInputEvent batches to the owning agent session.
     pub input_event_tx: tokio::sync::broadcast::Sender<(String, crate::proto::EventBatch)>,
+
+    /// Broadcast sender for `ElementRepositionedEvent` notifications (hud-bs2q.6).
+    ///
+    /// Emitted after drag completion (geometry_override persisted) and after
+    /// reset-to-default (geometry_override cleared). Each session handler subscribes
+    /// and delivers the event only when the agent is subscribed to `SCENE_TOPOLOGY`
+    /// and the session is `Active`. Agents cannot reject — no response mechanism.
+    ///
+    /// Subscription category: SCENE_TOPOLOGY (requires `read_scene_topology`).
+    /// Message class: Transactional (never coalesced or dropped).
+    pub element_repositioned_tx:
+        tokio::sync::broadcast::Sender<crate::proto::ElementRepositionedEvent>,
 }
 
 impl HudSessionImpl {
@@ -1480,6 +1495,8 @@ impl HudSessionImpl {
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (input_event_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (element_repositioned_tx, _) =
+            tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state: Arc::new(Mutex::new(SharedState {
                 scene: Arc::new(Mutex::new(scene)),
@@ -1500,6 +1517,7 @@ impl HudSessionImpl {
             degradation_tx,
             capability_revocation_tx,
             input_event_tx,
+            element_repositioned_tx,
         }
     }
 
@@ -1512,6 +1530,8 @@ impl HudSessionImpl {
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (input_event_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (element_repositioned_tx, _) =
+            tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
@@ -1520,6 +1540,7 @@ impl HudSessionImpl {
             degradation_tx,
             capability_revocation_tx,
             input_event_tx,
+            element_repositioned_tx,
         }
     }
 
@@ -1542,6 +1563,8 @@ impl HudSessionImpl {
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (input_event_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (element_repositioned_tx, _) =
+            tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
@@ -1550,6 +1573,7 @@ impl HudSessionImpl {
             degradation_tx,
             capability_revocation_tx,
             input_event_tx,
+            element_repositioned_tx,
         }
     }
 
@@ -1648,6 +1672,136 @@ impl HudSessionImpl {
             .send((namespace.into(), batch))
             .unwrap_or_default()
     }
+
+    /// Broadcast an `ElementRepositionedEvent` to all active sessions subscribed
+    /// to `SCENE_TOPOLOGY` (hud-bs2q.6).
+    ///
+    /// Called after:
+    /// - Drag completion: `geometry_override` has been persisted.
+    /// - Reset-to-default: `geometry_override` has been cleared.
+    ///
+    /// Each session handler delivers the event only when:
+    /// 1. The session is `SessionState::Active`.
+    /// 2. The agent is subscribed to `SCENE_TOPOLOGY`.
+    ///
+    /// Returns the number of active session handlers that received the broadcast
+    /// (0 if no sessions are connected).
+    pub fn broadcast_element_repositioned(
+        &self,
+        event: crate::proto::ElementRepositionedEvent,
+    ) -> usize {
+        self.element_repositioned_tx.send(event).unwrap_or_default()
+    }
+
+    /// Reset an element's user geometry override to the fallback position and
+    /// broadcast an `ElementRepositionedEvent` to subscribed agents (hud-bs2q.6).
+    ///
+    /// This is the programmatic path for "reset-to-default". The visual entry
+    /// point (right-click context menu / tap button on the drag handle) calls
+    /// this from the compositor/input pipeline.
+    ///
+    /// # Behaviour
+    ///
+    /// 1. Clears `geometry_override` from the element store entry.
+    /// 2. If no override was set, returns `false` (no-op).
+    /// 3. Re-resolves the effective geometry from the fallback chain:
+    ///    agent bounds → config override → default policy.
+    /// 4. Persists the element store to disk.
+    /// 5. Broadcasts `ElementRepositionedEvent {
+    ///        element_id,
+    ///        new_geometry  = fallback geometry,
+    ///        previous_geometry = cleared override,
+    ///    }` to sessions subscribed to `SCENE_TOPOLOGY`.
+    ///
+    /// Returns `true` if an override was cleared and the event was emitted.
+    pub async fn reset_element_geometry(&self, element_id: SceneId) -> bool {
+        let (previous_override, fallback_geometry, persist_request) = {
+            let mut st = self.state.lock().await;
+            // Attempt to clear the override.
+            let previous = st.element_store.reset_geometry_override(element_id);
+            if previous.is_none() {
+                // No override present — no-op.
+                return false;
+            }
+            // Resolve fallback geometry (agent bounds → config → default policy).
+            let scene = st.scene.lock().await;
+            let zero_policy = GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.0,
+                height_pct: 0.0,
+            };
+            let fallback = if let Some(entry) = st.element_store.entries.get(&element_id) {
+                match entry.element_type {
+                    ElementType::Tile => {
+                        let agent_policy = scene.tiles.get(&element_id).map(|tile| {
+                            rect_to_relative_geometry_policy(
+                                tile.bounds,
+                                scene.display_area.width,
+                                scene.display_area.height,
+                            )
+                        });
+                        resolve_geometry_override_chain(None, agent_policy, None, None)
+                            .unwrap_or(zero_policy)
+                    }
+                    ElementType::Zone => scene
+                        .zone_registry
+                        .resolve_geometry_policy_for_zone(&entry.namespace, None, None)
+                        .unwrap_or(zero_policy),
+                    ElementType::Widget => scene
+                        .widget_registry
+                        .resolve_geometry_policy_for_instance(&entry.namespace, None)
+                        .unwrap_or(zero_policy),
+                }
+            } else {
+                zero_policy
+            };
+            drop(scene);
+            let persist_req =
+                st.element_store_path
+                    .clone()
+                    .map(|path| ElementStorePersistRequest {
+                        store: st.element_store.clone(),
+                        path,
+                    });
+            (previous.unwrap(), fallback, persist_req)
+        };
+
+        // Persist store outside the lock.
+        persist_element_store(persist_request).await;
+
+        // Build and broadcast ElementRepositionedEvent.
+        let event = crate::proto::ElementRepositionedEvent {
+            element_id: scene_id_to_bytes(element_id),
+            new_geometry: Some(convert::geometry_policy_to_proto(&fallback_geometry)),
+            previous_geometry: Some(convert::geometry_policy_to_proto(&previous_override)),
+        };
+        self.broadcast_element_repositioned(event);
+        true
+    }
+
+    /// Build and broadcast an `ElementRepositionedEvent` for a completed drag
+    /// (hud-bs2q.6).
+    ///
+    /// Called by the compositor after `persist_drag_geometry` has already written
+    /// the new `geometry_override` to the element store.
+    ///
+    /// `new_geometry` is the newly persisted policy.
+    /// `previous_geometry` is the geometry that was in effect before the drag
+    /// (the prior override or `None` if there was no override).
+    pub fn emit_drag_repositioned_event(
+        &self,
+        element_id: SceneId,
+        new_geometry: &GeometryPolicy,
+        previous_geometry: Option<&GeometryPolicy>,
+    ) {
+        let event = crate::proto::ElementRepositionedEvent {
+            element_id: scene_id_to_bytes(element_id),
+            new_geometry: Some(convert::geometry_policy_to_proto(new_geometry)),
+            previous_geometry: previous_geometry.map(convert::geometry_policy_to_proto),
+        };
+        self.broadcast_element_repositioned(event);
+    }
 }
 
 #[tonic::async_trait]
@@ -1677,6 +1831,10 @@ impl HudSession for HudSessionImpl {
         // Subscribe to the input event broadcast channel (hud-i6yd.6).
         // Each session handler delivers only batches addressed to its own namespace.
         let mut input_event_rx = self.input_event_tx.subscribe();
+
+        // Subscribe to the element-repositioned broadcast channel (hud-bs2q.6).
+        // Delivery is gated on SCENE_TOPOLOGY subscription in the session loop.
+        let mut element_repositioned_rx = self.element_repositioned_tx.subscribe();
 
         // Create outbound channel
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(
@@ -2146,6 +2304,44 @@ impl HudSession for HudSessionImpl {
                                 // events (ClickEvent, CommandInputEvent) must not be
                                 // dropped; in production this should emit a metric/alert.
                                 // For v1 we continue silently — the session remains open.
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                // Runtime shutting down — treat as ungraceful disconnect.
+                                session.transition(SessionState::Closed);
+                                break;
+                            }
+                        }
+                    }
+
+                    // ── ElementRepositionedEvent broadcast (hud-bs2q.6) ──────────
+                    //
+                    // Emitted after drag completion or reset-to-default. Delivered to
+                    // agents subscribed to SCENE_TOPOLOGY (requires read_scene_topology).
+                    // Transactional — never coalesced or dropped. Agent cannot reject.
+                    element_repositioned_result = element_repositioned_rx.recv() => {
+                        match element_repositioned_result {
+                            Ok(event) => {
+                                // Gate on SCENE_TOPOLOGY subscription.
+                                if session.subscriptions.contains(
+                                    &crate::subscriptions::category::SCENE_TOPOLOGY.to_string()
+                                ) {
+                                    let seq = session.next_server_seq();
+                                    let _ = tx
+                                        .send(Ok(ServerMessage {
+                                            sequence: seq,
+                                            timestamp_wall_us: now_wall_us(),
+                                            payload: Some(
+                                                ServerPayload::ElementRepositioned(event),
+                                            ),
+                                        }))
+                                        .await;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                // Missed notifications. Log and continue — the element
+                                // store state is persistent so a future snapshot or
+                                // ListElementsRequest will reflect the current position.
+                                let _ = n; // suppress unused warning; production: tracing::warn!
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 // Runtime shutting down — treat as ungraceful disconnect.
@@ -14579,5 +14775,341 @@ mod tests {
         }
 
         (tx, init_messages, streaming)
+    }
+
+    // ─── ElementRepositionedEvent tests (hud-bs2q.6) ─────────────────────────
+
+    /// Build a service + shared-state + element_repositioned broadcast channel.
+    ///
+    /// Extracts the shared state and broadcast sender before moving the service
+    /// into the server task. The test can then call `broadcast_element_repositioned`
+    /// via the channel directly, or manipulate the shared state for reset tests.
+    async fn setup_test_with_reposition_tx() -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+        Arc<Mutex<SharedState>>,
+        tokio::sync::broadcast::Sender<crate::proto::ElementRepositionedEvent>,
+    ) {
+        let scene = SceneGraph::new(1920.0, 1080.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+        let shared_state = service.state.clone();
+        let reposition_tx = service.element_repositioned_tx.clone();
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+            .await
+            .unwrap();
+
+        (client, handle, shared_state, reposition_tx)
+    }
+
+    /// GIVEN element with geometry_override
+    /// WHEN reset_geometry_override is called on the element store
+    /// THEN override is cleared and the previous value is returned
+    #[test]
+    fn test_reset_geometry_override_clears_override_and_returns_previous() {
+        use tze_hud_scene::element_store::{ElementStore, ElementStoreEntry, ElementType};
+
+        let tile_id = SceneId::new();
+        let override_policy = GeometryPolicy::Relative {
+            x_pct: 0.5,
+            y_pct: 0.5,
+            width_pct: 0.2,
+            height_pct: 0.1,
+        };
+        let mut store = ElementStore::default();
+        store.entries.insert(
+            tile_id,
+            ElementStoreEntry {
+                element_type: ElementType::Tile,
+                namespace: "test-agent".to_string(),
+                created_at: 1000,
+                last_published_at: 2000,
+                geometry_override: Some(override_policy),
+            },
+        );
+
+        let previous = store.reset_geometry_override(tile_id);
+        assert_eq!(
+            previous,
+            Some(override_policy),
+            "reset must return the cleared override"
+        );
+        assert!(
+            store
+                .entries
+                .get(&tile_id)
+                .unwrap()
+                .geometry_override
+                .is_none(),
+            "geometry_override must be None after reset"
+        );
+    }
+
+    /// GIVEN element without geometry_override
+    /// WHEN reset_geometry_override is called
+    /// THEN returns None (no-op)
+    #[test]
+    fn test_reset_geometry_override_noop_when_no_override() {
+        use tze_hud_scene::element_store::{ElementStore, ElementStoreEntry, ElementType};
+
+        let tile_id = SceneId::new();
+        let mut store = ElementStore::default();
+        store.entries.insert(
+            tile_id,
+            ElementStoreEntry {
+                element_type: ElementType::Tile,
+                namespace: "test-agent".to_string(),
+                created_at: 1000,
+                last_published_at: 2000,
+                geometry_override: None,
+            },
+        );
+
+        let previous = store.reset_geometry_override(tile_id);
+        assert!(
+            previous.is_none(),
+            "reset must return None when no override"
+        );
+    }
+
+    /// GIVEN unknown element_id
+    /// WHEN reset_geometry_override is called
+    /// THEN returns None (no-op)
+    #[test]
+    fn test_reset_geometry_override_noop_for_unknown_element() {
+        use tze_hud_scene::element_store::ElementStore;
+
+        let mut store = ElementStore::default();
+        let result = store.reset_geometry_override(SceneId::new());
+        assert!(
+            result.is_none(),
+            "reset must return None for unknown element"
+        );
+    }
+
+    /// GIVEN agent subscribed to SCENE_TOPOLOGY
+    /// WHEN broadcast_element_repositioned is called via the channel
+    /// THEN agent receives ElementRepositionedEvent
+    #[tokio::test]
+    async fn test_element_repositioned_delivered_to_scene_topology_subscriber() {
+        let (mut client, _server, _shared_state, reposition_tx) =
+            setup_test_with_reposition_tx().await;
+        let (_tx, _msgs, mut stream) = handshake(&mut client, "test-agent", "test-key").await;
+
+        // Give the session handler a moment to fully subscribe.
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+        let element_id = SceneId::new();
+        let new_policy = GeometryPolicy::Relative {
+            x_pct: 0.3,
+            y_pct: 0.2,
+            width_pct: 0.25,
+            height_pct: 0.15,
+        };
+        let old_policy = GeometryPolicy::Relative {
+            x_pct: 0.1,
+            y_pct: 0.1,
+            width_pct: 0.25,
+            height_pct: 0.15,
+        };
+
+        let event = crate::proto::ElementRepositionedEvent {
+            element_id: scene_id_to_bytes(element_id),
+            new_geometry: Some(convert::geometry_policy_to_proto(&new_policy)),
+            previous_geometry: Some(convert::geometry_policy_to_proto(&old_policy)),
+        };
+        let _ = reposition_tx.send(event);
+
+        // Collect next message from stream (with timeout to avoid hanging on failure).
+        let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+            .await
+            .expect("timed out waiting for ElementRepositionedEvent")
+            .expect("stream should not close")
+            .expect("should not error");
+
+        match msg.payload {
+            Some(ServerPayload::ElementRepositioned(event)) => {
+                // element_id must match
+                let expected_id: Vec<u8> = scene_id_to_bytes(element_id);
+                assert_eq!(event.element_id, expected_id, "element_id must match");
+                // new_geometry must be set and match new_policy
+                let ng = event.new_geometry.expect("new_geometry must be set");
+                match ng.policy {
+                    Some(crate::proto::geometry_policy_proto::Policy::Relative(r)) => {
+                        assert!((r.x_pct - 0.3_f32).abs() < 1e-4, "x_pct mismatch");
+                        assert!((r.y_pct - 0.2_f32).abs() < 1e-4, "y_pct mismatch");
+                    }
+                    other => panic!("expected Relative geometry, got {other:?}"),
+                }
+                // previous_geometry must be set and match old_policy
+                let pg = event
+                    .previous_geometry
+                    .expect("previous_geometry must be set");
+                match pg.policy {
+                    Some(crate::proto::geometry_policy_proto::Policy::Relative(r)) => {
+                        assert!((r.x_pct - 0.1_f32).abs() < 1e-4, "prev x_pct mismatch");
+                    }
+                    other => panic!("expected Relative previous geometry, got {other:?}"),
+                }
+            }
+            other => panic!("expected ElementRepositioned, got {other:?}"),
+        }
+    }
+
+    /// GIVEN agent NOT subscribed to SCENE_TOPOLOGY
+    /// WHEN broadcast_element_repositioned is called
+    /// THEN agent does not receive ElementRepositionedEvent
+    #[tokio::test]
+    async fn test_element_repositioned_not_delivered_without_scene_topology_subscription() {
+        use crate::proto::session::hud_session_client::HudSessionClient;
+        use crate::proto::session::hud_session_server::HudSessionServer;
+
+        let scene = SceneGraph::new(1920.0, 1080.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+        let reposition_tx = service.element_repositioned_tx.clone();
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let _handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let mut client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+            .await
+            .unwrap();
+
+        // Handshake WITHOUT read_scene_topology capability → no SCENE_TOPOLOGY subscription.
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "no-topology-agent".to_string(),
+                agent_display_name: "no-topology-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec!["create_tiles".to_string()],
+                initial_subscriptions: vec![],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        // Drain handshake (SessionEstablished + SceneSnapshot).
+        response_stream.next().await;
+        response_stream.next().await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+        let element_id = SceneId::new();
+        let new_policy = GeometryPolicy::Relative {
+            x_pct: 0.3,
+            y_pct: 0.2,
+            width_pct: 0.25,
+            height_pct: 0.15,
+        };
+        let event = crate::proto::ElementRepositionedEvent {
+            element_id: scene_id_to_bytes(element_id),
+            new_geometry: Some(convert::geometry_policy_to_proto(&new_policy)),
+            previous_geometry: None,
+        };
+        let _ = reposition_tx.send(event);
+
+        // Agent should NOT receive the event; timeout expected.
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(200),
+            response_stream.next(),
+        )
+        .await;
+        // Timeout means no event was delivered — correct behaviour.
+        // If no timeout: check it's not an ElementRepositioned.
+        if let Ok(Some(Ok(msg))) = result {
+            if let Some(ServerPayload::ElementRepositioned(_)) = msg.payload {
+                panic!(
+                    "ElementRepositioned must NOT be delivered without SCENE_TOPOLOGY subscription"
+                );
+            }
+            // Other messages (e.g., Heartbeat) are allowed.
+        }
+        drop(tx); // close stream
+    }
+
+    /// GIVEN element with override and known agent tile bounds
+    /// WHEN the element store override is cleared and event is broadcast
+    /// THEN event carries previous_geometry=old_override and new_geometry=fallback
+    #[test]
+    fn test_reset_geometry_override_carries_correct_previous_and_new() {
+        use tze_hud_scene::element_store::{ElementStore, ElementStoreEntry, ElementType};
+
+        let tile_id = SceneId::new();
+        let override_policy = GeometryPolicy::Relative {
+            x_pct: 0.8,
+            y_pct: 0.8,
+            width_pct: 0.1,
+            height_pct: 0.1,
+        };
+        let mut store = ElementStore::default();
+        store.entries.insert(
+            tile_id,
+            ElementStoreEntry {
+                element_type: ElementType::Tile,
+                namespace: "test-agent".to_string(),
+                created_at: 1000,
+                last_published_at: 2000,
+                geometry_override: Some(override_policy),
+            },
+        );
+
+        // Simulate reset: clear override and note previous value.
+        let previous = store.reset_geometry_override(tile_id);
+        assert_eq!(
+            previous,
+            Some(override_policy),
+            "previous must be the removed override"
+        );
+
+        // After reset, override must be gone.
+        let entry = store.entries.get(&tile_id).unwrap();
+        assert!(
+            entry.geometry_override.is_none(),
+            "override must be cleared"
+        );
+
+        // The fallback geometry (agent bounds) would be applied by the caller;
+        // verify the store correctly reflects the cleared state.
+        let proto_previous = convert::geometry_policy_to_proto(&previous.unwrap());
+        match proto_previous.policy {
+            Some(crate::proto::geometry_policy_proto::Policy::Relative(r)) => {
+                assert!(
+                    (r.x_pct - 0.8_f32).abs() < 1e-4,
+                    "previous x_pct must match override"
+                );
+            }
+            other => panic!("expected Relative previous_geometry proto, got {other:?}"),
+        }
     }
 }

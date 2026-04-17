@@ -187,6 +187,11 @@ message ServerMessage {
 
     // Element discovery response for ListElementsRequest (field 39).
     tze_hud.protocol.v1.ListElementsResponse list_elements_response = 50;
+
+    // Element repositioned event — emitted on drag completion or reset-to-default.
+    // Subscription: SCENE_TOPOLOGY (requires read_scene_topology capability).
+    // Message class: Transactional (never coalesced or dropped).
+    tze_hud.protocol.v1.ElementRepositionedEvent element_repositioned = 51;
   }
 
   // Field 22 (lease_denial) was removed in the v1 vocabulary rename.

@@ -4,6 +4,41 @@ package tze_hud.protocol.v1;
 
 import "types.proto";
 
+// ─── Element reposition event (drag-to-reposition + reset-to-default) ────────
+//
+// Emitted on drag completion (after geometry_override is persisted) and on
+// reset-to-default (when the user override is cleared).
+//
+// Subscription category: SCENE_TOPOLOGY (requires read_scene_topology).
+// Message class: Transactional (reliable, ordered — never coalesced or dropped).
+// Direction: server → client only.
+// Delivery: agents with an active session subscribed to SCENE_TOPOLOGY.
+// Agents cannot reject — no response mechanism.
+//
+// On drag completion:
+//   new_geometry  = the persisted GeometryPolicy::Relative user override
+//   previous_geometry = the geometry that was in effect before the drag
+//
+// On reset-to-default:
+//   new_geometry  = the fallback geometry after the override is cleared
+//                   (agent bounds → config override → default policy)
+//   previous_geometry = the user override that was cleared
+message ElementRepositionedEvent {
+  // 16-byte SceneId identifying the element (Tile / Zone / Widget).
+  bytes element_id = 1;
+
+  // Effective geometry after the change.
+  // On drag: the newly persisted user override.
+  // On reset: the fallback geometry (agent bounds / config / default).
+  GeometryPolicyProto new_geometry = 2;
+
+  // Geometry that was in effect before the change.
+  // On drag: the previously effective policy (may be a prior user override or fallback).
+  // On reset: the user override that was cleared.
+  // Absent if no prior geometry was resolved (e.g., newly created element with no policy).
+  GeometryPolicyProto previous_geometry = 3;
+}
+
 // NOTE: Deprecated legacy wire messages (InputEvent, InputEventKind,
 // TileCreatedEvent, TileDeletedEvent, TileUpdatedEvent, LeaseEvent,
 // LeaseEventKind, SceneEvent) have been moved to events_legacy.proto.
