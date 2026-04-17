@@ -303,10 +303,6 @@ Scope: v1-mandatory
 - **WHEN** the agent's EventBatch queue is full and non-transactional input variants (PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, ScrollOffsetChangedEvent) are queued
 - **THEN** the oldest non-transactional input events MAY be coalesced or dropped; transactional variants (PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent, focus/IME/capture events) SHALL NOT be dropped per RFC 0004 §8.5
 
-#### Scenario: Upload chunks are not droppable
-- **WHEN** a resident client sends chunked upload data under backpressure
-- **THEN** the runtime MUST preserve ordered, reliable delivery for `ResourceUploadChunk` rather than treating chunk bytes as a droppable realtime class
-
 ---
 
 ### Requirement: Heartbeat Protocol
@@ -824,7 +820,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Resident Upload Traffic Classes and Backpressure
-Resident upload control messages (`ResourceUploadStart`, `ResourceUploadComplete`, `ResourceUploadAccepted`, `ResourceStored`, and `ResourceErrorResponse`) SHALL use the transactional traffic class. `ResourceUploadChunk` SHALL also be transactional: upload bytes MUST remain ordered, reliable, and never silently dropped. Upload throughput shaping SHALL rely on the existing session backpressure model and per-session upload rate limiting; the runtime MAY delay reading or acknowledging chunk progress under backpressure, but it SHALL NOT downgrade upload chunks to a droppable class.
+Resident upload control messages (`ResourceUploadStart`, `ResourceUploadComplete`, `ResourceUploadAccepted`, `ResourceStored`, and `ResourceErrorResponse`) SHALL use the transactional traffic class. `ResourceUploadChunk` SHALL also be transactional: upload bytes MUST remain ordered, reliable, and never silently dropped. Upload throughput shaping SHALL rely on the existing session backpressure model and per-session upload rate limiting; the runtime MAY delay reading or acknowledging chunk progress under backpressure, but it SHALL NOT downgrade upload chunks to a droppable class. To mitigate head-of-line blocking of other transactional messages (e.g., MutationBatch), the protocol SHALL allow interleaving `ResourceUploadChunk` messages with other transactional payloads on the same session stream; implementations SHOULD document their chunk-interleaving strategy.
 Source: session-resource-upload-rfc0011 direction/design, reconciling main session traffic-class rules with RFC 0011 §8.4
 Scope: v1-mandatory
 
