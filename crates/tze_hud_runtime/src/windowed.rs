@@ -88,7 +88,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
 use crate::component_startup::{register_profile_widgets, run_component_startup};
-use tze_hud_compositor::{Compositor, WindowSurface};
+use tze_hud_compositor::{Compositor, CompositorSurface, WindowSurface};
 use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
@@ -119,6 +119,39 @@ use crate::widget_hover::{
 use crate::widget_runtime_registration::process_pending_widget_svgs;
 use crate::window::{HitRegion, WindowConfig, WindowMode};
 use crate::window::{resolve_window_mode, should_capture_pointer_event};
+
+fn zone_hit_regions_to_overlay_regions(scene: &SceneGraph) -> Vec<HitRegion> {
+    scene
+        .zone_hit_regions
+        .iter()
+        .map(|region| {
+            HitRegion::new(
+                region.bounds.x,
+                region.bounds.y,
+                region.bounds.width,
+                region.bounds.height,
+            )
+        })
+        .collect()
+}
+
+fn combined_overlay_hit_regions(
+    static_regions: &[HitRegion],
+    scene: &SceneGraph,
+) -> Vec<HitRegion> {
+    let mut regions = static_regions.to_vec();
+    regions.extend(zone_hit_regions_to_overlay_regions(scene));
+    regions
+}
+
+fn refresh_zone_hit_regions_after_render(
+    compositor: &Compositor,
+    scene: &mut SceneGraph,
+    surface: &dyn CompositorSurface,
+) {
+    let (surf_w, surf_h) = surface.size();
+    compositor.populate_zone_hit_regions(scene, surf_w as f32, surf_h as f32);
+}
 
 // ─── WindowedConfig ──────────────────────────────────────────────────────────
 
@@ -707,6 +740,11 @@ impl ApplicationHandler for WinitApp {
                         // ── Stage 5–7: Render Encode + GPU Submit ─────────
                         let compositor_telemetry =
                             compositor.render_frame(&scene, surface_for_compositor.as_ref());
+                        refresh_zone_hit_regions_after_render(
+                            &compositor,
+                            &mut scene,
+                            surface_for_compositor.as_ref(),
+                        );
                         drop(scene); // Release lock before signalling main thread.
 
                         // ── Signal main thread to present ─────────────────
@@ -1142,6 +1180,7 @@ impl WinitApp {
         };
 
         let mut next_trackers: Option<std::collections::HashMap<String, WidgetHoverTracker>> = None;
+        let mut dynamic_hit_regions: Option<Vec<HitRegion>> = None;
         let mut removed_mutations = Vec::new();
         if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(scene) = state.scene.try_lock() {
@@ -1149,6 +1188,10 @@ impl WinitApp {
                     build_hover_trackers(&scene, surf_w, surf_h, &self.state.widget_hover_trackers);
                 removed_mutations =
                     hidden_mutations_for_removed(&self.state.widget_hover_trackers, &next);
+                dynamic_hit_regions = Some(combined_overlay_hit_regions(
+                    &self.state.static_hit_regions,
+                    &scene,
+                ));
                 next_trackers = Some(next);
             }
         }
@@ -1157,9 +1200,10 @@ impl WinitApp {
         }
         self.apply_widget_hover_mutations(removed_mutations);
 
-        // Hover tracking is decoupled from pointer capture: keep passthrough
-        // semantics unless callers explicitly registered capture regions.
-        self.state.hit_regions = self.state.static_hit_regions.clone();
+        // Pointer capture includes explicit static regions plus compositor-managed
+        // zone interaction regions (notification dismiss/action affordances).
+        self.state.hit_regions =
+            dynamic_hit_regions.unwrap_or_else(|| self.state.static_hit_regions.clone());
     }
 
     /// Tick widget hover trackers and apply local parameter mutations.
@@ -2139,6 +2183,36 @@ mod tests {
             ..WindowedConfig::default()
         };
         assert_eq!(cfg.window.mode, WindowMode::Overlay);
+    }
+
+    #[test]
+    fn combined_overlay_hit_regions_includes_zone_interaction_regions() {
+        let static_regions = vec![HitRegion::new(10.0, 20.0, 30.0, 40.0)];
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene
+            .zone_hit_regions
+            .push(tze_hud_scene::types::ZoneHitRegion {
+                zone_name: "notification-area".to_string(),
+                published_at_wall_us: 123,
+                publisher_namespace: "test-agent".to_string(),
+                bounds: tze_hud_scene::types::Rect::new(100.0, 200.0, 20.0, 20.0),
+                kind: tze_hud_scene::types::ZoneInteractionKind::Dismiss,
+                interaction_id: "zone:notification-area:dismiss:123:test-agent".to_string(),
+                tab_order: 0,
+            });
+
+        let combined = combined_overlay_hit_regions(&static_regions, &scene);
+
+        assert_eq!(combined.len(), 2, "static + zone capture regions expected");
+        assert_eq!(
+            combined[0], static_regions[0],
+            "static region must be preserved"
+        );
+        assert_eq!(
+            combined[1],
+            HitRegion::new(100.0, 200.0, 20.0, 20.0),
+            "zone hit region must be exposed to overlay click-capture"
+        );
     }
 
     // ── resolve_window_mode integration ──────────────────────────────────

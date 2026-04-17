@@ -195,6 +195,7 @@ fn roundtrip_node_proto_solid_color() {
                 width: 50.0,
                 height: 50.0,
             }),
+            radius: 12.0,
         })),
     };
     let decoded = round_trip(&orig);
@@ -202,6 +203,7 @@ fn roundtrip_node_proto_solid_color() {
     match &decoded.data {
         Some(NodeData::SolidColor(sc)) => {
             assert_eq!(sc.color.as_ref().unwrap().r, 1.0);
+            assert_eq!(sc.radius, 12.0);
         }
         _ => panic!("wrong data variant"),
     }

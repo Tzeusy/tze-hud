@@ -72,43 +72,43 @@ const SEVERITY_CRITICAL: Rgba = Rgba {
 /// `color.notification.urgency.*` design tokens are absent.
 ///
 /// Per spec §Notification Urgency Backdrop Token Schema:
-///   color.notification.urgency.low      → #2A2A2A → (0.165, 0.165, 0.165)
-///   color.notification.urgency.normal   → #1A1A3A → (0.102, 0.102, 0.227)
-///   color.notification.urgency.urgent   → #8B6914 → (0.545, 0.412, 0.078)
-///   color.notification.urgency.critical → #8B1A1A → (0.545, 0.102, 0.102)
+///   color.notification.urgency.low      → #000000 → (0.0, 0.0, 0.0)
+///   color.notification.urgency.normal   → #0C1426 → (0.0037, 0.007, 0.0194)
+///   color.notification.urgency.urgent   → #2A1E08 → (0.0232, 0.013, 0.0024)
+///   color.notification.urgency.critical → #450612 → (0.0595, 0.0018, 0.006)
 ///
 /// These tokens are for notification-area (and non-alert-banner notification zones)
 /// only. Alert-banner continues to use `color.severity.*` tokens.
 const NOTIFICATION_URGENCY_LOW: Rgba = Rgba {
-    r: 0.165,
-    g: 0.165,
-    b: 0.165,
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
     a: 1.0,
 };
 const NOTIFICATION_URGENCY_NORMAL: Rgba = Rgba {
-    r: 0.102,
-    g: 0.102,
-    b: 0.227,
+    r: 0.0037,
+    g: 0.007,
+    b: 0.0194,
     a: 1.0,
 };
 const NOTIFICATION_URGENCY_URGENT: Rgba = Rgba {
-    r: 0.545,
-    g: 0.412,
-    b: 0.078,
+    r: 0.0232,
+    g: 0.013,
+    b: 0.0024,
     a: 1.0,
 };
 const NOTIFICATION_URGENCY_CRITICAL: Rgba = Rgba {
-    r: 0.545,
-    g: 0.102,
-    b: 0.102,
+    r: 0.0595,
+    g: 0.0018,
+    b: 0.006,
     a: 1.0,
 };
 
 /// Per-notification backdrop opacity applied to urgency-tinted backdrop quads.
 ///
-/// This is the fixed 0.9 opacity specified for notification zone backdrop rendering.
+/// This is the fixed 0.8 opacity specified for notification zone backdrop rendering.
 /// It overrides the token color's alpha channel.
-const NOTIFICATION_BACKDROP_OPACITY: f32 = 0.9;
+const NOTIFICATION_BACKDROP_OPACITY: f32 = 0.8;
 
 /// Scale factor for the body line font size in two-line notification layout.
 ///
@@ -148,6 +148,12 @@ const NOTIFICATION_ICON_SIZE_PX: f32 = 24.0;
 
 /// Horizontal gap between the icon and the notification text (pixels).
 const NOTIFICATION_ICON_GAP_PX: f32 = 6.0;
+
+/// Side length of the notification dismiss affordance (square, top-right).
+const NOTIFICATION_DISMISS_BUTTON_SIZE_PX: f32 = 20.0;
+
+/// Horizontal breathing room between the dismiss affordance and notification text.
+const NOTIFICATION_DISMISS_GAP_PX: f32 = 8.0;
 
 /// Fallback color for `color.border.default` when the token is absent.
 ///
@@ -240,6 +246,8 @@ fn sort_alert_banner_indices(publishes: &[ZonePublishRecord]) -> Vec<usize> {
 ///
 /// This is a minimal, allocation-free parser used to resolve token color
 /// values at render time without depending on `tze_hud_config`.
+/// Hex channels are interpreted as sRGB design-token values and converted to
+/// linear RGB for the compositor pipeline.
 /// Returns `None` if the string does not match either form.
 fn parse_hex_color(s: &str) -> Option<Rgba> {
     let s = s.trim();
@@ -258,9 +266,9 @@ fn parse_hex_color(s: &str) -> Option<Rgba> {
                 255
             };
             Some(Rgba::new(
-                r as f32 / 255.0,
-                g as f32 / 255.0,
-                b as f32 / 255.0,
+                srgb_to_linear(r as f32 / 255.0),
+                srgb_to_linear(g as f32 / 255.0),
+                srgb_to_linear(b as f32 / 255.0),
                 a as f32 / 255.0,
             ))
         }
@@ -317,10 +325,10 @@ fn urgency_to_severity_color(urgency: u32, token_map: &HashMap<String, String>) 
 /// absent or cannot be parsed as a hex color.
 ///
 /// Per spec §Notification Urgency Backdrop Token Schema:
-///   urgency 0     → color.notification.urgency.low      (fallback: #2A2A2A)
-///   urgency 1     → color.notification.urgency.normal   (fallback: #1A1A3A)
-///   urgency 2     → color.notification.urgency.urgent   (fallback: #8B6914)
-///   urgency 3+    → color.notification.urgency.critical (fallback: #8B1A1A)
+///   urgency 0     → color.notification.urgency.low      (fallback: #000000)
+///   urgency 1     → color.notification.urgency.normal   (fallback: #0C1426)
+///   urgency 2     → color.notification.urgency.urgent   (fallback: #2A1E08)
+///   urgency 3+    → color.notification.urgency.critical (fallback: #450612)
 ///
 /// Urgency values greater than 3 are clamped to 3 (critical).
 ///
@@ -347,6 +355,27 @@ fn urgency_to_notification_color(urgency: u32, token_map: &HashMap<String, Strin
 #[inline]
 fn resolve_border_default_color(token_map: &HashMap<String, String>) -> Rgba {
     resolve_token_color(token_map, "color.border.default").unwrap_or(BORDER_DEFAULT_FALLBACK)
+}
+
+#[inline]
+fn resolve_notification_control_color(
+    policy: &RenderingPolicy,
+    token_map: &HashMap<String, String>,
+) -> Rgba {
+    policy.text_color.unwrap_or_else(|| {
+        resolve_token_color(token_map, "color.text.primary")
+            .unwrap_or(Rgba::new(1.0, 1.0, 1.0, 0.875))
+    })
+}
+
+#[inline]
+fn notification_dismiss_bounds(x: f32, slot_y: f32, w: f32, effective_slot_h: f32) -> Rect {
+    Rect::new(
+        x + w - NOTIFICATION_DISMISS_BUTTON_SIZE_PX,
+        slot_y,
+        NOTIFICATION_DISMISS_BUTTON_SIZE_PX,
+        NOTIFICATION_DISMISS_BUTTON_SIZE_PX.min(effective_slot_h),
+    )
 }
 
 /// Emit 4 thin 1px border quads positioned inside the given backdrop rectangle.
@@ -2465,10 +2494,20 @@ impl Compositor {
                                     _ => (None, None),
                                 };
 
+                                let dismiss_reserved_w = if is_alert_banner_zone(zone_name) {
+                                    0.0
+                                } else {
+                                    NOTIFICATION_DISMISS_BUTTON_SIZE_PX
+                                        + NOTIFICATION_DISMISS_GAP_PX
+                                };
                                 // Text x-offset respects icon reservation (from icon texture pipeline).
                                 let text_x = zx + inset_h + icon_width_reserved;
-                                let text_w =
-                                    (zw - inset_h - icon_width_reserved - inset_h).max(1.0);
+                                let text_w = (zw
+                                    - inset_h
+                                    - icon_width_reserved
+                                    - inset_h
+                                    - dismiss_reserved_w)
+                                    .max(1.0);
 
                                 if payload.title.is_empty() {
                                     // ── Single-line rendering (backward-compatible) ──
@@ -2537,6 +2576,37 @@ impl Compositor {
                                         overflow: tze_hud_scene::types::TextOverflow::Clip,
                                         outline_color: oc,
                                         outline_width: ow,
+                                        opacity: effective_opacity,
+                                    });
+                                }
+
+                                if !is_alert_banner_zone(zone_name)
+                                    && self.text_rasterizer.is_some()
+                                {
+                                    let dismiss_bounds = notification_dismiss_bounds(
+                                        zx,
+                                        slot_y,
+                                        zw,
+                                        effective_slot_h,
+                                    );
+                                    let dismiss_color = crate::text::apply_opacity_to_color(
+                                        base_color,
+                                        effective_opacity,
+                                    );
+                                    items.push(TextItem {
+                                        text: "X".to_string(),
+                                        pixel_x: dismiss_bounds.x,
+                                        pixel_y: dismiss_bounds.y + 1.0,
+                                        bounds_width: dismiss_bounds.width.max(1.0),
+                                        bounds_height: dismiss_bounds.height.max(1.0),
+                                        font_size_px: 12.0,
+                                        font_family,
+                                        font_weight: 700,
+                                        color: dismiss_color,
+                                        alignment: tze_hud_scene::types::TextAlign::Center,
+                                        overflow: tze_hud_scene::types::TextOverflow::Clip,
+                                        outline_color: None,
+                                        outline_width: None,
                                         opacity: effective_opacity,
                                     });
                                 }
@@ -3415,18 +3485,19 @@ impl Compositor {
             let mut rr_post: Vec<crate::pipeline::RoundedRectDrawCmd> = Vec::new();
             rr_post.extend(rr_all.content);
             rr_post.extend(rr_all.chrome);
+            rr_post.extend(self.collect_tile_rounded_rect_cmds(scene));
             self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_post, sw, sh);
         }
 
         // ── Text pass (Stage 6) ───────────────────────────────────────────────
         // Collect text items before borrowing the rasterizer mutably, to avoid
         // simultaneous mutable + immutable borrow of `self`.
-        let text_items: Vec<TextItem> = if self.text_rasterizer.is_some() {
+        let has_text_rasterizer = self.text_rasterizer.is_some();
+        let text_items: Vec<TextItem> = if has_text_rasterizer {
             self.collect_text_items(scene, sw, sh)
         } else {
             vec![]
         };
-
         // If a text rasterizer is present, prepare glyphon buffers and run a
         // LoadOp::Load text pass on top of the geometry written above.
         if let Some(ref mut tr) = self.text_rasterizer {
@@ -3552,18 +3623,18 @@ impl Compositor {
         let bg_vertex_count = vertices.len();
 
         for tile in &tiles {
-            // Render tile background
-            let bg_color = self.tile_background_color(tile, scene);
-            let verts = rect_vertices(
-                tile.bounds.x,
-                tile.bounds.y,
-                tile.bounds.width,
-                tile.bounds.height,
-                sw,
-                sh,
-                self.gpu_color_raw(bg_color),
-            );
-            vertices.extend_from_slice(&verts);
+            if let Some(bg_color) = self.tile_background_color(tile, scene) {
+                let verts = rect_vertices(
+                    tile.bounds.x,
+                    tile.bounds.y,
+                    tile.bounds.width,
+                    tile.bounds.height,
+                    sw,
+                    sh,
+                    self.gpu_color_raw(bg_color),
+                );
+                vertices.extend_from_slice(&verts);
+            }
 
             // Render nodes within the tile
             if let Some(root_id) = tile.root_node {
@@ -3712,17 +3783,18 @@ impl Compositor {
         let bg_vertex_count = vertices.len();
 
         for tile in &tiles {
-            let bg_color = self.tile_background_color(tile, scene);
-            let verts = rect_vertices(
-                tile.bounds.x,
-                tile.bounds.y,
-                tile.bounds.width,
-                tile.bounds.height,
-                sw,
-                sh,
-                bg_color,
-            );
-            vertices.extend_from_slice(&verts);
+            if let Some(bg_color) = self.tile_background_color(tile, scene) {
+                let verts = rect_vertices(
+                    tile.bounds.x,
+                    tile.bounds.y,
+                    tile.bounds.width,
+                    tile.bounds.height,
+                    sw,
+                    sh,
+                    bg_color,
+                );
+                vertices.extend_from_slice(&verts);
+            }
 
             if let Some(root_id) = tile.root_node {
                 self.render_node(
@@ -3895,17 +3967,18 @@ impl Compositor {
         let bg_vertex_count = content_vertices.len();
 
         for tile in &tiles {
-            let bg_color = self.tile_background_color(tile, scene);
-            let verts = rect_vertices(
-                tile.bounds.x,
-                tile.bounds.y,
-                tile.bounds.width,
-                tile.bounds.height,
-                sw,
-                sh,
-                bg_color,
-            );
-            content_vertices.extend_from_slice(&verts);
+            if let Some(bg_color) = self.tile_background_color(tile, scene) {
+                let verts = rect_vertices(
+                    tile.bounds.x,
+                    tile.bounds.y,
+                    tile.bounds.width,
+                    tile.bounds.height,
+                    sw,
+                    sh,
+                    bg_color,
+                );
+                content_vertices.extend_from_slice(&verts);
+            }
             if let Some(root_id) = tile.root_node {
                 self.render_node(
                     root_id,
@@ -4056,6 +4129,7 @@ impl Compositor {
             let mut rr_post: Vec<crate::pipeline::RoundedRectDrawCmd> = Vec::new();
             rr_post.extend(rr_all.content);
             rr_post.extend(rr_all.chrome);
+            rr_post.extend(self.collect_tile_rounded_rect_cmds(scene));
             self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_post, sw, sh);
         }
 
@@ -4576,6 +4650,60 @@ impl Compositor {
         result
     }
 
+    fn collect_tile_rounded_rect_cmds(
+        &self,
+        scene: &SceneGraph,
+    ) -> Vec<crate::pipeline::RoundedRectDrawCmd> {
+        let mut cmds = Vec::new();
+        for tile in &scene.visible_tiles() {
+            if let Some(root_id) = tile.root_node {
+                // Compute scroll offset once per tile rather than on every
+                // recursive node visit — it is constant across all nodes in
+                // the same tile.
+                let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
+                self.collect_tile_rounded_rect_cmds_from_node(
+                    root_id, tile, scene, scroll_x, scroll_y, &mut cmds,
+                );
+            }
+        }
+        cmds
+    }
+
+    fn collect_tile_rounded_rect_cmds_from_node(
+        &self,
+        node_id: SceneId,
+        tile: &Tile,
+        scene: &SceneGraph,
+        scroll_x: f32,
+        scroll_y: f32,
+        cmds: &mut Vec<crate::pipeline::RoundedRectDrawCmd>,
+    ) {
+        let node = match scene.nodes.get(&node_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        if let NodeData::SolidColor(sc) = &node.data {
+            if let Some(radius) = sc.radius.filter(|r| *r > 0.0) {
+                let max_r = (sc.bounds.width * 0.5).min(sc.bounds.height * 0.5).max(0.0);
+                cmds.push(crate::pipeline::RoundedRectDrawCmd {
+                    x: tile.bounds.x + sc.bounds.x - scroll_x,
+                    y: tile.bounds.y + sc.bounds.y - scroll_y,
+                    width: sc.bounds.width,
+                    height: sc.bounds.height,
+                    radius: radius.min(max_r),
+                    color: self.gpu_color(sc.color),
+                });
+            }
+        }
+
+        for child_id in &node.children {
+            self.collect_tile_rounded_rect_cmds_from_node(
+                *child_id, tile, scene, scroll_x, scroll_y, cmds,
+            );
+        }
+    }
+
     /// Encode a GPU pass that renders the given rounded-rectangle commands
     /// using the SDF pipeline.
     ///
@@ -4645,7 +4773,7 @@ impl Compositor {
     ///   backdrop color with the urgency-derived `color.severity.*` token color.
     /// - For non-alert-banner zones with `Notification` content, overrides the
     ///   backdrop color with the urgency-derived `color.notification.urgency.*`
-    ///   token color at 0.9 opacity, and renders a 1px 4-quad border using
+    ///   token color at 0.8 opacity, and renders a 1px 4-quad border using
     ///   `color.border.default`.
     /// - Applies the zone's current animation opacity (fade-in/fade-out).
     /// - Skips the backdrop quad when `rendering_policy.backdrop` is `None`.
@@ -4776,7 +4904,7 @@ impl Compositor {
                         // Determine backdrop color.
                         // alert-banner: urgency → color.severity.* tokens
                         // non-alert-banner Notification: urgency → color.notification.urgency.* tokens
-                        //   with fixed 0.9 opacity and 1px 4-quad border
+                        //   with fixed 0.8 opacity and 1px 4-quad border
                         // SolidColor: always its own color
                         // StaticImage: warm-gray placeholder quad (full GPU texture deferred)
                         // Other: policy.backdrop
@@ -4874,6 +5002,24 @@ impl Compositor {
                                         self.gpu_color(border_color),
                                     );
                                 }
+                            }
+
+                            if is_notification_content && !is_alert_banner_zone(zone_name) {
+                                let dismiss_bounds =
+                                    notification_dismiss_bounds(x, slot_y, w, effective_slot_h);
+                                let mut control_color =
+                                    resolve_notification_control_color(policy, &self.token_map);
+                                control_color.a *= combined_opacity;
+                                emit_border_quads(
+                                    vertices,
+                                    dismiss_bounds.x,
+                                    dismiss_bounds.y,
+                                    dismiss_bounds.width,
+                                    dismiss_bounds.height,
+                                    sw,
+                                    sh,
+                                    self.gpu_color(control_color),
+                                );
                             }
                         }
 
@@ -5743,37 +5889,45 @@ impl Compositor {
         }
     }
 
-    /// Determine the background color for a tile based on its content.
-    fn tile_background_color(&self, tile: &Tile, scene: &SceneGraph) -> [f32; 4] {
+    /// Determine the background fill color for a tile based on its root content.
+    ///
+    /// Returns `None` when the tile's rounded root node should be solely
+    /// responsible for its own backdrop shape.
+    fn tile_background_color(&self, tile: &Tile, scene: &SceneGraph) -> Option<[f32; 4]> {
         if let Some(root_id) = tile.root_node
             && let Some(node) = scene.nodes.get(&root_id)
         {
             match &node.data {
-                NodeData::SolidColor(sc) => return sc.color.to_array(),
+                NodeData::SolidColor(sc) => {
+                    if sc.radius.is_some_and(|r| r > 0.0) {
+                        return None;
+                    }
+                    return Some(sc.color.to_array());
+                }
                 NodeData::TextMarkdown(tm) => {
                     if let Some(bg) = &tm.background {
-                        return bg.to_array();
+                        return Some(bg.to_array());
                     }
-                    return [0.15, 0.15, 0.25, tile.opacity];
+                    return Some([0.15, 0.15, 0.25, tile.opacity]);
                 }
                 NodeData::HitRegion(_) => {
                     // Check local state for visual feedback
                     if let Some(state) = scene.hit_region_states.get(&root_id) {
                         if state.pressed {
-                            return [0.4, 0.7, 1.0, tile.opacity]; // Active blue
+                            return Some([0.4, 0.7, 1.0, tile.opacity]); // Active blue
                         } else if state.hovered {
-                            return [0.3, 0.5, 0.8, tile.opacity]; // Hover blue
+                            return Some([0.3, 0.5, 0.8, tile.opacity]); // Hover blue
                         }
                     }
-                    return [0.2, 0.3, 0.5, tile.opacity]; // Default hit region
+                    return Some([0.2, 0.3, 0.5, tile.opacity]); // Default hit region
                 }
                 NodeData::StaticImage(_) => {
                     // Tile background for image tiles: near-black with slight tint
-                    return [0.05, 0.05, 0.05, tile.opacity];
+                    return Some([0.05, 0.05, 0.05, tile.opacity]);
                 }
             }
         }
-        [0.1, 0.1, 0.2, tile.opacity]
+        Some([0.1, 0.1, 0.2, tile.opacity])
     }
 
     /// Render a node and its children within a tile.
@@ -5796,16 +5950,18 @@ impl Compositor {
 
         match &node.data {
             NodeData::SolidColor(sc) => {
-                let verts = rect_vertices(
-                    tile.bounds.x + sc.bounds.x - scroll_x,
-                    tile.bounds.y + sc.bounds.y - scroll_y,
-                    sc.bounds.width,
-                    sc.bounds.height,
-                    sw,
-                    sh,
-                    self.gpu_color(sc.color),
-                );
-                vertices.extend_from_slice(&verts);
+                if !sc.radius.is_some_and(|r| r > 0.0) {
+                    let verts = rect_vertices(
+                        tile.bounds.x + sc.bounds.x - scroll_x,
+                        tile.bounds.y + sc.bounds.y - scroll_y,
+                        sc.bounds.width,
+                        sc.bounds.height,
+                        sw,
+                        sh,
+                        self.gpu_color(sc.color),
+                    );
+                    vertices.extend_from_slice(&verts);
+                }
             }
             NodeData::TextMarkdown(tm) => {
                 if self.text_rasterizer.is_some() {
@@ -6157,6 +6313,7 @@ mod tests {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(1.0, 0.0, 0.0, 1.0),
                         bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+                        radius: None,
                     }),
                 },
             )
@@ -6238,6 +6395,7 @@ mod tests {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(1.0, 0.0, 0.0, 1.0), // bright red
                         bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+                        radius: None,
                     }),
                 },
             )
@@ -6306,6 +6464,7 @@ mod tests {
                         // Blue tile — fills entire surface in content pass.
                         color: Rgba::new(0.0, 0.0, 1.0, 1.0),
                         bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+                        radius: None,
                     }),
                 },
             )
@@ -6360,6 +6519,7 @@ mod tests {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(0.5, 0.5, 0.5, 1.0),
                 bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+                radius: None,
             }),
         });
         // Empty chrome cmds — must not panic.
@@ -7459,7 +7619,7 @@ mod tests {
         );
 
         // Render and check: the backdrop must NOT be severity critical (pure red R~1.0, G~0.0, B~0.0).
-        // It should be notification urgency critical fallback: #8B1A1A (R~0.545, G~0.102, B~0.102).
+        // It should be notification urgency critical fallback: #450612.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
         compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
@@ -7479,105 +7639,103 @@ mod tests {
 
     // ── Notification urgency token tests ─────────────────────────────────────
 
-    /// urgency_to_notification_color: low (0) maps to #2A2A2A fallback.
+    /// urgency_to_notification_color: low (0) maps to #000000 fallback.
     #[test]
     fn test_notification_urgency_low_fallback() {
         let no_tokens = HashMap::new();
         let color = urgency_to_notification_color(0, &no_tokens);
-        // #2A2A2A → R=G=B ≈ 0.165
         assert!(
-            (color.r - 0.165).abs() < 0.01,
-            "urgency low R should be ~0.165, got {}",
+            color.r < 0.001,
+            "urgency low R should be ~0.0, got {}",
             color.r
         );
         assert!(
-            (color.g - 0.165).abs() < 0.01,
-            "urgency low G should be ~0.165, got {}",
+            color.g < 0.001,
+            "urgency low G should be ~0.0, got {}",
             color.g
         );
         assert!(
-            (color.b - 0.165).abs() < 0.01,
-            "urgency low B should be ~0.165, got {}",
+            color.b < 0.001,
+            "urgency low B should be ~0.0, got {}",
             color.b
         );
     }
 
-    /// urgency_to_notification_color: normal (1) maps to #1A1A3A fallback.
+    /// urgency_to_notification_color: normal (1) maps to #0C1426 fallback.
     #[test]
     fn test_notification_urgency_normal_fallback() {
         let no_tokens = HashMap::new();
         let color = urgency_to_notification_color(1, &no_tokens);
-        // #1A1A3A: R≈0.102, G≈0.102, B≈0.227
         assert!(
-            (color.r - 0.102).abs() < 0.01,
-            "urgency normal R should be ~0.102, got {}",
+            (color.r - 0.0037).abs() < 0.002,
+            "urgency normal R should be ~0.0037, got {}",
             color.r
         );
         assert!(
-            (color.b - 0.227).abs() < 0.02,
-            "urgency normal B should be ~0.227, got {}",
+            (color.g - 0.0070).abs() < 0.002,
+            "urgency normal G should be ~0.0070, got {}",
+            color.g
+        );
+        assert!(
+            (color.b - 0.0194).abs() < 0.003,
+            "urgency normal B should be ~0.0194, got {}",
             color.b
         );
-        // B must be clearly greater than R for blue-tint
         assert!(
-            color.b > color.r + 0.05,
+            color.b > color.r + 0.01,
             "urgency normal B should be > R (blue tint)"
         );
     }
 
-    /// urgency_to_notification_color: urgent (2) maps to #8B6914 fallback.
+    /// urgency_to_notification_color: urgent (2) maps to #2A1E08 fallback.
     #[test]
     fn test_notification_urgency_urgent_fallback() {
         let no_tokens = HashMap::new();
         let color = urgency_to_notification_color(2, &no_tokens);
-        // #8B6914: R≈0.545, G≈0.412, B≈0.078
         assert!(
-            color.r > 0.4,
-            "urgency urgent R should be >0.4, got {}",
+            (color.r - 0.0232).abs() < 0.003,
+            "urgency urgent R should be ~0.0232, got {}",
             color.r
         );
         assert!(
-            color.g > 0.3,
-            "urgency urgent G should be >0.3, got {}",
+            (color.g - 0.0130).abs() < 0.003,
+            "urgency urgent G should be ~0.0130, got {}",
             color.g
         );
         assert!(
-            color.b < 0.2,
-            "urgency urgent B should be <0.2, got {}",
+            (color.b - 0.0024).abs() < 0.002,
+            "urgency urgent B should be ~0.0024, got {}",
             color.b
         );
-        // R should be greatest (amber-gold tint)
         assert!(
-            color.r > color.b,
-            "urgency urgent R should be > B (amber tint)"
+            color.r > color.g && color.g > color.b,
+            "urgency urgent should retain an amber-black R > G > B ordering"
         );
     }
 
-    /// urgency_to_notification_color: critical (3) maps to #8B1A1A fallback.
+    /// urgency_to_notification_color: critical (3) maps to #450612 fallback.
     #[test]
     fn test_notification_urgency_critical_fallback() {
         let no_tokens = HashMap::new();
         let color = urgency_to_notification_color(3, &no_tokens);
-        // #8B1A1A: R≈0.545, G≈0.102, B≈0.102
         assert!(
-            color.r > 0.4,
-            "urgency critical R should be >0.4, got {}",
+            (color.r - 0.0595).abs() < 0.004,
+            "urgency critical R should be ~0.0595, got {}",
             color.r
         );
         assert!(
-            color.g < 0.2,
-            "urgency critical G should be <0.2, got {}",
+            (color.g - 0.0018).abs() < 0.002,
+            "urgency critical G should be ~0.0018, got {}",
             color.g
         );
         assert!(
-            color.b < 0.2,
-            "urgency critical B should be <0.2, got {}",
+            (color.b - 0.0060).abs() < 0.002,
+            "urgency critical B should be ~0.0060, got {}",
             color.b
         );
-        // R should be clearly greater than G and B (dark red)
         assert!(
-            color.r > color.g + 0.2,
-            "urgency critical R should dominate (dark red)"
+            color.r > color.b && color.b > color.g,
+            "urgency critical should retain a red-black R > B > G ordering"
         );
     }
 
@@ -7637,36 +7795,40 @@ mod tests {
     #[test]
     fn test_notification_urgency_critical_token_override() {
         let mut token_map = HashMap::new();
-        // Override critical with pure magenta (#FF00FF).
+        // Override critical with the exemplar's dark red-black token.
         token_map.insert(
             "color.notification.urgency.critical".to_string(),
-            "#FF00FF".to_string(),
+            "#450612".to_string(),
         );
         let color = urgency_to_notification_color(3, &token_map);
         assert!(
-            color.r > 0.9,
-            "custom critical token R should be ~1.0, got {}",
+            (color.r - 0.0595).abs() < 0.004,
+            "custom critical token R should decode from sRGB hex to ~0.0595 linear, got {}",
             color.r
         );
         assert!(
-            color.b > 0.9,
-            "custom critical token B should be ~1.0, got {}",
+            (color.g - 0.0018).abs() < 0.002,
+            "custom critical token G should decode from sRGB hex to ~0.0018 linear, got {}",
+            color.g
+        );
+        assert!(
+            (color.b - 0.0060).abs() < 0.002,
+            "custom critical token B should decode from sRGB hex to ~0.0060 linear, got {}",
             color.b
         );
         assert!(
-            color.g < 0.1,
-            "custom critical token G should be ~0.0, got {}",
-            color.g
+            color.r > color.b && color.b > color.g,
+            "custom critical token should retain a red-black R > B > G ordering"
         );
     }
 
-    /// notification-area urgency-tinted backdrop: renders backdrop at 0.9 opacity.
+    /// notification-area urgency-tinted backdrop: renders backdrop at 0.8 opacity.
     ///
     /// Per spec: non-alert-banner Notification content must use
-    /// color.notification.urgency.* tokens with fixed 0.9 opacity.
+    /// color.notification.urgency.* tokens with fixed 0.8 opacity.
     /// The policy.backdrop_opacity must NOT override this.
     #[tokio::test]
-    async fn test_notification_area_backdrop_uses_0_9_opacity() {
+    async fn test_notification_area_backdrop_uses_0_8_opacity() {
         let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
@@ -7683,7 +7845,7 @@ mod tests {
             accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
             rendering_policy: RenderingPolicy {
                 backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.5)),
-                // backdrop_opacity = 0.5 must NOT override the 0.9 fixed opacity
+                // backdrop_opacity = 0.5 must NOT override the 0.8 fixed opacity
                 backdrop_opacity: Some(0.5),
                 text_color: Some(Rgba::WHITE),
                 ..Default::default()
@@ -7717,11 +7879,11 @@ mod tests {
         compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         assert!(!vertices.is_empty(), "expected vertices");
-        // The first quad's alpha (index 3 of color) should be 0.9.
+        // The first quad's alpha (index 3 of color) should be 0.8.
         let first_alpha = vertices[0].color[3];
         assert!(
-            (first_alpha - 0.9).abs() < 0.01,
-            "notification-area backdrop alpha must be 0.9, got {first_alpha}"
+            (first_alpha - 0.8).abs() < 0.01,
+            "notification-area backdrop alpha must be 0.8, got {first_alpha}"
         );
     }
 
@@ -10085,6 +10247,83 @@ mod tests {
         );
     }
 
+    /// Stack notifications render a dedicated dismiss label and reserve width for it.
+    #[tokio::test]
+    async fn test_notification_stack_adds_dismiss_label_and_reserves_text_width() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "dismiss label test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: Some(8_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Dismissible notification".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                    title: String::new(),
+                    actions: Vec::new(),
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 2, "body text + dismiss label expected");
+
+        let body_item = items
+            .iter()
+            .find(|item| item.text == "Dismissible notification")
+            .expect("body text item must exist");
+        let dismiss_item = items
+            .iter()
+            .find(|item| item.text == "X")
+            .expect("dismiss text item must exist");
+
+        assert_eq!(body_item.pixel_x, 9.0, "body text keeps left inset");
+        assert_eq!(
+            body_item.bounds_width, 274.0,
+            "body width must reserve dismiss control space"
+        );
+        assert_eq!(
+            dismiss_item.alignment,
+            TextAlign::Center,
+            "dismiss label must be centered in its button bounds"
+        );
+        assert!(
+            dismiss_item.pixel_x >= 300.0,
+            "dismiss label must sit near the right edge, got {}",
+            dismiss_item.pixel_x
+        );
+    }
+
     /// Notification text is inset by 9px (8px padding + 1px border) from backdrop edges.
     ///
     /// AC: text content area starts at (x + 9, y + 9).
@@ -10161,6 +10400,63 @@ mod tests {
             item.overflow,
             TextOverflow::Clip,
             "notification text must clip at content area (no wrapping)"
+        );
+    }
+
+    /// Flat-rect stack notifications render an outlined dismiss affordance with no fill.
+    #[tokio::test]
+    async fn test_notification_stack_emits_dismiss_outline_quads() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "dismiss outline test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: Some(8_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Dismiss outline".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                    title: String::new(),
+                    actions: Vec::new(),
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
+
+        assert_eq!(
+            vertices.len(),
+            54,
+            "notification slot should emit backdrop + card border + dismiss outline"
         );
     }
 

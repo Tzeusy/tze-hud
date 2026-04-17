@@ -53,6 +53,7 @@ fn arb_solid_color_node() -> impl Strategy<Value = Node> {
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba::new(0.5, 0.5, 0.5, 1.0),
             bounds,
+            radius: None,
         }),
     })
 }
@@ -566,7 +567,8 @@ proptest! {
                 data: NodeData::SolidColor(SolidColorNode {
                     color: Rgba::WHITE,
                     bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
-                }),
+                    radius: None,
+}),
             });
         }
 
@@ -673,7 +675,8 @@ proptest! {
                         data: NodeData::SolidColor(SolidColorNode {
                             color: Rgba::WHITE,
                             bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
-                        }),
+                            radius: None,
+}),
                     },
                 )
                 .unwrap();

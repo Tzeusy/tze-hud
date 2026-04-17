@@ -1301,6 +1301,7 @@ mod tests {
                         a: 1.0,
                     },
                     bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                    radius: None,
                 }),
             }],
         );

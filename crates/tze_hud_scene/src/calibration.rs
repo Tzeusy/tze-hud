@@ -232,6 +232,7 @@ fn run_scene_workload() -> f64 {
                 data: NodeData::SolidColor(SolidColorNode {
                     color: Rgba::new(0.5, 0.5, 0.5, 1.0),
                     bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
+                    radius: None,
                 }),
             }
         } else {
@@ -288,6 +289,7 @@ fn run_scene_workload() -> f64 {
                 data: NodeData::SolidColor(SolidColorNode {
                     color: Rgba::new(batch_idx as f32 / CALIBRATION_BATCHES as f32, 0.5, 0.5, 1.0),
                     bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
+                    radius: None,
                 }),
             };
             mutations.push(SceneMutation::SetTileRoot {
@@ -331,6 +333,7 @@ fn run_scene_workload() -> f64 {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.3, 0.3, 0.3, 1.0),
                         bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
+                        radius: None,
                     }),
                 };
                 let _ = scene.set_tile_root(new_tile_id, node);

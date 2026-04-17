@@ -369,6 +369,7 @@ impl TestSceneRegistry {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(0.05, 0.05, 0.1, 1.0),
                 bounds: Rect::new(0.0, 0.0, self.display_width, status_h),
+                radius: None,
             }),
         };
         graph
@@ -436,6 +437,7 @@ impl TestSceneRegistry {
                                 1.0,
                             ),
                             bounds: Rect::new(0.0, 0.0, tile_w - 2.0, tile_h - 2.0),
+                            radius: None,
                         }),
                     }
                 } else {
@@ -536,6 +538,7 @@ impl TestSceneRegistry {
                 data: NodeData::SolidColor(SolidColorNode {
                     color,
                     bounds: Rect::new(0.0, 0.0, bounds.width, bounds.height),
+                    radius: None,
                 }),
             };
             graph
@@ -594,6 +597,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.1, 0.1, 0.5, 1.0),
                         bounds: Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                        radius: None,
                     }),
                 },
             )
@@ -613,6 +617,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(1.0, 1.0, 1.0, 0.5),
                         bounds: Rect::new(0.0, 0.0, overlay_bounds.width, overlay_bounds.height),
+                        radius: None,
                     }),
                 },
             )
@@ -936,6 +941,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.2, 0.4, 0.7, 1.0),
                         bounds: Rect::new(0.0, 0.0, sync_tile_w, sync_tile_h),
+                        radius: None,
                     }),
                 },
             )
@@ -966,6 +972,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.7, 0.4, 0.2, 1.0),
                         bounds: Rect::new(0.0, 0.0, sync_tile_w, sync_tile_h),
+                        radius: None,
                     }),
                 },
             )
@@ -1037,6 +1044,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.05, 0.05, 0.15, 1.0),
                         bounds: Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                        radius: None,
                     }),
                 },
             )
@@ -1287,6 +1295,7 @@ impl TestSceneRegistry {
                         data: NodeData::SolidColor(SolidColorNode {
                             color: *color,
                             bounds: Rect::new(0.0, 0.0, bounds.width, bounds.height),
+                            radius: None,
                         }),
                     },
                 )
@@ -1391,6 +1400,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.0, 0.0, 0.0, 0.15),
                         bounds: Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                        radius: None,
                     }),
                 },
             )
@@ -1515,6 +1525,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.8, 0.2, 0.2, 1.0),
                         bounds: Rect::new(0.0, 0.0, one_bounds_a.width, one_bounds_a.height),
+                        radius: None,
                     }),
                 },
             )
@@ -1560,6 +1571,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.2, 0.7, 0.2, 1.0),
                         bounds: Rect::new(0.0, 0.0, two_bounds.width, two_bounds.height),
+                        radius: None,
                     }),
                 },
             )
@@ -1581,6 +1593,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.2, 0.4, 0.9, 1.0),
                         bounds: Rect::new(0.0, 0.0, three_bounds.width, three_bounds.height),
+                        radius: None,
                     }),
                 },
             )
@@ -2281,6 +2294,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.0, 0.3, 0.5, 0.9),
                         bounds: Rect::new(0.0, 0.0, pip_bounds.width, pip_bounds.height),
+                        radius: None,
                     }),
                 },
             )
@@ -2368,6 +2382,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.08, 0.1, 0.18, 1.0),
                         bounds: Rect::new(0.0, 0.0, self.display_width, self.display_height * 0.85),
+                        radius: None,
                     }),
                 },
             )
@@ -2488,6 +2503,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.05, 0.05, 0.1, 1.0),
                         bounds: Rect::new(0.0, 0.0, self.display_width, 40.0),
+                        radius: None,
                     }),
                 },
             )
@@ -2692,6 +2708,7 @@ impl TestSceneRegistry {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.9, 0.1, 0.1, 1.0),
                         bounds: Rect::new(0.0, 0.0, self.display_width, 48.0),
+                        radius: None,
                     }),
                 },
             )

@@ -202,6 +202,7 @@ fn make_bg_node() -> Node {
         data: NodeData::SolidColor(SolidColorNode {
             color: BG_COLOR,
             bounds: Rect::new(0.0, 0.0, TILE_W, TILE_H),
+            radius: None,
         }),
     }
 }
@@ -223,6 +224,7 @@ fn make_bg_root_with_children(
         data: NodeData::SolidColor(SolidColorNode {
             color: BG_COLOR,
             bounds: Rect::new(0.0, 0.0, TILE_W, TILE_H),
+            radius: None,
         }),
     }
 }

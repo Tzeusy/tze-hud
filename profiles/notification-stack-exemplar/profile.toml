@@ -9,7 +9,7 @@
 
 name        = "notification-stack-exemplar"
 version     = "1.0.0"
-description = "Notification stack exemplar — rounded urgency-tinted cards with stronger type hierarchy"
+description = "Notification stack exemplar — rounded black-tinted cards with stronger type hierarchy"
 
 component_type = "notification"
 
@@ -20,15 +20,15 @@ component_type = "notification"
 #
 # All four urgency levels must be defined for full coverage.
 [token_overrides]
-"color.notification.urgency.low"      = "#2A2A2A"   # dark gray — low urgency
-"color.notification.urgency.normal"   = "#1A1A3A"   # dark navy — normal
-"color.notification.urgency.urgent"   = "#8B6914"   # amber — urgent attention
-"color.notification.urgency.critical" = "#8B1A1A"   # deep red — critical
+"color.notification.urgency.low"      = "#000000"   # smoke black — low urgency
+"color.notification.urgency.normal"   = "#0C1426"   # blue-black — normal
+"color.notification.urgency.urgent"   = "#2A1E08"   # amber-black — urgent attention
+"color.notification.urgency.critical" = "#450612"   # red-black — critical
 
 # Base backdrop and typography tokens
 "color.text.primary"      = "#F5F7FA"
-"color.backdrop.default"  = "#141A24"    # fallback when no urgency tinting
-"opacity.backdrop.opaque" = "0.92"       # satisfies OpaqueBackdrop (>= 0.8)
+"color.backdrop.default"  = "#000000"    # fallback when no urgency tinting
+"opacity.backdrop.opaque" = "0.80"       # satisfies OpaqueBackdrop (>= 0.8)
 "color.border.default"    = "#6E7A91"
 "typography.body.family"  = "system-ui"
 "typography.body.size"    = "15"

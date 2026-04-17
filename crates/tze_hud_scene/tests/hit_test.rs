@@ -566,6 +566,7 @@ fn last_sibling_wins_in_reverse_tree_order() {
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba::BLACK,
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            radius: None,
         }),
     };
 

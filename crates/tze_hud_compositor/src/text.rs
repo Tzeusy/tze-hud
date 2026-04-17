@@ -139,6 +139,12 @@ impl TextRasterizer {
         self.loaded_font_ids.contains(resource_id)
     }
 
+    /// Total number of font faces visible to glyphon's `FontSystem`.
+    #[inline]
+    pub fn font_face_count(&self) -> usize {
+        self.font_system.db().faces().count()
+    }
+
     /// Update the viewport resolution before each frame.
     ///
     /// Must be called once per frame before `render_text_pass`.
@@ -361,12 +367,18 @@ impl TextItem {
         let b = linear_to_srgb_u8(node.color.b);
         let a = (node.color.a * 255.0).clamp(0.0, 255.0) as u8;
 
-        // Add a small inset margin so text doesn't touch the tile edge.
-        let margin = 6.0_f32;
-        let x = tile_x + node.bounds.x + margin;
-        let y = tile_y + node.bounds.y + margin;
-        let w = (node.bounds.width - margin * 2.0).max(1.0);
-        let h = (node.bounds.height - margin * 2.0).max(1.0);
+        // Add a size-aware inset margin so large text boxes get breathing room
+        // without collapsing compact HUD labels like Presence Card rows.
+        let font_size_px = node.font_size_px.clamp(6.0, 200.0);
+        let line_height = font_size_px * 1.4;
+        let margin_x = (node.bounds.width * 0.08).clamp(1.0, 6.0);
+        let target_margin_y = (node.bounds.height * 0.20).clamp(1.0, 6.0);
+        let max_margin_y = ((node.bounds.height - line_height).max(0.0) / 2.0).min(6.0);
+        let margin_y = target_margin_y.min(max_margin_y);
+        let x = tile_x + node.bounds.x + margin_x;
+        let y = tile_y + node.bounds.y + margin_y;
+        let w = (node.bounds.width - margin_x * 2.0).max(1.0);
+        let h = (node.bounds.height - margin_y * 2.0).max(1.0);
 
         TextItem {
             text: stripped,
@@ -374,7 +386,7 @@ impl TextItem {
             pixel_y: y,
             bounds_width: w,
             bounds_height: h,
-            font_size_px: node.font_size_px.clamp(6.0, 200.0),
+            font_size_px,
             font_family: node.font_family,
             font_weight: 400, // TextMarkdownNode does not carry weight; default regular.
             color: [r, g, b, a],
@@ -697,6 +709,32 @@ mod tests {
         assert!(item.outline_color.is_none());
         assert!(item.outline_width.is_none());
         assert_eq!(item.opacity, 1.0);
+    }
+
+    #[test]
+    fn text_item_from_small_text_markdown_node_does_not_collapse_height() {
+        use tze_hud_scene::types::{Rect, Rgba, TextMarkdownNode};
+        let node = TextMarkdownNode {
+            content: "RESIDENT AGENT".to_owned(),
+            bounds: Rect::new(96.0, 18.0, 152.0, 12.0),
+            font_size_px: 11.0,
+            font_family: FontFamily::SystemSansSerif,
+            color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+        };
+        let item = TextItem::from_text_markdown_node(&node, 0.0, 0.0);
+        assert!(
+            item.bounds_height >= 11.0,
+            "small presence-card labels must retain height close to their font size for live glyph rendering; got {}",
+            item.bounds_height
+        );
+        assert!(
+            item.pixel_y < 22.0,
+            "small presence-card labels should not be pushed too far down by inset margin; got {}",
+            item.pixel_y
+        );
     }
 
     // ── from_zone_policy tests [hud-sc0a.8] ──────────────────────────────────

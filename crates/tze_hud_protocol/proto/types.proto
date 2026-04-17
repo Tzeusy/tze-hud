@@ -48,6 +48,7 @@ message NodeProto {
 message SolidColorNodeProto {
   Rgba color = 1;
   Rect bounds = 2;
+  float radius = 3;  // -1.0 = not set sentinel; valid >= 0.0
 }
 
 message TextMarkdownNodeProto {

@@ -21,7 +21,7 @@ class PresenceCardExemplarTests(unittest.TestCase):
         self.assertEqual(presence_card_exemplar.format_last_active(60), "1m ago")
         self.assertEqual(presence_card_exemplar.format_last_active(125), "2m ago")
 
-    def test_build_presence_card_mutations_include_tile_setup_and_three_nodes(self) -> None:
+    def test_build_presence_card_mutations_include_tile_setup_and_dismiss_control(self) -> None:
         tile_id = uuid.uuid4().bytes
         root_uuid = uuid.UUID("11111111-2222-7333-8444-555555555555")
 
@@ -34,16 +34,20 @@ class PresenceCardExemplarTests(unittest.TestCase):
             root_uuid=root_uuid,
         )
 
-        self.assertEqual(len(mutations), 15)
+        self.assertEqual(len(mutations), 13)
         self.assertAlmostEqual(mutations[0].update_tile_opacity.opacity, 1.0)
         self.assertEqual(
             mutations[1].update_tile_input_mode.input_mode,
             types_pb2.TILE_INPUT_MODE_CAPTURE,
         )
         self.assertEqual(mutations[2].WhichOneof("mutation"), "set_tile_root")
+        self.assertAlmostEqual(
+            mutations[2].set_tile_root.node.solid_color.radius,
+            presence_card_exemplar.CARD_RADIUS,
+        )
         for mutation in mutations[3:]:
             self.assertEqual(mutation.WhichOneof("mutation"), "add_node")
-            self.assertEqual(mutation.add_node.parent_id, root_uuid.bytes)
+            self.assertEqual(mutation.add_node.parent_id, root_uuid.bytes_le)
         self.assertEqual(
             mutations[7].add_node.node.text_markdown.content,
             "RESIDENT AGENT",
@@ -58,14 +62,10 @@ class PresenceCardExemplarTests(unittest.TestCase):
         )
         self.assertEqual(
             mutations[11].add_node.node.text_markdown.content,
-            "NOW",
-        )
-        self.assertEqual(
-            mutations[13].add_node.node.text_markdown.content,
             "X",
         )
         self.assertEqual(
-            mutations[14].add_node.node.hit_region.interaction_id,
+            mutations[12].add_node.node.hit_region.interaction_id,
             "dismiss-card",
         )
 
@@ -82,7 +82,7 @@ class PresenceCardExemplarTests(unittest.TestCase):
             root_uuid=root_uuid,
         )
 
-        self.assertEqual(len(mutations), 13)
+        self.assertEqual(len(mutations), 11)
         self.assertEqual(mutations[0].WhichOneof("mutation"), "set_tile_root")
         for mutation in mutations[1:]:
             self.assertEqual(mutation.WhichOneof("mutation"), "add_node")
@@ -92,14 +92,10 @@ class PresenceCardExemplarTests(unittest.TestCase):
         )
         self.assertEqual(
             mutations[9].add_node.node.text_markdown.content,
-            "1M",
-        )
-        self.assertEqual(
-            mutations[11].add_node.node.text_markdown.content,
             "X",
         )
         self.assertEqual(
-            mutations[12].add_node.node.hit_region.interaction_id,
+            mutations[10].add_node.node.hit_region.interaction_id,
             "dismiss-card",
         )
 
@@ -134,6 +130,35 @@ class PresenceCardExemplarTests(unittest.TestCase):
             presence_card_exemplar.AVATAR_PLATE_H
             - presence_card_exemplar.AVATAR_H
             - (presence_card_exemplar.AVATAR_Y - presence_card_exemplar.AVATAR_PLATE_Y),
+        )
+        self.assertEqual(
+            presence_card_exemplar.AVATAR_X - presence_card_exemplar.AVATAR_PLATE_X,
+            presence_card_exemplar.AVATAR_INSET,
+        )
+        self.assertEqual(
+            presence_card_exemplar.AVATAR_Y - presence_card_exemplar.AVATAR_PLATE_Y,
+            presence_card_exemplar.AVATAR_INSET,
+        )
+
+    def test_presence_card_has_single_top_right_control(self) -> None:
+        self.assertGreaterEqual(
+            presence_card_exemplar.DISMISS_BG_X,
+            presence_card_exemplar.NAME_X + presence_card_exemplar.NAME_W,
+        )
+        self.assertLess(
+            presence_card_exemplar.DISMISS_BG_X,
+            presence_card_exemplar.CARD_W - presence_card_exemplar.DISMISS_BG_W,
+        )
+        self.assertAlmostEqual(
+            presence_card_exemplar.DISMISS_BG_RADIUS,
+            9.0,
+        )
+
+    def test_sheen_is_inset_so_rounded_card_corners_stay_visible(self) -> None:
+        self.assertGreater(presence_card_exemplar.SHEEN_X, 0.0)
+        self.assertAlmostEqual(
+            presence_card_exemplar.SHEEN_X * 2.0 + presence_card_exemplar.SHEEN_W,
+            presence_card_exemplar.CARD_W,
         )
 
     def test_build_step_plan_tracks_create_update_disconnect_cleanup(self) -> None:

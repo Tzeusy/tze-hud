@@ -453,6 +453,8 @@ pub enum NodeData {
 pub struct SolidColorNode {
     pub color: Rgba,
     pub bounds: Rect,
+    #[serde(default)]
+    pub radius: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

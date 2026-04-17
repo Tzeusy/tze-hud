@@ -1376,6 +1376,7 @@ mod tests {
                 data: NodeData::SolidColor(tze_hud_scene::SolidColorNode {
                     color: tze_hud_scene::Rgba::new(1.0, 0.0, 0.0, 1.0),
                     bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                    radius: None,
                 }),
             },
         );

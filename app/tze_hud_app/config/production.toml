@@ -63,6 +63,20 @@ notification = "notification-stack-exemplar"
 name        = "Main"
 default_tab = true
 
+# ── Gauge widget instance ─────────────────────────────────────────────────────
+# MCP widget_name: "main-gauge"
+# Parameters: level (f32 0–1), label (string), fill_color (color), severity (enum)
+# Position: left edge, vertically centered; narrow vertical meter clear of subtitles.
+[[tabs.widgets]]
+widget_type = "gauge"
+instance_id  = "main-gauge"
+
+[tabs.widgets.geometry]
+x      = 40
+y      = 420
+width  = 100
+height = 240
+
 # ── Progress-bar widget instance ──────────────────────────────────────────────
 # MCP widget_name: "main-progress"
 # Parameters: progress (f32 0–1), label (string), fill_color (color)

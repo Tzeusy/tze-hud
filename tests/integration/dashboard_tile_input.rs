@@ -142,6 +142,7 @@ fn setup_dashboard_tile_scene() -> (SceneGraph, SceneId, SceneId, SceneId, Scene
             data: NodeData::SolidColor(SolidColorNode {
                 color: tze_hud_scene::Rgba::new(0.07, 0.07, 0.07, 0.90),
                 bounds: Rect::new(0.0, 0.0, TILE_W, TILE_H),
+                radius: None,
             }),
         },
     );

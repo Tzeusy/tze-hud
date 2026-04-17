@@ -36,18 +36,20 @@ CARD_H = 112.0
 CARD_GAP = 12.0
 LEFT_MARGIN = 24.0
 BOTTOM_MARGIN = 24.0
+CARD_RADIUS = 12.0
 
-BG_RGBA = (0.10, 0.14, 0.19, 0.72)
+BG_RGBA = (0.0, 0.0, 0.0, 0.80)
 SHEEN_RGBA = (0.92, 0.96, 1.0, 0.16)
-EYEBROW_RGBA = (0.72, 0.80, 0.90, 0.82)
+EYEBROW_RGBA = (0.88, 0.93, 0.98, 0.98)
 NAME_RGBA = (0.97, 0.99, 1.0, 1.0)
-STATUS_RGBA = (0.82, 0.88, 0.94, 0.92)
-CHIP_BG_RGBA = (0.86, 0.92, 1.0, 0.12)
-CHIP_TEXT_RGBA = (0.96, 0.98, 1.0, 0.96)
+STATUS_RGBA = (0.90, 0.95, 1.0, 0.98)
+AVATAR_PLATE_RGBA = (0.94, 0.97, 1.0, 0.10)
+DISMISS_BG_RGBA = (0.94, 0.97, 1.0, 0.14)
+DISMISS_TEXT_RGBA = (0.96, 0.98, 1.0, 0.96)
 
-SHEEN_X = 0.0
+SHEEN_X = 14.0
 SHEEN_Y = 0.0
-SHEEN_W = CARD_W
+SHEEN_W = CARD_W - SHEEN_X * 2.0
 SHEEN_H = 2.0
 
 ACCENT_X = 0.0
@@ -55,55 +57,46 @@ ACCENT_Y = 18.0
 ACCENT_W = 4.0
 ACCENT_H = 76.0
 
-AVATAR_PLATE_X = 24.0
-AVATAR_PLATE_Y = 28.0
-AVATAR_PLATE_W = 56.0
-AVATAR_PLATE_H = 56.0
+AVATAR_PLATE_X = 22.0
+AVATAR_PLATE_Y = 26.0
+AVATAR_PLATE_W = 60.0
+AVATAR_PLATE_H = 60.0
+AVATAR_INSET = 10.0
 
-AVATAR_X = 34.0
-AVATAR_Y = 38.0
-AVATAR_W = 36.0
-AVATAR_H = 36.0
+AVATAR_X = AVATAR_PLATE_X + AVATAR_INSET
+AVATAR_Y = AVATAR_PLATE_Y + AVATAR_INSET
+AVATAR_W = AVATAR_PLATE_W - AVATAR_INSET * 2.0
+AVATAR_H = AVATAR_PLATE_H - AVATAR_INSET * 2.0
 
 EYEBROW_X = 96.0
-EYEBROW_Y = 18.0
-EYEBROW_W = 152.0
-EYEBROW_H = 12.0
-EYEBROW_FONT_SIZE_PX = 11.0
+EYEBROW_Y = 16.0
+EYEBROW_W = 170.0
+EYEBROW_H = 18.0
+EYEBROW_FONT_SIZE_PX = 12.0
 
 NAME_X = 96.0
 NAME_Y = 34.0
-NAME_W = 152.0
-NAME_H = 26.0
-NAME_FONT_SIZE_PX = 20.0
+NAME_W = 176.0
+NAME_H = 34.0
+NAME_FONT_SIZE_PX = 24.0
 
 STATUS_X = 96.0
-STATUS_Y = 68.0
-STATUS_W = 148.0
-STATUS_H = 18.0
-STATUS_FONT_SIZE_PX = 13.0
+STATUS_Y = 74.0
+STATUS_W = 180.0
+STATUS_H = 24.0
+STATUS_FONT_SIZE_PX = 15.0
 
-CHIP_BG_X = 224.0
-CHIP_BG_Y = 20.0
-CHIP_BG_W = 44.0
-CHIP_BG_H = 22.0
+DISMISS_BG_X = 276.0
+DISMISS_BG_Y = 16.0
+DISMISS_BG_W = 30.0
+DISMISS_BG_H = 30.0
+DISMISS_BG_RADIUS = 9.0
 
-CHIP_TEXT_X = CHIP_BG_X
-CHIP_TEXT_Y = CHIP_BG_Y + 1.0
-CHIP_TEXT_W = CHIP_BG_W
-CHIP_TEXT_H = CHIP_BG_H
-CHIP_FONT_SIZE_PX = 10.0
-
-DISMISS_BG_X = 280.0
-DISMISS_BG_Y = 18.0
-DISMISS_BG_W = 24.0
-DISMISS_BG_H = 24.0
-
-DISMISS_TEXT_X = DISMISS_BG_X
-DISMISS_TEXT_Y = DISMISS_BG_Y
-DISMISS_TEXT_W = DISMISS_BG_W
-DISMISS_TEXT_H = DISMISS_BG_H
-DISMISS_FONT_SIZE_PX = 12.0
+DISMISS_TEXT_X = DISMISS_BG_X + 7.0
+DISMISS_TEXT_Y = DISMISS_BG_Y + 4.0
+DISMISS_TEXT_W = 16.0
+DISMISS_TEXT_H = 20.0
+DISMISS_FONT_SIZE_PX = 15.0
 DISMISS_INTERACTION_ID = "dismiss-card"
 
 DEFAULT_PSK_ENV = "TZE_HUD_PSK"
@@ -160,17 +153,6 @@ def build_text_content(agent_name: str, elapsed_seconds: int) -> str:
     return f"Connected • last active {format_last_active(elapsed_seconds)}"
 
 
-def build_time_chip_content(elapsed_seconds: int) -> str:
-    label = format_last_active(elapsed_seconds)
-    if label == "now":
-        return "NOW"
-    if label.endswith("s ago"):
-        return f"{label[:-5]}S"
-    if label.endswith("m ago"):
-        return f"{label[:-5]}M"
-    return label.upper()
-
-
 def build_presence_card_mutations(
     tile_id: bytes,
     agent_name: str,
@@ -190,6 +172,7 @@ def build_presence_card_mutations(
                 "g": BG_RGBA[1],
                 "b": BG_RGBA[2],
                 "a": BG_RGBA[3],
+                "radius": CARD_RADIUS,
             },
             "bounds": [0.0, 0.0, CARD_W, CARD_H],
         }
@@ -219,10 +202,10 @@ def build_presence_card_mutations(
     avatar_plate_node = _make_node(
         {
             "solid_color": {
-                "r": avatar_rgba[0],
-                "g": avatar_rgba[1],
-                "b": avatar_rgba[2],
-                "a": 0.22,
+                "r": AVATAR_PLATE_RGBA[0],
+                "g": AVATAR_PLATE_RGBA[1],
+                "b": AVATAR_PLATE_RGBA[2],
+                "a": AVATAR_PLATE_RGBA[3],
             },
             "bounds": [AVATAR_PLATE_X, AVATAR_PLATE_Y, AVATAR_PLATE_W, AVATAR_PLATE_H],
         }
@@ -269,34 +252,14 @@ def build_presence_card_mutations(
             "bounds": [STATUS_X, STATUS_Y, STATUS_W, STATUS_H],
         }
     )
-    chip_bg_node = _make_node(
-        {
-            "solid_color": {
-                "r": CHIP_BG_RGBA[0],
-                "g": CHIP_BG_RGBA[1],
-                "b": CHIP_BG_RGBA[2],
-                "a": CHIP_BG_RGBA[3],
-            },
-            "bounds": [CHIP_BG_X, CHIP_BG_Y, CHIP_BG_W, CHIP_BG_H],
-        }
-    )
-    chip_text_node = _make_node(
-        {
-            "text_markdown": {
-                "content": build_time_chip_content(elapsed_seconds),
-                "font_size_px": CHIP_FONT_SIZE_PX,
-                "color": list(CHIP_TEXT_RGBA),
-            },
-            "bounds": [CHIP_TEXT_X, CHIP_TEXT_Y, CHIP_TEXT_W, CHIP_TEXT_H],
-        }
-    )
     dismiss_bg_node = _make_node(
         {
             "solid_color": {
-                "r": 0.94,
-                "g": 0.97,
-                "b": 1.0,
-                "a": 0.14,
+                "r": DISMISS_BG_RGBA[0],
+                "g": DISMISS_BG_RGBA[1],
+                "b": DISMISS_BG_RGBA[2],
+                "a": DISMISS_BG_RGBA[3],
+                "radius": DISMISS_BG_RADIUS,
             },
             "bounds": [DISMISS_BG_X, DISMISS_BG_Y, DISMISS_BG_W, DISMISS_BG_H],
         }
@@ -306,7 +269,7 @@ def build_presence_card_mutations(
             "text_markdown": {
                 "content": "X",
                 "font_size_px": DISMISS_FONT_SIZE_PX,
-                "color": list(CHIP_TEXT_RGBA),
+                "color": list(DISMISS_TEXT_RGBA),
             },
             "bounds": [DISMISS_TEXT_X, DISMISS_TEXT_Y, DISMISS_TEXT_W, DISMISS_TEXT_H],
         }
@@ -396,20 +359,6 @@ def build_presence_card_mutations(
                     tile_id=tile_id,
                     parent_id=root_node.id,
                     node=status_node,
-                )
-            ),
-            types_pb2.MutationProto(
-                add_node=types_pb2.AddNodeMutation(
-                    tile_id=tile_id,
-                    parent_id=root_node.id,
-                    node=chip_bg_node,
-                )
-            ),
-            types_pb2.MutationProto(
-                add_node=types_pb2.AddNodeMutation(
-                    tile_id=tile_id,
-                    parent_id=root_node.id,
-                    node=chip_text_node,
                 )
             ),
             types_pb2.MutationProto(

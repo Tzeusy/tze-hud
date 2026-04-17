@@ -103,7 +103,11 @@ fn make_solid_node(bounds: Rect, color: Rgba) -> Node {
     Node {
         id: SceneId::new(),
         children: vec![],
-        data: NodeData::SolidColor(SolidColorNode { bounds, color }),
+        data: NodeData::SolidColor(SolidColorNode {
+            bounds,
+            color,
+            radius: None,
+        }),
     }
 }
 

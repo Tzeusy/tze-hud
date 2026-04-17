@@ -437,6 +437,7 @@ pub async fn do_content_update(
                     width: TILE_W,
                     height: TILE_H,
                 }),
+                radius: -1.0, // -1.0 sentinel = no rounded corners
             },
         )),
     };
@@ -1490,6 +1491,7 @@ pub async fn create_tile_batch(
                     width: TILE_W,
                     height: TILE_H,
                 }),
+                radius: -1.0, // -1.0 sentinel = no rounded corners
             },
         )),
     };

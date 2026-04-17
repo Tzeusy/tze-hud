@@ -45,6 +45,7 @@ import grpc
 # Proto stubs are in proto_gen/ relative to this file.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _SCRIPT_DIR)
+sys.path.insert(0, os.path.join(_SCRIPT_DIR, "proto_gen"))
 
 from proto_gen import session_pb2, session_pb2_grpc, types_pb2
 
@@ -214,6 +215,7 @@ def build_presence_card_root_node(
                 "g": 0.14,
                 "b": 0.19,
                 "a": 0.72,
+                "radius": 12.0,
             },
             "bounds": [0, 0, width, height],
         }
@@ -379,6 +381,7 @@ def build_presence_card_dismiss_bg_node() -> types_pb2.NodeProto:
                 "g": 0.97,
                 "b": 1.0,
                 "a": 0.14,
+                "radius": 8.0,
             },
             "bounds": [280, 18, 24, 24],
         }
@@ -501,6 +504,7 @@ def _make_node(data: dict) -> types_pb2.NodeProto:
         node.solid_color.CopyFrom(types_pb2.SolidColorNodeProto(
             color=types_pb2.Rgba(r=c["r"], g=c["g"], b=c["b"], a=c.get("a", 1.0)),
             bounds=rect,
+            radius=c.get("radius", -1.0),
         ))
     elif "text_markdown" in data:
         t = data["text_markdown"]

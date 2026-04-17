@@ -2299,6 +2299,7 @@ mod tests {
                 data: NodeData::SolidColor(SolidColorNode {
                     color: Rgba::BLACK,
                     bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                    radius: None,
                 }),
             },
         );
@@ -2402,6 +2403,7 @@ mod tests {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::WHITE,
                         bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                        radius: None,
                     }),
                 },
             );
@@ -2519,6 +2521,7 @@ mod tests {
                 data: NodeData::SolidColor(SolidColorNode {
                     color: Rgba::WHITE,
                     bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                    radius: None,
                 }),
             },
         );
@@ -2594,6 +2597,7 @@ mod tests {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::WHITE,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                radius: None,
             }),
         };
         graph.set_tile_root(tile_id, root_node).expect("set root");
