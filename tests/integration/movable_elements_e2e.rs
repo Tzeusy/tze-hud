@@ -14,14 +14,14 @@
 //!   Test 3 — Reset fallback chain:               IGNORED (hud-zc7f not merged)
 //!   Test 4 — Zone with config override + reset:  IGNORED (hud-zc7f not merged)
 //!   Test 5 — Display resolution change:          ACTIVE
-//!   Test 6 — Agent notification:                 IGNORED (ElementRepositionedEvent not yet wired)
+//!   Test 6 — Agent notification:                 ACTIVE
 
 use tze_hud_input::{
     DeviceDragState, DragEventOutcome, DragHandleElementKind, DragPhase, InputProcessor,
     PointerEvent, PointerEventKind,
 };
 use tze_hud_scene::{
-    ElementStore, ElementStoreEntry, ElementType, GeometryPolicy, Rect, SceneId,
+    ElementStore, ElementStoreEntry, ElementType, GeometryPolicy, Rect, SceneGraph, SceneId,
     geometry_policy_to_absolute_rect, rect_to_relative_geometry_policy,
 };
 
@@ -427,7 +427,7 @@ fn display_resolution_change_preserves_relative_center_position() {
     let original_w = 1920.0_f32;
     let original_h = 1080.0_f32;
 
-    // Element size (constant, absolute pixels — same physical component size).
+    // Element size, stored as a relative percentage of the display dimensions.
     let elem_w = 384.0_f32; // 20% of 1920
     let elem_h = 216.0_f32; // 20% of 1080
 
@@ -594,36 +594,174 @@ fn display_resolution_double_center_example_from_spec() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 6 — Agent notification (DEFERRED — ElementRepositionedEvent not wired)
+// Test 6 — Agent notification
 //
-// Agent creates tile → user drags → agent receives ElementRepositionedEvent
-// with correct old_geometry and new_geometry.
+// Simulates the runtime path: persist drag geometry → emit_drag_repositioned_event
+// → agent receives ElementRepositionedEvent with correct old_geometry and
+// new_geometry.
 //
-// Requires: ElementRepositionedEvent in the gRPC ServerMessage stream and the
-// session_server wiring that emits it on DragEventOutcome::Released.
+// Uses HudSessionImpl directly (Layer 1 headless gRPC, no display server or GPU).
+// ElementRepositionedEvent is broadcast via the public channel landed in hud-bs2q.6.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[test]
-#[ignore = "ElementRepositionedEvent not yet implemented; enable after the gRPC event emission is wired in session_server.rs"]
-fn agent_receives_element_repositioned_event_with_old_and_new_geometry() {
-    // Prereqs:
-    //   - ElementRepositionedEvent added to ServerMessage::payload oneof in proto/session.proto
-    //   - session_server.rs emits the event when DragEventOutcome::Released is processed
-    //   - Event carries: element_id, old_geometry (agent-requested Rect as Relative),
-    //     new_geometry (user-overridden Relative from geometry_override)
-    //
-    // Expected flow:
-    //   1. Agent connects, creates tile at agent_bounds.
-    //   2. User long-press drags tile to new position (DragEventOutcome::Released emitted).
-    //   3. Runtime persists geometry to ElementStore.
-    //   4. Agent receives ElementRepositionedEvent {
-    //          element_id: tile_id,
-    //          old_geometry: rect_to_relative(agent_bounds, display),
-    //          new_geometry: geometry_override (user position),
-    //      }.
-    //   5. Test verifies both geometry fields are correct.
-    unimplemented!(
-        "enable after ElementRepositionedEvent is added to proto/session.proto and \
-         emitted in session_server.rs on DragEventOutcome::Released"
+#[tokio::test]
+async fn agent_receives_element_repositioned_event_with_old_and_new_geometry() {
+    use tokio_stream::StreamExt as _;
+    use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
+    use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
+    use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
+    use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
+    use tze_hud_protocol::proto::session::{ClientMessage, SessionInit};
+    use tze_hud_protocol::session_server::HudSessionImpl;
+
+    // ── Setup: bind gRPC server on a dynamic port ─────────────────────────────
+    let scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let service = HudSessionImpl::new(scene, "test-key");
+    let reposition_tx = service.element_repositioned_tx.clone();
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let _server = tokio::spawn(async move {
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        tonic::transport::Server::builder()
+            .add_service(HudSessionServer::new(service))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+
+    // ── Connect agent with SCENE_TOPOLOGY subscription ────────────────────────
+    let mut client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+        .await
+        .unwrap();
+
+    let now_us = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    tx.send(ClientMessage {
+        sequence: 1,
+        timestamp_wall_us: now_us(),
+        payload: Some(ClientPayload::SessionInit(SessionInit {
+            agent_id: "test-agent-notify".to_string(),
+            agent_display_name: "test-agent-notify".to_string(),
+            pre_shared_key: "test-key".to_string(),
+            requested_capabilities: vec![
+                "create_tiles".to_string(),
+                "read_scene_topology".to_string(),
+            ],
+            initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
+            resume_token: vec![],
+            agent_timestamp_wall_us: now_us(),
+            min_protocol_version: 1000,
+            max_protocol_version: 1001,
+            auth_credential: None,
+        })),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client.session(stream).await.unwrap().into_inner();
+
+    // Drain SessionEstablished + SceneSnapshot.
+    stream.next().await;
+    stream.next().await;
+
+    // Give the session handler time to complete subscription.
+    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+    // ── Simulate drag: compute old and new geometry ───────────────────────────
+    let tile_id = SceneId::new();
+
+    // Agent-requested bounds (old geometry before drag).
+    let agent_bounds = element_bounds();
+    let old_geometry = rect_to_relative_geometry_policy(agent_bounds, DISPLAY_W, DISPLAY_H);
+
+    // User drags to new position.
+    let target_x = 600.0_f32;
+    let target_y = 400.0_f32;
+    let new_geometry = rect_to_relative_geometry_policy(
+        Rect::new(target_x, target_y, ELEMENT_W, ELEMENT_H),
+        DISPLAY_W,
+        DISPLAY_H,
     );
+
+    // ── Emit: simulate what the runtime does after persist_drag_geometry ──────
+    // We broadcast via reposition_tx directly, mirroring what the runtime would
+    // do after persist_drag_geometry writes the geometry_override (hud-bs2q.6).
+    let event = tze_hud_protocol::proto::ElementRepositionedEvent {
+        element_id: tile_id.as_uuid().as_bytes().to_vec(),
+        new_geometry: Some(tze_hud_protocol::convert::geometry_policy_to_proto(
+            &new_geometry,
+        )),
+        previous_geometry: Some(tze_hud_protocol::convert::geometry_policy_to_proto(
+            &old_geometry,
+        )),
+    };
+    let _ = reposition_tx.send(event);
+
+    // ── Assert: agent receives ElementRepositionedEvent ───────────────────────
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("timed out waiting for ElementRepositionedEvent")
+        .expect("stream must not close")
+        .expect("must not error");
+
+    drop(tx); // close agent stream
+
+    match msg.payload {
+        Some(ServerPayload::ElementRepositioned(ev)) => {
+            // element_id must round-trip correctly.
+            let expected_id = tile_id.as_uuid().as_bytes().to_vec();
+            assert_eq!(ev.element_id, expected_id, "element_id must match");
+
+            // new_geometry must be Relative and match the drag target.
+            let ng = ev.new_geometry.expect("new_geometry must be set");
+            match ng.policy {
+                Some(tze_hud_protocol::proto::geometry_policy_proto::Policy::Relative(r)) => {
+                    let expected_x_pct = target_x / DISPLAY_W;
+                    let expected_y_pct = target_y / DISPLAY_H;
+                    assert!(
+                        (r.x_pct - expected_x_pct).abs() < 1e-4,
+                        "new_geometry x_pct must be {expected_x_pct:.4}, got {:.4}",
+                        r.x_pct
+                    );
+                    assert!(
+                        (r.y_pct - expected_y_pct).abs() < 1e-4,
+                        "new_geometry y_pct must be {expected_y_pct:.4}, got {:.4}",
+                        r.y_pct
+                    );
+                }
+                other => panic!("expected Relative new_geometry, got {other:?}"),
+            }
+
+            // previous_geometry must reflect the original agent-requested bounds.
+            let pg = ev.previous_geometry.expect("previous_geometry must be set");
+            match pg.policy {
+                Some(tze_hud_protocol::proto::geometry_policy_proto::Policy::Relative(r)) => {
+                    let expected_old_x = ELEMENT_X / DISPLAY_W;
+                    let expected_old_y = ELEMENT_Y / DISPLAY_H;
+                    assert!(
+                        (r.x_pct - expected_old_x).abs() < 1e-4,
+                        "previous_geometry x_pct must be {expected_old_x:.4}, got {:.4}",
+                        r.x_pct
+                    );
+                    assert!(
+                        (r.y_pct - expected_old_y).abs() < 1e-4,
+                        "previous_geometry y_pct must be {expected_old_y:.4}, got {:.4}",
+                        r.y_pct
+                    );
+                }
+                other => panic!("expected Relative previous_geometry, got {other:?}"),
+            }
+        }
+        other => panic!("expected ElementRepositioned, got {other:?}"),
+    }
 }
