@@ -90,6 +90,18 @@ pub struct SceneGraph {
     /// at the start of each frame before zone geometry is recomputed.
     #[serde(skip, default)]
     pub zone_hit_regions: Vec<ZoneHitRegion>,
+    /// Runtime-managed chrome drag-handle hit regions.
+    ///
+    /// Populated by the compositor each frame from currently visible tiles,
+    /// active zones, and active widgets. These are runtime-internal affordances
+    /// and are never serialized or exposed over agent-facing scene mutations.
+    #[serde(skip, default)]
+    pub drag_handle_hit_regions: Vec<DragHandleHitRegion>,
+    /// Local-first hover/press state keyed by drag-handle interaction id.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub drag_handle_states: HashMap<String, DragHandleLocalState>,
     /// Runtime-registered widget SVG assets awaiting compositor registration.
     ///
     /// Producers (session/MCP runtime registration paths) enqueue validated SVGs
@@ -264,6 +276,8 @@ impl SceneGraph {
             sequence_number: 0,
             registered_resources: HashMap::new(),
             zone_hit_regions: Vec::new(),
+            drag_handle_hit_regions: Vec::new(),
+            drag_handle_states: HashMap::new(),
             pending_widget_svg_assets: Vec::new(),
             tile_scroll_configs: HashMap::new(),
             tile_scroll_offsets: HashMap::new(),
@@ -2515,6 +2529,22 @@ impl SceneGraph {
     /// Pure geometry — no GPU involvement.  Target: < 100 µs for 50 tiles
     /// (scene-graph/spec.md line 267, RFC 0001 §10).
     pub fn hit_test(&self, x: f32, y: f32) -> HitResult {
+        // ── Chrome drag-handle hit regions (global, chrome-priority) ────────
+        for region in &self.drag_handle_hit_regions {
+            if region.hit_region.accepts_pointer && region.bounds.contains_point(x, y) {
+                return HitResult::ZoneInteraction {
+                    zone_name: "__chrome_drag_handle__".to_string(),
+                    published_at_wall_us: 0,
+                    publisher_namespace: "runtime".to_string(),
+                    interaction_id: region.interaction_id.clone(),
+                    kind: ZoneInteractionKind::DragHandle {
+                        element_id: region.element_id,
+                        element_kind: region.element_kind,
+                    },
+                };
+            }
+        }
+
         // ── Zone hit regions check (global, not tab-specific) ────────────────
         // These are runtime-managed zone hit regions (dismiss/action buttons on
         // notification slots). They are populated by the compositor each frame and
@@ -2678,6 +2708,24 @@ impl SceneGraph {
         if let Some(state) = self.hit_region_states.get_mut(&node_id) {
             state.focused = focused;
         }
+    }
+
+    /// Set hover state for a chrome drag handle interaction id.
+    pub fn set_drag_handle_hovered(&mut self, interaction_id: &str, hovered: bool) {
+        let state = self
+            .drag_handle_states
+            .entry(interaction_id.to_string())
+            .or_default();
+        state.hovered = hovered;
+    }
+
+    /// Set pressed state for a chrome drag handle interaction id.
+    pub fn set_drag_handle_pressed(&mut self, interaction_id: &str, pressed: bool) {
+        let state = self
+            .drag_handle_states
+            .entry(interaction_id.to_string())
+            .or_default();
+        state.pressed = pressed;
     }
 
     fn hit_test_node(&self, node_id: SceneId, x: f32, y: f32) -> Option<SceneId> {

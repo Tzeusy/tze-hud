@@ -455,6 +455,16 @@ struct TexturedDrawCmd {
     tint: [f32; 4],
 }
 
+/// Collected runtime drag handle geometry + style for one visible element.
+#[derive(Clone, Debug)]
+struct DragHandleEntry {
+    element_id: SceneId,
+    element_kind: DragHandleElementKind,
+    bounds: Rect,
+    interaction_id: String,
+    style: DragHandleStyle,
+}
+
 /// Compute the UV rectangle and destination rectangle for a given fit mode.
 ///
 /// Returns `(dest_x, dest_y, dest_w, dest_h, uv_rect)` where:
@@ -3593,6 +3603,9 @@ impl Compositor {
             sh,
             Some(LayerAttachment::Chrome),
         );
+        let drag_handles = self.collect_drag_handle_entries(scene, sw, sh);
+        let mut drag_handle_vertices: Vec<RectVertex> = Vec::new();
+        self.append_drag_handle_vertices(scene, &drag_handles, &mut drag_handle_vertices, sw, sh);
 
         // ── Widget texture sync: rasterize dirty SVGs BEFORE frame acquisition.
         // SVG rasterization can be slow; if a resize event arrives while we hold
@@ -3619,6 +3632,7 @@ impl Compositor {
 
         // ── Widget pass: composite pre-synced textures above zone content ────
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
+        self.encode_drag_handle_pass(&mut encoder, &frame.view, &drag_handle_vertices);
 
         let submit_start = std::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -3747,6 +3761,11 @@ impl Compositor {
             sh,
             Some(LayerAttachment::Chrome),
         );
+        // Collect drag handle entries once and reuse for both rendering and hit-region
+        // population, avoiding a redundant second traversal at the end of the frame.
+        let drag_handles = self.collect_drag_handle_entries(scene, sw, sh);
+        let mut drag_handle_vertices: Vec<RectVertex> = Vec::new();
+        self.append_drag_handle_vertices(scene, &drag_handles, &mut drag_handle_vertices, sw, sh);
 
         // ── Widget texture sync before frame acquisition (same as windowed path).
         self.sync_widget_textures(scene, self.degradation_level);
@@ -3771,6 +3790,7 @@ impl Compositor {
 
         // ── Widget pass: composite pre-synced textures above zone content ────
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
+        self.encode_drag_handle_pass(&mut encoder, &frame.view, &drag_handle_vertices);
 
         // Headless-specific: copy rendered texture to readback buffer.
         // Must happen after all render passes and before submit.
@@ -3791,6 +3811,8 @@ impl Compositor {
         // computed from the rendered geometry are used for hit-testing on the
         // next input event.
         self.populate_zone_hit_regions(scene, sw, sh);
+        // Reuse the pre-computed drag_handles list rather than collecting again.
+        self.populate_drag_handle_hit_regions_from(scene, drag_handles);
 
         telemetry
     }
@@ -3941,6 +3963,8 @@ impl Compositor {
             let verts = rect_vertices(cmd.x, cmd.y, cmd.width, cmd.height, sw, sh, cmd.color);
             chrome_vertices.extend_from_slice(&verts);
         }
+        let drag_handles = self.collect_drag_handle_entries(scene, sw, sh);
+        self.append_drag_handle_vertices(scene, &drag_handles, &mut chrome_vertices, sw, sh);
 
         let chrome_buffer = if chrome_vertices.is_empty() {
             None
@@ -4235,6 +4259,48 @@ impl Compositor {
         });
 
         wr.composite_widgets(&mut widget_pass, registry, surf_w, surf_h, &self.device);
+    }
+
+    /// Encode a top-most chrome pass for drag-handle quads.
+    fn encode_drag_handle_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame_view: &wgpu::TextureView,
+        vertices: &[RectVertex],
+    ) {
+        if vertices.is_empty() {
+            return;
+        }
+
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("drag_handle_vertex_buffer"),
+                contents: bytemuck::cast_slice(vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("drag_handle_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: frame_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        if self.overlay_mode {
+            pass.set_pipeline(&self.clear_pipeline);
+        } else {
+            pass.set_pipeline(&self.pipeline);
+        }
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.draw(0..vertices.len() as u32, 0..1);
     }
 
     /// Encode a render pass for textured image quads.
@@ -5269,6 +5335,253 @@ impl Compositor {
                 (zx, zy, zw, zh)
             }
         }
+    }
+
+    fn resolve_widget_geometry(
+        instance: &WidgetInstance,
+        definition: &WidgetDefinition,
+        sw: f32,
+        sh: f32,
+    ) -> (f32, f32, f32, f32) {
+        let policy = instance
+            .geometry_override
+            .as_ref()
+            .unwrap_or(&definition.default_geometry_policy);
+        Self::resolve_zone_geometry(policy, sw, sh)
+    }
+
+    fn synthetic_widget_element_id(instance_name: &str) -> SceneId {
+        let key = format!("widget:{instance_name}");
+        let rid = ResourceId::of(key.as_bytes());
+        SceneId::from_bytes_le(&rid.as_bytes()[..16]).unwrap_or(SceneId::null())
+    }
+
+    fn scene_id_hex(id: SceneId) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(32);
+        for b in id.to_bytes_le() {
+            let _ = write!(&mut out, "{b:02x}");
+        }
+        out
+    }
+
+    fn drag_handle_bounds(element_bounds: Rect, style: DragHandleStyle, sw: f32, sh: f32) -> Rect {
+        let w = style.width_dp.max(1.0).min(sw.max(1.0));
+        let h = style.height_dp.max(1.0).min(sh.max(1.0));
+        let x = (element_bounds.x + (element_bounds.width - w) * 0.5).clamp(0.0, (sw - w).max(0.0));
+        let y = (element_bounds.y - h * 0.5).clamp(0.0, (sh - h).max(0.0));
+        Rect::new(x, y, w, h)
+    }
+
+    fn collect_drag_handle_entries(
+        &self,
+        scene: &SceneGraph,
+        sw: f32,
+        sh: f32,
+    ) -> Vec<DragHandleEntry> {
+        let style = DragHandleStyle::default();
+        let mut entries: Vec<DragHandleEntry> = Vec::new();
+
+        for tile in scene.visible_tiles() {
+            let bounds = Self::drag_handle_bounds(tile.bounds, style, sw, sh);
+            let interaction_id = format!("drag-handle:{}", Self::scene_id_hex(tile.id));
+            entries.push(DragHandleEntry {
+                element_id: tile.id,
+                element_kind: DragHandleElementKind::Tile,
+                bounds,
+                interaction_id,
+                style,
+            });
+        }
+
+        let mut zone_names: Vec<_> = scene.zone_registry.active_publishes.keys().collect();
+        zone_names.sort_unstable();
+        for zone_name in zone_names {
+            if scene
+                .zone_registry
+                .active_publishes
+                .get(zone_name)
+                .is_none_or(|p| p.is_empty())
+            {
+                continue;
+            }
+            let zone_def = match scene.zone_registry.zones.get(zone_name) {
+                Some(z) => z,
+                None => continue,
+            };
+            let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
+            let bounds = Self::drag_handle_bounds(Rect::new(x, y, w, h), style, sw, sh);
+            let interaction_id = format!("drag-handle:{}", Self::scene_id_hex(zone_def.id));
+            entries.push(DragHandleEntry {
+                element_id: zone_def.id,
+                element_kind: DragHandleElementKind::Zone,
+                bounds,
+                interaction_id,
+                style,
+            });
+        }
+
+        let active_tab = scene.active_tab;
+        let mut widget_names: Vec<_> = scene.widget_registry.instances.keys().collect();
+        widget_names.sort_unstable();
+        for instance_name in widget_names {
+            if scene
+                .widget_registry
+                .active_publishes
+                .get(instance_name)
+                .is_none_or(|p| p.is_empty())
+            {
+                continue;
+            }
+            let instance = match scene.widget_registry.instances.get(instance_name) {
+                Some(i) => i,
+                None => continue,
+            };
+            if let Some(tab_id) = active_tab
+                && instance.tab_id != tab_id
+            {
+                continue;
+            }
+            let definition = match scene
+                .widget_registry
+                .definitions
+                .get(&instance.widget_type_name)
+            {
+                Some(d) => d,
+                None => continue,
+            };
+            let (x, y, w, h) = Self::resolve_widget_geometry(instance, definition, sw, sh);
+            let bounds = Self::drag_handle_bounds(Rect::new(x, y, w, h), style, sw, sh);
+            let element_id = Self::synthetic_widget_element_id(instance_name);
+            let interaction_id = format!("drag-handle:{}", Self::scene_id_hex(element_id));
+            entries.push(DragHandleEntry {
+                element_id,
+                element_kind: DragHandleElementKind::Widget,
+                bounds,
+                interaction_id,
+                style,
+            });
+        }
+
+        entries
+    }
+
+    fn append_drag_handle_vertices(
+        &self,
+        scene: &SceneGraph,
+        handles: &[DragHandleEntry],
+        vertices: &mut Vec<RectVertex>,
+        sw: f32,
+        sh: f32,
+    ) {
+        for entry in handles {
+            let local_state = scene
+                .drag_handle_states
+                .get(&entry.interaction_id)
+                .copied()
+                .unwrap_or_default();
+            let opacity = if local_state.hovered || local_state.pressed {
+                entry.style.opacity_active
+            } else {
+                entry.style.opacity_idle
+            }
+            .clamp(0.0, 1.0);
+
+            let mut base = entry.style.color;
+            base.a = (base.a * opacity).clamp(0.0, 1.0);
+            vertices.extend_from_slice(&rect_vertices(
+                entry.bounds.x,
+                entry.bounds.y,
+                entry.bounds.width,
+                entry.bounds.height,
+                sw,
+                sh,
+                self.gpu_color(base),
+            ));
+
+            match entry.style.grip_pattern {
+                DragHandleGripPattern::Dots => {
+                    let dot = (entry.bounds.height * 0.35).max(1.0);
+                    let gap = (dot * 0.6).max(1.0);
+                    let total_w = dot * 3.0 + gap * 2.0;
+                    let start_x = entry.bounds.x + (entry.bounds.width - total_w) * 0.5;
+                    let y = entry.bounds.y + (entry.bounds.height - dot) * 0.5;
+                    let grip = Rgba::new(base.r, base.g, base.b, (base.a * 0.9).clamp(0.0, 1.0));
+                    for idx in 0..3 {
+                        vertices.extend_from_slice(&rect_vertices(
+                            start_x + idx as f32 * (dot + gap),
+                            y,
+                            dot,
+                            dot,
+                            sw,
+                            sh,
+                            self.gpu_color(grip),
+                        ));
+                    }
+                }
+                DragHandleGripPattern::Bar => {
+                    let bar_w = (entry.bounds.width * 0.5).max(2.0);
+                    let bar_h = (entry.bounds.height * 0.2).max(1.0);
+                    let x = entry.bounds.x + (entry.bounds.width - bar_w) * 0.5;
+                    let y = entry.bounds.y + (entry.bounds.height - bar_h) * 0.5;
+                    let grip = Rgba::new(base.r, base.g, base.b, (base.a * 0.9).clamp(0.0, 1.0));
+                    vertices.extend_from_slice(&rect_vertices(
+                        x,
+                        y,
+                        bar_w,
+                        bar_h,
+                        sw,
+                        sh,
+                        self.gpu_color(grip),
+                    ));
+                }
+                DragHandleGripPattern::None => {}
+            }
+        }
+    }
+
+    /// Recompute runtime-internal drag-handle hit regions for the current frame.
+    pub fn populate_drag_handle_hit_regions(&self, scene: &mut SceneGraph, sw: f32, sh: f32) {
+        let handles = self.collect_drag_handle_entries(scene, sw, sh);
+        self.populate_drag_handle_hit_regions_from(scene, handles);
+    }
+
+    /// Populate drag-handle hit regions from a pre-computed entry list.
+    ///
+    /// Callers that already hold a `collect_drag_handle_entries` result (e.g.
+    /// `render_frame_headless`) should use this variant to avoid a second
+    /// collection pass.
+    fn populate_drag_handle_hit_regions_from(
+        &self,
+        scene: &mut SceneGraph,
+        handles: Vec<DragHandleEntry>,
+    ) {
+        scene.drag_handle_hit_regions.clear();
+        for (tab_order, entry) in (0_u32..).zip(handles.into_iter()) {
+            let hit_region = HitRegionNode {
+                bounds: entry.bounds,
+                interaction_id: entry.interaction_id.clone(),
+                accepts_focus: false,
+                accepts_pointer: true,
+                auto_capture: false,
+                ..Default::default()
+            };
+            scene.drag_handle_hit_regions.push(DragHandleHitRegion {
+                element_id: entry.element_id,
+                element_kind: entry.element_kind,
+                bounds: entry.bounds,
+                interaction_id: entry.interaction_id,
+                hit_region,
+                tab_order,
+            });
+        }
+
+        let live: HashSet<String> = scene
+            .drag_handle_hit_regions
+            .iter()
+            .map(|r| r.interaction_id.clone())
+            .collect();
+        scene.drag_handle_states.retain(|k, _| live.contains(k));
     }
 
     /// Recompute the zone interaction hit regions for the current frame.
@@ -12157,6 +12470,279 @@ mod tests {
             scene.zone_hit_regions.len(),
             1,
             "second call must still produce 1 (not accumulate to 2)"
+        );
+    }
+
+    #[tokio::test]
+    async fn drag_handle_regions_cover_visible_tile_zone_and_widget() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("agent-a", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab,
+                "agent-a",
+                lease,
+                Rect::new(100.0, 100.0, 320.0, 180.0),
+                10,
+            )
+            .unwrap();
+
+        let visible_zone_id = SceneId::new();
+        scene.register_zone(ZoneDefinition {
+            id: visible_zone_id,
+            name: "drag-zone".to_string(),
+            description: "zone with active content".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.55,
+                y_pct: 0.10,
+                width_pct: 0.30,
+                height_pct: 0.20,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            layer_attachment: LayerAttachment::Chrome,
+            ephemeral: false,
+        });
+        let empty_zone_id = SceneId::new();
+        scene.register_zone(ZoneDefinition {
+            id: empty_zone_id,
+            name: "empty-zone".to_string(),
+            description: "zone without active content".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.10,
+                y_pct: 0.10,
+                width_pct: 0.20,
+                height_pct: 0.20,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            layer_attachment: LayerAttachment::Chrome,
+            ephemeral: false,
+        });
+        scene
+            .publish_to_zone(
+                "drag-zone",
+                ZoneContent::StreamText("active".to_string()),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        scene.widget_registry.register_definition(WidgetDefinition {
+            id: "test-widget".to_string(),
+            name: "Test Widget".to_string(),
+            description: "test".to_string(),
+            parameter_schema: vec![WidgetParameterDeclaration {
+                name: "level".to_string(),
+                param_type: WidgetParamType::F32,
+                default_value: WidgetParameterValue::F32(0.0),
+                constraints: Some(WidgetParamConstraints {
+                    f32_min: Some(0.0),
+                    f32_max: Some(1.0),
+                    ..Default::default()
+                }),
+            }],
+            layers: vec![],
+            default_geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.20,
+                y_pct: 0.55,
+                width_pct: 0.18,
+                height_pct: 0.12,
+            },
+            default_rendering_policy: RenderingPolicy::default(),
+            default_contention_policy: ContentionPolicy::LatestWins,
+            ephemeral: false,
+            hover_behavior: None,
+        });
+        scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
+            widget_type_name: "test-widget".to_string(),
+            tab_id: tab,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "test-widget-1".to_string(),
+            current_params: std::collections::HashMap::new(),
+        });
+        scene
+            .publish_to_widget(
+                "test-widget-1",
+                std::collections::HashMap::new(),
+                "agent-a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        compositor.populate_drag_handle_hit_regions(&mut scene, 1920.0, 1080.0);
+
+        let kinds: Vec<_> = scene
+            .drag_handle_hit_regions
+            .iter()
+            .map(|r| r.element_kind)
+            .collect();
+        assert!(
+            kinds.contains(&DragHandleElementKind::Tile),
+            "tile handle missing"
+        );
+        assert!(
+            kinds.contains(&DragHandleElementKind::Zone),
+            "zone handle missing"
+        );
+        assert!(
+            kinds.contains(&DragHandleElementKind::Widget),
+            "widget handle missing"
+        );
+        assert!(
+            scene
+                .drag_handle_hit_regions
+                .iter()
+                .any(|r| r.element_id == tile_id),
+            "tile-id handle missing"
+        );
+        assert!(
+            scene
+                .drag_handle_hit_regions
+                .iter()
+                .any(|r| r.element_id == visible_zone_id),
+            "active zone handle missing"
+        );
+        assert!(
+            !scene
+                .drag_handle_hit_regions
+                .iter()
+                .any(|r| r.element_id == empty_zone_id),
+            "empty zones must not produce drag handles"
+        );
+        for region in &scene.drag_handle_hit_regions {
+            assert!(
+                region.interaction_id.starts_with("drag-handle:"),
+                "interaction id must use drag-handle scheme"
+            );
+            assert!(
+                region.hit_region.accepts_pointer,
+                "drag handles must accept pointer"
+            );
+            assert!(
+                !region.hit_region.auto_capture,
+                "drag handles must not auto-capture before long-press activation"
+            );
+            assert!(
+                !region.hit_region.accepts_focus,
+                "drag handles must not participate in focus cycle"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn drag_handle_hit_test_wins_on_passthrough_tile() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("agent-a", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab,
+                "agent-a",
+                lease,
+                Rect::new(140.0, 180.0, 360.0, 220.0),
+                10,
+            )
+            .unwrap();
+        if let Some(tile) = scene.tiles.get_mut(&tile_id) {
+            tile.input_mode = InputMode::Passthrough;
+        }
+
+        compositor.populate_drag_handle_hit_regions(&mut scene, 1920.0, 1080.0);
+        let handle = scene
+            .drag_handle_hit_regions
+            .iter()
+            .find(|r| r.element_id == tile_id)
+            .expect("tile drag handle must exist");
+        let hx = handle.bounds.x + handle.bounds.width * 0.5;
+        let hy = handle.bounds.y + handle.bounds.height * 0.5;
+
+        let hit = scene.hit_test(hx, hy);
+        match hit {
+            HitResult::ZoneInteraction {
+                kind:
+                    ZoneInteractionKind::DragHandle {
+                        element_id,
+                        element_kind,
+                    },
+                interaction_id,
+                ..
+            } => {
+                assert_eq!(element_id, tile_id);
+                assert_eq!(element_kind, DragHandleElementKind::Tile);
+                assert_eq!(interaction_id, handle.interaction_id);
+            }
+            other => panic!("expected drag-handle hit, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drag_handle_opacity_switches_to_active_on_hover_state() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("agent-a", 60_000, vec![]);
+        let _tile_id = scene
+            .create_tile(
+                tab,
+                "agent-a",
+                lease,
+                Rect::new(120.0, 140.0, 320.0, 180.0),
+                10,
+            )
+            .unwrap();
+
+        let handles = compositor.collect_drag_handle_entries(&scene, 1920.0, 1080.0);
+        let handle = handles.first().expect("must have at least one drag handle");
+
+        let mut idle_vertices = Vec::new();
+        compositor.append_drag_handle_vertices(
+            &scene,
+            std::slice::from_ref(handle),
+            &mut idle_vertices,
+            1920.0,
+            1080.0,
+        );
+        let idle_alpha = idle_vertices[0].color[3];
+
+        scene
+            .drag_handle_states
+            .entry(handle.interaction_id.clone())
+            .or_default()
+            .hovered = true;
+        let mut active_vertices = Vec::new();
+        compositor.append_drag_handle_vertices(
+            &scene,
+            std::slice::from_ref(handle),
+            &mut active_vertices,
+            1920.0,
+            1080.0,
+        );
+        let active_alpha = active_vertices[0].color[3];
+
+        assert!(
+            active_alpha > idle_alpha,
+            "hovered handle alpha must be greater than idle alpha"
         );
     }
 
