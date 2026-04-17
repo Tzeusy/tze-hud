@@ -1540,11 +1540,14 @@ impl WinitApp {
             (previous, fallback, store_snapshot, persist_path)
         };
 
-        // Persist the updated store (outside the lock, main-thread sync I/O).
+        // Persist the updated store on a background thread to avoid blocking the
+        // Winit event loop with sync disk I/O (atomic write + fsync).
         if let Some(path) = persist_path {
-            if let Err(e) = store_snapshot.persist_to_path_atomic(&path) {
-                tracing::warn!(error = %e, "perform_reset_element_geometry: persist failed");
-            }
+            std::thread::spawn(move || {
+                if let Err(e) = store_snapshot.persist_to_path_atomic(&path) {
+                    tracing::warn!(error = %e, "perform_reset_element_geometry: persist failed");
+                }
+            });
         }
 
         // Broadcast ElementRepositionedEvent.
