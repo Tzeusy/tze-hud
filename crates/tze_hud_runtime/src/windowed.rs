@@ -135,7 +135,10 @@ fn zone_hit_regions_to_overlay_regions(scene: &SceneGraph) -> Vec<HitRegion> {
         .collect()
 }
 
-fn combined_overlay_hit_regions(static_regions: &[HitRegion], scene: &SceneGraph) -> Vec<HitRegion> {
+fn combined_overlay_hit_regions(
+    static_regions: &[HitRegion],
+    scene: &SceneGraph,
+) -> Vec<HitRegion> {
     let mut regions = static_regions.to_vec();
     regions.extend(zone_hit_regions_to_overlay_regions(scene));
     regions
@@ -1185,8 +1188,10 @@ impl WinitApp {
                     build_hover_trackers(&scene, surf_w, surf_h, &self.state.widget_hover_trackers);
                 removed_mutations =
                     hidden_mutations_for_removed(&self.state.widget_hover_trackers, &next);
-                dynamic_hit_regions =
-                    Some(combined_overlay_hit_regions(&self.state.static_hit_regions, &scene));
+                dynamic_hit_regions = Some(combined_overlay_hit_regions(
+                    &self.state.static_hit_regions,
+                    &scene,
+                ));
                 next_trackers = Some(next);
             }
         }
@@ -2184,20 +2189,25 @@ mod tests {
     fn combined_overlay_hit_regions_includes_zone_interaction_regions() {
         let static_regions = vec![HitRegion::new(10.0, 20.0, 30.0, 40.0)];
         let mut scene = SceneGraph::new(1920.0, 1080.0);
-        scene.zone_hit_regions.push(tze_hud_scene::types::ZoneHitRegion {
-            zone_name: "notification-area".to_string(),
-            published_at_wall_us: 123,
-            publisher_namespace: "test-agent".to_string(),
-            bounds: tze_hud_scene::types::Rect::new(100.0, 200.0, 20.0, 20.0),
-            kind: tze_hud_scene::types::ZoneInteractionKind::Dismiss,
-            interaction_id: "zone:notification-area:dismiss:123:test-agent".to_string(),
-            tab_order: 0,
-        });
+        scene
+            .zone_hit_regions
+            .push(tze_hud_scene::types::ZoneHitRegion {
+                zone_name: "notification-area".to_string(),
+                published_at_wall_us: 123,
+                publisher_namespace: "test-agent".to_string(),
+                bounds: tze_hud_scene::types::Rect::new(100.0, 200.0, 20.0, 20.0),
+                kind: tze_hud_scene::types::ZoneInteractionKind::Dismiss,
+                interaction_id: "zone:notification-area:dismiss:123:test-agent".to_string(),
+                tab_order: 0,
+            });
 
         let combined = combined_overlay_hit_regions(&static_regions, &scene);
 
         assert_eq!(combined.len(), 2, "static + zone capture regions expected");
-        assert_eq!(combined[0], static_regions[0], "static region must be preserved");
+        assert_eq!(
+            combined[0], static_regions[0],
+            "static region must be preserved"
+        );
         assert_eq!(
             combined[1],
             HitRegion::new(100.0, 200.0, 20.0, 20.0),

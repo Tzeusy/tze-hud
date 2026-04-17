@@ -2580,15 +2580,19 @@ impl Compositor {
                                     });
                                 }
 
-                                if !is_alert_banner_zone(zone_name) && self.text_rasterizer.is_some() {
+                                if !is_alert_banner_zone(zone_name)
+                                    && self.text_rasterizer.is_some()
+                                {
                                     let dismiss_bounds = notification_dismiss_bounds(
                                         zx,
                                         slot_y,
                                         zw,
                                         effective_slot_h,
                                     );
-                                    let dismiss_color =
-                                        crate::text::apply_opacity_to_color(base_color, effective_opacity);
+                                    let dismiss_color = crate::text::apply_opacity_to_color(
+                                        base_color,
+                                        effective_opacity,
+                                    );
                                     items.push(TextItem {
                                         text: "X".to_string(),
                                         pixel_x: dismiss_bounds.x,
@@ -3494,18 +3498,12 @@ impl Compositor {
         } else {
             vec![]
         };
-        let mut text_prepare_error: Option<String> = None;
-        let mut text_render_error: Option<String> = None;
-        let mut text_font_faces: usize = 0;
-
         // If a text rasterizer is present, prepare glyphon buffers and run a
         // LoadOp::Load text pass on top of the geometry written above.
         if let Some(ref mut tr) = self.text_rasterizer {
-            text_font_faces = tr.font_face_count();
             tr.update_viewport(&self.queue, surf_w, surf_h);
             if !text_items.is_empty() {
                 if let Err(e) = tr.prepare_text_items(&self.device, &self.queue, &text_items) {
-                    text_prepare_error = Some(e.clone());
                     tracing::warn!(error = %e, "text prepare failed — frame continues without text");
                 } else {
                     let mut text_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3524,7 +3522,6 @@ impl Compositor {
                         occlusion_query_set: None,
                     });
                     if let Err(e) = tr.render_text_pass(&mut text_pass) {
-                        text_render_error = Some(e.clone());
                         tracing::warn!(error = %e, "text render failed — frame continues without text");
                     }
                 }
@@ -3532,36 +3529,6 @@ impl Compositor {
             // Trim every frame regardless of item count — glyphs from prior frames
             // must be evicted even when the current frame has no text.
             tr.trim_atlas();
-        }
-
-        if cfg!(target_os = "windows") && (self.frame_number <= 2 || self.frame_number % 120 == 0) {
-            let sample_items = text_items
-                .iter()
-                .take(4)
-                .map(|item| {
-                    format!(
-                        "\"{}\"@({:.1},{:.1}) {}x{} rgba={:?}",
-                        item.text.replace('\n', "\\n"),
-                        item.pixel_x,
-                        item.pixel_y,
-                        item.bounds_width,
-                        item.bounds_height,
-                        item.color,
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" | ");
-            let diag = format!(
-                "frame={} has_text_rasterizer={} text_items={} font_faces={} prepare_error={} render_error={} samples={}\n",
-                self.frame_number,
-                has_text_rasterizer,
-                text_items.len(),
-                text_font_faces,
-                text_prepare_error.as_deref().unwrap_or(""),
-                text_render_error.as_deref().unwrap_or(""),
-                sample_items,
-            );
-            let _ = std::fs::write("C:\\tze_hud\\logs\\text_diag.txt", diag);
         }
 
         let encode_us = encode_start.elapsed().as_micros() as u64;
@@ -4690,7 +4657,13 @@ impl Compositor {
         let mut cmds = Vec::new();
         for tile in &scene.visible_tiles() {
             if let Some(root_id) = tile.root_node {
-                self.collect_tile_rounded_rect_cmds_from_node(root_id, tile, scene, &mut cmds);
+                // Compute scroll offset once per tile rather than on every
+                // recursive node visit — it is constant across all nodes in
+                // the same tile.
+                let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
+                self.collect_tile_rounded_rect_cmds_from_node(
+                    root_id, tile, scene, scroll_x, scroll_y, &mut cmds,
+                );
             }
         }
         cmds
@@ -4701,13 +4674,14 @@ impl Compositor {
         node_id: SceneId,
         tile: &Tile,
         scene: &SceneGraph,
+        scroll_x: f32,
+        scroll_y: f32,
         cmds: &mut Vec<crate::pipeline::RoundedRectDrawCmd>,
     ) {
         let node = match scene.nodes.get(&node_id) {
             Some(n) => n,
             None => return,
         };
-        let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
 
         if let NodeData::SolidColor(sc) = &node.data {
             if let Some(radius) = sc.radius.filter(|r| *r > 0.0) {
@@ -4724,7 +4698,9 @@ impl Compositor {
         }
 
         for child_id in &node.children {
-            self.collect_tile_rounded_rect_cmds_from_node(*child_id, tile, scene, cmds);
+            self.collect_tile_rounded_rect_cmds_from_node(
+                *child_id, tile, scene, scroll_x, scroll_y, cmds,
+            );
         }
     }
 
