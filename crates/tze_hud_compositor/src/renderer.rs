@@ -3751,6 +3751,13 @@ impl Compositor {
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
         self.encode_drag_handle_pass(&mut encoder, &frame.view, &drag_handle_vertices);
 
+        // ── Chrome context menu (hud-zc7f) ─────────────────────────────────
+        // Render the drag-handle reset context menu on top of everything.
+        let context_menu_vertices = self.collect_context_menu_vertices(scene, sw, sh);
+        if !context_menu_vertices.is_empty() {
+            self.encode_drag_handle_pass(&mut encoder, &frame.view, &context_menu_vertices);
+        }
+
         let submit_start = std::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
 
@@ -3909,6 +3916,12 @@ impl Compositor {
         // ── Widget pass: composite pre-synced textures above zone content ────
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
         self.encode_drag_handle_pass(&mut encoder, &frame.view, &drag_handle_vertices);
+
+        // ── Chrome context menu (hud-zc7f) ─────────────────────────────────
+        let context_menu_vertices = self.collect_context_menu_vertices(scene, sw, sh);
+        if !context_menu_vertices.is_empty() {
+            self.encode_drag_handle_pass(&mut encoder, &frame.view, &context_menu_vertices);
+        }
 
         // Headless-specific: copy rendered texture to readback buffer.
         // Must happen after all render passes and before submit.
@@ -5799,6 +5812,63 @@ impl Compositor {
             .map(|r| r.interaction_id.clone())
             .collect();
         scene.drag_handle_states.retain(|k, _| live.contains(k));
+    }
+
+    // ── Chrome context menu rendering (hud-zc7f) ─────────────────────────────
+
+    /// Dimensions for the "Reset to default" context menu popup.
+    const CONTEXT_MENU_W: f32 = 160.0;
+    const CONTEXT_MENU_H: f32 = 32.0;
+    const CONTEXT_MENU_PADDING: f32 = 4.0;
+
+    /// Build vertices for the drag-handle reset context menu, if one is showing.
+    ///
+    /// Returns an empty `Vec` when `scene.drag_handle_context_menu` is `None`.
+    /// The menu is rendered as two rects:
+    /// - A semi-transparent dark background (the popup container).
+    /// - A lighter "Reset to default" button inside it.
+    fn collect_context_menu_vertices(
+        &self,
+        scene: &SceneGraph,
+        sw: f32,
+        sh: f32,
+    ) -> Vec<RectVertex> {
+        let Some(ref menu) = scene.drag_handle_context_menu else {
+            return Vec::new();
+        };
+
+        let mut vertices = Vec::with_capacity(12); // 2 quads × 6 vertices
+
+        // Menu background.
+        let bg_rgba = [0.12_f32, 0.12, 0.12, 0.92];
+        let bg_color = self.gpu_color_raw(bg_rgba);
+        let bg_verts = rect_vertices(
+            menu.anchor_x,
+            menu.anchor_y,
+            Self::CONTEXT_MENU_W,
+            Self::CONTEXT_MENU_H,
+            sw,
+            sh,
+            bg_color,
+        );
+        vertices.extend_from_slice(&bg_verts);
+
+        // "Reset to default" button.
+        let btn_rgba = [0.22_f32, 0.22, 0.22, 0.95];
+        let btn_color = self.gpu_color_raw(btn_rgba);
+        let p = Self::CONTEXT_MENU_PADDING;
+        let btn_verts = rect_vertices(
+            menu.anchor_x + p,
+            menu.anchor_y + p,
+            Self::CONTEXT_MENU_W - p * 2.0,
+            Self::CONTEXT_MENU_H - p * 2.0,
+            sw,
+            sh,
+            btn_color,
+        );
+        vertices.extend_from_slice(&btn_verts);
+
+        vertices
     }
 
     /// Recompute the zone interaction hit regions for the current frame.

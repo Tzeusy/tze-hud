@@ -100,7 +100,9 @@ use tze_hud_resource::{RuntimeWidgetStore, RuntimeWidgetStoreConfig};
 use tze_hud_scene::HitResult;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::{WidgetParameterValue, ZoneContent, ZoneInteractionKind};
+use tze_hud_scene::types::{
+    DragHandleContextMenuState, WidgetParameterValue, ZoneContent, ZoneInteractionKind,
+};
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
@@ -333,6 +335,15 @@ struct WindowedRuntimeState {
     /// `resumed()`. After that call the field is no longer needed but is kept
     /// for potential hot-reload use.
     global_tokens: std::collections::HashMap<String, String>,
+    /// Broadcast sender for `ElementRepositionedEvent`.
+    ///
+    /// Cloned from the `HudSessionImpl` after creation. `None` when gRPC is
+    /// disabled (grpc_port == 0) or before network services start.
+    ///
+    /// Used by the windowed runtime to broadcast reset events without holding
+    /// the async session lock (the reset path is sync chrome-layer code).
+    element_repositioned_tx:
+        Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -863,7 +874,16 @@ impl ApplicationHandler for WinitApp {
                         ElementState::Pressed => PointerEventKind::Down,
                         ElementState::Released => PointerEventKind::Up,
                     };
+                    // If the context menu is showing and this is a left-press,
+                    // check if it lands on the Reset button.  If so, trigger
+                    // the reset; otherwise dismiss the menu (click-outside).
+                    if state == ElementState::Released {
+                        self.handle_left_click_with_context_menu();
+                    }
                     self.enqueue_pointer_event(kind);
+                } else if button == MouseButton::Right && state == ElementState::Released {
+                    // Right-click: show context menu if cursor is on a drag handle.
+                    self.handle_right_click_on_drag_handle();
                 }
             }
 
@@ -927,6 +947,8 @@ impl ApplicationHandler for WinitApp {
                 self.refresh_widget_hover_tracking();
                 self.tick_widget_hover_tracking();
                 self.update_overlay_cursor_hittest();
+                // Auto-dismiss the drag-handle context menu after 3 seconds.
+                self.tick_context_menu_auto_dismiss();
                 // Stage 1/2 bookkeeping: check frame-ready signal and present.
                 self.maybe_present_frame();
 
@@ -1303,20 +1325,248 @@ impl WinitApp {
         }
     }
 
-    /// Check the `FrameReadySignal` and present the frame if the compositor
-    /// has signalled one.
+    // ── Chrome context menu (drag handle reset gesture) ────────────────────
+
+    /// Show the chrome context menu anchored at the cursor position if the
+    /// cursor is currently over a drag handle.
     ///
-    /// Per spec §Compositor Thread Ownership (line 54-55):
-    /// "WHEN a frame is ready for presentation THEN the compositor thread MUST
-    /// signal the main thread via FrameReadySignal, and only the main thread
-    /// SHALL call surface.present()."
+    /// Called on right-click (desktop).  No-op if the cursor is not on a
+    /// drag handle.
+    fn handle_right_click_on_drag_handle(&mut self) {
+        let cx = self.state.cursor_x;
+        let cy = self.state.cursor_y;
+
+        // Find the drag handle under the cursor.
+        let element_id = {
+            let Ok(state) = self.state.shared_state.try_lock() else {
+                return;
+            };
+            let Ok(scene) = state.scene.try_lock() else {
+                return;
+            };
+            scene
+                .drag_handle_hit_regions
+                .iter()
+                .find(|r| {
+                    cx >= r.bounds.x
+                        && cx < r.bounds.x + r.bounds.width
+                        && cy >= r.bounds.y
+                        && cy < r.bounds.y + r.bounds.height
+                })
+                .map(|r| r.element_id)
+        };
+
+        let Some(element_id) = element_id else {
+            return; // Cursor is not on a drag handle — nothing to show.
+        };
+
+        // Anchor the menu to the right-click position.
+        // Pre-compute the reset button rect (constant throughout the menu's lifetime).
+        const MENU_W: f32 = 160.0;
+        const MENU_H: f32 = 32.0;
+        const PADDING: f32 = 4.0;
+        let menu = DragHandleContextMenuState {
+            element_id,
+            anchor_x: cx,
+            anchor_y: cy,
+            shown_at_ns: nanoseconds_since_start(),
+            reset_button_rect: Some(tze_hud_scene::Rect::new(
+                cx + PADDING,
+                cy + PADDING,
+                MENU_W - PADDING * 2.0,
+                MENU_H - PADDING * 2.0,
+            )),
+        };
+
+        if let Ok(state) = self.state.shared_state.try_lock() {
+            if let Ok(mut scene) = state.scene.try_lock() {
+                scene.drag_handle_context_menu = Some(menu);
+                tracing::debug!(
+                    element_id = %element_id,
+                    x = cx,
+                    y = cy,
+                    "chrome context menu shown for drag handle"
+                );
+            }
+        }
+    }
+
+    /// Handle a left-click when the chrome context menu is showing.
     ///
-    /// The compositor thread stores the rendered `SurfaceTexture` in
-    /// `WindowSurface::pending_texture` during `acquire_frame()`. This method
-    /// retrieves that exact texture via `take_pending_texture()` and calls
-    /// `SurfaceTexture::present()` on it — satisfying the macOS/Metal requirement
-    /// that `present()` runs on the main thread, and ensuring we present the
-    /// texture the compositor actually rendered into.
+    /// - If the click lands on the "Reset to default" button rect → trigger reset.
+    /// - Otherwise → dismiss the menu (click-outside).
+    ///
+    /// Called synchronously on `MouseButton::Left` release, before the normal
+    /// `enqueue_pointer_event` path.
+    fn handle_left_click_with_context_menu(&mut self) {
+        let cx = self.state.cursor_x;
+        let cy = self.state.cursor_y;
+
+        // Extract context menu state, then immediately drop the scene lock.
+        let menu_state = {
+            let Ok(state) = self.state.shared_state.try_lock() else {
+                return;
+            };
+            let Ok(scene) = state.scene.try_lock() else {
+                return;
+            };
+            scene.drag_handle_context_menu.clone()
+        };
+
+        let Some(menu) = menu_state else {
+            return; // Menu not showing — nothing to do.
+        };
+
+        // Check if the click landed on the Reset button.
+        let hit_reset = menu
+            .reset_button_rect
+            .is_some_and(|r| cx >= r.x && cx < r.x + r.width && cy >= r.y && cy < r.y + r.height);
+
+        // Dismiss the menu in all cases.
+        if let Ok(state) = self.state.shared_state.try_lock() {
+            if let Ok(mut scene) = state.scene.try_lock() {
+                scene.drag_handle_context_menu = None;
+            }
+        }
+
+        if !hit_reset {
+            tracing::debug!("chrome context menu dismissed (click-outside)");
+            return;
+        }
+
+        // Reset the element geometry.
+        self.perform_reset_element_geometry(menu.element_id);
+    }
+
+    /// Auto-dismiss the context menu after 3 seconds.
+    ///
+    /// Called each frame from `RedrawRequested`.  No-op when no menu is showing.
+    fn tick_context_menu_auto_dismiss(&mut self) {
+        const AUTO_DISMISS_NS: u64 = 3_000_000_000; // 3 seconds
+
+        let now_ns = nanoseconds_since_start();
+
+        let should_dismiss = {
+            let Ok(state) = self.state.shared_state.try_lock() else {
+                return;
+            };
+            let Ok(scene) = state.scene.try_lock() else {
+                return;
+            };
+            scene
+                .drag_handle_context_menu
+                .as_ref()
+                .is_some_and(|m| now_ns.saturating_sub(m.shown_at_ns) >= AUTO_DISMISS_NS)
+        };
+
+        if should_dismiss {
+            if let Ok(state) = self.state.shared_state.try_lock() {
+                if let Ok(mut scene) = state.scene.try_lock() {
+                    scene.drag_handle_context_menu = None;
+                    tracing::debug!("chrome context menu auto-dismissed after 3s");
+                }
+            }
+        }
+    }
+
+    /// Synchronously reset the geometry override for `element_id` and broadcast
+    /// an `ElementRepositionedEvent` (hud-zc7f).
+    ///
+    /// This is the sync chrome-layer path for the "Reset to default" context
+    /// menu action.  It mirrors the logic in `HudSessionImpl::reset_element_geometry`
+    /// but runs on the main thread without async, using the stored broadcast sender.
+    ///
+    /// No-op if the element has no user override.
+    fn perform_reset_element_geometry(&mut self, element_id: tze_hud_scene::SceneId) {
+        use tze_hud_scene::types::{
+            rect_to_relative_geometry_policy, resolve_geometry_override_chain,
+        };
+        use tze_hud_scene::{ElementType, GeometryPolicy};
+
+        // Collect previous override, fallback geometry, and optional persist path.
+        let (previous_override, fallback_geometry, store_snapshot, persist_path) = {
+            let Ok(mut state) = self.state.shared_state.try_lock() else {
+                tracing::warn!("perform_reset_element_geometry: could not acquire shared state");
+                return;
+            };
+            // Clear the override.
+            let previous = state.element_store.reset_geometry_override(element_id);
+            let Some(previous) = previous else {
+                tracing::debug!(
+                    element_id = %element_id,
+                    "perform_reset_element_geometry: no override — no-op"
+                );
+                return;
+            };
+            // Resolve fallback geometry (agent bounds → config → default policy).
+            let zero_policy = GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.0,
+                height_pct: 0.0,
+            };
+            let fallback = {
+                let Ok(scene) = state.scene.try_lock() else {
+                    return;
+                };
+                if let Some(entry) = state.element_store.entries.get(&element_id) {
+                    match entry.element_type {
+                        ElementType::Tile => {
+                            let agent_policy = scene.tiles.get(&element_id).map(|tile| {
+                                rect_to_relative_geometry_policy(
+                                    tile.bounds,
+                                    scene.display_area.width,
+                                    scene.display_area.height,
+                                )
+                            });
+                            resolve_geometry_override_chain(None, agent_policy, None, None)
+                                .unwrap_or(zero_policy)
+                        }
+                        ElementType::Zone => scene
+                            .zone_registry
+                            .resolve_geometry_policy_for_zone(&entry.namespace, None, None)
+                            .unwrap_or(zero_policy),
+                        ElementType::Widget => scene
+                            .widget_registry
+                            .resolve_geometry_policy_for_instance(&entry.namespace, None)
+                            .unwrap_or(zero_policy),
+                    }
+                } else {
+                    zero_policy
+                }
+            };
+            let store_snapshot = state.element_store.clone();
+            let persist_path = state.element_store_path.clone();
+            (previous, fallback, store_snapshot, persist_path)
+        };
+
+        // Persist the updated store (outside the lock, main-thread sync I/O).
+        if let Some(path) = persist_path {
+            if let Err(e) = store_snapshot.persist_to_path_atomic(&path) {
+                tracing::warn!(error = %e, "perform_reset_element_geometry: persist failed");
+            }
+        }
+
+        // Broadcast ElementRepositionedEvent.
+        if let Some(ref tx) = self.state.element_repositioned_tx {
+            let event = tze_hud_protocol::proto::ElementRepositionedEvent {
+                // Use big-endian UUID bytes to match scene_id_to_bytes wire contract.
+                element_id: element_id.as_uuid().as_bytes().to_vec(),
+                new_geometry: Some(tze_hud_protocol::convert::geometry_policy_to_proto(
+                    &fallback_geometry,
+                )),
+                previous_geometry: Some(tze_hud_protocol::convert::geometry_policy_to_proto(
+                    &previous_override,
+                )),
+            };
+            tx.send(event).unwrap_or_default();
+            tracing::debug!(
+                element_id = %element_id,
+                "ElementRepositionedEvent broadcast after reset-to-default"
+            );
+        }
+    }
+
     /// Cycle the overlay to the next (+1) or previous (-1) monitor.
     ///
     /// Enumerates available monitors, advances the index, and repositions +
@@ -1353,6 +1603,20 @@ impl WinitApp {
         }
     }
 
+    /// Check the `FrameReadySignal` and present the frame if the compositor
+    /// has signalled one.
+    ///
+    /// Per spec §Compositor Thread Ownership (line 54-55):
+    /// "WHEN a frame is ready for presentation THEN the compositor thread MUST
+    /// signal the main thread via FrameReadySignal, and only the main thread
+    /// SHALL call surface.present()."
+    ///
+    /// The compositor thread stores the rendered `SurfaceTexture` in
+    /// `WindowSurface::pending_texture` during `acquire_frame()`. This method
+    /// retrieves that exact texture via `take_pending_texture()` and calls
+    /// `SurfaceTexture::present()` on it — satisfying the macOS/Metal requirement
+    /// that `present()` runs on the main thread, and ensuring we present the
+    /// texture the compositor actually rendered into.
     fn maybe_present_frame(&mut self) {
         if self.state.frame_ready_rx.has_changed().unwrap_or(false) {
             // Acknowledge the signal.
@@ -1561,13 +1825,14 @@ impl WindowedRuntime {
         // runtime for gRPC server, MCP bridge, session management."
         //
         // gRPC server is disabled when grpc_port == 0 (per WindowedConfig docs).
-        let (mut network_rt, mut network_handles) = start_network_services(
-            cfg.grpc_port,
-            &cfg.psk,
-            shared_state.clone(),
-            Arc::clone(&runtime_context),
-            fallback_unrestricted,
-        )?;
+        let (mut network_rt, mut network_handles, element_repositioned_tx) =
+            start_network_services(
+                cfg.grpc_port,
+                &cfg.psk,
+                shared_state.clone(),
+                Arc::clone(&runtime_context),
+                fallback_unrestricted,
+            )?;
 
         // ── MCP HTTP server ────────────────────────────────────────────────────
         //
@@ -1656,6 +1921,7 @@ impl WindowedRuntime {
             modifiers: winit::keyboard::ModifiersState::empty(),
             current_monitor_index: 0,
             global_tokens: startup_compositor_tokens,
+            element_repositioned_tx,
         };
 
         let mut app = WinitApp { state: app_state };
@@ -1833,13 +2099,19 @@ fn start_network_services(
     shared_state: Arc<Mutex<SharedState>>,
     runtime_context: SharedRuntimeContext,
     fallback_unrestricted: bool,
-) -> Result<(Option<NetworkRuntime>, Vec<tokio::task::JoinHandle<()>>), Box<dyn std::error::Error>>
-{
+) -> Result<
+    (
+        Option<NetworkRuntime>,
+        Vec<tokio::task::JoinHandle<()>>,
+        Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     if grpc_port == 0 {
         tracing::info!(
             "windowed runtime: gRPC server disabled (grpc_port = 0); running compositor-only"
         );
-        return Ok((None, Vec::new()));
+        return Ok((None, Vec::new(), None));
     }
 
     // Build the multi-thread Tokio runtime for network tasks.
@@ -1858,6 +2130,11 @@ fn start_network_services(
         agent_caps,
         fallback_unrestricted,
     );
+
+    // Clone the broadcast sender before moving the service into the gRPC task.
+    // The windowed runtime holds this sender to broadcast ElementRepositionedEvents
+    // from the sync chrome-layer reset path (right-click context menu).
+    let element_repositioned_tx = service.element_repositioned_tx.clone();
 
     // Wire RuntimeService (ReloadConfig RPC) alongside HudSession.
     let runtime_svc = RuntimeServiceImpl::new(Arc::clone(&runtime_context));
@@ -1878,7 +2155,11 @@ fn start_network_services(
 
     tracing::info!(grpc_addr = %addr, "windowed runtime: gRPC server task spawned");
 
-    Ok((Some(network_rt), vec![handle]))
+    Ok((
+        Some(network_rt),
+        vec![handle],
+        Some(element_repositioned_tx),
+    ))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -2443,7 +2724,7 @@ mod tests {
     fn start_network_services_grpc_port_zero_returns_no_runtime() {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles) = start_network_services(0, "test-psk", shared_state, ctx, true)
+        let (rt, handles, _tx) = start_network_services(0, "test-psk", shared_state, ctx, true)
             .expect("start_network_services should not fail for port 0");
         assert!(
             rt.is_none(),
@@ -2462,7 +2743,7 @@ mod tests {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
         // Use a high ephemeral port unlikely to conflict.
-        let (rt, handles) = start_network_services(59781, "test-psk", shared_state, ctx, true)
+        let (rt, handles, _tx) = start_network_services(59781, "test-psk", shared_state, ctx, true)
             .expect("start_network_services should not error for a valid port");
         assert!(
             rt.is_some(),
@@ -2509,7 +2790,7 @@ mod tests {
         for _ in 0..2 {
             let shared_state = make_shared_state();
             let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-            let (rt, handles) = start_network_services(0, "psk", shared_state, ctx, false)
+            let (rt, handles, _tx) = start_network_services(0, "psk", shared_state, ctx, false)
                 .expect("port-0 must not error");
             assert!(rt.is_none());
             assert!(handles.is_empty());
