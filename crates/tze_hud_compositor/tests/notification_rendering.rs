@@ -7,16 +7,16 @@
 //! ## Test list
 //!
 //! 1. `test_notification_urgency0_low_backdrop` — urgency=0 → backdrop pixels match
-//!    `color.notification.urgency.low` (#2A2A2A, 0.9 alpha over clear).
+//!    `color.notification.urgency.low` (#000000, 0.8 alpha over clear).
 //!
 //! 2. `test_notification_urgency1_normal_backdrop` — urgency=1 → backdrop pixels match
-//!    `color.notification.urgency.normal` (#1A1A3A, 0.9 alpha over clear).
+//!    `color.notification.urgency.normal` (#0C1426, 0.8 alpha over clear).
 //!
 //! 3. `test_notification_urgency2_urgent_backdrop` — urgency=2 → backdrop pixels match
-//!    `color.notification.urgency.urgent` (#8B6914, 0.9 alpha over clear).
+//!    `color.notification.urgency.urgent` (#2A1E08, 0.8 alpha over clear).
 //!
 //! 4. `test_notification_urgency3_critical_backdrop` — urgency=3 → backdrop pixels match
-//!    `color.notification.urgency.critical` (#8B1A1A, 0.9 alpha over clear).
+//!    `color.notification.urgency.critical` (#450612, 0.8 alpha over clear).
 //!
 //! 5. `test_notification_urgency_distinct_colors` — each urgency level renders a
 //!    visually distinct backdrop (low, normal, urgent, critical each have different
@@ -53,17 +53,17 @@
 //!   slot 0 centre y = 0 + 17 = 17
 //!
 //! Notification urgency colors (linear sRGB, per spec §Notification Urgency Backdrop Token Schema):
-//!   urgency 0 (low)     → #2A2A2A → linear(0.165, 0.165, 0.165)
-//!   urgency 1 (normal)  → #1A1A3A → linear(0.102, 0.102, 0.227)
-//!   urgency 2 (urgent)  → #8B6914 → linear(0.545, 0.412, 0.078)
-//!   urgency 3 (critical)→ #8B1A1A → linear(0.545, 0.102, 0.102)
+//!   urgency 0 (low)     → #000000 → linear(0.0, 0.0, 0.0)
+//!   urgency 1 (normal)  → #0C1426 → linear(0.0037, 0.007, 0.0194)
+//!   urgency 2 (urgent)  → #2A1E08 → linear(0.0232, 0.013, 0.0024)
+//!   urgency 3 (critical)→ #450612 → linear(0.0595, 0.0018, 0.0060)
 //!
-//! At 0.9 alpha composited over the compositor's dark clear color
+//! At 0.8 alpha composited over the compositor's dark clear color
 //! (linear {r:0.05, g:0.05, b:0.1, a:1.0}), calibrated from llvmpipe output:
-//!   urgency 0 (low)      → sRGB ≈ (104, 104, 106)  [near-neutral dark gray]
-//!   urgency 1 (normal)   → sRGB ≈ (80, 80, 133)    [dark blue-tinted]
-//!   urgency 2 (urgent)   → sRGB ≈ (184, 166, 72)   [amber/olive]
-//!   urgency 3 (critical) → sRGB ≈ (184, 80, 82)    [dark red]
+//!   urgency 0 (low)      → sRGB ≈ (25, 25, 39)     [smoke black]
+//!   urgency 1 (normal)   → sRGB ≈ (30, 33, 53)     [blue-black]
+//!   urgency 2 (urgent)   → sRGB ≈ (47, 39, 41)     [amber-black]
+//!   urgency 3 (critical) → sRGB ≈ (68, 28, 44)     [red-black]
 //!
 //! Tolerances of ±12 accommodate software-renderer (llvmpipe / WARP) rounding
 //! differences and sRGB compositing precision variation across platforms.
@@ -161,33 +161,33 @@ fn register_notification_zone(scene: &mut SceneGraph) {
 // ─── Expected sRGB pixel values ──────────────────────────────────────────────
 //
 // Notification urgency colors (linear sRGB, from NOTIFICATION_URGENCY_* constants):
-//   low      = (0.165, 0.165, 0.165)   → #2A2A2A
-//   normal   = (0.102, 0.102, 0.227)   → #1A1A3A
-//   urgent   = (0.545, 0.412, 0.078)   → #8B6914
-//   critical = (0.545, 0.102, 0.102)   → #8B1A1A
+//   low      = (0.0, 0.0, 0.0)         → #000000
+//   normal   = (0.0037, 0.007, 0.0194) → #0C1426
+//   urgent   = (0.0232, 0.013, 0.0024) → #2A1E08
+//   critical = (0.0595, 0.0018, 0.006) → #450612
 //
-// Blended at 0.9 alpha over compositor clear (linear 0.05, 0.05, 0.1):
-//   out_lin = urgency_lin * 0.9 + clear_lin * 0.1
+// Blended at 0.8 alpha over compositor clear (linear 0.05, 0.05, 0.1):
+//   out_lin = urgency_lin * 0.8 + clear_lin * 0.2
 //
 // urgency 0 (low):
-//   r = 0.165*0.9 + 0.05*0.1 = 0.1535  → sRGB ≈ 104
-//   g = 0.165*0.9 + 0.05*0.1 = 0.1535  → sRGB ≈ 104
-//   b = 0.165*0.9 + 0.1*0.1  = 0.1585  → sRGB ≈ 106
+//   r = 0.0*0.8    + 0.05*0.2 = 0.0100 → sRGB ≈ 25
+//   g = 0.0*0.8    + 0.05*0.2 = 0.0100 → sRGB ≈ 25
+//   b = 0.0*0.8    + 0.1*0.2  = 0.0200 → sRGB ≈ 39
 //
 // urgency 1 (normal):
-//   r = 0.102*0.9 + 0.05*0.1 = 0.0968  → sRGB ≈ 80
-//   g = 0.102*0.9 + 0.05*0.1 = 0.0968  → sRGB ≈ 80
-//   b = 0.227*0.9 + 0.1*0.1  = 0.2143  → sRGB ≈ 133
+//   r = 0.0037*0.8 + 0.05*0.2 = 0.0130 → sRGB ≈ 30
+//   g = 0.0070*0.8 + 0.05*0.2 = 0.0156 → sRGB ≈ 33
+//   b = 0.0194*0.8 + 0.1*0.2  = 0.0355 → sRGB ≈ 53
 //
 // urgency 2 (urgent):
-//   r = 0.545*0.9 + 0.05*0.1 = 0.4955  → sRGB ≈ 184 (R-dominant)
-//   g = 0.412*0.9 + 0.05*0.1 = 0.3758  → sRGB ≈ 166
-//   b = 0.078*0.9 + 0.1*0.1  = 0.0802  → sRGB ≈ 72
+//   r = 0.0232*0.8 + 0.05*0.2 = 0.0286 → sRGB ≈ 47
+//   g = 0.0130*0.8 + 0.05*0.2 = 0.0204 → sRGB ≈ 39
+//   b = 0.0024*0.8 + 0.1*0.2  = 0.0219 → sRGB ≈ 41
 //
 // urgency 3 (critical):
-//   r = 0.545*0.9 + 0.05*0.1 = 0.4955  → sRGB ≈ 184
-//   g = 0.102*0.9 + 0.05*0.1 = 0.0968  → sRGB ≈ 80
-//   b = 0.102*0.9 + 0.1*0.1  = 0.1018  → sRGB ≈ 82
+//   r = 0.0595*0.8 + 0.05*0.2 = 0.0576 → sRGB ≈ 68
+//   g = 0.0018*0.8 + 0.05*0.2 = 0.0114 → sRGB ≈ 28
+//   b = 0.0060*0.8 + 0.1*0.2  = 0.0248 → sRGB ≈ 44
 //
 // (Calibrated from theoretical linear-sRGB math; run the `debug_probe_pixel_values`
 // ignored test with HEADLESS_FORCE_SOFTWARE=1 to verify against llvmpipe output.)
@@ -197,25 +197,25 @@ fn register_notification_zone(scene: &mut SceneGraph) {
 /// are more sensitive to sRGB gamma rounding across software renderer implementations.
 const TOLERANCE: u8 = 12;
 
-// Expected sRGB bytes for urgency=0 (low) backdrop at 0.9 alpha.
-// #2A2A2A linear(0.165, 0.165, 0.165) at 0.9α over clear:
-//   sRGB ≈ (104, 104, 106)
-const LOW_EXPECTED: [u8; 4] = [104, 104, 106, 255];
+// Expected sRGB bytes for urgency=0 (low) backdrop at 0.8 alpha.
+// #000000 linear(0.0, 0.0, 0.0) at 0.8α over clear:
+//   sRGB ≈ (25, 25, 39)
+const LOW_EXPECTED: [u8; 4] = [25, 25, 39, 255];
 
-// Expected sRGB bytes for urgency=1 (normal) backdrop at 0.9 alpha.
-// #1A1A3A linear(0.102, 0.102, 0.227) at 0.9α over clear:
-//   sRGB ≈ (80, 80, 133)
-const NORMAL_EXPECTED: [u8; 4] = [80, 80, 133, 255];
+// Expected sRGB bytes for urgency=1 (normal) backdrop at 0.8 alpha.
+// #0C1426 linear(0.0037, 0.007, 0.0194) at 0.8α over clear:
+//   sRGB ≈ (30, 33, 53)
+const NORMAL_EXPECTED: [u8; 4] = [30, 33, 53, 255];
 
-// Expected sRGB bytes for urgency=2 (urgent) backdrop at 0.9 alpha.
-// #8B6914 linear(0.545, 0.412, 0.078) at 0.9α over clear:
-//   sRGB ≈ (184, 166, 72)
-const URGENT_EXPECTED: [u8; 4] = [184, 166, 72, 255];
+// Expected sRGB bytes for urgency=2 (urgent) backdrop at 0.8 alpha.
+// #2A1E08 linear(0.0232, 0.013, 0.0024) at 0.8α over clear:
+//   sRGB ≈ (47, 39, 41)
+const URGENT_EXPECTED: [u8; 4] = [47, 39, 41, 255];
 
-// Expected sRGB bytes for urgency=3 (critical) backdrop at 0.9 alpha.
-// #8B1A1A linear(0.545, 0.102, 0.102) at 0.9α over clear:
-//   sRGB ≈ (184, 80, 82)
-const CRITICAL_EXPECTED: [u8; 4] = [184, 80, 82, 255];
+// Expected sRGB bytes for urgency=3 (critical) backdrop at 0.8 alpha.
+// #450612 linear(0.0595, 0.0018, 0.0060) at 0.8α over clear:
+//   sRGB ≈ (68, 28, 44)
+const CRITICAL_EXPECTED: [u8; 4] = [68, 28, 44, 255];
 
 // ─── Notification-area geometry constants ─────────────────────────────────────
 //
@@ -247,7 +247,7 @@ const SLOT0_Y: u32 = 17;
 ///
 /// Publishing a `NotificationPayload` with `urgency = 0` to the notification-area
 /// zone MUST produce a backdrop quad whose rendered pixels match
-/// `color.notification.urgency.low` (#2A2A2A) at 0.9 alpha, within ±12 per channel.
+/// `color.notification.urgency.low` (#000000) at 0.8 alpha, within ±12 per channel.
 #[tokio::test]
 async fn test_notification_urgency0_low_backdrop() {
     let (mut compositor, surface) =
@@ -293,7 +293,7 @@ async fn test_notification_urgency0_low_backdrop() {
 ///
 /// Publishing a `NotificationPayload` with `urgency = 1` to the notification-area
 /// zone MUST produce a backdrop quad whose rendered pixels match
-/// `color.notification.urgency.normal` (#1A1A3A) at 0.9 alpha, within ±12 per channel.
+/// `color.notification.urgency.normal` (#0C1426) at 0.8 alpha, within ±12 per channel.
 #[tokio::test]
 async fn test_notification_urgency1_normal_backdrop() {
     let (mut compositor, surface) =
@@ -339,7 +339,7 @@ async fn test_notification_urgency1_normal_backdrop() {
 ///
 /// Publishing a `NotificationPayload` with `urgency = 2` to the notification-area
 /// zone MUST produce a backdrop quad whose rendered pixels match
-/// `color.notification.urgency.urgent` (#8B6914) at 0.9 alpha, within ±12 per channel.
+/// `color.notification.urgency.urgent` (#2A1E08) at 0.8 alpha, within ±12 per channel.
 #[tokio::test]
 async fn test_notification_urgency2_urgent_backdrop() {
     let (mut compositor, surface) =
@@ -385,7 +385,7 @@ async fn test_notification_urgency2_urgent_backdrop() {
 ///
 /// Publishing a `NotificationPayload` with `urgency = 3` to the notification-area
 /// zone MUST produce a backdrop quad whose rendered pixels match
-/// `color.notification.urgency.critical` (#8B1A1A) at 0.9 alpha, within ±12 per channel.
+/// `color.notification.urgency.critical` (#450612) at 0.8 alpha, within ±12 per channel.
 #[tokio::test]
 async fn test_notification_urgency3_critical_backdrop() {
     let (mut compositor, surface) =

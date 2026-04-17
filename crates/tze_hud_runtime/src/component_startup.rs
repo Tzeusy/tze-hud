@@ -791,32 +791,32 @@ notification = "notification-stack-exemplar"
                 .compositor_tokens
                 .get("color.notification.urgency.low")
                 .map(|s| s.as_str()),
-            Some("#2A2A2A"),
-            "compositor_tokens: urgency.low should be #2A2A2A"
+            Some("#000000"),
+            "compositor_tokens: urgency.low should be #000000"
         );
         assert_eq!(
             result
                 .compositor_tokens
                 .get("color.notification.urgency.normal")
                 .map(|s| s.as_str()),
-            Some("#1A1A3A"),
-            "compositor_tokens: urgency.normal should be #1A1A3A"
+            Some("#0C1426"),
+            "compositor_tokens: urgency.normal should be #0C1426"
         );
         assert_eq!(
             result
                 .compositor_tokens
                 .get("color.notification.urgency.urgent")
                 .map(|s| s.as_str()),
-            Some("#8B6914"),
-            "compositor_tokens: urgency.urgent should be #8B6914"
+            Some("#2A1E08"),
+            "compositor_tokens: urgency.urgent should be #2A1E08"
         );
         assert_eq!(
             result
                 .compositor_tokens
                 .get("color.notification.urgency.critical")
                 .map(|s| s.as_str()),
-            Some("#8B1A1A"),
-            "compositor_tokens: urgency.critical should be #8B1A1A"
+            Some("#450612"),
+            "compositor_tokens: urgency.critical should be #450612"
         );
         // compositor_tokens must also contain global tokens (e.g. canonical text color).
         assert!(

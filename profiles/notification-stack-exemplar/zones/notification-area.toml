@@ -1,7 +1,7 @@
 # Zone rendering overrides for the "notification-area" zone type.
 #
 # This is the exemplar rendering configuration for the notification stack.
-# backdrop_opacity = 0.9 satisfies OpaqueBackdrop readability (>= 0.8).
+# backdrop_opacity = 0.8 satisfies OpaqueBackdrop readability (>= 0.8).
 #
 # Source: exemplar-notification/tasks.md §7.2
 
@@ -15,7 +15,7 @@ text_color = "{{color.text.primary}}"         # resolved: #F5F7FA
 text_align = "start"                          # left-aligned
 
 # Backdrop — base backdrop; urgency tinting applied per-notification by compositor
-backdrop_color   = "{{color.backdrop.default}}"  # resolved: #141A24 (fallback when no urgency tint)
+backdrop_color   = "{{color.backdrop.default}}"  # resolved: #000000 (fallback when no urgency tint)
 backdrop_opacity = "{{opacity.backdrop.opaque}}"  # satisfies OpaqueBackdrop >= 0.8
 
 # Rounded card styling

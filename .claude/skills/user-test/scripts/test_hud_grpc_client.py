@@ -67,6 +67,7 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(root.solid_color.color.a, 0.72, places=5)
         self.assertEqual(root.solid_color.bounds.width, 320.0)
         self.assertEqual(root.solid_color.bounds.height, 112.0)
+        self.assertEqual(root.solid_color.radius, 12.0)
 
         self.assertTrue(sheen.HasField("solid_color"))
         self.assertEqual(sheen.solid_color.bounds.height, 2.0)
@@ -109,6 +110,7 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(dismiss_bg.HasField("solid_color"))
         self.assertEqual(dismiss_bg.solid_color.bounds.width, 24.0)
         self.assertEqual(dismiss_bg.solid_color.bounds.height, 24.0)
+        self.assertEqual(dismiss_bg.solid_color.radius, 8.0)
 
         self.assertTrue(dismiss_text.HasField("text_markdown"))
         self.assertEqual(dismiss_text.text_markdown.content, "X")
@@ -276,6 +278,7 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(root_node.HasField("solid_color"))
         self.assertEqual(root_node.solid_color.bounds.width, 320.0)
         self.assertEqual(root_node.solid_color.bounds.height, 112.0)
+        self.assertEqual(root_node.solid_color.radius, 12.0)
 
         self.assertEqual(client.add_node.await_count, 12)
         for awaited in client.add_node.await_args_list:

@@ -289,6 +289,7 @@ fn make_bg_node() -> Node {
         data: NodeData::SolidColor(SolidColorNode {
             color: BG_RGBA,
             bounds: Rect::new(0.0, 0.0, CARD_W, CARD_H),
+            radius: None,
         }),
     }
 }
@@ -300,6 +301,7 @@ fn make_sheen_node() -> Node {
         data: NodeData::SolidColor(SolidColorNode {
             color: SHEEN_RGBA,
             bounds: Rect::new(0.0, 0.0, CARD_W, SHEEN_H),
+            radius: None,
         }),
     }
 }
@@ -311,6 +313,7 @@ fn make_accent_node(rgb: [u8; 3]) -> Node {
         data: NodeData::SolidColor(SolidColorNode {
             color: rgba_from_rgb(rgb, 0.78),
             bounds: Rect::new(ACCENT_X, ACCENT_Y, ACCENT_W, ACCENT_H),
+            radius: None,
         }),
     }
 }
@@ -327,6 +330,7 @@ fn make_avatar_plate_node(rgb: [u8; 3]) -> Node {
                 AVATAR_PLATE_W,
                 AVATAR_PLATE_H,
             ),
+            radius: None,
         }),
     }
 }
@@ -405,6 +409,7 @@ fn make_chip_bg_node() -> Node {
         data: NodeData::SolidColor(SolidColorNode {
             color: CHIP_BG_RGBA,
             bounds: Rect::new(CHIP_BG_X, CHIP_BG_Y, CHIP_BG_W, CHIP_BG_H),
+            radius: None,
         }),
     }
 }
@@ -433,6 +438,7 @@ fn make_dismiss_bg_node() -> Node {
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba::new(0.94, 0.97, 1.0, 0.14),
             bounds: Rect::new(DISMISS_BG_X, DISMISS_BG_Y, DISMISS_BG_W, DISMISS_BG_H),
+            radius: None,
         }),
     }
 }

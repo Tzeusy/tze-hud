@@ -89,6 +89,24 @@ Scope: v1-mandatory
 
 ---
 
+### Requirement: Notification Dismiss Affordance
+Each stack notification in the notification-area zone MUST render a visible dismiss affordance in the top-right corner of its slot. The affordance MUST occupy a `20x20` pixel square aligned to the slot's top-right edge, MUST use a transparent fill so the notification backdrop remains visible beneath it, and MUST render a 1px outline plus centered `X` label using the effective primary text color. Notification title/body layout MUST reserve horizontal space for the dismiss affordance so content does not overlap it.
+Scope: v1-mandatory
+
+#### Scenario: Dismiss affordance uses transparent background
+- **WHEN** a notification is rendered in the notification-area zone
+- **THEN** the dismiss control interior MUST show the underlying notification backdrop rather than an opaque chip fill
+
+#### Scenario: Dismiss affordance uses primary-text outline
+- **WHEN** a notification is rendered in the notification-area zone
+- **THEN** the dismiss control MUST render a 1px outline and centered `X` label using `color.text.primary` (or the effective text-color override)
+
+#### Scenario: Notification text avoids the dismiss affordance
+- **WHEN** notification title/body text is laid out inside the slot
+- **THEN** the content width MUST reserve horizontal space for the dismiss affordance and its gap so visible text does not collide with the top-right control
+
+---
+
 ### Requirement: Notification Text Rendering
 Notification text MUST be rendered using the `typography.body.family` font family, `typography.body.size` font size (16px canonical default), and `typography.body.weight` font weight, resolved from the zone's effective rendering policy (token-derived defaults, then profile overrides). Text MUST be left-aligned within the notification's content area (backdrop minus padding minus border). Text color MUST use `color.text.primary`. Padding MUST use `spacing.padding.medium` (8px canonical default) on all four sides between the border and the text content area.
 Scope: v1-mandatory

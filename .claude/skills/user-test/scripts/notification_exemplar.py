@@ -162,9 +162,9 @@ def phase1_initial_burst(
 
     print(
         "\n  [visual check] 3 notifications should appear stacked:"
-        "\n    - gamma (urgent/amber)  at top"
-        "\n    - beta  (normal/blue)   in middle"
-        "\n    - alpha (low/gray)      at bottom",
+        "\n    - gamma (urgent/amber-black) at top"
+        "\n    - beta  (normal/blue-black) in middle"
+        "\n    - alpha (low/smoke-black)   at bottom",
         flush=True,
     )
     print("  Pausing 2s for visual inspection...", flush=True)
@@ -205,11 +205,11 @@ def phase2_stack_growth(
 
     print(
         "\n  [visual check] Stack should now show 5 notifications:"
-        "\n    - beta  (normal/blue)   at top    (newest)"
-        "\n    - alpha (critical/red)  slot 1"
-        "\n    - gamma (urgent/amber)  slot 2"
-        "\n    - beta  (normal/blue)   slot 3"
-        "\n    - alpha (low/gray)      at bottom (oldest)",
+        "\n    - beta  (normal/blue-black) at top    (newest)"
+        "\n    - alpha (critical/red-black) slot 1"
+        "\n    - gamma (urgent/amber-black) slot 2"
+        "\n    - beta  (normal/blue-black) slot 3"
+        "\n    - alpha (low/smoke-black)   at bottom (oldest)",
         flush=True,
     )
     print("  Pausing 2s for visual inspection...", flush=True)

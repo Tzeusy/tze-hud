@@ -31,8 +31,8 @@
 use tze_hud_compositor::{Compositor, CompositorError, surface::HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{
-    ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, Rgba, SceneId, ZoneContent,
-    ZoneDefinition, ZoneMediaType, ZoneRegistry,
+    ContentionPolicy, GeometryPolicy, LayerAttachment, Node, NodeData, Rect, RenderingPolicy, Rgba,
+    SceneId, SolidColorNode, ZoneContent, ZoneDefinition, ZoneMediaType, ZoneRegistry,
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -389,6 +389,69 @@ async fn test_background_layer_rounded_rect_renders_backdrop() {
         expected_green,
         TOLERANCE,
         "Background-layer rounded-rect zone interior must show green backdrop",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Requirement: Raw tile solid-color nodes support rounded corners.
+///
+/// A tile root `SolidColorNode` with a non-zero radius must render through the
+/// same rounded-rect pipeline as zone backdrops. The corner pixel of the tile's
+/// bounds must remain clear instead of showing the tile fill color.
+#[tokio::test]
+async fn test_tile_solid_color_radius_rounds_corners() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+
+    let mut scene = SceneGraph::new(SURFACE_W as f32, SURFACE_H as f32);
+    let tab_id = scene.create_tab("Main", 0).expect("create_tab");
+    let lease_id = scene.grant_lease(
+        "test-agent",
+        300_000,
+        vec![
+            tze_hud_scene::types::Capability::CreateTile,
+            tze_hud_scene::types::Capability::ModifyOwnTiles,
+        ],
+    );
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "test-agent",
+            lease_id,
+            Rect::new(64.0, 102.0, 128.0, 51.0),
+            10,
+        )
+        .expect("create_tile");
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba {
+                        r: 0.0,
+                        g: 0.5,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    bounds: Rect::new(0.0, 0.0, 128.0, 51.0),
+                    radius: Some(16.0),
+                }),
+            },
+        )
+        .expect("set_tile_root");
+
+    compositor.render_frame_headless(&mut scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+    HeadlessSurface::assert_pixel_color(
+        &pixels,
+        SURFACE_W,
+        64,
+        102,
+        CLEAR_COLOR_EXPECTED,
+        TOLERANCE,
+        "corner pixel of rounded tile root must remain clear",
     )
     .unwrap_or_else(|e| panic!("{e}"));
 }

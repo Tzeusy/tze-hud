@@ -5,7 +5,7 @@
     "ttl_us": 18000000,
     "content": {
       "type": "notification",
-      "title": "Info / Low",
+      "title": "Low / Smoke Black",
       "text": "Background sync finished with no action needed.",
       "icon": "",
       "urgency": 0
@@ -17,7 +17,7 @@
     "ttl_us": 18000000,
     "content": {
       "type": "notification",
-      "title": "Normal Update",
+      "title": "Normal / Blue-Black",
       "text": "New build artifacts are ready for review in the dashboard.",
       "icon": "",
       "urgency": 1
@@ -29,7 +29,7 @@
     "ttl_us": 22000000,
     "content": {
       "type": "notification",
-      "title": "Urgent Attention",
+      "title": "Urgent / Amber-Black",
       "text": "Queue depth exceeded soft threshold for more than 3 minutes.",
       "icon": "",
       "urgency": 2,
@@ -51,7 +51,7 @@
     "ttl_us": 24000000,
     "content": {
       "type": "notification",
-      "title": "Critical Incident",
+      "title": "Critical / Red-Black",
       "text": "Please check corner radius and typography while this long sentence tests card height containment under stress.",
       "icon": "",
       "urgency": 3,
