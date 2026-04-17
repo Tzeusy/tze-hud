@@ -1910,6 +1910,32 @@ pub struct DragHandleLocalState {
     pub pressed: bool,
 }
 
+/// Runtime-managed chrome context menu anchored to a drag handle.
+///
+/// Shown on right-click (desktop) or short-tap (touch) of a drag handle.
+/// Contains a single "Reset to default" action.  Auto-dismisses after 3 s or
+/// on click-outside.
+///
+/// Stored in `SceneGraph::drag_handle_context_menu` (ephemerally; never
+/// serialised).  The compositor renders it as a chrome-layer overlay and
+/// registers its pixel bounds in `context_menu_hit_rect` so the input path
+/// can route a left-click to the reset action.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DragHandleContextMenuState {
+    /// Element to reset when the user activates the menu item.
+    pub element_id: SceneId,
+    /// Display-space anchor point (top-left of menu).
+    pub anchor_x: f32,
+    pub anchor_y: f32,
+    /// Monotonic nanosecond timestamp when the menu was shown.
+    /// Used for the 3-second auto-dismiss timer.
+    pub shown_at_ns: u64,
+    /// Pixel-space bounding rect of the "Reset to default" button, populated
+    /// by the compositor after each render pass (used for hit-testing).
+    #[serde(skip, default)]
+    pub reset_button_rect: Option<Rect>,
+}
+
 /// Status-bar payload: key → display string map.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusBarPayload {

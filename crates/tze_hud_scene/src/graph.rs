@@ -111,6 +111,15 @@ pub struct SceneGraph {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub drag_active_elements: std::collections::HashSet<SceneId>,
+    /// Chrome-layer context menu shown on right-click / short-tap of a drag handle.
+    ///
+    /// `Some` while the menu is visible; `None` otherwise.  The compositor
+    /// renders this overlay and populates `reset_button_rect` for hit-testing.
+    /// Auto-dismissed by the windowed runtime after 3 s, or on click-outside.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub drag_handle_context_menu: Option<crate::types::DragHandleContextMenuState>,
     /// Runtime-registered widget SVG assets awaiting compositor registration.
     ///
     /// Producers (session/MCP runtime registration paths) enqueue validated SVGs
@@ -288,6 +297,7 @@ impl SceneGraph {
             drag_handle_hit_regions: Vec::new(),
             drag_handle_states: HashMap::new(),
             drag_active_elements: std::collections::HashSet::new(),
+            drag_handle_context_menu: None,
             pending_widget_svg_assets: Vec::new(),
             tile_scroll_configs: HashMap::new(),
             tile_scroll_offsets: HashMap::new(),
