@@ -119,6 +119,15 @@ path = "text_stream_portal_governance.rs"
 name = "drag_reposition"
 path = "drag_reposition.rs"
 
+# hud-bs2q.7: E2E integration tests for persistent movable elements.
+# Tests: cross-session persistence (TOML round-trip), element discovery by
+# namespace filter, display resolution change (relative-percentage invariance).
+# Tests 3, 4, 6 are #[ignore]d pending hud-zc7f (reset UI) and
+# ElementRepositionedEvent wiring.
+[[test]]
+name = "movable_elements_e2e"
+path = "movable_elements_e2e.rs"
+
 # Integration tests always run headless (no display server required).
 # tze_hud_runtime is built with the headless feature unconditionally so
 # all tests run in CI without a display. The workspace-level `headless`
