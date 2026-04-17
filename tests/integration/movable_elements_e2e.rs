@@ -385,7 +385,7 @@ fn reset_position_clears_user_override_and_restores_agent_bounds() {
         height_pct: 0.15,
     };
     let agent_requested = rect_to_relative_geometry_policy(
-        Rect::new(ELEMENT_X, ELEMENT_Y, ELEMENT_W, ELEMENT_H),
+        element_bounds(),
         DISPLAY_W,
         DISPLAY_H,
     );
@@ -486,7 +486,7 @@ fn zone_reset_falls_back_to_config_override_not_default_policy() {
     store.entries.insert(
         zone_id,
         ElementStoreEntry {
-            element_type: ElementType::Tile,
+            element_type: ElementType::Zone,
             namespace: "zone-with-config-override".to_string(),
             created_at: 1_000,
             last_published_at: 2_000,
