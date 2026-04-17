@@ -11,8 +11,8 @@
 //! Test status overview:
 //!   Test 1 — Cross-session persistence:          ACTIVE
 //!   Test 2 — Element discovery and reuse:        ACTIVE
-//!   Test 3 — Reset fallback chain:               IGNORED (hud-zc7f not merged)
-//!   Test 4 — Zone with config override + reset:  IGNORED (hud-zc7f not merged)
+//!   Test 3 — Reset fallback chain:               ACTIVE (hud-zc7f merged)
+//!   Test 4 — Zone with config override + reset:  ACTIVE (hud-zc7f merged)
 //!   Test 5 — Display resolution change:          ACTIVE
 //!   Test 6 — Agent notification:                 ACTIVE
 
@@ -366,49 +366,180 @@ fn element_discovery_by_namespace_returns_correct_scene_id_with_override_preserv
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 3 — Reset fallback chain (DEFERRED — hud-zc7f not yet merged)
+// Test 3 — Reset fallback chain
 //
 // User drags element → user resets position → element returns to
 // agent-requested bounds (geometry_override cleared).
-//
-// Requires: reset-position API from hud-zc7f (ResetElementPosition mutation /
-// clear_geometry_override RPC). Ship when hud-zc7f lands on main.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "hud-zc7f (reset UI) not yet merged; enable after ElementStore.clear_geometry_override is wired"]
 fn reset_position_clears_user_override_and_restores_agent_bounds() {
-    // Prereq: reset-position API from hud-zc7f must be available.
-    // Expected flow:
-    //   1. Set geometry_override on an ElementStore entry (simulate post-drag).
-    //   2. User triggers reset (calls clear_geometry_override / ResetElementPosition).
-    //   3. geometry_override is None on the entry.
-    //   4. resolve_geometry_override_chain returns the agent-requested bounds.
-    unimplemented!("enable after hud-zc7f lands: clear_geometry_override API required");
+    let tile_namespace = "agent-resettable-tile";
+    let tile_id = SceneId::new();
+
+    // Simulate post-drag state: geometry_override is set.
+    let user_override = GeometryPolicy::Relative {
+        x_pct: 0.6,
+        y_pct: 0.5,
+        width_pct: 0.20,
+        height_pct: 0.15,
+    };
+    let agent_requested = rect_to_relative_geometry_policy(
+        Rect::new(ELEMENT_X, ELEMENT_Y, ELEMENT_W, ELEMENT_H),
+        DISPLAY_W,
+        DISPLAY_H,
+    );
+
+    let mut store = ElementStore::default();
+    store.entries.insert(
+        tile_id,
+        ElementStoreEntry {
+            element_type: ElementType::Tile,
+            namespace: tile_namespace.to_string(),
+            created_at: 1_000,
+            last_published_at: 2_000,
+            geometry_override: Some(user_override),
+        },
+    );
+
+    // Confirm user override wins before reset.
+    let pre_reset = tze_hud_scene::resolve_geometry_override_chain(
+        Some(user_override),
+        Some(agent_requested),
+        None,
+        None,
+    );
+    assert_eq!(
+        pre_reset,
+        Some(user_override),
+        "user override must win before reset"
+    );
+
+    // User triggers reset: clear the geometry_override.
+    let cleared = store.reset_geometry_override(tile_id);
+    assert_eq!(
+        cleared,
+        Some(user_override),
+        "reset_geometry_override must return the previously-set override"
+    );
+
+    // geometry_override must now be None.
+    let entry = store.entries.get(&tile_id).expect("entry must exist");
+    assert!(
+        entry.geometry_override.is_none(),
+        "geometry_override must be None after reset"
+    );
+
+    // Resolve chain after reset: agent-requested bounds must win.
+    let post_reset = tze_hud_scene::resolve_geometry_override_chain(
+        entry.geometry_override,
+        Some(agent_requested),
+        None,
+        None,
+    );
+    assert_eq!(
+        post_reset,
+        Some(agent_requested),
+        "after reset, agent-requested bounds must be returned by the fallback chain"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 4 — Zone with config override (DEFERRED — hud-zc7f not yet merged)
+// Test 4 — Zone with config override
 //
 // Zone with config-level geometry_override → user drags → user resets →
 // zone returns to config override (NOT default geometry policy).
 //
-// Requires: reset-position API from hud-zc7f. After reset, the chain
-// user_override=None, agent_requested=None, config_override=Some(X) must
-// return X (not None / default).
+// After reset, the chain user_override=None, agent_requested=None,
+// config_override=Some(X) must return X (not None / default).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "hud-zc7f (reset UI) not yet merged; enable after ElementStore.clear_geometry_override and zone reset path are wired"]
 fn zone_reset_falls_back_to_config_override_not_default_policy() {
-    // Prereq: reset-position API from hud-zc7f must be available.
-    // Expected flow:
-    //   1. Zone has config_override=Some(GeometryPolicy::Relative { x=0.1, … }).
-    //   2. User drags → geometry_override set.
-    //   3. User resets → geometry_override cleared (user_override=None).
-    //   4. resolve_geometry_override_chain(None, None, Some(config_override), Some(default))
-    //      returns config_override — NOT default.
-    unimplemented!("enable after hud-zc7f lands: zone reset must resolve to config_override");
+    let zone_id = SceneId::new();
+
+    // Config-level geometry override (set by zone profile, not the user).
+    let config_override = GeometryPolicy::Relative {
+        x_pct: 0.1,
+        y_pct: 0.1,
+        width_pct: 0.25,
+        height_pct: 0.15,
+    };
+
+    // Default policy (lower priority than config_override).
+    let default_policy = GeometryPolicy::Relative {
+        x_pct: 0.0,
+        y_pct: 0.0,
+        width_pct: 0.5,
+        height_pct: 0.5,
+    };
+
+    // User drags the zone: geometry_override is set in the store.
+    let user_drag_override = GeometryPolicy::Relative {
+        x_pct: 0.7,
+        y_pct: 0.6,
+        width_pct: 0.25,
+        height_pct: 0.15,
+    };
+
+    let mut store = ElementStore::default();
+    store.entries.insert(
+        zone_id,
+        ElementStoreEntry {
+            element_type: ElementType::Tile,
+            namespace: "zone-with-config-override".to_string(),
+            created_at: 1_000,
+            last_published_at: 2_000,
+            geometry_override: Some(user_drag_override),
+        },
+    );
+
+    // While user override is set, it wins over both config and default.
+    let pre_reset = tze_hud_scene::resolve_geometry_override_chain(
+        Some(user_drag_override),
+        None,
+        Some(config_override),
+        Some(default_policy),
+    );
+    assert_eq!(
+        pre_reset,
+        Some(user_drag_override),
+        "user drag override must win before reset"
+    );
+
+    // User resets: clear the geometry_override.
+    let cleared = store.reset_geometry_override(zone_id);
+    assert_eq!(
+        cleared,
+        Some(user_drag_override),
+        "reset_geometry_override must return the previously-set override"
+    );
+
+    let entry = store.entries.get(&zone_id).expect("entry must exist");
+    assert!(
+        entry.geometry_override.is_none(),
+        "geometry_override must be None after reset"
+    );
+
+    // After reset: config_override must win, NOT the default policy.
+    let post_reset = tze_hud_scene::resolve_geometry_override_chain(
+        entry.geometry_override,
+        None,
+        Some(config_override),
+        Some(default_policy),
+    );
+    assert_eq!(
+        post_reset,
+        Some(config_override),
+        "after reset, config_override must be returned (not default_policy)"
+    );
+
+    // Explicitly confirm default_policy is NOT returned.
+    assert_ne!(
+        post_reset,
+        Some(default_policy),
+        "default_policy must NOT win when config_override is present after reset"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
