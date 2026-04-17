@@ -102,6 +102,15 @@ pub struct SceneGraph {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub drag_handle_states: HashMap<String, DragHandleLocalState>,
+    /// Set of element_ids that are currently being actively dragged.
+    ///
+    /// Written by the input processor on DragActivated and cleared on
+    /// DragReleased / DragCancelled. Read by the compositor to apply v1-
+    /// compatible visual feedback (z-order boost, opacity, 2px highlight border).
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub drag_active_elements: std::collections::HashSet<SceneId>,
     /// Runtime-registered widget SVG assets awaiting compositor registration.
     ///
     /// Producers (session/MCP runtime registration paths) enqueue validated SVGs
@@ -278,6 +287,7 @@ impl SceneGraph {
             zone_hit_regions: Vec::new(),
             drag_handle_hit_regions: Vec::new(),
             drag_handle_states: HashMap::new(),
+            drag_active_elements: std::collections::HashSet::new(),
             pending_widget_svg_assets: Vec::new(),
             tile_scroll_configs: HashMap::new(),
             tile_scroll_offsets: HashMap::new(),
@@ -2717,6 +2727,21 @@ impl SceneGraph {
             .entry(interaction_id.to_string())
             .or_default();
         state.hovered = hovered;
+    }
+
+    /// Mark an element as actively being dragged (show visual feedback).
+    pub fn set_drag_active(&mut self, element_id: SceneId) {
+        self.drag_active_elements.insert(element_id);
+    }
+
+    /// Clear the active drag mark for an element.
+    pub fn clear_drag_active(&mut self, element_id: SceneId) {
+        self.drag_active_elements.remove(&element_id);
+    }
+
+    /// Returns `true` if the element is currently being dragged.
+    pub fn is_drag_active(&self, element_id: SceneId) -> bool {
+        self.drag_active_elements.contains(&element_id)
     }
 
     /// Set pressed state for a chrome drag handle interaction id.

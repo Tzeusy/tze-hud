@@ -111,6 +111,14 @@ path = "text_stream_portal_coalescing.rs"
 name = "text_stream_portal_governance"
 path = "text_stream_portal_governance.rs"
 
+# hud-bs2q.5: Long-press drag-to-reposition interaction.
+# Tests: long-press recognizer activation/cancellation, multi-touch independence,
+# snap quantisation, boundary clamping at all 4 edges, full drag lifecycle
+# (press → hold → drag → release → persisted geometry).
+[[test]]
+name = "drag_reposition"
+path = "drag_reposition.rs"
+
 # Integration tests always run headless (no display server required).
 # tze_hud_runtime is built with the headless feature unconditionally so
 # all tests run in CI without a display. The workspace-level `headless`
