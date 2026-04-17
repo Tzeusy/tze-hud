@@ -934,6 +934,7 @@ fn second_agent_cannot_mutate_dashboard_tile() {
                         a: 1.0,
                     },
                     bounds: Rect::new(0.0, 0.0, TILE_W, TILE_H),
+                    radius: None,
                 }),
             },
         }],

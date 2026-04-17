@@ -2726,6 +2726,7 @@ mod tests {
                         height: 300.0,
                         ..Default::default()
                     }),
+                    radius: -1.0,
                 },
             )),
         };
@@ -3094,6 +3095,7 @@ mod tests {
                         width: crate::TILE_W,
                         height: crate::TILE_H,
                     }),
+                    radius: -1.0,
                 },
             )),
         };
@@ -3199,6 +3201,7 @@ mod tests {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(0.07, 0.07, 0.07, 0.90),
                 bounds: Rect::new(0.0, 0.0, crate::TILE_W, crate::TILE_H),
+                radius: None,
             }),
         };
         scene
@@ -5165,6 +5168,7 @@ mod tests {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(1.0, 0.0, 0.0, 1.0),
                 bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                radius: None,
             }),
         };
 
@@ -5243,6 +5247,7 @@ mod tests {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(0.0, 1.0, 0.0, 1.0),
                 bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                radius: None,
             }),
         };
         let r_set_root = scene.set_tile_root_checked(other_tile_id, node_a, dashboard_ns);
@@ -5263,6 +5268,7 @@ mod tests {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(0.1, 0.1, 0.1, 1.0),
                 bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                radius: None,
             }),
         };
         scene

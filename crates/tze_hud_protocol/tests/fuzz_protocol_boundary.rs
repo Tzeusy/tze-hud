@@ -269,6 +269,7 @@ fn proto_node_solid_color_no_bounds_returns_some() {
                 a: 1.0,
             }),
             bounds: None, // missing bounds
+            radius: -1.0,
         })),
     };
     // Conversion must not panic; it fills in a default.

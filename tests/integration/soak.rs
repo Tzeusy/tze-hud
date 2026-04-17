@@ -430,6 +430,7 @@ async fn update_tile_content(
                                                 b: b as f32 / 255.0,
                                                 a: 1.0,
                                             }),
+                                            radius: -1.0,
                                         },
                                     )),
                                 }),

@@ -151,6 +151,7 @@ fn make_bg_node() -> Node {
                 a: 0.72,
             },
             bounds: Rect::new(0.0, 0.0, CARD_W, CARD_H),
+            radius: None,
         }),
     }
 }

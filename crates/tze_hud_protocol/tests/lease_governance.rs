@@ -415,6 +415,7 @@ fn grace_period_expiry_removes_all_tile_nodes() {
                 a: 0.9,
             },
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            radius: None,
         }),
         children: vec![],
     };
@@ -514,6 +515,7 @@ fn explicit_lease_release_removes_all_nodes() {
                 a: 1.0,
             },
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            radius: None,
         }),
         children: vec![],
     };
@@ -635,6 +637,7 @@ fn ttl_expiry_without_renewal_removes_tile() {
                 a: 1.0,
             },
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            radius: None,
         }),
         children: vec![],
     };
@@ -697,6 +700,7 @@ fn second_agent_cannot_mutate_dashboard_tile() {
                 a: 1.0,
             },
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            radius: None,
         }),
         children: vec![],
     };
@@ -792,6 +796,7 @@ fn dashboard_agent_cannot_mutate_other_namespace_tiles() {
                 a: 1.0,
             },
             bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+            radius: None,
         }),
         children: vec![],
     };
@@ -971,6 +976,7 @@ fn mutation_after_release_is_rejected() {
                 a: 1.0,
             },
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            radius: None,
         }),
         children: vec![],
     };
