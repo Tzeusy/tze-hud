@@ -498,6 +498,100 @@ fn full_drag_flow_persists_geometry_on_release() {
     }
 }
 
+// ── ElementRepositionedEvent emission (hud-bs2q.6) ───────────────────────────
+
+/// GIVEN a completed drag (geometry_override persisted)
+/// WHEN emit_drag_repositioned_event is called
+/// THEN the resulting broadcast carries the correct element_id, new_geometry,
+///      and previous_geometry (all fields present and values match).
+///
+/// This is a headless Layer 0 test — no gRPC session required.
+/// Delivery to subscribed agents is covered by session_server.rs tests.
+#[test]
+fn drag_completion_emits_element_repositioned_event_with_correct_fields() {
+    use tze_hud_protocol::session_server::HudSessionImpl;
+
+    let scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let service = HudSessionImpl::new(scene, "test-key");
+
+    // Subscribe to the broadcast BEFORE emitting.
+    let mut rx = service.element_repositioned_tx.subscribe();
+
+    let element_id = SceneId::new();
+    let new_policy = GeometryPolicy::Relative {
+        x_pct: 0.3,
+        y_pct: 0.2,
+        width_pct: 0.25,
+        height_pct: 0.15,
+    };
+    let old_policy = GeometryPolicy::Relative {
+        x_pct: 0.1,
+        y_pct: 0.1,
+        width_pct: 0.25,
+        height_pct: 0.15,
+    };
+
+    service.emit_drag_repositioned_event(element_id, &new_policy, Some(&old_policy));
+
+    let event = rx.try_recv().expect("event must be broadcast immediately");
+
+    // element_id must be 16 bytes (UUID) and non-zero.
+    assert_eq!(event.element_id.len(), 16, "element_id must be 16 bytes");
+    assert!(
+        event.element_id.iter().any(|&b| b != 0),
+        "element_id must be non-zero"
+    );
+
+    // new_geometry must reflect new_policy.
+    let ng = event.new_geometry.expect("new_geometry must be set");
+    match ng.policy {
+        Some(tze_hud_protocol::proto::geometry_policy_proto::Policy::Relative(r)) => {
+            assert!((r.x_pct - 0.3_f32).abs() < 1e-4, "new x_pct mismatch");
+            assert!((r.y_pct - 0.2_f32).abs() < 1e-4, "new y_pct mismatch");
+        }
+        other => panic!("expected Relative new_geometry, got {other:?}"),
+    }
+
+    // previous_geometry must reflect old_policy.
+    let pg = event
+        .previous_geometry
+        .expect("previous_geometry must be set");
+    match pg.policy {
+        Some(tze_hud_protocol::proto::geometry_policy_proto::Policy::Relative(r)) => {
+            assert!((r.x_pct - 0.1_f32).abs() < 1e-4, "prev x_pct mismatch");
+        }
+        other => panic!("expected Relative previous_geometry, got {other:?}"),
+    }
+}
+
+/// GIVEN a completed drag with no prior geometry override
+/// WHEN emit_drag_repositioned_event is called with previous_geometry=None
+/// THEN previous_geometry field is absent (None) in the broadcast event.
+#[test]
+fn drag_completion_event_has_absent_previous_geometry_when_no_prior_override() {
+    use tze_hud_protocol::session_server::HudSessionImpl;
+
+    let scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let service = HudSessionImpl::new(scene, "test-key");
+    let mut rx = service.element_repositioned_tx.subscribe();
+
+    let element_id = SceneId::new();
+    let new_policy = GeometryPolicy::Relative {
+        x_pct: 0.5,
+        y_pct: 0.5,
+        width_pct: 0.3,
+        height_pct: 0.2,
+    };
+
+    service.emit_drag_repositioned_event(element_id, &new_policy, None);
+
+    let event = rx.try_recv().expect("event must be broadcast");
+    assert!(
+        event.previous_geometry.is_none(),
+        "previous_geometry must be absent when no prior override"
+    );
+}
+
 // ── Scene-graph drag_active_elements bookkeeping ──────────────────────────────
 
 #[test]

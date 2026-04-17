@@ -103,6 +103,22 @@ impl ElementStore {
         Ok(())
     }
 
+    /// Clear the user geometry override for an element, returning the override
+    /// that was removed.
+    ///
+    /// Returns `Some(previous_override)` if an override was present and has been
+    /// cleared. Returns `None` if the element has no override or is unknown
+    /// (no-op in either case).
+    ///
+    /// The caller MUST:
+    /// 1. Persist the store after a successful clear.
+    /// 2. Re-resolve the effective geometry via the fallback chain to populate
+    ///    the `new_geometry` field of any outbound `ElementRepositionedEvent`.
+    pub fn reset_geometry_override(&mut self, element_id: SceneId) -> Option<GeometryPolicy> {
+        let entry = self.entries.get_mut(&element_id)?;
+        entry.geometry_override.take()
+    }
+
     /// Find an entry by `(element_type, namespace)`.
     ///
     /// If duplicates exist, returns the oldest (then lexicographically smallest ID).
