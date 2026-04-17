@@ -5,7 +5,7 @@
 - [x] 1.3 Reconcile scene-resource budget charging semantics to reference time instead of upload-storage time
 - [x] 1.4 Decide and document the v1 boundary for agent-uploaded fonts versus runtime-owned zone/component typography
 - [x] 1.5 Sync the temporary `resident-scene-resource-upload` synthesis slice into its authoritative homes and mark its archive posture
-- [ ] 1.6 Sync the resident scene-resource upload delta into the authoritative session-protocol and resource-store specs after signoff
+- [x] 1.6 Sync the resident scene-resource upload delta into the authoritative session-protocol and resource-store specs after signoff
 
 ## 2. Schema
 
