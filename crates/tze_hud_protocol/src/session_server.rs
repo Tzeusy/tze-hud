@@ -13726,6 +13726,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resource_upload_inline_transport_backpressure_from_rate_limit() {
+        // Inline data (upload_start with inline_data set) must pass through
+        // apply_upload_transport_backpressure just like the chunk path does.
+        // A rate limit of 8 bytes/s means an 8-byte inline payload exhausts the
+        // window immediately; a second upload of equal size should be delayed.
+        let (mut client, handle) = setup_widget_test_with_upload_rate_limit(8).await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "resource-inline-rate-limit",
+            "test-key",
+            &["upload_resource"],
+        )
+        .await;
+
+        let payload_a = vec![0x01u8; 8];
+        let payload_b = vec![0x02u8; 8];
+        let hash_a = blake3::hash(&payload_a).as_bytes().to_vec();
+        let hash_b = blake3::hash(&payload_b).as_bytes().to_vec();
+
+        // First inline upload (fills the rate window).
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash_a,
+                resource_type: 1, // IMAGE_RGBA8
+                total_size_bytes: payload_a.len() as u64,
+                metadata: Some(ResourceMetadata {
+                    width: 2,
+                    height: 1,
+                    ..Default::default()
+                }),
+                inline_data: payload_a,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Second inline upload (should be delayed by the rate limiter).
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ResourceUploadStart(ResourceUploadStart {
+                expected_hash: hash_b,
+                resource_type: 1, // IMAGE_RGBA8
+                total_size_bytes: payload_b.len() as u64,
+                metadata: Some(ResourceMetadata {
+                    width: 2,
+                    height: 1,
+                    ..Default::default()
+                }),
+                inline_data: payload_b,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // First upload should complete quickly (no prior debt in window).
+        let first_stored = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            next_non_state_change(&mut stream),
+        )
+        .await
+        .expect("first inline upload should complete before rate limiter delays second");
+
+        match &first_stored.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                assert_eq!(stored.request_sequence, 2);
+                assert!(
+                    stored.upload_id.is_empty(),
+                    "inline upload has no upload_id"
+                );
+                assert!(!stored.was_deduplicated);
+            }
+            other => panic!("expected ResourceStored for first inline upload, got: {other:?}"),
+        }
+
+        // Second upload result must be delayed by the rate window.
+        let early_second = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            next_non_state_change(&mut stream),
+        )
+        .await;
+        assert!(
+            early_second.is_err(),
+            "second inline upload should be rate-limited; result arrived too quickly"
+        );
+
+        let second_stored = tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            next_non_state_change(&mut stream),
+        )
+        .await
+        .expect("second inline upload should complete once rate-limit window clears");
+
+        match &second_stored.payload {
+            Some(ServerPayload::ResourceStored(stored)) => {
+                assert_eq!(stored.request_sequence, 3);
+                assert!(
+                    stored.upload_id.is_empty(),
+                    "inline upload has no upload_id"
+                );
+                assert!(!stored.was_deduplicated);
+            }
+            other => panic!("expected ResourceStored for second inline upload, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
     async fn test_resource_upload_start_requires_upload_resource_capability() {
         let (mut client, handle) = setup_widget_test().await;
         let (tx, _init_msgs, mut stream) =
