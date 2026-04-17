@@ -1478,11 +1478,6 @@ impl WinitApp {
     ///
     /// No-op if the element has no user override.
     fn perform_reset_element_geometry(&mut self, element_id: tze_hud_scene::SceneId) {
-        use tze_hud_scene::types::{
-            rect_to_relative_geometry_policy, resolve_geometry_override_chain,
-        };
-        use tze_hud_scene::{ElementType, GeometryPolicy};
-
         // Collect previous override, fallback geometry, and optional persist path.
         let (previous_override, fallback_geometry, store_snapshot, persist_path) = {
             let Ok(mut state) = self.state.shared_state.try_lock() else {
@@ -1499,41 +1494,25 @@ impl WinitApp {
                 return;
             };
             // Resolve fallback geometry (agent bounds → config → default policy).
-            let zero_policy = GeometryPolicy::Relative {
-                x_pct: 0.0,
-                y_pct: 0.0,
-                width_pct: 0.0,
-                height_pct: 0.0,
-            };
             let fallback = {
                 let Ok(scene) = state.scene.try_lock() else {
                     return;
                 };
-                if let Some(entry) = state.element_store.entries.get(&element_id) {
-                    match entry.element_type {
-                        ElementType::Tile => {
-                            let agent_policy = scene.tiles.get(&element_id).map(|tile| {
-                                rect_to_relative_geometry_policy(
-                                    tile.bounds,
-                                    scene.display_area.width,
-                                    scene.display_area.height,
-                                )
-                            });
-                            resolve_geometry_override_chain(None, agent_policy, None, None)
-                                .unwrap_or(zero_policy)
-                        }
-                        ElementType::Zone => scene
-                            .zone_registry
-                            .resolve_geometry_policy_for_zone(&entry.namespace, None, None)
-                            .unwrap_or(zero_policy),
-                        ElementType::Widget => scene
-                            .widget_registry
-                            .resolve_geometry_policy_for_instance(&entry.namespace, None)
-                            .unwrap_or(zero_policy),
-                    }
-                } else {
-                    zero_policy
-                }
+                state
+                    .element_store
+                    .entries
+                    .get(&element_id)
+                    .map(|entry| {
+                        tze_hud_scene::element_store::fallback_geometry_for_element(
+                            element_id, entry, &scene,
+                        )
+                    })
+                    .unwrap_or(tze_hud_scene::GeometryPolicy::Relative {
+                        x_pct: 0.0,
+                        y_pct: 0.0,
+                        width_pct: 0.0,
+                        height_pct: 0.0,
+                    })
             };
             let store_snapshot = state.element_store.clone();
             let persist_path = state.element_store_path.clone();

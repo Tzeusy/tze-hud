@@ -35,7 +35,9 @@ pub use calibration::{
 };
 pub use clock::{Clock, SimulatedClock, SystemClock, TestClock};
 pub use diff::{DiffEntry, SceneDiff};
-pub use element_store::{ElementStore, ElementStoreEntry, ElementType};
+pub use element_store::{
+    ElementStore, ElementStoreEntry, ElementType, fallback_geometry_for_element,
+};
 pub use graph::{
     MAX_MARKDOWN_BYTES,
     MAX_NODES_PER_TILE,
