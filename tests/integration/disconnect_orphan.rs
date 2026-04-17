@@ -111,6 +111,7 @@ fn make_card_root_node(_agent_name: &str) -> Node {
                 a: 0.72,
             },
             bounds: Rect::new(0.0, 0.0, CARD_W, CARD_H),
+            radius: None,
         }),
     }
 }

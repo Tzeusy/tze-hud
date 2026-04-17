@@ -7420,6 +7420,7 @@ mod tests {
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::WHITE,
                 bounds: Rect::new(0.0, 0.0, 16.0, 16.0),
+                radius: None,
             }),
         });
         invalid_node.data = None;

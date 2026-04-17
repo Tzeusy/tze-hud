@@ -180,6 +180,7 @@ async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(i as f32 / UPLOAD_ROUNDS as f32, 0.5, 0.5, 0.8),
                         bounds: Rect::new(0.0, 0.0, 64.0, 64.0),
+                        radius: None,
                     }),
                 };
                 let _ = scene.set_tile_root(tile_id, node);
@@ -844,6 +845,7 @@ async fn test_texture_upload_p99_within_budget() {
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(i as f32 / UPLOAD_ROUNDS as f32, 0.3, 0.7, 1.0),
                         bounds: Rect::new(0.0, 0.0, 64.0, 64.0),
+                        radius: None,
                     }),
                 };
                 let _ = scene.set_tile_root(tile_id, node);
@@ -1238,6 +1240,7 @@ async fn test_layer1_pixel_readback_z_order() {
                     data: NodeData::SolidColor(SolidColorNode {
                         bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
                         color: Rgba::new(0.20, 0.30, 0.50, 1.0),
+                        radius: None,
                     }),
                     children: vec![],
                 },
@@ -1262,6 +1265,7 @@ async fn test_layer1_pixel_readback_z_order() {
                     data: NodeData::SolidColor(SolidColorNode {
                         bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                         color: Rgba::new(1.0, 0.0, 0.0, 1.0), // red
+                        radius: None,
                     }),
                     children: vec![],
                 },

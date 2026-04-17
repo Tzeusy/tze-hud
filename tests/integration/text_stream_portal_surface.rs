@@ -156,6 +156,7 @@ fn build_collapsed_nodes(
         data: NodeData::SolidColor(SolidColorNode {
             color: tze_hud_scene::Rgba::new(0.10, 0.12, 0.16, 0.88),
             bounds: Rect::new(0.0, 0.0, COLLAPSED_W, COLLAPSED_H),
+            radius: None,
         }),
     };
     let title = Node {
@@ -242,6 +243,7 @@ fn build_expanded_nodes(
         data: NodeData::SolidColor(SolidColorNode {
             color: tze_hud_scene::Rgba::new(0.08, 0.10, 0.13, 0.92),
             bounds: Rect::new(0.0, 0.0, EXPANDED_W, EXPANDED_H),
+            radius: None,
         }),
     };
     let transcript_text = state.bounded_transcript_markdown();
@@ -518,6 +520,7 @@ fn user_scroll_offset_remains_authoritative_after_append_update() {
         data: NodeData::SolidColor(SolidColorNode {
             color: tze_hud_scene::Rgba::new(0.08, 0.10, 0.13, 0.92),
             bounds: Rect::new(0.0, 0.0, EXPANDED_W, EXPANDED_H),
+            radius: None,
         }),
     };
     let transcript = Node {
@@ -772,6 +775,7 @@ fn expanded_transcript_materialization_is_bounded_to_viewport_and_budget() {
         data: NodeData::SolidColor(SolidColorNode {
             color: tze_hud_scene::Rgba::new(0.08, 0.10, 0.13, 0.92),
             bounds: Rect::new(0.0, 0.0, EXPANDED_W, EXPANDED_H),
+            radius: None,
         }),
     };
     let transcript = Node {

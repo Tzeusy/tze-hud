@@ -49,6 +49,7 @@ fn portal_root(transcript: &str) -> (Node, Vec<Node>) {
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba::new(0.09, 0.11, 0.14, 0.9),
             bounds: Rect::new(0.0, 0.0, PORTAL_BOUNDS.width, PORTAL_BOUNDS.height),
+            radius: None,
         }),
     };
     let transcript_node = Node {
