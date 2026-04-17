@@ -141,6 +141,59 @@ impl ElementStore {
     }
 }
 
+/// Zero-area relative geometry policy used as the final fallback when no
+/// configured or agent-supplied geometry can be resolved.
+pub const ZERO_GEOMETRY_POLICY: GeometryPolicy = GeometryPolicy::Relative {
+    x_pct: 0.0,
+    y_pct: 0.0,
+    width_pct: 0.0,
+    height_pct: 0.0,
+};
+
+/// Resolve the fallback geometry for an element after its user override has
+/// been cleared (or when no override is present).
+///
+/// Implements the shared resolution chain used by both the sync Winit-thread
+/// path (`perform_reset_element_geometry` in `tze_hud_runtime::windowed`) and
+/// the async gRPC path (`HudSessionImpl::reset_element_geometry` in
+/// `tze_hud_protocol::session_server`):
+///
+/// - **Tile**: agent-requested bounds → (no config override) → zero policy.
+/// - **Zone**: config policy from `zone_registry` → zero policy.
+/// - **Widget**: config policy from `widget_registry` → zero policy.
+///
+/// Returns [`ZERO_GEOMETRY_POLICY`] when the element is unknown or no registry
+/// entry can be found, matching the pre-existing caller behaviour.
+pub fn fallback_geometry_for_element(
+    element_id: SceneId,
+    entry: &ElementStoreEntry,
+    scene: &crate::graph::SceneGraph,
+) -> GeometryPolicy {
+    use crate::types::{rect_to_relative_geometry_policy, resolve_geometry_override_chain};
+
+    match entry.element_type {
+        ElementType::Tile => {
+            let agent_policy = scene.tiles.get(&element_id).map(|tile| {
+                rect_to_relative_geometry_policy(
+                    tile.bounds,
+                    scene.display_area.width,
+                    scene.display_area.height,
+                )
+            });
+            resolve_geometry_override_chain(None, agent_policy, None, None)
+                .unwrap_or(ZERO_GEOMETRY_POLICY)
+        }
+        ElementType::Zone => scene
+            .zone_registry
+            .resolve_geometry_policy_for_zone(&entry.namespace, None, None)
+            .unwrap_or(ZERO_GEOMETRY_POLICY),
+        ElementType::Widget => scene
+            .widget_registry
+            .resolve_geometry_policy_for_instance(&entry.namespace, None)
+            .unwrap_or(ZERO_GEOMETRY_POLICY),
+    }
+}
+
 fn unique_temp_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let stem = path

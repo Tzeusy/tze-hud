@@ -1725,37 +1725,16 @@ impl HudSessionImpl {
             }
             // Resolve fallback geometry (agent bounds → config → default policy).
             let scene = st.scene.lock().await;
-            let zero_policy = GeometryPolicy::Relative {
-                x_pct: 0.0,
-                y_pct: 0.0,
-                width_pct: 0.0,
-                height_pct: 0.0,
-            };
-            let fallback = if let Some(entry) = st.element_store.entries.get(&element_id) {
-                match entry.element_type {
-                    ElementType::Tile => {
-                        let agent_policy = scene.tiles.get(&element_id).map(|tile| {
-                            rect_to_relative_geometry_policy(
-                                tile.bounds,
-                                scene.display_area.width,
-                                scene.display_area.height,
-                            )
-                        });
-                        resolve_geometry_override_chain(None, agent_policy, None, None)
-                            .unwrap_or(zero_policy)
-                    }
-                    ElementType::Zone => scene
-                        .zone_registry
-                        .resolve_geometry_policy_for_zone(&entry.namespace, None, None)
-                        .unwrap_or(zero_policy),
-                    ElementType::Widget => scene
-                        .widget_registry
-                        .resolve_geometry_policy_for_instance(&entry.namespace, None)
-                        .unwrap_or(zero_policy),
-                }
-            } else {
-                zero_policy
-            };
+            let fallback = st
+                .element_store
+                .entries
+                .get(&element_id)
+                .map(|entry| {
+                    tze_hud_scene::element_store::fallback_geometry_for_element(
+                        element_id, entry, &scene,
+                    )
+                })
+                .unwrap_or(tze_hud_scene::ZERO_GEOMETRY_POLICY);
             drop(scene);
             let persist_req =
                 st.element_store_path
