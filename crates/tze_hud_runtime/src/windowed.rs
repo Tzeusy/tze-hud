@@ -1507,12 +1507,7 @@ impl WinitApp {
                             element_id, entry, &scene,
                         )
                     })
-                    .unwrap_or(tze_hud_scene::GeometryPolicy::Relative {
-                        x_pct: 0.0,
-                        y_pct: 0.0,
-                        width_pct: 0.0,
-                        height_pct: 0.0,
-                    })
+                    .unwrap_or(tze_hud_scene::ZERO_GEOMETRY_POLICY)
             };
             let store_snapshot = state.element_store.clone();
             let persist_path = state.element_store_path.clone();

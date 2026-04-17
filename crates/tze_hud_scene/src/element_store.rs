@@ -141,6 +141,15 @@ impl ElementStore {
     }
 }
 
+/// Zero-area relative geometry policy used as the final fallback when no
+/// configured or agent-supplied geometry can be resolved.
+pub const ZERO_GEOMETRY_POLICY: GeometryPolicy = GeometryPolicy::Relative {
+    x_pct: 0.0,
+    y_pct: 0.0,
+    width_pct: 0.0,
+    height_pct: 0.0,
+};
+
 /// Resolve the fallback geometry for an element after its user override has
 /// been cleared (or when no override is present).
 ///
@@ -153,8 +162,8 @@ impl ElementStore {
 /// - **Zone**: config policy from `zone_registry` → zero policy.
 /// - **Widget**: config policy from `widget_registry` → zero policy.
 ///
-/// Returns a zero `GeometryPolicy::Relative` when the element is unknown or
-/// no registry entry can be found, matching the pre-existing caller behaviour.
+/// Returns [`ZERO_GEOMETRY_POLICY`] when the element is unknown or no registry
+/// entry can be found, matching the pre-existing caller behaviour.
 pub fn fallback_geometry_for_element(
     element_id: SceneId,
     entry: &ElementStoreEntry,
@@ -162,12 +171,6 @@ pub fn fallback_geometry_for_element(
 ) -> GeometryPolicy {
     use crate::types::{rect_to_relative_geometry_policy, resolve_geometry_override_chain};
 
-    let zero_policy = GeometryPolicy::Relative {
-        x_pct: 0.0,
-        y_pct: 0.0,
-        width_pct: 0.0,
-        height_pct: 0.0,
-    };
     match entry.element_type {
         ElementType::Tile => {
             let agent_policy = scene.tiles.get(&element_id).map(|tile| {
@@ -177,16 +180,17 @@ pub fn fallback_geometry_for_element(
                     scene.display_area.height,
                 )
             });
-            resolve_geometry_override_chain(None, agent_policy, None, None).unwrap_or(zero_policy)
+            resolve_geometry_override_chain(None, agent_policy, None, None)
+                .unwrap_or(ZERO_GEOMETRY_POLICY)
         }
         ElementType::Zone => scene
             .zone_registry
             .resolve_geometry_policy_for_zone(&entry.namespace, None, None)
-            .unwrap_or(zero_policy),
+            .unwrap_or(ZERO_GEOMETRY_POLICY),
         ElementType::Widget => scene
             .widget_registry
             .resolve_geometry_policy_for_instance(&entry.namespace, None)
-            .unwrap_or(zero_policy),
+            .unwrap_or(ZERO_GEOMETRY_POLICY),
     }
 }
 
