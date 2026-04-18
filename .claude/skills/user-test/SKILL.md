@@ -834,6 +834,72 @@ All published via MCP `publish_to_zone` to `ambient-background` zone with
 persistent — `auto_clear_ms=None` on this zone) for phases 1–3.
 
 
+## Text Stream Portals Exemplar Scenario
+
+**Status: pre-implementation.** The `text-stream-portals` capability spec
+(`openspec/specs/text-stream-portals/spec.md`) is ratified, but no runtime code,
+adapter, or automation fixture has been allocated yet (see archived change
+`2026-04-17-text-stream-portals`, tasks 4.3 — stopped before bead generation).
+Treat this section as a forward-looking test contract; **do not attempt to run
+a portal exemplar** until a phase-0 pilot lands and scripts are added here.
+
+### What the capability covers
+
+A governed, low-latency **text stream portal** — not a terminal host, not a
+chat app. The runtime boundary is transport-agnostic: generic output streams,
+bounded viewer input, session identity, and session status metadata. Tmux,
+chat platforms, and LLM sessions are all valid adapters behind the same
+contract.
+
+### Phase-0 pilot shape (what the eventual user-test will exercise)
+
+- **Resident raw-tile pilot** — constructed from existing text, solid-color,
+  image, and hit-region primitives. No new dedicated node type.
+- **Resident gRPC session** — portal traffic rides the existing primary
+  bidirectional `HudSession` stream. No second long-lived portal stream.
+- **Content-layer surface** — portal tile renders below chrome like any other
+  content-layer zone. No chrome-hosted portal affordances.
+- **External adapter, authenticated** — local adapter processes must still
+  pass existing capability grants; no implicit local trust.
+
+### Intended validation axes (when scripts exist)
+
+Each axis below maps to a normative requirement in
+`openspec/specs/text-stream-portals/spec.md`:
+
+| Axis | Spec requirement | Observable behavior to verify |
+|------|------------------|-------------------------------|
+| Transport-agnostic | Transport-Agnostic Stream Boundary | Same portal contract works with at least two adapter shapes (e.g. tmux + mock) |
+| Content layer | Content-Layer Portal Surface | Portal tile renders below chrome; not addressable as chrome element |
+| Raw-tile pilot | Phase-0 Raw-Tile Pilot | Portal is composed of existing node primitives; no terminal-emulator node |
+| Bounded viewport | Bounded Transcript Viewport | Scene-node text stays within TextMarkdown budgets; full history is not mirrored |
+| Incremental output | Low-Latency Text Interaction | Output arrives as ordered state-stream updates, not snapshot replace |
+| Transactional input | Low-Latency Text Interaction | Viewer submit is reliable/ordered, not coalescible |
+| Local-first scroll | Transcript Interaction Contract | Scroll offset updates locally before adapter ack |
+| Coalescing coherence | Coherent Transcript Coalescing | Retained window never collapses to only latest line under backpressure |
+| Redaction | Governance, Privacy, and Override Compliance | Portal redacts under viewer policy; geometry preserved, transcript suppressed |
+| Safe mode | Governance, Privacy, and Override Compliance | Portal updates suspend under safe mode like other content surfaces |
+| Orphan path | Governance, Privacy, and Override Compliance | Disconnected portal freezes at last coherent state; grace expiry removes it |
+| Ambient attention | Ambient Portal Attention Defaults | Unread backlog does not auto-escalate interruption class |
+| Clock domains | Transport-Agnostic Stream Boundary | Timing metadata uses `_wall_us` / `_mono_us` per existing clock-domain contract |
+
+### Out of scope for the eventual exemplar
+
+- Terminal-emulator rendering (ANSI, cursor positioning, PTY control)
+- Full transcript history storage in the scene graph
+- Chrome-hosted portal affordances or shell-owned portal controls
+- Portal-specific transport RPCs outside the primary session stream
+- Runtime ownership of external process or tmux lifecycle
+
+### When scripts land
+
+A future `text_stream_portal_exemplar.py` should drive the resident raw-tile
+pilot through the primary `HudSession` stream (like
+`presence_card_exemplar.py`), exercise the axes above, and emit a per-step
+JSON transcript compatible with the existing `test_results/` artifact shape.
+Update this section with CLI, phases, and a Human Acceptance Criteria table
+once the pilot is implemented.
+
 ## Behavior Rules
 
 - Use automation-first deploy/launch by default.
