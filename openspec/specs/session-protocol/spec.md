@@ -16,9 +16,7 @@ resident scene-resource upload handshake. This spec is the normative source of t
 for all wire-level session behaviour in v1.
 
 ---
-
 ## Requirements
-
 ### Requirement: Session Authorization Authority Boundary (v1)
 In v1, session authorization authority SHALL be runtime-owned: handshake authentication establishes an agent's policy capability set, mutation/lease checks SHALL enforce that set, and mid-session capability requests SHALL be evaluated against that established authorization policy. This surface is authoritative even while broader policy wiring remains a separate follow-on track.
 Source: RFC 0005 §1.4, §5.3, crates/tze_hud_protocol/src/session_server.rs
@@ -773,23 +771,23 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Widget Publish Result
-WidgetPublishResult SHALL be a ServerMessage payload at field 47. It MUST carry: accepted (bool), widget_name (string), error_code (string, machine-readable; populated if accepted=false), and error_message (string, human-readable reason; populated if accepted=false). Error codes: WIDGET_NOT_FOUND, WIDGET_UNKNOWN_PARAMETER, WIDGET_PARAMETER_TYPE_MISMATCH, WIDGET_PARAMETER_INVALID_VALUE, WIDGET_CAPABILITY_MISSING. WidgetPublishResult SHALL only be sent for durable-widget publishes.
-Source: widget-system proposal
-Scope: v1-mandatory
+WidgetPublishResult SHALL be a ServerMessage payload at field 47. It MUST carry: `request_sequence` (uint64, echoing the originating ClientMessage envelope sequence for the durable `WidgetPublish`), `accepted` (bool), `widget_name` (string), `error_code` (string, machine-readable; populated if accepted=false), and `error_message` (string, human-readable reason; populated if accepted=false). Error codes remain: WIDGET_NOT_FOUND, WIDGET_UNKNOWN_PARAMETER, WIDGET_PARAMETER_TYPE_MISMATCH, WIDGET_PARAMETER_INVALID_VALUE, WIDGET_CAPABILITY_MISSING. WidgetPublishResult SHALL only be sent for durable-widget publishes.
 
-#### Scenario: Accepted result
+#### Scenario: Accepted result echoes request sequence
 - **WHEN** the runtime successfully applies a durable widget publish
-- **THEN** it SHALL send WidgetPublishResult(accepted=true, widget_name=<name>) with no error field
+- **THEN** it SHALL send `WidgetPublishResult(accepted=true, request_sequence=<client-envelope-sequence>, widget_name=<name>)`
 
-#### Scenario: Rejected with error code
-- **WHEN** a durable widget publish includes a parameter name not declared in the widget's schema
-- **THEN** the runtime SHALL send WidgetPublishResult(accepted=false, widget_name=<name>, error_code="WIDGET_UNKNOWN_PARAMETER", error_message="parameter '<param_name>' is not declared in widget '<widget_name>' schema")
+#### Scenario: Rejected result still echoes request sequence
+- **WHEN** a durable widget publish is rejected for schema, capability, or lookup reasons
+- **THEN** the runtime SHALL still send `WidgetPublishResult(accepted=false, request_sequence=<client-envelope-sequence>, widget_name=<name>, error_code=..., error_message=...)`
 
-#### Scenario: No result for ephemeral
+#### Scenario: Repeated publishes to the same widget remain distinguishable
+- **WHEN** multiple durable publishes target the same widget instance on the same session stream
+- **THEN** the runtime SHALL emit a distinct `request_sequence` in each acknowledgement so the client can correlate each result to the correct publish request
+
+#### Scenario: No result for ephemeral publish
 - **WHEN** an agent publishes to an ephemeral widget
 - **THEN** the runtime SHALL NOT send a WidgetPublishResult regardless of whether the publish succeeded or failed
-
----
 
 ### Requirement: Widget Registry Query
 WidgetRegistryRequest and WidgetRegistryResponse SHALL be defined as types in types.proto (not as session messages). Agents SHALL query the widget registry via the SceneSnapshot delivered at session establishment, which MUST include the full WidgetRegistrySnapshot. There SHALL be no separate widget registry query RPC in v1 — the snapshot is authoritative. MCP agents query via the `list_widgets` tool.
