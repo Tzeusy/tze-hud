@@ -19,6 +19,8 @@ This RFC also defines a phased boundary:
 - **Phase 0 / pilot:** text stream portals are proven using resident raw tiles plus external adapters. No tmux-specific logic enters the runtime. No terminal-emulator node is added.
 - **Post-pilot:** if the pattern proves stable and governance requirements remain coherent, the project may define a first-class portal surface or node type. That promotion requires separate approval and does not happen automatically.
 
+**Inline color runs (cross-reference):** `TextMarkdownNode.color_runs` (see RFC 0001 §TextMarkdownNode) enables adapter-side ANSI-to-runs conversion without a terminal-emulator surface. An adapter can strip ANSI escape sequences from `content` and map each color segment to a `TextColorRun` entry, letting the runtime compositor render colored spans natively. This feature is in scope for Phase 0 adapters; terminal emulation (PTY, cursor positioning, scrollback) remains out of scope.
+
 ---
 
 ## Motivation

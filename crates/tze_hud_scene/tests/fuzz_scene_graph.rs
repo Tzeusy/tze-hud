@@ -72,6 +72,7 @@ fn arb_text_node() -> impl Strategy<Value = Node> {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     })
 }
@@ -887,6 +888,7 @@ fn test_oversized_markdown_content_rejected() {
                 background: None,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         },
     );

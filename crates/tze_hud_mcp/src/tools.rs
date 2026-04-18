@@ -314,6 +314,7 @@ pub fn handle_set_content(params: Value, scene: &mut SceneGraph) -> McpResult<Se
             background,
             alignment,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     };
 

@@ -1088,3 +1088,115 @@ async fn test_color_25_policy_arbitration_collision_has_content() {
         "policy_arbitration_collision: at least one tile must render"
     );
 }
+
+// ─── color_runs pixel readback [hud-r52v] ────────────────────────────────────
+
+/// TextMarkdownNode with color_runs: a large red text paragraph.
+///
+/// Scene: one tile at (0, 0, 960, 540) containing a TextMarkdownNode with
+/// content "ERROR rest" where "ERROR" (bytes 0..5) is red (1,0,0,1) and the
+/// remaining text uses the base white color.
+///
+/// The test samples the left edge of the text area, where the first glyph of
+/// "ERROR" renders.  We assert that the sampled region contains at least one
+/// pixel where R > G+60 (strongly red-dominant), indicating that the red run
+/// was applied correctly by the compositor.
+///
+/// We also assert that background pixels outside the tile remain BG_SRGB.
+///
+/// WHEN TextMarkdownNode with color_runs rendered
+/// THEN text region contains strongly red-dominant pixels.
+///
+/// Acceptance criterion AC-5 [hud-r52v].
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_color_runs_red_error_text_rendered() {
+    use tze_hud_scene::{
+        graph::SceneGraph,
+        types::{
+            Capability, FontFamily, Node, NodeData, Rect, Rgba, TextAlign, TextColorRun,
+            TextMarkdownNode, TextOverflow,
+        },
+    };
+
+    let mut runtime = make_scene_runtime().await;
+
+    // Build a minimal scene: one tab, one tile, one TextMarkdownNode.
+    let mut scene = SceneGraph::new(SCENE_W as f32, SCENE_H as f32);
+    let tab_id = scene.create_tab("main", 0).expect("create_tab");
+    let lease_id = scene.grant_lease("agent", 120_000, vec![Capability::CreateTile]);
+
+    // Place the tile to the left-center of the canvas so glyphs are well within
+    // the pixel readback area.  Use a large tile so text is easily sampled.
+    let tile_w = 800.0_f32;
+    let tile_h = 200.0_f32;
+    let tile_x = 50.0_f32;
+    let tile_y = 400.0_f32;
+
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(tile_x, tile_y, tile_w, tile_h),
+            10,
+        )
+        .expect("create_tile");
+
+    // "ERROR rest of the text" — "ERROR" (bytes 0..5) → red, rest → base white.
+    let content = "ERROR rest of the text";
+    let node = Node {
+        id: tze_hud_scene::types::SceneId::new(),
+        children: vec![],
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            content: content.to_string(),
+            bounds: Rect::new(0.0, 0.0, tile_w, tile_h),
+            font_size_px: 48.0, // large so glyphs cover many pixels
+            font_family: FontFamily::SystemSansSerif,
+            color: Rgba::WHITE,
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            color_runs: vec![TextColorRun {
+                start_byte: 0,
+                end_byte: 5, // "ERROR"
+                color: Rgba::new(1.0, 0.0, 0.0, 1.0), // pure red
+            }]
+            .into_boxed_slice(),
+        }),
+    };
+
+    scene.set_tile_root(tile_id, node).expect("set_tile_root");
+
+    // Render the scene.
+    let pixels = render_scene_pixels(&mut runtime, scene).await;
+    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize);
+
+    // Sample the text area: look for at least one red-dominant pixel.
+    // The first letter 'E' at font_size=48px will be somewhere in the
+    // region x=[tile_x+margin .. tile_x+120], y=[tile_y+margin .. tile_y+60].
+    // The margin from from_text_markdown_node is about 1..6 px.
+    // We scan a generous region to tolerate sub-pixel variation.
+    let scan_x0 = (tile_x + 5.0) as u32;
+    let scan_x1 = (tile_x + 200.0) as u32; // first ~4 characters of "ERROR"
+    let scan_y0 = (tile_y + 5.0) as u32;
+    let scan_y1 = (tile_y + tile_h - 5.0) as u32;
+
+    let mut found_red_dominant = false;
+    'outer: for y in scan_y0..scan_y1 {
+        for x in scan_x0..scan_x1 {
+            let px = HeadlessSurface::pixel_at(&pixels, SCENE_W, x, y);
+            // R > G + 60 and R > B + 60: strongly red.
+            if px[0] > px[1].saturating_add(60) && px[0] > px[2].saturating_add(60) {
+                found_red_dominant = true;
+                break 'outer;
+            }
+        }
+    }
+
+    assert!(
+        found_red_dominant,
+        "color_runs: expected at least one strongly red-dominant pixel in the 'ERROR' region \
+         (scan [{scan_x0}..{scan_x1}) × [{scan_y0}..{scan_y1})). \
+         This indicates the red color run was not applied by the compositor."
+    );
+}

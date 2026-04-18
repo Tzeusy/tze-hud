@@ -92,6 +92,8 @@ pub fn check_all(graph: &SceneGraph) -> Vec<InvariantViolation> {
     v.extend(check_tab_display_order_unique(graph));
     v.extend(check_agent_tile_z_order_below_zone_band(graph));
 
+    v.extend(check_text_color_run_invariants(graph));
+
     // ── Area 2: Atomic batch semantics ────────────────────────────────────────
     v.extend(check_max_batch_size_constant(graph));
 
@@ -1610,6 +1612,75 @@ pub fn check_zone_publish_record_expires_at_valid(graph: &SceneGraph) -> Vec<Inv
     violations
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Area 1 cont'd: TextMarkdownNode color_run invariants
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Every `TextColorRun` in every `TextMarkdownNode` must have valid byte ranges.
+///
+/// For each run in `color_runs`:
+/// - `start_byte < end_byte` (non-empty range)
+/// - `end_byte <= content.len()` (within the string)
+/// - `start_byte` and `end_byte` must both be valid UTF-8 character boundaries
+///
+/// Spec: scene-graph/spec.md §TextMarkdownNode inline color_runs.
+pub fn check_text_color_run_invariants(graph: &SceneGraph) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+    for node in graph.nodes.values() {
+        let NodeData::TextMarkdown(tm) = &node.data else {
+            continue;
+        };
+        for (idx, run) in tm.color_runs.iter().enumerate() {
+            let start = run.start_byte as usize;
+            let end = run.end_byte as usize;
+
+            if start >= end {
+                violations.push(InvariantViolation::new(
+                    "color_run_empty_or_inverted",
+                    format!(
+                        "node {}: color_runs[{idx}] has start_byte ({start}) >= end_byte ({end})",
+                        node.id
+                    ),
+                ));
+                continue;
+            }
+
+            if end > tm.content.len() {
+                violations.push(InvariantViolation::new(
+                    "color_run_out_of_range",
+                    format!(
+                        "node {}: color_runs[{idx}] end_byte ({end}) > content.len() ({})",
+                        node.id,
+                        tm.content.len()
+                    ),
+                ));
+                continue;
+            }
+
+            if !tm.content.is_char_boundary(start) {
+                violations.push(InvariantViolation::new(
+                    "color_run_start_not_char_boundary",
+                    format!(
+                        "node {}: color_runs[{idx}] start_byte ({start}) is not a UTF-8 char boundary",
+                        node.id
+                    ),
+                ));
+            }
+
+            if !tm.content.is_char_boundary(end) {
+                violations.push(InvariantViolation::new(
+                    "color_run_end_not_char_boundary",
+                    format!(
+                        "node {}: color_runs[{idx}] end_byte ({end}) is not a UTF-8 char boundary",
+                        node.id
+                    ),
+                ));
+            }
+        }
+    }
+    violations
+}
+
 /// The scene version must be ≥ 0 (trivially-true for u64, but flagged if content
 /// exists and version is still 0, suggesting mutations were not version-stamped).
 pub fn check_version_non_decreasing(graph: &SceneGraph) -> Vec<InvariantViolation> {
@@ -2852,5 +2923,175 @@ mod tests {
         let v = check_sync_group_member_back_refs(&graph);
         assert!(!v.is_empty());
         assert_eq!(v[0].code, "sync_group_member_tile_missing");
+    }
+
+    // ── TextColorRun invariant tests [hud-r52v] ───────────────────────────────
+
+    use crate::types::{FontFamily, TextAlign, TextColorRun, TextMarkdownNode, TextOverflow};
+
+    fn make_text_node(content: &str, runs: Vec<TextColorRun>) -> Node {
+        Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.to_string(),
+                bounds: Rect::new(0.0, 0.0, 200.0, 60.0),
+                font_size_px: 16.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba::WHITE,
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+                color_runs: runs.into_boxed_slice(),
+            }),
+        }
+    }
+
+    /// WHEN color_runs is empty THEN no violations.
+    #[test]
+    fn color_run_empty_vec_passes() {
+        let mut graph = make_graph();
+        let node = make_text_node("hello world", vec![]);
+        graph.nodes.insert(node.id, node);
+        let v = check_text_color_run_invariants(&graph);
+        assert!(v.is_empty(), "empty color_runs must pass: {v:?}");
+    }
+
+    /// WHEN color_run covers a valid ASCII range THEN no violations.
+    #[test]
+    fn color_run_valid_ascii_range_passes() {
+        let mut graph = make_graph();
+        let node = make_text_node(
+            "ERROR: something happened",
+            vec![TextColorRun {
+                start_byte: 0,
+                end_byte: 5, // "ERROR"
+                color: Rgba::new(1.0, 0.0, 0.0, 1.0),
+            }],
+        );
+        graph.nodes.insert(node.id, node);
+        let v = check_text_color_run_invariants(&graph);
+        assert!(v.is_empty(), "valid ASCII run must pass: {v:?}");
+    }
+
+    /// WHEN start_byte >= end_byte THEN color_run_empty_or_inverted fires.
+    #[test]
+    fn color_run_inverted_range_detected() {
+        let mut graph = make_graph();
+        let node = make_text_node(
+            "hello",
+            vec![TextColorRun {
+                start_byte: 5,
+                end_byte: 2, // inverted
+                color: Rgba::WHITE,
+            }],
+        );
+        graph.nodes.insert(node.id, node);
+        let v = check_text_color_run_invariants(&graph);
+        assert!(!v.is_empty(), "inverted range must be detected");
+        assert_eq!(v[0].code, "color_run_empty_or_inverted");
+    }
+
+    /// WHEN start_byte == end_byte THEN color_run_empty_or_inverted fires.
+    #[test]
+    fn color_run_zero_length_range_detected() {
+        let mut graph = make_graph();
+        let node = make_text_node(
+            "hello",
+            vec![TextColorRun {
+                start_byte: 3,
+                end_byte: 3, // empty
+                color: Rgba::WHITE,
+            }],
+        );
+        graph.nodes.insert(node.id, node);
+        let v = check_text_color_run_invariants(&graph);
+        assert!(!v.is_empty(), "empty range must be detected");
+        assert_eq!(v[0].code, "color_run_empty_or_inverted");
+    }
+
+    /// WHEN end_byte > content.len() THEN color_run_out_of_range fires.
+    #[test]
+    fn color_run_end_byte_past_content_detected() {
+        let mut graph = make_graph();
+        let node = make_text_node(
+            "hi", // 2 bytes
+            vec![TextColorRun {
+                start_byte: 0,
+                end_byte: 5, // past end
+                color: Rgba::WHITE,
+            }],
+        );
+        graph.nodes.insert(node.id, node);
+        let v = check_text_color_run_invariants(&graph);
+        assert!(!v.is_empty(), "out-of-range end_byte must be detected");
+        assert_eq!(v[0].code, "color_run_out_of_range");
+    }
+
+    /// WHEN start_byte falls mid-codepoint THEN color_run_start_not_char_boundary fires.
+    #[test]
+    fn color_run_start_not_char_boundary_detected() {
+        let mut graph = make_graph();
+        // "héllo" — 'é' is 2 UTF-8 bytes at offset 1..3.
+        let content = "héllo";
+        let node = make_text_node(
+            content,
+            vec![TextColorRun {
+                start_byte: 2, // middle of 'é' (which occupies bytes 1–2)
+                end_byte: 4,
+                color: Rgba::WHITE,
+            }],
+        );
+        graph.nodes.insert(node.id, node);
+        let v = check_text_color_run_invariants(&graph);
+        assert!(
+            !v.is_empty(),
+            "start_byte mid-codepoint must be detected; content={content:?} len={}",
+            content.len()
+        );
+        assert_eq!(v[0].code, "color_run_start_not_char_boundary");
+    }
+
+    /// WHEN color_run covers a valid UTF-8 multi-byte range THEN no violations.
+    #[test]
+    fn color_run_valid_multibyte_range_passes() {
+        let mut graph = make_graph();
+        // "café" — 'é' occupies bytes 3..5 (2 bytes).
+        let content = "café";
+        let node = make_text_node(
+            content,
+            vec![TextColorRun {
+                start_byte: 3, // 'é' start
+                end_byte: 5,   // 'é' end (exclusive)
+                color: Rgba::new(1.0, 0.0, 0.0, 1.0),
+            }],
+        );
+        graph.nodes.insert(node.id, node);
+        let v = check_text_color_run_invariants(&graph);
+        assert!(v.is_empty(), "valid multi-byte run must pass: {v:?}");
+    }
+
+    /// WHEN multiple valid runs are present THEN no violations.
+    #[test]
+    fn color_run_multiple_valid_runs_pass() {
+        let mut graph = make_graph();
+        let node = make_text_node(
+            "ERROR: disk full",
+            vec![
+                TextColorRun {
+                    start_byte: 0,
+                    end_byte: 5, // "ERROR"
+                    color: Rgba::new(1.0, 0.0, 0.0, 1.0),
+                },
+                TextColorRun {
+                    start_byte: 7,
+                    end_byte: 16, // "disk full"
+                    color: Rgba::new(1.0, 1.0, 0.0, 1.0),
+                },
+            ],
+        );
+        graph.nodes.insert(node.id, node);
+        let v = check_text_color_run_invariants(&graph);
+        assert!(v.is_empty(), "multiple valid runs must pass: {v:?}");
     }
 }

@@ -94,6 +94,7 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 .as_ref()
                 .map(proto_rect_to_scene)
                 .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+            let color_runs = proto_color_runs_to_scene(&tm.color_runs);
             NodeData::TextMarkdown(TextMarkdownNode {
                 content: tm.content.clone(),
                 bounds,
@@ -107,6 +108,7 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 background: bg,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs,
             })
         }
         Some(proto::node_proto::Data::HitRegion(hr)) => {
@@ -203,6 +205,7 @@ pub fn proto_update_node_content_data_to_scene(
                 .as_ref()
                 .map(proto_rect_to_scene)
                 .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+            let color_runs = proto_color_runs_to_scene(&tm.color_runs);
             Some(NodeData::TextMarkdown(TextMarkdownNode {
                 content: tm.content.clone(),
                 bounds,
@@ -216,6 +219,7 @@ pub fn proto_update_node_content_data_to_scene(
                 background: bg,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs,
             }))
         }
         Data::HitRegion(hr) => {
@@ -258,6 +262,40 @@ pub fn proto_update_node_content_data_to_scene(
             }))
         }
     }
+}
+
+// ─── Color-run conversions ────────────────────────────────────────────────────
+
+/// Convert a slice of `TextColorRunProto` to a `Box<[TextColorRun]>`.
+///
+/// Malformed runs (missing `color` field) are converted with an opaque white
+/// fallback rather than being dropped, so callers can detect unexpected proto
+/// states via invariant validation rather than silent loss.
+pub fn proto_color_runs_to_scene(runs: &[proto::TextColorRunProto]) -> Box<[TextColorRun]> {
+    runs.iter()
+        .map(|r| TextColorRun {
+            start_byte: r.start_byte,
+            end_byte: r.end_byte,
+            color: r.color.as_ref().map(proto_rgba_to_scene).unwrap_or(Rgba::WHITE),
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+}
+
+/// Convert a `Box<[TextColorRun]>` to a `Vec<TextColorRunProto>`.
+pub fn scene_color_runs_to_proto(runs: &[TextColorRun]) -> Vec<proto::TextColorRunProto> {
+    runs.iter()
+        .map(|r| proto::TextColorRunProto {
+            start_byte: r.start_byte,
+            end_byte: r.end_byte,
+            color: Some(proto::Rgba {
+                r: r.color.r,
+                g: r.color.g,
+                b: r.color.b,
+                a: r.color.a,
+            }),
+        })
+        .collect()
 }
 
 // ─── Mutation conversions ─────────────────────────────────────────────────────
@@ -564,6 +602,7 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
                     b: c.b,
                     a: c.a,
                 }),
+                color_runs: scene_color_runs_to_proto(&tm.color_runs),
             },
         )),
         NodeData::HitRegion(hr) => Some(proto::node_proto::Data::HitRegion(

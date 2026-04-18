@@ -34,8 +34,8 @@
 use std::collections::HashSet;
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
+    AttrsList, Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use tze_hud_scene::types::{
     FontFamily, RenderingPolicy, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
@@ -209,8 +209,64 @@ impl TextRasterizer {
                 // Map CSS-style weight (100–900) to glyphon Weight.
                 // Clamp to [100, 900]; Weight(0) would select arbitrary fallback fonts.
                 let weight = Weight(item.font_weight.clamp(100, 900));
-                let attrs = Attrs::new().family(family).weight(weight);
-                buf.set_text(&mut self.font_system, &item.text, attrs, Shaping::Basic);
+                let base_attrs = Attrs::new().family(family).weight(weight);
+
+                if item.color_runs.is_empty() {
+                    // Fast path: no inline runs — use uniform base color.
+                    buf.set_text(&mut self.font_system, &item.text, base_attrs, Shaping::Basic);
+                } else {
+                    // Styled path: build AttrsList with per-run color spans.
+                    // `default_color` on TextArea acts as the fallback for glyphs
+                    // without a color_opt set, so base_attrs has no color_opt and
+                    // run attrs carry explicit Color values.
+                    let mut attrs_list = AttrsList::new(base_attrs);
+                    for run in &item.color_runs {
+                        let run_attrs = base_attrs.color(Color::rgba(
+                            run.color[0],
+                            run.color[1],
+                            run.color[2],
+                            run.color[3],
+                        ));
+                        attrs_list.add_span(run.start_byte..run.end_byte, run_attrs);
+                    }
+                    // set_rich_text handles newlines correctly across run boundaries.
+                    // We reconstruct the span list from attrs_list by iterating the
+                    // text with their assigned attrs.  For simplicity and correctness
+                    // we use the lower-level BufferLine API: set the full text on the
+                    // buffer and then replace the attrs_list on each resulting line.
+                    //
+                    // Approach: set_text first (to create BufferLines with the text),
+                    // then re-apply attrs_list per line with adjusted offsets.
+                    buf.set_text(&mut self.font_system, &item.text, base_attrs, Shaping::Basic);
+                    // Re-apply the attrs_list to each line, offsetting spans by the
+                    // cumulative byte position of each line within the full text.
+                    let mut line_start = 0usize;
+                    for line in buf.lines.iter_mut() {
+                        let line_len = line.text().len();
+                        let line_end = line_start + line_len;
+
+                        // Build a per-line AttrsList by collecting spans that
+                        // overlap [line_start, line_end) and remapping to line-local offsets.
+                        let mut line_attrs = AttrsList::new(base_attrs);
+                        for (span_range, span_attrs) in attrs_list.spans() {
+                            let overlap_start = span_range.start.max(line_start);
+                            let overlap_end = span_range.end.min(line_end);
+                            if overlap_start < overlap_end {
+                                let local_start = overlap_start - line_start;
+                                let local_end = overlap_end - line_start;
+                                line_attrs.add_span(
+                                    local_start..local_end,
+                                    span_attrs.as_attrs(),
+                                );
+                            }
+                        }
+                        line.set_attrs_list(line_attrs);
+
+                        // Advance past this line + newline separator (1 byte '\n').
+                        line_start = line_end + 1;
+                    }
+                }
+
                 // Apply text alignment to all lines in the buffer.
                 let ct_align = match item.alignment {
                     TextAlign::Start => glyphon::cosmic_text::Align::Left,
@@ -351,15 +407,44 @@ pub struct TextItem {
     pub outline_width: Option<f32>,
     /// Opacity multiplier (0.0–1.0) from zone animation state; 1.0 = fully opaque.
     pub opacity: f32,
+    /// Inline color runs (byte offsets into `text`, which is the **post-strip**
+    /// content).  Empty = use `color` for the entire text.
+    ///
+    /// Offsets are remapped from raw-content byte positions by
+    /// `TextItem::from_text_markdown_node` when `color_runs` are present.
+    /// Zone-derived `TextItem`s always carry an empty slice (no run support yet).
+    pub color_runs: Box<[ColorRunItem]>,
+}
+
+/// A single resolved color run for `TextItem` rendering, with byte offsets
+/// into the **post-strip** `text` string.
+#[derive(Debug, Clone)]
+pub struct ColorRunItem {
+    /// Inclusive byte offset into `TextItem::text`.
+    pub start_byte: usize,
+    /// Exclusive byte offset into `TextItem::text`.
+    pub end_byte: usize,
+    /// sRGB u8 color: [r, g, b, a].
+    pub color: [u8; 4],
 }
 
 impl TextItem {
     /// Build a `TextItem` from a `TextMarkdownNode` and its tile-relative position.
     ///
     /// `tile_x` / `tile_y` are the pixel-space position of the tile origin.
+    ///
+    /// When `node.color_runs` is non-empty, Markdown stripping is skipped and
+    /// the raw content is used as-is, so byte offsets in the runs are preserved
+    /// exactly.  Callers that supply `color_runs` must pre-strip Markdown before
+    /// populating `content`, or accept that markup characters appear in the output.
     pub fn from_text_markdown_node(node: &TextMarkdownNode, tile_x: f32, tile_y: f32) -> Self {
-        // Strip minimal Markdown for v1: remove `#` heading markers, `*` emphasis markers.
-        let stripped = strip_markdown_v1(&node.content);
+        // When color_runs are present, skip Markdown stripping so that the raw
+        // byte offsets in the runs remain valid against `text`.
+        let text = if node.color_runs.is_empty() {
+            strip_markdown_v1(&node.content)
+        } else {
+            node.content.clone()
+        };
 
         // Convert linear f32 color [0..1] to sRGB u8 [0..255].
         let r = linear_to_srgb_u8(node.color.r);
@@ -380,8 +465,35 @@ impl TextItem {
         let w = (node.bounds.width - margin_x * 2.0).max(1.0);
         let h = (node.bounds.height - margin_y * 2.0).max(1.0);
 
+        // Convert scene TextColorRun (raw content offsets) to ColorRunItem
+        // (text/post-strip offsets).  Since we skip stripping when runs are
+        // present, the offsets map 1:1 to positions in `text`.
+        let color_runs: Box<[ColorRunItem]> = node
+            .color_runs
+            .iter()
+            .filter_map(|run| {
+                // Clamp to actual text length to guard against stale runs after
+                // any future content truncation.
+                let start = (run.start_byte as usize).min(text.len());
+                let end = (run.end_byte as usize).min(text.len());
+                if start >= end {
+                    return None;
+                }
+                // Only emit the run if both boundaries are valid UTF-8 positions.
+                if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                    return None;
+                }
+                Some(ColorRunItem {
+                    start_byte: start,
+                    end_byte: end,
+                    color: rgba_to_srgb_u8(run.color),
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
         TextItem {
-            text: stripped,
+            text,
             pixel_x: x,
             pixel_y: y,
             bounds_width: w,
@@ -395,6 +507,7 @@ impl TextItem {
             outline_color: None,
             outline_width: None,
             opacity: 1.0,
+            color_runs,
         }
     }
 
@@ -463,6 +576,7 @@ impl TextItem {
             outline_color,
             outline_width,
             opacity,
+            color_runs: Box::default(),
         }
     }
 
@@ -500,6 +614,7 @@ impl TextItem {
             outline_color: None,
             outline_width: None,
             opacity: 1.0,
+            color_runs: Box::default(),
         }
     }
 
@@ -536,6 +651,7 @@ impl TextItem {
             outline_color: None,
             outline_width: None,
             opacity: 1.0,
+            color_runs: Box::default(),
         }
     }
 }
@@ -699,6 +815,7 @@ mod tests {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         };
         let item = TextItem::from_text_markdown_node(&node, 50.0, 50.0);
         // tile_x=50, tile_y=50, node.bounds.x=10, node.bounds.y=20, margin=6
@@ -723,6 +840,7 @@ mod tests {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         };
         let item = TextItem::from_text_markdown_node(&node, 0.0, 0.0);
         assert!(
@@ -896,6 +1014,7 @@ mod tests {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         };
         let item = TextItem::from_text_markdown_node(&node, 0.0, 0.0);
         assert_eq!(

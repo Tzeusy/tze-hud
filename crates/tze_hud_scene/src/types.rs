@@ -457,6 +457,31 @@ pub struct SolidColorNode {
     pub radius: Option<f32>,
 }
 
+/// A single inline color run for a [`TextMarkdownNode`].
+///
+/// Byte offsets are UTF-8 byte positions into the **raw** `content` string
+/// (before any Markdown stripping).  The renderer remaps these offsets to
+/// post-strip positions; if stripping is skipped when runs are present the
+/// offsets are used as-is.
+///
+/// # Invariants (enforced by `tze_hud_scene::invariants`)
+/// - `start_byte < end_byte`
+/// - both `start_byte` and `end_byte` must be ≤ `content.len()`
+/// - both must fall on valid UTF-8 character boundaries
+///
+/// # Overlap semantics
+/// When runs overlap, **last-writer-wins** (the last run in the `Vec` whose
+/// range covers a given byte position takes precedence).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextColorRun {
+    /// Inclusive UTF-8 byte offset into `TextMarkdownNode::content`.
+    pub start_byte: u32,
+    /// Exclusive UTF-8 byte offset into `TextMarkdownNode::content`.
+    pub end_byte: u32,
+    /// Color to apply to bytes `[start_byte, end_byte)`.
+    pub color: Rgba,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextMarkdownNode {
     pub content: String,
@@ -467,6 +492,17 @@ pub struct TextMarkdownNode {
     pub background: Option<Rgba>,
     pub alignment: TextAlign,
     pub overflow: TextOverflow,
+    /// Optional inline color runs.
+    ///
+    /// Empty (default) → use `color` for the entire content.
+    /// Non-empty → each run colors its `[start_byte, end_byte)` range;
+    /// bytes not covered by any run fall back to `color`.
+    /// Overlapping runs are resolved last-writer-wins (last entry wins).
+    ///
+    /// Stored as a boxed slice (16 bytes) rather than `Vec` (24 bytes) to keep
+    /// `TextMarkdownNode` within the Node structural size budget (RFC 0001 §8).
+    #[serde(default)]
+    pub color_runs: Box<[TextColorRun]>,
 }
 
 /// Cursor style hint forwarded to the host OS pointer layer.
