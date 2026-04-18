@@ -234,6 +234,7 @@ fn roundtrip_node_proto_text_markdown() {
                 b: 1.0,
                 a: 0.0,
             }),
+            color_runs: vec![],
         })),
     };
     let decoded = round_trip(&orig);
@@ -241,9 +242,141 @@ fn roundtrip_node_proto_text_markdown() {
         Some(NodeData::TextMarkdown(tm)) => {
             assert_eq!(tm.content, "**hello world**");
             assert_eq!(tm.font_size_px, 14.0);
+            // Backward-compat: no color_runs → empty vec on decode.
+            assert!(
+                tm.color_runs.is_empty(),
+                "empty color_runs must round-trip as empty"
+            );
         }
         _ => panic!("wrong data variant"),
     }
+}
+
+/// Proto roundtrip: TextMarkdownNodeProto with two color runs survives encode/decode.
+///
+/// Field number 6 (color_runs) is stable and covered by this test.
+/// Acceptance criterion AC-4 [hud-r52v].
+#[test]
+fn roundtrip_node_proto_text_markdown_with_color_runs() {
+    use tze_hud_protocol::proto::TextColorRunProto;
+
+    let orig = NodeProto {
+        id: b"node-colored".to_vec(),
+        data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
+            content: "ERROR: disk full".to_string(),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 60.0,
+            }),
+            font_size_px: 14.0,
+            color: Some(Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }),
+            background: None,
+            color_runs: vec![
+                TextColorRunProto {
+                    start_byte: 0,
+                    end_byte: 5, // "ERROR"
+                    color: Some(Rgba {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                },
+                TextColorRunProto {
+                    start_byte: 7,
+                    end_byte: 16, // "disk full"
+                    color: Some(Rgba {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                },
+            ],
+        })),
+    };
+
+    let decoded = round_trip(&orig);
+    match &decoded.data {
+        Some(NodeData::TextMarkdown(tm)) => {
+            assert_eq!(tm.content, "ERROR: disk full");
+            assert_eq!(
+                tm.color_runs.len(),
+                2,
+                "two color runs must survive roundtrip"
+            );
+            // First run: "ERROR" in red
+            assert_eq!(tm.color_runs[0].start_byte, 0);
+            assert_eq!(tm.color_runs[0].end_byte, 5);
+            let r0 = tm.color_runs[0].color.as_ref().expect("color must be set");
+            assert!((r0.r - 1.0).abs() < 1e-5, "R should be 1.0 (red)");
+            assert!(r0.g.abs() < 1e-5, "G should be 0.0");
+            // Second run: "disk full" in yellow
+            assert_eq!(tm.color_runs[1].start_byte, 7);
+            assert_eq!(tm.color_runs[1].end_byte, 16);
+        }
+        _ => panic!("wrong data variant"),
+    }
+}
+
+/// Convert roundtrip: proto → scene → proto preserves color runs.
+///
+/// Acceptance criterion AC-3 (convert roundtrip) [hud-r52v].
+#[test]
+fn convert_roundtrip_color_runs() {
+    use tze_hud_protocol::convert::{proto_color_runs_to_scene, scene_color_runs_to_proto};
+    use tze_hud_protocol::proto::TextColorRunProto;
+    use tze_hud_scene::types::Rgba;
+
+    let proto_runs = vec![
+        TextColorRunProto {
+            start_byte: 0,
+            end_byte: 5,
+            color: Some(tze_hud_protocol::proto::Rgba {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+        },
+        TextColorRunProto {
+            start_byte: 7,
+            end_byte: 16,
+            color: Some(tze_hud_protocol::proto::Rgba {
+                r: 0.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+        },
+    ];
+
+    // Proto → scene
+    let scene_runs = proto_color_runs_to_scene(&proto_runs);
+    assert_eq!(scene_runs.len(), 2);
+    assert_eq!(scene_runs[0].start_byte, 0);
+    assert_eq!(scene_runs[0].end_byte, 5);
+    assert!((scene_runs[0].color.r - 1.0).abs() < 1e-5);
+
+    // Scene → proto
+    let back_to_proto = scene_color_runs_to_proto(&scene_runs);
+    assert_eq!(back_to_proto.len(), 2);
+    assert_eq!(back_to_proto[0].start_byte, 0);
+    assert_eq!(back_to_proto[0].end_byte, 5);
+    let c = back_to_proto[0].color.as_ref().unwrap();
+    assert!((c.r - 1.0).abs() < 1e-5);
+
+    // Empty round-trip
+    let empty: Box<[tze_hud_scene::types::TextColorRun]> = Box::default();
+    assert!(proto_color_runs_to_scene(&[]).is_empty());
+    assert!(scene_color_runs_to_proto(&empty).is_empty());
 }
 
 #[test]

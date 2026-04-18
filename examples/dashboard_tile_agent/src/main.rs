@@ -480,6 +480,7 @@ pub async fn do_content_update(
                     a: 1.0,
                 }),
                 background: None,
+                color_runs: vec![],
             },
         )),
     };
@@ -504,6 +505,7 @@ pub async fn do_content_update(
                     a: 1.0,
                 }),
                 background: None,
+                color_runs: vec![],
             },
         )),
     };
@@ -1534,6 +1536,7 @@ pub async fn create_tile_batch(
                     a: 1.0,
                 }),
                 background: None,
+                color_runs: vec![],
             },
         )),
     };
@@ -1557,6 +1560,7 @@ pub async fn create_tile_batch(
                     a: 1.0,
                 }),
                 background: None,
+                color_runs: vec![],
             },
         )),
     };
@@ -3218,6 +3222,7 @@ mod tests {
                 font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
                 color: Rgba::WHITE,
                 background: None,
+                color_runs: vec![],
                 alignment: tze_hud_scene::types::TextAlign::Start,
                 overflow: tze_hud_scene::types::TextOverflow::Clip,
             }),
@@ -3236,6 +3241,7 @@ mod tests {
                 font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
                 color: Rgba::new(0.78, 0.78, 0.78, 1.0),
                 background: None,
+                color_runs: vec![],
                 alignment: tze_hud_scene::types::TextAlign::Start,
                 overflow: tze_hud_scene::types::TextOverflow::Clip,
             }),

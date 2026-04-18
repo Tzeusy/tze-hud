@@ -51,12 +51,29 @@ message SolidColorNodeProto {
   float radius = 3;  // -1.0 = not set sentinel; valid >= 0.0
 }
 
+// A single inline color run for TextMarkdownNodeProto.
+//
+// Byte offsets are into the raw `content` string (pre-markdown-strip).
+// start_byte MUST be < end_byte, both MUST be valid UTF-8 boundary positions
+// within `content`.  Ranges not covered by any run inherit the node's base
+// `color`.  When runs overlap, the last run in the repeated list wins.
+message TextColorRunProto {
+  uint32 start_byte = 1;  // Inclusive UTF-8 byte offset into content
+  uint32 end_byte   = 2;  // Exclusive UTF-8 byte offset into content
+  Rgba   color      = 3;
+}
+
 message TextMarkdownNodeProto {
   string content = 1;
   Rect bounds = 2;
   float font_size_px = 3;
   Rgba color = 4;
   Rgba background = 5;
+  // Optional inline color runs.  Empty = use base `color` everywhere
+  // (backward-compatible default).  Offsets reference the raw `content`
+  // bytes before any Markdown stripping.  Field 6 is stable and must not
+  // be renumbered.
+  repeated TextColorRunProto color_runs = 6;
 }
 
 message HitRegionNodeProto {

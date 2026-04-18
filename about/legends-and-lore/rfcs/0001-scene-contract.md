@@ -299,17 +299,41 @@ pub struct Rgba {
 #### TextMarkdownNode
 
 ```rust
+pub struct TextColorRun {
+    pub start_byte: u32,  // Inclusive UTF-8 byte offset into `content` (raw, pre-strip)
+    pub end_byte: u32,    // Exclusive UTF-8 byte offset into `content`
+    pub color: Rgba,      // Color for bytes [start_byte, end_byte)
+}
+
 pub struct TextMarkdownNode {
     pub content: String,            // CommonMark markdown; max 65535 UTF-8 bytes
     pub bounds: Rect,               // Relative to tile origin
     pub font_size_px: f32,          // Must be > 0.0
     pub font_family: FontFamily,
-    pub color: Rgba,
+    pub color: Rgba,                // Base color; used for bytes not covered by any run
     pub background: Option<Rgba>,
     pub alignment: TextAlign,
     pub overflow: TextOverflow,
     pub present_at_us: Option<u64>, // Override tile-level present_at_us for this node (μs, UTC; RFC 0003 §3.1)
+    pub color_runs: Box<[TextColorRun]>, // Optional inline color runs; empty = use base color everywhere
 }
+```
+
+##### `color_runs` semantics
+
+- **Empty** (default): `color` applies to the entire content. All prior behavior preserved.
+- **Non-empty**: each run colors the `[start_byte, end_byte)` byte range of `content` in `run.color`. Bytes not covered by any run fall back to `color`.
+- **Overlap resolution**: when runs overlap, **last-writer-wins** — the last run in the slice whose range covers a given byte position takes precedence.
+- **Byte offset contract**: offsets are into the **raw** `content` string before any Markdown stripping. When `color_runs` is non-empty, the renderer skips Markdown stripping to keep offsets valid. Callers that supply `color_runs` must therefore pre-strip Markdown or supply plain text in `content`.
+- **Invariants** (all validated at mutation intake):
+  - `start_byte < end_byte`
+  - `end_byte <= content.len()`
+  - both `start_byte` and `end_byte` must lie on valid UTF-8 character boundaries
+
+##### Portal-layer integration
+
+`color_runs` enables adapter-side ANSI-to-runs conversion for text-stream portals without requiring a terminal emulator node. See RFC 0013 and `openspec/specs/text-stream-portals/spec.md` for cross-reference.
+
 
 pub enum FontFamily {
     SystemSansSerif,

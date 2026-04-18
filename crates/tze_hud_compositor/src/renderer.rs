@@ -2588,6 +2588,7 @@ impl Compositor {
                                         outline_color: oc,
                                         outline_width: ow,
                                         opacity: effective_opacity,
+                                        color_runs: Box::default(),
                                     });
                                 } else {
                                     // ── Two-line rendering: bold title + regular body ──
@@ -2615,6 +2616,7 @@ impl Compositor {
                                         outline_color: oc,
                                         outline_width: ow,
                                         opacity: effective_opacity,
+                                        color_runs: Box::default(),
                                     });
                                     // Body line (regular weight, 0.85× size)
                                     let body_top =
@@ -2637,6 +2639,7 @@ impl Compositor {
                                         outline_color: oc,
                                         outline_width: ow,
                                         opacity: effective_opacity,
+                                        color_runs: Box::default(),
                                     });
                                 }
 
@@ -2668,6 +2671,7 @@ impl Compositor {
                                         outline_color: None,
                                         outline_width: None,
                                         opacity: effective_opacity,
+                                        color_runs: Box::default(),
                                     });
                                 }
                             }
@@ -2817,6 +2821,7 @@ impl Compositor {
                                             outline_color: oc,
                                             outline_width: ow,
                                             opacity: anim_opacity,
+                                            color_runs: Box::default(),
                                         });
                                     } else {
                                         items.push(TextItem::from_zone_policy(
@@ -2949,6 +2954,7 @@ impl Compositor {
                                         outline_color: oc,
                                         outline_width: ow,
                                         opacity: anim_opacity,
+                                        color_runs: Box::default(),
                                     });
                                 } else {
                                     items.push(TextItem::from_zone_policy(
@@ -6822,6 +6828,7 @@ mod tests {
                 background: Some(Rgba::new(0.0, 0.0, 0.5, 1.0)), // dark blue
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         let mut scene = scene_with_node(node);
@@ -6861,6 +6868,7 @@ mod tests {
                 background: Some(Rgba::new(0.0, 0.0, 0.0, 1.0)),
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         let mut scene = scene_with_node(node);
@@ -6910,6 +6918,7 @@ mod tests {
                 background: Some(Rgba::new(0.0, 0.0, 0.0, 1.0)), // pure black bg
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         let mut scene = scene_with_node(node);
@@ -6965,6 +6974,7 @@ mod tests {
                 background: Some(Rgba::new(0.1, 0.1, 0.1, 1.0)),
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Ellipsis,
+                color_runs: Box::default(),
             }),
         };
         let mut scene = scene_with_node(node);
@@ -7334,6 +7344,7 @@ mod tests {
                         background: Some(Rgba::new(0.05, 0.05, 0.1, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )

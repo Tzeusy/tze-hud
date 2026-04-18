@@ -4060,6 +4060,7 @@ mod tests {
                 background: Some(Rgba::new(0.1, 0.1, 0.2, 1.0)),
                 alignment: TextAlign::Center,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         scene.set_tile_root(tile1_id, text_node).unwrap();
@@ -7831,6 +7832,7 @@ mod spec_scenarios {
                 background: None,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         // The validation function
@@ -8028,6 +8030,7 @@ mod spec_scenarios {
                 background: None,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
 

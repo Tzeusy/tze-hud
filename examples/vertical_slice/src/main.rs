@@ -679,6 +679,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                         background: Some(Rgba::new(0.1, 0.15, 0.3, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )

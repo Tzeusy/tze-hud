@@ -50,6 +50,16 @@ The first implementation of text stream portals SHALL be expressible as a reside
 - **WHEN** the pilot portal is rendered
 - **THEN** it SHALL be constructible from existing text, solid-color, image, and hit-region primitives rather than a new dedicated node type
 
+#### Scenario: adapter-side ANSI color with inline runs
+
+- **WHEN** a portal adapter receives ANSI-colorized terminal output (e.g. `\e[31mERROR\e[0m: disk full`)
+- **THEN** the adapter SHALL parse ANSI escape sequences and map each color run to a `TextColorRun` entry on the `TextMarkdownNode`
+- **AND** the adapter SHALL strip ANSI escape sequences from the `content` string and populate `color_runs` with byte offsets into the stripped content
+- **THEN** the runtime SHALL render the colored spans without a terminal-emulator node
+- **AND** terminal emulation (PTY semantics, cursor positioning, scrollback) remains out of scope per Phase 0 boundary
+
+Note: `TextMarkdownNode.color_runs` (RFC 0001 §TextMarkdownNode, scene-graph/spec.md §TextMarkdownNode inline color_runs) enables this adapter pattern. No new node type is required.
+
 #### Scenario: pilot uses resident session flow
 
 - **WHEN** the pilot portal is active

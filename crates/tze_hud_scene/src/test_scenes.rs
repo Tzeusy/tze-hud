@@ -262,6 +262,7 @@ impl TestSceneRegistry {
                 background: Some(Rgba::new(0.08, 0.08, 0.15, 1.0)),
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         graph
@@ -324,6 +325,7 @@ impl TestSceneRegistry {
                 background: Some(Rgba::new(0.1, 0.1, 0.2, 1.0)),
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Ellipsis,
+                color_runs: Box::default(),
             }),
         };
         graph
@@ -453,6 +455,7 @@ impl TestSceneRegistry {
                             background: None,
                             alignment: TextAlign::Center,
                             overflow: TextOverflow::Clip,
+                            color_runs: Box::default(),
                         }),
                     }
                 };
@@ -693,6 +696,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.1, 0.2, 0.4, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -733,6 +737,7 @@ impl TestSceneRegistry {
                             background: Some(Rgba::new(0.2, 0.1, 0.3, 1.0)),
                             alignment: TextAlign::Start,
                             overflow: TextOverflow::Clip,
+                            color_runs: Box::default(),
                         }),
                     },
                 )
@@ -803,6 +808,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.5, 0.1, 0.1, 1.0)),
                         alignment: TextAlign::Center,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -868,6 +874,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.05, 0.1, 0.15, 1.0)),
                         alignment: TextAlign::Center,
                         overflow: TextOverflow::Ellipsis,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -1172,6 +1179,7 @@ impl TestSceneRegistry {
                                 )),
                                 alignment: TextAlign::Start,
                                 overflow: TextOverflow::Ellipsis,
+                                color_runs: Box::default(),
                             }),
                         },
                     )
@@ -1550,6 +1558,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.4, 0.1, 0.1, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -1664,6 +1673,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.05, 0.2, 0.05, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -1699,6 +1709,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.3, 0.05, 0.05, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -1856,6 +1867,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.0, 0.0, 0.0, 0.75)),
                         alignment: TextAlign::Center,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -1943,6 +1955,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.15, 0.1, 0.25, 1.0)),
                         alignment: TextAlign::Center,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -2039,6 +2052,7 @@ impl TestSceneRegistry {
                             background: Some(Rgba::new(0.2, 0.1, 0.1, 0.9)),
                             alignment: TextAlign::Center,
                             overflow: TextOverflow::Ellipsis,
+                            color_runs: Box::default(),
                         }),
                     },
                 )
@@ -2186,6 +2200,7 @@ impl TestSceneRegistry {
                             background: Some(Rgba::new(0.1, 0.1, 0.3, 0.85)),
                             alignment: TextAlign::Center,
                             overflow: TextOverflow::Clip,
+                            color_runs: Box::default(),
                         }),
                     },
                 )
@@ -2413,6 +2428,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.0, 0.0, 0.0, 0.75)),
                         alignment: TextAlign::Center,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -2544,6 +2560,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.05, 0.2, 0.05, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -2587,6 +2604,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.3, 0.05, 0.05, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Ellipsis,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -2750,6 +2768,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.25, 0.05, 0.05, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Ellipsis,
+                        color_runs: Box::default(),
                     }),
                 },
             )
@@ -2792,6 +2811,7 @@ impl TestSceneRegistry {
                         background: Some(Rgba::new(0.05, 0.15, 0.05, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                 },
             )

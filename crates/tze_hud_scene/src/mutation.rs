@@ -1234,6 +1234,7 @@ mod tests {
                 background: None,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         let node_id = node.id;
@@ -1265,6 +1266,7 @@ mod tests {
                     background: None,
                     alignment: TextAlign::Start,
                     overflow: TextOverflow::Clip,
+                    color_runs: Box::default(),
                 }),
             }],
         );
@@ -1342,6 +1344,7 @@ mod tests {
                     background: None,
                     alignment: TextAlign::Start,
                     overflow: TextOverflow::Clip,
+                    color_runs: Box::default(),
                 }),
             }],
         );
@@ -1388,6 +1391,7 @@ mod tests {
                 background: None,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         let node_a_id = node_a.id;
@@ -1425,6 +1429,7 @@ mod tests {
                     background: None,
                     alignment: TextAlign::Start,
                     overflow: TextOverflow::Clip,
+                    color_runs: Box::default(),
                 }),
             }],
         );
@@ -1465,6 +1470,7 @@ mod tests {
                     background: None,
                     alignment: TextAlign::Start,
                     overflow: TextOverflow::Clip,
+                    color_runs: Box::default(),
                 }),
             }],
         );

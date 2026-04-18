@@ -146,12 +146,35 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: V1 Node Types
-The runtime MUST support four node types: SolidColorNode (with color and bounds), TextMarkdownNode (with CommonMark content up to 65535 UTF-8 bytes, font_size_px > 0.0, font family, color, alignment, overflow), StaticImageNode (with ResourceId, bounds, fit mode), and HitRegionNode (with bounds, interaction_id, accepts_focus, accepts_pointer). Each node MUST have a SceneId and an ordered list of child SceneIds.
+The runtime MUST support four node types: SolidColorNode (with color and bounds), TextMarkdownNode (with CommonMark content up to 65535 UTF-8 bytes, font_size_px > 0.0, font family, base color, alignment, overflow, and optional `color_runs`), StaticImageNode (with ResourceId, bounds, fit mode), and HitRegionNode (with bounds, interaction_id, accepts_focus, accepts_pointer). Each node MUST have a SceneId and an ordered list of child SceneIds.
 Source: RFC 0001 §2.4
 Scope: v1-mandatory
 
 #### Scenario: TextMarkdownNode content limit
 - **WHEN** an agent submits a TextMarkdownNode with content exceeding 65535 UTF-8 bytes
+- **THEN** the runtime MUST reject the mutation with `InvalidFieldValue`
+
+#### Scenario: TextMarkdownNode with empty color_runs uses base color
+- **WHEN** a TextMarkdownNode has `color_runs` empty (default)
+- **THEN** the entire content MUST be rendered in the node's base `color`
+- **AND** all existing behavior is preserved (full backward compatibility)
+
+#### Scenario: TextMarkdownNode with color_runs applies inline styling
+- **WHEN** a TextMarkdownNode has one or more `color_runs`
+- **THEN** each run MUST color its `[start_byte, end_byte)` byte range in the run's color
+- **AND** bytes not covered by any run MUST fall back to the base `color`
+- **AND** when runs overlap, the last run in the list wins (last-writer-wins)
+
+#### Scenario: Invalid color_run byte range rejected
+- **WHEN** an agent submits a TextMarkdownNode with a `color_run` where `start_byte >= end_byte`
+- **THEN** the runtime MUST reject the mutation with `InvalidFieldValue`
+
+#### Scenario: Out-of-range color_run byte offset rejected
+- **WHEN** an agent submits a TextMarkdownNode with a `color_run` where `end_byte > content.len()`
+- **THEN** the runtime MUST reject the mutation with `InvalidFieldValue`
+
+#### Scenario: Non-UTF-8-boundary color_run offset rejected
+- **WHEN** an agent submits a TextMarkdownNode with a `color_run` where `start_byte` or `end_byte` is not on a UTF-8 character boundary
 - **THEN** the runtime MUST reject the mutation with `InvalidFieldValue`
 
 #### Scenario: StaticImageNode with unknown resource

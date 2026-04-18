@@ -248,6 +248,7 @@ fn run_scene_workload() -> f64 {
                     background: None,
                     alignment: TextAlign::Start,
                     overflow: TextOverflow::Clip,
+                    color_runs: Box::default(),
                 }),
             }
         };
