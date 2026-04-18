@@ -99,7 +99,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Pointer Capture Semantics
-Only one node SHALL hold pointer capture at a time globally across the entire scene. Capture SHALL be associated with a specific pointer device identified by device_id. Capture SHALL only be acquired in response to a PointerDownEvent (not on PointerMove or PointerUp). While capture is active, all pointer events from the captured device SHALL be routed to the capturing node, bypassing normal hit-testing.
+Only one node SHALL hold pointer capture at a time globally across the entire scene. Capture SHALL be associated with a specific pointer device identified by device_id. Capture SHALL only be acquired in response to a PointerDownEvent (not on PointerMove or PointerUp); this restriction applies to agent-requested capture semantics. Runtime-owned chrome interactions MAY acquire or release capture at other event phases when needed for sovereign chrome UX (for example, drag-handle interactions). While capture is active, all pointer events from the captured device SHALL be routed to the capturing node, bypassing normal hit-testing.
 Source: RFC 0004 §2.1, §2.2
 Scope: v1-mandatory
 
@@ -352,7 +352,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Event Coalescing Under Backpressure
-PointerMoveEvent SHALL be coalesced under backpressure: only the latest position is retained. Hover state changes SHALL be coalesced to net state. ScrollOffsetChangedEvent SHALL be coalesced per tile to latest offset. Transactional events (down, up, click, key, focus, capture, IME) SHALL NEVER be dropped or coalesced. The event queue default depth SHALL be 256 events per agent with a hard cap of 4096.
+PointerMoveEvent SHALL be coalesced under backpressure: only the latest position is retained. Hover state changes SHALL be coalesced to net state. ScrollOffsetChangedEvent SHALL be coalesced per tile to latest offset. Transactional events (down, up, click, key, focus, capture, IME) SHALL NEVER be dropped or coalesced. The event queue default depth SHALL be 256 events per agent with a hard cap of 4096 for non-transactional events; transactional events SHALL be enqueued regardless of queue depth, displacing non-transactional events if necessary.
 Source: RFC 0004 §8.5
 Scope: v1-mandatory
 
