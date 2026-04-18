@@ -116,6 +116,10 @@ Scope: v1-mandatory
 - **WHEN** a benchmark or test scenario runs to completion
 - **THEN** the telemetry MUST report zero lease violations
 
+#### Scenario: Sync drift budget
+- **WHEN** a sync group runs across two or more streams
+- **THEN** sync group drift MUST be under 500 microseconds (measured as wall-clock delta between earliest and latest frame presentation within a sync group, in the compositor clock domain)
+
 ---
 
 ### Requirement: Layer 4 - Developer Visibility Artifacts
