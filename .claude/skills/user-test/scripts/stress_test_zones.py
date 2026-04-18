@@ -626,6 +626,122 @@ class RateController:
         self._next_tick += self._interval
 
 
+# ---------------------------------------------------------------------------
+# Baseline phases
+# ---------------------------------------------------------------------------
+
+
+def run_network_baseline(url: str, token: str) -> dict[str, Any]:
+    """
+    Run 10 sequential list_zones JSON-RPC calls to measure bare HTTP round-trip.
+
+    No concurrent load, no SSH telemetry. Isolates network + server dispatch
+    latency from publish overhead. Results appear as top-level key
+    network_baseline in the JSON report.
+
+    Returns a dict with keys: calls, successes, errors, latency_stats_ms.
+    latency_stats_ms contains p50, p95, p99, max (all in milliseconds).
+    """
+    CALLS = 10
+    latencies_ms: list[float] = []
+    errors = 0
+
+    print("--- Network baseline: 10x list_zones ---", flush=True)
+    for i in range(CALLS):
+        t0 = time.monotonic()
+        try:
+            resp = rpc_call(url, token, "list_zones", {}, request_id=i, timeout=10.0)
+            if "error" in resp:
+                raise RuntimeError(f"JSON-RPC error: {resp['error']}")
+            latencies_ms.append((time.monotonic() - t0) * 1000.0)
+        except Exception as exc:
+            errors += 1
+            print(f"  network_baseline call {i} error: {exc}", file=sys.stderr)
+
+    s = sorted(latencies_ms)
+    stats: dict[str, float] = {
+        "p50": percentile(s, 50),
+        "p95": percentile(s, 95),
+        "p99": percentile(s, 99),
+        "max": s[-1] if s else float("nan"),
+    }
+    print(
+        f"  network_baseline: calls={CALLS} ok={len(latencies_ms)} err={errors} "
+        f"p50={_fmt(stats['p50'])}ms p95={_fmt(stats['p95'])}ms "
+        f"p99={_fmt(stats['p99'])}ms max={_fmt(stats['max'])}ms",
+        flush=True,
+    )
+    return {
+        "calls": CALLS,
+        "successes": len(latencies_ms),
+        "errors": errors,
+        "latency_stats_ms": stats,
+    }
+
+
+def run_publish_baseline(url: str, token: str) -> dict[str, Any]:
+    """
+    Run 10 sequential publish_to_zone calls at 1/s across all 6 default zones.
+
+    One call per second, one zone per call (cycling through ZONES), no
+    concurrent load. Measures single-publish latency without load-profile
+    pressure. Results appear as top-level key publish_baseline in the JSON
+    report.
+
+    Returns a dict with keys: calls, successes, errors, latency_stats_ms.
+    latency_stats_ms contains p50, p95, p99, max (all in milliseconds).
+    """
+    CALLS = 10
+    RATE = 1.0  # calls per second
+    latencies_ms: list[float] = []
+    errors = 0
+
+    print("--- Publish baseline: 10x publish_to_zone at 1/s ---", flush=True)
+    controller = RateController(RATE)
+    for i in range(CALLS):
+        controller.wait_for_next()
+        zone = ZONES[i % len(ZONES)]
+        params: dict[str, Any] = {
+            "zone_name": zone["zone_name"],
+            "content": f"{zone['content']} baseline-{i}",
+            "namespace": DEFAULT_NAMESPACE,
+            "ttl_us": DEFAULT_TTL_US,
+            "merge_key": zone["merge_key"],
+        }
+        t0 = time.monotonic()
+        try:
+            resp = rpc_call(url, token, "publish_to_zone", params, request_id=i, timeout=10.0)
+            if "error" in resp:
+                raise RuntimeError(f"JSON-RPC error: {resp['error']}")
+            latencies_ms.append((time.monotonic() - t0) * 1000.0)
+        except Exception as exc:
+            errors += 1
+            print(
+                f"  publish_baseline call {i} ({zone['zone_name']}) error: {exc}",
+                file=sys.stderr,
+            )
+
+    s = sorted(latencies_ms)
+    stats: dict[str, float] = {
+        "p50": percentile(s, 50),
+        "p95": percentile(s, 95),
+        "p99": percentile(s, 99),
+        "max": s[-1] if s else float("nan"),
+    }
+    print(
+        f"  publish_baseline: calls={CALLS} ok={len(latencies_ms)} err={errors} "
+        f"p50={_fmt(stats['p50'])}ms p95={_fmt(stats['p95'])}ms "
+        f"p99={_fmt(stats['p99'])}ms max={_fmt(stats['max'])}ms",
+        flush=True,
+    )
+    return {
+        "calls": CALLS,
+        "successes": len(latencies_ms),
+        "errors": errors,
+        "latency_stats_ms": stats,
+    }
+
+
 def _dispatch_one(
     url: str,
     token: str,
@@ -942,8 +1058,14 @@ def main() -> int:
     if not preflight_check(args.url, token):
         sys.exit(1)
 
-    results: list[ProfileResult] = []
     run_id = str(uuid.uuid4())
+
+    # Baseline phases: run before load profiles to establish single-call latency
+    # reference points. These appear as top-level keys in the JSON report.
+    network_baseline = run_network_baseline(args.url, token)
+    publish_baseline = run_publish_baseline(args.url, token)
+
+    results: list[ProfileResult] = []
 
     for prof in profiles_to_run:
         name, rate, profile_concurrency, dur = prof
@@ -981,6 +1103,8 @@ def main() -> int:
         "mcp_url": args.url,
         "ssh_host": f"{args.ssh_user}@{args.ssh_host}",
         "zones_tested": [z["zone_name"] for z in ZONES],
+        "network_baseline": network_baseline,
+        "publish_baseline": publish_baseline,
         "profiles": [r.to_dict() for r in results],
     }
     with open(args.report, "w", encoding="utf-8") as f:
