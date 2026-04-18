@@ -181,17 +181,17 @@ Scope: v1-mandatory
 - **THEN** mutation and lease checks MUST still deny it until granted, and CapabilityRequest MAY grant it using the allow-list source
 
 ### Requirement: Level 4 Attention Management
-The attention level MUST manage interruption flow with five classes matching the InterruptionClass enum defined in RFC 0010 §3.1: SILENT (always passes, never counted against budget), LOW (discarded during quiet hours; too stale by quiet hours exit to be useful), NORMAL (queued during quiet hours; delivered when quiet hours end), HIGH (passes through quiet hours unless `pass_through_class` raises the threshold; subject to attention budget), CRITICAL (always passes, bypasses both quiet hours and attention budget; only the runtime may emit CRITICAL). Attention budget MUST track rolling per-agent and per-zone counters over the last 60 seconds with configurable limits (defaults: 20 per agent per minute, 10 per zone per minute; 30 per zone per minute for Stack-policy zones per RFC 0010 §7). When budget is exhausted, mutations MUST be coalesced (latest-wins within agent+zone key). Attention budget check MUST complete in < 10us. Note: RFC 0009 §11.5 uses the older doctrine names (Gentle/Normal/Urgent) and older default values (6/12); RFC 0010 §3.1 is authoritative for both the enum names and the default budgets.
+The attention level MUST manage interruption flow with five classes matching the InterruptionClass enum defined in RFC 0010 §3.1: SILENT (always passes, never counted against budget), LOW (shed during quiet hours; too stale by quiet hours exit to be useful), NORMAL (queued during quiet hours; delivered when quiet hours end), HIGH (passes through quiet hours unless `pass_through_class` raises the threshold; subject to attention budget), CRITICAL (always passes, bypasses both quiet hours and attention budget; only the runtime may emit CRITICAL). Attention budget MUST track rolling per-agent and per-zone counters over the last 60 seconds with configurable limits (defaults: 20 per agent per minute, 10 per zone per minute; 30 per zone per minute for Stack-policy zones per RFC 0010 §7). When budget is exhausted, non-SILENT mutations MUST be coalesced (latest-wins within agent+zone key). Attention budget check MUST complete in < 10us. Note: RFC 0009 §11.5 uses the older doctrine names (Gentle/Normal/Urgent) and older default values (6/12); RFC 0010 §3.1 is authoritative for both the enum names and the default budgets.
 Source: RFC 0010 §3.1, §7, RFC 0009 §11.5
 Scope: v1-mandatory
 
 #### Scenario: Quiet hours queue NORMAL interruptions
 - **WHEN** quiet hours are active and a mutation with NORMAL interruption class arrives
-- **THEN** the mutation is queued until quiet hours end and then delivered in FIFO order
+- **THEN** the mutation MUST be queued until quiet hours end and then delivered in FIFO order
 
 #### Scenario: Quiet hours discard LOW interruptions
 - **WHEN** quiet hours are active and a mutation with LOW interruption class arrives
-- **THEN** the mutation is discarded (not queued) because LOW content (background sync, telemetry, status refreshes) is too stale by quiet hours exit to be useful
+- **THEN** the mutation MUST be shed (not queued) because LOW content (background sync, telemetry, status refreshes) is too stale by quiet hours exit to be useful
 
 #### Scenario: HIGH passes quiet hours
 - **WHEN** quiet hours are active and a mutation with HIGH interruption class arrives
@@ -306,7 +306,7 @@ Scope: v1-mandatory
 - **THEN** the mutation is queued with a redaction flag and rendered with placeholder when delivered
 
 ### Requirement: Freeze Semantics at Level 0
-Freeze MUST be classified as a Level 0 (Human Override) action. During freeze: agent mutations MUST be queued (not rejected), resource budgets MUST be paused, the degradation ladder MUST NOT advance, attention signals MUST be deferred, tile rendering MUST be frozen at last committed state, override controls MUST remain active, agent input routing MUST be suspended. Max freeze duration MUST be configurable; auto-unfreeze MUST occur on timeout.
+Freeze MUST be classified as a Level 0 (Human Override) action. During freeze: agent mutations MUST be queued (not rejected), resource budgets MUST be paused, the degradation ladder MUST NOT advance, attention signals MUST be deferred, tile rendering MUST be frozen at last committed state, override controls MUST remain active, agent input routing MUST be suspended. The mutation queue limit applies only to non-transactional events; transactional mutations MUST always be enqueued, even if it means dropping non-transactional events from a full queue. Max freeze duration MUST be configurable; auto-unfreeze MUST occur on timeout.
 Source: RFC 0009 §6.1, §6.2
 Scope: v1-mandatory
 
