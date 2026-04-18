@@ -2619,4 +2619,87 @@ mod tests {
             "combined wheel + keyboard scroll must accumulate; expected {expected}, got {offset_y}"
         );
     }
+
+    // ── hud-8lpu: local-first invariant before agent dispatch ─────────────────
+
+    /// AC §4 (hud-8lpu): local scroll offset is updated synchronously before
+    /// the `ScrollOffsetChangedEvent` is returned for agent dispatch.
+    ///
+    /// `process_scroll_event` must:
+    /// 1. Update the scene graph tile offset (local-first, < 4ms p99).
+    /// 2. Return a `ScrollOffsetChangedEvent` whose fields match the new offset.
+    ///
+    /// The windowed runtime uses the returned event to build an `EventBatch`
+    /// for injection via `input_event_tx`; this test verifies that the event
+    /// carries the correct committed offset (not a stale or zero value).
+    #[test]
+    fn test_scroll_local_update_before_agent_event() {
+        let (mut scene, tile_id) = setup_scrollable_scene();
+        let mut processor = InputProcessor::new();
+
+        let ev = processor.process_scroll_event(
+            &ScrollEvent {
+                x: 150.0,
+                y: 150.0,
+                delta_x: 0.0,
+                delta_y: 80.0,
+            },
+            &mut scene,
+        );
+
+        // process_scroll_event must return Some for a scrollable tile hit.
+        let ev = ev.expect(
+            "process_scroll_event must return ScrollOffsetChangedEvent for a scrollable tile",
+        );
+
+        // The returned event must carry the committed offset, not zero.
+        assert!(
+            (ev.offset_y - 80.0).abs() < f32::EPSILON,
+            "event.offset_y must equal the applied delta (80.0), got {}",
+            ev.offset_y
+        );
+        assert!(
+            ev.offset_x.abs() < f32::EPSILON,
+            "event.offset_x must be 0.0 for y-only scroll, got {}",
+            ev.offset_x
+        );
+
+        // The scene tile scroll offset must also reflect the update (local-first).
+        let (scene_x, scene_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (scene_y - 80.0).abs() < f32::EPSILON,
+            "scene tile offset_y must be 80.0 after wheel scroll, got {scene_y}"
+        );
+        assert!(
+            scene_x.abs() < f32::EPSILON,
+            "scene tile offset_x must be 0.0 for y-only scroll, got {scene_x}"
+        );
+    }
+
+    /// AC §4 (hud-8lpu): keyboard scroll (PgDn) also updates local offset before
+    /// returning the notification event.
+    #[test]
+    fn test_keyboard_scroll_local_update_before_agent_event() {
+        let (mut scene, tile_id) = setup_scrollable_scene();
+        let mut processor = InputProcessor::new();
+
+        let ev = processor
+            .process_keyboard_scroll(150.0, 150.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
+
+        let ev = ev.expect(
+            "process_keyboard_scroll must return ScrollOffsetChangedEvent for a scrollable tile",
+        );
+
+        assert!(
+            (ev.offset_y - KEYBOARD_PAGE_SCROLL_PX).abs() < 1e-4,
+            "event.offset_y must equal KEYBOARD_PAGE_SCROLL_PX, got {}",
+            ev.offset_y
+        );
+
+        let (_, scene_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (scene_y - KEYBOARD_PAGE_SCROLL_PX).abs() < 1e-4,
+            "scene tile offset_y must equal KEYBOARD_PAGE_SCROLL_PX, got {scene_y}"
+        );
+    }
 }

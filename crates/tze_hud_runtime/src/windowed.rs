@@ -93,6 +93,7 @@ use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
+use tze_hud_protocol::proto::{EventBatch, InputEnvelope};
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_protocol::token::TokenStore;
@@ -401,6 +402,18 @@ struct WindowedRuntimeState {
     /// the async session lock (the reset path is sync chrome-layer code).
     element_repositioned_tx:
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
+    /// Broadcast sender for runtime-injected input event batches.
+    ///
+    /// Cloned from the `HudSessionImpl` after creation. `None` when gRPC is
+    /// disabled (grpc_port == 0) or before network services start.
+    ///
+    /// Used by the windowed runtime to dispatch `ScrollOffsetChangedEvent` to
+    /// agents after wheel/keyboard scroll events update a scrollable tile.
+    /// Each `(namespace, EventBatch)` pair is delivered only to the session
+    /// handler whose namespace matches, filtered by `INPUT_EVENTS` subscription.
+    scroll_event_tx: Option<
+        tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>,
+    >,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -1161,6 +1174,10 @@ impl WinitApp {
     }
 
     /// Enqueue and process a local-first scroll event.
+    ///
+    /// Applies the offset locally (< 4ms p99 path) and, if the tile owner is
+    /// subscribed, dispatches a `ScrollOffsetChangedEvent` to the agent via the
+    /// `INPUT_EVENTS` channel.
     fn enqueue_scroll_event(&mut self, delta_x: f32, delta_y: f32) {
         self.refresh_widget_hover_tracking();
         let x = self.state.cursor_x;
@@ -1170,7 +1187,7 @@ impl WinitApp {
         if let Ok(state) = self.state.shared_state.try_lock()
             && let Ok(mut scene) = state.scene.try_lock()
         {
-            let _ = self.state.input_processor.process_scroll_event(
+            if let Some(ev) = self.state.input_processor.process_scroll_event(
                 &tze_hud_input::ScrollEvent {
                     x,
                     y,
@@ -1178,7 +1195,9 @@ impl WinitApp {
                     delta_y,
                 },
                 &mut scene,
-            );
+            ) {
+                dispatch_scroll_offset_event(&self.state.scroll_event_tx, &scene, ev);
+            }
         }
     }
 
@@ -1188,6 +1207,9 @@ impl WinitApp {
     /// scroll.  Delegates to
     /// [`InputProcessor::process_keyboard_scroll`] which applies the same
     /// local-first coalescing and clamping as `process_scroll_event`.
+    ///
+    /// Dispatches a `ScrollOffsetChangedEvent` to the tile-owning agent via the
+    /// `INPUT_EVENTS` channel when the scroll changes the tile offset.
     fn enqueue_keyboard_scroll_event(&mut self, delta_y: f32) {
         let x = self.state.cursor_x;
         let y = self.state.cursor_y;
@@ -1195,10 +1217,13 @@ impl WinitApp {
         if let Ok(state) = self.state.shared_state.try_lock()
             && let Ok(mut scene) = state.scene.try_lock()
         {
-            let _ = self
+            if let Some(ev) = self
                 .state
                 .input_processor
-                .process_keyboard_scroll(x, y, delta_y, &mut scene);
+                .process_keyboard_scroll(x, y, delta_y, &mut scene)
+            {
+                dispatch_scroll_offset_event(&self.state.scroll_event_tx, &scene, ev);
+            }
         }
     }
 
@@ -1905,7 +1930,7 @@ impl WindowedRuntime {
         // runtime for gRPC server, MCP bridge, session management."
         //
         // gRPC server is disabled when grpc_port == 0 (per WindowedConfig docs).
-        let (mut network_rt, mut network_handles, element_repositioned_tx) =
+        let (mut network_rt, mut network_handles, element_repositioned_tx, scroll_event_tx) =
             start_network_services(
                 cfg.grpc_port,
                 &cfg.psk,
@@ -2002,6 +2027,7 @@ impl WindowedRuntime {
             current_monitor_index: 0,
             global_tokens: startup_compositor_tokens,
             element_repositioned_tx,
+            scroll_event_tx,
         };
 
         let mut app = WinitApp { state: app_state };
@@ -2184,6 +2210,9 @@ fn start_network_services(
         Option<NetworkRuntime>,
         Vec<tokio::task::JoinHandle<()>>,
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
+        Option<
+            tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>,
+        >,
     ),
     Box<dyn std::error::Error>,
 > {
@@ -2191,7 +2220,7 @@ fn start_network_services(
         tracing::info!(
             "windowed runtime: gRPC server disabled (grpc_port = 0); running compositor-only"
         );
-        return Ok((None, Vec::new(), None));
+        return Ok((None, Vec::new(), None, None));
     }
 
     // Build the multi-thread Tokio runtime for network tasks.
@@ -2211,10 +2240,12 @@ fn start_network_services(
         fallback_unrestricted,
     );
 
-    // Clone the broadcast sender before moving the service into the gRPC task.
-    // The windowed runtime holds this sender to broadcast ElementRepositionedEvents
-    // from the sync chrome-layer reset path (right-click context menu).
+    // Clone the broadcast senders before moving the service into the gRPC task.
+    // The windowed runtime holds these senders to:
+    // - broadcast ElementRepositionedEvents from the sync chrome-layer reset path.
+    // - inject ScrollOffsetChangedEvent batches after wheel/keyboard scroll events.
     let element_repositioned_tx = service.element_repositioned_tx.clone();
+    let scroll_event_tx = service.input_event_tx.clone();
 
     // Wire RuntimeService (ReloadConfig RPC) alongside HudSession.
     let runtime_svc = RuntimeServiceImpl::new(Arc::clone(&runtime_context));
@@ -2239,10 +2270,66 @@ fn start_network_services(
         Some(network_rt),
         vec![handle],
         Some(element_repositioned_tx),
+        Some(scroll_event_tx),
     ))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Dispatch a `ScrollOffsetChangedEvent` to the tile-owning agent.
+///
+/// Looks up the owning namespace from the scene graph, constructs an
+/// `EventBatch` with a single `ScrollOffsetChangedEvent` envelope, and sends it
+/// on the `scroll_event_tx` broadcast channel.  The session handler delivers the
+/// batch only when the agent is subscribed to `INPUT_EVENTS` — the subscription
+/// gate is enforced in `subscriptions::filter_event_batch`, not here.
+///
+/// This is a best-effort dispatch (non-blocking, try_send semantics): if no
+/// receiver is connected (gRPC disabled, no agent subscribed) the event is
+/// silently dropped, matching the ephemeral-realtime message class contract.
+fn dispatch_scroll_offset_event(
+    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    scene: &SceneGraph,
+    ev: tze_hud_input::ScrollOffsetChangedEvent,
+) {
+    let Some(tx) = tx else { return };
+
+    // Look up the namespace that owns this tile so the session handler can
+    // route the batch to the correct agent.
+    let Some(namespace) = scene
+        .tiles
+        .get(&ev.tile_id)
+        .map(|t| t.namespace.clone())
+    else {
+        return;
+    };
+
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+    let batch = EventBatch {
+        frame_number: 0, // synthetic — not tied to a compositor frame
+        batch_ts_us: now_us,
+        events: vec![InputEnvelope {
+            event: Some(InputEvent::ScrollOffsetChanged(
+                tze_hud_protocol::proto::ScrollOffsetChangedEvent {
+                    tile_id: ev.tile_id.as_uuid().as_bytes().to_vec(),
+                    timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                    offset_x: ev.offset_x,
+                    offset_y: ev.offset_y,
+                },
+            )),
+        }],
+    };
+
+    // Broadcast to all session handler tasks; each one delivers only if the
+    // namespace matches and INPUT_EVENTS is active. Errors (no receivers,
+    // channel full) are silently ignored — scroll events are ephemeral.
+    let _ = tx.send((namespace, batch));
+}
 
 /// Push an `InputEvent` into the ring buffer, dropping the oldest if full.
 fn enqueue_input(
@@ -2988,8 +3075,9 @@ mod tests {
     fn start_network_services_grpc_port_zero_returns_no_runtime() {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _tx) = start_network_services(0, "test-psk", shared_state, ctx, true)
-            .expect("start_network_services should not fail for port 0");
+        let (rt, handles, _tx, _scroll_tx) =
+            start_network_services(0, "test-psk", shared_state, ctx, true)
+                .expect("start_network_services should not fail for port 0");
         assert!(
             rt.is_none(),
             "grpc_port=0 must not create a NetworkRuntime (compositor-only)"
@@ -3007,8 +3095,9 @@ mod tests {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
         // Use a high ephemeral port unlikely to conflict.
-        let (rt, handles, _tx) = start_network_services(59781, "test-psk", shared_state, ctx, true)
-            .expect("start_network_services should not error for a valid port");
+        let (rt, handles, _tx, _scroll_tx) =
+            start_network_services(59781, "test-psk", shared_state, ctx, true)
+                .expect("start_network_services should not error for a valid port");
         assert!(
             rt.is_some(),
             "non-zero grpc_port must create a NetworkRuntime"
@@ -3054,8 +3143,9 @@ mod tests {
         for _ in 0..2 {
             let shared_state = make_shared_state();
             let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-            let (rt, handles, _tx) = start_network_services(0, "psk", shared_state, ctx, false)
-                .expect("port-0 must not error");
+            let (rt, handles, _tx, _scroll_tx) =
+                start_network_services(0, "psk", shared_state, ctx, false)
+                    .expect("port-0 must not error");
             assert!(rt.is_none());
             assert!(handles.is_empty());
         }
