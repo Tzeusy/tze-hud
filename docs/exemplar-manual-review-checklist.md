@@ -17,7 +17,7 @@ Reviewed: 2026-04-09
 | 8 | [Gauge Widget](#8-gauge-widget) | **done** | Automation batch + manual visual sign-off completed on 2026-04-09 (ultra-minimal track, hover-only readout/label, tuned spacing/colors) |
 | 9 | [Progress Bar](#9-progress-bar) | **automation-pass** | Step + color-sweep batches passed on 2026-04-09; manual visual sign-off pending |
 | 10 | [Status Indicator](#10-status-indicator) | **automation-pass** | Enum/theme/label/validation batches passed on 2026-04-09; manual visual sign-off pending |
-| 11 | [Text Stream Portals](#11-text-stream-portals) | **pre-implementation** | Capability spec ratified (`openspec/specs/text-stream-portals/`); phase-0 raw-tile pilot not yet built. No scripts, no runtime code. |
+| 11 | [Text Stream Portals](#11-text-stream-portals) | **integration-pass** | Phase-0 pilot shipped via epic `hud-t98e`; 13/13 spec requirements covered by integration tests (gen-2 reconciliation, PR #441). Live user-test exemplar script + manual visual sign-off still pending. |
 
 ---
 
@@ -331,23 +331,24 @@ _(to be filled during review)_
 **Type:** Resident raw tile | **Transport:** primary `HudSession` gRPC stream | **Position:** content-layer (below chrome)
 
 **Spec:** `openspec/specs/text-stream-portals/spec.md`
-**Archived change:** `openspec/changes/archive/2026-04-17-text-stream-portals/`
+**Epic:** `hud-t98e` — closeout report in `docs/reports/hud-t98e-text-stream-portals.md`
+**Archived change:** `openspec/changes/archive/2026-04-17-text-stream-portals/` (spec/RFC planning only; implementation tracked under `hud-t98e`)
 **RFC:** 0013 (see `about/legends-and-lore/`)
 
-**Status:** pre-implementation. Doctrine, RFC, and capability spec are ratified; per archived change tasks 4.3, work **stopped before bead generation** pending signoff on the RFC/spec direction. No runtime code, no adapter, no exemplar script exists yet.
+**Status:** integration-pass. Phase-0 raw-tile pilot shipped across `hud-t98e.1` / `.2` / `.3` / `.4` (PRs #427, #429, #432, #435), with follow-up closures `hud-r11x` (PR #437) and `hud-r9u0` (PR #438). Gen-2 reconciliation `hud-fomr` (PR #441) confirmed full 13/13 spec requirement coverage. Live user-test exemplar script and manual visual sign-off are the remaining closeout items.
 
 ### Capability summary
 
 A governed, low-latency **text stream portal** — not a terminal host, not a chat app. Transport-agnostic boundary: generic output streams, bounded viewer input, session identity, and session status metadata. Tmux, chat platforms, and LLM sessions are all valid adapters behind the same contract.
 
-### Phase-0 pilot shape (what the eventual exemplar will exercise)
+### Phase-0 pilot shape (delivered)
 
-- Resident raw-tile pilot composed from existing text, solid-color, image, and hit-region primitives — **no** new dedicated node type.
-- Portal traffic rides the existing primary bidirectional `HudSession` stream — **no** second long-lived portal stream per agent.
-- Content-layer surface rendering below chrome — **no** chrome-hosted affordances or shell-owned portal controls.
-- External adapter authenticates through existing capability grants — **no** implicit local trust, **no** runtime ownership of tmux/process lifecycle.
+- Resident raw-tile pilot composed from existing `SolidColor`, `TextMarkdown`, `StaticImage`, and `HitRegion` primitives — no new dedicated node type.
+- Portal traffic rides the existing primary bidirectional `HudSession` stream — no second long-lived portal stream per agent.
+- Content-layer surface rendering below chrome — no chrome-hosted affordances or shell-owned portal controls.
+- External adapter authenticates through existing capability grants — no implicit local trust, no runtime ownership of tmux/process lifecycle.
 
-### Design Review (pending implementation)
+### Design Review (pending live run)
 
 - [ ] Tile size, viewport bounds, and stack position feel right for peripheral text presence
 - [ ] Output streaming reveal timing feels natural (incremental, not snapshot replace)
@@ -358,25 +359,33 @@ A governed, low-latency **text stream portal** — not a terminal host, not a ch
 - [ ] Safe-mode / freeze visual is indistinguishable from generic queue-pressure state (no portal-specific leakage)
 - [ ] Orphan/disconnect freeze and grace-expiry cleanup match presence-card precedent
 
-### Validation axes (maps to normative spec requirements)
+### Automated coverage (complete)
 
-| Axis | Spec requirement | Observable behavior to verify |
-|------|------------------|-------------------------------|
-| Transport-agnostic | Transport-Agnostic Stream Boundary | Same contract works with ≥2 adapter shapes (e.g. tmux + mock) |
-| Content layer | Content-Layer Portal Surface | Portal renders below chrome; not addressable as chrome element |
-| Raw-tile pilot | Phase-0 Raw-Tile Pilot | Composed of existing node primitives; no terminal-emulator node |
-| Bounded viewport | Bounded Transcript Viewport | Scene-node text stays within TextMarkdown budgets; no full-history mirror |
-| Incremental output | Low-Latency Text Interaction | Output arrives as ordered state-stream updates |
-| Transactional input | Low-Latency Text Interaction | Viewer submit is reliable/ordered, not coalescible |
-| Local-first scroll | Transcript Interaction Contract | Scroll offset updates locally before adapter ack |
-| Coalescing coherence | Coherent Transcript Coalescing | Retained window never collapses to only latest line under backpressure |
-| Redaction | Governance / Privacy / Override | Portal redacts under viewer policy; geometry preserved, transcript suppressed |
+Integration tests in `tests/integration/`:
+
+- `text_stream_portal_surface.rs` — raw-tile composition, bounded viewport, local-first scroll, ambient attention
+- `text_stream_portal_adapter.rs` — transport-agnostic seam, tmux + non-tmux conformance, external adapter isolation
+- `text_stream_portal_coalescing.rs` — retained-window coherence under backpressure
+- `text_stream_portal_governance.rs` — redaction, safe-mode, freeze, orphan path, chrome exclusion
+
+Evidence: `docs/evidence/text-stream-portals/validation-2026-04-16.md`. Spec-to-test requirement matrix: see the closeout report's compliance table.
+
+### Live validation axes (pending operator run)
+
+Integration tests prove structure; these axes still need operator-visible proof during a live HUD run:
+
+| Axis | Spec requirement | What the operator should see |
+|------|------------------|------------------------------|
+| Streaming reveal | Low-Latency Text Interaction | Output arrives as ordered incremental updates, not snapshot replace |
+| Local-first scroll | Transcript Interaction Contract | Scroll offset visibly updates before any adapter ack |
+| Bounded viewport | Bounded Transcript Viewport | Retained window stays within on-screen bounds as transcript grows |
+| Coalescing coherence | Coherent Transcript Coalescing | Under rapid-publish pressure, retained window never collapses to only latest line |
+| Redaction | Governance / Privacy / Override | Portal geometry preserved; transcript content suppressed under viewer policy |
 | Safe mode | Governance / Privacy / Override | Portal updates suspend under safe mode like other content surfaces |
 | Orphan path | Governance / Privacy / Override | Disconnected portal freezes at last coherent state; grace expiry removes it |
 | Ambient attention | Ambient Portal Attention Defaults | Unread backlog does not auto-escalate interruption class |
-| Clock domains | Transport-Agnostic Stream Boundary | Timing metadata uses `_wall_us` / `_mono_us` per clock-domain contract |
 
-### Out of scope for the eventual exemplar
+### Out of scope
 
 - Terminal-emulator rendering (ANSI, cursor positioning, PTY control)
 - Full transcript history storage in the scene graph
@@ -384,16 +393,15 @@ A governed, low-latency **text stream portal** — not a terminal host, not a ch
 - Portal-specific transport RPCs outside the primary session stream
 - Runtime ownership of external process or tmux lifecycle
 
-### Closeout path (when implementation begins)
+### Closeout path
 
-1. Allocate beads for phase-0 pilot (resident raw tile, one adapter, no terminal semantics).
-2. Add `text_stream_portal_exemplar.py` under `.claude/skills/user-test/scripts/` following the `presence_card_exemplar.py` pattern (uses primary `HudSession` stream, emits per-step JSON transcript to `test_results/`).
-3. Update the user-test skill (`.claude/skills/user-test/SKILL.md`) with CLI, phases, and Human Acceptance Criteria.
-4. Run the exemplar live, record PASS/FAIL per validation axis, then move this row to `automation-pass` → `done`.
+1. Author `text_stream_portal_exemplar.py` under `.claude/skills/user-test/scripts/`, following `presence_card_exemplar.py` (uses primary `HudSession` stream, emits per-step JSON transcript to `test_results/`).
+2. Update the user-test skill (`.claude/skills/user-test/SKILL.md`) with CLI, phases, and a Human Acceptance Criteria table once the script exists.
+3. Run the exemplar against the live Windows HUD, record PASS/FAIL per live validation axis above, then move this row to `done`.
 
 ### UX Tweaks
 
-_(none yet — capability is pre-implementation)_
+_(to be filled during live visual review)_
 
 ---
 

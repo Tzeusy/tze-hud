@@ -836,54 +836,58 @@ persistent — `auto_clear_ms=None` on this zone) for phases 1–3.
 
 ## Text Stream Portals Exemplar Scenario
 
-**Status: pre-implementation.** The `text-stream-portals` capability spec
-(`openspec/specs/text-stream-portals/spec.md`) is ratified, but no runtime code,
-adapter, or automation fixture has been allocated yet (see archived change
-`2026-04-17-text-stream-portals`, tasks 4.3 — stopped before bead generation).
-Treat this section as a forward-looking test contract; **do not attempt to run
-a portal exemplar** until a phase-0 pilot lands and scripts are added here.
+**Status: implementation complete, live user-test exemplar pending.** The
+phase-0 raw-tile pilot shipped via epic `hud-t98e` (see
+`docs/reports/hud-t98e-text-stream-portals.md`). All 13 normative requirements
+in `openspec/specs/text-stream-portals/spec.md` are covered by integration
+tests; gen-2 reconciliation (PR #441) confirmed 13/13 coverage. What remains
+is a live user-test exemplar script plus recorded manual visual sign-off.
 
-### What the capability covers
+### Existing automated coverage (do not duplicate)
 
-A governed, low-latency **text stream portal** — not a terminal host, not a
-chat app. The runtime boundary is transport-agnostic: generic output streams,
-bounded viewer input, session identity, and session status metadata. Tmux,
-chat platforms, and LLM sessions are all valid adapters behind the same
-contract.
+Integration tests in `tests/integration/`:
 
-### Phase-0 pilot shape (what the eventual user-test will exercise)
+- `text_stream_portal_surface.rs` — raw-tile pilot composition, bounded
+  viewport, local-first scroll, ambient attention
+- `text_stream_portal_adapter.rs` — transport-agnostic seam, tmux and
+  non-tmux adapter conformance, external adapter isolation
+- `text_stream_portal_coalescing.rs` — retained-window coherence under
+  backpressure
+- `text_stream_portal_governance.rs` — redaction, safe-mode, freeze, orphan
+  path, chrome exclusion
 
-- **Resident raw-tile pilot** — constructed from existing text, solid-color,
+Evidence artifact: `docs/evidence/text-stream-portals/validation-2026-04-16.md`.
+
+### Phase-0 pilot shape (recap)
+
+- **Resident raw-tile pilot** — composed from existing text, solid-color,
   image, and hit-region primitives. No new dedicated node type.
 - **Resident gRPC session** — portal traffic rides the existing primary
   bidirectional `HudSession` stream. No second long-lived portal stream.
 - **Content-layer surface** — portal tile renders below chrome like any other
   content-layer zone. No chrome-hosted portal affordances.
-- **External adapter, authenticated** — local adapter processes must still
-  pass existing capability grants; no implicit local trust.
+- **External adapter, authenticated** — local adapter processes pass through
+  existing capability grants; no implicit local trust.
 
-### Intended validation axes (when scripts exist)
+### What the live exemplar still needs to exercise
 
-Each axis below maps to a normative requirement in
-`openspec/specs/text-stream-portals/spec.md`:
+A `text_stream_portal_exemplar.py` (not yet authored) should drive the
+resident raw-tile pilot against a live HUD — following the same shape as
+`presence_card_exemplar.py` — and produce operator-visible proof for axes
+that integration tests cannot validate alone:
 
-| Axis | Spec requirement | Observable behavior to verify |
-|------|------------------|-------------------------------|
-| Transport-agnostic | Transport-Agnostic Stream Boundary | Same portal contract works with at least two adapter shapes (e.g. tmux + mock) |
-| Content layer | Content-Layer Portal Surface | Portal tile renders below chrome; not addressable as chrome element |
-| Raw-tile pilot | Phase-0 Raw-Tile Pilot | Portal is composed of existing node primitives; no terminal-emulator node |
-| Bounded viewport | Bounded Transcript Viewport | Scene-node text stays within TextMarkdown budgets; full history is not mirrored |
-| Incremental output | Low-Latency Text Interaction | Output arrives as ordered state-stream updates, not snapshot replace |
-| Transactional input | Low-Latency Text Interaction | Viewer submit is reliable/ordered, not coalescible |
-| Local-first scroll | Transcript Interaction Contract | Scroll offset updates locally before adapter ack |
-| Coalescing coherence | Coherent Transcript Coalescing | Retained window never collapses to only latest line under backpressure |
-| Redaction | Governance, Privacy, and Override Compliance | Portal redacts under viewer policy; geometry preserved, transcript suppressed |
+| Axis | Spec requirement | What the operator should see |
+|------|------------------|------------------------------|
+| Streaming reveal | Low-Latency Text Interaction | Output arrives as ordered incremental updates, not snapshot replace |
+| Local-first scroll | Transcript Interaction Contract | Scroll offset visibly updates before any adapter ack |
+| Bounded viewport | Bounded Transcript Viewport | Retained window stays within on-screen bounds as transcript grows |
+| Coalescing coherence | Coherent Transcript Coalescing | Under rapid-publish pressure, retained window never collapses to only latest line |
+| Redaction | Governance, Privacy, and Override Compliance | Portal geometry preserved; transcript content suppressed under viewer policy |
 | Safe mode | Governance, Privacy, and Override Compliance | Portal updates suspend under safe mode like other content surfaces |
 | Orphan path | Governance, Privacy, and Override Compliance | Disconnected portal freezes at last coherent state; grace expiry removes it |
 | Ambient attention | Ambient Portal Attention Defaults | Unread backlog does not auto-escalate interruption class |
-| Clock domains | Transport-Agnostic Stream Boundary | Timing metadata uses `_wall_us` / `_mono_us` per existing clock-domain contract |
 
-### Out of scope for the eventual exemplar
+### Out of scope for the live exemplar
 
 - Terminal-emulator rendering (ANSI, cursor positioning, PTY control)
 - Full transcript history storage in the scene graph
@@ -891,14 +895,16 @@ Each axis below maps to a normative requirement in
 - Portal-specific transport RPCs outside the primary session stream
 - Runtime ownership of external process or tmux lifecycle
 
-### When scripts land
+### When the exemplar script lands
 
-A future `text_stream_portal_exemplar.py` should drive the resident raw-tile
-pilot through the primary `HudSession` stream (like
-`presence_card_exemplar.py`), exercise the axes above, and emit a per-step
-JSON transcript compatible with the existing `test_results/` artifact shape.
-Update this section with CLI, phases, and a Human Acceptance Criteria table
-once the pilot is implemented.
+1. Add `text_stream_portal_exemplar.py` under
+   `.claude/skills/user-test/scripts/`, following `presence_card_exemplar.py`
+   (uses primary `HudSession` stream, emits per-step JSON transcript to
+   `test_results/`).
+2. Replace this section with CLI, phase table, and Human Acceptance Criteria
+   once the script is implemented.
+3. Update `docs/exemplar-manual-review-checklist.md` row 11 with the manual
+   visual sign-off result.
 
 ## Behavior Rules
 
