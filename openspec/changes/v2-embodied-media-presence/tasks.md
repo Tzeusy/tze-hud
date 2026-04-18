@@ -29,13 +29,13 @@
 
 ## 5. Validation and Operations
 
-- [ ] 5.1 Extend validation framework with media/device rehearsal scenes and CI-visible verdicts
-- [ ] 5.2 Define runner strategy and calibration requirements for real-decode and device-profile lanes
-- [ ] 5.3 Add structured observability for media admission, teardown, operator actions, and device-state transitions
-- [ ] 5.4 Define release-readiness gates for v2 media/device/embodied capability claims
+- [ ] 5.1 Extend validation framework with media/device rehearsal scenes, CI-visible verdicts, and the carried-forward v1 baseline scene registry
+- [ ] 5.2 Define runner strategy and calibration requirements for real-decode and device-profile lanes, including standalone benchmark JSON emission and normalized reference-hardware budget gates
+- [ ] 5.3 Add structured observability for media admission, teardown, operator actions, device-state transitions, and replay/soak evidence capture
+- [ ] 5.4 Define release-readiness gates for v2 media/device/embodied capability claims, including the three-agent integration run
 
 ## 6. Planning and Reconciliation
 
 - [ ] 6.1 Produce an end-to-end v2 execution plan with phase gates, dependencies, and explicit non-goals
-- [ ] 6.2 Reconcile v2 specs against doctrine, RFCs, and the current bounded-ingress tranche
+- [ ] 6.2 Reconcile v2 specs against doctrine, RFCs, the current bounded-ingress tranche, and the carried-forward v1 convergence audits
 - [ ] 6.3 Generate a beads graph for the approved v2 program after signoff
