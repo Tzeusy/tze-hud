@@ -67,9 +67,9 @@ The v1 protobuf definitions SHALL be organized into four files under `crates/tze
 - Identity: `SceneIdProto` (16-byte little-endian UUIDv7), `ResourceIdProto` (32-byte BLAKE3 hash)
 - Geometry: `Rect`, `Rgba`
 - Node types: `NodeProto`, `SolidColorNodeProto`, `TextMarkdownNodeProto`, `HitRegionNodeProto`, `StaticImageNodeProto`, `ImageFitModeProto`
-- Mutation types: `MutationProto` (oneof with 9 variants: `CreateTileMutation`, `SetTileRootMutation`, `UpdateNodeContentMutation`, `AddNodeMutation`, `UpdateTileOpacityMutation`, `UpdateTileInputModeMutation`, `PublishToZoneMutation`, `ClearZoneMutation`, `ClearWidgetMutation`)
+- Mutation types: `MutationProto` (oneof with 10 variants: `CreateTileMutation`, `SetTileRootMutation`, `PublishToZoneMutation`, `ClearZoneMutation`, `ClearWidgetMutation`, `UpdateNodeContentMutation`, `AddNodeMutation`, `UpdateTileOpacityMutation`, `UpdateTileInputModeMutation`, `PublishToTileMutation`)
 - Zone types: `ZoneContent`, `ZonePublishToken`, `ZoneDefinitionProto`, `ZoneRegistrySnapshotProto`, `ZonePublishRecordProto`, `NotificationPayload`, `StatusBarPayload`, `GeometryPolicyProto`, `RelativeGeometryPolicy`, `EdgeAnchoredGeometryPolicy`, `RenderingPolicyProto`, `DisplayEdge`, `TextAlignProto`, `ContentionPolicyProto`
-- Widget types: `WidgetDefinitionProto`, `WidgetParameterValueProto`, `WidgetParameterConstraintsProto`, `WidgetInstanceProto`, `WidgetBindingProto`
+- Widget types: `WidgetDefinitionProto`, `WidgetParameterValueProto`, `WidgetParameterConstraintsProto`, `WidgetParameterDeclarationProto`, `WidgetParameterSchemaProto`, `WidgetInstanceProto`, `WidgetBindingProto`, `WidgetBindingMappingProto`, `WidgetSvgLayerProto`, `WidgetPublishRecordProto`
 
 **`events.proto`** (`package tze_hud.protocol.v1`) — RFC 0004-conformant input event types using bytes-encoded IDs and monotonic timestamps. SHALL import `types.proto`. SHALL contain a 19-variant `InputEnvelope` oneof with:
 - Pointer events: `PointerMoveEvent`, `PointerEnterEvent`, `PointerLeaveEvent`, `PointerDownEvent`, `PointerUpEvent`, `ClickEvent`, `PointerCancelEvent`
@@ -150,7 +150,7 @@ Scope: v1-mandatory
 
 #### Scenario: types.proto contains widget types
 - **WHEN** building the v1 protobuf package
-- **THEN** `types.proto` SHALL define `WidgetDefinitionProto`, `WidgetInstanceProto`, `WidgetParameterValueProto`, `WidgetParameterConstraintsProto`, and `WidgetBindingProto` alongside existing zone and geometry types
+- **THEN** `types.proto` SHALL define `WidgetDefinitionProto`, `WidgetInstanceProto`, `WidgetParameterValueProto`, `WidgetParameterConstraintsProto`, `WidgetParameterDeclarationProto`, `WidgetParameterSchemaProto`, `WidgetBindingProto`, `WidgetBindingMappingProto`, `WidgetSvgLayerProto`, and `WidgetPublishRecordProto` alongside existing zone and geometry types
 
 #### Scenario: session.proto contains widget publish messages
 - **WHEN** building the v1 protobuf package
@@ -256,7 +256,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: ClientMessage and ServerMessage Envelopes
-Every client-to-server message on the session stream SHALL be wrapped in a ClientMessage envelope, and every server-to-client message SHALL be wrapped in a ServerMessage envelope. Both envelopes SHALL contain: sequence (per-direction monotonically increasing, starting at 1), timestamp_wall_us (sender wall-clock, advisory only), and a oneof payload. ClientMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-12 (SessionInit=10, SessionResume=11, SessionClose=12), agent operations at 20-38 (MutationBatch=20, LeaseRequest=21, LeaseRenew=22, LeaseRelease=23, SubscriptionChange=24, ZonePublish=25, TelemetryFrame=26, InputFocusRequest=27, InputCaptureRequest=28, InputCaptureRelease=29, SetImePosition=30, Heartbeat=31, CapabilityRequest=32, EmitSceneEvent=33, WidgetAssetRegister=34, WidgetPublish=35, ResourceUploadStart=36, ResourceUploadChunk=37, ResourceUploadComplete=38). ServerMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-15 (SessionEstablished=10, SessionError=11, SessionResumeResult=12, SessionSuspended=13, SessionResumed=14, RuntimeError=15), mutation/lease responses at 20-25 (MutationResult=20, LeaseResponse=21, LeaseStateChange=23, CapabilityNotice=25), scene state at 30-36 (SceneSnapshot=30, SceneDelta=31, Heartbeat=33, EventBatch=34, BackpressureSignal=35, RuntimeTelemetryFrame=36), operational responses at 39-49 (SubscriptionChangeResult=39, ZonePublishResult=40, ResourceUploadAccepted=41, ResourceStored=42, InputFocusResponse=43, InputCaptureResponse=44, EmitSceneEventResult=45, DegradationNotice=46, WidgetPublishResult=47, WidgetAssetRegisterResult=48, ResourceErrorResponse=49). Fields 50-99 in both envelopes SHALL be reserved for post-v1 use.
+Every client-to-server message on the session stream SHALL be wrapped in a ClientMessage envelope, and every server-to-client message SHALL be wrapped in a ServerMessage envelope. Both envelopes SHALL contain: sequence (per-direction monotonically increasing, starting at 1), timestamp_wall_us (sender wall-clock, advisory only), and a oneof payload. ClientMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-12 (SessionInit=10, SessionResume=11, SessionClose=12), agent operations at 20-39 (MutationBatch=20, LeaseRequest=21, LeaseRenew=22, LeaseRelease=23, SubscriptionChange=24, ZonePublish=25, TelemetryFrame=26, InputFocusRequest=27, InputCaptureRequest=28, InputCaptureRelease=29, SetImePosition=30, Heartbeat=31, CapabilityRequest=32, EmitSceneEvent=33, WidgetAssetRegister=34, WidgetPublish=35, ResourceUploadStart=36, ResourceUploadChunk=37, ResourceUploadComplete=38, ListElementsRequest=39). ServerMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-15 (SessionEstablished=10, SessionError=11, SessionResumeResult=12, SessionSuspended=13, SessionResumed=14, RuntimeError=15), mutation/lease responses at 20-25 (MutationResult=20, LeaseResponse=21, LeaseStateChange=23, CapabilityNotice=25), scene state at 30-36 (SceneSnapshot=30, SceneDelta=31, Heartbeat=33, EventBatch=34, BackpressureSignal=35, RuntimeTelemetryFrame=36), operational responses at 39-51 (SubscriptionChangeResult=39, ZonePublishResult=40, ResourceUploadAccepted=41, ResourceStored=42, InputFocusResponse=43, InputCaptureResponse=44, EmitSceneEventResult=45, DegradationNotice=46, WidgetPublishResult=47, WidgetAssetRegisterResult=48, ResourceErrorResponse=49, ListElementsResponse=50, ElementRepositionedEvent=51). Fields 52-99 in both envelopes SHALL be reserved for post-v1 use.
 Source: RFC 0005 §2.2, §9.2; RFC 0011 §3.1, §3.4; session-resource-upload-rfc0011 direction/design
 Scope: v1-mandatory
 
@@ -332,7 +332,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Traffic Class Routing
-Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest, WidgetAssetRegister, ResourceUploadStart, ResourceUploadChunk, ResourceUploadComplete, ResourceUploadAccepted, ResourceStored, ResourceErrorResponse, durable WidgetPublish; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish, ephemeral WidgetPublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (Heartbeat, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The traffic-class distinction between transactional and ephemeral input events is governed by RFC 0004 §8.5 and applies to the InputEvent messages carried in field 34 of ServerMessage.
+Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest, WidgetAssetRegister, ResourceUploadStart, ResourceUploadChunk, ResourceUploadComplete, ResourceUploadAccepted, ResourceStored, ResourceErrorResponse, durable WidgetPublish; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, PointerCancelEvent, KeyDownEvent, KeyUpEvent, CharacterEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish, ephemeral WidgetPublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (Heartbeat, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The traffic-class distinction between transactional and ephemeral input events is governed by RFC 0004 §8.5 and applies to the InputEvent messages carried in field 34 of ServerMessage.
 Source: RFC 0005 §3.1, §3.2, §5.1, RFC 0004 §8.5; session-resource-upload-rfc0011 direction/design
 Scope: v1-mandatory
 
@@ -566,7 +566,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: MCP Bridge Guest Tools (V1)
-The v1 MCP guest tool surface SHALL be restricted to zone-centric operations: publish_to_zone (zone_name, content, ttl_us, merge_key), list_zones (returns zone registry), and list_scene (returns tab names and zone registry only, not full tile topology). Guest tools (publish_to_zone, list_zones, list_scene) MUST be available to any authenticated MCP caller without any lease grant or capability negotiation — these are unconditionally accessible. Resident tools (create_tab, create_tile, set_content, dismiss) MUST be rejected unless the calling agent has been granted the `resident_mcp` capability through the session handshake. Invoking a resident tool without the `resident_mcp` capability SHALL produce a structured JSON-RPC error with error_code CAPABILITY_REQUIRED, a context field identifying the tool, and a hint field containing `{"required_capability": "resident_mcp"}`.
+The v1 MCP guest tool surface SHALL be restricted to zone-centric operations: publish_to_zone (zone_name, content, ttl_us, merge_key), list_zones (returns zone registry), and list_scene (returns tab names and zone registry only, not full tile topology). Guest tools (publish_to_zone, list_zones, list_scene) MUST be available to any authenticated MCP caller without any lease grant or capability negotiation — these are unconditionally accessible. Resident tools (create_tab, create_tile, set_content, dismiss) MUST be rejected unless the calling agent has been granted the `resident_mcp` capability through the session handshake. Invoking a resident tool without the `resident_mcp` capability SHALL produce a structured JSON-RPC error with error_code CAPABILITY_REQUIRED, a context field identifying the tool, and a hint field containing at minimum `{"required_capability": "resident_mcp"}` (additional advisory fields such as `"resolution"` MAY be included).
 Source: RFC 0005 §8.1, §8.3, DR-SP7
 Scope: v1-mandatory
 
@@ -768,12 +768,12 @@ Scope: v1-mandatory
 
 #### Scenario: Missing capability rejected
 - **WHEN** an agent sends WidgetPublish for widget "gauge_01" without the `publish_widget:gauge_01` capability
-- **THEN** the runtime SHALL reject the publish with WidgetPublishResult(accepted=false, error={code=WIDGET_CAPABILITY_MISSING})
+- **THEN** the runtime SHALL reject the publish with WidgetPublishResult(accepted=false, error_code="WIDGET_CAPABILITY_MISSING")
 
 ---
 
 ### Requirement: Widget Publish Result
-WidgetPublishResult SHALL be a ServerMessage payload at field 47. It MUST carry: accepted (bool), widget_name (string), and error (optional structured error with code and message). Error codes: WIDGET_NOT_FOUND, WIDGET_UNKNOWN_PARAMETER, WIDGET_PARAMETER_TYPE_MISMATCH, WIDGET_PARAMETER_INVALID_VALUE, WIDGET_CAPABILITY_MISSING. WidgetPublishResult SHALL only be sent for durable-widget publishes.
+WidgetPublishResult SHALL be a ServerMessage payload at field 47. It MUST carry: accepted (bool), widget_name (string), error_code (string, machine-readable; populated if accepted=false), and error_message (string, human-readable reason; populated if accepted=false). Error codes: WIDGET_NOT_FOUND, WIDGET_UNKNOWN_PARAMETER, WIDGET_PARAMETER_TYPE_MISMATCH, WIDGET_PARAMETER_INVALID_VALUE, WIDGET_CAPABILITY_MISSING. WidgetPublishResult SHALL only be sent for durable-widget publishes.
 Source: widget-system proposal
 Scope: v1-mandatory
 
@@ -783,7 +783,7 @@ Scope: v1-mandatory
 
 #### Scenario: Rejected with error code
 - **WHEN** a durable widget publish includes a parameter name not declared in the widget's schema
-- **THEN** the runtime SHALL send WidgetPublishResult(accepted=false, widget_name=<name>, error={code=WIDGET_UNKNOWN_PARAMETER, message="parameter '<param_name>' is not declared in widget '<widget_name>' schema"})
+- **THEN** the runtime SHALL send WidgetPublishResult(accepted=false, widget_name=<name>, error_code="WIDGET_UNKNOWN_PARAMETER", error_message="parameter '<param_name>' is not declared in widget '<widget_name>' schema")
 
 #### Scenario: No result for ephemeral
 - **WHEN** an agent publishes to an ephemeral widget
