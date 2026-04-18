@@ -1371,7 +1371,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="SECONDS",
         help=(
-            "Override per-profile duration in seconds "
+            "Override duration in seconds for ALL profiles including burst "
             "(default: per-profile — idle/low/medium/high=30s, burst=10s)"
         ),
     )
