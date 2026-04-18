@@ -384,11 +384,7 @@ fn reset_position_clears_user_override_and_restores_agent_bounds() {
         width_pct: 0.20,
         height_pct: 0.15,
     };
-    let agent_requested = rect_to_relative_geometry_policy(
-        element_bounds(),
-        DISPLAY_W,
-        DISPLAY_H,
-    );
+    let agent_requested = rect_to_relative_geometry_policy(element_bounds(), DISPLAY_W, DISPLAY_H);
 
     let mut store = ElementStore::default();
     store.entries.insert(
