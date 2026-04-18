@@ -15,7 +15,7 @@ use tze_hud_runtime::{
     hit_regions_enabled, is_tile_redacted,
 };
 use tze_hud_scene::{
-    Capability, DeliveryPolicy, MAX_MARKDOWN_BYTES, MessageClass, TimestampValidationInput,
+    Capability, DeliveryPolicy, MAX_MARKDOWN_BYTES, MessageClass, MonoUs, TimestampValidationInput,
     TimingError, TimingHints, WallUs, ZONE_TILE_Z_MIN,
     graph::{MAX_NODES_PER_TILE, SceneGraph},
     lease::LeaseState,
@@ -1073,4 +1073,321 @@ fn portal_typing_indicator_timing_profile_is_ephemeral_realtime() {
     let err = tze_hud_scene::validate_timing_hints(&transactional, &ctx)
         .expect_err("drop-if-late must reject transactional message class");
     assert_eq!(err, TimingError::InvalidDeliveryPolicy);
+}
+
+// ─── Scroll-offset seam tests (hud-w5ih) ─────────────────────────────────────
+//
+// These tests cover the Transcript Interaction Contract and Bounded Transcript
+// Viewport requirements from openspec/specs/text-stream-portals/spec.md without
+// requiring live pointer events (hud-dih4 pointer capture not needed). They drive
+// scroll state directly via InputProcessor::process_scroll_event and
+// set_tile_scroll_offset_local, bypassing the OS input path.
+
+/// Direct `process_scroll_event` call updates the portal tile scroll offset
+/// local-first, without waiting for any adapter response.
+///
+/// AC: local-first scroll offset updates before adapter ack.
+#[test]
+fn portal_scroll_updates_local_first_via_input_processor() {
+    use tze_hud_input::{InputProcessor, ScrollEvent};
+
+    let namespace = "portal-scroll-seam";
+    let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let tab_id = scene.create_tab("Main", 0).expect("tab create");
+    scene.active_tab = Some(tab_id);
+    let lease_id = scene.grant_lease(
+        namespace,
+        120_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let create = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: namespace.to_string(),
+            lease_id,
+            bounds: portal_bounds(true),
+            z_order: PORTAL_Z_ORDER,
+        }],
+    ));
+    assert!(create.applied);
+    let tile_id = create.created_ids[0];
+    let tile_bounds = portal_bounds(true);
+
+    // Register a scroll config so the tile is scrollable.
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: Some(EXPANDED_W),
+                content_height: Some(EXPANDED_H * 4.0),
+            },
+        )
+        .expect("register scroll config");
+
+    let mut input_processor = InputProcessor::new();
+
+    // Fire a scroll event whose (x, y) hits inside the expanded portal tile.
+    // Use the tile's center as the hit point so hit-test resolves to the tile.
+    let hit_x = tile_bounds.x + tile_bounds.width / 2.0;
+    let hit_y = tile_bounds.y + tile_bounds.height / 2.0;
+    let delta_y = 60.0_f32;
+
+    let changed_event = input_processor.process_scroll_event(
+        &ScrollEvent {
+            x: hit_x,
+            y: hit_y,
+            delta_x: 0.0,
+            delta_y,
+        },
+        &mut scene,
+    );
+
+    // The scroll must register on the tile.
+    assert!(
+        changed_event.is_some(),
+        "process_scroll_event must return Some for a scrollable portal tile hit"
+    );
+    let ev = changed_event.unwrap();
+    assert_eq!(
+        ev.tile_id, tile_id,
+        "changed event must reference the portal tile"
+    );
+    assert!(
+        (ev.offset_y - delta_y).abs() < f32::EPSILON,
+        "offset_y must equal delta"
+    );
+
+    // The scene's local offset must be updated synchronously (local-first).
+    let (sx, sy) = scene.tile_scroll_offset_local(tile_id);
+    assert!(
+        (sx).abs() < f32::EPSILON,
+        "x offset must be zero (axis-locked)"
+    );
+    assert!(
+        (sy - delta_y).abs() < f32::EPSILON,
+        "scene scroll offset must equal delta after local-first update; got sy={sy}"
+    );
+}
+
+/// Multiple scroll events for the same tile coalesce to the latest offset under
+/// backpressure. The currently-visible scroll window is preserved (not clobbered
+/// to zero).
+///
+/// AC: Coherent Transcript Coalescing requirement — coalescing under backpressure
+/// preserves the currently-visible scroll window.
+#[test]
+fn portal_scroll_coalescing_preserves_visible_window() {
+    // The coalescing pipeline uses `tze_hud_input::envelope::InputEnvelope`
+    // (the full multi-variant pipeline type), distinct from the agent-facing
+    // `tze_hud_input::events::InputEnvelope` which carries only pointer events.
+    use tze_hud_input::FrameCoalescer;
+    use tze_hud_input::envelope::{InputEnvelope as PipelineEnvelope, ScrollOffsetChangedData};
+
+    let tile_id = SceneId::new();
+    let mut coalescer = FrameCoalescer::default();
+
+    // Simulate several scroll events arriving quickly for the same tile.
+    // Only the LAST offset must survive coalescing.
+    let offsets: &[f32] = &[20.0, 50.0, 90.0, 130.0, 170.0];
+    for (i, &oy) in offsets.iter().enumerate() {
+        coalescer.push(PipelineEnvelope::ScrollOffsetChanged(
+            ScrollOffsetChangedData {
+                tile_id,
+                timestamp_mono_us: MonoUs(i as u64 * 1_000),
+                offset_x: 0.0,
+                offset_y: oy,
+            },
+        ));
+    }
+
+    let events = coalescer.into_events();
+    let scroll_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, PipelineEnvelope::ScrollOffsetChanged(d) if d.tile_id == tile_id))
+        .collect();
+
+    assert_eq!(
+        scroll_events.len(),
+        1,
+        "FrameCoalescer must coalesce multiple scroll events into one"
+    );
+    if let PipelineEnvelope::ScrollOffsetChanged(d) = scroll_events[0] {
+        assert!(
+            (d.offset_y - 170.0).abs() < f32::EPSILON,
+            "coalesced scroll must carry the latest (largest) offset; got {}",
+            d.offset_y
+        );
+    }
+}
+
+/// Scroll offset is clamped to the retained transcript window; the viewer
+/// cannot scroll past the content boundary registered in `TileScrollConfig`.
+///
+/// AC: Bounded Transcript Viewport — runtime limits scroll-offset range.
+#[test]
+fn portal_scroll_offset_clamped_to_content_boundary() {
+    use tze_hud_input::{InputProcessor, ScrollEvent};
+
+    let namespace = "portal-scroll-clamp";
+    let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let tab_id = scene.create_tab("Main", 0).expect("tab create");
+    scene.active_tab = Some(tab_id);
+    let lease_id = scene.grant_lease(
+        namespace,
+        120_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let create = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: namespace.to_string(),
+            lease_id,
+            bounds: portal_bounds(true),
+            z_order: PORTAL_Z_ORDER,
+        }],
+    ));
+    assert!(create.applied);
+    let tile_id = create.created_ids[0];
+    let tile_bounds = portal_bounds(true);
+
+    let content_height = 300.0_f32;
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: Some(EXPANDED_W),
+                content_height: Some(content_height),
+            },
+        )
+        .expect("register scroll config");
+
+    let mut input_processor = InputProcessor::new();
+
+    let hit_x = tile_bounds.x + tile_bounds.width / 2.0;
+    let hit_y = tile_bounds.y + tile_bounds.height / 2.0;
+
+    // Scroll far beyond the content boundary.
+    let huge_delta = 9999.0_f32;
+    let ev = input_processor.process_scroll_event(
+        &ScrollEvent {
+            x: hit_x,
+            y: hit_y,
+            delta_x: 0.0,
+            delta_y: huge_delta,
+        },
+        &mut scene,
+    );
+    assert!(ev.is_some(), "scroll event must be accepted");
+    let ev = ev.unwrap();
+    assert!(
+        ev.offset_y <= content_height,
+        "scroll offset must be clamped to content_height={content_height}; got {}",
+        ev.offset_y
+    );
+
+    let (_, sy) = scene.tile_scroll_offset_local(tile_id);
+    assert!(
+        sy <= content_height,
+        "scene scroll_y must be clamped to {content_height}; got {sy}"
+    );
+}
+
+/// Adapter append (content update) while user holds a non-zero scroll offset
+/// preserves the user's scroll position (not reset to 0).
+///
+/// AC: Coherent Transcript Coalescing — adapter continues publishing at the
+/// tail while viewer stays at their chosen offset.
+#[test]
+fn portal_adapter_append_preserves_user_scroll_position() {
+    let namespace = "portal-append-preserves-scroll";
+    let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let tab_id = scene.create_tab("Main", 0).expect("tab create");
+    scene.active_tab = Some(tab_id);
+    let lease_id = scene.grant_lease(
+        namespace,
+        120_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let create = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: namespace.to_string(),
+            lease_id,
+            bounds: portal_bounds(true),
+            z_order: PORTAL_Z_ORDER,
+        }],
+    ));
+    assert!(create.applied);
+    let tile_id = create.created_ids[0];
+
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: Some(EXPANDED_W),
+                content_height: Some(EXPANDED_H * 5.0),
+            },
+        )
+        .expect("register scroll config");
+
+    // User scrolled to a mid-transcript position.
+    let user_scroll_y = 200.0_f32;
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, user_scroll_y)
+        .expect("set user scroll offset");
+
+    // Simulate an adapter append: update the tile content (SetTileRoot).
+    let root = Node {
+        id: SceneId::new(),
+        children: Vec::new(),
+        data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
+            color: tze_hud_scene::Rgba::new(0.08, 0.10, 0.13, 0.92),
+            bounds: Rect::new(0.0, 0.0, EXPANDED_W, EXPANDED_H),
+            radius: None,
+        }),
+    };
+    let transcript = Node {
+        id: SceneId::new(),
+        children: Vec::new(),
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            content: "new tail content appended by adapter".to_string(),
+            bounds: Rect::new(12.0, 44.0, EXPANDED_W - 24.0, EXPANDED_H - 108.0),
+            font_size_px: 13.0,
+            font_family: FontFamily::SystemMonospace,
+            color: tze_hud_scene::Rgba::new(0.90, 0.94, 1.0, 0.98),
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+        }),
+    };
+    let append = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        root_batch_for_tile(tile_id, root, vec![transcript]),
+    ));
+    assert!(append.applied, "adapter append must apply");
+
+    // Scroll offset must be unchanged — the MutationBatch path does NOT
+    // reset local-first scroll state.
+    let (sx, sy) = scene.tile_scroll_offset_local(tile_id);
+    assert!(
+        (sx).abs() < f32::EPSILON,
+        "x offset must remain 0 after adapter append"
+    );
+    assert!(
+        (sy - user_scroll_y).abs() < f32::EPSILON,
+        "user scroll_y must be preserved after adapter append; expected {user_scroll_y} got {sy}"
+    );
 }

@@ -2361,7 +2361,13 @@ impl Compositor {
         // ── TextMarkdownNode tiles ────────────────────────────────────────────
         for tile in &scene.visible_tiles() {
             if let Some(root_id) = tile.root_node {
-                self.collect_text_items_from_node(root_id, tile, scene, &mut items);
+                // Compute scroll offset once per tile and pass it down so text
+                // glyph positions track the scrolled content (Bounded Transcript
+                // Viewport requirement — hud-w5ih).
+                let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
+                self.collect_text_items_from_node(
+                    root_id, tile, scene, scroll_x, scroll_y, &mut items,
+                );
             }
         }
 
@@ -3358,6 +3364,8 @@ impl Compositor {
         node_id: SceneId,
         tile: &Tile,
         scene: &SceneGraph,
+        scroll_x: f32,
+        scroll_y: f32,
         items: &mut Vec<TextItem>,
     ) {
         let node = match scene.nodes.get(&node_id) {
@@ -3366,15 +3374,18 @@ impl Compositor {
         };
 
         if let NodeData::TextMarkdown(tm) = &node.data {
+            // Subtract scroll offset so text glyphs move with the scrolled
+            // content — matches the geometry pass in `render_node` which already
+            // applies `tile.bounds.x - scroll_x` / `tile.bounds.y - scroll_y`.
             items.push(TextItem::from_text_markdown_node(
                 tm,
-                tile.bounds.x,
-                tile.bounds.y,
+                tile.bounds.x - scroll_x,
+                tile.bounds.y - scroll_y,
             ));
         }
 
         for child_id in &node.children {
-            self.collect_text_items_from_node(*child_id, tile, scene, items);
+            self.collect_text_items_from_node(*child_id, tile, scene, scroll_x, scroll_y, items);
         }
     }
 
@@ -13378,5 +13389,223 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&svg_path);
+    }
+
+    // ─── Scroll-offset text rendering (hud-w5ih) ────────────────────────────
+
+    /// `collect_text_items` applies the tile scroll offset to `TextItem` pixel
+    /// positions so text glyphs track the scrolled content.
+    ///
+    /// Without the fix, `collect_text_items_from_node` passed bare
+    /// `tile.bounds.x`/`tile.bounds.y` to `TextItem::from_text_markdown_node`,
+    /// leaving text anchored at its original position while the geometry quads
+    /// moved with the scroll. This test pins the contract: a text node at
+    /// `(node_x, node_y)` in a tile scrolled by `(scroll_x, scroll_y)` must
+    /// produce a `TextItem` whose `pixel_x`/`pixel_y` subtract the scroll offset.
+    ///
+    /// Spec refs: hud-w5ih Bounded Transcript Viewport requirement; RFC 0013
+    /// Transcript Interaction Contract (local-first scroll).
+    #[tokio::test]
+    async fn test_collect_text_items_applies_tile_scroll_offset() {
+        // This test needs no GPU — `collect_text_items` is a pure CPU path.
+        // We construct a Compositor without a surface render call.
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(720, 360).await);
+
+        let mut scene = SceneGraph::new(720.0, 360.0);
+        let tab_id = scene.create_tab("test", 0).unwrap();
+        let lease_id = scene.grant_lease("scroll-test", 120_000, vec![]);
+
+        // Place a tile at (100, 50).
+        let tile_x = 100.0_f32;
+        let tile_y = 50.0_f32;
+        let tile_w = 400.0_f32;
+        let tile_h = 200.0_f32;
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "scroll-test",
+                lease_id,
+                Rect::new(tile_x, tile_y, tile_w, tile_h),
+                1,
+            )
+            .unwrap();
+
+        // Register a scroll config so scroll offsets are valid on this tile.
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                tze_hud_scene::types::TileScrollConfig {
+                    scrollable_x: false,
+                    scrollable_y: true,
+                    content_width: None,
+                    content_height: Some(600.0),
+                },
+            )
+            .unwrap();
+
+        // Set a 80px vertical scroll offset (local-first, no agent roundtrip).
+        let scroll_y = 80.0_f32;
+        scene
+            .set_tile_scroll_offset_local(tile_id, 0.0, scroll_y)
+            .unwrap();
+
+        // Place a TextMarkdown node at tile-local (10, 20).
+        let node_x = 10.0_f32;
+        let node_y = 20.0_f32;
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "scroll test line".to_string(),
+                bounds: Rect::new(node_x, node_y, 300.0, 24.0),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemMonospace,
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        };
+        scene.set_tile_root(tile_id, node).unwrap();
+
+        // Collect text items with scroll_y=80 applied — the path under test.
+        let items_scrolled = compositor.collect_text_items(&scene, 720.0, 360.0);
+        assert_eq!(
+            items_scrolled.len(),
+            1,
+            "expected one TextItem for the scroll tile"
+        );
+        let scrolled_item = &items_scrolled[0];
+        assert_eq!(
+            scrolled_item.text, "scroll test line",
+            "TextItem content must match the node"
+        );
+
+        // Now create an identical scene WITHOUT scroll offset so we can
+        // compare pixel_y values directly. Both tiles have the same bounds and
+        // the same node bounds, so margin_y is identical in both — subtracting
+        // yields exactly scroll_y.
+        //
+        //   pixel_y_scrolled = (tile_y - scroll_y) + node_y + margin_y
+        //   pixel_y_baseline =  tile_y             + node_y + margin_y
+        //   diff             =  scroll_y  (margin cancels)
+        let mut scene_baseline = SceneGraph::new(720.0, 360.0);
+        let tab2 = scene_baseline.create_tab("test", 0).unwrap();
+        let lease2 = scene_baseline.grant_lease("baseline", 120_000, vec![]);
+        let tile_id2 = scene_baseline
+            .create_tile(
+                tab2,
+                "baseline",
+                lease2,
+                Rect::new(tile_x, tile_y, tile_w, tile_h),
+                1,
+            )
+            .unwrap();
+        // No scroll offset registered — offset defaults to (0, 0).
+        let baseline_node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "scroll test line".to_string(),
+                bounds: Rect::new(node_x, node_y, 300.0, 24.0),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemMonospace,
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        };
+        scene_baseline
+            .set_tile_root(tile_id2, baseline_node)
+            .unwrap();
+        let items_baseline = compositor.collect_text_items(&scene_baseline, 720.0, 360.0);
+        assert_eq!(
+            items_baseline.len(),
+            1,
+            "baseline must also produce one TextItem"
+        );
+        let baseline_item = &items_baseline[0];
+
+        // Verify that the scrolled item is positioned exactly scroll_y pixels
+        // above the baseline item (margin cancels between identical bounds).
+        // Use 0.01 tolerance — f32 precision at values ~80.0 is ~9.5e-6, larger
+        // than f32::EPSILON (1.19e-7), and intermediate margin arithmetic may
+        // accumulate sub-ULP error. 0.01px is tight enough to catch wrong offset
+        // but not fragile against f32 rounding. Matches existing renderer test
+        // convention (see position comparisons at < 0.5 and color deltas at <
+        // 0.01 throughout this module).
+        let actual_shift = baseline_item.pixel_y - scrolled_item.pixel_y;
+        assert!(
+            (actual_shift - scroll_y).abs() < 0.01,
+            "scroll shift ({actual_shift}) must equal scroll_y ({scroll_y}); \
+             baseline_y={}, scrolled_y={}",
+            baseline_item.pixel_y,
+            scrolled_item.pixel_y
+        );
+
+        // Directional sanity: scrolled item must be above baseline.
+        assert!(
+            scrolled_item.pixel_y < baseline_item.pixel_y,
+            "scrolled text ({}) must be above unscrolled text ({})",
+            scrolled_item.pixel_y,
+            baseline_item.pixel_y
+        );
+    }
+
+    /// `collect_text_items` does NOT shift text for tiles with zero scroll offset.
+    ///
+    /// Regression guard: ensuring the fix is additive (non-scrolled tiles
+    /// are unaffected).
+    #[tokio::test]
+    async fn test_collect_text_items_zero_scroll_unchanged() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(720, 360).await);
+
+        let mut scene = SceneGraph::new(720.0, 360.0);
+        let tab_id = scene.create_tab("test", 0).unwrap();
+        let lease_id = scene.grant_lease("no-scroll-test", 120_000, vec![]);
+
+        let tile_x = 50.0_f32;
+        let tile_y = 30.0_f32;
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "no-scroll-test",
+                lease_id,
+                Rect::new(tile_x, tile_y, 200.0, 100.0),
+                1,
+            )
+            .unwrap();
+
+        let node_x = 5.0_f32;
+        let node_y = 10.0_f32;
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "no-scroll baseline".to_string(),
+                bounds: Rect::new(node_x, node_y, 180.0, 20.0),
+                font_size_px: 12.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        };
+        scene.set_tile_root(tile_id, node).unwrap();
+        // No scroll offset registered or set — tile_scroll_offset_local returns (0, 0).
+
+        let items = compositor.collect_text_items(&scene, 720.0, 360.0);
+        assert_eq!(items.len(), 1, "one TextItem for the non-scrolled tile");
+
+        let item = &items[0];
+        // pixel_y must be >= tile_y + node_y (the raw sum before margin).
+        // The margin is positive, so pixel_y >= tile_y + node_y always holds.
+        assert!(
+            item.pixel_y >= tile_y + node_y,
+            "non-scrolled text pixel_y ({}) must be >= tile_y ({tile_y}) + node_y ({node_y})",
+            item.pixel_y
+        );
     }
 }
