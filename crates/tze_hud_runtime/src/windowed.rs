@@ -137,12 +137,69 @@ fn zone_hit_regions_to_overlay_regions(scene: &SceneGraph) -> Vec<HitRegion> {
         .collect()
 }
 
+/// Collect overlay capture regions from content-layer tiles that contain at
+/// least one `HitRegionNode` with `accepts_pointer = true`.
+///
+/// In overlay mode, the OS routes all pointer events to the desktop unless the
+/// window has set `cursor_hittest(true)`.  We flip to capture only when the
+/// cursor is inside a known interactive region.  Zone-owned affordances are
+/// covered by `zone_hit_regions_to_overlay_regions`; this function handles
+/// agent-owned content tiles that carry a `HitRegionNode`.
+///
+/// **Granularity**: we use the tile's display-space bounding box as the OS
+/// capture region (not individual node bounds).  The OS capture decision must be
+/// made before the event is dispatched, so a coarser region is correct here.
+/// Precise hit-testing against individual `HitRegionNode` bounds still happens
+/// in Stage 2 (`crates/tze_hud_input/src/hit_test.rs`) after the event arrives.
+///
+/// Tiles with `InputMode::Passthrough` are excluded — they are transparent by
+/// design and must not block underlying desktop events.
+fn content_tile_hit_regions_from_scene(scene: &SceneGraph) -> Vec<HitRegion> {
+    let mut regions = Vec::new();
+    for tile in scene.tiles.values() {
+        // Passthrough tiles intentionally let events fall through to the desktop.
+        if tile.input_mode == tze_hud_scene::InputMode::Passthrough {
+            continue;
+        }
+        // Only register a capture region if the tile tree has at least one
+        // HitRegionNode with accepts_pointer=true.
+        if let Some(root_id) = tile.root_node {
+            if tile_has_pointer_hit_region(scene, root_id) {
+                regions.push(HitRegion::new(
+                    tile.bounds.x,
+                    tile.bounds.y,
+                    tile.bounds.width,
+                    tile.bounds.height,
+                ));
+            }
+        }
+    }
+    regions
+}
+
+/// Returns `true` if the node subtree rooted at `node_id` contains at least
+/// one `HitRegionNode` with `accepts_pointer = true`.
+fn tile_has_pointer_hit_region(scene: &SceneGraph, node_id: tze_hud_scene::SceneId) -> bool {
+    let Some(node) = scene.nodes.get(&node_id) else {
+        return false;
+    };
+    if let tze_hud_scene::NodeData::HitRegion(hr) = &node.data {
+        if hr.accepts_pointer {
+            return true;
+        }
+    }
+    node.children
+        .iter()
+        .any(|&child_id| tile_has_pointer_hit_region(scene, child_id))
+}
+
 fn combined_overlay_hit_regions(
     static_regions: &[HitRegion],
     scene: &SceneGraph,
 ) -> Vec<HitRegion> {
     let mut regions = static_regions.to_vec();
     regions.extend(zone_hit_regions_to_overlay_regions(scene));
+    regions.extend(content_tile_hit_regions_from_scene(scene));
     regions
 }
 
@@ -2470,6 +2527,190 @@ mod tests {
             combined[1],
             HitRegion::new(100.0, 200.0, 20.0, 20.0),
             "zone hit region must be exposed to overlay click-capture"
+        );
+    }
+
+    // ── Content-layer tile HitRegion capture ─────────────────────────────
+
+    /// Helper: build a scene with a single tile that has a HitRegionNode child.
+    fn scene_with_capture_tile() -> (SceneGraph, tze_hud_scene::SceneId) {
+        use tze_hud_scene::{Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId};
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(300.0, 400.0, 600.0, 200.0),
+                1,
+            )
+            .unwrap();
+        let node_id = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 200.0, 40.0),
+                        interaction_id: "portal-submit".to_string(),
+                        accepts_pointer: true,
+                        accepts_focus: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+        (scene, tile_id)
+    }
+
+    /// A content tile with a pointer HitRegionNode must appear in the overlay
+    /// capture region set so the OS delivers pointer events to the window rather
+    /// than routing them to the desktop.
+    ///
+    /// Spec §Overlay click-through (line 181): events outside active hit-regions
+    /// pass through to the desktop. The tile's display-space bounds represent the
+    /// coarsest valid capture region; precise node hit-testing happens in Stage 2.
+    #[test]
+    fn content_tile_with_hit_region_node_registers_capture_region() {
+        let (scene, tile_id) = scene_with_capture_tile();
+        let tile_bounds = scene.tiles[&tile_id].bounds;
+
+        let regions = content_tile_hit_regions_from_scene(&scene);
+
+        assert_eq!(
+            regions.len(),
+            1,
+            "exactly one capture region for one capture-mode tile with HitRegionNode"
+        );
+        assert_eq!(
+            regions[0],
+            HitRegion::new(
+                tile_bounds.x,
+                tile_bounds.y,
+                tile_bounds.width,
+                tile_bounds.height
+            ),
+            "capture region must match the tile's display-space bounds"
+        );
+    }
+
+    /// A tile with `input_mode == Passthrough` must NOT generate a capture
+    /// region, even if it has HitRegionNodes.  Passthrough tiles are transparent
+    /// by design and must let desktop events fall through.
+    #[test]
+    fn passthrough_tile_with_hit_region_does_not_register_capture_region() {
+        use tze_hud_scene::{Capability, HitRegionNode, InputMode, Node, NodeData, Rect, SceneId};
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("overlay", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "overlay",
+                lease_id,
+                Rect::new(0.0, 0.0, 300.0, 300.0),
+                1,
+            )
+            .unwrap();
+        // Explicitly set input_mode to Passthrough.
+        scene.tiles.get_mut(&tile_id).unwrap().input_mode = InputMode::Passthrough;
+        let node_id = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
+                        interaction_id: "passthrough-btn".to_string(),
+                        accepts_pointer: true,
+                        accepts_focus: false,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        let regions = content_tile_hit_regions_from_scene(&scene);
+        assert!(
+            regions.is_empty(),
+            "passthrough tile must not register a capture region"
+        );
+    }
+
+    /// A tile whose root node has `accepts_pointer = false` on its only
+    /// HitRegionNode must NOT generate a capture region.
+    #[test]
+    fn tile_with_accepts_pointer_false_does_not_register_capture_region() {
+        use tze_hud_scene::{Capability, HitRegionNode, Node, NodeData, Rect, SceneId};
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 100.0),
+                1,
+            )
+            .unwrap();
+        let node_id = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                        interaction_id: "focus-only".to_string(),
+                        accepts_pointer: false, // focus-only, not pointer
+                        accepts_focus: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        let regions = content_tile_hit_regions_from_scene(&scene);
+        assert!(
+            regions.is_empty(),
+            "tile with accepts_pointer=false node must not register a capture region"
+        );
+    }
+
+    /// `combined_overlay_hit_regions` must merge static, zone, and content-tile
+    /// capture regions into one flat list.
+    #[test]
+    fn combined_overlay_hit_regions_includes_content_tile_regions() {
+        let (scene, tile_id) = scene_with_capture_tile();
+        let tile_bounds = scene.tiles[&tile_id].bounds;
+
+        let static_regions = vec![HitRegion::new(10.0, 10.0, 50.0, 50.0)];
+        let combined = combined_overlay_hit_regions(&static_regions, &scene);
+
+        // static (1) + zone (0, none in this scene) + content tile (1)
+        assert_eq!(
+            combined.len(),
+            2,
+            "static + content-tile capture regions expected"
+        );
+        assert_eq!(combined[0], static_regions[0], "static region preserved");
+        assert_eq!(
+            combined[1],
+            HitRegion::new(
+                tile_bounds.x,
+                tile_bounds.y,
+                tile_bounds.width,
+                tile_bounds.height
+            ),
+            "content-tile capture region must cover tile display-space bounds"
         );
     }
 
