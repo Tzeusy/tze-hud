@@ -42,10 +42,6 @@ Scope: v1-mandatory
 - **WHEN** an agent requests a tile z-order value exceeding all other tiles
 - **THEN** the tile renders below the chrome layer
 
-#### Scenario: Text stream portal identity excluded from chrome
-- **WHEN** one or more text stream portals are active
-- **THEN** the shell status area MAY expose aggregate system health only and SHALL NOT expose portal-specific identities, transcript previews, or agent-owned controls
-
 ### Requirement: Text Stream Portals Remain Outside Chrome
 Text stream portal identity, transcript state, and interaction affordances SHALL remain outside the chrome layer unless a future shell-specific capability explicitly defines a runtime-owned portal shell surface. The current system shell MUST NOT expose agent-specific portal identities or transcript state.
 Source: change text-stream-portals
