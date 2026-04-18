@@ -662,7 +662,9 @@ class _BucketAccumulator:
     Each request completion records its latency (ms) and outcome into the
     bucket keyed by ``int(completed_at - profile_wall_start)``.  After the
     profile finishes, ``to_time_series()`` converts every bucket into a
-    dict entry with p50/p95/p99 latency percentiles and request counts.
+    spec-compliant dict entry with the exact field names required by the
+    mcp-stress-testing spec (ts, latency_p50_ms, latency_p99_ms,
+    reqs_in_interval, errors_in_interval, host_cpu_pct, host_private_mem_mb).
 
     Thread-safe: ``record()`` acquires a lock, so it is safe to call from
     concurrent executor threads.
@@ -687,18 +689,28 @@ class _BucketAccumulator:
             else:
                 bucket["failures"] += 1
 
-    def to_time_series(self) -> list[dict[str, Any]]:
+    def to_time_series(
+        self,
+        profile_wall_start_epoch: float = 0.0,
+        telemetry_samples: list | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Return a sorted list of per-second time-series entries.
 
-        Each entry contains:
-          wall_t          - bucket start offset in seconds from profile start
-          requests_sent   - total requests that completed in this second
-          successes       - count of successful requests
-          failures        - count of failed requests
-          p50_ms          - p50 latency (NaN when no successful requests)
-          p95_ms          - p95 latency
-          p99_ms          - p99 latency
+        Field names match the spec exactly:
+          ts                  - unix epoch float for the start of this bucket
+          latency_p50_ms      - p50 latency (NaN when no successful requests)
+          latency_p99_ms      - p99 latency
+          reqs_in_interval    - total requests that completed in this second
+          errors_in_interval  - count of failed requests
+          host_cpu_pct        - CPU% from telemetry for this second (or null)
+          host_private_mem_mb - private memory MB from telemetry (or null)
+
+        The p95 percentile is kept as an extra field for diagnostics.
+        ``profile_wall_start_epoch`` is the wall-clock time.time() at which the
+        profile started (used to compute ``ts`` from the monotonic bucket index).
+        ``telemetry_samples`` is the list of dicts from TelemetryThread.to_dict_list();
+        entries are matched to buckets by nearest-neighbor on wall_ts.
         """
         with self._lock:
             # Deep-copy latency lists inside the lock so concurrent record()
@@ -712,19 +724,33 @@ class _BucketAccumulator:
                 for idx, b in self._buckets.items()
             }
 
+        # Build a quick lookup: bucket_second_idx -> telemetry sample (closest match)
+        # telemetry_samples are dicts with "wall_ts" (absolute epoch float).
+        # We map them to bucket indices via round(sample.wall_ts - profile_wall_start_epoch).
+        telem_by_bucket: dict[int, dict] = {}
+        if telemetry_samples and profile_wall_start_epoch > 0:
+            for s in telemetry_samples:
+                wall_ts = s.get("wall_ts")
+                if wall_ts is not None:
+                    bucket_idx = int(round(wall_ts - profile_wall_start_epoch))
+                    if bucket_idx not in telem_by_bucket:
+                        telem_by_bucket[bucket_idx] = s
+
         entries: list[dict[str, Any]] = []
         for idx in sorted(snapshot.keys()):
             b = snapshot[idx]
             lats = sorted(b["latencies"])
+            ts = profile_wall_start_epoch + idx if profile_wall_start_epoch > 0 else float(idx)
+            telem = telem_by_bucket.get(idx)
             entries.append(
                 {
-                    "wall_t": float(idx),
-                    "requests_sent": b["successes"] + b["failures"],
-                    "successes": b["successes"],
-                    "failures": b["failures"],
-                    "p50_ms": percentile(lats, 50),
-                    "p95_ms": percentile(lats, 95),
-                    "p99_ms": percentile(lats, 99),
+                    "ts": ts,
+                    "latency_p50_ms": percentile(lats, 50),
+                    "latency_p99_ms": percentile(lats, 99),
+                    "reqs_in_interval": b["successes"] + b["failures"],
+                    "errors_in_interval": b["failures"],
+                    "host_cpu_pct": telem.get("cpu_pct") if telem else None,
+                    "host_private_mem_mb": telem.get("private_mb") if telem else None,
                 }
             )
         return entries
@@ -1165,7 +1191,13 @@ def run_profile(
         result.telemetry_samples = telem.to_dict_list()
         result.telemetry_avg_cpu_pct = telem.avg_cpu_pct
 
-    result.time_series = bucketer.to_time_series()
+    # Merge telemetry into the 1s time-series buckets (spec §Report Output).
+    # result.start_ts is time.time() at profile start; used to map bucket indices
+    # (monotonic offsets) to absolute timestamps and to match telemetry samples.
+    result.time_series = bucketer.to_time_series(
+        profile_wall_start_epoch=result.start_ts,
+        telemetry_samples=result.telemetry_samples if telem_ok else None,
+    )
 
     stats = result.latency_stats()
     avg_cpu_str = (
@@ -1339,24 +1371,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--short-ttl",
         action="store_true",
-        help=(
-            f"Set publish TTL to 1s ({SHORT_TTL_US} us) instead of the default "
-            f"60s ({DEFAULT_TTL_US} us). Exercises TTL expiry housekeeping. "
-            "Report will include ttl_mode: 'short'."
-        ),
-    )
-    # Spec §Payload Size Variation: large-payloads flag.
-    parser.add_argument(
-        "--large-payloads",
-        action="store_true",
-        help=(
-            "Rotate StreamText payload sizes across publishes: "
-            "~100B, ~1KB, ~10KB, ~60KB. Tests near-limit payload handling."
-        ),
-    )
-    parser.add_argument(
-        "--short-ttl",
-        action="store_true",
         default=False,
         help=(
             f"Set publish TTL to {SHORT_TTL_US // 1_000_000}s instead of "
@@ -1438,10 +1452,11 @@ def main() -> int:
     profiles_to_run = [p for p in PROFILES if p[0] in selected_names]
 
     # Apply --duration override if provided.
-    # Spec §Load Profiles: --duration overrides idle/low/medium/high but not burst.
+    # Spec §Load Profiles: --duration overrides the duration of ALL profiles,
+    # including burst. The burst default of 10s is just its per-profile default.
     if args.duration is not None:
         profiles_to_run = [
-            (name, rate, conc, args.duration if name != "burst" else _dur)
+            (name, rate, conc, args.duration)
             for name, rate, conc, _dur in profiles_to_run
         ]
 
