@@ -252,6 +252,7 @@ const SUPPORTED_KV_ARGS: &[&str] = &[
     "target-throughput-rps",
     "transport",
     "publish-intent",
+    "layer4-output-root",
 ];
 
 const SUPPORTED_FLAGS: &[&str] = &["normalization-mapping-approved"];
