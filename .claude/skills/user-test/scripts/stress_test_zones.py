@@ -20,6 +20,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -120,7 +121,293 @@ def rpc_call(
 
 
 # ---------------------------------------------------------------------------
-# Telemetry: SSH-based host metrics
+# Telemetry: background SSH sampling thread
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TelemetrySample:
+    """One per-second snapshot from the remote host."""
+
+    wall_ts: float               # time.time() when sample was taken
+    cpu_total_sec: float | None  # raw Get-Process .CPU (cumulative seconds)
+    cpu_pct: float | None        # delta CPU% (computed from prev; None for first)
+    ws_mb: float | None          # working set MB
+    private_mb: float | None     # private memory MB
+    gpu_util_pct: float | None
+    gpu_mem_mb: float | None
+
+
+def _parse_proc_line(line: str) -> tuple[float | None, float | None, float | None]:
+    """Parse 'cpu_sec ws_mb priv_mb' from PowerShell output."""
+    parts = line.strip().split()
+    if len(parts) >= 3:
+        try:
+            return float(parts[0]), float(parts[1]), float(parts[2])
+        except ValueError:
+            pass
+    return None, None, None
+
+
+def _parse_nvidia_line(line: str) -> tuple[float | None, float | None]:
+    """Parse 'util_pct, mem_mb' from nvidia-smi output."""
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) >= 2:
+        try:
+            return float(parts[0]), float(parts[1])
+        except ValueError:
+            pass
+    return None, None
+
+
+class TelemetryThread:
+    """
+    Background thread that SSH-samples host metrics every 1 second.
+
+    Maintains a single persistent SSH connection running a remote loop that
+    emits one line per second containing process CPU seconds, working set MB,
+    private memory MB, GPU utilization %, and GPU memory MB.
+
+    Usage::
+
+        thr = TelemetryThread(user, host, key)
+        ok = thr.start()          # False if SSH connection fails
+        # ... run load profile ...
+        thr.stop()                # join(timeout=5), kill SSH if needed
+        samples = thr.samples     # list[TelemetrySample]
+        avg_cpu = thr.avg_cpu_pct # float | None
+
+    If SSH fails at start(), returns False and the profile continues with
+    telemetry_status="incomplete".
+    """
+
+    # Remote script emits one line per second:
+    #   "<cpu_sec> <ws_mb> <priv_mb>|<gpu_util>,<gpu_mem>"
+    # The '|' separates process stats from GPU stats for unambiguous parsing.
+    _REMOTE_LOOP = (
+        "while true; do "
+        "CPU=$(powershell -NoProfile -NonInteractive -Command \""
+        "try { $p = Get-Process tze_hud -ErrorAction Stop; "
+        "Write-Output \\\"$($p.CPU) "
+        "$([math]::Round($p.WorkingSet64/1MB,2)) "
+        "$([math]::Round($p.PrivateMemorySize64/1MB,2))\\\" "
+        "} catch { Write-Output '0 0 0' }"
+        "\"); "
+        "GPU=$(nvidia-smi --query-gpu=utilization.gpu,memory.used "
+        "--format=csv,noheader,nounits 2>/dev/null || echo '0,0'); "
+        "echo \"${CPU}|${GPU}\"; "
+        "sleep 1; "
+        "done"
+    )
+
+    def __init__(self, user: str, host: str, key: str) -> None:
+        self._user = user
+        self._host = host
+        self._key = key
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        self.samples: list[TelemetrySample] = []
+        self._lock = threading.Lock()
+
+    def start(self) -> bool:
+        """
+        Spawn the background SSH process and start the sampling thread.
+
+        Returns True on success; False if SSH fails to produce output within
+        12 seconds (auth error, unreachable host, etc.). On False the caller
+        should set telemetry_status="incomplete" and continue the profile.
+        """
+        try:
+            self._proc = subprocess.Popen(
+                [
+                    "ssh",
+                    "-i", self._key,
+                    "-o", "BatchMode=yes",
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "ConnectTimeout=8",
+                    f"{self._user}@{self._host}",
+                    self._REMOTE_LOOP,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except Exception as exc:
+            print(
+                f"WARNING: telemetry SSH launch failed: {exc}",
+                file=sys.stderr,
+            )
+            return False
+
+        # Probe: wait up to 12s for the first output line to confirm connection.
+        first_line_event = threading.Event()
+        first_line: list[str] = []
+
+        def _read_first() -> None:
+            assert self._proc is not None
+            assert self._proc.stdout is not None
+            line = self._proc.stdout.readline()
+            first_line.append(line)
+            first_line_event.set()
+
+        probe = threading.Thread(target=_read_first, daemon=True)
+        probe.start()
+        got_first = first_line_event.wait(timeout=12.0)
+
+        if not got_first or not first_line or not first_line[0].strip():
+            stderr_data = ""
+            if self._proc.stderr:
+                try:
+                    stderr_data = self._proc.stderr.read(512)
+                except Exception:
+                    pass
+            print(
+                f"WARNING: telemetry SSH produced no output within 12s "
+                f"(stderr: {stderr_data.strip()!r}). "
+                "Profile will continue without telemetry.",
+                file=sys.stderr,
+            )
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+            return False
+
+        # Seed samples with the first line already read.
+        first_sample = self._parse_line(first_line[0], prev_sample=None)
+        with self._lock:
+            self.samples.append(first_sample)
+
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return True
+
+    def _parse_line(
+        self,
+        line: str,
+        prev_sample: TelemetrySample | None,
+    ) -> TelemetrySample:
+        """Parse one output line from the remote loop into a TelemetrySample."""
+        wall_ts = time.time()
+        cpu_total_sec: float | None = None
+        ws_mb: float | None = None
+        private_mb: float | None = None
+        gpu_util: float | None = None
+        gpu_mem: float | None = None
+
+        line = line.strip()
+        if "|" in line:
+            proc_part, gpu_part = line.split("|", 1)
+        else:
+            proc_part = line
+            gpu_part = ""
+
+        cpu_total_sec, ws_mb, private_mb = _parse_proc_line(proc_part)
+        if gpu_part:
+            gpu_util, gpu_mem = _parse_nvidia_line(gpu_part)
+
+        # Instantaneous CPU% = delta_cpu_seconds / delta_wall_seconds * 100
+        cpu_pct: float | None = None
+        if (
+            prev_sample is not None
+            and prev_sample.cpu_total_sec is not None
+            and cpu_total_sec is not None
+        ):
+            dt_wall = wall_ts - prev_sample.wall_ts
+            dt_cpu = cpu_total_sec - prev_sample.cpu_total_sec
+            if dt_wall > 0:
+                cpu_pct = (dt_cpu / dt_wall) * 100.0
+
+        return TelemetrySample(
+            wall_ts=wall_ts,
+            cpu_total_sec=cpu_total_sec,
+            cpu_pct=cpu_pct,
+            ws_mb=ws_mb,
+            private_mb=private_mb,
+            gpu_util_pct=gpu_util,
+            gpu_mem_mb=gpu_mem,
+        )
+
+    def _run(self) -> None:
+        """Thread body: read lines from SSH stdout, build sample list."""
+        assert self._proc is not None
+        assert self._proc.stdout is not None
+
+        while not self._stop_event.is_set():
+            try:
+                line = self._proc.stdout.readline()
+            except Exception:
+                break
+            if not line:
+                # SSH process exited unexpectedly
+                break
+            with self._lock:
+                prev = self.samples[-1] if self.samples else None
+                sample = self._parse_line(line, prev_sample=prev)
+                self.samples.append(sample)
+
+    def stop(self) -> None:
+        """
+        Signal the thread to stop and join with a 5-second timeout.
+
+        If the thread does not stop within 5 seconds (e.g. blocked on
+        readline), kill the SSH subprocess to unblock it.
+        """
+        self._stop_event.set()
+
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            if self._thread.is_alive():
+                if self._proc is not None:
+                    try:
+                        self._proc.kill()
+                    except Exception:
+                        pass
+                self._thread.join(timeout=1.0)
+        elif self._proc is not None:
+            # start() probing failed but proc was launched; clean up.
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+
+    @property
+    def avg_cpu_pct(self) -> float | None:
+        """
+        Average CPU% as total_cpu_delta / total_elapsed * 100.
+
+        Uses first and last samples with valid cpu_total_sec values.
+        Returns None if fewer than two valid samples exist.
+        """
+        with self._lock:
+            valid = [s for s in self.samples if s.cpu_total_sec is not None]
+        if len(valid) < 2:
+            return None
+        dt_cpu = valid[-1].cpu_total_sec - valid[0].cpu_total_sec  # type: ignore[operator]
+        dt_wall = valid[-1].wall_ts - valid[0].wall_ts
+        if dt_wall <= 0:
+            return None
+        return (dt_cpu / dt_wall) * 100.0
+
+    def to_dict_list(self) -> list[dict[str, Any]]:
+        """Serialize samples to a list of dicts for the JSON report."""
+        with self._lock:
+            return [
+                {
+                    "wall_ts": s.wall_ts,
+                    "cpu_pct": s.cpu_pct,
+                    "ws_mb": s.ws_mb,
+                    "private_mb": s.private_mb,
+                    "gpu_util_pct": s.gpu_util_pct,
+                    "gpu_mem_mb": s.gpu_mem_mb,
+                }
+                for s in self.samples
+            ]
+
+
+# ---------------------------------------------------------------------------
+# Telemetry: single-shot SSH-based host metrics (kept for backward compat)
 # ---------------------------------------------------------------------------
 
 
@@ -241,6 +528,10 @@ class ProfileResult:
     host_metrics_end: dict = field(default_factory=dict)
     start_ts: float = 0.0
     end_ts: float = 0.0
+    # Background telemetry time-series
+    telemetry_samples: list = field(default_factory=list)  # list[dict] serialized
+    telemetry_avg_cpu_pct: float | None = None
+    telemetry_status: str = "ok"  # "ok" | "incomplete"
 
     @property
     def error_rate(self) -> float:
@@ -351,10 +642,20 @@ def run_profile(
         duration_sec=duration_sec,
     )
 
-    print(f"  [{profile_name}] Collecting baseline host metrics...", flush=True)
-    result.host_metrics_start = collect_host_metrics(ssh_user, ssh_host, ssh_key)
-    result.start_ts = time.time()
+    # --- Start background telemetry thread ---
+    telem = TelemetryThread(ssh_user, ssh_host, ssh_key)
+    print(f"  [{profile_name}] Starting background telemetry thread...", flush=True)
+    telem_ok = telem.start()
+    if not telem_ok:
+        result.telemetry_status = "incomplete"
+        print(
+            f"  [{profile_name}] WARNING: telemetry unavailable; "
+            "profile continues without host metrics.",
+            file=sys.stderr,
+            flush=True,
+        )
 
+    result.start_ts = time.time()
     deadline = time.monotonic() + duration_sec
     controller = RateController(rate_per_sec)
     req_id_counter = 1
@@ -407,17 +708,30 @@ def run_profile(
 
     result.end_ts = time.time()
 
-    print(f"  [{profile_name}] Collecting final host metrics...", flush=True)
-    result.host_metrics_end = collect_host_metrics(ssh_user, ssh_host, ssh_key)
+    # --- Stop background telemetry thread ---
+    print(f"  [{profile_name}] Stopping telemetry thread...", flush=True)
+    telem.stop()
+
+    if telem_ok:
+        result.telemetry_samples = telem.to_dict_list()
+        result.telemetry_avg_cpu_pct = telem.avg_cpu_pct
 
     stats = result.latency_stats()
+    avg_cpu_str = (
+        f"{result.telemetry_avg_cpu_pct:.1f}%"
+        if result.telemetry_avg_cpu_pct is not None
+        else "n/a"
+    )
+    n_samples = len(result.telemetry_samples)
     print(
         f"  [{profile_name}] Done: "
         f"total={result.total_requests} "
         f"ok={result.success_count} "
         f"err={result.error_count} "
         f"p50={stats['p50']:.1f}ms "
-        f"p99={stats['p99']:.1f}ms",
+        f"p99={stats['p99']:.1f}ms "
+        f"avg_cpu={avg_cpu_str} "
+        f"telem_samples={n_samples}",
         flush=True,
     )
 
@@ -439,7 +753,7 @@ def print_summary_table(results: list[ProfileResult]) -> None:
     header = (
         f"{'Profile':<12} {'Rate/s':>6} {'Total':>7} {'Errors':>7} "
         f"{'ErrRate':>8} {'p50ms':>7} {'p95ms':>7} {'p99ms':>7} {'maxms':>7} "
-        f"{'CPU%':>6} {'Mem%':>6} {'GPU%':>6}"
+        f"{'AvgCPU%':>8} {'Samples':>8}"
     )
     sep = "-" * len(header)
     print()
@@ -451,21 +765,20 @@ def print_summary_table(results: list[ProfileResult]) -> None:
 
     for r in results:
         stats = r.latency_stats()
-        cpu_end = r.host_metrics_end.get("cpu_percent")
-        mem_end = r.host_metrics_end.get("mem_percent")
-        gpu_end = r.host_metrics_end.get("gpu_util_percent")
         err_pct = (
             "n/a"
             if math.isnan(r.error_rate)
             else f"{r.error_rate * 100:.1f}%"
         )
+        avg_cpu = _fmt(r.telemetry_avg_cpu_pct)
+        n_samples = len(r.telemetry_samples)
 
         print(
             f"{r.profile_name:<12} {r.rate_per_sec:>6.0f} {r.total_requests:>7} "
             f"{r.error_count:>7} {err_pct:>8} "
             f"{_fmt(stats['p50']):>7} {_fmt(stats['p95']):>7} "
             f"{_fmt(stats['p99']):>7} {_fmt(stats['max']):>7} "
-            f"{_fmt(cpu_end):>6} {_fmt(mem_end):>6} {_fmt(gpu_end):>6}"
+            f"{avg_cpu:>8} {n_samples:>8}"
         )
 
     print(sep)
