@@ -51,6 +51,7 @@ EXEMPT_PATHS=(
     "openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md"
     "openspec/changes/v1-mvp-standards/specs/configuration/spec.md"
     "openspec/specs/configuration/spec.md"
+    "openspec/specs/policy-arbitration/spec.md"
     "docs/rfcs/0005-session-protocol.md"
     "docs/prompts/07-configuration.md"
     "docs/reviews/0001-scene-contract-round3.md"
