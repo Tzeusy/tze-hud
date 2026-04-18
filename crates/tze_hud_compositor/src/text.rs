@@ -1552,4 +1552,151 @@ mod tests {
         let c0 = spans[0].1.color_opt.unwrap();
         assert_eq!((c0.r(), c0.g(), c0.b()), (255, 0, 0));
     }
+
+    // ── color_run_spans multiline tests [hud-vwggh] ───────────────────────────
+
+    /// A single color run spanning bytes that cross two `\n` boundaries is
+    /// produced as one contiguous styled span.
+    ///
+    /// text  = "line 1\nline 2\nline 3"  (20 bytes)
+    ///          0123456 789012 3456789
+    ///                ^           ^
+    ///         run:  3..16  →  "e 1\nline 2\nli"
+    ///
+    /// Expected spans:
+    ///   [0] "lin"          (bytes 0..3)   — unstyled prefix on line 1
+    ///   [1] "e 1\nline 2\nli" (bytes 3..16) — single colored span crossing both \n
+    ///   [2] "ne 3"         (bytes 16..20) — unstyled suffix on line 3
+    ///
+    /// This verifies that `color_run_spans` does not split on `\n` itself and
+    /// that the resulting string slices include the newline characters verbatim.
+    /// `set_rich_text` (glyphon) handles the actual line splitting during shaping.
+    #[test]
+    fn color_run_spans_cross_newline_single_run() {
+        let text = "line 1\nline 2\nline 3";
+        // byte layout: "line 1"=0..6, '\n'=6, "line 2"=7..13, '\n'=13, "line 3"=14..20
+        let runs = [ColorRunItem {
+            start_byte: 3,
+            end_byte: 16, // spans "e 1\nline 2\nli"
+            color: [255, 128, 0, 255],
+        }];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+
+        assert_eq!(
+            spans.len(),
+            3,
+            "cross-newline run must produce: prefix + colored + suffix"
+        );
+
+        // Unstyled prefix (part of line 1 before the run).
+        assert_eq!(spans[0].0, "lin", "prefix span must be 'lin'");
+        assert!(
+            spans[0].1.color_opt.is_none(),
+            "prefix span must use base_attrs (no color)"
+        );
+
+        // Colored span crossing both newlines — the slice includes the '\n' chars.
+        assert_eq!(
+            spans[1].0, "e 1\nline 2\nli",
+            "colored span must include both newline characters verbatim"
+        );
+        assert!(
+            spans[1].1.color_opt.is_some(),
+            "colored span must carry color_opt"
+        );
+
+        // Unstyled suffix (part of line 3 after the run end).
+        assert_eq!(spans[2].0, "ne 3", "suffix span must be 'ne 3'");
+        assert!(
+            spans[2].1.color_opt.is_none(),
+            "suffix span must use base_attrs (no color)"
+        );
+
+        // Sanity: concatenating all spans reconstructs the original text.
+        let reconstructed: String = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(
+            reconstructed, text,
+            "spans must reconstruct the original text exactly"
+        );
+    }
+
+    /// Three color runs each constrained to one line produce per-line color spans
+    /// with the `\n` separator characters falling into unstyled gap spans between
+    /// them.  No color bleeds across a newline boundary.
+    ///
+    /// text  = "red line\nblue line\ngreen line"  (29 bytes)
+    ///          01234567  8 9012345678  9012345678
+    ///
+    /// Runs:  [0..8] red, [9..18] blue, [19..29] green
+    ///
+    /// Expected spans (5 total):
+    ///   [0] "red line"  (0..8)   — red
+    ///   [1] "\n"        (8..9)   — unstyled gap
+    ///   [2] "blue line" (9..18)  — blue
+    ///   [3] "\n"        (18..19) — unstyled gap
+    ///   [4] "green line"(19..29) — green
+    #[test]
+    fn color_run_spans_per_line_runs_no_bleed() {
+        let text = "red line\nblue line\ngreen line";
+        // byte layout: "red line"=0..8, '\n'=8, "blue line"=9..18, '\n'=18, "green line"=19..29
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        let green = [0, 200, 0, 255];
+        let runs = [
+            ColorRunItem { start_byte: 0, end_byte: 8, color: red },
+            ColorRunItem { start_byte: 9, end_byte: 18, color: blue },
+            ColorRunItem { start_byte: 19, end_byte: 29, color: green },
+        ];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+
+        assert_eq!(
+            spans.len(),
+            5,
+            "3 per-line runs with \\n gaps must produce 5 spans (run, \\n, run, \\n, run)"
+        );
+
+        // Line 1: red
+        assert_eq!(spans[0].0, "red line", "first span must be 'red line'");
+        assert!(
+            spans[0].1.color_opt.is_some(),
+            "line-1 span must carry color_opt"
+        );
+
+        // Gap: the '\n' between line 1 and line 2 is unstyled.
+        assert_eq!(spans[1].0, "\n", "gap between line 1 and line 2 must be '\\n'");
+        assert!(
+            spans[1].1.color_opt.is_none(),
+            "newline gap must use base_attrs — no color bleed from line-1 run"
+        );
+
+        // Line 2: blue
+        assert_eq!(spans[2].0, "blue line", "second span must be 'blue line'");
+        assert!(
+            spans[2].1.color_opt.is_some(),
+            "line-2 span must carry color_opt"
+        );
+
+        // Gap: the '\n' between line 2 and line 3 is unstyled.
+        assert_eq!(spans[3].0, "\n", "gap between line 2 and line 3 must be '\\n'");
+        assert!(
+            spans[3].1.color_opt.is_none(),
+            "newline gap must use base_attrs — no color bleed from line-2 run"
+        );
+
+        // Line 3: green
+        assert_eq!(spans[4].0, "green line", "third span must be 'green line'");
+        assert!(
+            spans[4].1.color_opt.is_some(),
+            "line-3 span must carry color_opt"
+        );
+
+        // Sanity: concatenating all spans reconstructs the original text.
+        let reconstructed: String = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(
+            reconstructed, text,
+            "spans must reconstruct the original text exactly"
+        );
+    }
 }
