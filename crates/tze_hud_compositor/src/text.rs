@@ -31,7 +31,7 @@
 //!   visible line count to fit the bounds, appending "…" if truncation occurs.
 //!   Full ellipsis support is deferred to post-MVP.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
@@ -654,31 +654,120 @@ pub fn apply_opacity_to_color(color: [u8; 4], opacity: f32) -> [u8; 4] {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Canonicalize a slice of [`ColorRunItem`]s into a sorted, non-overlapping
+/// sequence using **last-writer-wins** overlap semantics.
+///
+/// # Semantics
+///
+/// For any byte position covered by multiple runs, the run with the **highest
+/// original index** (i.e. the last run in the input slice whose range covers
+/// that byte) wins.
+///
+/// # Algorithm
+///
+/// Uses a sweep-line over all interval endpoints:
+///
+/// 1. Clamp each run to `text_len`; drop degenerate (start ≥ end) runs.
+/// 2. Emit two events per run — a START and an END — keyed by byte position.
+///    At equal positions, END events sort before START events so adjacent
+///    runs are handled correctly.
+/// 3. Walk events left-to-right, maintaining a `BTreeMap<orig_idx, color>`
+///    of currently-active runs.  Before each event, emit a span from the
+///    active run with the **highest key** (= highest original index).
+/// 4. Merge adjacent output spans with identical colors to minimize span count.
+///
+/// Out-of-bounds or zero-length runs are silently dropped.
+fn canonicalize_color_runs_impl(runs: &[ColorRunItem], text_len: usize) -> Vec<ColorRunItem> {
+    if runs.is_empty() {
+        return Vec::new();
+    }
+
+    // (position, is_start, orig_idx, color)
+    // is_start=false (END) sorts before is_start=true (START) at equal positions,
+    // so a run ending exactly where another begins does not overlap.
+    let mut events: Vec<(usize, bool, usize, [u8; 4])> = Vec::with_capacity(runs.len() * 2);
+    for (i, r) in runs.iter().enumerate() {
+        let s = r.start_byte.min(text_len);
+        let e = r.end_byte.min(text_len);
+        if s < e {
+            events.push((s, true, i, r.color));
+            events.push((e, false, i, r.color));
+        }
+    }
+
+    // Sort: primary by position, secondary END < START (false < true).
+    events.sort_by_key(|&(pos, is_start, _, _)| (pos, is_start));
+
+    // active: orig_idx → color, for currently open runs.
+    let mut active: BTreeMap<usize, [u8; 4]> = BTreeMap::new();
+    // raw output segments before merging: (start, end, color).
+    let mut raw: Vec<(usize, usize, [u8; 4])> = Vec::new();
+    let mut last_pos = 0usize;
+
+    for (pos, is_start, idx, color) in events {
+        if pos > last_pos {
+            // Emit segment for the active run with the highest original index,
+            // which is the last-writer per the semantics contract.
+            if let Some((&_, &active_color)) = active.iter().next_back() {
+                raw.push((last_pos, pos, active_color));
+            }
+        }
+        if is_start {
+            active.insert(idx, color);
+        } else {
+            active.remove(&idx);
+        }
+        last_pos = pos;
+    }
+
+    // Merge adjacent segments with the same color to minimize span count.
+    let mut out: Vec<ColorRunItem> = Vec::with_capacity(raw.len());
+    for (s, e, c) in raw {
+        if let Some(last) = out.last_mut() {
+            if last.end_byte == s && last.color == c {
+                last.end_byte = e;
+                continue;
+            }
+        }
+        out.push(ColorRunItem { start_byte: s, end_byte: e, color: c });
+    }
+    out
+}
+
 /// Build `(text_slice, Attrs)` pairs for [`Buffer::set_rich_text`] from a set
-/// of sorted, non-overlapping [`ColorRunItem`]s and a base `Attrs`.
+/// of [`ColorRunItem`]s and a base `Attrs`.
+///
+/// Runs need not be sorted or non-overlapping — this function canonicalizes
+/// them using last-writer-wins semantics before building spans:
+///
+/// - Runs are sorted by `start_byte`.
+/// - When two runs overlap, the **later run** (higher index in the original
+///   slice) wins on the intersection.  The earlier run is split: its prefix
+///   before the overlap is kept; the overlap itself is replaced by the later
+///   run's color; any suffix of the earlier run beyond the later run's end
+///   resumes with the earlier run's color.
 ///
 /// Segments of `text` not covered by any run are emitted with `base_attrs`
 /// (no color override, so `TextArea::default_color` applies at render time).
 /// Segments covered by a run are emitted with `base_attrs` plus an explicit
 /// `Color` set from the run.
 ///
-/// Overlapping or out-of-bounds run byte offsets are clamped / skipped
-/// defensively; callers should already validate runs before constructing a
-/// `TextItem`.
+/// Out-of-bounds run byte offsets are clamped to `text.len()`.
 pub(crate) fn color_run_spans<'t, 'a>(
     text: &'t str,
-    runs: &'a [ColorRunItem],
+    runs: &[ColorRunItem],
     base_attrs: Attrs<'a>,
 ) -> Vec<(&'t str, Attrs<'a>)> {
-    let mut spans: Vec<(&'t str, Attrs<'a>)> = Vec::with_capacity(runs.len() * 2 + 1);
+    let canonical = canonicalize_color_runs_impl(runs, text.len());
+
+    let mut spans: Vec<(&'t str, Attrs<'a>)> = Vec::with_capacity(canonical.len() * 2 + 1);
     let mut cursor = 0usize;
 
-    for run in runs {
-        let run_start = run.start_byte.min(text.len());
-        let run_end = run.end_byte.min(text.len());
-        if run_start >= run_end {
-            continue;
-        }
+    for run in &canonical {
+        let run_start = run.start_byte;
+        let run_end = run.end_byte;
+        // run_start < run_end guaranteed by canonicalize_color_runs_impl.
+        // Both are ≤ text.len() (clamped during canonicalization).
 
         // Emit unstyled gap before this run (if any).
         if cursor < run_start {
@@ -1222,5 +1311,245 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].0, "é");
         assert_eq!(spans[1].0, "world");
+    }
+
+    // ── Overlap / out-of-order tests [hud-qu8k4] ─────────────────────────────
+
+    /// Two overlapping runs: later run wins on the intersection.
+    ///
+    /// Input: red 0..10, blue 5..15 on "0123456789abcde" (15 bytes).
+    /// Expected: red 0..5, blue 5..15.
+    #[test]
+    fn color_run_spans_two_runs_overlap_later_wins() {
+        let text = "0123456789abcde"; // 15 ASCII bytes
+        let red = [255u8, 0, 0, 255];
+        let blue = [0u8, 0, 255, 255];
+        let runs = [
+            ColorRunItem { start_byte: 0, end_byte: 10, color: red },
+            ColorRunItem { start_byte: 5, end_byte: 15, color: blue },
+        ];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+
+        // Reconstruct text coverage.
+        let combined: String = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(combined, text, "all text must be covered");
+
+        // First span: "01234" (bytes 0..5) — red.
+        assert_eq!(spans[0].0, &text[0..5], "red prefix should be 0..5");
+        assert!(spans[0].1.color_opt.is_some(), "first span must be colored");
+        let red_color = spans[0].1.color_opt.unwrap();
+        assert_eq!((red_color.r(), red_color.g(), red_color.b()), (255, 0, 0),
+            "first span should be red");
+
+        // Second span: "56789abcde" (bytes 5..15) — blue (later run wins intersection).
+        assert_eq!(spans[1].0, &text[5..15], "blue span should cover 5..15");
+        assert!(spans[1].1.color_opt.is_some(), "second span must be colored");
+        let blue_color = spans[1].1.color_opt.unwrap();
+        assert_eq!((blue_color.r(), blue_color.g(), blue_color.b()), (0, 0, 255),
+            "second span should be blue (later-writer-wins)");
+
+        assert_eq!(spans.len(), 2, "no trailing unstyled text expected");
+    }
+
+    /// Three runs: middle run overlaps both outer runs; middle (later) wins intersection.
+    ///
+    /// Input: red 0..8, green 4..12, blue 10..15 on 15-byte ASCII.
+    /// Expected: red 0..4, green 4..12, blue 12..15.
+    #[test]
+    fn color_run_spans_three_runs_middle_overlaps_outer() {
+        let text = "0123456789abcde"; // 15 ASCII bytes
+        let red = [255u8, 0, 0, 255];
+        let green = [0u8, 255, 0, 255];
+        let blue = [0u8, 0, 255, 255];
+        // red: 0..8, green: 4..12 (overlaps red and blue), blue: 10..15
+        let runs = [
+            ColorRunItem { start_byte: 0, end_byte: 8, color: red },
+            ColorRunItem { start_byte: 4, end_byte: 12, color: green },
+            ColorRunItem { start_byte: 10, end_byte: 15, color: blue },
+        ];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+
+        let combined: String = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(combined, text, "all 15 bytes must be covered");
+
+        // Verify the color at the start of each expected segment.
+        // Expected layout: red[0..4], green[4..12], blue[12..15].
+        // (green wins 4..12; blue wins 10..15 — within green's range 10..12 is disputed;
+        //  blue is the latest run touching 10..12, so blue wins.)
+        // Actually: blue(10..15) is later than green(4..12), so blue wins 10..12 too.
+        // Expected: red[0..4], green[4..10], blue[10..15].
+        let segment_texts: Vec<&str> = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(segment_texts[0], &text[0..4], "segment 0 = red[0..4]");
+        assert_eq!(segment_texts[1], &text[4..10], "segment 1 = green[4..10]");
+        assert_eq!(segment_texts[2], &text[10..15], "segment 2 = blue[10..15]");
+
+        let c0 = spans[0].1.color_opt.unwrap();
+        assert_eq!((c0.r(), c0.g(), c0.b()), (255, 0, 0), "seg0 = red");
+        let c1 = spans[1].1.color_opt.unwrap();
+        assert_eq!((c1.r(), c1.g(), c1.b()), (0, 255, 0), "seg1 = green");
+        let c2 = spans[2].1.color_opt.unwrap();
+        assert_eq!((c2.r(), c2.g(), c2.b()), (0, 0, 255), "seg2 = blue");
+    }
+
+    /// Unsorted input (run B before run A by start_byte) produces the same
+    /// output as the equivalent sorted input.
+    #[test]
+    fn color_run_spans_unsorted_input_same_as_sorted() {
+        let text = "hello world"; // 11 bytes
+        let red = [255u8, 0, 0, 255];
+        let blue = [0u8, 0, 255, 255];
+
+        // Sorted order: red 0..5, blue 6..11.
+        let sorted_runs = [
+            ColorRunItem { start_byte: 0, end_byte: 5, color: red },
+            ColorRunItem { start_byte: 6, end_byte: 11, color: blue },
+        ];
+        // Reversed order: same runs but blue listed first.
+        let unsorted_runs = [
+            ColorRunItem { start_byte: 6, end_byte: 11, color: blue },
+            ColorRunItem { start_byte: 0, end_byte: 5, color: red },
+        ];
+
+        let base = Attrs::new();
+        let sorted_spans = color_run_spans(text, &sorted_runs, base);
+        let unsorted_spans = color_run_spans(text, &unsorted_runs, base);
+
+        // Text coverage must be identical.
+        let sorted_text: String = sorted_spans.iter().map(|(s, _)| *s).collect();
+        let unsorted_text: String = unsorted_spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(sorted_text, unsorted_text, "text coverage must match");
+
+        // Span count must match.
+        assert_eq!(sorted_spans.len(), unsorted_spans.len(), "span count must match");
+
+        // Each span's slice and color must match.
+        for i in 0..sorted_spans.len() {
+            assert_eq!(sorted_spans[i].0, unsorted_spans[i].0,
+                "span[{i}] text slice must match");
+            assert_eq!(sorted_spans[i].1.color_opt, unsorted_spans[i].1.color_opt,
+                "span[{i}] color must match");
+        }
+    }
+
+    /// Adjacent (touching) non-overlapping runs are preserved as separate spans.
+    #[test]
+    fn color_run_spans_adjacent_non_overlapping() {
+        let text = "abcdef"; // 6 bytes
+        let red = [255u8, 0, 0, 255];
+        let blue = [0u8, 0, 255, 255];
+        // run A: 0..3 ("abc"), run B: 3..6 ("def") — adjacent, no overlap.
+        let runs = [
+            ColorRunItem { start_byte: 0, end_byte: 3, color: red },
+            ColorRunItem { start_byte: 3, end_byte: 6, color: blue },
+        ];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+
+        let combined: String = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(combined, text, "full text must be covered");
+        assert_eq!(spans.len(), 2, "two adjacent runs → two spans (no gap)");
+        assert_eq!(spans[0].0, "abc");
+        assert_eq!(spans[1].0, "def");
+
+        let c0 = spans[0].1.color_opt.unwrap();
+        assert_eq!((c0.r(), c0.g(), c0.b()), (255, 0, 0), "first span = red");
+        let c1 = spans[1].1.color_opt.unwrap();
+        assert_eq!((c1.r(), c1.g(), c1.b()), (0, 0, 255), "second span = blue");
+    }
+
+    /// Fully nested run: inner run (later) wins; outer run retains prefix and
+    /// suffix around the inner region.
+    ///
+    /// Input: red 0..12, blue 4..8 on "0123456789ab" (12 bytes).
+    /// Expected: red 0..4, blue 4..8, red 8..12.
+    #[test]
+    fn color_run_spans_nested_inner_wins() {
+        let text = "0123456789ab"; // 12 ASCII bytes
+        let red = [255u8, 0, 0, 255];
+        let blue = [0u8, 0, 255, 255];
+        let runs = [
+            ColorRunItem { start_byte: 0, end_byte: 12, color: red },
+            ColorRunItem { start_byte: 4, end_byte: 8, color: blue }, // nested inside red
+        ];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+
+        let combined: String = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(combined, text, "all 12 bytes must be covered");
+
+        assert_eq!(spans.len(), 3, "nested inner run → prefix + inner + suffix");
+        assert_eq!(spans[0].0, &text[0..4]);
+        assert_eq!(spans[1].0, &text[4..8]);
+        assert_eq!(spans[2].0, &text[8..12]);
+
+        let c0 = spans[0].1.color_opt.unwrap();
+        assert_eq!((c0.r(), c0.g(), c0.b()), (255, 0, 0), "prefix = red");
+        let c1 = spans[1].1.color_opt.unwrap();
+        assert_eq!((c1.r(), c1.g(), c1.b()), (0, 0, 255), "inner = blue (later wins)");
+        let c2 = spans[2].1.color_opt.unwrap();
+        assert_eq!((c2.r(), c2.g(), c2.b()), (255, 0, 0), "suffix = red (resumed)");
+    }
+
+    /// Higher original-index run wins even when it starts earlier than the
+    /// lower-index run.
+    ///
+    /// Input: blue(index 0) = 5..15, red(index 1) = 0..10 on 15-byte ASCII.
+    /// Red has the higher original index so it wins bytes 5..10.
+    /// Expected: red 0..10, blue 10..15.
+    #[test]
+    fn color_run_spans_higher_index_earlier_start_wins() {
+        let text = "0123456789abcde"; // 15 ASCII bytes
+        let red = [255u8, 0, 0, 255];
+        let blue = [0u8, 0, 255, 255];
+        // blue is index 0, red is index 1 — red (higher index) must win the overlap.
+        let runs = [
+            ColorRunItem { start_byte: 5, end_byte: 15, color: blue },
+            ColorRunItem { start_byte: 0, end_byte: 10, color: red },
+        ];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+
+        let combined: String = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(combined, text, "all 15 bytes must be covered");
+
+        // Expected: red[0..10], blue[10..15].
+        assert_eq!(spans.len(), 2, "higher-index-wins overlap → two spans");
+        assert_eq!(spans[0].0, &text[0..10], "span 0 = red 0..10");
+        assert_eq!(spans[1].0, &text[10..15], "span 1 = blue 10..15");
+
+        let c0 = spans[0].1.color_opt.unwrap();
+        assert_eq!((c0.r(), c0.g(), c0.b()), (255, 0, 0), "red (higher index) wins 0..10");
+        let c1 = spans[1].1.color_opt.unwrap();
+        assert_eq!((c1.r(), c1.g(), c1.b()), (0, 0, 255), "blue covers unclaimed 10..15");
+    }
+
+    /// Zero-length and out-of-bounds runs are silently dropped.
+    #[test]
+    fn color_run_spans_degenerate_runs_dropped() {
+        let text = "hello"; // 5 bytes
+        let red = [255u8, 0, 0, 255];
+        let runs = [
+            // zero-length: start == end
+            ColorRunItem { start_byte: 2, end_byte: 2, color: red },
+            // out-of-bounds: extends past text.len()
+            ColorRunItem { start_byte: 3, end_byte: 100, color: red },
+            // valid run
+            ColorRunItem { start_byte: 0, end_byte: 3, color: red },
+        ];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+
+        let combined: String = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(combined, text, "all text must be covered");
+
+        // Degenerate run at 2..2 is dropped.
+        // Out-of-bounds 3..100 is clamped to 3..5 and still applies.
+        // Valid 0..3 covers "hel". Clamped 3..5 covers "lo".
+        // Both are red, and they're adjacent — so they should merge into one span.
+        assert_eq!(spans.len(), 1, "adjacent same-color spans should merge");
+        let c0 = spans[0].1.color_opt.unwrap();
+        assert_eq!((c0.r(), c0.g(), c0.b()), (255, 0, 0));
     }
 }
