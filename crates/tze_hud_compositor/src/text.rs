@@ -250,15 +250,37 @@ impl TextRasterizer {
                     );
                     // Re-apply the attrs_list to each line, offsetting spans by the
                     // cumulative byte position of each line within the full text.
+                    //
+                    // O(L+S) cursor scan: `attrs_list.spans()` returns spans sorted
+                    // by start position (RangeMap is backed by BTreeMap).  A single
+                    // cursor advances monotonically through the span list as we walk
+                    // lines, giving O(L+S) instead of the naive O(L×S) double loop.
+                    let sorted_spans = attrs_list.spans();
+                    let mut span_cursor = 0usize;
                     let mut line_start = 0usize;
                     for line in buf.lines.iter_mut() {
                         let line_len = line.text().len();
                         let line_end = line_start + line_len;
 
-                        // Build a per-line AttrsList by collecting spans that
-                        // overlap [line_start, line_end) and remapping to line-local offsets.
+                        // Advance cursor past spans that end at or before line_start
+                        // (they cannot overlap this line or any subsequent line).
+                        while span_cursor < sorted_spans.len()
+                            && sorted_spans[span_cursor].0.end <= line_start
+                        {
+                            span_cursor += 1;
+                        }
+
+                        // Build a per-line AttrsList from spans that overlap
+                        // [line_start, line_end), remapping to line-local offsets.
+                        // Because spans are sorted and non-overlapping, we stop as
+                        // soon as a span starts at or after line_end.
                         let mut line_attrs = AttrsList::new(base_attrs);
-                        for (span_range, span_attrs) in attrs_list.spans() {
+                        let mut i = span_cursor;
+                        while i < sorted_spans.len() {
+                            let (span_range, span_attrs) = &sorted_spans[i];
+                            if span_range.start >= line_end {
+                                break; // No further span can overlap this line.
+                            }
                             let overlap_start = span_range.start.max(line_start);
                             let overlap_end = span_range.end.min(line_end);
                             if overlap_start < overlap_end {
@@ -266,7 +288,9 @@ impl TextRasterizer {
                                 let local_end = overlap_end - line_start;
                                 line_attrs.add_span(local_start..local_end, span_attrs.as_attrs());
                             }
+                            i += 1;
                         }
+
                         // Capture ending length before the mutable borrow.
                         let ending_len = line.ending().as_str().len();
                         line.set_attrs_list(line_attrs);
@@ -691,6 +715,49 @@ pub fn apply_opacity_to_color(color: [u8; 4], opacity: f32) -> [u8; 4] {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Advance a cursor into a sorted span list past spans that end at or before
+/// `line_start`, then collect overlapping spans remapped to line-local offsets.
+///
+/// `sorted_spans` must be sorted by `start` (as guaranteed by
+/// `AttrsList::spans()` which wraps a `RangeMap`/`BTreeMap`).
+///
+/// Returns `(new_cursor, local_spans)` where `local_spans` contains
+/// `(local_start, local_end, color)` tuples for spans overlapping
+/// `[line_start, line_end)`.
+///
+/// This is the O(L+S) cursor algorithm extracted as a pure function for
+/// unit-testability — the production path in `prepare_text_items` inlines
+/// the same logic operating on glyphon `AttrsList` spans directly.
+#[cfg(test)]
+pub(crate) fn map_color_run_spans_to_line(
+    sorted_spans: &[(usize, usize, [u8; 4])],
+    mut cursor: usize,
+    line_start: usize,
+    line_end: usize,
+) -> (usize, Vec<(usize, usize, [u8; 4])>) {
+    // Advance cursor past spans that end at or before line_start.
+    while cursor < sorted_spans.len() && sorted_spans[cursor].1 <= line_start {
+        cursor += 1;
+    }
+    let new_cursor = cursor;
+
+    let mut local_spans = Vec::new();
+    let mut i = cursor;
+    while i < sorted_spans.len() {
+        let (span_start, span_end, color) = sorted_spans[i];
+        if span_start >= line_end {
+            break;
+        }
+        let overlap_start = span_start.max(line_start);
+        let overlap_end = span_end.min(line_end);
+        if overlap_start < overlap_end {
+            local_spans.push((overlap_start - line_start, overlap_end - line_start, color));
+        }
+        i += 1;
+    }
+    (new_cursor, local_spans)
+}
+
 /// Format a 32-byte resource ID as a lowercase hex string for logging.
 pub(crate) fn format_resource_id(id: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
@@ -1070,6 +1137,157 @@ mod tests {
             item.overflow,
             TextOverflow::Clip,
             "overflow should be Clip when policy.overflow is Some(Clip)"
+        );
+    }
+
+    // ── cursor-based span mapping tests [hud-rxfc] ───────────────────────────
+
+    /// Helper to create sorted span tuples for testing.
+    fn make_spans(ranges: &[(usize, usize, [u8; 4])]) -> Vec<(usize, usize, [u8; 4])> {
+        ranges.to_vec()
+    }
+
+    /// Span entirely within one line maps to local offsets unchanged.
+    #[test]
+    fn cursor_span_within_single_line() {
+        // Text: "hello\nworld" → line0=[0,5), line1=[6,11)
+        // Span [1,4) is entirely within line 0.
+        let red = [255u8, 0, 0, 255];
+        let spans = make_spans(&[(1, 4, red)]);
+        let (cursor, local) = map_color_run_spans_to_line(&spans, 0, 0, 5);
+        assert_eq!(
+            cursor, 0,
+            "cursor should not advance; span not yet past line_end"
+        );
+        assert_eq!(local, vec![(1, 4, red)]);
+
+        // Line 1: span [1,4) ends at 4 <= 6 (line1_start), cursor advances.
+        let (cursor2, local2) = map_color_run_spans_to_line(&spans, cursor, 6, 11);
+        assert_eq!(cursor2, 1, "cursor should advance past the span");
+        assert!(
+            local2.is_empty(),
+            "span [1,4) does not overlap line1 [6,11)"
+        );
+    }
+
+    /// Span spanning a line boundary is split correctly.
+    #[test]
+    fn cursor_span_crossing_line_boundary() {
+        // Text: "hello\nworld" → line0=[0,5) ending_len=1 → line1_start=6
+        // Span [3,9) crosses line boundary: overlaps [3,5) in line0 and [6,9) in line1.
+        let blue = [0u8, 0, 255, 255];
+        let spans = make_spans(&[(3, 9, blue)]);
+
+        let (cursor0, local0) = map_color_run_spans_to_line(&spans, 0, 0, 5);
+        // Overlap in line0: [3,5) → local [3,5)
+        assert_eq!(cursor0, 0, "span not consumed; it still overlaps next line");
+        assert_eq!(local0, vec![(3, 5, blue)]);
+
+        // Line1 starts at 6 (0+5+1), ends at 11.
+        let (cursor1, local1) = map_color_run_spans_to_line(&spans, cursor0, 6, 11);
+        // Overlap in line1: [6,9) → local [0,3)
+        assert_eq!(cursor1, 0, "span not yet past line1");
+        assert_eq!(local1, vec![(0, 3, blue)]);
+    }
+
+    /// Span entirely within one line advances cursor for subsequent lines.
+    #[test]
+    fn cursor_advances_past_finished_spans() {
+        // Three lines, spans on line0 and line2 only.
+        let red = [255u8, 0, 0, 255];
+        let green = [0u8, 255, 0, 255];
+        // line0=[0,5), line1=[6,10), line2=[11,16)
+        // Span A=[1,3) on line0; Span B=[12,15) on line2.
+        let spans = make_spans(&[(1, 3, red), (12, 15, green)]);
+
+        // Line 0
+        let (c0, l0) = map_color_run_spans_to_line(&spans, 0, 0, 5);
+        assert_eq!(l0, vec![(1, 3, red)]);
+        assert_eq!(c0, 0);
+
+        // Line 1 (no spans)
+        let (c1, l1) = map_color_run_spans_to_line(&spans, c0, 6, 10);
+        assert_eq!(
+            c1, 1,
+            "cursor should advance past span A [1,3) which ends before line1"
+        );
+        assert!(l1.is_empty());
+
+        // Line 2
+        let (c2, l2) = map_color_run_spans_to_line(&spans, c1, 11, 16);
+        assert_eq!(c2, 1, "cursor stays at span B which overlaps line2");
+        assert_eq!(l2, vec![(1, 4, green)]);
+    }
+
+    /// Many spans on the same line all captured without cursor moving past them.
+    #[test]
+    fn cursor_multiple_spans_same_line() {
+        let r = [255u8, 0, 0, 255];
+        let g = [0u8, 255, 0, 255];
+        let b = [0u8, 0, 255, 255];
+        // Single line [0, 20); three spans within it.
+        let spans = make_spans(&[(0, 5, r), (5, 12, g), (12, 20, b)]);
+        let (cursor, local) = map_color_run_spans_to_line(&spans, 0, 0, 20);
+        assert_eq!(cursor, 0);
+        assert_eq!(local, vec![(0, 5, r), (5, 12, g), (12, 20, b)]);
+    }
+
+    /// No spans: cursor stays at 0 and no locals are produced.
+    #[test]
+    fn cursor_no_spans() {
+        let spans: Vec<(usize, usize, [u8; 4])> = vec![];
+        let (cursor, local) = map_color_run_spans_to_line(&spans, 0, 0, 10);
+        assert_eq!(cursor, 0);
+        assert!(local.is_empty());
+    }
+
+    /// Cursor-based and reference O(L×S) implementations agree on a multi-line
+    /// multi-span input exercising boundary conditions.
+    #[test]
+    fn cursor_matches_reference_impl() {
+        // Text split into virtual lines with byte boundaries:
+        // line0=[0,6), line1=[7,13), line2=[14,20)
+        // (each 6 bytes of content + 1-byte '\n' separator except last)
+        let lines: &[(usize, usize)] = &[(0, 6), (7, 13), (14, 20)];
+        let r = [255u8, 0, 0, 255];
+        let g = [0u8, 255, 0, 255];
+        let b = [0u8, 0, 255, 255];
+        // Spans: one within line0, one crossing line0→line1, one in line2.
+        let spans = make_spans(&[(1, 4, r), (5, 10, g), (15, 20, b)]);
+
+        // Reference O(L×S): for each line iterate all spans.
+        let reference: Vec<Vec<(usize, usize, [u8; 4])>> = lines
+            .iter()
+            .map(|&(ls, le)| {
+                spans
+                    .iter()
+                    .filter_map(|&(ss, se, c)| {
+                        let os = ss.max(ls);
+                        let oe = se.min(le);
+                        if os < oe {
+                            Some((os - ls, oe - ls, c))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Cursor O(L+S):
+        let mut cursor = 0usize;
+        let cursor_result: Vec<Vec<(usize, usize, [u8; 4])>> = lines
+            .iter()
+            .map(|&(ls, le)| {
+                let (new_cursor, local) = map_color_run_spans_to_line(&spans, cursor, ls, le);
+                cursor = new_cursor;
+                local
+            })
+            .collect();
+
+        assert_eq!(
+            cursor_result, reference,
+            "cursor O(L+S) must produce identical results to reference O(L×S)"
         );
     }
 }

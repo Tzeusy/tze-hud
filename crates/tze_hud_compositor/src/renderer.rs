@@ -13475,6 +13475,7 @@ mod tests {
                 background: None,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         scene.set_tile_root(tile_id, node).unwrap();
@@ -13525,6 +13526,7 @@ mod tests {
                 background: None,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         scene_baseline
@@ -13602,6 +13604,7 @@ mod tests {
                 background: None,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
             }),
         };
         scene.set_tile_root(tile_id, node).unwrap();

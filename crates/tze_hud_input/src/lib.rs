@@ -2521,9 +2521,13 @@ mod tests {
         let mut processor = InputProcessor::new();
 
         // Cursor is inside the tile (tile bounds: 100,100 → 500,400).
-        let ev = processor.process_keyboard_scroll(150.0, 150.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
+        let ev =
+            processor.process_keyboard_scroll(150.0, 150.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
 
-        assert!(ev.is_some(), "PgDn must return a changed event for a scrollable tile");
+        assert!(
+            ev.is_some(),
+            "PgDn must return a changed event for a scrollable tile"
+        );
         let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
         assert!(
             (offset_y - KEYBOARD_PAGE_SCROLL_PX).abs() < 1e-4,
@@ -2538,7 +2542,8 @@ mod tests {
         let mut processor = InputProcessor::new();
 
         // Starting at offset 0, PgUp should clamp to 0 (no-op on offset).
-        let ev = processor.process_keyboard_scroll(150.0, 150.0, -KEYBOARD_PAGE_SCROLL_PX, &mut scene);
+        let ev =
+            processor.process_keyboard_scroll(150.0, 150.0, -KEYBOARD_PAGE_SCROLL_PX, &mut scene);
 
         // Scroll event fires (tile is scrollable and hit), but offset stays 0.
         // queue_user_scroll sets dirty=true before clamping, so commit_frame returns
@@ -2563,8 +2568,10 @@ mod tests {
         processor.process_keyboard_scroll(150.0, 150.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
 
         let (_, before) = scene.tile_scroll_offset_local(tile_id);
-        assert!((before - 2.0 * KEYBOARD_PAGE_SCROLL_PX).abs() < 1e-4,
-            "expected 2x page scroll; got {before}");
+        assert!(
+            (before - 2.0 * KEYBOARD_PAGE_SCROLL_PX).abs() < 1e-4,
+            "expected 2x page scroll; got {before}"
+        );
 
         // Scroll back up by one page step.
         processor.process_keyboard_scroll(150.0, 150.0, -KEYBOARD_PAGE_SCROLL_PX, &mut scene);
@@ -2584,7 +2591,10 @@ mod tests {
 
         // Cursor far outside the tile (tile: 100,100 → 500,400).
         let ev = processor.process_keyboard_scroll(10.0, 10.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
-        assert!(ev.is_none(), "keyboard scroll outside tile bounds must return None");
+        assert!(
+            ev.is_none(),
+            "keyboard scroll outside tile bounds must return None"
+        );
     }
 
     /// Keyboard scroll on a non-scrollable tile returns None.
@@ -2594,8 +2604,12 @@ mod tests {
         let mut processor = InputProcessor::new();
 
         // The scene_with_hit_region tile has no scroll config registered.
-        let ev = processor.process_keyboard_scroll(200.0, 180.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
-        assert!(ev.is_none(), "keyboard scroll on a non-scrollable tile must return None");
+        let ev =
+            processor.process_keyboard_scroll(200.0, 180.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
+        assert!(
+            ev.is_none(),
+            "keyboard scroll on a non-scrollable tile must return None"
+        );
     }
 
     /// Keyboard scroll coalesces with wheel scroll under the same frame — user wins.
@@ -2606,7 +2620,12 @@ mod tests {
 
         // Wheel scroll first.
         processor.process_scroll_event(
-            &ScrollEvent { x: 150.0, y: 150.0, delta_x: 0.0, delta_y: 40.0 },
+            &ScrollEvent {
+                x: 150.0,
+                y: 150.0,
+                delta_x: 0.0,
+                delta_y: 40.0,
+            },
             &mut scene,
         );
         // Then keyboard scroll (same frame — no commit between).
