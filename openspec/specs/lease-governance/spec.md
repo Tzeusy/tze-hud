@@ -11,7 +11,7 @@ Source RFC: 0008 (Lease and Resource Governance)
 ## Requirements
 
 ### Requirement: Lease State Machine
-The runtime MUST implement the following lease state machine with states: REQUESTED, ACTIVE, SUSPENDED, ORPHANED, REVOKED, EXPIRED, DENIED, RELEASED. Valid transitions MUST be: REQUESTED->ACTIVE (granted), REQUESTED->DENIED (denied), ACTIVE->SUSPENDED (safe mode), ACTIVE->ORPHANED (disconnect), ACTIVE->EXPIRED (TTL elapsed), ACTIVE->REVOKED (viewer dismiss, budget policy), ACTIVE->RELEASED (agent releases), SUSPENDED->ACTIVE (safe mode exit), SUSPENDED->REVOKED (max suspension time exceeded), ORPHANED->ACTIVE (reconnect within grace), ORPHANED->EXPIRED (grace period elapsed). DENIED, REVOKED, EXPIRED, and RELEASED are terminal states. Lease grants MUST always be a subset of the session's currently granted capabilities at request time.
+The runtime MUST implement the following lease state machine with states: REQUESTED, ACTIVE, SUSPENDED, ORPHANED, REVOKED, EXPIRED, DENIED, RELEASED. Valid transitions MUST be: REQUESTED->ACTIVE (granted), REQUESTED->DENIED (denied), ACTIVE->SUSPENDED (safe mode), ACTIVE->ORPHANED (disconnect), ACTIVE->EXPIRED (TTL elapsed), ACTIVE->REVOKED (viewer dismiss, budget policy), ACTIVE->RELEASED (agent releases), SUSPENDED->ACTIVE (safe mode exit), SUSPENDED->REVOKED (max suspension time exceeded), ORPHANED->ACTIVE (reconnect within grace), ORPHANED->EXPIRED (grace period elapsed, TTL elapsed). DENIED, REVOKED, EXPIRED, and RELEASED are terminal states. Lease grants MUST always be a subset of the session's currently granted capabilities at request time.
 Source: RFC 0008 §3.1
 Scope: v1-mandatory
 
@@ -185,7 +185,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Resource Budget Schema
-Every lease MUST carry a `ResourceBudget` with dimensions: `max_nodes_per_tile` (range [1, 64]), `update_rate_hz` (mutations/second), `max_tiles` (range [1, 64]), `texture_bytes_total`, `max_active_leases` (range [1, 64]), `max_concurrent_streams` (0 in v1). Default values MUST match the platform profile defaults.
+Every lease MUST carry a `ResourceBudget` with dimensions: `texture_bytes_per_tile` (per-tile texture memory limit, enforced per tile at mutation time), `max_nodes_per_tile` (range [1, 64]), `update_rate_hz` (mutations/second), `max_tiles` (range [1, 64]), `texture_bytes_total`, `max_active_leases` (range [1, 64]), `max_concurrent_streams` (0 in v1). Default values MUST match the platform profile defaults.
 Source: RFC 0008 §6.1
 Scope: v1-mandatory
 
