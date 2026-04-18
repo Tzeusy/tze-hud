@@ -38,6 +38,11 @@ cd "${REPO_ROOT}"
 #   - normative docs that document the canonical→stale mapping
 #   - historical review docs describing the pre-fix state
 #
+# Prefix-exemptions (any file under these paths is exempt):
+#   - openspec/changes/archive/ — archived changes preserve the vocabulary that
+#     was current at archive time; enforcing the lint on historical specs would
+#     require rewriting history, not correcting current code.
+#
 # Add new entries here if a file intentionally uses legacy names.
 EXEMPT_PATHS=(
     "crates/tze_hud_policy/src/security.rs"
@@ -50,8 +55,6 @@ EXEMPT_PATHS=(
     "examples/vertical_slice/src/main.rs"
     "openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md"
     "openspec/changes/v1-mvp-standards/specs/configuration/spec.md"
-    "openspec/changes/archive/2026-04-18-v1-mvp-standards/specs/policy-arbitration/spec.md"
-    "openspec/changes/archive/2026-04-18-v1-mvp-standards/specs/configuration/spec.md"
     "openspec/specs/configuration/spec.md"
     "openspec/specs/policy-arbitration/spec.md"
     "docs/rfcs/0005-session-protocol.md"
@@ -62,6 +65,12 @@ EXEMPT_PATHS=(
     "about/legends-and-lore/prompts/07-configuration.md"
     "about/legends-and-lore/reviews/0001-scene-contract-round3.md"
     "about/legends-and-lore/reconciliations/reconciliation-gen4.md"
+)
+
+# Path prefixes (relative to repo root) under which ALL files are exempt.
+# This is separate from EXEMPT_PATHS to avoid per-file maintenance.
+EXEMPT_PREFIXES=(
+    "openspec/changes/archive/"
 )
 
 # Patterns to search for (ERE)
@@ -105,7 +114,7 @@ for i in "${!STALE_PATTERNS[@]}"; do
         # Normalize: strip leading "./"
         filepath="${filepath#./}"
 
-        # Check if this file is exempt
+        # Check if this file is exempt (exact path match)
         is_exempt=0
         for exempt in "${EXEMPT_PATHS[@]}"; do
             if [[ "${filepath}" == "${exempt}" ]]; then
@@ -113,6 +122,16 @@ for i in "${!STALE_PATTERNS[@]}"; do
                 break
             fi
         done
+
+        # Check if this file falls under an exempt prefix (prefix match)
+        if [[ "${is_exempt}" -eq 0 ]]; then
+            for prefix in "${EXEMPT_PREFIXES[@]}"; do
+                if [[ "${filepath}" == "${prefix}"* ]]; then
+                    is_exempt=1
+                    break
+                fi
+            done
+        fi
 
         if [[ "${is_exempt}" -eq 0 ]]; then
             hits+=("${line}")
@@ -145,7 +164,9 @@ if [[ "${FAILURES}" -gt 0 ]]; then
     echo "        telemetry_read   → read_telemetry"
     echo ""
     echo "      If a file legitimately needs the legacy name (e.g., for rejection tests),"
-    echo "      add it to the EXEMPT_PATHS list in scripts/check_canonical_vocabulary.sh."
+    echo "      add it to EXEMPT_PATHS (exact match) or EXEMPT_PREFIXES (directory prefix)"
+    echo "      in scripts/check_canonical_vocabulary.sh."
+    echo "      Note: openspec/changes/archive/** is globally exempt (historical specs)."
     exit 1
 else
     echo "PASS: canonical vocabulary check — no stale names found."
