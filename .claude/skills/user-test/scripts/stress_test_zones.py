@@ -15,6 +15,7 @@ Connection defaults:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import math
 import os
@@ -76,13 +77,13 @@ ZONES: list[dict[str, Any]] = [
     },
 ]
 
-# Load profiles: (name, rate_per_sec, duration_sec)
-PROFILES: list[tuple[str, float, int]] = [
-    ("idle", 1, 15),
-    ("low", 5, 15),
-    ("medium", 20, 15),
-    ("high", 50, 15),
-    ("burst", 100, 10),
+# Load profiles: (name, rate_per_sec, concurrency, duration_sec)
+PROFILES: list[tuple[str, float, int, int]] = [
+    ("idle",   1,  1, 30),
+    ("low",    5,  1, 30),
+    ("medium", 20, 4, 30),
+    ("high",   50, 8, 30),
+    ("burst", 100, 16, 10),
 ]
 
 # ---------------------------------------------------------------------------
@@ -525,6 +526,9 @@ class ProfileResult:
     host_metrics_end: dict = field(default_factory=dict)
     start_ts: float = 0.0
     end_ts: float = 0.0
+    # Concurrency and achieved throughput
+    concurrency: int = 1
+    achieved_rate: float | None = None  # successful_requests / elapsed_wall_time
     # Background telemetry time-series
     telemetry_samples: list = field(default_factory=list)  # list[dict] serialized
     telemetry_avg_cpu_pct: float | None = None
@@ -622,6 +626,46 @@ class RateController:
         self._next_tick += self._interval
 
 
+def _dispatch_one(
+    url: str,
+    token: str,
+    req_id: int,
+    zone: dict,
+    verbose: bool,
+) -> tuple[float | None, bool]:
+    """
+    Dispatch a single publish_to_zone request and return (latency_ms, success).
+
+    Thread-safe: uses only immutable arguments and the thread-local stack.
+    Returns (latency_ms, True) on success; (None, False) on any error.
+    """
+    params: dict[str, Any] = {
+        "zone_name": zone["zone_name"],
+        "content": f"{zone['content']} #{req_id}",
+        "namespace": DEFAULT_NAMESPACE,
+        "ttl_us": DEFAULT_TTL_US,
+        "merge_key": zone["merge_key"],
+    }
+    t0 = time.monotonic()
+    try:
+        rpc_call(url, token, "publish_to_zone", params, req_id, timeout=5.0)
+        latency_ms = (time.monotonic() - t0) * 1000.0
+        if verbose:
+            print(
+                f"    req={req_id} zone={zone['zone_name']}"
+                f" lat={latency_ms:.1f}ms ok"
+            )
+        return latency_ms, True
+    except Exception as exc:
+        latency_ms = (time.monotonic() - t0) * 1000.0
+        if verbose:
+            print(
+                f"    req={req_id} zone={zone['zone_name']}"
+                f" lat={latency_ms:.1f}ms ERR: {exc}"
+            )
+        return None, False
+
+
 def run_profile(
     profile_name: str,
     rate_per_sec: float,
@@ -632,11 +676,13 @@ def run_profile(
     ssh_host: str,
     ssh_key: str,
     verbose: bool = False,
+    concurrency: int = 1,
 ) -> ProfileResult:
     result = ProfileResult(
         profile_name=profile_name,
         rate_per_sec=rate_per_sec,
         duration_sec=duration_sec,
+        concurrency=concurrency,
     )
 
     # --- Start background telemetry thread ---
@@ -653,57 +699,67 @@ def run_profile(
         )
 
     result.start_ts = time.time()
-    deadline = time.monotonic() + duration_sec
+    wall_start = time.monotonic()
+    deadline = wall_start + duration_sec
     controller = RateController(rate_per_sec)
     req_id_counter = 1
     zone_cycle = 0
 
     print(
-        f"  [{profile_name}] Running {rate_per_sec}/s for {duration_sec}s...",
+        f"  [{profile_name}] Running {rate_per_sec}/s "
+        f"(concurrency={concurrency}) for {duration_sec}s...",
         flush=True,
     )
 
-    while time.monotonic() < deadline:
-        controller.wait_for_next()
-        if time.monotonic() >= deadline:
-            break
-
-        zone = ZONES[zone_cycle % len(ZONES)]
-        zone_cycle += 1
-        req_id = req_id_counter
-        req_id_counter += 1
-
-        params: dict[str, Any] = {
-            "zone_name": zone["zone_name"],
-            "content": f"{zone['content']} #{req_id}",
-            "namespace": DEFAULT_NAMESPACE,
-            "ttl_us": DEFAULT_TTL_US,
-            "merge_key": zone["merge_key"],
-        }
-
-        t0 = time.monotonic()
-        try:
-            rpc_call(url, token, "publish_to_zone", params, req_id, timeout=5.0)
-            latency_ms = (time.monotonic() - t0) * 1000.0
-            result.latencies_ms.append(latency_ms)
-            result.success_count += 1
-            if verbose:
-                print(
-                    f"    req={req_id} zone={zone['zone_name']}"
-                    f" lat={latency_ms:.1f}ms ok"
-                )
-        except Exception as exc:
-            result.error_count += 1
-            if verbose:
-                latency_ms = (time.monotonic() - t0) * 1000.0
-                print(
-                    f"    req={req_id} zone={zone['zone_name']}"
-                    f" lat={latency_ms:.1f}ms ERR: {exc}"
-                )
-        finally:
+    if concurrency > 1:
+        # Concurrent dispatch: submit one future per tick, collect results
+        # as they complete. Each thread records its own latency independently.
+        futures: list[concurrent.futures.Future] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+            while time.monotonic() < deadline:
+                controller.wait_for_next()
+                if time.monotonic() >= deadline:
+                    break
+                zone = ZONES[zone_cycle % len(ZONES)]
+                zone_cycle += 1
+                req_id = req_id_counter
+                req_id_counter += 1
+                fut = executor.submit(_dispatch_one, url, token, req_id, zone, verbose)
+                futures.append(fut)
+            # Collect all results (executor waits for running futures on exit)
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    latency_ms, success = fut.result()
+                except Exception:
+                    latency_ms, success = None, False
+                result.total_requests += 1
+                if success and latency_ms is not None:
+                    result.latencies_ms.append(latency_ms)
+                    result.success_count += 1
+                else:
+                    result.error_count += 1
+    else:
+        # Single-threaded dispatch (concurrency == 1)
+        while time.monotonic() < deadline:
+            controller.wait_for_next()
+            if time.monotonic() >= deadline:
+                break
+            zone = ZONES[zone_cycle % len(ZONES)]
+            zone_cycle += 1
+            req_id = req_id_counter
+            req_id_counter += 1
+            latency_ms, success = _dispatch_one(url, token, req_id, zone, verbose)
             result.total_requests += 1
+            if success and latency_ms is not None:
+                result.latencies_ms.append(latency_ms)
+                result.success_count += 1
+            else:
+                result.error_count += 1
 
     result.end_ts = time.time()
+    elapsed_wall = time.monotonic() - wall_start
+    if elapsed_wall > 0:
+        result.achieved_rate = result.success_count / elapsed_wall
 
     # --- Stop background telemetry thread ---
     print(f"  [{profile_name}] Stopping telemetry thread...", flush=True)
@@ -720,11 +776,18 @@ def run_profile(
         else "n/a"
     )
     n_samples = len(result.telemetry_samples)
+    achieved_str = (
+        f"{result.achieved_rate:.1f}/s"
+        if result.achieved_rate is not None
+        else "n/a"
+    )
     print(
         f"  [{profile_name}] Done: "
         f"total={result.total_requests} "
         f"ok={result.success_count} "
         f"err={result.error_count} "
+        f"tgt={rate_per_sec}/s "
+        f"got={achieved_str} "
         f"p50={stats['p50']:.1f}ms "
         f"p99={stats['p99']:.1f}ms "
         f"avg_cpu={avg_cpu_str} "
@@ -748,7 +811,7 @@ def _fmt(v: Any, decimals: int = 1) -> str:
 
 def print_summary_table(results: list[ProfileResult]) -> None:
     header = (
-        f"{'Profile':<12} {'Rate/s':>6} {'Total':>7} {'Errors':>7} "
+        f"{'Profile':<12} {'Tgt/s':>6} {'Got/s':>6} {'Total':>7} {'Errors':>7} "
         f"{'ErrRate':>8} {'p50ms':>7} {'p95ms':>7} {'p99ms':>7} {'maxms':>7} "
         f"{'AvgCPU%':>8} {'Samples':>8}"
     )
@@ -770,9 +833,10 @@ def print_summary_table(results: list[ProfileResult]) -> None:
         avg_cpu = _fmt(r.telemetry_avg_cpu_pct)
         n_samples = len(r.telemetry_samples)
 
+        got_rate = _fmt(r.achieved_rate)
         print(
-            f"{r.profile_name:<12} {r.rate_per_sec:>6.0f} {r.total_requests:>7} "
-            f"{r.error_count:>7} {err_pct:>8} "
+            f"{r.profile_name:<12} {r.rate_per_sec:>6.0f} {got_rate:>6} "
+            f"{r.total_requests:>7} {r.error_count:>7} {err_pct:>8} "
             f"{_fmt(stats['p50']):>7} {_fmt(stats['p95']):>7} "
             f"{_fmt(stats['p99']):>7} {_fmt(stats['max']):>7} "
             f"{avg_cpu:>8} {n_samples:>8}"
@@ -831,6 +895,13 @@ def parse_args() -> argparse.Namespace:
         help="Which load profiles to run (default: all)",
     )
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Override per-profile concurrency with a fixed worker count",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print each request result",
@@ -862,6 +933,8 @@ def main() -> int:
     print(f"  Report  : {args.report}")
     print(f"  Zones   : {len(ZONES)}")
     print(f"  Profiles: {[p[0] for p in profiles_to_run]}")
+    if args.concurrency is not None:
+        print(f"  Concurrency override: {args.concurrency} (overrides per-profile defaults)")
     print()
 
     # Preflight: verify MCP endpoint is reachable before running any baselines
@@ -872,8 +945,16 @@ def main() -> int:
     results: list[ProfileResult] = []
     run_id = str(uuid.uuid4())
 
-    for name, rate, dur in profiles_to_run:
-        print(f"--- Profile: {name} ({rate}/s, {dur}s) ---", flush=True)
+    for prof in profiles_to_run:
+        name, rate, profile_concurrency, dur = prof
+        # CLI --concurrency overrides the per-profile default
+        effective_concurrency = (
+            args.concurrency if args.concurrency is not None else profile_concurrency
+        )
+        print(
+            f"--- Profile: {name} ({rate}/s, concurrency={effective_concurrency}, {dur}s) ---",
+            flush=True,
+        )
         result = run_profile(
             profile_name=name,
             rate_per_sec=rate,
@@ -884,10 +965,11 @@ def main() -> int:
             ssh_host=args.ssh_host,
             ssh_key=args.ssh_key,
             verbose=args.verbose,
+            concurrency=effective_concurrency,
         )
         results.append(result)
-        # Small cooldown between profiles to let the host settle
-        if (name, rate, dur) != profiles_to_run[-1]:
+        # 3-second cooldown between profiles to let the host settle
+        if prof != profiles_to_run[-1]:
             print("  (cooling down 3s...)", flush=True)
             time.sleep(3)
 
