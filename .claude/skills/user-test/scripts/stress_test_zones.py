@@ -890,11 +890,11 @@ def run_network_baseline(url: str, token: str) -> dict[str, Any]:
     Returns a dict with keys: calls, successes, errors, latency_stats_ms.
     latency_stats_ms contains p50, p95, p99, max (all in milliseconds).
     """
-    CALLS = 10
+    CALLS = 100
     latencies_ms: list[float] = []
     errors = 0
 
-    print("--- Network baseline: 10x list_zones ---", flush=True)
+    print("--- Network baseline: 100x list_zones ---", flush=True)
     for i in range(CALLS):
         t0 = time.monotonic()
         try:
@@ -939,12 +939,12 @@ def run_publish_baseline(url: str, token: str) -> dict[str, Any]:
     Returns a dict with keys: calls, successes, errors, latency_stats_ms.
     latency_stats_ms contains p50, p95, p99, max (all in milliseconds).
     """
-    CALLS = 10
+    CALLS = 100
     RATE = 1.0  # calls per second
     latencies_ms: list[float] = []
     errors = 0
 
-    print("--- Publish baseline: 10x publish_to_zone at 1/s ---", flush=True)
+    print("--- Publish baseline: 100x publish_to_zone at 1/s ---", flush=True)
     controller = RateController(RATE)
     for i in range(CALLS):
         controller.wait_for_next()
