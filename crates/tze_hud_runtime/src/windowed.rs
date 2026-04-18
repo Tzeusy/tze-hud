@@ -2534,9 +2534,7 @@ mod tests {
 
     /// Helper: build a scene with a single tile that has a HitRegionNode child.
     fn scene_with_capture_tile() -> (SceneGraph, tze_hud_scene::SceneId) {
-        use tze_hud_scene::{
-            Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId,
-        };
+        use tze_hud_scene::{Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId};
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
@@ -2590,7 +2588,12 @@ mod tests {
         );
         assert_eq!(
             regions[0],
-            HitRegion::new(tile_bounds.x, tile_bounds.y, tile_bounds.width, tile_bounds.height),
+            HitRegion::new(
+                tile_bounds.x,
+                tile_bounds.y,
+                tile_bounds.width,
+                tile_bounds.height
+            ),
             "capture region must match the tile's display-space bounds"
         );
     }
@@ -2701,7 +2704,12 @@ mod tests {
         assert_eq!(combined[0], static_regions[0], "static region preserved");
         assert_eq!(
             combined[1],
-            HitRegion::new(tile_bounds.x, tile_bounds.y, tile_bounds.width, tile_bounds.height),
+            HitRegion::new(
+                tile_bounds.x,
+                tile_bounds.y,
+                tile_bounds.width,
+                tile_bounds.height
+            ),
             "content-tile capture region must cover tile display-space bounds"
         );
     }
