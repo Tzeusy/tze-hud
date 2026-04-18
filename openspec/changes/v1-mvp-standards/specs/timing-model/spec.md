@@ -389,7 +389,7 @@ Scope: v1-mandatory
 - **THEN** the compositor MUST return its current monotonic and wall clock values and the estimated skew
 
 ### Requirement: Timing Configuration
-All timing parameters MUST be configurable via TimingConfig with documented defaults and validation ranges: target_fps (default 60, range 1-240), max_agent_clock_drift_ms (default 100, range 1-10000), max_vsync_jitter_ms (default 2, range 0-100), max_future_schedule_us (default 300000000, range 1000000-3600000000), sync_group_max_defer_frames (default 3, range 1-60), pending_queue_depth_per_agent (default 256, range 16-4096), sync_drift_budget_us (default 500, range 1-100000), tile_stale_threshold_ms (default 5000, range 500-300000), clock_jump_detection_ms (default 50, range 10-10000).
+All timing parameters MUST be configurable via TimingConfig with documented defaults and validation ranges: target_fps (default 60, range 1-240), max_agent_clock_drift_ms (default 100, range 1-10,000), max_vsync_jitter_ms (default 2, range 0-100), max_future_schedule_us (default 300,000,000, range 1,000,000-3,600,000,000), sync_group_max_defer_frames (default 3, range 1-60), pending_queue_depth_per_agent (default 256, range 16-4,096), sync_drift_budget_us (default 500, range 1-100,000), tile_stale_threshold_ms (default 5,000, range 500-300,000), clock_jump_detection_ms (default 50, range 10-10,000).
 Source: RFC 0003 §7.1, §10
 Scope: v1-mandatory
 
