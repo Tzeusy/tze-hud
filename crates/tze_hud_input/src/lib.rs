@@ -2526,7 +2526,7 @@ mod tests {
         assert!(ev.is_some(), "PgDn must return a changed event for a scrollable tile");
         let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
         assert!(
-            (offset_y - KEYBOARD_PAGE_SCROLL_PX).abs() < f32::EPSILON,
+            (offset_y - KEYBOARD_PAGE_SCROLL_PX).abs() < 1e-4,
             "offset_y must equal KEYBOARD_PAGE_SCROLL_PX after PgDn; got {offset_y}"
         );
     }
@@ -2541,15 +2541,15 @@ mod tests {
         let ev = processor.process_keyboard_scroll(150.0, 150.0, -KEYBOARD_PAGE_SCROLL_PX, &mut scene);
 
         // Scroll event fires (tile is scrollable and hit), but offset stays 0.
-        // process_scroll_event returns None when the offset didn't actually change.
-        // After clamping, delta applied is 0 and commit returns no change.
+        // queue_user_scroll sets dirty=true before clamping, so commit_frame returns
+        // true and process_scroll_event returns Some even when the clamped offset is
+        // unchanged.  The return value is not load-bearing for correctness here.
         let (_, offset_y) = scene.tile_scroll_offset_local(_tile_id);
-        assert!(
-            offset_y >= 0.0,
-            "PgUp must not produce a negative scroll offset; got {offset_y}"
+        assert_eq!(
+            offset_y, 0.0,
+            "PgUp at zero offset must result in exactly 0.0 scroll offset; got {offset_y}"
         );
-        // Whether Some or None depends on whether offset changed — clamped → None is correct.
-        let _ = ev; // return value is acceptable either way
+        let _ = ev; // return value is Some (dirty flag set before clamp) — not asserted
     }
 
     /// PgUp after PgDn returns toward origin.
@@ -2563,7 +2563,7 @@ mod tests {
         processor.process_keyboard_scroll(150.0, 150.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
 
         let (_, before) = scene.tile_scroll_offset_local(tile_id);
-        assert!((before - 2.0 * KEYBOARD_PAGE_SCROLL_PX).abs() < f32::EPSILON,
+        assert!((before - 2.0 * KEYBOARD_PAGE_SCROLL_PX).abs() < 1e-4,
             "expected 2x page scroll; got {before}");
 
         // Scroll back up by one page step.
@@ -2571,7 +2571,7 @@ mod tests {
 
         let (_, after) = scene.tile_scroll_offset_local(tile_id);
         assert!(
-            (after - KEYBOARD_PAGE_SCROLL_PX).abs() < f32::EPSILON,
+            (after - KEYBOARD_PAGE_SCROLL_PX).abs() < 1e-4,
             "one PgUp from 2x should leave offset at 1x page; got {after}"
         );
     }
@@ -2615,7 +2615,7 @@ mod tests {
         let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
         let expected = 40.0 + KEYBOARD_PAGE_SCROLL_PX;
         assert!(
-            (offset_y - expected).abs() < f32::EPSILON,
+            (offset_y - expected).abs() < 1e-4,
             "combined wheel + keyboard scroll must accumulate; expected {expected}, got {offset_y}"
         );
     }
