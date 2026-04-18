@@ -1,5 +1,10 @@
 # Tasks
 
+> **ARCHIVED 2026-04-18** — All tasks completed as part of epic hud-d0c8.
+> Implementation in `.claude/skills/user-test/scripts/stress_test_zones.py`.
+> Gen-1 reconciliation report: `docs/reports/mcp_stress_testing_d0c8_epic_report_20260418.md` (PR #487).
+> Archive bead: hud-b99p.
+
 ## Task 1: Implement stress_test_zones.py
 
 **File:** `.claude/skills/user-test/scripts/stress_test_zones.py`

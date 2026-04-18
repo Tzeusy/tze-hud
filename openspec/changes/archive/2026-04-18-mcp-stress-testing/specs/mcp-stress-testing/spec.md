@@ -2,7 +2,7 @@
 
 External load testing capability for the MCP HTTP `publish_to_zone` endpoint. Exercises zone publishing at configurable load levels while collecting latency and host resource telemetry.
 
-## Requirements
+## ADDED Requirements
 
 ### Requirement: Baseline Phases
 Before load profiles begin, the tool SHALL run two baseline phases:
