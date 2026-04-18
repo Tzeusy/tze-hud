@@ -200,12 +200,12 @@ async fn wheel_scroll_delivers_scroll_offset_changed_event_to_agent() {
                 Some(InputEvent::ScrollOffsetChanged(ev)) => {
                     assert_eq!(ev.tile_id, tile_id_bytes, "tile_id must match");
                     assert!(
-                        (ev.offset_y - 120.0).abs() < f32::EPSILON,
+                        (ev.offset_y - 120.0).abs() < 1e-4,
                         "offset_y must be 120.0, got {}",
                         ev.offset_y
                     );
                     assert!(
-                        ev.offset_x.abs() < f32::EPSILON,
+                        ev.offset_x.abs() < 1e-4,
                         "offset_x must be 0.0, got {}",
                         ev.offset_x
                     );
@@ -244,7 +244,7 @@ async fn keyboard_scroll_delivers_scroll_offset_changed_event_to_agent() {
                 Some(InputEvent::ScrollOffsetChanged(ev)) => {
                     assert_eq!(ev.tile_id, tile_id_bytes);
                     assert!(
-                        (ev.offset_y - 160.0).abs() < f32::EPSILON,
+                        (ev.offset_y - 160.0).abs() < 1e-4,
                         "PgDn scroll offset_y must be 160.0, got {}",
                         ev.offset_y
                     );

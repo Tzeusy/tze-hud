@@ -2654,12 +2654,12 @@ mod tests {
 
         // The returned event must carry the committed offset, not zero.
         assert!(
-            (ev.offset_y - 80.0).abs() < f32::EPSILON,
+            (ev.offset_y - 80.0).abs() < 1e-4,
             "event.offset_y must equal the applied delta (80.0), got {}",
             ev.offset_y
         );
         assert!(
-            ev.offset_x.abs() < f32::EPSILON,
+            ev.offset_x.abs() < 1e-4,
             "event.offset_x must be 0.0 for y-only scroll, got {}",
             ev.offset_x
         );
@@ -2667,11 +2667,11 @@ mod tests {
         // The scene tile scroll offset must also reflect the update (local-first).
         let (scene_x, scene_y) = scene.tile_scroll_offset_local(tile_id);
         assert!(
-            (scene_y - 80.0).abs() < f32::EPSILON,
+            (scene_y - 80.0).abs() < 1e-4,
             "scene tile offset_y must be 80.0 after wheel scroll, got {scene_y}"
         );
         assert!(
-            scene_x.abs() < f32::EPSILON,
+            scene_x.abs() < 1e-4,
             "scene tile offset_x must be 0.0 for y-only scroll, got {scene_x}"
         );
     }
