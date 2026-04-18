@@ -1284,20 +1284,13 @@ def print_summary_table(results: list[ProfileResult]) -> None:
         )
         avg_cpu = _fmt(r.telemetry_avg_cpu_pct)
         n_samples = len(r.telemetry_samples)
-        pmem_vals = [
-            e["host_private_mem_mb"]
-            for e in r.time_series
-            if e.get("host_private_mem_mb") is not None
-        ]
-        avg_pmem = (sum(pmem_vals) / len(pmem_vals)) if pmem_vals else None
-
         got_rate = _fmt(r.achieved_rate)
         print(
             f"{r.profile_name:<12} {r.rate_per_sec:>6.0f} {got_rate:>6} "
             f"{r.total_requests:>7} {r.error_count:>7} {err_pct:>8} "
             f"{_fmt(stats['p50']):>7} {_fmt(stats['p95']):>7} "
             f"{_fmt(stats['p99']):>7} {_fmt(stats['max']):>7} "
-            f"{avg_cpu:>8} {_fmt(avg_pmem):>8} {n_samples:>8}"
+            f"{avg_cpu:>8} {_fmt(r.telemetry_avg_pmem_mb):>8} {n_samples:>8}"
         )
 
     print(sep)
