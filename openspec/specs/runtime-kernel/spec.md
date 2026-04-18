@@ -335,10 +335,10 @@ Scope: v1-mandatory
 
 #### Scenario: Post-revocation cleanup
 - **WHEN** a session is revoked
-- **THEN** the runtime MUST free all agent-owned textures and node data after a configurable post-revocation delay in the range [0ms, 5000ms] (see Implementation Notes for default), reducing the agent's resource footprint to zero
+- **THEN** the runtime MUST free all agent-owned textures and node data after a configurable post-revocation delay in the range [0ms, 5,000ms] (see Implementation Notes for default), reducing the agent's resource footprint to zero
 
 ### Requirement: Graceful Shutdown
-Shutdown MUST follow an ordered sequence: (1) stop accepting new connections, (2) drain active mutations (wait up to a configurable drain timeout in the range [0ms, 60000ms] for compositor thread to finish current frame), (3) revoke all leases without waiting for acknowledgement, (4) flush telemetry with a configurable grace period in the range [0ms, 10000ms], (5) terminate agent sessions, (6) GPU drain via device.poll(Wait), (7) release resources with reference counts reaching zero, (8) exit process (code 0 for clean, non-zero for error). See Implementation Notes for suggested defaults.
+Shutdown MUST follow an ordered sequence: (1) stop accepting new connections, (2) drain active mutations (wait up to a configurable drain timeout in the range [0ms, 60,000ms] for compositor thread to finish current frame), (3) revoke all leases without waiting for acknowledgement, (4) flush telemetry with a configurable grace period in the range [0ms, 10,000ms], (5) terminate agent sessions, (6) GPU drain via device.poll(Wait), (7) release resources with reference counts reaching zero, (8) exit process (code 0 for clean, non-zero for error). See Implementation Notes for suggested defaults.
 Source: RFC 0002 §1.4
 Scope: v1-mandatory
 
