@@ -55,24 +55,24 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Display Profile full-display
-The `full-display` built-in profile MUST define the following budget values: `max_tiles = 1024`, `max_texture_mb = 2048`, `max_agents = 16`, `target_fps = 60`, `min_fps = 30`. The admission control for this profile MUST be "tight" (budget enforcement active).
+The `full-display` built-in profile MUST define the following budget values: `max_tiles = 1024`, `max_texture_mb = 2048`, `max_agents = 16`, `target_fps = 60`, `min_fps = 30`, `max_media_streams = 4`, `max_agent_update_hz = 60`. The admission control for this profile MUST be "tight" (budget enforcement active).
 Source: RFC 0006 §3.2
 Scope: v1-mandatory
 
 #### Scenario: full-display profile budget values
 - **WHEN** the runtime starts with `profile = "full-display"` and no display_profile overrides
-- **THEN** the effective profile has max_tiles=1024, max_texture_mb=2048, max_agents=16, target_fps=60, min_fps=30
+- **THEN** the effective profile has max_tiles=1024, max_texture_mb=2048, max_agents=16, target_fps=60, min_fps=30, max_media_streams=4, max_agent_update_hz=60
 
 ---
 
 ### Requirement: Display Profile headless
-The `headless` built-in profile MUST define the following budget values: `max_tiles = 256`, `max_texture_mb = 512`, `max_agents = 8`, `target_fps = 60`, `min_fps = 1`. The headless profile MUST use an offscreen render target with no window. The `headless` profile MUST NOT be extendable via `[display_profile].extends`.
+The `headless` built-in profile MUST define the following budget values: `max_tiles = 256`, `max_texture_mb = 512`, `max_agents = 8`, `target_fps = 60`, `min_fps = 1`, `max_media_streams = 2`, `max_agent_update_hz = 30`. The headless profile MUST use an offscreen render target with no window. The `headless` profile MUST NOT be extendable via `[display_profile].extends`.
 Source: RFC 0006 §3.4
 Scope: v1-mandatory
 
 #### Scenario: headless profile budget values
 - **WHEN** the runtime starts with `profile = "headless"`
-- **THEN** the effective profile has max_tiles=256, max_texture_mb=512, max_agents=8, target_fps=60, min_fps=1 and renders to an offscreen surface
+- **THEN** the effective profile has max_tiles=256, max_texture_mb=512, max_agents=8, target_fps=60, min_fps=1, max_media_streams=2, max_agent_update_hz=30 and renders to an offscreen surface
 
 #### Scenario: headless not extendable
 - **WHEN** a config file sets `[display_profile] extends = "headless"`
@@ -230,7 +230,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Quiet Hours Configuration
-The `[privacy.quiet_hours]` section MUST support `enabled` (default: `false`), a `[[privacy.quiet_hours.schedule]]` array of time ranges with `start` (HH:MM 24-hour), `end` (HH:MM 24-hour, wraps midnight), and optional `days` (array of `"mon"`..`"sun"`; default: all days), `pass_through_class` (one of `CRITICAL`, `HIGH`, `NORMAL`, `LOW`, `SILENT`; default: `HIGH`; values use the canonical `InterruptionClass` enum from RFC 0010 §3.1), and `quiet_mode_display` (one of `"dim"`, `"clock_only"`, `"off"`; default: `"dim"`). `pass_through_class` specifies the minimum interruption class that passes through immediately during quiet hours. `CRITICAL` always passes through regardless of this setting; specifying `CRITICAL` as the threshold is valid (meaning only CRITICAL passes — all others queued or discarded). Classes below the configured threshold are deferred: NORMAL is queued and delivered when quiet hours end; LOW is discarded (too stale to be useful); SILENT is unaffected (invisible by definition). Invalid `pass_through_class` values MUST produce `CONFIG_UNKNOWN_INTERRUPTION_CLASS`. Note: RFC 0006 originally used doctrine names (`urgent`, `gentle`) for `pass_through_class`; the canonical wire values are the InterruptionClass enum names (`CRITICAL`, `HIGH`, `LOW`, etc.) as established by RFC 0010 §3.1.
+The `[privacy.quiet_hours]` section MUST support `enabled` (default: `false`), a `[[privacy.quiet_hours.schedule]]` array of time ranges with `start` (HH:MM 24-hour), `end` (HH:MM 24-hour, wraps midnight), and optional `days` (array of `"mon"`..`"sun"`; default: all days), `pass_through_class` (one of `CRITICAL`, `HIGH`, `NORMAL`, `LOW`, `SILENT`; default: `HIGH`; values use the canonical `InterruptionClass` enum from RFC 0010 §3.1), and `quiet_mode_display` (one of `"dim"`, `"clock_only"`, `"off"`; default: `"dim"`). `pass_through_class` specifies the minimum interruption class that passes through immediately during quiet hours. `CRITICAL` always passes through regardless of this setting; specifying `CRITICAL` as the threshold is valid (meaning only CRITICAL passes — all others queued or discarded). Classes below the configured threshold are deferred, except `SILENT` which is always unaffected (invisible by definition and carries no user-visible signal to defer): NORMAL is queued and delivered when quiet hours end; LOW is discarded (too stale to be useful); SILENT is never queued or discarded regardless of the threshold. Invalid `pass_through_class` values MUST produce `CONFIG_UNKNOWN_INTERRUPTION_CLASS`. Note: RFC 0006 originally used doctrine names (`urgent`, `gentle`) for `pass_through_class`; the canonical wire values are the InterruptionClass enum names (`CRITICAL`, `HIGH`, `LOW`, etc.) as established by RFC 0010 §3.1.
 Source: RFC 0006 §7.1, RFC 0010 §3.1, §4.2
 Scope: v1-mandatory
 
@@ -297,7 +297,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Scene Event Naming Convention
-Scene event names used in `tab_switch_on_event` MUST follow the `<source>.<action>` dotted hierarchy pattern matching `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`. Invalid patterns MUST produce `CONFIG_INVALID_EVENT_NAME`. An empty string MUST be valid (meaning no automatic switch) and MUST NOT generate a warning. Unrecognized (but validly formatted) event names MUST be accepted with a WARN log.
+The `tab_switch_on_event` field accepts either an empty string (meaning no automatic switch) or a non-empty event name. An empty string MUST be valid and MUST NOT generate a warning. Non-empty scene event names MUST follow the `<source>.<action>` dotted hierarchy pattern matching `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`. Non-empty names that do not match this pattern MUST produce `CONFIG_INVALID_EVENT_NAME`. Unrecognized (but validly formatted) non-empty event names MUST be accepted with a WARN log.
 Source: RFC 0006 §5.5
 Scope: v1-mandatory
 
@@ -502,7 +502,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Capability Vocabulary
-Capability identifiers in agent grants MUST use the canonical `snake_case` wire-format names. The capability vocabulary defined in this specification is CANONICAL — all other specs, protocol handlers, example code, and MCP tool implementations MUST use these exact names when referencing capabilities. No synonyms, aliases, or legacy names are permitted in v1. The runtime MUST recognize all v1 capabilities: `create_tiles`, `modify_own_tiles`, `manage_tabs`, `manage_sync_groups`, `upload_resource`, `read_scene_topology`, `subscribe_scene_events`, `overlay_privileges`, `access_input_events`, `high_priority_z_order`, `exceed_default_budgets`, `read_telemetry`, `publish_zone:<zone_name>`, `publish_zone:*`, `emit_scene_event:<event_name>`, `resident_mcp`, `lease:priority:<N>`, `publish_widget:<widget_name>`, and `publish_widget:*`. Any capability name not in this canonical list (including misspellings, camelCase variants, or legacy names) MUST be rejected. Parameterized capability grants using the `system.` or `scene.` prefix for `emit_scene_event` MUST be rejected with `CONFIG_RESERVED_EVENT_PREFIX`. Note: RFC 0009 §8.1 contains older names (`read_scene`, `receive_input`, `zone_publish`) superseded by RFC 0005 Round 14 (rig-b2s); RFC 0006 §6.3 (this requirement) is the canonical authority.
+Capability identifiers in agent grants MUST use the canonical `snake_case` wire-format names. The capability vocabulary defined in this specification is CANONICAL — all other specs, protocol handlers, example code, and MCP tool implementations MUST use these exact names when referencing capabilities. No synonyms, aliases, or legacy names are permitted in v1. The runtime MUST recognize all v1 capabilities: `create_tiles`, `modify_own_tiles`, `manage_tabs`, `manage_sync_groups`, `upload_resource`, `register_widget_asset`, `read_scene_topology`, `subscribe_scene_events`, `overlay_privileges`, `access_input_events`, `high_priority_z_order`, `exceed_default_budgets`, `read_telemetry`, `publish_zone:<zone_name>`, `publish_zone:*`, `emit_scene_event:<event_name>`, `resident_mcp`, `lease:priority:<N>`, `publish_widget:<widget_name>`, and `publish_widget:*`. Any capability name not in this canonical list (including misspellings, camelCase variants, or legacy names) MUST be rejected. Parameterized capability grants using the `system.` or `scene.` prefix for `emit_scene_event` MUST be rejected with `CONFIG_RESERVED_EVENT_PREFIX`. Note: RFC 0009 §8.1 contains older names (`read_scene`, `receive_input`, `zone_publish`) superseded by RFC 0005 Round 14 (rig-b2s); RFC 0006 §6.3 (this requirement) is the canonical authority.
 Source: RFC 0006 §6.3, RFC 0005 Round 14
 Scope: v1-mandatory
 
