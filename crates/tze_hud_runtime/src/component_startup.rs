@@ -868,13 +868,15 @@ notification = "notification-stack-exemplar"
         let mut scene = make_scene();
         let result = run_component_startup(&raw, None, Some("headless"), &mut scene);
 
-        // Profile override (#2A2A2A) must win over the [design_tokens] value (#DEADBE).
+        // Profile override (#000000, "smoke black") must win over the [design_tokens] value
+        // (#DEADBE).  The design doc originally used #2A2A2A as a placeholder; the finalised
+        // profile.toml sets urgency.low to #000000.
         assert_eq!(
             result
                 .compositor_tokens
                 .get("color.notification.urgency.low")
                 .map(|s| s.as_str()),
-            Some("#2A2A2A"),
+            Some("#000000"),
             "profile urgency.low token should override global design_token value in compositor_tokens"
         );
     }
