@@ -111,8 +111,8 @@ Criteria map to `openspec/changes/mcp-stress-testing/tasks.md` Task 1.
 
 | SHALL | Implemented | File Location |
 |---|---|---|
-| 10 list_zones calls (network baseline) | YES | `run_network_baseline()` L854 |
-| 10 publish_to_zone calls at 1/s (publish baseline) | YES | `run_publish_baseline()` L902 |
+| 10 list_zones calls (network baseline) | YES | `run_network_baseline()` L882 |
+| 10 publish_to_zone calls at 1/s (publish baseline) | YES | `run_publish_baseline()` L930 |
 | Both report p50/p95/p99/max | YES | `percentile()` + stats dict |
 | Included in JSON as `network_baseline` / `publish_baseline` | YES | L1484, L1485 |
 

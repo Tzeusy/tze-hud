@@ -724,15 +724,17 @@ class _BucketAccumulator:
                 for idx, b in self._buckets.items()
             }
 
-        # Build a quick lookup: bucket_second_idx -> telemetry sample (closest match)
+        # Build a quick lookup: bucket_second_idx -> telemetry sample (floor join).
         # telemetry_samples are dicts with "wall_ts" (absolute epoch float).
-        # We map them to bucket indices via round(sample.wall_ts - profile_wall_start_epoch).
+        # We map them to bucket indices via int(floor) to match request bucketing
+        # (requests use int(completed_at - wall_start)), so a telemetry sample
+        # taken at 1.7s falls into bucket 1, same as requests from 1.0-1.999s.
         telem_by_bucket: dict[int, dict] = {}
         if telemetry_samples and profile_wall_start_epoch > 0:
             for s in telemetry_samples:
                 wall_ts = s.get("wall_ts")
                 if wall_ts is not None:
-                    bucket_idx = int(round(wall_ts - profile_wall_start_epoch))
+                    bucket_idx = int(wall_ts - profile_wall_start_epoch)
                     if bucket_idx not in telem_by_bucket:
                         telem_by_bucket[bucket_idx] = s
 
