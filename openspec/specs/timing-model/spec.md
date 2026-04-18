@@ -64,7 +64,7 @@ Scope: v1-mandatory
 
 ### Requirement: Arrival Time Is Not Presentation Time
 
-Every payload with timing significance MUST carry explicit timestamp fields. The compositor MUST never infer "show this now" from "this just arrived." Mutations with present_at_wall_us in the future MUST be held in a pending queue until the target frame. Mutations without present_at_wall_us (or present_at_wall_us = 0) SHALL be applied at the earliest available frame.
+Every payload with timing significance MUST carry explicit timestamp fields. The compositor MUST never infer "show this now" from "this just arrived." Mutations with present_at_wall_us in the future MUST be held in a pending queue until the target frame. Mutations without present_at_wall_us (or present_at_wall_us = 0) MUST be applied at the earliest available frame.
 Source: RFC 0003 §3.1
 Scope: v1-mandatory
 
@@ -176,7 +176,7 @@ Scope: v1-mandatory
 
 ### Requirement: Sync Group Commit Policies
 
-Two commit policies MUST be supported: AllOrDefer (all members must have pending mutations before any can be applied; if incomplete at frame close, the group defers) and AvailableMembers (apply whatever subset of members have pending mutations; no deferral).
+Two commit policies MUST be supported: AllOrDefer (all members MUST have pending mutations before any can be applied; if incomplete at frame close, the group defers) and AvailableMembers (apply whatever subset of members have pending mutations; no deferral).
 Source: RFC 0003 §2.2, §2.3
 Scope: v1-mandatory
 
@@ -480,7 +480,7 @@ Scope: v1-mandatory
 
 ### Requirement: Timing Configuration
 
-All timing parameters MUST be configurable via TimingConfig with documented defaults and validation ranges: target_fps (default 60, range 1-240), max_agent_clock_drift_ms (default 100, range 1-10000), max_vsync_jitter_ms (default 2, range 0-100), max_future_schedule_us (default 300000000, range 1000000-3600000000), sync_group_max_defer_frames (default 3, range 1-60), pending_queue_depth_per_agent (default 256, range 16-4096), sync_drift_budget_us (default 500, range 1-100000), tile_stale_threshold_ms (default 5000, range 500-300000), clock_jump_detection_ms (default 50, range 10-10000).
+All timing parameters MUST be configurable via TimingConfig with documented defaults and validation ranges: target_fps (default 60, range 1-240), max_agent_clock_drift_ms (default 100, range 1-10,000), max_vsync_jitter_ms (default 2, range 0-100), max_future_schedule_us (default 300,000,000, range 1,000,000-3,600,000,000), sync_group_max_defer_frames (default 3, range 1-60), pending_queue_depth_per_agent (default 256, range 16-4,096), sync_drift_budget_us (default 500, range 1-100,000), tile_stale_threshold_ms (default 5,000, range 500-300,000), clock_jump_detection_ms (default 50, range 10-10,000).
 Source: RFC 0003 §7.1, §10
 Scope: v1-mandatory
 
@@ -502,7 +502,7 @@ Scope: post-v1
 
 #### Scenario: No media clock in v1
 - **WHEN** the v1 runtime starts
-- **THEN** no GStreamer pipeline clock SHALL be created; ClockedMediaCue message class SHALL be defined in the proto but not actively processed
+- **THEN** the compositor MUST NOT create a GStreamer pipeline clock; ClockedMediaCue message class MUST be defined in the proto but MUST NOT be actively processed
 
 ---
 

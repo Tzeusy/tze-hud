@@ -48,7 +48,7 @@ Scope: v1-mandatory
 - **THEN** the compositor MUST record session_open_mono_us and session_open_wall_us and compute the initial clock-skew estimate for that session
 
 ### Requirement: Arrival Time Is Not Presentation Time
-Every payload with timing significance MUST carry explicit timestamp fields. The compositor MUST never infer "show this now" from "this just arrived." Mutations with present_at_wall_us in the future MUST be held in a pending queue until the target frame. Mutations without present_at_wall_us (or present_at_wall_us = 0) SHALL be applied at the earliest available frame.
+Every payload with timing significance MUST carry explicit timestamp fields. The compositor MUST never infer "show this now" from "this just arrived." Mutations with present_at_wall_us in the future MUST be held in a pending queue until the target frame. Mutations without present_at_wall_us (or present_at_wall_us = 0) MUST be applied at the earliest available frame.
 Source: RFC 0003 §3.1
 Scope: v1-mandatory
 
@@ -139,7 +139,7 @@ Scope: v1-mandatory
 - **THEN** the sync group MUST be destroyed and removed from the scene graph
 
 ### Requirement: Sync Group Commit Policies
-Two commit policies MUST be supported: AllOrDefer (all members must have pending mutations before any can be applied; if incomplete at frame close, the group defers) and AvailableMembers (apply whatever subset of members have pending mutations; no deferral).
+Two commit policies MUST be supported: AllOrDefer (all members MUST have pending mutations before any can be applied; if incomplete at frame close, the group defers) and AvailableMembers (apply whatever subset of members have pending mutations; no deferral).
 Source: RFC 0003 §2.2, §2.3
 Scope: v1-mandatory
 
@@ -408,7 +408,7 @@ Scope: post-v1
 
 #### Scenario: No media clock in v1
 - **WHEN** the v1 runtime starts
-- **THEN** no GStreamer pipeline clock SHALL be created; ClockedMediaCue message class SHALL be defined in the proto but not actively processed
+- **THEN** the compositor MUST NOT create a GStreamer pipeline clock; ClockedMediaCue message class MUST be defined in the proto but MUST NOT be actively processed
 
 ### Requirement: Clocked Media/Cue Message Class (Deferred)
 The ClockedMediaCue message class (scheduled against media/display clock for AV sync, subtitles, word-highlighting) MUST be defined in the proto enum but MUST NOT be actively processed in v1.
