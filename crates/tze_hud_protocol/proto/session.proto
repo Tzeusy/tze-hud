@@ -584,13 +584,15 @@ message WidgetPublish {
 }
 
 // Server response to a durable-widget WidgetPublish (widget-system spec).
-// Correlated by widget_name. NOT sent for ephemeral-widget publishes.
+// Correlated by request_sequence matching the WidgetPublish envelope's sequence.
+// NOT sent for ephemeral-widget publishes.
 // Encoded at ServerMessage field 47.
 message WidgetPublishResult {
-  bool   accepted     = 1;   // true = applied; false = rejected
-  string widget_name  = 2;   // Echoed from WidgetPublish
-  string error_code   = 3;   // Machine-readable error code (if accepted=false)
-  string error_message = 4;  // Human-readable reason (if accepted=false)
+  bool   accepted         = 1;  // true = applied; false = rejected
+  string widget_name      = 2;  // Echoed from WidgetPublish
+  string error_code       = 3;  // Machine-readable error code (if accepted=false)
+  string error_message    = 4;  // Human-readable reason (if accepted=false)
+  uint64 request_sequence = 5;  // Sequence of the WidgetPublish that triggered this
 }
 
 // ─── Widget asset registration messages ─────────────────────────────────────
