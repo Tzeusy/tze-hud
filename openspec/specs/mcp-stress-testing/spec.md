@@ -82,7 +82,7 @@ The tool SHALL validate that each zone exists (via `list_zones`) before starting
 ---
 
 ### Requirement: TTL Variation
-The tool SHALL support a `--short-ttl` flag that sets publish TTL to 1 second (1,000,000 us) instead of the default 120 seconds. This exercises the TTL expiry housekeeping path and measures its impact on latency. When enabled, the report SHALL include a `ttl_mode: "short"` field.
+The tool SHALL support a `--short-ttl` flag that sets publish TTL to 1 second (1,000,000 us) instead of the default 60 seconds. This exercises the TTL expiry housekeeping path and measures its impact on latency. When enabled, the report SHALL include a `ttl_mode: "short"` field.
 
 Default TTL (without the flag) SHALL be 60 seconds (60,000,000 us).
 
