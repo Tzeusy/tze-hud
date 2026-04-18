@@ -1,11 +1,9 @@
-# Runtime Kernel Specification
+# runtime-kernel Specification
 
-Domain: FOUNDATION
-Source RFC: 0002 (Runtime Kernel)
+## Purpose
+The runtime kernel is the sovereign process core of tze_hud: it owns the GPU context, frame pipeline, thread model, window surface, scene commit, and resource enforcement. It defines the authority boundary for frame-loop safety, per-agent budget enforcement, and graceful degradation — all executed directly in runtime/session/scene paths without delegation to external policy evaluators.
 
----
-
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Runtime Authority Boundary for v1
 The runtime kernel SHALL be the authoritative v1 enforcement surface for frame-loop safety, resource enforcement, and shell override state. In current v1 runtime reality, these controls execute directly in runtime/session/scene paths; they SHALL NOT be delegated to a centralized `tze_hud_policy` hot-path evaluator.
@@ -387,10 +385,6 @@ Scope: post-v1
 #### Scenario: Media pool not spawned
 - **WHEN** the v1 runtime starts
 - **THEN** no GStreamer or WebRTC threads SHALL be created; the DecodedFrameReady channel slot MUST remain empty
-
-### Spec-First Handoff Notes
-- `hud-iq2x.7`: define the runtime-policy-scene seam contract before introducing any runtime-kernel requirement that implies centralized policy-crate execution in Stages 1-7.
-- `hud-iq2x.8`: align capability-escalation authority semantics with session-protocol before changing Stage 3 admission or lease-governance ownership claims.
 
 ### Requirement: Parallel Render Encoding (Deferred)
 Parallel render encoding (multiple CommandEncoder instances recorded in parallel for Stage 6) MUST NOT be implemented in v1; it is deferred to post-v1 based on profiling data.
