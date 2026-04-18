@@ -270,6 +270,51 @@ class ProfileResult:
 
 
 # ---------------------------------------------------------------------------
+# Preflight gate
+# ---------------------------------------------------------------------------
+
+
+def preflight_check(url: str, token: str) -> bool:
+    """
+    Send a single list_zones call to verify the MCP endpoint is reachable.
+
+    Returns True if the endpoint responds with a valid JSON-RPC result.
+    Returns False (after printing to stderr) on any failure: connection
+    refused, DNS error, HTTP non-200, JSON-RPC error, or timeout.
+    """
+    try:
+        resp = rpc_call(url, token, "list_zones", {}, request_id=0, timeout=5.0)
+    except urllib.error.URLError as exc:
+        print(
+            f"MCP endpoint unreachable at {url}: {exc.reason}",
+            file=sys.stderr,
+        )
+        return False
+    except OSError as exc:
+        print(
+            f"MCP endpoint unreachable at {url}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"MCP endpoint unreachable at {url}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+    if "error" in resp:
+        err = resp["error"]
+        print(
+            f"MCP endpoint unreachable at {url}: JSON-RPC error {err}",
+            file=sys.stderr,
+        )
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Load driver
 # ---------------------------------------------------------------------------
 
@@ -508,6 +553,11 @@ def main() -> int:
     print(f"  Zones   : {len(ZONES)}")
     print(f"  Profiles: {[p[0] for p in profiles_to_run]}")
     print()
+
+    # Preflight: verify MCP endpoint is reachable before running any baselines
+    # or load profiles. Fails fast with exit code 1 on any connectivity error.
+    if not preflight_check(args.url, token):
+        sys.exit(1)
 
     results: list[ProfileResult] = []
     run_id = str(uuid.uuid4())
