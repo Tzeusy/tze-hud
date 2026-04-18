@@ -112,3 +112,4 @@ All artifacts complete. All tasks complete.
 - Show clear summary of what happened
 - If sync is requested, use openspec-sync-specs approach (agent-driven)
 - If delta specs exist, always run the sync assessment and show the combined summary before prompting
+- **Vocab-lint exempt**: Archived changes under `openspec/changes/archive/**` are automatically exempt from `scripts/check_canonical_vocabulary.sh` via `EXEMPT_PREFIXES`. No per-file `EXEMPT_PATHS` entries are needed after archiving — archives preserve historical vocabulary by policy; don't rewrite them to current canonical terms.
