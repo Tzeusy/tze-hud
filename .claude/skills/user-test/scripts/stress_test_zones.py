@@ -1202,13 +1202,15 @@ def run_profile(
         telemetry_samples=result.telemetry_samples if telem_ok else None,
     )
 
-    # Compute average private memory MB from the time-series entries.
+    # Compute average private memory MB from the raw telemetry samples.
     # Mirrors telemetry_avg_cpu_pct: mean of non-null values, None if all null.
+    # Uses raw samples (not bucketed time_series) so gaps and process restarts
+    # are handled consistently with how avg_cpu_pct is computed.
     _pmem_vals = [
-        e["host_private_mem_mb"]
-        for e in result.time_series
-        if e.get("host_private_mem_mb") is not None
-        and not math.isnan(e["host_private_mem_mb"])
+        s["private_mb"]
+        for s in result.telemetry_samples
+        if s.get("private_mb") is not None
+        and not math.isnan(s["private_mb"])
     ]
     result.telemetry_avg_pmem_mb = (
         sum(_pmem_vals) / len(_pmem_vals) if _pmem_vals else None
