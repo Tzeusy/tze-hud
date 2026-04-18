@@ -10,12 +10,26 @@ Connection defaults:
   PSK env : MCP_TEST_PSK  (default token: tze-hud-key)
   SSH host: tzeus@tzehouse-windows.parrot-hen.ts.net
   SSH key : ~/.ssh/ecdsa_home
+
+CLI flags (see parse_args() for full reference):
+  --url           MCP HTTP endpoint
+  --psk-env       Env var containing the auth PSK
+  --ssh-host      SSH hostname for telemetry (user@host format)
+  --ssh-key       SSH private key path
+  --output        JSON report output path (default: stress_report_<ISO8601>.json)
+  --concurrency   Override per-profile concurrency
+  --profiles      Comma-separated subset of profiles to run (default: all)
+  --duration      Override per-profile duration in seconds
+  --short-ttl     Use 1s TTL instead of default 60s; exercises TTL housekeeping
+  --large-payloads  Rotate payload sizes across publishes (100B/1KB/10KB/60KB)
+  --verbose       Print each request result
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import datetime
 import json
 import math
 import os
@@ -39,7 +53,7 @@ DEFAULT_PSK_FALLBACK = "tze-hud-key"
 DEFAULT_SSH_USER = "tzeus"
 DEFAULT_SSH_HOST = "tzehouse-windows.parrot-hen.ts.net"
 DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/ecdsa_home")
-DEFAULT_REPORT_FILE = "stress_report.json"
+# Spec: --output default is stress_report_{ISO8601_compact}.json (generated at startup)
 DEFAULT_NAMESPACE = "stress-test"
 DEFAULT_TTL_US = 60_000_000   # 60 seconds (spec default)
 SHORT_TTL_US   = 1_000_000    # 1 second  (--short-ttl)
@@ -94,6 +108,7 @@ ZONES: list[dict[str, Any]] = [
 ]
 
 # Load profiles: (name, rate_per_sec, concurrency, duration_sec)
+# Spec §Load Profiles table.
 PROFILES: list[tuple[str, float, int, int]] = [
     ("idle",   1,  1, 30),
     ("low",    5,  1, 30),
@@ -1234,6 +1249,12 @@ def print_summary_table(results: list[ProfileResult]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _default_output_path() -> str:
+    """Generate the default report filename with ISO8601 compact timestamp."""
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
+    return f"stress_report_{ts}.json"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="MCP publish_to_zone stress test with performance telemetry",
@@ -1253,29 +1274,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ssh-user",
         default=DEFAULT_SSH_USER,
+        # Intentional: spec uses combined --ssh-host (user@host); we keep them
+        # split for TelemetryThread which accepts user and host separately.
+        # The combined form is accepted as --ssh-host with user@ prefix.
         help=f"SSH username for host metrics (default: {DEFAULT_SSH_USER})",
     )
     parser.add_argument(
         "--ssh-host",
         default=DEFAULT_SSH_HOST,
-        help=f"SSH hostname for host metrics (default: {DEFAULT_SSH_HOST})",
+        # Spec default: tzeus@tzehouse-windows.parrot-hen.ts.net.
+        # If the value contains '@', it is split into user and host below.
+        help=(
+            f"SSH hostname (or user@host) for telemetry "
+            f"(default: {DEFAULT_SSH_HOST})"
+        ),
     )
     parser.add_argument(
         "--ssh-key",
         default=DEFAULT_SSH_KEY,
         help=f"SSH private key path (default: {DEFAULT_SSH_KEY})",
     )
+    # Spec §Connection Parameters: --output with dynamic default.
+    # We also accept --report as a backward-compatible alias.
     parser.add_argument(
+        "--output",
         "--report",
-        default=DEFAULT_REPORT_FILE,
-        help=f"Path to write JSON report (default: {DEFAULT_REPORT_FILE})",
+        dest="output",
+        default=None,  # resolved to _default_output_path() in main() if not set
+        metavar="PATH",
+        help=(
+            "Path to write JSON report "
+            "(default: stress_report_<ISO8601compact>.json)"
+        ),
     )
     parser.add_argument(
         "--profiles",
-        nargs="+",
-        choices=[p[0] for p in PROFILES] + ["all"],
-        default=["all"],
-        help="Which load profiles to run (default: all)",
+        default="all",
+        metavar="PROFILES",
+        help=(
+            "Comma-separated load profiles to run: "
+            + ",".join(p[0] for p in PROFILES)
+            + " (default: all)"
+        ),
     )
     parser.add_argument(
         "--concurrency",
@@ -1283,6 +1323,36 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="N",
         help="Override per-profile concurrency with a fixed worker count",
+    )
+    # Spec §Load Profiles: duration override (default 30s per profile).
+    parser.add_argument(
+        "--duration",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Override per-profile duration in seconds "
+            "(default: per-profile — idle/low/medium/high=30s, burst=10s)"
+        ),
+    )
+    # Spec §TTL Variation: short-ttl flag.
+    parser.add_argument(
+        "--short-ttl",
+        action="store_true",
+        help=(
+            f"Set publish TTL to 1s ({SHORT_TTL_US} us) instead of the default "
+            f"60s ({DEFAULT_TTL_US} us). Exercises TTL expiry housekeeping. "
+            "Report will include ttl_mode: 'short'."
+        ),
+    )
+    # Spec §Payload Size Variation: large-payloads flag.
+    parser.add_argument(
+        "--large-payloads",
+        action="store_true",
+        help=(
+            "Rotate StreamText payload sizes across publishes: "
+            "~100B, ~1KB, ~10KB, ~60KB. Tests near-limit payload handling."
+        ),
     )
     parser.add_argument(
         "--short-ttl",
@@ -1316,6 +1386,29 @@ def main() -> int:
     global ZONES  # may be filtered by preflight zone discovery
     args = parse_args()
 
+    # Warn if the deprecated --report alias was used.
+    if "--report" in sys.argv:
+        print(
+            "WARNING: --report is deprecated; use --output instead.",
+            file=sys.stderr,
+        )
+
+    # Resolve output path (dynamic default: ISO8601 compact timestamp).
+    output_path = args.output if args.output is not None else _default_output_path()
+
+    # Resolve effective TTL.
+    # Spec §TTL Variation: --short-ttl → 1s; default → 60s.
+    ttl_us = SHORT_TTL_US if args.short_ttl else DEFAULT_TTL_US
+    ttl_mode = "short" if args.short_ttl else "default"
+
+    # Split user@host if the spec-style combined form was given to --ssh-host.
+    ssh_host_raw = args.ssh_host
+    if "@" in ssh_host_raw:
+        ssh_user, ssh_host = ssh_host_raw.split("@", 1)
+    else:
+        ssh_user = args.ssh_user
+        ssh_host = ssh_host_raw
+
     # Resolve token -- no hardcoded credentials in logic
     token = os.environ.get(args.psk_env, "").strip()
     if not token:
@@ -1325,19 +1418,37 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    ttl_us = SHORT_TTL_US if args.short_ttl else DEFAULT_TTL_US
-    ttl_mode = "short" if args.short_ttl else "default"
-
-    # Determine which profiles to run
-    selected_names = (
-        {p[0] for p in PROFILES} if "all" in args.profiles else set(args.profiles)
-    )
+    # Resolve which profiles to run.
+    # Spec §Connection Parameters: --profiles is a comma-separated subset.
+    raw_profiles = args.profiles.strip()
+    if raw_profiles == "all":
+        selected_names = {p[0] for p in PROFILES}
+    else:
+        selected_names = {name.strip() for name in raw_profiles.split(",") if name.strip()}
+    valid_names = {p[0] for p in PROFILES}
+    unknown = selected_names - valid_names
+    if unknown:
+        print(
+            f"ERROR: unknown profile(s): {', '.join(sorted(unknown))}. "
+            f"Valid: {', '.join(p[0] for p in PROFILES)}",
+            file=sys.stderr,
+        )
+        return 1
+    # Preserve canonical order from PROFILES.
     profiles_to_run = [p for p in PROFILES if p[0] in selected_names]
+
+    # Apply --duration override if provided.
+    # Spec §Load Profiles: --duration overrides idle/low/medium/high but not burst.
+    if args.duration is not None:
+        profiles_to_run = [
+            (name, rate, conc, args.duration if name != "burst" else _dur)
+            for name, rate, conc, _dur in profiles_to_run
+        ]
 
     print("MCP Stress Test")
     print(f"  Target  : {args.url}")
-    print(f"  SSH     : {args.ssh_user}@{args.ssh_host} (key: {args.ssh_key})")
-    print(f"  Report  : {args.report}")
+    print(f"  SSH     : {ssh_user}@{ssh_host} (key: {args.ssh_key})")
+    print(f"  Output  : {output_path}")
     print(f"  Zones   : {len(ZONES)}")
     print(f"  Profiles: {[p[0] for p in profiles_to_run]}")
     print(f"  TTL mode: {ttl_mode} ({ttl_us // 1_000_000}s)")
@@ -1366,6 +1477,7 @@ def main() -> int:
         sys.exit(1)
 
     run_id = str(uuid.uuid4())
+    run_ts = datetime.datetime.utcnow().isoformat() + "Z"
 
     # Baseline phases: run before load profiles to establish single-call latency
     # reference points. These appear as top-level keys in the JSON report.
@@ -1390,8 +1502,8 @@ def main() -> int:
             duration_sec=dur,
             url=args.url,
             token=token,
-            ssh_user=args.ssh_user,
-            ssh_host=args.ssh_host,
+            ssh_user=ssh_user,
+            ssh_host=ssh_host,
             ssh_key=args.ssh_key,
             verbose=args.verbose,
             concurrency=effective_concurrency,
@@ -1406,21 +1518,32 @@ def main() -> int:
 
     print_summary_table(results)
 
-    # Write JSON report
-    report = {
+    # Write JSON report.
+    # Spec §Report Output: include timestamp, target URL, profiles run,
+    # total duration, and flags (short-ttl, large-payloads, concurrency).
+    report: dict[str, Any] = {
         "run_id": run_id,
+        "timestamp": run_ts,
         "mcp_url": args.url,
-        "ssh_host": f"{args.ssh_user}@{args.ssh_host}",
+        "ssh_host": f"{ssh_user}@{ssh_host}",
         "zones_tested": [z["zone_name"] for z in ZONES],
         "network_baseline": network_baseline,
         "publish_baseline": publish_baseline,
-        "ttl_mode": ttl_mode,
-        "large_payloads": args.large_payloads,
+        "flags": {
+            "short_ttl": args.short_ttl,
+            "large_payloads": args.large_payloads,
+            "concurrency_override": args.concurrency,
+            "duration_override": args.duration,
+        },
         "profiles": [r.to_dict() for r in results],
     }
-    with open(args.report, "w", encoding="utf-8") as f:
+    # Spec §TTL Variation: include ttl_mode: "short" in report when --short-ttl.
+    if args.short_ttl:
+        report["ttl_mode"] = "short"
+
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=True)
-    print(f"Report written to: {args.report}", flush=True)
+    print(f"Report written to: {output_path}", flush=True)
 
     # Exit non-zero if any profile had errors
     return 1 if any(r.error_count > 0 for r in results) else 0
