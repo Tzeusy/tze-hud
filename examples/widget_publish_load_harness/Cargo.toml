@@ -1,0 +1,21 @@
+[package]
+name = "widget_publish_load_harness"
+description = "Resident gRPC widget publish load harness"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "widget_publish_load_harness"
+path = "src/main.rs"
+
+[dependencies]
+tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
+tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
+tze_hud_validation = { path = "../../crates/tze_hud_validation" }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
