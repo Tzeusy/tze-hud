@@ -640,6 +640,81 @@ def percentile(sorted_data: list[float], p: float) -> float:
     return sorted_data[lo] + frac * (sorted_data[hi] - sorted_data[lo])
 
 
+class _BucketAccumulator:
+    """
+    Per-second bucketer for load-side time-series data.
+
+    Each request completion records its latency (ms) and outcome into the
+    bucket keyed by ``int(completed_at - profile_wall_start)``.  After the
+    profile finishes, ``to_time_series()`` converts every bucket into a
+    dict entry with p50/p95/p99 latency percentiles and request counts.
+
+    Thread-safe: ``record()`` acquires a lock, so it is safe to call from
+    concurrent executor threads.
+    """
+
+    def __init__(self, wall_start: float) -> None:
+        self._wall_start = wall_start
+        # bucket_idx -> {"latencies": [...], "successes": int, "failures": int}
+        self._buckets: dict[int, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def record(self, completed_at: float, latency_ms: float | None, success: bool) -> None:
+        """Record one completed request into the appropriate 1-second bucket."""
+        bucket_idx = int(completed_at - self._wall_start)
+        with self._lock:
+            if bucket_idx not in self._buckets:
+                self._buckets[bucket_idx] = {"latencies": [], "successes": 0, "failures": 0}
+            bucket = self._buckets[bucket_idx]
+            if success and latency_ms is not None:
+                bucket["latencies"].append(latency_ms)
+                bucket["successes"] += 1
+            else:
+                bucket["failures"] += 1
+
+    def to_time_series(self) -> list[dict[str, Any]]:
+        """
+        Return a sorted list of per-second time-series entries.
+
+        Each entry contains:
+          wall_t          - bucket start offset in seconds from profile start
+          requests_sent   - total requests that completed in this second
+          successes       - count of successful requests
+          failures        - count of failed requests
+          p50_ms          - p50 latency (NaN when no successful requests)
+          p95_ms          - p95 latency
+          p99_ms          - p99 latency
+        """
+        with self._lock:
+            # Deep-copy latency lists inside the lock so concurrent record()
+            # calls cannot mutate them after we release.
+            snapshot = {
+                idx: {
+                    "latencies": list(b["latencies"]),
+                    "successes": b["successes"],
+                    "failures": b["failures"],
+                }
+                for idx, b in self._buckets.items()
+            }
+
+        entries: list[dict[str, Any]] = []
+        for idx in sorted(snapshot.keys()):
+            b = snapshot[idx]
+            lats = sorted(b["latencies"])
+            entries.append(
+                {
+                    "wall_t": float(idx),
+                    "requests_sent": b["successes"] + b["failures"],
+                    "successes": b["successes"],
+                    "failures": b["failures"],
+                    "p50_ms": percentile(lats, 50),
+                    "p95_ms": percentile(lats, 95),
+                    "p99_ms": percentile(lats, 99),
+                }
+            )
+        return entries
+
+
 @dataclass
 class ProfileResult:
     profile_name: str
@@ -660,6 +735,8 @@ class ProfileResult:
     telemetry_samples: list = field(default_factory=list)  # list[dict] serialized
     telemetry_avg_cpu_pct: float | None = None
     telemetry_status: str = "ok"  # "ok" | "incomplete"
+    # Per-second load-side time-series (from _BucketAccumulator)
+    time_series: list = field(default_factory=list)  # list[dict]
 
     @property
     def error_rate(self) -> float:
@@ -880,12 +957,16 @@ def _dispatch_one(
     large_payload_index: int | None,
     total_requests_in_profile: int,
     req_index: int,
-) -> tuple[float | None, bool]:
+) -> tuple[float | None, bool, float]:
     """
-    Dispatch a single publish_to_zone request and return (latency_ms, success).
+    Dispatch a single publish_to_zone request and return (latency_ms, success, completed_at).
 
     Thread-safe: uses only immutable arguments and the thread-local stack.
-    Returns (latency_ms, True) on success; (None, False) on any error.
+    ``completed_at`` is a monotonic timestamp captured immediately after the
+    RPC call returns (or raises), used by the caller to bucket the result
+    into the correct 1-second time-series slot.
+    Returns (latency_ms, True, completed_at) on success;
+    (None, False, completed_at) on any error.
 
     Args:
         url: MCP endpoint URL.
@@ -915,24 +996,28 @@ def _dispatch_one(
     }
     t0 = time.monotonic()
     try:
-        rpc_call(url, token, "publish_to_zone", params, req_id, timeout=5.0)
-        latency_ms = (time.monotonic() - t0) * 1000.0
+        resp = rpc_call(url, token, "publish_to_zone", params, req_id, timeout=5.0)
+        completed_at = time.monotonic()
+        if "error" in resp:
+            raise RuntimeError(f"JSON-RPC error: {resp['error']}")
+        latency_ms = (completed_at - t0) * 1000.0
         if verbose:
             print(
                 f"    req={req_id} zone={zone['zone_name']}"
                 f" media={zone['media_type']}"
                 f" lat={latency_ms:.1f}ms ok"
             )
-        return latency_ms, True
+        return latency_ms, True, completed_at
     except Exception as exc:
-        latency_ms = (time.monotonic() - t0) * 1000.0
+        completed_at = time.monotonic()
+        latency_ms = (completed_at - t0) * 1000.0
         if verbose:
             print(
                 f"    req={req_id} zone={zone['zone_name']}"
                 f" media={zone['media_type']}"
                 f" lat={latency_ms:.1f}ms ERR: {exc}"
             )
-        return None, False
+        return None, False, completed_at
 
 
 def run_profile(
@@ -980,6 +1065,7 @@ def run_profile(
     req_id_counter = 1
     zone_cycle = 0
     req_index = 0  # zero-based index within this profile for MergeByKey phase split
+    bucketer = _BucketAccumulator(wall_start)
 
     print(
         f"  [{profile_name}] Running {rate_per_sec}/s "
@@ -1016,9 +1102,10 @@ def run_profile(
             # Collect all results (executor waits for running futures on exit)
             for fut in futures:
                 try:
-                    latency_ms, success = fut.result()
+                    latency_ms, success, completed_at = fut.result()
                 except Exception:
-                    latency_ms, success = None, False
+                    latency_ms, success, completed_at = None, False, time.monotonic()
+                bucketer.record(completed_at, latency_ms, success)
                 result.total_requests += 1
                 if success and latency_ms is not None:
                     result.latencies_ms.append(latency_ms)
@@ -1038,10 +1125,11 @@ def run_profile(
             lp_index = req_index if large_payloads else None
             ri = req_index
             req_index += 1
-            latency_ms, success = _dispatch_one(
+            latency_ms, success, completed_at = _dispatch_one(
                 url, token, req_id, zone, verbose,
                 ttl_us, lp_index, estimated_total, ri,
             )
+            bucketer.record(completed_at, latency_ms, success)
             result.total_requests += 1
             if success and latency_ms is not None:
                 result.latencies_ms.append(latency_ms)
@@ -1061,6 +1149,8 @@ def run_profile(
     if telem_ok:
         result.telemetry_samples = telem.to_dict_list()
         result.telemetry_avg_cpu_pct = telem.avg_cpu_pct
+
+    result.time_series = bucketer.to_time_series()
 
     stats = result.latency_stats()
     avg_cpu_str = (
