@@ -300,7 +300,7 @@
 
 ## Deferred Items Summary
 
-The 25 deferred items above fall into four categories:
+The 9 deferred items above fall into three categories:
 
 **Category A — Validation completeness (items 12.5, 12.7, 12.9, 12.10)**: Infrastructure files exist but completeness against spec (25-scene registry, standalone benchmark binary, full record/replay, soak tolerance) is not confirmed. File targeted beads under the validation framework if these gaps block v1 release.
 
