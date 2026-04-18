@@ -472,6 +472,9 @@ pub struct SolidColorNode {
 /// # Overlap semantics
 /// When runs overlap, **last-writer-wins** (the last run in the `Vec` whose
 /// range covers a given byte position takes precedence).
+///
+/// Runs need not be pre-sorted. The compositor's `color_run_spans` helper
+/// canonicalizes them into sorted, non-overlapping spans at render time.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextColorRun {
     /// Inclusive UTF-8 byte offset into `TextMarkdownNode::content`.
