@@ -6,7 +6,7 @@ The scene graph is the authoritative data model for tze_hud. It defines the scen
 ## Requirements
 
 ### Requirement: SceneId Identity
-All live scene objects (tabs, tiles, nodes, leases, zones, sync groups) SHALL be identified by a `SceneId`, which MUST be a UUIDv7 (time-ordered). SceneId provides lexicographic sortability by creation time for sequence ordering and log correlation. When serialized, SceneId MUST be encoded as a 16-byte little-endian binary representation.
+All live scene objects (tabs, tiles, nodes, leases, zones, sync groups) SHALL be identified by a `SceneId`, which MUST be a UUIDv7 (time-ordered). UUIDv7 is monotonically increasing by creation time, enabling sequence ordering and log correlation by UUID logical value. When serialized, SceneId MUST be encoded as a 16-byte little-endian binary representation (as returned by `Uuid::to_bytes_le`). Note: the LE wire encoding does not preserve byte-level lexicographic sort order; time ordering must be recovered by parsing the UUID, not by comparing raw wire bytes.
 Source: RFC 0001 §1.1, §4.1
 Scope: v1-mandatory
 
@@ -267,7 +267,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Zone Media Types V1
-The runtime MUST support six zone media types: five v1-mandatory (StreamText, ShortTextWithIcon, KeyValuePairs, StaticImage, SolidColor) and one post-v1 (VideoSurfaceRef, deferred to post-v1 media layer). Zone publish content MUST match one of the zone type's accepted_media_types.
+The runtime MUST support five mandatory zone media types in v1: StreamText, ShortTextWithIcon, KeyValuePairs, StaticImage, and SolidColor. Support for VideoSurfaceRef is deferred to the post-v1 media layer. Zone publish content MUST match one of the zone type's accepted_media_types.
 Source: RFC 0001 §2.5
 Scope: v1-mandatory
 
@@ -422,13 +422,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Hit-Testing Contract
-Hit-testing MUST map a 2D point to the deepest interactive element. Traversal order: (1) Chrome layer first, (2) Content layer tiles by z_order descending, (3) within each tile, reverse tree order of nodes. Passthrough tiles MUST be skipped. HitRegionNodes MUST be the interactive primitive. The hit-test MUST return one of: NodeHit, TileHit, Passthrough, or Chrome.
+Hit-testing MUST map a 2D point to the deepest interactive element. Traversal order: (1) Chrome drag-handle hit regions and Zone hit regions (runtime-managed zone affordances such as dismiss/action buttons), (2) Chrome layer tiles, (3) Content layer tiles sorted by (z_order DESC), (4) within each tile, sorted by (tree_order DESC) of nodes. Passthrough tiles MUST be skipped. HitRegionNodes MUST be the interactive primitive. The hit-test MUST return one of: NodeHit, TileHit, Passthrough, Chrome, or ZoneInteraction.
 Source: RFC 0001 §5.1, §5.2
 Scope: v1-mandatory
 
 #### Scenario: Chrome layer always wins
 - **WHEN** a pointer event lands on a chrome element (tab bar, system indicator)
-- **THEN** the hit-test MUST return ChromeHit regardless of underlying tiles
+- **THEN** the hit-test MUST return Chrome regardless of underlying tiles
 
 #### Scenario: Highest-z tile hit
 - **WHEN** two non-passthrough tiles overlap and the pointer lands in the overlap region
@@ -452,7 +452,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Scene Snapshot Serialization
-A full scene snapshot MUST be a complete, deterministic serialization of the scene graph at a specific sequence number. It MUST include: sequence, snapshot_wall_us (UTC wall-clock timestamp of the snapshot), snapshot_mono_us (monotonic timestamp of the snapshot), all tabs (ordered by display_order), all tiles, all nodes, zone_registry (types, instances, active publishes), widget_registry (types, instances, active publishes), active_tab, and a BLAKE3 checksum. Fields MUST be serialized in deterministic order (BTreeMap, not HashMap). Serialization MUST complete in < 1ms for a 100-tile scene with 1000 nodes total.
+A full scene snapshot MUST be a complete, deterministic serialization of the scene graph at a specific sequence number. It MUST include: sequence, snapshot_wall_us (UTC wall-clock timestamp of the snapshot), snapshot_mono_us (monotonic timestamp of the snapshot), all tabs (ordered by display_order), all tiles, all nodes, zone_registry (types, active publishes; zone_instances is intentionally empty in v1 because instance binding is implicit — one per tab per zone type — and is not stored explicitly), widget_registry (types, instances, active publishes), active_tab, and a BLAKE3 checksum. Fields MUST be serialized in deterministic order (BTreeMap, not HashMap). Serialization MUST complete in < 1ms for a 100-tile scene with 1000 nodes total.
 Source: RFC 0001 §4.1, §10
 Scope: v1-mandatory
 
