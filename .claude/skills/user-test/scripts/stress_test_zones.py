@@ -187,11 +187,11 @@ class TelemetryThread:
     _REMOTE_LOOP = (
         "while true; do "
         "CPU=$(powershell -NoProfile -NonInteractive -Command \""
-        "try { $p = Get-Process tze_hud -ErrorAction Stop; "
+        "try { $p = Get-Process tze_hud -ErrorAction Stop | Select-Object -First 1; "
         "Write-Output \\\"$($p.CPU) "
         "$([math]::Round($p.WorkingSet64/1MB,2)) "
         "$([math]::Round($p.PrivateMemorySize64/1MB,2))\\\" "
-        "} catch { Write-Output '0 0 0' }"
+        "} catch { Write-Output 'none none none' }"
         "\"); "
         "GPU=$(nvidia-smi --query-gpu=utilization.gpu,memory.used "
         "--format=csv,noheader,nounits 2>/dev/null || echo '0,0'); "
@@ -316,7 +316,7 @@ class TelemetryThread:
         ):
             dt_wall = wall_ts - prev_sample.wall_ts
             dt_cpu = cpu_total_sec - prev_sample.cpu_total_sec
-            if dt_wall > 0:
+            if dt_wall > 0 and dt_cpu >= 0:
                 cpu_pct = (dt_cpu / dt_wall) * 100.0
 
         return TelemetrySample(
@@ -375,20 +375,17 @@ class TelemetryThread:
     @property
     def avg_cpu_pct(self) -> float | None:
         """
-        Average CPU% as total_cpu_delta / total_elapsed * 100.
+        Average CPU% across all samples with valid per-sample cpu_pct.
 
-        Uses first and last samples with valid cpu_total_sec values.
-        Returns None if fewer than two valid samples exist.
+        Averages individual delta-based cpu_pct values, which correctly handles
+        counter resets (process restarts) and gaps in data collection.
+        Returns None if no samples with valid cpu_pct exist.
         """
         with self._lock:
-            valid = [s for s in self.samples if s.cpu_total_sec is not None]
-        if len(valid) < 2:
+            pcts = [s.cpu_pct for s in self.samples if s.cpu_pct is not None and not math.isnan(s.cpu_pct)]
+        if not pcts:
             return None
-        dt_cpu = valid[-1].cpu_total_sec - valid[0].cpu_total_sec  # type: ignore[operator]
-        dt_wall = valid[-1].wall_ts - valid[0].wall_ts
-        if dt_wall <= 0:
-            return None
-        return (dt_cpu / dt_wall) * 100.0
+        return sum(pcts) / len(pcts)
 
     def to_dict_list(self) -> list[dict[str, Any]]:
         """Serialize samples to a list of dicts for the JSON report."""
