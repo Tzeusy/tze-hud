@@ -267,7 +267,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Upload Capability Gate
-Uploading a resource SHALL require the `upload_resource` capability (included in the default resident capability set). Guest agents SHALL NOT be able to upload resources directly; they interact through MCP zone tools which handle resource management internally.
+Uploading a resource SHALL require the appropriate capability: `upload_resource` for scene-node image/font resources, or `register_widget_asset` for runtime widget SVG assets (included in the default resident capability set). Guest agents SHALL NOT be able to upload resources directly; they interact through MCP zone tools which handle resource management internally.
 Source: RFC 0011 §5.2
 Scope: v1-mandatory
 
