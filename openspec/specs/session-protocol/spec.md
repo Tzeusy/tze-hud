@@ -771,7 +771,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Widget Publish Result
-WidgetPublishResult SHALL be a ServerMessage payload at field 47. It MUST carry: `request_sequence` (uint64, echoing the originating ClientMessage envelope sequence for the durable `WidgetPublish`), `accepted` (bool), `widget_name` (string), and error (optional structured error with code and message). Error codes remain: WIDGET_NOT_FOUND, WIDGET_UNKNOWN_PARAMETER, WIDGET_PARAMETER_TYPE_MISMATCH, WIDGET_PARAMETER_INVALID_VALUE, WIDGET_CAPABILITY_MISSING. WidgetPublishResult SHALL only be sent for durable-widget publishes.
+WidgetPublishResult SHALL be a ServerMessage payload at field 47. It MUST carry: `request_sequence` (uint64, echoing the originating ClientMessage envelope sequence for the durable `WidgetPublish`), `accepted` (bool), `widget_name` (string), `error_code` (string, machine-readable; populated if accepted=false), and `error_message` (string, human-readable reason; populated if accepted=false). Error codes remain: WIDGET_NOT_FOUND, WIDGET_UNKNOWN_PARAMETER, WIDGET_PARAMETER_TYPE_MISMATCH, WIDGET_PARAMETER_INVALID_VALUE, WIDGET_CAPABILITY_MISSING. WidgetPublishResult SHALL only be sent for durable-widget publishes.
 
 #### Scenario: Accepted result echoes request sequence
 - **WHEN** the runtime successfully applies a durable widget publish
@@ -779,7 +779,7 @@ WidgetPublishResult SHALL be a ServerMessage payload at field 47. It MUST carry:
 
 #### Scenario: Rejected result still echoes request sequence
 - **WHEN** a durable widget publish is rejected for schema, capability, or lookup reasons
-- **THEN** the runtime SHALL still send `WidgetPublishResult(accepted=false, request_sequence=<client-envelope-sequence>, widget_name=<name>, error=...)`
+- **THEN** the runtime SHALL still send `WidgetPublishResult(accepted=false, request_sequence=<client-envelope-sequence>, widget_name=<name>, error_code=..., error_message=...)`
 
 #### Scenario: Repeated publishes to the same widget remain distinguishable
 - **WHEN** multiple durable publishes target the same widget instance on the same session stream

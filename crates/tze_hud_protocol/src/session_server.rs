@@ -12653,7 +12653,10 @@ mod tests {
                 );
                 assert_eq!(result.widget_name, "gauge");
                 assert!(result.error_code.is_empty(), "No error code on success");
-                assert_eq!(result.request_sequence, 2, "request_sequence must echo client sequence");
+                assert_eq!(
+                    result.request_sequence, 2,
+                    "request_sequence must echo client sequence"
+                );
             }
             other => panic!("Expected WidgetPublishResult, got: {other:?}"),
         }

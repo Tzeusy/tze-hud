@@ -31,7 +31,7 @@ Terminal reconciliation for the `rust-widget-publish-load-harness` OpenSpec chan
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
 | 1 | `examples/widget_publish_load_harness/` builds as workspace member | PASS | `Cargo.toml:21` (`"examples/widget_publish_load_harness"`); crate present with `Cargo.toml` + `src/main.rs`. |
-| 2 | `WidgetPublishResult.request_sequence` present and non-zero in durable-publish round-trip test | PASS | `crates/tze_hud_protocol/proto/session.proto:595` (`uint64 request_sequence = 5`); wire-up in `session_server.rs` lines 811–1161; `test_durable_widget_publish_repeated_requests_are_correlated` in `crates/tze_hud_protocol/tests/widget_publish_integration.rs` (10 references); roundtrip.rs:1245 asserts `request_sequence: 42`. |
+| 2 | `WidgetPublishResult.request_sequence` present and non-zero in durable-publish round-trip test | PASS | `crates/tze_hud_protocol/proto/session.proto:595` (`uint64 request_sequence = 5`); wire-up in `session_server.rs` lines 6071–6280; `test_durable_widget_publish_repeated_requests_are_correlated` in `crates/tze_hud_protocol/tests/widget_publish_integration.rs` (10 references); roundtrip.rs:1245 asserts `request_sequence: 42`. |
 | 3 | `targets/publish_load_targets.toml` restored and parsed by harness CLI | PASS | `targets/publish_load_targets.toml` present; harness CLI resolves targets at startup. |
 | 4 | Layer 4 telemetry + artifact tests pass | PASS | `crates/tze_hud_telemetry/src/publish_load.rs` restored; `crates/tze_hud_telemetry/tests/publish_load_artifact.rs` restored; `crates/tze_hud_telemetry/src/validation.rs` with `evaluate_policy_mutation_latency_conformance` restored. |
 | 5 | Epic closeout report and diagrams restored; `scripts/epic-report-scaffold.sh` restored | PASS | `docs/reports/hud-bm9i-rust-widget-publish-load-harness.md` present; `docs/reports/diagrams/hud-bm9i-component-flow.mmd` + `.svg` present; `scripts/epic-report-scaffold.sh` present with `scripts/tests/test_epic_report_scaffold.py`. |
@@ -75,7 +75,7 @@ Spec deltas merged:
 
 The session-protocol delta in `openspec/changes/rust-widget-publish-load-harness/specs/session-protocol/spec.md` asserted `WidgetPublishResult.request_sequence`. This delta is now satisfied:
 - Proto field added: `crates/tze_hud_protocol/proto/session.proto:595`
-- Runtime wire-up: `crates/tze_hud_protocol/src/session_server.rs` lines 811–1161
+- Runtime wire-up: `crates/tze_hud_protocol/src/session_server.rs` lines 6071–6280
 - Main spec updated: `openspec/specs/session-protocol/spec.md:774`
 - Delta archived: `openspec/changes/archive/2026-04-18-rust-widget-publish-load-harness/`
 
