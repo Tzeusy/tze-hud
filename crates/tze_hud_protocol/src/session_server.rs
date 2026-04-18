@@ -6072,7 +6072,7 @@ async fn handle_widget_publish(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
-    _request_sequence: u64,
+    request_sequence: u64,
     publish: WidgetPublish,
 ) {
     let (resolved_widget_name, resolved_element_id) = if !publish.element_id.is_empty() {
@@ -6095,6 +6095,7 @@ async fn handle_widget_publish(
                                     error_code: "ELEMENT_NOT_FOUND".to_string(),
                                     error_message: "element_id does not reference a known widget"
                                         .to_string(),
+                                    request_sequence,
                                 },
                             )),
                         }))
@@ -6113,6 +6114,7 @@ async fn handle_widget_publish(
                             widget_name: publish.widget_name.clone(),
                             error_code: "INVALID_ARGUMENT".to_string(),
                             error_message: "invalid element_id: expected 16 bytes".to_string(),
+                            request_sequence,
                         })),
                     }))
                     .await;
@@ -6145,6 +6147,7 @@ async fn handle_widget_publish(
                         widget_name: resolved_widget_name.clone(),
                         error_code: "WIDGET_CAPABILITY_MISSING".to_string(),
                         error_message: format!("Missing capability: {required_cap}"),
+                        request_sequence,
                     })),
                 }))
                 .await;
@@ -6214,6 +6217,7 @@ async fn handle_widget_publish(
                             widget_name: resolved_widget_name.clone(),
                             error_code: String::new(),
                             error_message: String::new(),
+                            request_sequence,
                         })),
                     }))
                     .await;
@@ -6266,6 +6270,7 @@ async fn handle_widget_publish(
                             widget_name: resolved_widget_name.clone(),
                             error_code,
                             error_message,
+                            request_sequence,
                         })),
                     }))
                     .await;
@@ -12648,6 +12653,7 @@ mod tests {
                 );
                 assert_eq!(result.widget_name, "gauge");
                 assert!(result.error_code.is_empty(), "No error code on success");
+                assert_eq!(result.request_sequence, 2, "request_sequence must echo client sequence");
             }
             other => panic!("Expected WidgetPublishResult, got: {other:?}"),
         }
@@ -12831,6 +12837,58 @@ mod tests {
             }
             other => {
                 panic!("Expected WidgetPublishResult(WIDGET_UNKNOWN_PARAMETER), got: {other:?}")
+            }
+        }
+
+        drop(tx);
+    }
+
+    /// Scenario: repeated durable WidgetPublish requests to the same widget are
+    /// unambiguously correlated by request_sequence.
+    #[tokio::test]
+    async fn test_durable_widget_publish_repeated_requests_are_correlated() {
+        let (mut client, _handle) = setup_widget_test().await;
+
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "widget-correlation-agent",
+            "test-key",
+            &["publish_widget:gauge"],
+        )
+        .await;
+
+        for (sequence, level) in [(2u64, 0.25f32), (3u64, 0.75f32)] {
+            tx.send(ClientMessage {
+                sequence,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
+                    widget_name: "gauge".to_string(),
+                    instance_id: String::new(),
+                    params: vec![crate::proto::WidgetParameterValueProto {
+                        param_name: "level".to_string(),
+                        value: Some(crate::proto::widget_parameter_value_proto::Value::F32Value(
+                            level,
+                        )),
+                    }],
+                    transition_ms: 0,
+                    ttl_us: 0,
+                    element_id: Vec::new(),
+                    merge_key: String::new(),
+                })),
+            })
+            .await
+            .unwrap();
+
+            let result_msg = next_non_state_change(&mut stream).await;
+            match &result_msg.payload {
+                Some(ServerPayload::WidgetPublishResult(result)) => {
+                    assert_eq!(result.request_sequence, sequence);
+                    assert!(result.accepted, "expected durable publish to be accepted");
+                    assert_eq!(result.widget_name, "gauge");
+                    assert!(result.error_code.is_empty());
+                    assert!(result.error_message.is_empty());
+                }
+                other => panic!("Expected WidgetPublishResult, got: {other:?}"),
             }
         }
 
