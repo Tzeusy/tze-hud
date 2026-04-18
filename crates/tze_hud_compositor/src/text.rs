@@ -267,10 +267,15 @@ impl TextRasterizer {
                                 line_attrs.add_span(local_start..local_end, span_attrs.as_attrs());
                             }
                         }
+                        // Capture ending length before the mutable borrow.
+                        let ending_len = line.ending().as_str().len();
                         line.set_attrs_list(line_attrs);
 
-                        // Advance past this line + newline separator (1 byte '\n').
-                        line_start = line_end + 1;
+                        // Advance past this line's text plus its line-ending
+                        // (1 byte for '\n' or '\r', 2 bytes for '\r\n', 0 for
+                        // the last line).  Using line.ending() avoids the
+                        // hard-coded +1 that would misalign CRLF input.
+                        line_start = line_end + ending_len;
                     }
                 }
 
