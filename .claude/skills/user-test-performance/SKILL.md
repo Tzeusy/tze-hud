@@ -1,6 +1,6 @@
 ---
 name: user-test-performance
-description: Use when running deep performance and throughput investigations for HUD publishing paths (widgets/zones/tiles), including MCP HTTP and gRPC bidi stream benchmarks.
+description: Use when running deep performance and throughput investigations for HUD publishing paths (widgets/zones/tiles), including MCP HTTP benchmarks and gRPC bidi stream benchmarks. The canonical gRPC widget publish-load benchmark is `examples/widget_publish_load_harness` (Rust); the Python `grpc_widget_publish_perf.py` script is a secondary alternative.
 ---
 
 # User Test Performance
@@ -72,7 +72,14 @@ then add more (for example, a remote MacBook target) under new `target_id` keys.
 - `scripts/mcp_publish_perf.py`
   - Benchmarks MCP publishes for `widget` or `zone` modes.
   - Supports count, concurrency, pacing, target registry, traceability tags, thresholds, and CSV recording.
-- `scripts/grpc_widget_publish_perf.py`
+- `examples/widget_publish_load_harness` (Rust — **canonical gRPC widget benchmark**)
+  - Compiled Rust binary; build with `cargo build --release -p widget_publish_load_harness`.
+  - Supports `--mode burst|paced`, `--publish-count`, `--duration-s`, `--target-rate-rps`,
+    `--target-p99-rtt-us`, `--target-throughput-rps`, `--normalization-mapping-approved`,
+    `--layer4-output-root` (Layer 4 artifact emission), and full target registry via
+    `--targets-file` (default: `./targets/publish_load_targets.toml`).
+  - Outputs a JSON artifact to `benchmarks/publish-load/` by default.
+- `scripts/grpc_widget_publish_perf.py` (Python — secondary alternative)
   - Benchmarks `WidgetPublish` on one gRPC bidi stream.
   - Supports pacing, target registry, byte accounting, traceability tags, thresholds, and CSV recording.
   - Uses local `scripts/proto_gen/` stubs (self-contained inside this skill).
@@ -85,7 +92,7 @@ then add more (for example, a remote MacBook target) under new `target_id` keys.
 Use the minimum run shape that answers the current hypothesis:
 
 1. Transport bottleneck hypothesis (`per-request overhead`, `HTTP connection churn`) -> `mcp_publish_perf.py`
-2. Stream throughput hypothesis (`single bidi stream`, `drain/result pacing`) -> `grpc_widget_publish_perf.py`
+2. Stream throughput hypothesis (`single bidi stream`, `drain/result pacing`) -> `examples/widget_publish_load_harness` (Rust, canonical); fallback: `scripts/grpc_widget_publish_perf.py`
 3. Regression hypothesis (`did we get better/worse than prior runs?`) -> `compare_results.py`
 
 If uncertain, start with one fast MCP run (`--count 20`) and one fast gRPC run (`--count 20`), then deepen only the path that regresses.
@@ -115,7 +122,28 @@ python3 .claude/skills/user-test-performance/scripts/mcp_publish_perf.py \
   --duration-ms 5000
 ```
 
-### 3) gRPC widget stream: 100 publishes on one bidi connection
+### 3) gRPC widget stream (Rust — canonical): 1000 burst publishes
+
+```bash
+cargo run --release -p widget_publish_load_harness -- \
+  --target-id user-test-windows-tailnet \
+  --widget-name main-progress \
+  --mode burst \
+  --publish-count 1000
+```
+
+### 4) gRPC widget stream (Rust — canonical): 100 publishes paced over 5 seconds
+
+```bash
+cargo run --release -p widget_publish_load_harness -- \
+  --target-id user-test-windows-tailnet \
+  --widget-name main-progress \
+  --mode paced \
+  --duration-s 5 \
+  --target-rate-rps 20
+```
+
+### 3a) gRPC widget stream (Python — secondary): 100 publishes on one bidi connection
 
 ```bash
 python3 .claude/skills/user-test-performance/scripts/grpc_widget_publish_perf.py \
@@ -124,7 +152,7 @@ python3 .claude/skills/user-test-performance/scripts/grpc_widget_publish_perf.py
   --count 100
 ```
 
-### 4) gRPC widget stream: 100 publishes over 5 seconds
+### 4a) gRPC widget stream (Python — secondary): 100 publishes over 5 seconds
 
 ```bash
 python3 .claude/skills/user-test-performance/scripts/grpc_widget_publish_perf.py \
@@ -146,12 +174,17 @@ python3 .claude/skills/user-test-performance/scripts/compare_results.py \
 
 ## Traceability and Threshold Flags
 
-Both benchmark scripts support:
+The Python MCP and gRPC scripts (`mcp_publish_perf.py`, `grpc_widget_publish_perf.py`) support:
 
 - Traceability: `--trace-spec-ref`, `--trace-rfc-ref`, `--trace-doctrine-ref`, `--trace-budget-ref`
 - Thresholds: `--expected-e2e-ms-max`, `--expected-p95-ms-max`, `--expected-p99-ms-max`, `--expected-throughput-rps-min`, `--expected-error-rate-max`
 
 These fields are persisted in `results.csv` for auditable historical comparisons.
+
+The Rust harness (`examples/widget_publish_load_harness`) uses structured thresholds via
+`--target-p99-rtt-us` and `--target-throughput-rps`, with traceability embedded in the
+emitted JSON artifact (RFC-0005 / `publish-load-harness` spec ID) and Layer 4 artifact
+output (via `--layer4-output-root`).
 
 ## Notes
 
