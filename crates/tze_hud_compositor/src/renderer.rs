@@ -7586,10 +7586,12 @@ mod tests {
             "expected backdrop vertices for notification with opaque backdrop"
         );
 
-        // Also verify the text item uses the policy text_color.
+        // Also verify the text items use the policy text_color.
+        // collect_text_items emits 2 items for a notification slot when the text
+        // rasterizer is active: the notification body text + the dismiss "X" button.
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
-        assert_eq!(items.len(), 1, "expected one TextItem for notification");
-        // White text → R channel should be near 255.
+        assert_eq!(items.len(), 2, "expected two TextItems: notification body + dismiss button");
+        // The first item is the notification body text. White text → R channel near 255.
         assert!(
             items[0].color[0] > 200,
             "text color R should be near-white from policy.text_color"
@@ -8750,8 +8752,9 @@ mod tests {
         compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // Two publications → two backdrop quads (6 verts each) + border quads.
-        // Each Notification slot emits: 1 backdrop quad (6) + 4 border quads (24) = 30.
-        // Total: 2 × 30 = 60 vertices.
+        // Each Notification slot emits:
+        //   1 backdrop quad (6) + 4 border quads (24) + 4 dismiss-button border quads (24) = 54.
+        // Total: 2 × 54 = 108 vertices.
         // We assert at least 12 (2 backdrops) and a multiple of 6.
         assert!(
             vertices.len() >= 12,
@@ -8768,13 +8771,17 @@ mod tests {
         // The first backdrop quad's top-left y should be 0 (zone starts at y_pct=0.0 → y=0).
         // The second backdrop quad's top-left y should be ~slot_h after the first slot.
         // zone_h = 720 * 0.5556 ≈ 400; slot_h is content-sized per stack_slot_height.
-        // Vertices are in NDC; we check the first and 7th vertex y values differ.
+        // Vertices are in NDC; we check the first and Nth vertex y values differ.
         // rect_vertices emits 6 verts per quad in positions [x,y] NDC.
-        // With border quads added, the second backdrop quad starts at vertex index 30
-        // (6 backdrop + 24 border for first slot = 30 verts per slot).
+        // Each notification slot emits:
+        //   6  backdrop quad vertices
+        //   24 border quads (4 quads × 6 verts each)
+        //   24 dismiss-button border quads (4 quads × 6 verts each)
+        //   = 54 vertices per slot.
+        // The second backdrop quad therefore starts at vertex index 54.
         let first_quad_y = vertices[0].position[1];
-        // Find second backdrop by skipping first slot (30 vertices: 6 backdrop + 24 border).
-        let second_quad_idx = 30; // 6 backdrop + 4 border quads (6 each)
+        // Find second backdrop by skipping first slot (54 vertices: 6 backdrop + 24 border + 24 dismiss border).
+        let second_quad_idx = 54; // 6 backdrop + 4 border quads + 4 dismiss-button border quads (6 each)
         if vertices.len() > second_quad_idx {
             let second_quad_y = vertices[second_quad_idx].position[1];
             assert!(
