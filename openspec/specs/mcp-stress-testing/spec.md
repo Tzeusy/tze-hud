@@ -8,10 +8,12 @@ External load testing capability for the MCP HTTP `publish_to_zone` endpoint. Ex
 ### Requirement: Baseline Phases
 Before load profiles begin, the tool SHALL run two baseline phases:
 
-1. **Network baseline** — 10 `list_zones` calls (read-only, no scene lock contention). Isolates pure network round-trip time.
-2. **Publish baseline** — 10 `publish_to_zone` calls at idle rate (1/s) across zones. Establishes single-publish latency without concurrent load.
+1. **Network baseline** — 100 `list_zones` calls at idle rate (1/s) (read-only, no scene lock contention). Isolates pure network round-trip time.
+2. **Publish baseline** — 100 `publish_to_zone` calls at idle rate (1/s) across zones. Establishes single-publish latency without concurrent load.
 
 Both baselines SHALL report p50/p95/p99/max latency and be included in the JSON report as `network_baseline` and `publish_baseline` respectively.
+
+**Sample count rationale:** 100 samples per baseline ensures p99 is statistically meaningful (not just the single worst-case observation). At 1/s the network baseline completes in ~100 s and the publish baseline in ~100 s; total baseline overhead is acceptable given the multi-minute load-profile run that follows.
 
 #### Scenario: Successful baseline execution
 - **GIVEN** a running tze_hud.exe with MCP HTTP on port 9090
