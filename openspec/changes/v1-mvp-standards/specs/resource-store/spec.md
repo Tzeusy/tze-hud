@@ -425,32 +425,32 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: GPU Texture Compression (BC7/ASTC)
-GPU-native texture compression (BC7/ASTC) to reduce VRAM usage is deferred to post-v1 profiling.
+GPU-native texture compression (BC7/ASTC) to reduce VRAM usage is deferred to post-v1. The v1 runtime MUST NOT implement BC7/ASTC texture compression; images SHALL be stored in decoded uncompressed format in v1.
 Source: RFC 0011 §18.1
 Scope: post-v1
 
 #### Scenario: Deferred marker
 - **WHEN** GPU texture compression is needed to reduce VRAM
-- **THEN** this optimization is not available in v1; images are stored in decoded format
+- **THEN** this optimization MUST NOT be relied upon in v1; images are stored in decoded format
 
 ---
 
 ### Requirement: Persistent Resource Store
-A durable persistent store for scene-node image/font resources is deferred to post-v1. The v1 durable-storage exception applies only to runtime widget SVG assets.
+A durable persistent store for scene-node image/font resources is deferred to post-v1. The v1 runtime MUST NOT implement persistence for scene-node image/font resources; the v1 durable-storage exception applies only to runtime widget SVG assets.
 Source: RFC 0011 §9.2, §9.1
 Scope: post-v1
 
 #### Scenario: Deferred marker
 - **WHEN** scene-node image/font resources need to survive runtime restarts
-- **THEN** persistence is not implemented in v1 for those resource classes
+- **THEN** persistence MUST NOT be expected in v1 for those resource classes; agents must re-upload after reconnection
 
 ---
 
 ### Requirement: Post-V1 Resource Types
-VIDEO_H264, VIDEO_VP9, AUDIO_OPUS, AUDIO_AAC, and WASM_MODULE resource types are deferred to future RFCs.
+VIDEO_H264, VIDEO_VP9, AUDIO_OPUS, AUDIO_AAC, and WASM_MODULE resource types are deferred to future RFCs. The v1 runtime MUST NOT accept uploads for these types; they SHALL be rejected with RESOURCE_UNSUPPORTED_TYPE.
 Source: RFC 0011 §2.3
 Scope: post-v1
 
 #### Scenario: Deferred marker
 - **WHEN** video, audio, or WASM resources are needed
-- **THEN** these types are not available in v1 and will be added when corresponding node types ship
+- **THEN** these types MUST NOT be available in v1; uploads MUST be rejected with RESOURCE_UNSUPPORTED_TYPE until corresponding node types ship
