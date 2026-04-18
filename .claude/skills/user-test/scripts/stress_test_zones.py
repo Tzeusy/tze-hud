@@ -41,38 +41,54 @@ DEFAULT_SSH_HOST = "tzehouse-windows.parrot-hen.ts.net"
 DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/ecdsa_home")
 DEFAULT_REPORT_FILE = "stress_report.json"
 DEFAULT_NAMESPACE = "stress-test"
-DEFAULT_TTL_US = 30_000_000  # 30 seconds
+DEFAULT_TTL_US = 60_000_000   # 60 seconds (spec default)
+SHORT_TTL_US   = 1_000_000    # 1 second  (--short-ttl)
 
-# All 6 default zones with appropriate sample content
+# Payload size targets for --large-payloads (StreamText zones only).
+# Sizes rotate across requests: small -> medium -> large -> max -> small -> ...
+_LARGE_PAYLOAD_SIZES: list[int] = [100, 1_024, 10_240, 60_000]
+
+# MergeByKey rotation constants for the status-bar zone.
+# The first half of each profile fills rotating keys; the second half reuses them.
+_STATUS_BAR_MERGE_KEYS: int = 32  # max map depth per spec
+
+# All 6 default zones with per-zone media-type metadata.
+# ``media_type`` drives payload generation; ``contention`` is informational.
 ZONES: list[dict[str, Any]] = [
     {
         "zone_name": "subtitle",
-        "content": "Stress test running -- subtitle zone",
+        "media_type": "StreamText",
+        "contention": "LatestWins",
         "merge_key": "stress-subtitle",
     },
     {
         "zone_name": "status-bar",
-        "content": "Stress test active",
+        "media_type": "KeyValuePairs",
+        "contention": "MergeByKey",
         "merge_key": "stress-status",
     },
     {
         "zone_name": "notification-area",
-        "content": "Stress test notification",
+        "media_type": "ShortTextWithIcon",
+        "contention": "Stack",
         "merge_key": "stress-notification",
     },
     {
         "zone_name": "alert-banner",
-        "content": "Stress test alert banner",
+        "media_type": "StreamText",
+        "contention": "Replace",
         "merge_key": "stress-alert",
     },
     {
         "zone_name": "pip",
-        "content": "PIP stress test content",
+        "media_type": "SolidColor",
+        "contention": "Replace",
         "merge_key": "stress-pip",
     },
     {
         "zone_name": "ambient-background",
-        "content": "Ambient background stress content",
+        "media_type": "SolidColor",
+        "contention": "Replace",
         "merge_key": "stress-ambient",
     },
 ]
@@ -85,6 +101,117 @@ PROFILES: list[tuple[str, float, int, int]] = [
     ("high",   50, 8, 30),
     ("burst", 100, 16, 10),
 ]
+
+# ---------------------------------------------------------------------------
+# Per-zone-type payload generators
+# ---------------------------------------------------------------------------
+
+
+def _stream_text_payload(req_id: int, zone_name: str, large_payload_index: int | None) -> str:
+    """
+    Generate a StreamText content string.
+
+    When ``large_payload_index`` is not None, the payload is padded to one of
+    the four escalating target sizes defined in ``_LARGE_PAYLOAD_SIZES``,
+    rotating by index. This exercises how content size affects latency and
+    whether the server handles near-limit payloads.
+    """
+    base = f"Stress test message {req_id}"
+    if large_payload_index is None:
+        return base
+    target_size = _LARGE_PAYLOAD_SIZES[large_payload_index % len(_LARGE_PAYLOAD_SIZES)]
+    if len(base) >= target_size:
+        return base
+    pad_char = "x"
+    padding = pad_char * (target_size - len(base) - 1)  # -1 for separator space
+    return f"{base} {padding}"
+
+
+def _key_value_pairs_payload(req_id: int, total_requests_in_profile: int, req_index: int) -> dict[str, Any]:
+    """
+    Generate a KeyValuePairs payload for the status-bar zone.
+
+    Implements MergeByKey contention behaviour:
+    - First half of each profile: rotating keys ``key-0`` through ``key-31``
+      to fill the map (exercises the insert-or-replace-by-key path).
+    - Second half of each profile: reuse existing keys to exercise the
+      replace-by-key path on an already-full map.
+    """
+    half = max(total_requests_in_profile // 2, 1)
+    if req_index < half:
+        # Fill phase: rotate through all 32 key slots
+        key = f"key-{req_index % _STATUS_BAR_MERGE_KEYS}"
+    else:
+        # Reuse phase: repeat the same key rotation to hit existing entries
+        key = f"key-{(req_index - half) % _STATUS_BAR_MERGE_KEYS}"
+    return {"type": "status_bar", "entries": {key: f"value-{req_id}"}}
+
+
+def _short_text_with_icon_payload(req_id: int) -> dict[str, Any]:
+    """
+    Generate a ShortTextWithIcon payload for the notification-area zone.
+
+    The notification-area uses a Stack with max depth 8. Publishing faster than
+    the stack drains (during medium/high/burst profiles) intentionally triggers
+    eviction of the oldest entries.
+    """
+    return {"type": "notification", "text": f"Alert {req_id}", "icon": "warning"}
+
+
+def _solid_color_payload(zone_name: str) -> dict[str, Any]:
+    """
+    Generate a SolidColor payload for pip and ambient-background zones.
+
+    Uses fixed representative colours per zone so comparisons across runs
+    are meaningful.
+    """
+    if zone_name == "pip":
+        return {"type": "solid_color", "r": 0.2, "g": 0.5, "b": 0.8, "a": 1.0}
+    # ambient-background: semi-transparent black overlay
+    return {"type": "solid_color", "r": 0.0, "g": 0.0, "b": 0.0, "a": 0.5}
+
+
+def build_content(
+    zone: dict[str, Any],
+    req_id: int,
+    large_payload_index: int | None,
+    total_requests_in_profile: int,
+    req_index: int,
+) -> Any:
+    """
+    Return the correct content value for a zone based on its media type.
+
+    Dispatches to the appropriate per-media-type generator so each zone
+    exercises its real contention path rather than receiving a generic string.
+
+    Args:
+        zone: Zone descriptor from ``ZONES``.
+        req_id: Monotonic request counter used for unique content.
+        large_payload_index: If not None, selects a large-payload size for
+            StreamText zones (rotating through ``_LARGE_PAYLOAD_SIZES``).
+        total_requests_in_profile: Estimated total requests for this profile
+            (used to split MergeByKey fill vs reuse halves).
+        req_index: Zero-based index of this request within the profile (used
+            for MergeByKey key selection).
+    """
+    media_type = zone["media_type"]
+    zone_name = zone["zone_name"]
+
+    if media_type == "StreamText":
+        return _stream_text_payload(req_id, zone_name, large_payload_index)
+
+    if media_type == "KeyValuePairs":
+        return _key_value_pairs_payload(req_id, total_requests_in_profile, req_index)
+
+    if media_type == "ShortTextWithIcon":
+        return _short_text_with_icon_payload(req_id)
+
+    if media_type == "SolidColor":
+        return _solid_color_payload(zone_name)
+
+    # Fallback: plain string — should not happen with current ZONES definition
+    return f"Stress test message {req_id}"
+
 
 # ---------------------------------------------------------------------------
 # RPC helper (same pattern as publish_zone_batch.py)
@@ -566,13 +693,13 @@ class ProfileResult:
 # ---------------------------------------------------------------------------
 
 
-def preflight_check(url: str, token: str) -> bool:
+def preflight_check(url: str, token: str) -> set[str] | None:
     """
-    Send a single list_zones call to verify the MCP endpoint is reachable.
+    Call list_zones to verify the MCP endpoint is reachable and discover available zones.
 
-    Returns True if the endpoint responds with a valid JSON-RPC result.
-    Returns False (after printing to stderr) on any failure: connection
-    refused, DNS error, HTTP non-200, JSON-RPC error, or timeout.
+    Returns a set of zone names on success, or None on any failure (connection
+    refused, DNS error, HTTP non-200, JSON-RPC error, or timeout). Callers
+    should filter the ZONES list against the returned set and warn/skip missing zones.
     """
     try:
         resp = rpc_call(url, token, "list_zones", {}, request_id=0, timeout=5.0)
@@ -581,19 +708,19 @@ def preflight_check(url: str, token: str) -> bool:
             f"MCP endpoint unreachable at {url}: {exc.reason}",
             file=sys.stderr,
         )
-        return False
+        return None
     except OSError as exc:
         print(
             f"MCP endpoint unreachable at {url}: {exc}",
             file=sys.stderr,
         )
-        return False
+        return None
     except Exception as exc:  # noqa: BLE001
         print(
             f"MCP endpoint unreachable at {url}: {exc}",
             file=sys.stderr,
         )
-        return False
+        return None
 
     if "error" in resp:
         err = resp["error"]
@@ -601,9 +728,10 @@ def preflight_check(url: str, token: str) -> bool:
             f"MCP endpoint unreachable at {url}: JSON-RPC error {err}",
             file=sys.stderr,
         )
-        return False
+        return None
 
-    return True
+    zones_data = resp.get("result", {}).get("zones", [])
+    return {z["name"] for z in zones_data if isinstance(z, dict) and "name" in z}
 
 
 # ---------------------------------------------------------------------------
@@ -703,7 +831,7 @@ def run_publish_baseline(url: str, token: str) -> dict[str, Any]:
         zone = ZONES[i % len(ZONES)]
         params: dict[str, Any] = {
             "zone_name": zone["zone_name"],
-            "content": f"{zone['content']} baseline-{i}",
+            "content": build_content(zone, req_id=i, large_payload_index=None, total_requests_in_profile=CALLS, req_index=i),
             "namespace": DEFAULT_NAMESPACE,
             "ttl_us": DEFAULT_TTL_US,
             "merge_key": zone["merge_key"],
@@ -748,18 +876,41 @@ def _dispatch_one(
     req_id: int,
     zone: dict,
     verbose: bool,
+    ttl_us: int,
+    large_payload_index: int | None,
+    total_requests_in_profile: int,
+    req_index: int,
 ) -> tuple[float | None, bool]:
     """
     Dispatch a single publish_to_zone request and return (latency_ms, success).
 
     Thread-safe: uses only immutable arguments and the thread-local stack.
     Returns (latency_ms, True) on success; (None, False) on any error.
+
+    Args:
+        url: MCP endpoint URL.
+        token: Bearer auth token.
+        req_id: Monotonic request counter (appears in content for traceability).
+        zone: Zone descriptor from ``ZONES`` (includes media_type and contention).
+        verbose: Print each request result to stdout when True.
+        ttl_us: TTL in microseconds (DEFAULT_TTL_US or SHORT_TTL_US).
+        large_payload_index: If not None, selects a large payload size for
+            StreamText zones. Rotates through ``_LARGE_PAYLOAD_SIZES``.
+        total_requests_in_profile: Estimated total for MergeByKey phase split.
+        req_index: Zero-based request index within the profile.
     """
+    content = build_content(
+        zone=zone,
+        req_id=req_id,
+        large_payload_index=large_payload_index,
+        total_requests_in_profile=total_requests_in_profile,
+        req_index=req_index,
+    )
     params: dict[str, Any] = {
         "zone_name": zone["zone_name"],
-        "content": f"{zone['content']} #{req_id}",
+        "content": content,
         "namespace": DEFAULT_NAMESPACE,
-        "ttl_us": DEFAULT_TTL_US,
+        "ttl_us": ttl_us,
         "merge_key": zone["merge_key"],
     }
     t0 = time.monotonic()
@@ -769,6 +920,7 @@ def _dispatch_one(
         if verbose:
             print(
                 f"    req={req_id} zone={zone['zone_name']}"
+                f" media={zone['media_type']}"
                 f" lat={latency_ms:.1f}ms ok"
             )
         return latency_ms, True
@@ -777,6 +929,7 @@ def _dispatch_one(
         if verbose:
             print(
                 f"    req={req_id} zone={zone['zone_name']}"
+                f" media={zone['media_type']}"
                 f" lat={latency_ms:.1f}ms ERR: {exc}"
             )
         return None, False
@@ -793,6 +946,8 @@ def run_profile(
     ssh_key: str,
     verbose: bool = False,
     concurrency: int = 1,
+    ttl_us: int = DEFAULT_TTL_US,
+    large_payloads: bool = False,
 ) -> ProfileResult:
     result = ProfileResult(
         profile_name=profile_name,
@@ -800,6 +955,10 @@ def run_profile(
         duration_sec=duration_sec,
         concurrency=concurrency,
     )
+
+    # Estimate total requests so MergeByKey generators can split fill/reuse phases.
+    # This is a best-effort estimate; the actual count may differ due to timing.
+    estimated_total = int(rate_per_sec * duration_sec)
 
     # --- Start background telemetry thread ---
     telem = TelemetryThread(ssh_user, ssh_host, ssh_key)
@@ -820,16 +979,21 @@ def run_profile(
     controller = RateController(rate_per_sec)
     req_id_counter = 1
     zone_cycle = 0
+    req_index = 0  # zero-based index within this profile for MergeByKey phase split
 
     print(
         f"  [{profile_name}] Running {rate_per_sec}/s "
-        f"(concurrency={concurrency}) for {duration_sec}s...",
+        f"(concurrency={concurrency}, ttl={'short' if ttl_us == SHORT_TTL_US else 'default'}"
+        f"{', large-payloads' if large_payloads else ''}) for {duration_sec}s...",
         flush=True,
     )
 
     if concurrency > 1:
         # Concurrent dispatch: submit one future per tick, collect results
         # as they complete. Each thread records its own latency independently.
+        #
+        # large_payload_index and req_index are captured at submission time so
+        # the correct phase is associated with each request even under concurrency.
         futures: list[concurrent.futures.Future] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
             while time.monotonic() < deadline:
@@ -840,10 +1004,17 @@ def run_profile(
                 zone_cycle += 1
                 req_id = req_id_counter
                 req_id_counter += 1
-                fut = executor.submit(_dispatch_one, url, token, req_id, zone, verbose)
+                lp_index = req_index if large_payloads else None
+                ri = req_index
+                req_index += 1
+                fut = executor.submit(
+                    _dispatch_one,
+                    url, token, req_id, zone, verbose,
+                    ttl_us, lp_index, estimated_total, ri,
+                )
                 futures.append(fut)
             # Collect all results (executor waits for running futures on exit)
-            for fut in concurrent.futures.as_completed(futures):
+            for fut in futures:
                 try:
                     latency_ms, success = fut.result()
                 except Exception:
@@ -864,7 +1035,13 @@ def run_profile(
             zone_cycle += 1
             req_id = req_id_counter
             req_id_counter += 1
-            latency_ms, success = _dispatch_one(url, token, req_id, zone, verbose)
+            lp_index = req_index if large_payloads else None
+            ri = req_index
+            req_index += 1
+            latency_ms, success = _dispatch_one(
+                url, token, req_id, zone, verbose,
+                ttl_us, lp_index, estimated_total, ri,
+            )
             result.total_requests += 1
             if success and latency_ms is not None:
                 result.latencies_ms.append(latency_ms)
@@ -1018,6 +1195,26 @@ def parse_args() -> argparse.Namespace:
         help="Override per-profile concurrency with a fixed worker count",
     )
     parser.add_argument(
+        "--short-ttl",
+        action="store_true",
+        default=False,
+        help=(
+            f"Set publish TTL to {SHORT_TTL_US // 1_000_000}s instead of "
+            f"{DEFAULT_TTL_US // 1_000_000}s. "
+            "Exercises TTL expiry housekeeping; report includes ttl_mode=short."
+        ),
+    )
+    parser.add_argument(
+        "--large-payloads",
+        action="store_true",
+        default=False,
+        help=(
+            "Generate StreamText payloads at escalating sizes "
+            f"({', '.join(str(s) + 'B' for s in _LARGE_PAYLOAD_SIZES)}, rotating). "
+            "Tests how content size affects latency and near-limit behaviour."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print each request result",
@@ -1026,6 +1223,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    global ZONES  # may be filtered by preflight zone discovery
     args = parse_args()
 
     # Resolve token -- no hardcoded credentials in logic
@@ -1036,6 +1234,9 @@ def main() -> int:
             f"WARNING: {args.psk_env} not set, using built-in default token.",
             file=sys.stderr,
         )
+
+    ttl_us = SHORT_TTL_US if args.short_ttl else DEFAULT_TTL_US
+    ttl_mode = "short" if args.short_ttl else "default"
 
     # Determine which profiles to run
     selected_names = (
@@ -1049,13 +1250,29 @@ def main() -> int:
     print(f"  Report  : {args.report}")
     print(f"  Zones   : {len(ZONES)}")
     print(f"  Profiles: {[p[0] for p in profiles_to_run]}")
+    print(f"  TTL mode: {ttl_mode} ({ttl_us // 1_000_000}s)")
+    print(f"  Large payloads: {'yes' if args.large_payloads else 'no'}")
     if args.concurrency is not None:
         print(f"  Concurrency override: {args.concurrency} (overrides per-profile defaults)")
     print()
 
-    # Preflight: verify MCP endpoint is reachable before running any baselines
-    # or load profiles. Fails fast with exit code 1 on any connectivity error.
-    if not preflight_check(args.url, token):
+    # Preflight: verify MCP endpoint is reachable and discover available zones.
+    # Fails fast with exit code 1 on any connectivity error. Missing zones are
+    # skipped with a warning (spec: "skip with a warning rather than failing").
+    available_zone_names = preflight_check(args.url, token)
+    if available_zone_names is None:
+        sys.exit(1)
+
+    original_zones = ZONES
+    ZONES = [z for z in ZONES if z["zone_name"] in available_zone_names]
+    for z in original_zones:
+        if z["zone_name"] not in available_zone_names:
+            print(
+                f"WARNING: zone '{z['zone_name']}' not found on server — skipping",
+                file=sys.stderr,
+            )
+    if not ZONES:
+        print("ERROR: no zones available on server; aborting", file=sys.stderr)
         sys.exit(1)
 
     run_id = str(uuid.uuid4())
@@ -1088,6 +1305,8 @@ def main() -> int:
             ssh_key=args.ssh_key,
             verbose=args.verbose,
             concurrency=effective_concurrency,
+            ttl_us=ttl_us,
+            large_payloads=args.large_payloads,
         )
         results.append(result)
         # 3-second cooldown between profiles to let the host settle
@@ -1105,6 +1324,8 @@ def main() -> int:
         "zones_tested": [z["zone_name"] for z in ZONES],
         "network_baseline": network_baseline,
         "publish_baseline": publish_baseline,
+        "ttl_mode": ttl_mode,
+        "large_payloads": args.large_payloads,
         "profiles": [r.to_dict() for r in results],
     }
     with open(args.report, "w", encoding="utf-8") as f:
