@@ -1158,7 +1158,7 @@ async fn test_color_runs_red_error_text_rendered() {
             overflow: TextOverflow::Clip,
             color_runs: vec![TextColorRun {
                 start_byte: 0,
-                end_byte: 5, // "ERROR"
+                end_byte: 5,                          // "ERROR"
                 color: Rgba::new(1.0, 0.0, 0.0, 1.0), // pure red
             }]
             .into_boxed_slice(),

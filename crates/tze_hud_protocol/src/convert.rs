@@ -276,7 +276,11 @@ pub fn proto_color_runs_to_scene(runs: &[proto::TextColorRunProto]) -> Box<[Text
         .map(|r| TextColorRun {
             start_byte: r.start_byte,
             end_byte: r.end_byte,
-            color: r.color.as_ref().map(proto_rgba_to_scene).unwrap_or(Rgba::WHITE),
+            color: r
+                .color
+                .as_ref()
+                .map(proto_rgba_to_scene)
+                .unwrap_or(Rgba::WHITE),
         })
         .collect::<Vec<_>>()
         .into_boxed_slice()

@@ -34,7 +34,7 @@
 use std::collections::HashSet;
 
 use glyphon::{
-    AttrsList, Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
+    Attrs, AttrsList, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use tze_hud_scene::types::{
@@ -213,7 +213,12 @@ impl TextRasterizer {
 
                 if item.color_runs.is_empty() {
                     // Fast path: no inline runs — use uniform base color.
-                    buf.set_text(&mut self.font_system, &item.text, base_attrs, Shaping::Basic);
+                    buf.set_text(
+                        &mut self.font_system,
+                        &item.text,
+                        base_attrs,
+                        Shaping::Basic,
+                    );
                 } else {
                     // Styled path: build AttrsList with per-run color spans.
                     // `default_color` on TextArea acts as the fallback for glyphs
@@ -237,7 +242,12 @@ impl TextRasterizer {
                     //
                     // Approach: set_text first (to create BufferLines with the text),
                     // then re-apply attrs_list per line with adjusted offsets.
-                    buf.set_text(&mut self.font_system, &item.text, base_attrs, Shaping::Basic);
+                    buf.set_text(
+                        &mut self.font_system,
+                        &item.text,
+                        base_attrs,
+                        Shaping::Basic,
+                    );
                     // Re-apply the attrs_list to each line, offsetting spans by the
                     // cumulative byte position of each line within the full text.
                     let mut line_start = 0usize;
@@ -254,10 +264,7 @@ impl TextRasterizer {
                             if overlap_start < overlap_end {
                                 let local_start = overlap_start - line_start;
                                 let local_end = overlap_end - line_start;
-                                line_attrs.add_span(
-                                    local_start..local_end,
-                                    span_attrs.as_attrs(),
-                                );
+                                line_attrs.add_span(local_start..local_end, span_attrs.as_attrs());
                             }
                         }
                         line.set_attrs_list(line_attrs);

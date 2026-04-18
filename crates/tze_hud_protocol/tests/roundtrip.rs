@@ -243,7 +243,10 @@ fn roundtrip_node_proto_text_markdown() {
             assert_eq!(tm.content, "**hello world**");
             assert_eq!(tm.font_size_px, 14.0);
             // Backward-compat: no color_runs → empty vec on decode.
-            assert!(tm.color_runs.is_empty(), "empty color_runs must round-trip as empty");
+            assert!(
+                tm.color_runs.is_empty(),
+                "empty color_runs must round-trip as empty"
+            );
         }
         _ => panic!("wrong data variant"),
     }
@@ -304,7 +307,11 @@ fn roundtrip_node_proto_text_markdown_with_color_runs() {
     match &decoded.data {
         Some(NodeData::TextMarkdown(tm)) => {
             assert_eq!(tm.content, "ERROR: disk full");
-            assert_eq!(tm.color_runs.len(), 2, "two color runs must survive roundtrip");
+            assert_eq!(
+                tm.color_runs.len(),
+                2,
+                "two color runs must survive roundtrip"
+            );
             // First run: "ERROR" in red
             assert_eq!(tm.color_runs[0].start_byte, 0);
             assert_eq!(tm.color_runs[0].end_byte, 5);
