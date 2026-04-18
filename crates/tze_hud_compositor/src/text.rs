@@ -34,8 +34,8 @@
 use std::collections::HashSet;
 
 use glyphon::{
-    Attrs, AttrsList, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use tze_hud_scene::types::{
     FontFamily, RenderingPolicy, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
@@ -220,87 +220,26 @@ impl TextRasterizer {
                         Shaping::Basic,
                     );
                 } else {
-                    // Styled path: build AttrsList with per-run color spans.
-                    // `default_color` on TextArea acts as the fallback for glyphs
-                    // without a color_opt set, so base_attrs has no color_opt and
-                    // run attrs carry explicit Color values.
-                    let mut attrs_list = AttrsList::new(base_attrs);
-                    for run in &item.color_runs {
-                        let run_attrs = base_attrs.color(Color::rgba(
-                            run.color[0],
-                            run.color[1],
-                            run.color[2],
-                            run.color[3],
-                        ));
-                        attrs_list.add_span(run.start_byte..run.end_byte, run_attrs);
-                    }
-                    // set_rich_text handles newlines correctly across run boundaries.
-                    // We reconstruct the span list from attrs_list by iterating the
-                    // text with their assigned attrs.  For simplicity and correctness
-                    // we use the lower-level BufferLine API: set the full text on the
-                    // buffer and then replace the attrs_list on each resulting line.
+                    // Single-pass styled path: build (text_slice, Attrs) pairs and
+                    // call set_rich_text once.  This avoids the double-shape that
+                    // occurred when set_text created BufferLines and set_attrs_list
+                    // then invalidated their shaping state.
                     //
-                    // Approach: set_text first (to create BufferLines with the text),
-                    // then re-apply attrs_list per line with adjusted offsets.
-                    buf.set_text(
+                    // color_runs are sorted, non-overlapping byte ranges.  We walk
+                    // the text left-to-right, emitting an unstyled span for any gap
+                    // before a run, then a colored span for the run itself.  Text
+                    // after the last run (if any) is emitted as a final unstyled span.
+                    //
+                    // `default_color` on TextArea acts as the fallback for glyphs
+                    // without a color_opt set, so base_attrs carries no color_opt and
+                    // run attrs carry explicit Color values.
+                    let spans = color_run_spans(&item.text, &item.color_runs, base_attrs);
+                    buf.set_rich_text(
                         &mut self.font_system,
-                        &item.text,
+                        spans,
                         base_attrs,
                         Shaping::Basic,
                     );
-                    // Re-apply the attrs_list to each line, offsetting spans by the
-                    // cumulative byte position of each line within the full text.
-                    //
-                    // O(L+S) cursor scan: `attrs_list.spans()` returns spans sorted
-                    // by start position (RangeMap is backed by BTreeMap).  A single
-                    // cursor advances monotonically through the span list as we walk
-                    // lines, giving O(L+S) instead of the naive O(L×S) double loop.
-                    let sorted_spans = attrs_list.spans();
-                    let mut span_cursor = 0usize;
-                    let mut line_start = 0usize;
-                    for line in buf.lines.iter_mut() {
-                        let line_len = line.text().len();
-                        let line_end = line_start + line_len;
-
-                        // Advance cursor past spans that end at or before line_start
-                        // (they cannot overlap this line or any subsequent line).
-                        while span_cursor < sorted_spans.len()
-                            && sorted_spans[span_cursor].0.end <= line_start
-                        {
-                            span_cursor += 1;
-                        }
-
-                        // Build a per-line AttrsList from spans that overlap
-                        // [line_start, line_end), remapping to line-local offsets.
-                        // Because spans are sorted and non-overlapping, we stop as
-                        // soon as a span starts at or after line_end.
-                        let mut line_attrs = AttrsList::new(base_attrs);
-                        let mut i = span_cursor;
-                        while i < sorted_spans.len() {
-                            let (span_range, span_attrs) = &sorted_spans[i];
-                            if span_range.start >= line_end {
-                                break; // No further span can overlap this line.
-                            }
-                            let overlap_start = span_range.start.max(line_start);
-                            let overlap_end = span_range.end.min(line_end);
-                            if overlap_start < overlap_end {
-                                let local_start = overlap_start - line_start;
-                                let local_end = overlap_end - line_start;
-                                line_attrs.add_span(local_start..local_end, span_attrs.as_attrs());
-                            }
-                            i += 1;
-                        }
-
-                        // Capture ending length before the mutable borrow.
-                        let ending_len = line.ending().as_str().len();
-                        line.set_attrs_list(line_attrs);
-
-                        // Advance past this line's text plus its line-ending
-                        // (1 byte for '\n' or '\r', 2 bytes for '\r\n', 0 for
-                        // the last line).  Using line.ending() avoids the
-                        // hard-coded +1 that would misalign CRLF input.
-                        line_start = line_end + ending_len;
-                    }
                 }
 
                 // Apply text alignment to all lines in the buffer.
@@ -715,47 +654,61 @@ pub fn apply_opacity_to_color(color: [u8; 4], opacity: f32) -> [u8; 4] {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Advance a cursor into a sorted span list past spans that end at or before
-/// `line_start`, then collect overlapping spans remapped to line-local offsets.
+/// Build `(text_slice, Attrs)` pairs for [`Buffer::set_rich_text`] from a set
+/// of sorted, non-overlapping [`ColorRunItem`]s and a base `Attrs`.
 ///
-/// `sorted_spans` must be sorted by `start` (as guaranteed by
-/// `AttrsList::spans()` which wraps a `RangeMap`/`BTreeMap`).
+/// Segments of `text` not covered by any run are emitted with `base_attrs`
+/// (no color override, so `TextArea::default_color` applies at render time).
+/// Segments covered by a run are emitted with `base_attrs` plus an explicit
+/// `Color` set from the run.
 ///
-/// Returns `(new_cursor, local_spans)` where `local_spans` contains
-/// `(local_start, local_end, color)` tuples for spans overlapping
-/// `[line_start, line_end)`.
-///
-/// This is the O(L+S) cursor algorithm extracted as a pure function for
-/// unit-testability — the production path in `prepare_text_items` inlines
-/// the same logic operating on glyphon `AttrsList` spans directly.
-#[cfg(test)]
-pub(crate) fn map_color_run_spans_to_line(
-    sorted_spans: &[(usize, usize, [u8; 4])],
-    mut cursor: usize,
-    line_start: usize,
-    line_end: usize,
-) -> (usize, Vec<(usize, usize, [u8; 4])>) {
-    // Advance cursor past spans that end at or before line_start.
-    while cursor < sorted_spans.len() && sorted_spans[cursor].1 <= line_start {
-        cursor += 1;
-    }
-    let new_cursor = cursor;
+/// Overlapping or out-of-bounds run byte offsets are clamped / skipped
+/// defensively; callers should already validate runs before constructing a
+/// `TextItem`.
+pub(crate) fn color_run_spans<'t, 'a>(
+    text: &'t str,
+    runs: &'a [ColorRunItem],
+    base_attrs: Attrs<'a>,
+) -> Vec<(&'t str, Attrs<'a>)> {
+    let mut spans: Vec<(&'t str, Attrs<'a>)> = Vec::with_capacity(runs.len() * 2 + 1);
+    let mut cursor = 0usize;
 
-    let mut local_spans = Vec::new();
-    let mut i = cursor;
-    while i < sorted_spans.len() {
-        let (span_start, span_end, color) = sorted_spans[i];
-        if span_start >= line_end {
-            break;
+    for run in runs {
+        let run_start = run.start_byte.min(text.len());
+        let run_end = run.end_byte.min(text.len());
+        if run_start >= run_end {
+            continue;
         }
-        let overlap_start = span_start.max(line_start);
-        let overlap_end = span_end.min(line_end);
-        if overlap_start < overlap_end {
-            local_spans.push((overlap_start - line_start, overlap_end - line_start, color));
+
+        // Emit unstyled gap before this run (if any).
+        if cursor < run_start {
+            spans.push((&text[cursor..run_start], base_attrs));
         }
-        i += 1;
+
+        // Emit the colored run.
+        let run_attrs = base_attrs.color(Color::rgba(
+            run.color[0],
+            run.color[1],
+            run.color[2],
+            run.color[3],
+        ));
+        spans.push((&text[run_start..run_end], run_attrs));
+
+        cursor = run_end;
     }
-    (new_cursor, local_spans)
+
+    // Emit any trailing unstyled text after the last run.
+    if cursor < text.len() {
+        spans.push((&text[cursor..], base_attrs));
+    }
+
+    // If no spans were emitted (all runs were empty/invalid), fall back to
+    // the full text with base_attrs so the buffer is never left empty.
+    if spans.is_empty() {
+        spans.push((text, base_attrs));
+    }
+
+    spans
 }
 
 /// Format a 32-byte resource ID as a lowercase hex string for logging.
@@ -1140,154 +1093,134 @@ mod tests {
         );
     }
 
-    // ── cursor-based span mapping tests [hud-rxfc] ───────────────────────────
+    // ── color_run_spans single-pass tests [hud-9pmd] ─────────────────────────
 
-    /// Helper to create sorted span tuples for testing.
-    fn make_spans(ranges: &[(usize, usize, [u8; 4])]) -> Vec<(usize, usize, [u8; 4])> {
-        ranges.to_vec()
-    }
-
-    /// Span entirely within one line maps to local offsets unchanged.
+    /// Single colored run covering the entire text produces one span with color.
     #[test]
-    fn cursor_span_within_single_line() {
-        // Text: "hello\nworld" → line0=[0,5), line1=[6,11)
-        // Span [1,4) is entirely within line 0.
-        let red = [255u8, 0, 0, 255];
-        let spans = make_spans(&[(1, 4, red)]);
-        let (cursor, local) = map_color_run_spans_to_line(&spans, 0, 0, 5);
-        assert_eq!(
-            cursor, 0,
-            "cursor should not advance; span not yet past line_end"
-        );
-        assert_eq!(local, vec![(1, 4, red)]);
-
-        // Line 1: span [1,4) ends at 4 <= 6 (line1_start), cursor advances.
-        let (cursor2, local2) = map_color_run_spans_to_line(&spans, cursor, 6, 11);
-        assert_eq!(cursor2, 1, "cursor should advance past the span");
+    fn color_run_spans_single_run_full_text() {
+        let text = "hello";
+        let runs = [ColorRunItem {
+            start_byte: 0,
+            end_byte: 5,
+            color: [255, 0, 0, 255],
+        }];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+        assert_eq!(spans.len(), 1, "one run covering full text → one span");
+        assert_eq!(spans[0].0, "hello");
+        // The span must carry an explicit color (not base_attrs which has no color_opt).
         assert!(
-            local2.is_empty(),
-            "span [1,4) does not overlap line1 [6,11)"
+            spans[0].1.color_opt.is_some(),
+            "run span must have a color_opt set"
         );
     }
 
-    /// Span spanning a line boundary is split correctly.
+    /// Two runs with a gap in between produce three spans: gap, run, run.
     #[test]
-    fn cursor_span_crossing_line_boundary() {
-        // Text: "hello\nworld" → line0=[0,5) ending_len=1 → line1_start=6
-        // Span [3,9) crosses line boundary: overlaps [3,5) in line0 and [6,9) in line1.
-        let blue = [0u8, 0, 255, 255];
-        let spans = make_spans(&[(3, 9, blue)]);
-
-        let (cursor0, local0) = map_color_run_spans_to_line(&spans, 0, 0, 5);
-        // Overlap in line0: [3,5) → local [3,5)
-        assert_eq!(cursor0, 0, "span not consumed; it still overlaps next line");
-        assert_eq!(local0, vec![(3, 5, blue)]);
-
-        // Line1 starts at 6 (0+5+1), ends at 11.
-        let (cursor1, local1) = map_color_run_spans_to_line(&spans, cursor0, 6, 11);
-        // Overlap in line1: [6,9) → local [0,3)
-        assert_eq!(cursor1, 0, "span not yet past line1");
-        assert_eq!(local1, vec![(0, 3, blue)]);
+    fn color_run_spans_two_runs_with_gap() {
+        let text = "hello world";
+        // "hello" → red, " " → unstyled gap, "world" → blue
+        let runs = [
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 5,
+                color: [255, 0, 0, 255],
+            },
+            ColorRunItem {
+                start_byte: 6,
+                end_byte: 11,
+                color: [0, 0, 255, 255],
+            },
+        ];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+        // Expect: [("hello", red), (" ", base), ("world", blue)]
+        assert_eq!(spans.len(), 3, "two runs with gap → three spans");
+        assert_eq!(spans[0].0, "hello");
+        assert!(spans[0].1.color_opt.is_some(), "first run must have color");
+        assert_eq!(spans[1].0, " ", "gap between runs must be unstyled");
+        assert!(spans[1].1.color_opt.is_none(), "gap span must use base_attrs (no color_opt)");
+        assert_eq!(spans[2].0, "world");
+        assert!(spans[2].1.color_opt.is_some(), "second run must have color");
     }
 
-    /// Span entirely within one line advances cursor for subsequent lines.
+    /// A run followed by trailing unstyled text produces run + trailing span.
     #[test]
-    fn cursor_advances_past_finished_spans() {
-        // Three lines, spans on line0 and line2 only.
-        let red = [255u8, 0, 0, 255];
-        let green = [0u8, 255, 0, 255];
-        // line0=[0,5), line1=[6,10), line2=[11,16)
-        // Span A=[1,3) on line0; Span B=[12,15) on line2.
-        let spans = make_spans(&[(1, 3, red), (12, 15, green)]);
-
-        // Line 0
-        let (c0, l0) = map_color_run_spans_to_line(&spans, 0, 0, 5);
-        assert_eq!(l0, vec![(1, 3, red)]);
-        assert_eq!(c0, 0);
-
-        // Line 1 (no spans)
-        let (c1, l1) = map_color_run_spans_to_line(&spans, c0, 6, 10);
-        assert_eq!(
-            c1, 1,
-            "cursor should advance past span A [1,3) which ends before line1"
-        );
-        assert!(l1.is_empty());
-
-        // Line 2
-        let (c2, l2) = map_color_run_spans_to_line(&spans, c1, 11, 16);
-        assert_eq!(c2, 1, "cursor stays at span B which overlaps line2");
-        assert_eq!(l2, vec![(1, 4, green)]);
+    fn color_run_spans_trailing_unstyled() {
+        let text = "hello world";
+        let runs = [ColorRunItem {
+            start_byte: 0,
+            end_byte: 5,
+            color: [255, 0, 0, 255],
+        }];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+        assert_eq!(spans.len(), 2, "run + trailing unstyled → two spans");
+        assert_eq!(spans[0].0, "hello");
+        assert_eq!(spans[1].0, " world");
+        assert!(spans[1].1.color_opt.is_none(), "trailing span must use base_attrs");
     }
 
-    /// Many spans on the same line all captured without cursor moving past them.
+    /// Empty runs slice falls back to a single full-text base-attrs span.
     #[test]
-    fn cursor_multiple_spans_same_line() {
-        let r = [255u8, 0, 0, 255];
-        let g = [0u8, 255, 0, 255];
-        let b = [0u8, 0, 255, 255];
-        // Single line [0, 20); three spans within it.
-        let spans = make_spans(&[(0, 5, r), (5, 12, g), (12, 20, b)]);
-        let (cursor, local) = map_color_run_spans_to_line(&spans, 0, 0, 20);
-        assert_eq!(cursor, 0);
-        assert_eq!(local, vec![(0, 5, r), (5, 12, g), (12, 20, b)]);
+    fn color_run_spans_empty_runs_fallback() {
+        let text = "no color";
+        let spans = color_run_spans(text, &[], Attrs::new());
+        assert_eq!(spans.len(), 1, "no runs → single fallback span");
+        assert_eq!(spans[0].0, "no color");
+        assert!(spans[0].1.color_opt.is_none(), "fallback span must use base_attrs");
     }
 
-    /// No spans: cursor stays at 0 and no locals are produced.
+    /// Out-of-bounds run end is clamped; no panic.
     #[test]
-    fn cursor_no_spans() {
-        let spans: Vec<(usize, usize, [u8; 4])> = vec![];
-        let (cursor, local) = map_color_run_spans_to_line(&spans, 0, 0, 10);
-        assert_eq!(cursor, 0);
-        assert!(local.is_empty());
+    fn color_run_spans_clamped_out_of_bounds_run() {
+        let text = "hi";
+        let runs = [ColorRunItem {
+            start_byte: 0,
+            end_byte: 999, // way beyond text length
+            color: [0, 255, 0, 255],
+        }];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+        // Should produce one span covering the full text with color.
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].0, "hi");
+        assert!(spans[0].1.color_opt.is_some());
     }
 
-    /// Cursor-based and reference O(L×S) implementations agree on a multi-line
-    /// multi-span input exercising boundary conditions.
+    /// Degenerate run (start >= end) is skipped; remaining text is returned unstyled.
     #[test]
-    fn cursor_matches_reference_impl() {
-        // Text split into virtual lines with byte boundaries:
-        // line0=[0,6), line1=[7,13), line2=[14,20)
-        // (each 6 bytes of content + 1-byte '\n' separator except last)
-        let lines: &[(usize, usize)] = &[(0, 6), (7, 13), (14, 20)];
-        let r = [255u8, 0, 0, 255];
-        let g = [0u8, 255, 0, 255];
-        let b = [0u8, 0, 255, 255];
-        // Spans: one within line0, one crossing line0→line1, one in line2.
-        let spans = make_spans(&[(1, 4, r), (5, 10, g), (15, 20, b)]);
+    fn color_run_spans_degenerate_run_skipped() {
+        let text = "text";
+        let runs = [ColorRunItem {
+            start_byte: 2,
+            end_byte: 2, // zero-length: should be skipped
+            color: [255, 0, 0, 255],
+        }];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+        // Zero-length run → no gap before it (cursor=0, run_start=2), and run is skipped.
+        // cursor stays at 0, so trailing text "text" is emitted as unstyled.
+        // But the fallback at the end also covers this — spans should be non-empty.
+        assert!(!spans.is_empty(), "degenerate run must not produce empty spans");
+        let combined: String = spans.iter().map(|(s, _)| *s).collect();
+        assert_eq!(combined, "text", "all text must be covered even with degenerate run");
+    }
 
-        // Reference O(L×S): for each line iterate all spans.
-        let reference: Vec<Vec<(usize, usize, [u8; 4])>> = lines
-            .iter()
-            .map(|&(ls, le)| {
-                spans
-                    .iter()
-                    .filter_map(|&(ss, se, c)| {
-                        let os = ss.max(ls);
-                        let oe = se.min(le);
-                        if os < oe {
-                            Some((os - ls, oe - ls, c))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-
-        // Cursor O(L+S):
-        let mut cursor = 0usize;
-        let cursor_result: Vec<Vec<(usize, usize, [u8; 4])>> = lines
-            .iter()
-            .map(|&(ls, le)| {
-                let (new_cursor, local) = map_color_run_spans_to_line(&spans, cursor, ls, le);
-                cursor = new_cursor;
-                local
-            })
-            .collect();
-
-        assert_eq!(
-            cursor_result, reference,
-            "cursor O(L+S) must produce identical results to reference O(L×S)"
-        );
+    /// color_run_spans produces correct slices for multi-byte UTF-8 characters.
+    #[test]
+    fn color_run_spans_multibyte_utf8() {
+        // "é" is 2 bytes (0xC3 0xA9), "world" is 5 bytes → total 7 bytes
+        let text = "éworld";
+        let runs = [ColorRunItem {
+            start_byte: 0,
+            end_byte: 2, // "é"
+            color: [255, 0, 0, 255],
+        }];
+        let base = Attrs::new();
+        let spans = color_run_spans(text, &runs, base);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].0, "é");
+        assert_eq!(spans[1].0, "world");
     }
 }
