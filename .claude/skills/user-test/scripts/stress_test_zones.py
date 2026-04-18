@@ -777,6 +777,7 @@ class ProfileResult:
     # Background telemetry time-series
     telemetry_samples: list = field(default_factory=list)  # list[dict] serialized
     telemetry_avg_cpu_pct: float | None = None
+    telemetry_avg_pmem_mb: float | None = None
     telemetry_status: str = "ok"  # "ok" | "incomplete"
     # Per-second load-side time-series (from _BucketAccumulator)
     time_series: list = field(default_factory=list)  # list[dict]
@@ -1199,6 +1200,18 @@ def run_profile(
     result.time_series = bucketer.to_time_series(
         profile_wall_start_epoch=result.start_ts,
         telemetry_samples=result.telemetry_samples if telem_ok else None,
+    )
+
+    # Compute average private memory MB from the time-series entries.
+    # Mirrors telemetry_avg_cpu_pct: mean of non-null values, None if all null.
+    _pmem_vals = [
+        e["host_private_mem_mb"]
+        for e in result.time_series
+        if e.get("host_private_mem_mb") is not None
+        and not math.isnan(e["host_private_mem_mb"])
+    ]
+    result.telemetry_avg_pmem_mb = (
+        sum(_pmem_vals) / len(_pmem_vals) if _pmem_vals else None
     )
 
     stats = result.latency_stats()
