@@ -7590,7 +7590,11 @@ mod tests {
         // collect_text_items emits 2 items for a notification slot when the text
         // rasterizer is active: the notification body text + the dismiss "X" button.
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
-        assert_eq!(items.len(), 2, "expected two TextItems: notification body + dismiss button");
+        assert_eq!(
+            items.len(),
+            2,
+            "expected two TextItems: notification body + dismiss button"
+        );
         // The first item is the notification body text. White text → R channel near 255.
         assert!(
             items[0].color[0] > 200,
