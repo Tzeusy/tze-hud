@@ -1,6 +1,21 @@
-# Scene Events Specification
+# scene-events Specification
 
-## ADDED Requirements
+Source: RFC 0010 (Scene Events)
+Domain: EVENTS
+
+## Purpose
+
+Defines the runtime's event system: how events are classified, routed, filtered,
+and delivered to subscribed agents. Covers the three-category event taxonomy
+(input/scene/system), interruption classification (CRITICAL/HIGH/NORMAL/LOW/SILENT),
+quiet hours enforcement, agent event emission protocol, subscription model with
+category filtering, the four-stage event bus pipeline, `tab_switch_on_event`
+contract, self-event suppression, event ordering and sequence numbers, audit event
+visibility restrictions, and aggregate rate caps.
+
+---
+
+## Requirements
 
 ### Requirement: Three-Category Event Taxonomy
 The runtime SHALL classify all events into exactly three categories: input events (owned by RFC 0004), scene events (this specification), and system events (runtime-only, limited agent visibility). Each SceneEvent variant SHALL belong to exactly one subscription category. The runtime SHALL NOT deliver events in categories the agent has not subscribed to or lacks capability for.
