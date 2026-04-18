@@ -38,11 +38,6 @@ cd "${REPO_ROOT}"
 #   - normative docs that document the canonical→stale mapping
 #   - historical review docs describing the pre-fix state
 #
-# Prefix-exemptions (any file under these paths is exempt):
-#   - openspec/changes/archive/ — archived changes preserve the vocabulary that
-#     was current at archive time; enforcing the lint on historical specs would
-#     require rewriting history, not correcting current code.
-#
 # Add new entries here if a file intentionally uses legacy names.
 EXEMPT_PATHS=(
     "crates/tze_hud_policy/src/security.rs"
@@ -69,6 +64,11 @@ EXEMPT_PATHS=(
 
 # Path prefixes (relative to repo root) under which ALL files are exempt.
 # This is separate from EXEMPT_PATHS to avoid per-file maintenance.
+#
+# Prefix-exemptions (any file under these paths is exempt):
+#   - openspec/changes/archive/ — archived changes preserve the vocabulary that
+#     was current at archive time; enforcing the lint on historical specs would
+#     require rewriting history, not correcting current code.
 EXEMPT_PREFIXES=(
     "openspec/changes/archive/"
 )
