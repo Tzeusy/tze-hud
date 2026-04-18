@@ -13470,7 +13470,11 @@ mod tests {
 
         // Collect text items with scroll_y=80 applied — the path under test.
         let items_scrolled = compositor.collect_text_items(&scene, 720.0, 360.0);
-        assert_eq!(items_scrolled.len(), 1, "expected one TextItem for the scroll tile");
+        assert_eq!(
+            items_scrolled.len(),
+            1,
+            "expected one TextItem for the scroll tile"
+        );
         let scrolled_item = &items_scrolled[0];
         assert_eq!(
             scrolled_item.text, "scroll test line",
@@ -13489,7 +13493,13 @@ mod tests {
         let tab2 = scene_baseline.create_tab("test", 0).unwrap();
         let lease2 = scene_baseline.grant_lease("baseline", 120_000, vec![]);
         let tile_id2 = scene_baseline
-            .create_tile(tab2, "baseline", lease2, Rect::new(tile_x, tile_y, tile_w, tile_h), 1)
+            .create_tile(
+                tab2,
+                "baseline",
+                lease2,
+                Rect::new(tile_x, tile_y, tile_w, tile_h),
+                1,
+            )
             .unwrap();
         // No scroll offset registered — offset defaults to (0, 0).
         let baseline_node = Node {
@@ -13506,16 +13516,28 @@ mod tests {
                 overflow: TextOverflow::Clip,
             }),
         };
-        scene_baseline.set_tile_root(tile_id2, baseline_node).unwrap();
+        scene_baseline
+            .set_tile_root(tile_id2, baseline_node)
+            .unwrap();
         let items_baseline = compositor.collect_text_items(&scene_baseline, 720.0, 360.0);
-        assert_eq!(items_baseline.len(), 1, "baseline must also produce one TextItem");
+        assert_eq!(
+            items_baseline.len(),
+            1,
+            "baseline must also produce one TextItem"
+        );
         let baseline_item = &items_baseline[0];
 
         // Verify that the scrolled item is positioned exactly scroll_y pixels
         // above the baseline item (margin cancels between identical bounds).
+        // Use 0.01 tolerance — f32 precision at values ~80.0 is ~9.5e-6, larger
+        // than f32::EPSILON (1.19e-7), and intermediate margin arithmetic may
+        // accumulate sub-ULP error. 0.01px is tight enough to catch wrong offset
+        // but not fragile against f32 rounding. Matches existing renderer test
+        // convention (see position comparisons at < 0.5 and color deltas at <
+        // 0.01 throughout this module).
         let actual_shift = baseline_item.pixel_y - scrolled_item.pixel_y;
         assert!(
-            (actual_shift - scroll_y).abs() < f32::EPSILON,
+            (actual_shift - scroll_y).abs() < 0.01,
             "scroll shift ({actual_shift}) must equal scroll_y ({scroll_y}); \
              baseline_y={}, scrolled_y={}",
             baseline_item.pixel_y,

@@ -1137,7 +1137,12 @@ fn portal_scroll_updates_local_first_via_input_processor() {
     let delta_y = 60.0_f32;
 
     let changed_event = input_processor.process_scroll_event(
-        &ScrollEvent { x: hit_x, y: hit_y, delta_x: 0.0, delta_y },
+        &ScrollEvent {
+            x: hit_x,
+            y: hit_y,
+            delta_x: 0.0,
+            delta_y,
+        },
         &mut scene,
     );
 
@@ -1147,12 +1152,21 @@ fn portal_scroll_updates_local_first_via_input_processor() {
         "process_scroll_event must return Some for a scrollable portal tile hit"
     );
     let ev = changed_event.unwrap();
-    assert_eq!(ev.tile_id, tile_id, "changed event must reference the portal tile");
-    assert!((ev.offset_y - delta_y).abs() < f32::EPSILON, "offset_y must equal delta");
+    assert_eq!(
+        ev.tile_id, tile_id,
+        "changed event must reference the portal tile"
+    );
+    assert!(
+        (ev.offset_y - delta_y).abs() < f32::EPSILON,
+        "offset_y must equal delta"
+    );
 
     // The scene's local offset must be updated synchronously (local-first).
     let (sx, sy) = scene.tile_scroll_offset_local(tile_id);
-    assert!((sx).abs() < f32::EPSILON, "x offset must be zero (axis-locked)");
+    assert!(
+        (sx).abs() < f32::EPSILON,
+        "x offset must be zero (axis-locked)"
+    );
     assert!(
         (sy - delta_y).abs() < f32::EPSILON,
         "scene scroll offset must equal delta after local-first update; got sy={sy}"
@@ -1180,12 +1194,14 @@ fn portal_scroll_coalescing_preserves_visible_window() {
     // Only the LAST offset must survive coalescing.
     let offsets: &[f32] = &[20.0, 50.0, 90.0, 130.0, 170.0];
     for (i, &oy) in offsets.iter().enumerate() {
-        coalescer.push(PipelineEnvelope::ScrollOffsetChanged(ScrollOffsetChangedData {
-            tile_id,
-            timestamp_mono_us: MonoUs(i as u64 * 1_000),
-            offset_x: 0.0,
-            offset_y: oy,
-        }));
+        coalescer.push(PipelineEnvelope::ScrollOffsetChanged(
+            ScrollOffsetChangedData {
+                tile_id,
+                timestamp_mono_us: MonoUs(i as u64 * 1_000),
+                offset_x: 0.0,
+                offset_y: oy,
+            },
+        ));
     }
 
     let events = coalescer.into_events();
@@ -1261,7 +1277,12 @@ fn portal_scroll_offset_clamped_to_content_boundary() {
     // Scroll far beyond the content boundary.
     let huge_delta = 9999.0_f32;
     let ev = input_processor.process_scroll_event(
-        &ScrollEvent { x: hit_x, y: hit_y, delta_x: 0.0, delta_y: huge_delta },
+        &ScrollEvent {
+            x: hit_x,
+            y: hit_y,
+            delta_x: 0.0,
+            delta_y: huge_delta,
+        },
         &mut scene,
     );
     assert!(ev.is_some(), "scroll event must be accepted");
