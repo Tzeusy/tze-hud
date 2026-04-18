@@ -881,7 +881,7 @@ class RateController:
 
 def run_network_baseline(url: str, token: str) -> dict[str, Any]:
     """
-    Run 10 sequential list_zones JSON-RPC calls to measure bare HTTP round-trip.
+    Run 100 sequential list_zones JSON-RPC calls at 1/s to measure bare HTTP round-trip.
 
     No concurrent load, no SSH telemetry. Isolates network + server dispatch
     latency from publish overhead. Results appear as top-level key
@@ -891,16 +891,21 @@ def run_network_baseline(url: str, token: str) -> dict[str, Any]:
     latency_stats_ms contains p50, p95, p99, max (all in milliseconds).
     """
     CALLS = 100
+    RATE = 1.0  # calls per second
     latencies_ms: list[float] = []
     errors = 0
 
-    print("--- Network baseline: 100x list_zones ---", flush=True)
+    print("--- Network baseline: 100x list_zones at 1/s ---", flush=True)
+    controller = RateController(RATE)
     for i in range(CALLS):
+        controller.wait_for_next()
         t0 = time.monotonic()
         try:
             resp = rpc_call(url, token, "list_zones", {}, request_id=i, timeout=10.0)
             if "error" in resp:
-                raise RuntimeError(f"JSON-RPC error: {resp['error']}")
+                errors += 1
+                print(f"  network_baseline call {i} error: JSON-RPC error {resp['error']}", file=sys.stderr)
+                continue
             latencies_ms.append((time.monotonic() - t0) * 1000.0)
         except Exception as exc:
             errors += 1
