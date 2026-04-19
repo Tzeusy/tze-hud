@@ -331,6 +331,28 @@ This pattern preserves cpal's real-time callback contract without requiring asyn
 
 ---
 
+## 10. Maintenance & Migration Tracking
+
+This section tracks cpal version staleness and planning for future releases.
+
+**Current pin**: 0.17.3 (released 2025-02-18)
+
+**Watch**: https://github.com/RustAudio/cpal/releases for 0.18.0 release
+
+**Known breaking changes pending in unreleased master**:
+- Error enums marked `#[non_exhaustive]` (stabilization signal, low impact)
+- `StreamInstant` API redesign (affects latency measurement APIs; auditor impact unclear)
+- `DeviceTrait::build_*_stream()` takes `StreamConfig` by value instead of reference (API shape change)
+
+**Migration trigger**: When 0.18.0 ships, file a dedicated migration evaluation bead (`hud-mig-*`) before bumping the Cargo.toml pin. The evaluation should:
+1. Test the breaking changes against existing E22 audio subsystem code (if implemented)
+2. Measure integration overhead (resampler paths, device enumeration, ring buffer bridge)
+3. Assess timeline: upgrade immediately, defer to v2.1, or wait for 0.19.x patch stability
+
+**Owner**: This bead (hud-vv2dk) is a perpetual-monitoring task. Use `bd defer` to bump it forward monthly (set reminder: "check cpal releases").
+
+---
+
 ## Sources
 
 - cpal GitHub repository: https://github.com/RustAudio/cpal
