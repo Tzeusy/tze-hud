@@ -12,7 +12,7 @@
 
 **ADOPT-WITH-CAVEATS**
 
-GStreamer + gstreamer-rs is the correct and already-locked-in foundation for tze_hud's media decode, timing, and synchronization (CLAUDE.md, RFC 0002 §2.8, `about/heart-and-soul/media-doctrine.md`). It has no credible Rust-native alternative for the full v2 codec + synchronization requirements, and its in-process worker model is confirmed compatible with tze_hud's security posture (E24 verdict, `docs/decisions/e24-in-process-worker-posture.md`). Five caveats must be resolved in the implementation phase:
+GStreamer + gstreamer-rs is the correct and already-locked-in foundation for tze_hud's media decode, timing, and synchronization (CLAUDE.md, RFC 0002 §2.8, `about/heart-and-soul/media-doctrine.md`). It has no credible Rust-native alternative for the full v2 codec + synchronization requirements, and its in-process worker model is confirmed compatible with tze_hud's security posture (E24 verdict, `docs/decisions/e24-in-process-worker-posture.md`). Five caveats must be resolved in the implementation phase (details in §8 Known Caveats):
 
 1. **GStreamer system package availability is the dominant platform risk** — GStreamer is not bundled with the gstreamer-rs crate; it must be present as a system library. On Linux this is well-supported; on Windows and macOS it requires explicit CI/distribution work. iOS has no supported path at gstreamer-rs v0.23.
 2. **Plugin license matrix requires operator acknowledgement** — the LGPL-licensed plugins cover all v2 codec requirements (H.264, VP9), but the plugin-ugly set carries patent-exposure risk in certain jurisdictions and must be explicitly permitted at package time.
@@ -59,7 +59,7 @@ This audit evaluates GStreamer 1.x + the `gstreamer-rs` crate family (the `sdroe
 | `gstreamer-pbutils` | Codec discovery, element factory introspection | 0.23.x | MIT / Apache-2.0 |
 | `gstreamer-gl` | OpenGL/EGL texture sharing | 0.23.x | MIT / Apache-2.0 |
 
-**Note on versioning**: gstreamer-rs tracks GStreamer major/minor versions (0.23.x ↔ GStreamer 1.24.x). Each minor GStreamer release requires a new major gstreamer-rs release. Pinning gstreamer-rs to `0.23` implicitly pins the GStreamer 1.24 ABI; upgrading to GStreamer 1.26 will require bumping gstreamer-rs to `0.24` (expected mid-2025).
+**Note on versioning**: gstreamer-rs tracks GStreamer major/minor versions (0.23.x ↔ GStreamer 1.24.x). Each minor GStreamer release requires a new major gstreamer-rs release. Pinning gstreamer-rs to `0.23` implicitly pins the GStreamer 1.24 ABI; gstreamer-rs 0.24 and 0.25 have shipped (latest 0.25.1, 2026-02-28) for GStreamer 1.26+. The 0.23 pin remains valid for GStreamer 1.24 stability; a forward-looking migration to 0.24/0.25 should be tracked as a separate maintenance task.
 
 **Repository**: https://github.com/sdroege/gstreamer-rs
 **Main maintainer**: Sebastian Dröge (sdroege), Mathieu Duponchelle (tpm2)
@@ -364,6 +364,8 @@ The `add_watch` callback must be `'static + Send` — this is enforced by gstrea
 
 ## 8. Known Caveats
 
+**Note**: The Verdict's top-5 caveats (§ Verdict above) emphasize platform availability and licensing (covered in §2 and §3). This section details the five implementation-phase caveats that demand active discipline in the phase 1 work. Together they form the complete caveat inventory.
+
 ### 8.1 Hardware-Decode Pipeline Selection
 
 Hardware-decode elements (`vah264dec`, `nvh264dec`, `d3d11h264dec`, `vtdec`) are not guaranteed present on every machine. Pipeline construction will fail with `MISSING_PLUGIN` if the element is not available.
@@ -412,9 +414,11 @@ GStreamer ERROR bus messages contain `glib::Error` with domain and code. Not all
 - Log the full `glib::Error` detail string to the audit log (C17).
 - Any unmapped GStreamer error escalates to the budget watchdog as a decode failure event.
 
-### 8.5 GStreamer Version Compatibility on CI
+### 8.5 GStreamer Version Compatibility on CI and Platform Availability
 
 The GPU runner box (D18, phase 1 gate) must run Ubuntu 24.04 or later with GStreamer 1.24 to access all required elements. A CI job running Ubuntu 22.04 with GStreamer 1.20 will fail to find `vah264dec` and `vavp9dec` (added in 1.22), and some `d3d11` elements are 1.24-only. The CI image version must be pinned and documented.
+
+**Platform availability integration note**: While platform availability (§2) and licensing (§3) are resolved before implementation begins, the GStreamer installation and version on each CI target remains a runtime dependency. The implementation must verify at initialization (§10.2 `init_media_subsystem()`) that required elements are present; failure cascades to the E25 degradation ladder.
 
 ---
 
