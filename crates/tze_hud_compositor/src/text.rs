@@ -234,12 +234,7 @@ impl TextRasterizer {
                     // without a color_opt set, so base_attrs carries no color_opt and
                     // run attrs carry explicit Color values.
                     let spans = color_run_spans(&item.text, &item.color_runs, base_attrs);
-                    buf.set_rich_text(
-                        &mut self.font_system,
-                        spans,
-                        base_attrs,
-                        Shaping::Basic,
-                    );
+                    buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
                 }
 
                 // Apply text alignment to all lines in the buffer.
@@ -729,7 +724,11 @@ fn canonicalize_color_runs_impl(runs: &[ColorRunItem], text_len: usize) -> Vec<C
                 continue;
             }
         }
-        out.push(ColorRunItem { start_byte: s, end_byte: e, color: c });
+        out.push(ColorRunItem {
+            start_byte: s,
+            end_byte: e,
+            color: c,
+        });
     }
     out
 }
@@ -1228,7 +1227,10 @@ mod tests {
         assert_eq!(spans[0].0, "hello");
         assert!(spans[0].1.color_opt.is_some(), "first run must have color");
         assert_eq!(spans[1].0, " ", "gap between runs must be unstyled");
-        assert!(spans[1].1.color_opt.is_none(), "gap span must use base_attrs (no color_opt)");
+        assert!(
+            spans[1].1.color_opt.is_none(),
+            "gap span must use base_attrs (no color_opt)"
+        );
         assert_eq!(spans[2].0, "world");
         assert!(spans[2].1.color_opt.is_some(), "second run must have color");
     }
@@ -1247,7 +1249,10 @@ mod tests {
         assert_eq!(spans.len(), 2, "run + trailing unstyled → two spans");
         assert_eq!(spans[0].0, "hello");
         assert_eq!(spans[1].0, " world");
-        assert!(spans[1].1.color_opt.is_none(), "trailing span must use base_attrs");
+        assert!(
+            spans[1].1.color_opt.is_none(),
+            "trailing span must use base_attrs"
+        );
     }
 
     /// Empty runs slice falls back to a single full-text base-attrs span.
@@ -1257,7 +1262,10 @@ mod tests {
         let spans = color_run_spans(text, &[], Attrs::new());
         assert_eq!(spans.len(), 1, "no runs → single fallback span");
         assert_eq!(spans[0].0, "no color");
-        assert!(spans[0].1.color_opt.is_none(), "fallback span must use base_attrs");
+        assert!(
+            spans[0].1.color_opt.is_none(),
+            "fallback span must use base_attrs"
+        );
     }
 
     /// Out-of-bounds run end is clamped; no panic.
@@ -1291,9 +1299,15 @@ mod tests {
         // Zero-length run → no gap before it (cursor=0, run_start=2), and run is skipped.
         // cursor stays at 0, so trailing text "text" is emitted as unstyled.
         // But the fallback at the end also covers this — spans should be non-empty.
-        assert!(!spans.is_empty(), "degenerate run must not produce empty spans");
+        assert!(
+            !spans.is_empty(),
+            "degenerate run must not produce empty spans"
+        );
         let combined: String = spans.iter().map(|(s, _)| *s).collect();
-        assert_eq!(combined, "text", "all text must be covered even with degenerate run");
+        assert_eq!(
+            combined, "text",
+            "all text must be covered even with degenerate run"
+        );
     }
 
     /// color_run_spans produces correct slices for multi-byte UTF-8 characters.
@@ -1325,8 +1339,16 @@ mod tests {
         let red = [255u8, 0, 0, 255];
         let blue = [0u8, 0, 255, 255];
         let runs = [
-            ColorRunItem { start_byte: 0, end_byte: 10, color: red },
-            ColorRunItem { start_byte: 5, end_byte: 15, color: blue },
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 10,
+                color: red,
+            },
+            ColorRunItem {
+                start_byte: 5,
+                end_byte: 15,
+                color: blue,
+            },
         ];
         let base = Attrs::new();
         let spans = color_run_spans(text, &runs, base);
@@ -1339,15 +1361,24 @@ mod tests {
         assert_eq!(spans[0].0, &text[0..5], "red prefix should be 0..5");
         assert!(spans[0].1.color_opt.is_some(), "first span must be colored");
         let red_color = spans[0].1.color_opt.unwrap();
-        assert_eq!((red_color.r(), red_color.g(), red_color.b()), (255, 0, 0),
-            "first span should be red");
+        assert_eq!(
+            (red_color.r(), red_color.g(), red_color.b()),
+            (255, 0, 0),
+            "first span should be red"
+        );
 
         // Second span: "56789abcde" (bytes 5..15) — blue (later run wins intersection).
         assert_eq!(spans[1].0, &text[5..15], "blue span should cover 5..15");
-        assert!(spans[1].1.color_opt.is_some(), "second span must be colored");
+        assert!(
+            spans[1].1.color_opt.is_some(),
+            "second span must be colored"
+        );
         let blue_color = spans[1].1.color_opt.unwrap();
-        assert_eq!((blue_color.r(), blue_color.g(), blue_color.b()), (0, 0, 255),
-            "second span should be blue (later-writer-wins)");
+        assert_eq!(
+            (blue_color.r(), blue_color.g(), blue_color.b()),
+            (0, 0, 255),
+            "second span should be blue (later-writer-wins)"
+        );
 
         assert_eq!(spans.len(), 2, "no trailing unstyled text expected");
     }
@@ -1364,9 +1395,21 @@ mod tests {
         let blue = [0u8, 0, 255, 255];
         // red: 0..8, green: 4..12 (overlaps red and blue), blue: 10..15
         let runs = [
-            ColorRunItem { start_byte: 0, end_byte: 8, color: red },
-            ColorRunItem { start_byte: 4, end_byte: 12, color: green },
-            ColorRunItem { start_byte: 10, end_byte: 15, color: blue },
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 8,
+                color: red,
+            },
+            ColorRunItem {
+                start_byte: 4,
+                end_byte: 12,
+                color: green,
+            },
+            ColorRunItem {
+                start_byte: 10,
+                end_byte: 15,
+                color: blue,
+            },
         ];
         let base = Attrs::new();
         let spans = color_run_spans(text, &runs, base);
@@ -1403,13 +1446,29 @@ mod tests {
 
         // Sorted order: red 0..5, blue 6..11.
         let sorted_runs = [
-            ColorRunItem { start_byte: 0, end_byte: 5, color: red },
-            ColorRunItem { start_byte: 6, end_byte: 11, color: blue },
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 5,
+                color: red,
+            },
+            ColorRunItem {
+                start_byte: 6,
+                end_byte: 11,
+                color: blue,
+            },
         ];
         // Reversed order: same runs but blue listed first.
         let unsorted_runs = [
-            ColorRunItem { start_byte: 6, end_byte: 11, color: blue },
-            ColorRunItem { start_byte: 0, end_byte: 5, color: red },
+            ColorRunItem {
+                start_byte: 6,
+                end_byte: 11,
+                color: blue,
+            },
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 5,
+                color: red,
+            },
         ];
 
         let base = Attrs::new();
@@ -1422,14 +1481,22 @@ mod tests {
         assert_eq!(sorted_text, unsorted_text, "text coverage must match");
 
         // Span count must match.
-        assert_eq!(sorted_spans.len(), unsorted_spans.len(), "span count must match");
+        assert_eq!(
+            sorted_spans.len(),
+            unsorted_spans.len(),
+            "span count must match"
+        );
 
         // Each span's slice and color must match.
         for i in 0..sorted_spans.len() {
-            assert_eq!(sorted_spans[i].0, unsorted_spans[i].0,
-                "span[{i}] text slice must match");
-            assert_eq!(sorted_spans[i].1.color_opt, unsorted_spans[i].1.color_opt,
-                "span[{i}] color must match");
+            assert_eq!(
+                sorted_spans[i].0, unsorted_spans[i].0,
+                "span[{i}] text slice must match"
+            );
+            assert_eq!(
+                sorted_spans[i].1.color_opt, unsorted_spans[i].1.color_opt,
+                "span[{i}] color must match"
+            );
         }
     }
 
@@ -1441,8 +1508,16 @@ mod tests {
         let blue = [0u8, 0, 255, 255];
         // run A: 0..3 ("abc"), run B: 3..6 ("def") — adjacent, no overlap.
         let runs = [
-            ColorRunItem { start_byte: 0, end_byte: 3, color: red },
-            ColorRunItem { start_byte: 3, end_byte: 6, color: blue },
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 3,
+                color: red,
+            },
+            ColorRunItem {
+                start_byte: 3,
+                end_byte: 6,
+                color: blue,
+            },
         ];
         let base = Attrs::new();
         let spans = color_run_spans(text, &runs, base);
@@ -1470,8 +1545,16 @@ mod tests {
         let red = [255u8, 0, 0, 255];
         let blue = [0u8, 0, 255, 255];
         let runs = [
-            ColorRunItem { start_byte: 0, end_byte: 12, color: red },
-            ColorRunItem { start_byte: 4, end_byte: 8, color: blue }, // nested inside red
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 12,
+                color: red,
+            },
+            ColorRunItem {
+                start_byte: 4,
+                end_byte: 8,
+                color: blue,
+            }, // nested inside red
         ];
         let base = Attrs::new();
         let spans = color_run_spans(text, &runs, base);
@@ -1487,9 +1570,17 @@ mod tests {
         let c0 = spans[0].1.color_opt.unwrap();
         assert_eq!((c0.r(), c0.g(), c0.b()), (255, 0, 0), "prefix = red");
         let c1 = spans[1].1.color_opt.unwrap();
-        assert_eq!((c1.r(), c1.g(), c1.b()), (0, 0, 255), "inner = blue (later wins)");
+        assert_eq!(
+            (c1.r(), c1.g(), c1.b()),
+            (0, 0, 255),
+            "inner = blue (later wins)"
+        );
         let c2 = spans[2].1.color_opt.unwrap();
-        assert_eq!((c2.r(), c2.g(), c2.b()), (255, 0, 0), "suffix = red (resumed)");
+        assert_eq!(
+            (c2.r(), c2.g(), c2.b()),
+            (255, 0, 0),
+            "suffix = red (resumed)"
+        );
     }
 
     /// Higher original-index run wins even when it starts earlier than the
@@ -1505,8 +1596,16 @@ mod tests {
         let blue = [0u8, 0, 255, 255];
         // blue is index 0, red is index 1 — red (higher index) must win the overlap.
         let runs = [
-            ColorRunItem { start_byte: 5, end_byte: 15, color: blue },
-            ColorRunItem { start_byte: 0, end_byte: 10, color: red },
+            ColorRunItem {
+                start_byte: 5,
+                end_byte: 15,
+                color: blue,
+            },
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 10,
+                color: red,
+            },
         ];
         let base = Attrs::new();
         let spans = color_run_spans(text, &runs, base);
@@ -1520,9 +1619,17 @@ mod tests {
         assert_eq!(spans[1].0, &text[10..15], "span 1 = blue 10..15");
 
         let c0 = spans[0].1.color_opt.unwrap();
-        assert_eq!((c0.r(), c0.g(), c0.b()), (255, 0, 0), "red (higher index) wins 0..10");
+        assert_eq!(
+            (c0.r(), c0.g(), c0.b()),
+            (255, 0, 0),
+            "red (higher index) wins 0..10"
+        );
         let c1 = spans[1].1.color_opt.unwrap();
-        assert_eq!((c1.r(), c1.g(), c1.b()), (0, 0, 255), "blue covers unclaimed 10..15");
+        assert_eq!(
+            (c1.r(), c1.g(), c1.b()),
+            (0, 0, 255),
+            "blue covers unclaimed 10..15"
+        );
     }
 
     /// Zero-length and out-of-bounds runs are silently dropped.
@@ -1532,11 +1639,23 @@ mod tests {
         let red = [255u8, 0, 0, 255];
         let runs = [
             // zero-length: start == end
-            ColorRunItem { start_byte: 2, end_byte: 2, color: red },
+            ColorRunItem {
+                start_byte: 2,
+                end_byte: 2,
+                color: red,
+            },
             // out-of-bounds: extends past text.len()
-            ColorRunItem { start_byte: 3, end_byte: 100, color: red },
+            ColorRunItem {
+                start_byte: 3,
+                end_byte: 100,
+                color: red,
+            },
             // valid run
-            ColorRunItem { start_byte: 0, end_byte: 3, color: red },
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 3,
+                color: red,
+            },
         ];
         let base = Attrs::new();
         let spans = color_run_spans(text, &runs, base);
@@ -1644,9 +1763,21 @@ mod tests {
         let blue = [0, 0, 255, 255];
         let green = [0, 200, 0, 255];
         let runs = [
-            ColorRunItem { start_byte: 0, end_byte: 8, color: red },
-            ColorRunItem { start_byte: 9, end_byte: 18, color: blue },
-            ColorRunItem { start_byte: 19, end_byte: 29, color: green },
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 8,
+                color: red,
+            },
+            ColorRunItem {
+                start_byte: 9,
+                end_byte: 18,
+                color: blue,
+            },
+            ColorRunItem {
+                start_byte: 19,
+                end_byte: 29,
+                color: green,
+            },
         ];
         let base = Attrs::new();
         let spans = color_run_spans(text, &runs, base);
@@ -1665,7 +1796,10 @@ mod tests {
         );
 
         // Gap: the '\n' between line 1 and line 2 is unstyled.
-        assert_eq!(spans[1].0, "\n", "gap between line 1 and line 2 must be '\\n'");
+        assert_eq!(
+            spans[1].0, "\n",
+            "gap between line 1 and line 2 must be '\\n'"
+        );
         assert!(
             spans[1].1.color_opt.is_none(),
             "newline gap must use base_attrs — no color bleed from line-1 run"
@@ -1679,7 +1813,10 @@ mod tests {
         );
 
         // Gap: the '\n' between line 2 and line 3 is unstyled.
-        assert_eq!(spans[3].0, "\n", "gap between line 2 and line 3 must be '\\n'");
+        assert_eq!(
+            spans[3].0, "\n",
+            "gap between line 2 and line 3 must be '\\n'"
+        );
         assert!(
             spans[3].1.color_opt.is_none(),
             "newline gap must use base_attrs — no color bleed from line-2 run"
