@@ -827,6 +827,74 @@ adds the actual build.rs and Android shim crate.
 
 ---
 
+## 7.1 GStreamer 1.26+ Migration Considerations
+
+**Tracked for**: Phase 3 upgrade planning (hud-6pix7).
+
+GStreamer 1.26 introduces a significant build system migration that will require
+changes to the CI workflow and bootstrap process if phase 3 upgrades past GStreamer 1.24.x.
+
+### Android.mk Deprecation
+
+GStreamer 1.26 deprecates the Android.mk build system in favor of CMake. The `.mk`
+files will be removed in GStreamer 1.28 (scheduled H2 2026). Current phase 3 planning
+pins GStreamer 1.24.x, which still ships Android.mk, so **no action is needed until
+1.24 reaches end-of-life OR phase 3 explicitly selects 1.26+ for security/performance**.
+
+**Impact**: If/when phase 3 upgrades to 1.26+:
+- GStreamer prebuilt tarballs will no longer provide Android.mk stubs
+- Cerbero build configurations (if rebuilding from source) will require CMake
+- CI workflow validation steps should remain functional (CMake-built artifacts are
+  still `.a` and `.so`), but may require NDK CMake toolchain adjustments
+
+### CMake-in-Gradle Replacement
+
+The GStreamer Android documentation will pivot from `.mk` to CMake for integration
+into Gradle-based Android Studio projects. For the **CI-side validator** (Section 4),
+this change is largely transparent: the gates (tarball verification, pkg-config probes,
+cargo-ndk link tests) do not depend on the build system, only on the resulting static
+archives and `.so` files.
+
+For **phase 3 runtime integration** (on-device JVM bootstrapping), if moving from
+an existing Android project structure that relies on `.mk`, the migration path is:
+1. Migrate the `AndroidManifest.xml` and Java shim to a Gradle project
+2. Use the Android NDK CMake plugin (via `externalNativeBuild` in `build.gradle`)
+3. Replace Android.mk-based build with a `CMakeLists.txt` that links the GStreamer
+   prebuilt static archives
+4. Verify `gst_android_init()` call site is preserved in the JNI layer (same as 1.24)
+
+### FindGStreamerMobile.cmake Helper
+
+When upgrading to 1.26+, GStreamer provides a CMake helper script for discovery
+in the prebuilt tarball: `FindGStreamerMobile.cmake`. This script locates the
+GStreamer `.pc` files and static archives in the extracted SDK layout.
+
+If phase 3 uses CMake for JVM bootstrapping (instead of direct cargo-ndk), the
+integration will require:
+1. Copy or link `FindGStreamerMobile.cmake` into the Android project
+2. Invoke `find_package(GStreamerMobile)` in the JNI CMakeLists.txt
+3. Link against `GSTREAMER_MOBILE_LIBRARIES` (replaces manual `-L` and `-l` flags)
+
+The **CI validator** (Sections 3 and 4) does not require this: cargo-ndk and pkg-config
+handle discovery directly without CMake. This is a phase 3 runtime concern only.
+
+### Timeline and Re-evaluation
+
+- **No action needed until**: GStreamer 1.24 is deprecated OR phase 3 explicitly
+  chooses 1.26+ for a significant feature/fix
+- **Expected decision point**: Phase 3 kickoff (likely early Q3 2026). At that time,
+  evaluate GStreamer 1.26 availability, NDK integration patterns, and Android Studio
+  tooling maturity
+- **Expected effort**: Medium (mostly documentation + Android project structure migration);
+  CI gates remain the same
+
+**Related beads**:
+- hud-685ha — Android GStreamer SDK CI bootstrap (this bead's parent)
+- hud-fts60 — GStreamer 1.26 NDK MediaCodec audit (evaluation of per-frame optimization)
+- hud-dr5yf — Bootstrap CI implementation (CI workflow integration)
+
+---
+
 ## 8. Related Documents
 
 - `docs/audits/android-gstreamer-sdk-build-spike.md` — Full Android spike audit
