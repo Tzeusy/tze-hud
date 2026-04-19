@@ -280,8 +280,9 @@ requested, the pool may preempt the lowest-priority active worker:
 
 **Preemption sequence:**
 
-1. The lowest-priority active worker (lowest `lease_priority` score, breaking
-   ties by `z_order DESC`) transitions to DRAINING.
+1. The lowest-priority active worker (highest `lease_priority` value, breaking
+   ties by `z_order ASC` — background tiles before foreground, matching the
+   shedding order in RFC 0008 §2.2) transitions to DRAINING.
 2. A `MediaIngressCloseNotice` with `reason: PREEMPTED` is enqueued to the
    preempted agent (RFC 0005 A1, ServerMessage field 52).
 3. The pool slot is reserved for the new worker. Spawning begins immediately;
