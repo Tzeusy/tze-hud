@@ -194,6 +194,7 @@ fn make_text_node(content: &str) -> Node {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     }
 }
@@ -1023,6 +1024,7 @@ async fn set_tile_text_via_grpc(
                                                 a: 1.0,
                                             }),
                                             background: None,
+                                            color_runs: vec![],
                                         },
                                     )),
                                 }),

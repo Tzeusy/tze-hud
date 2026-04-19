@@ -171,6 +171,7 @@ fn build_collapsed_nodes(
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     };
     let preview = state
@@ -190,6 +191,7 @@ fn build_collapsed_nodes(
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     };
     let activity = Node {
@@ -204,6 +206,7 @@ fn build_collapsed_nodes(
             background: None,
             alignment: TextAlign::End,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     };
     let icon = Node {
@@ -259,6 +262,7 @@ fn build_expanded_nodes(
             background: Some(tze_hud_scene::Rgba::new(0.03, 0.04, 0.06, 0.78)),
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     };
     let title = Node {
@@ -273,6 +277,7 @@ fn build_expanded_nodes(
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     };
     let icon = Node {
@@ -299,6 +304,7 @@ fn build_expanded_nodes(
             background: None,
             alignment: TextAlign::Center,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     };
     let collapse_hit = Node {
@@ -535,6 +541,7 @@ fn user_scroll_offset_remains_authoritative_after_append_update() {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     };
     let append = scene.apply_batch(&make_batch(
@@ -790,6 +797,7 @@ fn expanded_transcript_materialization_is_bounded_to_viewport_and_budget() {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     };
     let apply = scene.apply_batch(&make_batch(
@@ -1370,6 +1378,7 @@ fn portal_adapter_append_preserves_user_scroll_position() {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     };
     let append = scene.apply_batch(&make_batch(

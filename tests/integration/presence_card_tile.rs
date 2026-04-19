@@ -364,6 +364,7 @@ fn make_eyebrow_node() -> Node {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     }
 }
@@ -381,6 +382,7 @@ fn make_name_node(agent_name: &str) -> Node {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     }
 }
@@ -398,6 +400,7 @@ fn make_status_node(elapsed_seconds: u64) -> Node {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     }
 }
@@ -427,6 +430,7 @@ fn make_chip_text_node(elapsed_seconds: u64) -> Node {
             background: None,
             alignment: TextAlign::Center,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     }
 }
@@ -456,6 +460,7 @@ fn make_dismiss_text_node() -> Node {
             background: None,
             alignment: TextAlign::Center,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     }
 }
