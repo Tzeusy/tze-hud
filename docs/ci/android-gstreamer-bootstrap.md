@@ -44,10 +44,19 @@ GStreamer 1.24 is the correct anchor because:
 - gstreamer-rs 0.22.x targets GStreamer 1.24 (stable bindings; no major API breaks
   expected within the 1.24.x series).
 
-At phase 3 kickoff, verify whether GStreamer 1.26 has shipped (expected late 2025
-upstream) and whether it includes the NDK-based MediaCodec code path from
-MR #4115 (`AMediaCodec*` C API path, which eliminates the JVM bootstrap requirement).
-If 1.26 is stable, evaluate upgrading before opening the Android bead.
+**MR #4115 status (confirmed by hud-fts60 / PR #540)**: MR #4115 shipped in
+GStreamer 1.24 (merged January 11, 2024), not 1.26 as originally speculated.
+The `AMediaCodec*` C API path reduces per-frame JNI overhead (codec start/stop/
+dequeue/queue operations), but does **not** eliminate the `gst_android_init` /
+JVM bootstrap requirement — codec enumeration and surface-to-ANativeWindow
+conversion still use JNI. All `JNI_OnLoad` ordering constraints in Sections 5.3
+and 6 remain in force for GStreamer 1.24.x.
+
+At phase 3 kickoff, verify `HAVE_NDKMEDIA` activates in the 1.24 prebuilt
+environment (it should — MR #4115 is merged). If upgrading to GStreamer 1.26,
+plan for the Android.mk → CMake build system migration (Android.mk deprecated
+upstream in 1.26). Evaluate upgrading if CI bootstrap reveals 1.24 tarball
+availability issues or significant security fixes in 1.26.
 
 ### 1.2 Tarball URLs
 
@@ -213,8 +222,10 @@ fn main() {
         .expect("GSTREAMER_ROOT_ANDROID must be set for Android builds");
 
     // cargo-ndk sets CARGO_NDK_ANDROID_TARGET to the ABI name (e.g., "arm64-v8a")
-    // Map ABI to GStreamer SDK subdirectory name
-    let abi = env::var("CARGO_NDK_ANDROID_TARGET").unwrap_or_else(|_| "arm64".to_string());
+    // Map ABI to GStreamer SDK subdirectory name.
+    // Default to "arm64-v8a" (not "arm64") so the match below resolves correctly
+    // when CARGO_NDK_ANDROID_TARGET is absent (e.g., direct cargo build, not cargo-ndk).
+    let abi = env::var("CARGO_NDK_ANDROID_TARGET").unwrap_or_else(|_| "arm64-v8a".to_string());
     let gst_abi_dir = match abi.as_str() {
         "arm64-v8a" => "arm64",
         "x86_64"    => "x86_64",
