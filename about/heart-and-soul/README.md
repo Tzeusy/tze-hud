@@ -31,18 +31,20 @@ Without the magnet, you get a flux diagram where every arrow points somewhere di
 
 4. **[security.md](security.md)** — Trust and governance. Authentication, capability scopes, agent isolation, resource governance, human override.
 
-5. **[privacy.md](privacy.md)** — Attention governance for household surfaces. Viewer context, content classification, redaction, interruption classes, quiet hours.
+5. **[media-doctrine.md](media-doctrine.md)** — The media plane: what it is, what it never does, and the governance posture (capability-gated, role-arbitrated, in-process budget-watched). Precedes RFC 0014.
 
-6. **[attention.md](attention.md)** — The philosophical stance on attention, attention budget, and the anti-patterns of attention exploitation. Read after privacy.md.
+6. **[privacy.md](privacy.md)** — Attention governance for household surfaces. Viewer context, content classification, redaction, interruption classes, quiet hours.
 
-7. **[failure.md](failure.md)** — What happens when things break. Agent failure modes, recovery, degradation, persistence, reconnection.
+7. **[attention.md](attention.md)** — The philosophical stance on attention, attention budget, and the anti-patterns of attention exploitation. Read after privacy.md.
 
-8. **[mobile.md](mobile.md)** — Mobile and smart-glasses profile. Same model, different budgets, degradation axes, upstream composition.
+8. **[failure.md](failure.md)** — What happens when things break. Agent failure modes, recovery, degradation, persistence, reconnection.
 
-9. **[validation.md](validation.md)** — How we test. Testing doctrine, five validation layers, LLM development loop, fuzzing, chaos testing, developer visibility artifacts.
+9. **[mobile.md](mobile.md)** — Mobile and smart-glasses profile. Same model, different budgets, degradation axes, upstream composition.
 
-10. **[development.md](development.md)** — How we build. Spec-driven workflow, task management, execution loop, development principles.
+10. **[validation.md](validation.md)** — How we test. Testing doctrine, five validation layers, LLM development loop, fuzzing, chaos testing, developer visibility artifacts.
 
-11. **[v1.md](v1.md)** — What v1 ships and what it defers. Scope boundary for the first working system.
+11. **[development.md](development.md)** — How we build. Spec-driven workflow, task management, execution loop, development principles.
+
+12. **[v1.md](v1.md)** — What v1 ships and what it defers. Scope boundary for the first working system.
 
 Note: The component shape language (design tokens, component profiles, visual extensibility) is documented in **presence.md** §"Component shape language" and **architecture.md** §"Text rendering policy and design tokens". The detailed specification lives in `openspec/changes/component-shape-language/`. The corresponding RFC is 0012 in `about/legends-and-lore/`.
