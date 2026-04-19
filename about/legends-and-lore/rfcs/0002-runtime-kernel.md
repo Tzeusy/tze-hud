@@ -1128,3 +1128,11 @@ pub struct FrameTimingRecord {
     // This struct is populated and serialized to protobuf by the telemetry thread.
 }
 ```
+
+---
+
+## 12. Review Record
+
+| Round | Date | Reviewer | Focus | Changes |
+|-------|------|----------|-------|---------|
+| A1 | 2026-04-19 | hud-ora8.1.9 | Amendment: media worker lifecycle | Converted RFC 0002 §2.8 ("Future: Media Worker Boundary") from reservation to normative lifecycle spec. Added worker state machine (SPAWNING → RUNNING → DRAINING → TERMINATED; FAILED terminal state). Defined three-condition activation gate: capability grant (RFC 0008 A1 `media-ingress`), budget headroom check (pool slot, per-session stream cap, global texture headroom), and role-authority re-check (RFC 0009 A1: owner or admin). Specified shared worker pool: N = 2–4 slots, priority-based preemption (lease_priority sort per RFC 0008 §2.2), budget-pressure contraction to 1 slot at degradation Level 2+. Defined degradation trigger authority: runtime-automatic (ladder advance), watchdog-automatic (per-worker threshold), operator-manual (Level 0 override); agents may only self-close, not demand degradation. Specified watchdog targets: CPU time (200ms/10s), GPU texture occupancy (256 MiB), ring-buffer occupancy (75%/30-frame sustained), decoder lifetime (24h), leases held (per §4.3 envelope). Documented in-process tokio task model (E24 COMPATIBLE verdict, `docs/decisions/e24-in-process-worker-posture.md`): session coordinator + watchdog tasks on network tokio runtime; GStreamer pipeline pool as black box; GPU device ownership invariant unchanged from §2.8; cross-agent isolation via session_id tagging on DecodedFrameReady. Added RFC 0014 forward cross-references. Full amendment document: `about/legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md` (issue hud-ora8.1.9). |
