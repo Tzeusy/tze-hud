@@ -10,14 +10,14 @@
 
 ## Verdict
 
-**APPROACH: Self-Hosted D18 Runner — One-Time Manual Install (Primary); GitHub Actions MSI Cache (Secondary)**
+**APPROACH: Self-Hosted D18 Runner — One-Time Manual Install (Primary); Manual MSI Cache (Secondary)**
 
-For tze_hud's GPU runner box (D18), the correct approach is a **one-time manual GStreamer MSVC SDK install** on the self-hosted Windows runner, not a per-run MSI download. This mirrors the Linux runner pattern (system packages installed once, available to every run) and eliminates per-run download cost for a ~500 MB installer. The GitHub Actions ephemeral-runner path (caching the MSI) is documented as a fallback for non-D18 cloud Windows jobs.
+For tze_hud's GPU runner box (D18), the correct approach is a **one-time manual GStreamer MSVC SDK install** on the self-hosted Windows runner, not a per-run MSI download. This mirrors the Linux runner pattern (system packages installed once, available to every run) and eliminates per-run download cost for a ~500 MB installer. The GitHub Actions ephemeral-runner path (manual MSI download + caching) is the recommended approach for non-D18 cloud Windows jobs.
 
 The three concrete steps are:
 1. Install GStreamer MSVC SDK 1.24.x on the D18 runner box once (manual or scripted).
 2. Set `GSTREAMER_1_0_ROOT_MSVC_X86_64` and prepend GStreamer's `bin` to `PATH` as system-level environment variables.
-3. For ephemeral runners: use the `blinemedical/setup-gstreamer` action with `actions/cache` to avoid re-downloading on every run.
+3. For ephemeral runners: use the manual MSI cache pattern (see §4.2) to avoid re-downloading the ~600 MB installer on every run. The `blinemedical/setup-gstreamer` community action is archived as of 2026-02-03 and will not receive Node.js 20→24 migration required before September 2026.
 
 ---
 
@@ -196,52 +196,9 @@ The GitHub Actions runner service reads machine-level environment variables on e
 
 For PRs that require Windows compilation checks on `windows-latest` (Microsoft-hosted, ephemeral), the MSI must be installed each run. Use caching to avoid re-downloading the ~600 MB installer on every job.
 
-**Recommended: `blinemedical/setup-gstreamer` action**
+**Recommended: Manual MSI Cache Approach (Primary)**
 
-The `blinemedical/setup-gstreamer` community action automates Windows MSI download, install, and environment variable setup:
-
-```yaml
-# .github/workflows/ci.yml (excerpt — Windows build job)
-jobs:
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Rust (MSVC)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          targets: x86_64-pc-windows-msvc
-
-      - name: Set up GStreamer
-        uses: blinemedical/setup-gstreamer@v1
-        with:
-          version: "1.24.12"
-          arch: x86_64
-        # Sets GSTREAMER_1_0_ROOT_MSVC_X86_64 and appends bin to GITHUB_PATH
-
-      - name: Set PKG_CONFIG_PATH
-        shell: pwsh
-        run: |
-          $gst_root = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
-          echo "PKG_CONFIG_PATH=${gst_root}\lib\pkgconfig" >> $env:GITHUB_ENV
-          # Ensure GStreamer pkg-config.exe is first in PATH
-          echo "${gst_root}\bin" >> $env:GITHUB_PATH
-
-      - name: Build
-        shell: pwsh
-        run: cargo build --workspace
-```
-
-The `setup-gstreamer` action constructs installer URLs using the canonical pattern:
-```
-https://gstreamer.freedesktop.org/data/pkg/windows/<version>/msvc/gstreamer-1.0-msvc-x86_64-<version>.msi
-```
-
-It downloads both runtime and devel packages, installs them silently via `msiexec`, and sets `GSTREAMER_1_0_ROOT_MSVC_X86_64` in the GitHub environment.
-
-**Manual approach without the community action** (lower dependency risk):
+The `blinemedical/setup-gstreamer` community action was archived on **2026-02-03** and will not receive the Node.js 20→24 migration required before September 2026. Use the **manual MSI cache pattern below** as the primary approach for ephemeral `windows-latest` runners:
 
 ```yaml
       - name: Cache GStreamer installer
@@ -281,6 +238,25 @@ It downloads both runtime and devel packages, installs them silently via `msiexe
 **Caching trade-off**: GitHub Actions cache is keyed by the GStreamer version string. The ~600 MB MSI cache hit saves ~2–4 minutes per run on `windows-latest` (where download speed is 50–100 MB/s). Cache misses on version bumps are acceptable — they are infrequent.
 
 **Cache storage cost**: The MSI cache counts against the 10 GB Actions cache limit per repository. At ~600 MB per version, this is manageable (1 version = 6% of the cache quota).
+
+---
+
+### 4.2.1 Legacy: `blinemedical/setup-gstreamer` Action (Deprecated — Archived 2026-02-03)
+
+The `blinemedical/setup-gstreamer` community action was archived on 2026-02-03 and is no longer maintained. It will not receive the Node.js 20→24 migration required before September 2026. **Do NOT use this action for new jobs.** All new ephemeral CI jobs must use the manual MSI cache pattern documented in §4.2 above.
+
+Historical reference for prior CI jobs that may still reference it:
+
+```yaml
+# DEPRECATED — Do not use for new jobs
+      - name: Set up GStreamer
+        uses: blinemedical/setup-gstreamer@v1
+        with:
+          version: "1.24.12"
+          arch: x86_64
+```
+
+For migration guidance, see the manual MSI cache pattern in §4.2 above.
 
 ---
 
@@ -366,8 +342,9 @@ The GStreamer MSVC "Complete" installation includes the `d3d11` plugin set (`d3d
 | Scenario | Recommended approach |
 |---|---|
 | D18 GPU runner box (phase 1 gate) | One-time manual install + system env vars. No per-job download overhead. |
-| `windows-latest` CI (compilation check on PRs) | `blinemedical/setup-gstreamer@v1` action + `actions/cache` on MSI files. |
-| Both needed | Implement D18 first (phase 1 gate); add cloud Windows job once D18 bootstrap is confirmed. |
+| `windows-latest` CI (compilation check on PRs) | **Manual MSI cache pattern** (§4.2). Download and cache ~600 MB installer; reuse on cache hit. |
+| `blinemedical/setup-gstreamer@v1` (legacy) | **DEPRECATED** — Archived 2026-02-03, does not receive Node.js 20→24 migration. Migrate to manual MSI cache. |
+| Both needed | Implement D18 first (phase 1 gate); add cloud Windows job once D18 bootstrap is confirmed, using manual MSI cache pattern. |
 
 **Phase 1 activation sequence for D18**:
 
