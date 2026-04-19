@@ -411,9 +411,8 @@ struct WindowedRuntimeState {
     /// agents after wheel/keyboard scroll events update a scrollable tile.
     /// Each `(namespace, EventBatch)` pair is delivered only to the session
     /// handler whose namespace matches, filtered by `INPUT_EVENTS` subscription.
-    scroll_event_tx: Option<
-        tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>,
-    >,
+    scroll_event_tx:
+        Option<tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>>,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -2210,9 +2209,7 @@ fn start_network_services(
         Option<NetworkRuntime>,
         Vec<tokio::task::JoinHandle<()>>,
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
-        Option<
-            tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>,
-        >,
+        Option<tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>>,
     ),
     Box<dyn std::error::Error>,
 > {
@@ -2296,11 +2293,7 @@ fn dispatch_scroll_offset_event(
 
     // Look up the namespace that owns this tile so the session handler can
     // route the batch to the correct agent.
-    let Some(namespace) = scene
-        .tiles
-        .get(&ev.tile_id)
-        .map(|t| t.namespace.clone())
-    else {
+    let Some(namespace) = scene.tiles.get(&ev.tile_id).map(|t| t.namespace.clone()) else {
         return;
     };
 
