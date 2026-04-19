@@ -48,7 +48,7 @@ Successor location for preserved/superseded items refers to:
 | BI-1 | Media/WebRTC ingress **MUST** remain post-v1 and **MUST NOT** alter v1 doctrine defaults. | **SUPERSEDED** | v2/media-plane "Governed Media Plane Activation" absorbs this. The "default-off, gated by explicit capability/lease/operator-policy/budget" invariant is explicitly restated. v2/signoff-packet F27 governs the v1 ship gate. |
 | BI-2 | The runtime **MUST** keep media ingress disabled unless explicit post-v1 activation criteria are met. | **PRESERVED** | v2/media-plane Requirement "Governed Media Plane Activation": "the runtime admits it only if capability, lease, privacy, operator, and budget gates all succeed." All six prerequisite checks reappear. |
 | BI-3 | Activation criteria **MUST** require all of: approved signaling contract, schema/snapshot deltas, zone transport contract, runtime budget gate, privacy/operator policy, compositor contract, and approved validation scenarios. | **SUPERSEDED** | The enumerated prerequisite list maps to RFC 0014 (wire protocol), RFC 0019 (audit schema), v2/validation-operations (validation), and v2/media-plane (policy/budget). The specific seven named artifacts are now governed by F29 (RFC merge gates) in v2/signoff-packet rather than being listed inside the spec. |
-| BI-4 | **Scenario**: v1 runtime remains media-disabled — MUST spawn no media worker threads and MUST accept no live media ingress. | **PRESERVED** | v2/media-plane Requirement "Governed Media Plane Activation" scenario "bounded ingress activation remains governed" restates the same invariant at v2 scope. The specific phrasing around v1 defaults is superseded (F27 gates code landing), but the observable behavior MUST is preserved. |
+| BI-4 | **Scenario**: v1 runtime remains media-disabled — MUST spawn no media worker threads and MUST accept no live media ingress. | **SUPERSEDED** | v2/media-plane Requirement "Governed Media Plane Activation" scenario "bounded ingress activation remains governed" restates the same invariant at v2 scope. The specific phrasing around v1 defaults is superseded by the F27 gate, and the authority for this requirement has moved to the v2/media-plane spec. |
 | BI-5 | **Scenario**: activation denied when any prerequisite contract is missing — MUST be denied and ingress MUST remain disabled. | **PRESERVED** | v2/media-plane same requirement scenario "bounded ingress activation remains governed": all gates must succeed; any failure blocks admission. |
 
 ### Requirement: Directional Transport Boundary
@@ -71,7 +71,7 @@ Successor location for preserved/superseded items refers to:
 | BI-14 | When both `ttl_us` and `expires_at_wall_us` are present, `expires_at_wall_us` **MUST** be canonical for snapshot/reconnect state. | **SUPERSEDED** | This is a wire-protocol normalization rule that belongs in RFC 0014 (Media Plane Wire Protocol). v2/media-plane "Media Timing Is First-Class" preserves the timing-semantics intent; the exact field normalization rule is delegated to the RFC authoring step (F29). |
 | BI-15 | `ttl_us` remains valid as relative input and maps to absolute expiry via deterministic formula. | **SUPERSEDED** | Same as BI-14 — field-level normalization moves to RFC 0014. |
 | BI-16 | If both `ttl_us` and `expires_at_wall_us` are non-zero and resolve to different expiry instants, publication **MUST** be rejected as invalid. | **SUPERSEDED** | Same as BI-14 — conflict-rejection rule moves to RFC 0014 wire protocol. The "fail closed on malformed timing" intent is preserved in v2/media-plane "Governed Media Plane Activation" (gates must all pass). |
-| BI-17 | **Scenario**: scheduled ingress does not render early; first presentation MUST occur no later than one frame period after `present_at_wall_us`. | **PRESERVED** | v2/media-plane "Media Timing Is First-Class" scenario "timed media cue survives governance checks": runtime schedules against declared timing contract. The one-frame-period tolerance is a validation threshold governed by v2/validation-operations and v2/signoff-packet D18 thresholds. |
+| BI-17 | **Scenario**: scheduled ingress does not render early; first presentation MUST occur no later than one frame period after `present_at_wall_us`. | **SUPERSEDED** | v2/media-plane "Media Timing Is First-Class" scenario "timed media cue survives governance checks": runtime schedules against declared timing contract. The one-frame-period tolerance is a validation threshold governed by v2/validation-operations and v2/signoff-packet D18 thresholds. |
 | BI-18 | **Scenario**: expired ingress MUST be rejected or immediately cleared; MUST render zero media frames for it. | **PRESERVED** | v2/media-plane "Media Timing Is First-Class": deterministic expiry/expiry behavior preserved. |
 | BI-19 | **Scenario**: ttl-only ingress — receiver MUST derive and persist effective absolute expiry. | **SUPERSEDED** | Field-level rule moves to RFC 0014. |
 | BI-20 | **Scenario**: conflicting ttl and absolute expiry — receiver MUST reject as malformed timing contract. | **SUPERSEDED** | Field-level rule moves to RFC 0014. |
@@ -169,7 +169,7 @@ Successor location for preserved/superseded items refers to:
 | # | Requirement text (paraphrased) | Verdict | Rationale & successor pointer |
 |---|---|---|---|
 | PO-17 | The runtime **MUST** emit structured observability signals for admission decisions, policy denials, operator enable/disable actions, and teardown events. | **PRESERVED** | v2/validation-operations "Structured Operator And Failure Observability": "The runtime SHALL emit structured signals for media admission, teardown, operator override, device-state transitions, and failure recovery." v2/signoff-packet C17 (mandatory audit events covering all named categories). |
-| PO-18 | Each signal **MUST** include the affected surface or zone, decision outcome, and machine-readable reason code. | **PRESERVED** | v2/validation-operations same requirement: signals are "machine-readable evidence"; v2/signoff-packet C17 audit schema versioned with per-event surface and reason. RFC 0019 (Audit Log Schema and Retention) will carry the field-level contract. |
+| PO-18 | Each signal **MUST** include the affected surface or zone, decision outcome, and machine-readable reason code. | **SUPERSEDED** | v2/validation-operations same requirement: signals are "machine-readable evidence"; v2/signoff-packet C17 audit schema versioned with per-event surface and reason. RFC 0019 (Audit Log Schema and Retention) will carry the field-level contract. |
 | PO-19 | The runtime **MUST NOT** emit raw media frames, audio, or viewer biometric data in observability signals. | **PRESERVED** | v2/validation-operations "Structured Operator And Failure Observability" scenario "teardown is auditable without payload leakage": "emits machine-readable evidence of the transition without exposing raw media content." |
 | PO-20 | **Scenario**: admission denial auditable without payload leakage — MUST record structured event with denial reason; MUST NOT contain raw media or viewer biometric data. | **PRESERVED** | v2/validation-operations same scenario. |
 | PO-21 | **Scenario**: operator toggle is visible to telemetry — MUST emit operator-action event with new state and affected surface/zone identifier. | **PRESERVED** | v2/validation-operations "Structured Operator And Failure Observability" + v2/signoff-packet C17 (mandatory audit events include operator overrides). |
@@ -178,7 +178,7 @@ Successor location for preserved/superseded items refers to:
 
 | # | Requirement text (paraphrased) | Verdict | Rationale & successor pointer |
 |---|---|---|---|
-| PO-22 | Media ingress admission **MUST** be evaluated in order: explicit enablement state → operator override state → viewer/privacy ceiling → remaining bounded-ingress admission checks. | **PRESERVED** | v2/media-plane "Governed Media Plane Activation" preserves the ordered-gate model. Specific gate ordering is an implementation contract for RFC 0014; the fail-first semantics are implicit in "all gates must succeed." The exact priority encoding may be spelled out more explicitly in RFC 0014 / v2/media-plane detailed spec authoring. |
+| PO-22 | Media ingress admission **MUST** be evaluated in order: explicit enablement state → operator override state → viewer/privacy ceiling → remaining bounded-ingress admission checks. | **SUPERSEDED** | v2/media-plane "Governed Media Plane Activation" preserves the ordered-gate model. Specific gate ordering is an implementation contract for RFC 0014; the fail-first semantics are implicit in "all gates must succeed." The exact priority encoding may be spelled out more explicitly in RFC 0014 / v2/media-plane detailed spec authoring. |
 | PO-23 | If any earlier check fails, the runtime **MUST** deny the request deterministically and **MUST NOT** attempt later checks. | **PRESERVED** | v2/media-plane "Governed Media Plane Activation": deny if any gate fails. Fail-fast behavior is a named project anti-pattern avoidance (CLAUDE.md craft: "fail-fast behavior over silent fallback"). |
 | PO-24 | **Scenario**: disabled policy short-circuits admission — MUST deny before evaluating viewer/privacy or transport checks. | **PRESERVED** | v2/media-plane ordered gates; see PO-22/PO-23. |
 | PO-25 | **Scenario**: operator disable short-circuits admission — MUST deny before evaluating viewer/privacy or transport checks. | **PRESERVED** | v2/media-plane ordered gates; see PO-22/PO-23. |
@@ -259,18 +259,23 @@ heading), per F28 instructions:
 
 The 22 superseded items fall into three categories:
 
-1. **Wire-protocol field rules** (BI-14 through BI-16, BI-19, BI-20, BI-30
-   through BI-32, BI-35 through BI-38, BI-40): specific protobuf field names,
-   normalization formulas, and zone/transport constraints move to RFC 0014.
-   These are not dropped — they must be reaffirmed in that RFC before phase-1
+1. **Wire-protocol and field-level rules** (BI-14 through BI-16, BI-19, BI-20,
+   BI-30 through BI-32, BI-35 through BI-38, BI-40, PO-18, PO-22): specific
+   protobuf field names, normalization formulas, zone/transport constraints,
+   audit signal field requirements, and gate ordering move to RFC 0014 (media
+   plane wire protocol) or RFC 0019 (audit log schema and retention).
+   These are not dropped — they must be reaffirmed in those RFCs before phase-1
    implementation beads can land.
 
-2. **Revocation timing thresholds** (BI-29, BI-44, PO-9): the one-compositor-frame
-   deadline is superseded by C16's tiered revocation numbers (soft ≤500 ms,
-   hard ≤100 ms). The v2 numbers are more precise and architecturally grounded;
-   the original one-frame claim was an implementation detail that has been
-   replaced by a tiered SLA.
+2. **Revocation and timing thresholds** (BI-17, BI-29, BI-44, PO-9): the
+   one-compositor-frame deadline and one-frame-period tolerance are superseded
+   by more precise v2 numbers — C16's tiered revocation SLA (soft ≤500 ms,
+   hard ≤100 ms) and D18's validation thresholds (TTFF ≤500 ms, etc.) in
+   v2/signoff-packet and v2/validation-operations. Specific thresholds move to
+   RFC 0014/0015 and v2/validation-operations authoring.
 
-3. **Prerequisite enumeration** (BI-3): the specific seven-artifact checklist
-   has been superseded by F29's RFC-merge-gate model, which is more precise
-   (named RFCs with review counts) and is authoritative for v2 phase-1 kickoff.
+3. **Prerequisite and v1-default framing** (BI-1, BI-3, BI-4): the specific
+   seven-artifact checklist has been superseded by F29's RFC-merge-gate model;
+   the v1-defaults framing for the media-disabled scenario is superseded by the
+   F27 gate and v2/media-plane scope. The observable behavior invariants are
+   preserved in v2/media-plane "Governed Media Plane Activation."
