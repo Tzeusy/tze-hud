@@ -352,9 +352,11 @@ tze_hud runtime
 - Full adapter design: `docs/reports/sfu-vendor-adapter-seam.md` §3.2 (hud-s2j0l).
 
 **Error implications:** The CF adapter error taxonomy partially diverges from the WHIP error
-table in §6. Section §6.1 maps both paths. Four additional `CloudRelayCloseReason` codes are
-introduced for CF-specific errors: `WHIP_RATE_LIMITED`, `WHIP_SERVER_ERROR`,
-`WHIP_PROTOCOL_VIOLATION`, `WHIP_BAD_REQUEST` — these apply to both adapter paths.
+table in §6. Section §6.1 maps both paths. Four `CloudRelayCloseReason` codes are defined in
+§4.3 for errors that apply to both adapter paths: `WHIP_RATE_LIMITED` (HTTP 429),
+`WHIP_SERVER_ERROR` (HTTP 5xx non-503), `WHIP_PROTOCOL_VIOLATION` (caller-side protocol
+misuse, e.g., missing Location header), `WHIP_BAD_REQUEST` (HTTP 400). Added by Amendment A2
+(hud-6t5hj) to fulfil the cross-reference in `docs/reports/sfu-vendor-adapter-seam.md` §4.1.
 
 ---
 
@@ -431,6 +433,58 @@ a=candidate:{candidate_line}
   stream to `CLOSING` with `TRANSPORT_FAILURE`.
 - ICE candidate count per WHIP session: MAX 50 per RFC 0014 §4.6 candidate-count limit
   (capped at the same per-stream limit as the direct path).
+
+#### 3.2.1 Cloudflare Realtime adapter: PUT /renegotiate
+
+The Cloudflare Realtime adapter does **not** use WHIP trickle PATCH (§3.2 above). Instead,
+it uses a proprietary `PUT /renegotiate` endpoint for ICE candidate delivery and simulcast
+layer changes. The tze_hud adapter branches on `SfuVendorConfig` to select the right method.
+
+**Why the divergence:** Cloudflare Realtime SFU does not accept
+`Content-Type: application/trickle-ice-sdpfrag` PATCH requests. ICE renegotiation is
+performed by sending a full revised SDP offer as a JSON body to:
+
+```
+PUT https://rtc.live.cloudflare.com/v1/apps/{appId}/sessions/{sessionId}/renegotiate
+Content-Type: application/json
+Authorization: Bearer {cf-api-token}
+
+{
+  "sessionDescription": {
+    "type": "offer",
+    "sdp": "..."
+  }
+}
+```
+
+Response: `200 OK` with `{ "sessionDescription": { "type": "answer", "sdp": "..." } }`.
+
+**Implications for the runtime adapter:**
+
+1. **Full ICE gathering required before `tracks/new`.** Because trickle ICE is not
+   supported on the native CF Realtime path, the runtime MUST wait for ICE gathering to
+   complete before issuing the initial `tracks/new` POST (§2.5b). This is in contrast to
+   the WHIP adapter (§2.5a), which permits partial-ICE offers with trickle PATCH.
+
+2. **`SfuVendorConfig` branch.** The adapter harness checks `media.cloud_relay.vendor`:
+   - `livekit` or `generic_whip` → use §3.2 trickle PATCH flow.
+   - `cloudflare_realtime` → use `PUT /renegotiate` flow; suppress trickle ICE delivery.
+   `CloudflareRealtimeAdapter::trickle_ice` returns `AdapterError::UnsupportedOperation`
+   to signal this branch explicitly rather than silently dropping candidates.
+
+3. **Simulcast layer control.** `PUT /renegotiate` also drives simulcast layer changes
+   (enable/disable spatial layers) on the CF adapter. The harness calls
+   `update_simulcast_layer` which issues a `PUT /renegotiate` with a revised SDP offer
+   reflecting the new layer configuration.
+
+4. **Timeout.** The renegotiate PUT is bounded by
+   `media.cloud_relay.cf_renegotiate_timeout_secs` (default: 5s, matching the field
+   `renegotiate_timeout` in `CloudflareRealtimeAdapterConfig`). On timeout →
+   `WHIP_SERVER_ERROR` close reason.
+
+Cross-reference: `docs/reports/sfu-vendor-adapter-seam.md` §3.2
+"CloudflareRealtimeAdapter" (hud-s2j0l, merged PR #552) contains the full
+`CloudflareRealtimeAdapter` struct, HTTP lifecycle, and test matrix for this path.
 
 ### 3.3 Stream Teardown (DELETE)
 
@@ -675,6 +729,11 @@ enum CloudRelayCloseReason {
   OPERATOR_DISABLED       = 9;  // Operator or policy disabled cloud-relay mid-session
   CAPABILITY_REVOKED      = 10; // cloud-relay capability revoked
   SESSION_DISCONNECTED    = 11; // Agent session disconnected; relay path cleaned up
+  // CF-specific and general HTTP error codes (Amendment A2, hud-6t5hj):
+  WHIP_RATE_LIMITED       = 12; // HTTP 429 Too Many Requests — SFU rate limit hit; maps AdapterError::RateLimited
+  WHIP_SERVER_ERROR       = 13; // HTTP 5xx (non-503) — unexpected SFU-side server failure; maps AdapterError::ServerError
+  WHIP_PROTOCOL_VIOLATION = 14; // Caller-side protocol misuse (e.g., missing Location header, wrong Content-Type); maps AdapterError::Protocol
+  WHIP_BAD_REQUEST        = 15; // HTTP 400 Bad Request — malformed SDP or missing required attributes; maps AdapterError::BadRequest
 }
 
 // Coalescible relay path health update (ServerMessage field 82).
@@ -755,16 +814,16 @@ However, the `hook` and `oidc` token sources SHOULD include:
 | HTTP Status | Context | `CloudRelayCloseReason` | `MediaCloseReason` (if stream terminates) | Notes |
 |------------|---------|------------------------|------------------------------------------|-------|
 | 201 Created | POST success | — (success path) | — | Normal continuation |
-| 400 Bad Request | POST: malformed SDP or missing required attributes | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Adapter logs the response body; does not retry |
+| 400 Bad Request | POST: malformed SDP or missing required attributes | `WHIP_BAD_REQUEST` | `TRANSPORT_FAILURE` | Adapter logs the response body; does not retry. Maps `AdapterError::BadRequest`. |
 | 401 Unauthorized | POST/PATCH/DELETE: invalid or expired token | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | See §5.2 |
 | 403 Forbidden | POST: token valid but room/capability denied | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | SFU policy rejection; operator must fix config |
 | 404 Not Found | PATCH/DELETE: resource URL expired | `WHIP_RESOURCE_EXPIRED` | `TRANSPORT_FAILURE` | Resource expired; stream terminated |
-| 405 Method Not Allowed | Any: WHIP endpoint does not support the method | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Config error; endpoint URL wrong |
+| 405 Method Not Allowed | Any: WHIP endpoint does not support the method | `WHIP_PROTOCOL_VIOLATION` | `TRANSPORT_FAILURE` | Config error; endpoint URL wrong. Also raised when SFU 201 missing Location header. Maps `AdapterError::Protocol`. |
 | 409 Conflict | POST: session state conflict (CF adapter only) | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | CF Realtime: session already exists or state machine conflict; operator must retry with a new session |
 | 422 Unprocessable Entity | POST: SDP negotiation rejected by SFU | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Adapter logs the response body; does not retry |
-| 429 Too Many Requests | POST: SFU rate limit | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Backoff is NOT implemented (see §9.4 DoS) |
+| 429 Too Many Requests | POST: SFU rate limit (both adapter paths) | `WHIP_RATE_LIMITED` | `TRANSPORT_FAILURE` | Backoff is NOT implemented (see §9.4 DoS). Maps `AdapterError::RateLimited`. |
 | 503 Service Unavailable | POST: SFU unavailable | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Operator should configure a fallback endpoint |
-| 5xx (non-503) | POST/PATCH/DELETE: unexpected server error | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Catch-all for server-side failures not covered by specific rows; adapter logs status and body |
+| 5xx (non-503) | POST/PATCH/DELETE: unexpected server error (both adapter paths) | `WHIP_SERVER_ERROR` | `TRANSPORT_FAILURE` | Catch-all for server-side failures not covered by specific rows; adapter logs status and body. Maps `AdapterError::ServerError`. |
 | Timeout (no response) | POST/PATCH/DELETE: network timeout | `WHIP_TIMEOUT` | `TRANSPORT_FAILURE` | See §3.1 timeout policy |
 | ICE failure (post-WHIP) | ICE gathering or consent check failure on relay path | `ICE_FAILURE` | `TRANSPORT_FAILURE` | After SDP exchange, before media flows |
 | DTLS failure (post-WHIP) | DTLS handshake failure on relay path | `DTLS_FAILURE` | `TRANSPORT_FAILURE` | |
@@ -1081,6 +1140,7 @@ implementation beads may be created. The table below is empty at draft time.
 |-------|------|----------|------|-------|---------|-------|
 | A0 | 2026-04-19 | hud-amf17 | author (agent worker) | Draft authored from F29 signoff packet + hud-1ee3a SFU fallback audit + hud-g89zs simulcast readiness + RFC 0014 (open PR #530). Resolved RFC 0014 §4.2 TBD on `runtime_sdp_answer` field shape. WHIP adapter specified as vendor-neutral (LiveKit + Cloudflare Calls). str0m fallback transport is compatible with no changes. | AUTHOR | Open questions flagged: ICE restart via PATCH (LiveKit only), simulcast in WHIP SDP (post-hud-fpq51), SRTP decryption posture disclosure. Note: §2.2 contained an error (Cloudflare WHIP claim) corrected in A1. |
 | A1 | 2026-04-19 | hud-ojxka | amendment worker | Three amendments applied: (1) Dual-adapter correction per PR #550 (hud-ejhnm) — §1.2, §2.2, §2.3, §2.4, §2.5 added with explicit WHIP (LiveKit) vs Cloudflare proprietary JSON REST protocol flows; cross-reference to `docs/reports/sfu-vendor-adapter-seam.md` added. (2) `runtime_sdp_answer` delivery path clarification (hud-4mdir) — §4.1 text and §4.3 proto comment updated to make explicit that `runtime_sdp_answer` is ALWAYS EMPTY for `FUTURE_CLOUD_RELAY`; `CloudRelayOpenResult.sdp_answer` is the authoritative delivery vehicle for cloud-relay SDP answers. (3) §6.1 error table catch-all rows added for 409 Conflict, 422 Unprocessable Entity, and 5xx (non-503). | AMENDMENT | F29 gate (≥1 external reviewer) still required and still blocks phase 4b bead creation. |
+| A2 | 2026-04-19 | hud-6t5hj | amendment worker | Two amendments applied: (1) [hud-6t5hj] Added 4 `CloudRelayCloseReason` enum variants referenced in §2.5b but missing from §4.3 proto: `WHIP_RATE_LIMITED` (HTTP 429, field 12), `WHIP_SERVER_ERROR` (HTTP 5xx non-503, field 13), `WHIP_PROTOCOL_VIOLATION` (caller-side protocol misuse, field 14), `WHIP_BAD_REQUEST` (HTTP 400, field 15). Updated §6.1 error table to map 400, 429, 5xx (non-503), and 405/protocol errors to the specific new codes rather than the generic `WHIP_POST_FAILED`. Variants match the `AdapterError` taxonomy in `docs/reports/sfu-vendor-adapter-seam.md` §4.1. (2) [hud-7lehd] Added §3.2.1 "Cloudflare Realtime adapter: PUT /renegotiate" documenting the proprietary `PUT /sessions/{sessionId}/renegotiate` path, the `SfuVendorConfig` branch point, full-ICE gathering requirement, simulcast layer control via renegotiate, and cross-reference to `docs/reports/sfu-vendor-adapter-seam.md` §3.2. Refs: hud-6t5hj + hud-7lehd. | AMENDMENT | F29 gate (≥1 external reviewer) still required and still blocks phase 4b bead creation. |
 | R1 | — | (external reviewer 1) | external | (to be assigned) | — | — |
 | (as needed) | — | — | — | — | — | — |
 
