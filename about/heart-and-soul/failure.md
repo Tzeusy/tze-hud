@@ -91,7 +91,7 @@ The runtime can degrade along explicit, designed axes. This is not failure — i
 Degradation follows a fixed ordered ladder, lightest impact first. The runtime descends only as far as necessary to restore headroom; it does not jump steps.
 
 **Trigger semantics:**
-- **Runtime-automatic:** budget breach (CPU, GPU, bandwidth, or memory threshold exceeded) triggers automatic descent at Level 1 safety arbitration (RFC 0009 §1.1). The runtime acts without asking.
+- **Runtime-automatic:** budget breach (CPU, GPU, bandwidth, or memory threshold exceeded) triggers automatic descent at Level 5 (Resource) arbitration (RFC 0009 §11.6). The runtime acts without asking.
 - **Operator-manual:** an operator can force entry at any rung by revoking a capability or session. This is the only external path to steps 9–10.
 - **Never agent-initiated:** an agent may not request its own degradation. An agent that requests self-degrade is treated as a policy violation and its request is rejected. Agent presence is governed by the runtime; agents request presence, the runtime decides cost and fitness.
 
