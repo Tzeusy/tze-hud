@@ -129,8 +129,7 @@ fn main() {
         let lib_path = PathBuf::from(&prebuilt_dir);
         assert!(
             lib_path.join("libvpx.a").exists(),
-            "LIBVPX_IOS_LIB_DIR is set to '{}' but libvpx.a was not found there",
-            prebuilt_dir
+            "LIBVPX_IOS_LIB_DIR is set to '{prebuilt_dir}' but libvpx.a was not found there"
         );
         println!("cargo:rustc-link-search=native={}", lib_path.display());
         println!("cargo:rustc-link-lib=static=vpx");
@@ -294,8 +293,7 @@ fn resolve_or_clone_libvpx_source(out_dir: &PathBuf, version: &str) -> PathBuf {
         let path = PathBuf::from(&src);
         assert!(
             path.join("configure").exists(),
-            "LIBVPX_SRC_DIR='{}' does not contain a libvpx configure script",
-            src
+            "LIBVPX_SRC_DIR='{src}' does not contain a libvpx configure script"
         );
         return path;
     }
