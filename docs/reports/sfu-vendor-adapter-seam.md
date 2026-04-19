@@ -544,7 +544,7 @@ path failures. The mapping from `AdapterError` to that taxonomy:
 | `UnsupportedOperation` | Not surfaced as close reason (programming error) |
 | `RenegotiationRequired` | Not surfaced (internal retry; if retry fails, maps to Protocol) |
 
-**Note:** Three new close reasons (`WHIP_RATE_LIMITED`, `WHIP_SERVER_ERROR`,
+**Note:** Four new close reasons (`WHIP_RATE_LIMITED`, `WHIP_SERVER_ERROR`,
 `WHIP_PROTOCOL_VIOLATION`, `WHIP_BAD_REQUEST`) are not yet defined in RFC 0018
 draft (PR #548). These must be added when RFC 0018 is amended for the CF adapter.
 This is a discovered follow-up (see §7).
@@ -721,9 +721,9 @@ harness test run
 
 The following issues are out of scope for hud-s2j0l but discovered during design:
 
-1. **RFC 0018 amendment for Cloudflare Realtime adapter** — RFC 0018 §2.2 ("Vendor
-   Neutrality") incorrectly claims CF Realtime natively supports WHIP. Once PR #550
-   merges, RFC 0018 must be amended to describe `CloudflareRealtimeAdapter`
+1. **RFC 0018 amendment for Cloudflare Realtime adapter** (`hud-ojxka`) — RFC 0018
+   §2.2 ("Vendor Neutrality") incorrectly claims CF Realtime natively supports WHIP.
+   Once PR #550 merges, RFC 0018 must be amended to describe `CloudflareRealtimeAdapter`
    explicitly and add the four new `AdapterError` variants to the `CloudRelayCloseReason`
    enum (`WHIP_RATE_LIMITED`, `WHIP_SERVER_ERROR`, `WHIP_PROTOCOL_VIOLATION`,
    `WHIP_BAD_REQUEST`). This is a blocking dependency for any phase 4b implementation
