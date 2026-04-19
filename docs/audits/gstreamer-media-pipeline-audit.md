@@ -603,6 +603,62 @@ while let Some(frame) = frame_rx.recv().await {
 
 ---
 
+## Security Advisory Subscription & Response
+
+Before any media pipeline ships to users, tze_hud maintainers must subscribe to GStreamer security advisories and establish a response policy for CVEs affecting the media ingest path.
+
+### Subscription Sources
+
+1. **GStreamer Security Mailing List**
+   - Address: `gstreamer-security@lists.freedesktop.org`
+   - Scope: Official security advisories for GStreamer core and plugins
+   - Subscribe at: https://lists.freedesktop.org/mailman/listinfo/gstreamer-security (or contact the list admin)
+
+2. **RustSec Advisory Database**
+   - Crate: `cargo-audit`
+   - Scope: Security advisories for `gstreamer-rs` and transitive Rust dependencies (e.g., FFmpeg bindings via gst-libav)
+   - Database: https://github.com/rustsec/advisory-db
+   - Usage: `cargo audit` in CI/locally to detect known vulnerabilities
+
+3. **GitHub Security Advisories**
+   - Repositories to watch:
+     - `freedesktop/gstreamer` (upstream C library)
+     - `gstreamer/gstreamer` mirror on GitHub
+     - `sdroege/gstreamer-rs` (Rust bindings)
+   - Enable GitHub security alerts on these repos
+
+4. **NVD CVE Feed**
+   - Keyword: "gstreamer"
+   - Source: https://nvd.nist.gov/vuln/search
+   - Covers: Upstream GStreamer C library CVEs and codec-related vulnerabilities
+
+### Response Policy
+
+| Severity | SLA | Response |
+|---|---|---|
+| **Critical** (RCE, remote unauthenticated code execution, authentication bypass) | Within 7 days | Patch or deploy mitigation (e.g., lease revocation disabling media plane) |
+| **High** (Denial of Service, information leak, privilege escalation) | Within 30 days | Patch and validate; escalate if blockers prevent timely patch |
+| **Medium/Low** | Next scheduled gstreamer-rs version bump | Roll into standard dependency update cycle; no expedited response required |
+
+**Critical CVE example**: A buffer overflow in `avdec_h264` parsing that crashes the media worker or leaks heap data would trigger a 7-day SLA. Response options:
+- Publish a patched gstreamer-rs / GStreamer version and update Cargo.lock.
+- If upstream patch is not available: temporarily revoke media plane lease (via E25 degradation ladder), marking surfaces as "media unavailable" until patch is published.
+
+**High CVE example**: A denial-of-service vector that causes the media worker to hang on malformed input would trigger a 30-day SLA. Patch and validate on the test media pipeline before promoting to production.
+
+### Owner & Escalation
+
+- **Owner**: Media plane operator (to be assigned at phase 1 closeout). Responsible for monitoring, triaging, and coordinating patches.
+- **Escalation path**: Any CVE blocking the SLA above escalates to the project lead and is tracked in the project's CVE backlog.
+- **Audit trail**: All responses logged in the media pipeline audit log (C17) with CVE ID, severity, response action, and patch date.
+
+### Cross-Reference
+
+- **Codec-level memory safety hardening**: See `hud-lezjj` (defense-in-depth sandboxing and subprocess isolation for codec workers), tracked as post-v2 work.
+- **Media plane degradation policy**: See E25 in the v2 signoff packet for the full graceful degradation ladder.
+
+---
+
 ## Sources
 
 - GStreamer homepage: https://gstreamer.freedesktop.org/
