@@ -1016,6 +1016,7 @@ async fn test_stage6_render_encode_p99_within_budget() {
                             background: Some(Rgba::new(0.08, 0.10, 0.18, 1.0)),
                             alignment: TextAlign::Start,
                             overflow: TextOverflow::Clip,
+                            color_runs: Box::default(),
                         }),
                     },
                 )
@@ -1170,6 +1171,7 @@ async fn test_layer1_pixel_readback_tile_color() {
                         background: Some(Rgba::new(0.10, 0.15, 0.30, 1.0)),
                         alignment: TextAlign::Start,
                         overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
                     }),
                     children: vec![],
                 },

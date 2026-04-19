@@ -69,6 +69,7 @@ fn portal_root(transcript: &str) -> (Node, Vec<Node>) {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
         }),
     };
     (root, vec![transcript_node])

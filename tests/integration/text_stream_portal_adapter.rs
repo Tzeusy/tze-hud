@@ -538,6 +538,7 @@ async fn set_tile_root_text(
                                                 b: 0.08,
                                                 a: 0.8,
                                             }),
+                                            color_runs: vec![],
                                         },
                                     )),
                                 }),

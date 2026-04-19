@@ -264,6 +264,7 @@ fn make_header_node() -> Node {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     }
 }
@@ -285,6 +286,7 @@ fn make_body_node(content: &str) -> Node {
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
         }),
     }
 }
