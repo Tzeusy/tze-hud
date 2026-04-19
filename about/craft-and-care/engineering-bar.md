@@ -40,6 +40,20 @@ Consolidated from RFCs. All times are p99 unless noted. Hardware-normalized per 
 
 A change that moves a metric closer to its budget ceiling (even while still passing) is a regression. Track trends, not just pass/fail.
 
+### D18 Media Budgets (v2 real-decode lane)
+
+The following thresholds apply to the dedicated self-hosted GPU runner nightly real-decode CI lane. Reference codecs are H.264 + VP9; reference streams are the fixed library checked into LFS. Source: signoff-packet D18.
+
+| Budget | Threshold | Notes |
+|--------|-----------|-------|
+| Glass-to-glass latency p50 | ≤ 150 ms | Measured end-to-end from capture to display |
+| Glass-to-glass latency p99 | ≤ 400 ms | Hard ceiling; regression if trend moves toward it |
+| Decode-drop rate | ≤ 0.5% | Frames dropped during decode under reference load |
+| Lip-sync drift | ≤ ±40 ms | AV offset; measured against reference stream timestamps |
+| Time-to-first-frame (TTFF) | ≤ 500 ms | From session media-admit to first decoded frame presented |
+
+These budgets are gated on the real-decode lane (nightly + label-gated on PRs via `run-real-decode`). Synthetic-only CI does not enforce them but reports trends. See D20 for the full CI cadence matrix.
+
 ## 3. Code Quality
 
 **Clippy.** `cargo clippy` must pass clean. Suppress with `#[allow(clippy::...)]` only with a comment explaining why the lint is wrong for this case.
@@ -62,6 +76,8 @@ Every code review checks:
 4. **Test coverage.** Does the PR include tests? Do the tests validate the right properties (invariants, not point values)?
 5. **Error handling.** Are new error variants documented with stable codes? Do error messages carry diagnostic context?
 6. **Documentation.** If the PR changes a public API or adds a crate, are docs updated?
+7. **Real-decode lane.** For any change touching the media pipeline: real-decode lane green on the GPU runner per D18 thresholds (label `run-real-decode` on PR or confirm nightly pass).
+8. **Device lane.** For any change touching device profiles, capability negotiation, or input handling: primary device lane green (1× iPhone, 1× Android, 1× Mac, 1× Windows, 1× Linux) per D19/D20 coverage requirements.
 
 PR merge requires: CI green, no unresolved review threads, approval present, branch up-to-date, no merge conflicts, no `.beads/` divergence. See `development.md` for the full six-condition guard.
 
@@ -88,3 +104,32 @@ PR merge requires: CI green, no unresolved review threads, approval present, bra
 **What not to document.** Internal implementation details, private helper functions, temporary workarounds. These change too fast and mislead future readers.
 
 **Rustdoc.** Every public type and function has a doc comment. Module-level docs explain the crate's role in the system and link to the relevant RFC/spec. Examples in doc comments must compile (`cargo test --doc`).
+
+## 8. v2 Release Gate — Tiered Issue Classification (D21)
+
+The following tier contents are the v2 release gate. Source: signoff-packet D21. Every issue discovered during v2 development or validation is classified into one of these tiers before a phase closeout or release tag proceeds.
+
+**Critical — always blocks release:**
+- Compositor hang or crash
+- Audit log gap (any missing mandatory audit event per C17)
+- Embodied session state-machine violation
+- Revocation completing in more than 1 second
+- Media escaping its sandboxed surface
+
+**Major — blocks unless waived by named approver (v2 tech lead + ≥1 external reviewer):**
+- p99 latency regression > 20% above D18 thresholds
+- Decode-drop rate > 1%
+- Recording artifact left unflushed on session close
+- Lip-sync drift > 50 ms
+
+**Minor — warning, does not block:**
+- Unit test flake rate < 1%
+- Non-primary device lane failure (cloud farm / long-tail breadth)
+- Documentation gap
+- Performance regression < 5% below budget ceiling
+
+Approver identity is recorded per-phase in the phase closeout report (`docs/reports/`). Waivers require a named approver's explicit sign-off in the PR thread.
+
+## 9. Validation Lane Co-tenancy
+
+The existing `mcp-stress-testing` harness (MCP HTTP endpoint stress test tool; see `openspec/specs/mcp-stress-testing/spec.md`) cohabits with the v2 media validation lane in Layer 3 of the validation framework. Both extend Layer 3 as complementary dimensions: `mcp-stress-testing` characterizes network-facing MCP endpoint latency and throughput; the v2 media lane characterizes real-decode pipeline performance against D18 budgets. The v2 `validation-operations` spec must not conflict with the existing Layer 3 MCP stress integration — share the Layer 4 artifact output conventions (`benchmarks/`) and the structured JSON report format already established by the `mcp-stress-testing` harness.
