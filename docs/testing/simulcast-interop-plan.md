@@ -222,15 +222,31 @@ run in the Linux container fleet.
 
 ### 5.3 Feature flag
 
-The test crate is guarded by a Cargo feature flag:
+The test crate is guarded by a Cargo feature flag. Since Playwright is a Node.js/Python
+library with no native Rust crate, the Cargo feature uses marker-based composition:
 
 ```toml
 [features]
-simulcast-interop = ["dep:playwright", "dep:webrtc"]
+simulcast-interop = ["dep:webrtc"]
+simulcast-interop-playwright = ["simulcast-interop"]  # no crate dep; signals CI to enable Node.js Playwright bridge
 ```
 
-This prevents the browser automation dependency from entering the main build
-graph before Phase 4.
+The `simulcast-interop-playwright` flag (with no dependency) signals the CI harness
+that the Node.js Playwright bridge subprocess (`playwright-bridge.js`) should be
+installed in the pre-step. This approach is documented in detail in
+`docs/ci/safari-simulcast-interop-runner.md` §4.3.1 (Approach A — Playwright as
+external subprocess).
+
+For the str0m fallback path (if invoked, §7), add a parallel feature:
+
+```toml
+simulcast-interop-str0m = ["simulcast-interop"]  # str0m transport layer
+simulcast-interop-str0m-playwright = ["simulcast-interop-str0m"]  # str0m + Playwright subprocess
+```
+
+Only one transport is active per CI lane (webrtc-rs or str0m); mixed-transport runs
+are not permitted. The feature flag presence signals the CI system which dependencies
+to configure.
 
 ---
 
@@ -518,20 +534,23 @@ etc.) are written against the trait and are transport-agnostic.
 
 #### 7.6.3 Feature flags
 
-Extend the existing feature flag (§5.3):
+Extend the existing feature flag scheme from §5.3. The webrtc-rs feature flags are
+defined in §5.3; for the str0m fallback path, add:
 
 ```toml
 [features]
-# Existing flag — enables browser automation dependencies
-simulcast-interop = ["dep:playwright", "dep:webrtc"]
+# str0m transport layer (mutually exclusive with webrtc-rs flag in any given CI lane)
+simulcast-interop-str0m = ["dep:str0m"]
 
-# New flag — enables str0m transport layer (mutually exclusive with webrtc-rs flag)
-simulcast-interop-str0m = ["dep:playwright", "dep:str0m"]
+# str0m + Playwright subprocess for browser automation
+simulcast-interop-str0m-playwright = ["simulcast-interop-str0m"]
 ```
 
 The CI matrix (§5.2) adds a second lane when the str0m fallback is invoked:
-run `--features simulcast-interop-str0m` in place of `--features simulcast-interop`.
-Only one transport is tested per lane; mixed runs are not permitted (per §6.3).
+run with `--features simulcast-interop-str0m-playwright` in place of
+`--features simulcast-interop-playwright`. Only one transport is tested per lane;
+mixed runs are not permitted (per §6.3). The Playwright subprocess bridge remains
+unchanged between transport layers.
 
 #### 7.6.4 GStreamer bridge delta
 
