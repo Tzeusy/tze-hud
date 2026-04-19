@@ -70,9 +70,10 @@ notifications.
 
 **It never keeps going when the budget says stop.** The degradation ladder governs
 media explicitly: framerate → resolution → second stream → freeze-and-no-input →
-tear down media (keep session) → revoke embodied → disconnect. The order is doctrine,
-not implementation preference. Agents may not initiate their own degradation; the
-runtime degrades and reports.
+tear down media (keep session) → revoke embodied → disconnect. (This list shows the
+media-plane-specific subset; see failure.md E25 for the complete 10-step canonical
+ladder.) The order is doctrine, not implementation preference. Agents may not initiate
+their own degradation; the runtime degrades and reports.
 
 **It never records content silently.** Recording is a separate capability, a separate
 operator grant, and a separate doctrine concern (see the forthcoming `recording-ethics.md`).
