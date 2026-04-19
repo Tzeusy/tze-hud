@@ -26,7 +26,7 @@
 | Firefox IPv6 ICE behavior | **Well-specified** — pref-controlled; defaults sane for production | Low |
 | Safari macOS IPv6 ICE behavior | **Highest risk** — conservative gather, HAPPY_EYEBALLS-influenced timing, strong IPv4 preference | Medium; verify in phase 4b test matrix |
 | LiveKit Cloud TURN/relay IPv6 | **Supported** — Anycast TURN infra supports IPv6 STUN/TURN | Low |
-| Cloudflare Calls relay IPv6 | **Supported** — Cloudflare Anycast is natively dual-stack | Low |
+| Cloudflare Calls relay IPv6 | **Partial** — Anycast for client-to-server; relay addresses are IPv4-only (RFC 6156 not supported per vendor docs) | Medium for IPv6-only/NAT64 clients |
 | WHIP signaling + IPv6 candidates | **Protocol-agnostic** — WHIP is HTTP signaling; ICE candidates in SDP body; no IPv6-specific exposure | Low |
 
 **Gate recommendation:** Phase 4b cloud-relay **SHALL NOT ship** until:
@@ -195,15 +195,18 @@ LiveKit Cloud (the recommended C15 vendor per `docs/audits/webrtc-sfu-fallback-a
 
 ### 4.3 Cloudflare Calls / Realtime IPv6 path
 
-Cloudflare Calls uses Cloudflare's Anycast network, which is natively dual-stack. All Cloudflare infrastructure supports IPv6 by default.
+Cloudflare Calls uses Cloudflare's Anycast network, which is natively dual-stack for client-to-server connectivity. However, the TURN relay layer has a documented limitation.
 
 | Aspect | Status |
 |---|---|
-| WHIP/WHEP endpoint IPv6 | Cloudflare's WHIP/WHEP API endpoints are dual-stack |
-| TURN relay IPv6 | Cloudflare's global network handles IPv6 relay transparently; no opt-in required |
-| ICE candidate IPv6 srflx | Returned normally for IPv6-capable clients |
+| WHIP/WHEP endpoint IPv6 | Cloudflare's WHIP/WHEP API endpoints are dual-stack; clients can connect over IPv4 or IPv6 |
+| TURN relay IPv6 — client-to-server | Clients can reach the TURN server over IPv6 (Cloudflare Anycast serves both address families) |
+| TURN relay IPv6 — relay addresses issued | **IPv4-only.** Cloudflare Realtime TURN does not issue relay addresses in IPv6 per RFC 6156. The `REQUESTED-ADDRESS-FAMILY` STUN attribute is ignored; only IPv4 relay addresses are allocated. (Source: Cloudflare Realtime TURN FAQ) |
+| ICE candidate IPv6 srflx | Returned for IPv6-capable clients connecting to a TURN server over IPv6 — the srflx candidate reflects the IPv6 address, but the relay candidate will still be IPv4 |
 
-**Cloudflare verdict:** Low risk for IPv6. Cloudflare's Anycast design makes IPv6 support inherent.
+**Cloudflare verdict:** Medium risk for IPv6-only clients. On a dual-stack network, the TURN relay candidate will be IPv4, which is generally fine — most implementations can relay over IPv4 even on a dual-stack client. However, on an IPv6-only client without NAT64 access to IPv4 relay addresses, the Cloudflare TURN relay may not be reachable as a relay endpoint because the returned relay address (IPv4) is unreachable from an IPv6-only host. This is a gap for the phase 4b NAT64 scenario.
+
+**Impact on G5 (NAT64 posture):** Cloudflare Calls TURN cannot serve as the relay for an IPv6-only (NAT64) client if the NAT64 gateway does not translate the IPv4 relay address back to a synthesized IPv6 address. This adds nuance to the phase 4b deployment posture for IPv6-only ISPs.
 
 ---
 
@@ -281,7 +284,7 @@ These items are out of scope for this spike and should be tracked as separate be
 | Firefox IPv6 ICE | **Standard behaviour** — well-specified, low risk |
 | Safari macOS IPv6 ICE | **Highest risk** — conservative gather, IPv4 preference, HAPPY_EYEBALLS influence |
 | LiveKit Cloud IPv6 relay | **Supported** — coturn-based TURN, dual-stack endpoints |
-| Cloudflare Calls IPv6 relay | **Supported** — Anycast, natively dual-stack |
+| Cloudflare Calls IPv6 relay | **Partial** — Anycast dual-stack for client-to-server; relay addresses issued as IPv4-only (RFC 6156 not supported) |
 | WHIP + IPv6 candidates | **No gap** — protocol-agnostic; verify in hud-amf17 canary |
 | Phase 4b ship criteria met | **Not yet** — Safari validation pending; #774 open for v0.20 path |
 
