@@ -113,7 +113,7 @@ The dialog is presented through the system shell (RFC 0007) on the runtime displ
 - A **"Grant"** action and a **"Deny"** action.
 - A **"Remember for 7 days"** checkbox (default: unchecked; operator opt-in only).
 
-The dialog MUST be rendered in the chrome layer (priority 0) so it cannot be occluded by agent tiles. It MUST NOT be dismissable by the agent whose request triggered it.
+The dialog MUST be rendered in the chrome layer (priority 0) so it cannot be occluded by agent tiles. It MUST NOT be dismissible by the agent whose request triggered it.
 
 **Bundled presets note (C13):** The signoff packet references "household demo" and "cloud-collab" presets as opinionated bundles. Preset application is a configuration concern (which C13 capabilities are pre-enabled in the deployment config) and does not bypass the per-session dialog. A preset only sets the deployment-level `capabilities.<token>.enabled` flag; the per-session dialog still fires on first use within that deployment.
 
@@ -167,7 +167,7 @@ pub struct CapabilityRememberRecord {
     pub granted_at_us: u64,
 
     /// When the remember record expires (UTC microseconds).
-    /// Always = granted_at_us + 7 * 24 * 60 * 60 * 1_000_000.
+    /// Always = granted_at_us + 7 * 24 * 60 * 60 * 1000000.
     pub expires_at_us: u64,
 
     /// Whether this record has been explicitly revoked before natural expiry.
@@ -187,11 +187,11 @@ pub struct CapabilityRememberRecord {
 
 The remember record expires automatically 7 days after `granted_at_us`. After expiry, the next `LeaseRequest` for the capability from that agent triggers the dialog again. Expiry is evaluated at request time; no background cleanup is required (expired records may linger in the store but are ignored on evaluation).
 
-**No renewal.** An expired remember record cannot be renewed by the agent. The operator must re-grant through the dialog to create a new record.
+**No renewal.** An expired remember record cannot be renewed by the agent. The operator MUST re-grant through the dialog to create a new record.
 
 #### A3.4 Revocation
 
-An operator principal with grant authority (RFC 0009 A1.3: `owner` or `admin` role) may revoke a remember record at any time before its natural expiry. Revocation is immediate:
+An operator principal with grant authority (RFC 0009 A1.3: `owner` or `admin` role) MAY revoke a remember record at any time before its natural expiry. Revocation is immediate:
 
 1. The `CapabilityRememberRecord.revoked` field is set to `true`.
 2. The `revoked_by` and `revoked_at_us` fields are populated.
@@ -363,7 +363,7 @@ A new configuration parameter is added to the parameter table (RFC 0008 SS11):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `capability_dialog_timeout_ms` | 30,000 (30 s) | How long the runtime waits for an operator response to the capability dialog before denying the request with `CAPABILITY_DIALOG_TIMEOUT`. |
+| `capability_dialog_timeout_ms` | 30000 (30s) | How long the runtime waits for an operator response to the capability dialog before denying the request with `CAPABILITY_DIALOG_TIMEOUT`. |
 
 ---
 
@@ -375,7 +375,7 @@ The capability dialog requires an operator action. Not all operator roles have a
 |--------------|-----------------|
 | `owner` | May grant any C13 capability in the dialog. "Remember for 7 days" option is available. |
 | `admin` | May grant any C13 capability in the dialog. "Remember for 7 days" option is available. |
-| `member` | The dialog is **not shown to a `member` operator** for C13 capabilities. A `member` cannot grant new capabilities (RFC 0009 A1.3). If the only operator present at the screen is a `member`, the dialog times out and the request is denied with `CAPABILITY_DIALOG_TIMEOUT`. The timeout message MUST indicate that a `member`-role operator cannot grant this capability and that an `owner` or `admin` is required. |
+| `member` | The dialog is **not shown to a `member` operator** for C13 capabilities. A `member` cannot grant new capabilities (RFC 0009 A1.3). If the only operator present at the screen is a `member`, the dialog times out and the request is denied with `CAPABILITY_DIALOG_TIMEOUT`. The timeout message MUST indicate that a `member` operator cannot grant this capability and that an `owner` or `admin` is required. |
 | `guest` | A `guest` cannot grant new capabilities. Same behavior as `member`: dialog is not shown; request times out with `CAPABILITY_DIALOG_TIMEOUT`. |
 
 **Escalation path:** When the runtime would show the dialog but no operator with `owner` or `admin` role is present, the runtime SHOULD show a notification that an owner/admin authorization is needed (using the system notification mechanism, RFC 0007 SS6) rather than silently timing out. This notification is informational only; the `LeaseRequest` is still denied on timeout.
