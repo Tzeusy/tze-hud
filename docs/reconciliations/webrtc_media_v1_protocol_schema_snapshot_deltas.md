@@ -98,10 +98,17 @@ WM-S2a selected the session-envelope extension path. WM-S2b makes that concrete:
 
 ### `session.proto` deltas
 
+> **Field number correction (supersedes original 6/7/8 numbering):**
+> `ZonePublish.element_id` was added at field 6 by hud-bs2q.3 after this
+> document was authored. The extension fields below therefore start at 7, not 6.
+> The RFC 0005 amendment (`about/legends-and-lore/rfcs/reviews/0005-amendment-media-signaling.md`,
+> §"Implementation Notes for hud-ora8.1.23") is the authoritative source for
+> this field numbering. Do not reuse field 6.
+
 1. Keep `ZonePublish` at field `25`; extend message fields additively:
-- `6`: `uint64 present_at_wall_us` (`0` = immediate)
-- `7`: `uint64 expires_at_wall_us` (`0` = no expiry)
-- `8`: `string content_classification` (empty = unset)
+- `7`: `uint64 present_at_wall_us` (`0` = immediate)
+- `8`: `uint64 expires_at_wall_us` (`0` = no expiry)
+- `9`: `string content_classification` (empty = unset)
 2. Define the new `MediaIngress*` messages listed above.
 3. Add explicit oneof comments + `reserved` declarations for any removed
    experimental tags/names during rollout to prevent wire reuse.
