@@ -27,7 +27,7 @@ The four load-bearing observations:
 
 ### 1. Agents already live outside the compositor's address space
 
-`architecture.md` §"The screen is sovereign" (line 46) is unambiguous:
+`RFC 0002 §1.1 "Single-Process Model"` (line 46) is unambiguous (the "screen is sovereign" section of `architecture.md` also establishes this principle at the doctrine level):
 
 > tze_hud runs as a single OS process. Agents are external gRPC clients;
 > they do not share the compositor's address space. The compositor is the
@@ -89,10 +89,18 @@ And line 414:
 The RFC reserves *in-process* worker threads inside the compositor
 process, communicating with the compositor thread via the
 `DecodedFrameReady` channel (§2.6). It nowhere reserves subprocess
-isolation. E24 simply layers tokio-task-based scheduling and a budget
-watchdog on top of that already-ratified shape. Pivoting to subprocess
-isolation would *contradict* RFC 0002 §2.8 — not extend it — and would
-require re-opening v1's runtime-kernel design.
+isolation. Pivoting to subprocess isolation would *contradict* RFC
+0002 §2.8 — not extend it — and would require re-opening v1's
+runtime-kernel design.
+
+One nuance worth noting: RFC 0002 §2.8 says GStreamer decode threads are
+"neither Tokio tasks nor `std::thread`s owned by the compositor" — those
+are GStreamer-managed. E24's Tokio-task layer sits *above* that: the
+budget watchdog and session-attribution coordinator are compositor-owned
+Tokio tasks that *manage* GStreamer pipelines as a black box (via the
+Rust GStreamer API), consistent with §2.8's defined boundary. The Tokio
+tasks do not replace or own the GStreamer internal thread pool; they
+orchestrate pipeline lifecycle and enforce budgets on top of it.
 
 ### 4. The capability/budget/watchdog mechanism *is* the isolation enforcement
 
