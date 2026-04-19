@@ -56,9 +56,9 @@ BG_RGBA = (0.0, 0.0, 0.0, 0.30)              # light portal frame only
 HEADER_BG_RGBA = (0.0, 0.0, 0.0, 0.50)       # header slightly denser than frame
 DIVIDER_RGBA = (1.0, 1.0, 1.0, 0.10)
 FOOTER_BG_RGBA = (0.0, 0.0, 0.0, 0.50)
-# Input + output panes: black at 95% opacity.
-INPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
-OUTPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
+# Input + output panes: black at 90% opacity.
+INPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.90)
+OUTPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.90)
 COMPOSER_BG_RGBA = (1.0, 1.0, 1.0, 0.05)
 COMPOSER_BORDER_RGBA = (1.0, 1.0, 1.0, 0.12)
 SUBMIT_HINT_RGBA = (0.54, 0.60, 0.68, 0.90)

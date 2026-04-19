@@ -6069,15 +6069,10 @@ impl Compositor {
                     return Some([0.15, 0.15, 0.25, tile.opacity]);
                 }
                 NodeData::HitRegion(_) => {
-                    // Check local state for visual feedback
-                    if let Some(state) = scene.hit_region_states.get(&root_id) {
-                        if state.pressed {
-                            return Some([0.4, 0.7, 1.0, tile.opacity]); // Active blue
-                        } else if state.hovered {
-                            return Some([0.3, 0.5, 0.8, tile.opacity]); // Hover blue
-                        }
-                    }
-                    return Some([0.2, 0.3, 0.5, tile.opacity]); // Default hit region
+                    // HitRegion is an invisible interaction primitive. Its visible
+                    // footprint is supplied by sibling content nodes; the runtime
+                    // only paints local-feedback tints on hover/press (RFC 0004 §6.5).
+                    return None;
                 }
                 NodeData::StaticImage(_) => {
                     // Tile background for image tiles: near-black with slight tint
@@ -6166,29 +6161,42 @@ impl Compositor {
                 }
             }
             NodeData::HitRegion(hr) => {
-                // Render hit region with local state feedback
-                let color = if let Some(state) = scene.hit_region_states.get(&node_id) {
-                    if state.pressed {
-                        [0.4, 0.7, 1.0, 1.0]
-                    } else if state.hovered {
-                        [0.3, 0.5, 0.8, 1.0]
-                    } else {
-                        [0.2, 0.3, 0.5, 1.0]
-                    }
-                } else {
-                    [0.2, 0.3, 0.5, 1.0]
+                // HitRegion is an invisible interaction primitive. Default (no
+                // state) paints nothing so siblings show through. Hover + press
+                // emit sibling-over tints per RFC 0004 §6.5:
+                //   hover:   add 0.1 white overlay (lightening)
+                //   pressed: multiply by 0.85 (~15% darken; approximated with
+                //            a black overlay at 0.15 alpha against the sibling)
+                // Per-node overrides come from `local_style.hover_tint` /
+                // `pressed_tint` when set.
+                let state = scene.hit_region_states.get(&node_id);
+                let tint = match state {
+                    Some(s) if s.pressed => Some(
+                        hr.local_style
+                            .pressed_tint
+                            .map(|c| c.to_array())
+                            .unwrap_or([0.0, 0.0, 0.0, 0.15]),
+                    ),
+                    Some(s) if s.hovered => Some(
+                        hr.local_style
+                            .hover_tint
+                            .map(|c| c.to_array())
+                            .unwrap_or([1.0, 1.0, 1.0, 0.1]),
+                    ),
+                    _ => None,
                 };
-
-                let verts = rect_vertices(
-                    tile.bounds.x + hr.bounds.x - scroll_x,
-                    tile.bounds.y + hr.bounds.y - scroll_y,
-                    hr.bounds.width,
-                    hr.bounds.height,
-                    sw,
-                    sh,
-                    self.gpu_color_raw(color),
-                );
-                vertices.extend_from_slice(&verts);
+                if let Some(color) = tint {
+                    let verts = rect_vertices(
+                        tile.bounds.x + hr.bounds.x - scroll_x,
+                        tile.bounds.y + hr.bounds.y - scroll_y,
+                        hr.bounds.width,
+                        hr.bounds.height,
+                        sw,
+                        sh,
+                        self.gpu_color_raw(color),
+                    );
+                    vertices.extend_from_slice(&verts);
+                }
             }
             NodeData::StaticImage(img) => {
                 // If a GPU texture is cached for this resource, emit a textured

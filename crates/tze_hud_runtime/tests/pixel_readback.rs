@@ -679,34 +679,24 @@ async fn test_color_13_three_agents_contention_high_prio_tile() {
 /// overlay_passthrough_regions: passthrough overlay on top of a HitRegion content tile.
 ///
 /// The scene has two tiles:
-/// - Content tile (z=1): full-display HitRegion — renders with compositor default
-///   HitRegion color [0.2, 0.3, 0.5, 1.0] linear → sRGB ≈ [124, 148, 188, 255].
+/// - Content tile (z=1): full-display HitRegion — invisible (no rect emitted;
+///   HitRegion is a pure interaction primitive, RFC 0004 §6.5).
 /// - Overlay tile (z=20): passthrough SolidColor [0.0, 0.0, 0.0, 0.15] — slight
-///   darkening drawn on top via alpha blending.
+///   darkening drawn on top of the clear background via alpha blending.
 ///
-/// Alpha blending in LINEAR space (correct for Rgba8UnormSrgb — wgpu blends in
-/// linear light before encoding to sRGB):
-/// blended_linear = 0.15 * [0, 0, 0] + 0.85 * [0.2, 0.3, 0.5] = [0.17, 0.255, 0.425]
-/// → sRGB encode → ≈ [115, 138, 174].
-///
-/// NOTE: llvmpipe (used in headless CI) has a known quirk where it blends
-/// Rgba8UnormSrgb in sRGB space rather than linear space, producing
-/// ≈ [105, 127, 160] instead. The tolerance below is widened to 15 per channel
-/// to accommodate this platform difference while keeping the expected value
-/// correct for real GPU hardware.
+/// Background clear: linear (0.05, 0.05, 0.10).  With no content tile on top,
+/// the overlay blends directly against it in LINEAR space:
+/// blended_linear = 0.15 * [0, 0, 0] + 0.85 * [0.05, 0.05, 0.10]
+///                = [0.0425, 0.0425, 0.085]
+/// → sRGB encode → ≈ [58, 58, 82].
 ///
 /// WHEN overlay_passthrough_regions rendered
-/// THEN (400, 300): HitRegion base darkened by overlay ≈ [115, 138, 174, 255]
-///      within CI_LLVMPIPE_BLEND_TOLERANCE=15.
+/// THEN (400, 300): clear background darkened by overlay ≈ [58, 58, 82, 255].
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_14_overlay_passthrough_regions_near_background() {
-    // HitRegion default [0.2, 0.3, 0.5] linear → sRGB ≈ [124, 148, 188].
-    // Overlay [0, 0, 0, 0.15]: linear-space blend gives [0.17, 0.255, 0.425] linear
-    // → sRGB ≈ [115, 138, 174]. (llvmpipe quirk produces ~[105, 127, 160] instead.)
-    const EXPECTED: [u8; 4] = [115, 138, 174, 255];
-    // Widened tolerance to cover the ~14-channel gap between correct linear-space
-    // blending ([115, 138, 174]) and the llvmpipe sRGB-space quirk (~[105, 127, 160]).
-    const CI_LLVMPIPE_BLEND_TOLERANCE: u8 = 15;
+    // Clear (0.05, 0.05, 0.10) linear × 0.85 → (0.0425, 0.0425, 0.085) linear
+    // → sRGB ≈ (58, 58, 82).
+    const EXPECTED: [u8; 4] = [58, 58, 82, 255];
 
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::new();
@@ -716,15 +706,15 @@ async fn test_color_14_overlay_passthrough_regions_near_background() {
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
 
-    // HitRegion content tile (z=1) darkened by semi-transparent black overlay (z=20).
+    // HitRegion content tile is invisible; overlay darkens the clear bg only.
     HeadlessSurface::assert_pixel_color(
         &pixels,
         SCENE_W,
         400,
         300,
         EXPECTED,
-        CI_LLVMPIPE_BLEND_TOLERANCE,
-        "overlay_passthrough_regions: (400,300) HitRegion content darkened by overlay",
+        CI_BLEND_TOLERANCE,
+        "overlay_passthrough_regions: (400,300) clear bg darkened by overlay",
     )
     .unwrap_or_else(|e| panic!("{e}"));
 }
@@ -804,19 +794,18 @@ async fn test_color_16_privacy_redaction_mode_public_tile() {
 
 /// chatty_dashboard_touch: 50 HitRegionNode tiles in 5×10 grid.
 ///
-/// The compositor renders HitRegion tiles with a default blue-ish background:
-/// [0.2, 0.3, 0.5, 1.0] linear → sRGB ≈ [124, 148, 188, 255].
+/// HitRegion is a pure interaction primitive — it paints nothing in its default
+/// state (RFC 0004 §6.5).  With all 50 tiles invisible, sampled points show the
+/// compositor background clear only: linear (0.05, 0.05, 0.10) → sRGB BG_SRGB.
 ///
-/// Grid layout on 1920×1080: 5 cols × 10 rows, each cell 384×108.
-/// Point (400, 300) is in column 1, row 2 (0-indexed) — inside a tile.
+/// Grid layout on 1920×1080: 5 cols × 10 rows, each cell 384×108.  (400, 300) is
+/// inside a HitRegion tile but the tile draws nothing, so the pixel reports the
+/// background clear colour.
 ///
 /// WHEN chatty_dashboard_touch rendered
-/// THEN (400,300): HitRegion default colour ≈ [124, 148, 188, 255] within CI_BLEND_TOLERANCE.
+/// THEN (400,300): background clear ≈ BG_SRGB within CI_SOLID_TOLERANCE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_17_chatty_dashboard_touch_transparent_tiles() {
-    // HitRegion default color: [0.2, 0.3, 0.5] linear → sRGB ≈ [124, 148, 188].
-    const EXPECTED_HIT_REGION: [u8; 4] = [124, 148, 188, 255];
-
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::new();
     let (scene, _spec) = registry
@@ -825,15 +814,15 @@ async fn test_color_17_chatty_dashboard_touch_transparent_tiles() {
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
 
-    // (400, 300) is inside a HitRegion tile — renders with compositor default HitRegion color.
+    // HitRegion tiles are invisible — pixel is the compositor clear colour.
     HeadlessSurface::assert_pixel_color(
         &pixels,
         SCENE_W,
         400,
         300,
-        EXPECTED_HIT_REGION,
-        CI_BLEND_TOLERANCE,
-        "chatty_dashboard_touch: (400,300) inside HitRegion tile, default blue-ish color",
+        BG_SRGB,
+        CI_SOLID_TOLERANCE,
+        "chatty_dashboard_touch: (400,300) HitRegion tiles invisible; bg clear shows",
     )
     .unwrap_or_else(|e| panic!("{e}"));
 }
