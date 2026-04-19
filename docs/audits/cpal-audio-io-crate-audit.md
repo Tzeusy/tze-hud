@@ -37,7 +37,7 @@ This audit evaluates `cpal` (the `RustAudio/cpal` crate) as the audio I/O layer 
 | Crate | `cpal` |
 | Repository | https://github.com/RustAudio/cpal |
 | Current version | 0.17.3 |
-| Release date | 2026-02-18 |
+| Release date | 2025-02-18 |
 | MSRV | Rust 1.78 (bumped in 0.17.2) |
 | License | Apache-2.0 |
 | Stars | ~3,700 |
@@ -152,7 +152,7 @@ When the `audio_thread_priority` feature is enabled, cpal elevates the audio thr
 
 | Metric | Observation |
 |---|---|
-| Last release | 0.17.3 — 2026-02-18 (2 months ago) |
+| Last release | 0.17.3 — 2025-02-18 (~14 months ago) |
 | Release cadence | 3–5 releases per year, accelerating in late 2024–2025 |
 | Active issues | Several longstanding platform-specific bugs (oldest: 2019–2020); recent issues filed April 2026 |
 | Contributor activity | Regular PRs from multiple contributors; not a single-maintainer project |
