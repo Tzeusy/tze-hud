@@ -9,6 +9,7 @@
 #   Gate 3 — cross-pkg-config resolves gstreamer-1.0
 #   Gate 4 — cargo-ndk link probe (aarch64-linux-android)
 #   Gate 5 — cargo-ndk link probe (x86_64-linux-android)
+#   Gate 6 — HAVE_NDKMEDIA active in libgstandroidmedia.so (hud-04b00)
 #
 # Gating policy: manual dispatch + PRs touching android/* or docs/ci/*.
 # Does NOT run on every push — the GStreamer SDK download is ~90s per ABI and
@@ -16,6 +17,7 @@
 #
 # References:
 #   docs/ci/android-gstreamer-bootstrap.md — full spike doc (hud-685ha, PR #539)
+#   docs/reports/gstreamer-1.26-ndk-mediacodec-audit.md — NDK path audit (hud-fts60, PR #540)
 #   .github/workflows/ci.yml               — main CI conventions
 
 name: Android GStreamer Bootstrap
@@ -305,6 +307,76 @@ jobs:
 
           echo "PASS: cargo-ndk linked gstreamer-full for x86_64-linux-android"
 
+      # ── Gate 6: HAVE_NDKMEDIA active in libgstandroidmedia.so ────────────────
+      #
+      # Strategy: inspect libgstandroidmedia.so for symbols that are compiled in
+      # only when HAVE_NDKMEDIA=1 is defined at build time (from meson.build):
+      #
+      #   if cc.check_header('media/NdkMediaCodec.h')
+      #     androidmedia_sources += ndk_sources
+      #     extra_cargs += [ '-DHAVE_NDKMEDIA' ]
+      #   endif
+      #
+      # The NDK path compiles gstamc-codec-ndk.c, which defines internal wrapper
+      # functions like gst_amc_codec_ndk_new, gst_amc_codec_ndk_start, etc.
+      # These symbols are present in the .so even though they are not exported
+      # (they can be found via readelf -s or nm with the --defined-only flag).
+      #
+      # Additionally, since libmediandk.so is accessed via dlopen/dlsym, the
+      # string "AMediaCodec_createCodecByName" appears in the .so's .rodata
+      # section — a reliable secondary indicator that the NDK path is active.
+      #
+      # References:
+      #   gstamc-codec-ndk.c: subprojects/gst-plugins-bad/sys/androidmedia/ndk/
+      #   hud-fts60 audit: docs/reports/gstreamer-1.26-ndk-mediacodec-audit.md
+      - name: "Gate 6 — HAVE_NDKMEDIA active in libgstandroidmedia.so"
+        run: |
+          PLUGIN="$GSTREAMER_ROOT_ANDROID/arm64/lib/gstreamer-1.0/libgstandroidmedia.so"
+
+          echo "Inspecting $PLUGIN for HAVE_NDKMEDIA symbols..."
+
+          # Primary check: look for NDK codec wrapper symbols from gstamc-codec-ndk.c.
+          # These only exist when HAVE_NDKMEDIA=1 at build time.
+          # We accept either the C name or the mangled form (T = defined text symbol).
+          NDK_SYMS=$(readelf -s --wide "$PLUGIN" 2>/dev/null \
+            | grep -E 'gst_amc_codec_ndk|gst_amc_format_ndk' | head -5 || true)
+
+          if [ -n "$NDK_SYMS" ]; then
+            echo "PASS (primary): NDK codec wrapper symbols found in libgstandroidmedia.so:"
+            echo "$NDK_SYMS"
+          else
+            echo "Primary symbol check found no gst_amc_codec_ndk_* symbols."
+            echo "Falling back to secondary check (dlsym string 'AMediaCodec_createCodecByName' in .rodata)..."
+
+            # Secondary check: the dlsym target string is embedded in .rodata when
+            # the NDK path is compiled in. strings(1) is available on ubuntu-latest.
+            DLSYM_STR=$(strings "$PLUGIN" 2>/dev/null \
+              | grep -F 'AMediaCodec_createCodecByName' || true)
+
+            if [ -n "$DLSYM_STR" ]; then
+              echo "PASS (secondary): dlsym string 'AMediaCodec_createCodecByName' found in binary."
+              echo "  => HAVE_NDKMEDIA is active; per-frame NDK codec path is compiled in."
+            else
+              echo ""
+              echo "FAIL: Neither NDK codec wrapper symbols nor the AMediaCodec_createCodecByName"
+              echo "dlsym string were found in libgstandroidmedia.so."
+              echo ""
+              echo "This means HAVE_NDKMEDIA was NOT defined at build time:"
+              echo "  - The prebuilt SDK may have been built without NdkMediaCodec.h in the NDK headers."
+              echo "  - All MediaCodec operations will go through JNI, not the AMediaCodec* C API."
+              echo "  - Per-frame JNI overhead reduction (MR #4115 / hud-fts60) is NOT active."
+              echo ""
+              echo "Resolution: verify GStreamer SDK version (must be >=1.24) and NDK API level"
+              echo "(must be >=21, which provides <media/NdkMediaCodec.h>)."
+              echo "See docs/reports/gstreamer-1.26-ndk-mediacodec-audit.md for details."
+              exit 1
+            fi
+          fi
+
+          echo ""
+          echo "HAVE_NDKMEDIA verification complete."
+
+
       # ── Summary ───────────────────────────────────────────────────────────────
       - name: Bootstrap gate summary
         run: |
@@ -312,5 +384,6 @@ jobs:
           echo "GStreamer version : ${{ env.GST_VERSION }}"
           echo "NDK version       : ${{ env.NDK_VERSION }}"
           echo "API level         : ${{ env.ANDROID_API_LEVEL }}"
-          echo "All 5 gates passed — Android GStreamer CI bootstrap validated."
+          echo "All 6 gates passed — Android GStreamer CI bootstrap validated."
+          echo "Gate 6 confirms HAVE_NDKMEDIA is active: per-frame NDK codec path enabled."
           echo "Pre-phase-3 gate is GREEN. Phase 3 Android bead may open."

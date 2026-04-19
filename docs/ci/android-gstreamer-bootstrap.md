@@ -331,6 +331,11 @@ GStreamer bootstrap. It is not yet added to `.github/workflows/ci.yml`. Phase 3
 kickoff is the correct time to integrate it (or add as a separate
 `.github/workflows/android-bootstrap.yml`).
 
+**Note**: As of PR #541 (hud-dr5yf) + PR #542 (hud-04b00), the workflow file
+`.github/workflows/android-bootstrap.yml` exists and includes Gates 1–6 (see
+Section 6 for Gate 6 HAVE_NDKMEDIA details). The sketch below reflects the original
+5-gate design from hud-685ha. The live file is the authoritative source.
+
 ```yaml
 # .github/workflows/android-bootstrap.yml
 # Pre-phase-3 validation: Android GStreamer SDK CI bootstrap gate
@@ -725,7 +730,73 @@ not resolve to a specific revision and may silently install a different patch.
 
 ---
 
-## 6. Pre-Phase-3 Gate Checklist
+## 6. Gate 6: HAVE_NDKMEDIA Verification
+
+**Added in**: hud-04b00 (PR #542), discovered follow-up from hud-fts60 (PR #540).
+
+### Why this gate exists
+
+GStreamer 1.24 shipped MR #4115 (NDK MediaCodec path). When `HAVE_NDKMEDIA=1` is
+defined at build time, `amcvideodec` uses `AMediaCodec*` C API calls for per-frame
+codec operations (dequeue, queue, start, stop) instead of JNI. This reduces per-frame
+JNI overhead on high-frame-rate streams.
+
+However, `HAVE_NDKMEDIA` is only defined if the meson build system detects
+`<media/NdkMediaCodec.h>` in the NDK headers at SDK build time:
+
+```meson
+if cc.check_header('media/NdkMediaCodec.h')
+  androidmedia_sources += ndk_sources
+  extra_cargs += [ '-DHAVE_NDKMEDIA' ]
+endif
+```
+
+The prebuilt GStreamer Android SDK tarballs from freedesktop.org should activate
+HAVE_NDKMEDIA automatically for NDK API level ≥21 (which exposes NdkMediaCodec.h).
+But this needs explicit verification: if it is absent, all MediaCodec operations go
+through JNI with no observable error, and phase 3 would miss the per-frame NDK
+optimization without knowing it.
+
+### Verification strategy
+
+Since `libmediandk.so` is accessed via `dlopen`/`dlsym` at runtime (not direct
+dynamic linkage), a `readelf -d` check for DT_NEEDED entries will not show it.
+Instead, the CI gate inspects the compiled symbol content of `libgstandroidmedia.so`:
+
+**Primary check**: `readelf -s --wide libgstandroidmedia.so | grep gst_amc_codec_ndk`
+
+The functions defined in `ndk/gstamc-codec-ndk.c` (e.g., `gst_amc_codec_ndk_new`,
+`gst_amc_codec_ndk_start`) are compiled into the `.so` as defined symbols when
+`HAVE_NDKMEDIA=1`. They are absent if `HAVE_NDKMEDIA` was not set.
+
+**Secondary check (fallback)**: `strings libgstandroidmedia.so | grep AMediaCodec_createCodecByName`
+
+Because the NDK path uses `dlsym("AMediaCodec_createCodecByName")`, this string
+literal is embedded in the binary's `.rodata` section when the NDK path is
+compiled in. Its absence means the NDK path is not present.
+
+### What to do if Gate 6 fails
+
+If neither check passes:
+
+1. Verify the GStreamer SDK version is ≥1.24. Older versions predate MR #4115.
+2. Verify the SDK tarball ABI. The per-ABI tarballs (`arm64`, `x86_64`) should
+   expose NdkMediaCodec.h for API level ≥21; the universal tarball occasionally
+   has different include path layouts.
+3. Check if the prebuilt was built with an NDK that includes `<media/NdkMediaCodec.h>`.
+   NDK r21+ provides this header for API 21+. NDK r16 and earlier do not.
+4. As a workaround, rebuild the SDK from source with Cerbero using NDK r27, which
+   is guaranteed to expose NdkMediaCodec.h for API 28.
+
+### Important: JNI bootstrap constraint unchanged
+
+`HAVE_NDKMEDIA` being active does **not** eliminate the `gst_android_init` /
+`JNI_OnLoad` bootstrap requirement. Codec enumeration and surface-to-ANativeWindow
+conversion still use JNI. See Section 5.3 and `docs/reports/gstreamer-1.26-ndk-mediacodec-audit.md`.
+
+---
+
+## 7. Pre-Phase-3 Gate Checklist
 
 The following items must ALL pass before the phase 3 Android implementation bead
 opens. Each item maps to a CI gate in the workflow above (Section 4) or to an
@@ -742,24 +813,28 @@ explicit manual verification step.
 | 7 | Rust targets `aarch64-linux-android` and `x86_64-linux-android` installed | CI: rust-toolchain step | Yes | Pending |
 | 8 | `cargo ndk -t aarch64-linux-android -p 28 build` links gstreamer-full without errors | CI Gate 4 | Yes | Pending |
 | 9 | `cargo ndk -t x86_64-linux-android -p 28 build` links gstreamer-full without errors | CI Gate 5 | Yes | Pending |
-| 10 | `build.rs` ABI-to-directory mapping handles both `arm64-v8a` and `x86_64` | Review of build.rs | Manual | Pending |
-| 11 | `gst_android_init()` call site exists in Android JNI entry point before `gst_init()` | Code review of JNI_OnLoad | Manual | Pending (phase 3 impl) |
-| 12 | On-device: `amcvideodec` element registered (`gst_element_factory_find("amcvideodec")` not null) | On-device logcat check | Device-only | Pending (phase 3) |
+| 10 | `HAVE_NDKMEDIA` active in `libgstandroidmedia.so` (NDK codec wrapper symbols present) | CI Gate 6 | Yes | Pending |
+| 11 | `build.rs` ABI-to-directory mapping handles both `arm64-v8a` and `x86_64` | Review of build.rs | Manual | Pending |
+| 12 | `gst_android_init()` call site exists in Android JNI entry point before `gst_init()` | Code review of JNI_OnLoad | Manual | Pending (phase 3 impl) |
+| 13 | On-device: `amcvideodec` element registered (`gst_element_factory_find("amcvideodec")` not null) | On-device logcat check | Device-only | Pending (phase 3) |
 
 Items 1–10 are validated by the GitHub Actions workflow in Section 4.
-Items 11–12 require phase 3 implementation work and on-device verification.
+Items 11–13 require phase 3 implementation work or on-device verification.
 
-**Gate is GREEN when**: items 1–10 pass in CI, item 10 passes manual review,
-and the android-bootstrap workflow exits 0 on a PR that adds the actual build.rs
-and Android shim crate.
+**Gate is GREEN when**: items 1–10 pass in CI (including Gate 6 HAVE_NDKMEDIA check),
+item 11 passes manual review, and the android-bootstrap workflow exits 0 on a PR that
+adds the actual build.rs and Android shim crate.
 
 ---
 
-## 7. Related Documents
+## 8. Related Documents
 
 - `docs/audits/android-gstreamer-sdk-build-spike.md` — Full Android spike audit
   (hud-4znng, PR #536). Primary reference for architectural decisions, toolchain
   matrix, plugin coverage, and the HYBRID-NATIVE-MEDIACODEC verdict.
+- `docs/reports/gstreamer-1.26-ndk-mediacodec-audit.md` — NDK MediaCodec audit
+  (hud-fts60, PR #540). Confirms MR #4115 shipped in GStreamer 1.24; explains
+  what HAVE_NDKMEDIA does and does not eliminate; basis for Gate 6 in this CI workflow.
 - `docs/audits/gstreamer-media-pipeline-audit.md` — GStreamer desktop pipeline
   audit. Desktop pattern reference for GStreamer pipeline model, AppSink bridge,
   GLib main loop threading.
@@ -774,7 +849,7 @@ and Android shim crate.
 
 ---
 
-## Sources
+## 9. Sources
 
 - GStreamer Android SDK download: https://gstreamer.freedesktop.org/download/
 - GStreamer Android installation guide: https://gstreamer.freedesktop.org/documentation/installing/for-android-development.html
