@@ -21,6 +21,7 @@ members = [
     "examples/widget_publish_load_harness",
     "examples/render_artifacts",
     "tests/integration",
+    "crates/tze_hud_media_android",
 ]
 
 [workspace.package]
