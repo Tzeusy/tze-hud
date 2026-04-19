@@ -230,6 +230,151 @@ enforcement ladder (Normal -> Warning -> Throttled -> Revoked), post-revocation 
 
 ---
 
+---
+
+## 8. Media Plane Data Flow
+
+Capability-gated (`media-ingress`). Activates only when an agent holds a valid
+`media-ingress` capability grant (RFC 0008 Amendment A1, RFC 0009 Amendment A1).
+All layers below operate on the **trusted** side of the gRPC/MCP wire boundary.
+Cross-agent isolation is enforced by `session_id` tagging on `DecodedFrameReady`
+messages — the compositor thread refuses to blit a frame tagged with session A's
+`session_id` into session B's tile.
+
+### 8a. Video ingress: WebRTC → GStreamer → compositor surface
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │     TRUST BOUNDARY: gRPC/MCP wire        │
+                    │   Agent lives outside this boundary.     │
+                    │   Everything below is compositor-internal.│
+                    └──────────────────┬──────────────────────┘
+                                       │
+Agent (remote)                         │ MediaIngressOpen (gRPC, RFC 0005 A1)
+  │                                    │ → activation gate check:
+  │── MediaIngressOpen ───────────────>│   (1) capability: media-ingress
+  │   {stream_url, session_id, ...}    │   (2) budget headroom (pool slot,
+  │                                    │       per-session stream cap,
+  │                                    │       texture memory headroom)
+  │                                    │   (3) role authority (owner/admin)
+  │                                    │
+  │                     ┌──────────────┴──────────────────────────────┐
+  │                     │  Pool Manager (compositor thread, Stage 3)   │
+  │                     │  Claims pool slot; spawns SessionCoordinator │
+  │                     └──────────────┬──────────────────────────────┘
+  │                                    │
+  │                     ┌──────────────▼──────────────────────────────┐
+  │                     │  SessionCoordinator (tokio task,             │
+  │                     │  network tokio runtime)                      │
+  │                     │                                              │
+  │                     │  WebRTC source (webrtc-rs)                   │
+  │                     │    └─ RTP packet stream                      │
+  │                     │         │                                    │
+  │                     │         ▼  tokio bridge                      │
+  │                     │    GStreamer appsrc element                  │
+  │                     │    (gstreamer-app::AppSrc)                   │
+  │                     │         │ push_buffer()                      │
+  │                     │         ▼                                    │
+  │                     │    GStreamer decode pipeline                  │
+  │                     │    (GStreamer-managed thread pool;            │
+  │                     │     NOT compositor-controlled)               │
+  │                     │                                              │
+  │                     │    H.264 or VP9 decode element               │
+  │                     │    (hardware: va/nvcodec/d3d11;              │
+  │                     │     fallback: avdec_h264/vp9dec)             │
+  │                     │         │ decoded YUV/RGB frames             │
+  │                     │         ▼                                    │
+  │                     │    GStreamer appsink element                 │
+  │                     │    (gstreamer-app::AppSink)                  │
+  │                     │         │ new_sample callback                │
+  │                     │         ▼                                    │
+  │                     │    DecodedFrameReady ring buffer             │
+  │                     │    (4 slots per stream, drop-oldest,        │
+  │                     │     tagged with session_id)                  │
+  │                     └──────────────┬──────────────────────────────┘
+  │                                    │
+  │                     ┌──────────────▼──────────────────────────────┐
+  │                     │  Watchdog (tokio task, shared across pool)   │
+  │                     │  Polls per-worker thresholds every ~1s:      │
+  │                     │    - CPU time: 200ms / 10s window            │
+  │                     │    - GPU texture occupancy: 256 MiB          │
+  │                     │    - Ring-buffer occupancy: ≥75% for 30 fr. │
+  │                     │    - Decoder lifetime: 24h                   │
+  │                     │  Threshold crossed → DRAINING transition     │
+  │                     └──────────────┬──────────────────────────────┘
+  │                                    │
+  │                     ┌──────────────▼──────────────────────────────┐
+  │                     │  Compositor Thread (Stage 3 + Stage 6)       │
+  │                     │                                              │
+  │                     │  Stage 3: Drains DecodedFrameReady;          │
+  │                     │    validates session_id tag (cross-agent     │
+  │                     │    isolation enforcement)                    │
+  │                     │    Uploads CPU buffer to GPU texture via     │
+  │                     │    device.create_texture + queue.write_texture│
+  │                     │    (sole wgpu Device/Queue owner — §2.8)     │
+  │                     │                                              │
+  │                     │  Stage 6: Blits GPU texture into tile        │
+  │                     │    compositing region; renders to surface    │
+  │                     └─────────────────────────────────────────────┘
+```
+
+### 8b. Audio ingress: GStreamer Opus decode → cpal output
+
+```
+  SessionCoordinator (tokio task)
+  │
+  │  GStreamer audio decode pipeline
+  │  (Opus RTP → rtpopusdepay → opusdec → audioconvert → audioresample)
+  │        │ decoded PCM (48 kHz, stereo, F32 or I16)
+  │        ▼
+  │  Lock-free ring buffer (ringbuf)
+  │  Producer side: tokio task writes PCM frames
+  │        │
+  │        │ ← Audio-Routing Subsystem (E22) ─────────────────────┐
+  │        │                                                        │
+  │        ▼                                                        │
+  │  cpal data callback (dedicated non-Tokio audio thread)         │
+  │  (real-time priority via rtkit / platform equivalent)          │
+  │    - Drains ring buffer into cpal output buffer                │
+  │    - Underrun: fills with silence (never blocks callback)      │
+  │    - Format conversion (F32 ↔ I16) if device native ≠ F32     │
+  │        │                                                        │
+  │        ▼                                                        │
+  │  cpal Stream → hardware output                                  │
+  │  (WASAPI on Windows, CoreAudio on macOS,                       │
+  │   ALSA/PipeWire on Linux)                                      │
+  │                                                                 │
+  │  Operator-selected sticky device (stored in config):           │
+  │    - Device ID persisted via cpal stable device IDs (v0.17.0+) │
+  │    - On Windows: IMMNotificationClient watches for             │
+  │      OnDefaultDeviceChanged; stream rebuilt on device switch   │
+  └────────────────────────────────────────────────────────────────┘
+```
+
+### 8c. Trust boundaries and isolation summary
+
+| Boundary | Where | Enforcement |
+|---|---|---|
+| Agent ↔ runtime | gRPC/MCP wire | PSK auth, capability check, lease gate |
+| Cross-agent media isolation | `DecodedFrameReady` message | `session_id` tag; compositor refuses cross-agent blits |
+| GPU device ownership | Compositor thread | Only compositor thread holds wgpu `Device`/`Queue`; no media worker may call GPU APIs directly (RFC 0002 §2.8) |
+| GStreamer thread pool | Black box managed by GStreamer | Session coordinator interacts only via `AppSrc`/`AppSink`/bus APIs; pipeline internals are not compositor-visible |
+| cpal audio thread | Non-Tokio, real-time priority | Ring buffer decouples Tokio PCM producer from real-time callback; callback never blocks |
+
+**Key files (forthcoming, owned by RFC 0014 and downstream implementation beads):**
+`tze_hud_runtime/src/media/` (pool manager, session coordinator, watchdog),
+`tze_hud_runtime/src/audio/` (audio-routing subsystem, cpal integration).
+
+**Cross-references:**
+- Worker pool lifecycle contract: `legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md`
+- E24 in-process posture: `docs/decisions/e24-in-process-worker-posture.md`
+- Audio-routing crate selection: `docs/audits/cpal-audio-io-crate-audit.md`
+- GStreamer pipeline details: `docs/audits/gstreamer-media-pipeline-audit.md`
+- Media-plane component entries: `lay-and-land/components.md` §"Media plane subsystems"
+- Capability gate: `legends-and-lore/rfcs/reviews/0008-amendment-c13-capability-dialog.md`
+
+---
+
 ## Cross-references
 
 | Topic | Document |
@@ -246,3 +391,7 @@ enforcement ladder (Normal -> Warning -> Throttled -> Revoked), post-revocation 
 | Resource store | `legends-and-lore/rfcs/0011-resource-store.md` |
 | Widget asset topology | `lay-and-land/runtime-widget-asset-topology.md` |
 | Security doctrine | `heart-and-soul/security.md` |
+| Media plane data flow | §8 (this document) |
+| Media worker lifecycle | `legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md` |
+| Audio-routing crate audit | `docs/audits/cpal-audio-io-crate-audit.md` |
+| GStreamer pipeline audit | `docs/audits/gstreamer-media-pipeline-audit.md` |

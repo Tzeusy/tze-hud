@@ -22,6 +22,24 @@ This map documents every crate in the tze_hud workspace: what it does, what it d
 | `tze_hud_validation` | None (testing) | Visual regression (Layer 2 SSIM comparison, perceptual hash pre-screening) and developer visibility artifacts (Layer 4 index.html + manifest.json generation). | `layer2::Layer2Validator::compare()`, `layer4::ArtifactBuilder`, `ssim::compute_ssim`, `phash::compute_phash` |
 | `tze_hud_widget` | None (loading) | Widget asset bundle loader: scans directories for `widget.toml` manifests, validates SVG files, resolves parameter bindings, structured error codes. | `loader::{scan_bundle_dirs, load_bundle_dir}`, `manifest::*`, `svg_ids::*`, `runtime_registration::register_runtime_widget_svg_asset` |
 
+### Media plane subsystems (2)
+
+These subsystems activate only when the `media-ingress` capability is granted
+(RFC 0008 Amendment A1). They are in-process, compositor-owned, and never
+access the wgpu GPU device directly.
+
+| Subsystem | Plane(s) | Responsibility | Key entry points |
+|---|---|---|---|
+| `media-worker-pool` (E24) | Media plane (in-process) | N = 2–4 compositor-owned tokio tasks; each manages one GStreamer pipeline for one active `media-ingress` stream. Capability-gated activation: `media-ingress` capability grant required before any worker spawns. Priority-preempted (lease_priority sort per RFC 0008 §2.2). Watchdog-bounded: CPU time (200ms/10s), GPU texture occupancy (256 MiB), ring-buffer occupancy (75% for 30 frames), decoder lifetime (24h). Budget-pressure contraction to 1 slot at degradation Level 2+. Worker state machine: SPAWNING → RUNNING → DRAINING → TERMINATED; FAILED is terminal. Pool manager runs on compositor thread at Stage 3. Watchdog runs as a shared tokio task on the network tokio runtime. | Pool manager (compositor thread, Stage 3 / spawn-request handling); `SessionCoordinator` tokio task (one per active worker); `DecodedFrameReady` ring buffer (4 slots per stream, drop-oldest) |
+| `audio-routing` (E22) | Media plane (in-process) | cpal-based runtime-owned audio output. Decoupled from video decode pipelines. Default output device is operator-selected at first run, sticky per platform, changeable via config. Receives decoded Opus PCM from the GStreamer pipeline via a lock-free ring buffer; cpal data callback drains the ring buffer into hardware output. WASAPI (Windows), CoreAudio (macOS), ALSA / PipeWire (Linux). Sample-rate negotiation is caller responsibility; resamples to 48 kHz if device native rate differs. | `AudioRoutingSubsystem` (tokio task); cpal `Stream` (dedicated audio thread, non-Tokio); ring buffer producer (GStreamer PCM output) / consumer (cpal callback) |
+
+**Cross-references:**
+- Worker pool contract: `about/legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md` (RFC 0002 Amendment A1, issue hud-ora8.1.9)
+- Audio-routing crate selection rationale: `docs/audits/cpal-audio-io-crate-audit.md` (issue hud-ora8.1.19)
+- E24 in-process posture verdict: `docs/decisions/e24-in-process-worker-posture.md`
+- Capability gate: `about/legends-and-lore/rfcs/reviews/0008-amendment-c13-capability-dialog.md`
+- Media-plane data-flow diagram: `about/lay-and-land/data-flow.md` §8
+
 ### App binary (1)
 
 | Crate | Responsibility | Key entry points |
@@ -59,6 +77,14 @@ Layer 5 — Runtime orchestration (hub crate)
 
 Layer 6 — App shell
     tze_hud_app              → runtime, config
+
+Layer M — Media plane subsystems (capability-gated; in-process; activate only when
+           media-ingress capability is granted)
+    media-worker-pool (E24)  → tze_hud_runtime (frame pipeline Stage 3),
+                               GStreamer pipeline thread pool (black box),
+                               DecodedFrameReady ring buffer → compositor
+    audio-routing (E22)      → GStreamer PCM output (ring buffer producer),
+                               cpal stream (audio thread, non-Tokio)
 ```
 
 ### Dependency detail for `tze_hud_runtime` (the hub)
@@ -166,8 +192,13 @@ tze_hud_runtime
 - **Protocol plane definitions**: `about/heart-and-soul/architecture.md` (MCP / gRPC / WebRTC three-plane model)
 - **Wire contracts**: `about/legends-and-lore/rfcs/` (13 RFCs):
   - RFC 0001 (scene), 0002 (runtime kernel), 0003 (timing), 0004 (input), 0005 (session protocol), 0006 (configuration), 0007 (system shell), 0008 (lease governance), 0009 (policy arbitration), 0010 (scene events), 0011 (resource store), 0013 (text stream portals)
+  - RFC 0002 Amendment A1 (media worker lifecycle): `about/legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md`
 - **Capability specs**: `openspec/specs/` (exemplar-notification, media-webrtc specs)
 - **v1 scope**: `about/heart-and-soul/v1.md`
 - **Validation framework**: `about/heart-and-soul/validation.md`
 - **Runtime widget asset topology**: `about/lay-and-land/runtime-widget-asset-topology.md`
 - **Operator checklists**: `about/lay-and-land/operations/`
+- **Media plane data-flow**: `about/lay-and-land/data-flow.md` §8
+- **E24 in-process posture verdict**: `docs/decisions/e24-in-process-worker-posture.md`
+- **Audio-routing crate audit**: `docs/audits/cpal-audio-io-crate-audit.md`
+- **GStreamer pipeline audit**: `docs/audits/gstreamer-media-pipeline-audit.md`
