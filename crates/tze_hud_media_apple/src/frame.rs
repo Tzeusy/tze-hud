@@ -131,7 +131,7 @@ impl DecodedFrame {
 /// function uses integer arithmetic that matches the VideoToolbox output.
 pub(crate) fn nv12_byte_count(width: u32, height: u32) -> usize {
     let y = (width as usize) * (height as usize);
-    let uv = (width as usize) * ((height as usize + 1) / 2);
+    let uv = (width as usize) * (height as usize).div_ceil(2);
     y + uv
 }
 
