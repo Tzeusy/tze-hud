@@ -2702,8 +2702,8 @@ mod tests {
         let (mut scene, tile_id) = setup_scrollable_scene();
         let mut processor = InputProcessor::new();
 
-        let ev = processor
-            .process_keyboard_scroll(150.0, 150.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
+        let ev =
+            processor.process_keyboard_scroll(150.0, 150.0, KEYBOARD_PAGE_SCROLL_PX, &mut scene);
 
         let ev = ev.expect(
             "process_keyboard_scroll must return ScrollOffsetChangedEvent for a scrollable tile",

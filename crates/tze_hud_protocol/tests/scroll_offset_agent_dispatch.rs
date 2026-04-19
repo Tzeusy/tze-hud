@@ -91,9 +91,7 @@ async fn perform_handshake_with_input(
             agent_id: agent_id.to_string(),
             agent_display_name: format!("{agent_id} (scroll test)"),
             pre_shared_key: "test-psk".to_string(),
-            requested_capabilities: vec![
-                "access_input_events".to_string(),
-            ],
+            requested_capabilities: vec!["access_input_events".to_string()],
             initial_subscriptions: vec!["INPUT_EVENTS".to_string()],
             resume_token: Vec::new(),
             agent_timestamp_wall_us: now_wall_us(),
@@ -180,8 +178,7 @@ fn scroll_event_batch(tile_id: Vec<u8>, offset_x: f32, offset_y: f32) -> EventBa
 #[tokio::test]
 async fn wheel_scroll_delivers_scroll_offset_changed_event_to_agent() {
     let (mut client, _server, input_event_tx) = start_server().await;
-    let (_tx, mut stream) =
-        perform_handshake_with_input(&mut client, "scroll-wheel-agent").await;
+    let (_tx, mut stream) = perform_handshake_with_input(&mut client, "scroll-wheel-agent").await;
 
     let tile_id_bytes: Vec<u8> = uuid::Uuid::now_v7().as_bytes().to_vec();
     let batch = scroll_event_batch(tile_id_bytes.clone(), 0.0, 120.0);
@@ -263,16 +260,14 @@ async fn keyboard_scroll_delivers_scroll_offset_changed_event_to_agent() {
 #[tokio::test]
 async fn scroll_event_not_delivered_to_unsubscribed_agent() {
     let (mut client, _server, input_event_tx) = start_server().await;
-    let (_tx, mut stream) =
-        perform_handshake_no_input(&mut client, "no-input-scroll-agent").await;
+    let (_tx, mut stream) = perform_handshake_no_input(&mut client, "no-input-scroll-agent").await;
 
     let tile_id_bytes: Vec<u8> = uuid::Uuid::now_v7().as_bytes().to_vec();
     let batch = scroll_event_batch(tile_id_bytes, 0.0, 50.0);
     let _ = input_event_tx.send(("no-input-scroll-agent".to_string(), batch));
 
     // Give the server enough time to process and (not) deliver the event.
-    let result =
-        tokio::time::timeout(tokio::time::Duration::from_millis(200), stream.next()).await;
+    let result = tokio::time::timeout(tokio::time::Duration::from_millis(200), stream.next()).await;
     assert!(
         result.is_err(),
         "unsubscribed agent must NOT receive a scroll event batch"
@@ -287,10 +282,8 @@ async fn scroll_event_routed_to_owning_namespace_only() {
     let (mut client, _server, input_event_tx) = start_server().await;
 
     // Connect two agents, both subscribed to INPUT_EVENTS.
-    let (_tx_a, mut stream_a) =
-        perform_handshake_with_input(&mut client, "owner-agent").await;
-    let (_tx_b, mut stream_b) =
-        perform_handshake_with_input(&mut client, "other-agent").await;
+    let (_tx_a, mut stream_a) = perform_handshake_with_input(&mut client, "owner-agent").await;
+    let (_tx_b, mut stream_b) = perform_handshake_with_input(&mut client, "other-agent").await;
 
     let tile_id_bytes: Vec<u8> = uuid::Uuid::now_v7().as_bytes().to_vec();
     let batch = scroll_event_batch(tile_id_bytes.clone(), 0.0, 30.0);
@@ -299,14 +292,11 @@ async fn scroll_event_routed_to_owning_namespace_only() {
     let _ = input_event_tx.send(("owner-agent".to_string(), batch));
 
     // owner-agent must receive the event.
-    let msg = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        stream_a.next(),
-    )
-    .await
-    .expect("timed out waiting for EventBatch on owner-agent")
-    .unwrap()
-    .unwrap();
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream_a.next())
+        .await
+        .expect("timed out waiting for EventBatch on owner-agent")
+        .unwrap()
+        .unwrap();
 
     match msg.payload {
         Some(ServerPayload::EventBatch(batch)) => {
@@ -323,11 +313,8 @@ async fn scroll_event_routed_to_owning_namespace_only() {
     }
 
     // other-agent must NOT receive the event (namespace mismatch).
-    let result = tokio::time::timeout(
-        tokio::time::Duration::from_millis(200),
-        stream_b.next(),
-    )
-    .await;
+    let result =
+        tokio::time::timeout(tokio::time::Duration::from_millis(200), stream_b.next()).await;
     assert!(
         result.is_err(),
         "other-agent must not receive scroll event intended for owner-agent"
