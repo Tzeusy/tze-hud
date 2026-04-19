@@ -14,6 +14,7 @@ members = [
     "crates/tze_hud_resource",
     "crates/tze_hud_validation",
     "crates/tze_hud_widget",
+    "crates/tze_hud_media_apple",
     "app/tze_hud_app",
     "examples/vertical_slice",
     "examples/dashboard_tile_agent",
