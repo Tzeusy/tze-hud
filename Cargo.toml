@@ -22,6 +22,7 @@ members = [
     "examples/render_artifacts",
     "tests/integration",
     "crates/tze_hud_media_android",
+    "crates/tze_hud_media_apple",
 ]
 
 [workspace.package]
