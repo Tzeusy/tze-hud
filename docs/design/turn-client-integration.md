@@ -712,9 +712,9 @@ TURN-over-TCP is considered compliant when ALL of the following gates pass:
 | G5 | Corporate firewall simulator (UDP blocked, TCP/443 only): tze_hud session establishes end-to-end | `integration_corporate_firewall` test passes |
 | G6 | TURN allocation completes within 8 seconds under normal network conditions | Measured in integration tests |
 | G7 | REFRESH is sent before allocation expires (no silent expiry) | Verified in `refresh_lifecycle` unit test |
-| G8 | LiveKit Cloud TURN-TCP/TLS support verified (if LiveKit Cloud selected as C15 vendor) | Manual verification step at C15 decision; documents the out-clause from hud-kjody §7 |
+| G8 | LiveKit Cloud TURN-TCP/TLS support verified (if LiveKit Cloud selected as C15 vendor); RFC 6062 WebRTC client support confirmed | Manual verification step at C15 decision; see Appendix A for findings |
 
-Gates G1–G7 must pass before TURN-over-TCP is declared compliant. Gate G8 is an informational step that may reduce the required scope if LiveKit Cloud's managed TURN covers the corporate-firewall case.
+Gates G1–G7 must pass before TURN-over-TCP is declared compliant. Gate G8 is an informational step that evaluates LiveKit Cloud's managed TURN capabilities and WebRTC client RFC 6062 support.
 
 ---
 
@@ -778,6 +778,73 @@ tokio = { version = "1", features = ["test-util", "macros"] }
 | FU-3 | Should `tze_hud_turn` expose a STUN-only client for server-reflexive candidate gathering? | Separate concern; out of scope here but could share the codec module |
 | FU-4 | coturn Docker image for CI: should this live in `ci/docker/` or a test-fixtures directory? | Coordinator to decide; no blocker |
 | FU-5 | str0m issue #723 (built-in TURN) — if this merges before phase 4b, this crate may be redundant for the str0m path | Monitor; will not block implementation |
+
+---
+
+---
+
+## Appendix A: LiveKit Cloud TURN Support Verification (hud-hcdxa)
+
+**Research Date**: 2026-04-19  
+**Bead**: hud-hcdxa  
+**Finding**: CONDITIONAL-GO with critical caveat regarding RFC 6062 TCP allocations
+
+### A.1 LiveKit Cloud Managed TURN Infrastructure
+
+LiveKit Cloud provides managed TURN service via the domain `*.turn.livekit.cloud`. The official firewall configuration documentation confirms:
+
+**Supported protocols and ports:**
+- **TURN/UDP**: UDP port 3478 to `*.host.livekit.cloud`
+- **TURN/TLS**: TCP port 443 to `*.turn.livekit.cloud` (encrypted TURN relay over TLS)
+- Signal connection: TCP port 443 to `*.livekit.cloud` (WebSocket signaling)
+- WebRTC media: UDP 50000-60000 and TCP 7881
+
+**Verdict**: LiveKit Cloud DOES provide TURN/TLS on port 443, which is sufficient for firewall-constrained environments that block UDP and restrict TCP to port 443 only. This covers the corporate firewall traversal use case via managed TURN.
+
+### A.2 RFC 6062 TCP Allocation Support — Critical Limitation
+
+Research reveals a fundamental incompatibility:
+
+**Finding**: WebRTC browsers (Chrome, Firefox) do NOT support RFC 6062 "TCP allocations" (REQUESTED-TRANSPORT: TCP with relay on TCP). They only support:
+1. UDP allocations with TURN transport over TCP (TURN/TCP) — media relay is still UDP
+2. UDP allocations with TURN transport over TLS (TURN/TLS) — media relay is still UDP
+
+**Key distinction**: RFC 6062 creates a TCP relay port on the TURN server for peer-to-peer data. Standard WebRTC clients do not request or use TCP relay allocations; they always allocate UDP relay ports and connect to those via TCP (if needed) or UDP.
+
+**Impact on this bead**:
+- Gates G2 and G4 (tze_hud_turn TCP allocation via RFC 6062) are technically valid from a server perspective (coturn supports RFC 6062 fully).
+- However, str0m's ICE candidate emission will never include a `REQUESTED-TRANSPORT: TCP` allocation request, because that is not part of the standard WebRTC ICE specification.
+- tze_hud can implement RFC 6062 for completeness and self-hosted flexibility, but it will not be used by str0m or compatible with standard WebRTC peer agents.
+
+### A.3 LiveKit Cloud C15 Decision Impact
+
+**If LiveKit Cloud is selected as the C15 SFU vendor:**
+- TURN/TLS on port 443 is available and adequate for corporate firewall traversal (without RFC 6062 TCP allocations).
+- The tze_hud_turn crate scope remains unchanged: implement UDP, TCP (RFC 6062), and TLS variants for self-hosted deployments.
+- Gates G1 (UDP) and G3 (TLS) are the operationally relevant gates for both LiveKit Cloud and self-hosted paths.
+- Gate G2 (TCP allocation) and G4 (str0m over TCP relay) are architecturally valid but will not be exercised by str0m in practice.
+
+### A.4 Recommendation for G8 Verdict
+
+**Verdict: CONDITIONAL-GO** (subject to RFC 6062 scope clarification)
+
+**Rationale**:
+1. LiveKit Cloud provides TURN/TLS on port 443, which solves the firewall-constrained connectivity problem without RFC 6062 TCP allocations.
+2. str0m and standard WebRTC clients do not request TCP allocations (RFC 6062), only UDP allocations relayed over TCP or TLS.
+3. The tze_hud_turn crate should implement all three transport variants (UDP, TCP/RFC 6062, TLS) for architectural completeness and self-hosted scenarios.
+4. However, Gates G2 and G4 (str0m over TCP relay) are technically infeasible: str0m's ICE layer will not emit REQUESTED-TRANSPORT: TCP, so the relay will never be used.
+
+**Action at phase 4b kickoff**:
+- Confirm LiveKit Cloud TURN/TLS availability for the selected region.
+- Clarify whether G2 and G4 should measure RFC 6062 TCP allocations (valid as a server-side capability) or ICE-TCP direct connections (RFC 6544) instead.
+- If the intent is corporate firewall traversal via relay, TURN/TLS on port 443 (G3) is the correct gate; TCP allocations (RFC 6062) are a spec-completeness feature, not a firewall-traversal feature.
+
+### A.5 References for Appendix A
+
+- LiveKit Cloud Firewall Configuration: https://docs.livekit.io/home/cloud/firewall/
+- RFC 6062 vs. WebRTC TURN/TCP distinction: https://groups.google.com/g/turn-server-project-rfc5766-turn-server/c/I867K4sVQZI
+- WebRTC browser RFC 6062 support: https://bugs.chromium.org/p/webrtc/issues/detail?id=1913
+- Firefox WebRTC/TCP discussion: https://groups.google.com/g/mozilla.dev.media/c/WtxbgXJrPWA
 
 ---
 
