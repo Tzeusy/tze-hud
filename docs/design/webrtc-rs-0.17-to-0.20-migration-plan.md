@@ -469,6 +469,23 @@ Track release notes between alpha.2 and stable for any breaking API changes. If 
 changes affect the core `Rtc` / `poll_output()` / `Event` surface, update the refactor
 PR before merging.
 
+### R6: IPv6 ICE gather regression (webrtc-rs #774)
+
+**Risk**: webrtc-rs v0.20 has a known open bug (#774) in IPv6 ICE candidate gathering. On
+Safari over cloud relay (Cloudflare NAT64 path, gate G5a in hud-0bqk8), IPv6 gather may
+fail or time out, causing session establishment failure for IPv6-only Safari clients. This
+is distinct from TURN-over-TCP coverage (hud-kjody) and is not mitigated by TURN alone.
+
+**Likelihood**: Medium — the issue is open as of 2026-04-19 with no committed fix timeline.
+Cloud-relay deployment (C15 gate) is the primary exposure path.
+
+**Mitigation**: Before Phase 4b cloud-relay deployment, verify webrtc-rs #774 is resolved
+or has a documented mitigation in the v0.20 stable release notes. If unresolved at that
+point: (a) restrict ICE candidate gathering to IPv4 + TURN as a short-term workaround, or
+(b) invoke the str0m fallback path, which does not share the same gather logic. Track via
+hud-0bqk8 IPv6 ICE audit. Do not block Phase 4a (LAN / STUN-only) on this risk; it is
+specific to the NAT64 cloud-relay path.
+
 ---
 
 ## 7. Effort Estimate
