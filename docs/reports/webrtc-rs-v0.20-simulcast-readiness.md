@@ -281,6 +281,44 @@ GCC interceptor merge. If these land before Phase 4 kickoff, upgrade to **CONDIT
 
 ---
 
+## Monitoring Update (2026-04-19)
+
+**Trigger:** hud-af6g1 phase 4 kickoff evaluation watch. Re-verified rtc PR #72 and webrtc-rs alpha.2 release status.
+
+### rtc PR #72 Status (rrid RTX association)
+
+**Status as of 2026-04-19:** **Open, awaiting review**
+
+The PR remains unmerged. Last activity was **April 10, 2026**, when the author rebased onto upstream master to resolve merge conflicts and address maintainer review feedback from rainliu. The PR passes all tests on its branch but requires maintainer sign-off before merging.
+
+**Delta from audit date:** No substantive change. The PR was open on 2026-04-18 (audit date); still open 2026-04-19 (monitoring date). No indication of imminent merge.
+
+### webrtc-rs v0.20.0-alpha.2 Release Status
+
+**Status as of 2026-04-19:** **Not released**
+
+The latest alpha release is still v0.20.0-alpha.1 (released 2026-03-01). No alpha.2 has been announced or published.
+
+The latest stable remains v0.17.1 (released 2026-02-06).
+
+The rtc crate shows stable at v0.9.0 (2026-02-08) with no subsequent releases.
+
+**Delta from audit date:** No change. The audit baseline was "only one alpha released since March"; this monitoring confirms alpha.2 remains absent through 2026-04-19.
+
+### Phase 4 Kickoff Gate Signal
+
+| Gate signal | Required | Status | Blocker? |
+|---|---|---|---|
+| rtc PR #72 (rrid RTX) merged | Yes | Open; awaiting review | **YES** |
+| webrtc-rs v0.20.0-alpha.2 released | Yes (soft signal) | Not released | **YES** |
+| webrtc-rs v0.20.0 stable released | Yes (required) | Not released | **YES** |
+
+**Conclusion:** Phase 4 kickoff gate remains **NO-GO**. All three signals are still absent as of monitoring date. The rrid RTX signal (PR #72 merge) is the most tractable near-term blocker; its merge would unblock alpha.2. Neither event has materialized in the 10 days since the original audit.
+
+**Recommendation:** Maintain existing gate. No Phase 4b harness implementation should begin until rtc PR #72 is merged AND webrtc-rs/webrtc cuts alpha.2 with that PR incorporated.
+
+---
+
 ## Sources
 
 - webrtc-rs GitHub releases: https://github.com/webrtc-rs/webrtc/releases
