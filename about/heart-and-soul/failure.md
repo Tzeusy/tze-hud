@@ -86,16 +86,33 @@ When an agent reconnects after a disconnect (within or outside the grace period)
 
 The runtime can degrade along explicit, designed axes. This is not failure — it is the product behaving correctly under a constrained operating envelope.
 
-Degradation is ordered by impact, lightest first:
+### E25 degradation ladder
 
-1. **Coalesce more aggressively.** Reduce update frequency for state-stream tiles. Visually identical for slowly-changing content.
-2. **Reduce media quality.** Lower resolution, lower frame rate for video tiles. Noticeable but functional.
-3. **Reduce concurrent streams.** Drop auxiliary/thumbnail video feeds, keep primary. Significant but preserves the most important content.
-4. **Simplify rendering.** Disable transitions, effects, transparency blending. Visually simpler but functionally complete.
-5. **Shed tiles.** Collapse low-priority tiles to free resources for high-priority ones. Content is lost but the system remains responsive.
-6. **Audio-first fallback.** If the display pipeline is overwhelmed, fall back to audio-only for media agents. Last resort before full disconnection.
+Degradation follows a fixed ordered ladder, lightest impact first. The runtime descends only as far as necessary to restore headroom; it does not jump steps.
+
+**Trigger semantics:**
+- **Runtime-automatic:** budget breach (CPU, GPU, bandwidth, or memory threshold exceeded) triggers automatic descent at Level 1 safety arbitration (RFC 0009 §1.1). The runtime acts without asking.
+- **Operator-manual:** an operator can force entry at any rung by revoking a capability or session. This is the only external path to steps 9–10.
+- **Never agent-initiated:** an agent may not request its own degradation. An agent that requests self-degrade is treated as a policy violation and its request is rejected. Agent presence is governed by the runtime; agents request presence, the runtime decides cost and fitness.
+
+The "never agent-initiated" rule is not an oversight. If agents could self-degrade they could use degradation as a side-channel (announcing resource pressure they have not actually encountered) or as a way to shed accountability for quality. The runtime must own the degradation decision so that degradation remains attributable, auditable, and reversible by the human.
+
+**The ladder (top-first, lightest step at 1):**
+
+1. **Degrade spatial audio.** Drop positional/3D audio processing; fall back to mono or stereo mix. Audio remains present; spatial cues are lost.
+2. **Reduce framerate.** Lower compositor target FPS for video and animation tiles. Motion becomes less smooth; content remains visible.
+3. **Reduce resolution.** Scale down video tile decode and render resolution. Content is visible but pixelated; bandwidth and decode load drop substantially.
+4. **Suspend recording.** Halt any active local capture or logging that is non-critical to the session. Session continues; the recording path is simply paused.
+5. **Drop cloud-relay.** Disconnect auxiliary cloud relay connections for media. The session continues over direct or local paths only; relay-dependent features (remote observers, cloud transcription) are lost.
+6. **Drop second stream.** Terminate secondary media streams (picture-in-picture, auxiliary camera, screen share). The primary stream continues; the additional feed is gone.
+7. **Freeze and block input.** Halt scene updates and stop accepting new agent mutations. The display is frozen at last-good state; touch and input are locally acknowledged but not forwarded. This is a holding state, not a teardown.
+8. **Tear down media, keep session.** Close the media plane (WebRTC). The gRPC control session remains live; the agent retains its lease and can resume a media session when budget recovers.
+9. **Revoke embodied presence.** Revoke the agent's embodied capability grants. The agent is demoted to resident or guest. It retains its session token but must re-request embodied grants when conditions allow.
+10. **Disconnect.** Terminate the agent session entirely. All leases are revoked, all streams closed, all state cleared. The agent must reconnect and re-establish presence from scratch.
 
 The runtime chooses the degradation level based on current resource pressure and tile priorities. It does not ask the user — it acts, and the user can override.
+
+> **Mechanism layer:** The protocol and runtime implementation for automatic ladder descent, threshold definitions, and per-stream budget attribution are specified in RFC 0014 (forthcoming). This doctrine deliberately precedes that RFC: the ladder order and the "never agent-initiated" rule are policy invariants, not implementation details, and must hold regardless of how RFC 0014 wires the mechanism.
 
 ## What the user always sees
 
