@@ -841,3 +841,152 @@ message PolicyTelemetry {
 4. **Cross-tab zone state.** Section 11.7 states zones on inactive tabs have inactive contention state. Behavior when a tab becomes active with pending zone content is deferred to the Scene Contract RFC revision.
 
 5. **Per-frame privacy evaluation cost.** With many tiles (64+) and frequent viewer context changes, the per-frame privacy check could approach the 200us budget. An incremental dirty-flag approach (only re-evaluate tiles whose classification changed or when viewer class changes) would reduce this to O(changed_tiles) instead of O(all_tiles).
+
+---
+
+## Amendment 1 (2026-04-19): C12 Role-Based Operators
+
+**Source:** v2 embodied-media-presence signoff packet, decision C12 (F29 mandated: RFC 0009 amendment required before implementation beads on this topic).
+**Bead:** hud-ora8.1.12
+**Cross-reference:** `openspec/changes/v2-embodied-media-presence/specs/identity-and-roles/` (capability spec hud-ora8.2.5, to be authored) owns role definitions, user-directory schema, and role-to-capability binding. This amendment establishes only the policy-arbitration impact of those roles.
+
+---
+
+### A1.1 Role Taxonomy
+
+v2 introduces four operator roles. Roles are assigned to human principals who configure and operate the runtime installation, not to agents. Agents operate under capability grants; roles govern the operator's authority to issue and modify those grants.
+
+| Role | Semantic | Scope |
+|------|----------|-------|
+| `owner` | Full authority over the installation. May grant any capability to any agent, override any policy, revoke any session, and configure the runtime unrestricted. Exactly one owner per installation in v2 (multi-owner federation is post-v2). | Installation |
+| `admin` | Full operational authority short of federation and ownership transfer. May grant or revoke any non-owner-reserved capability, configure display policies, revoke sessions, and manage the user directory. Cannot promote another principal to `owner`. | Installation |
+| `member` | Trusted household member. May interact with the display (touch, gesture, voice). May configure personal attention and privacy preferences within operator-defined bounds. Cannot grant or revoke agent capabilities or manage other users. | User-level |
+| `guest` | Transient visitor. Interaction permitted if the operator enables guest interaction in config. No capability-management authority. Session scope is ephemeral; no persistent preference storage. | User-level |
+
+**Identity boundary:** Role assignments are principal records in the operator identity store (not to be confused with agent session capability grants). An agent's capability grants are separate from the role of the human operator who configured them. An agent session does not "inherit" an operator's role.
+
+---
+
+### A1.2 Data Model
+
+The following fields are added to the operator identity record. They are stored in the runtime's operator configuration and exposed for audit. All fields are federation-aware in structure but federation enforcement is **not implemented in v2** (v2 ships no federation sub-epic; federation cross-operator policy merge is deferred per signoff A5 / C12 note).
+
+```rust
+/// Operator principal record — stored in runtime identity store.
+pub struct OperatorPrincipal {
+    /// Stable identifier for this principal. Local UUID in v2;
+    /// federation-aware DID reserved for post-v2 federation.
+    pub id: PrincipalId,
+
+    /// Human-readable display name.
+    pub display_name: String,
+
+    /// Role assigned to this principal.
+    pub role: OperatorRole,
+
+    /// Federation origin — set to `Local` in v2.
+    /// Reserved for cross-operator federation (post-v2 only).
+    pub origin: PrincipalOrigin,
+
+    /// Device bindings for biometric/hardware authentication (post-v2).
+    pub devices: Vec<DeviceBinding>,
+}
+
+pub enum OperatorRole {
+    Owner,
+    Admin,
+    Member,
+    Guest,
+}
+
+pub enum PrincipalOrigin {
+    /// v2: all principals are local.
+    Local,
+    /// Post-v2: federated principal from another installation.
+    /// Fields present in enum variant but federation enforcement is NOT active in v2.
+    Federated { federation_id: String, remote_installation_id: String },
+}
+```
+
+**v2 enforcement boundary:** `PrincipalOrigin::Federated` is defined in the data model to allow future federation without wire-breaking changes. In v2, the runtime rejects any principal record with `origin = Federated` at load time with a configuration error. Federation-aware fields in data structures ship in v2; federation *logic* does not.
+
+---
+
+### A1.3 Policy Arbitration Impact
+
+Role-based operator authority intersects the arbitration stack at **Level 3 (Security)** and **Level 0 (Human Override)**. No new arbitration levels are added. Roles do not introduce a new stack level; they extend the principal-authority model within existing levels.
+
+#### Level 3 — Capability Grant and Revocation Authority
+
+Capability grants and revocations (Section 11.4) require an authorizing operator action. The table below governs which roles may perform which capability-management operations:
+
+| Operation | Owner | Admin | Member | Guest |
+|-----------|-------|-------|--------|-------|
+| Grant any capability to an agent session | Yes | Yes | No | No |
+| Revoke a capability from an agent session | Yes | Yes | No | No |
+| Grant `overlay_privileges` or `high_priority_z_order` | Yes | Yes | No | No |
+| Grant `exceed_default_budgets` (requires user prompt, RFC 0009 §8.1) | Yes | Yes | No | No |
+| Grant `stream_media`, `resident_mcp` | Yes | Yes | No | No |
+| Manage other principals' role assignments | Yes | Admin → Member/Guest only (targets must not be Owner or Admin) | No | No |
+| Promote a principal to `owner` | Yes | No | No | No |
+
+**Conjunctive check:** A capability grant is accepted at Level 3 only if (a) the requested capability is within the set the agent's profile may receive (not restricted by presence level or session type), AND (b) the authorizing operator principal holds a role with grant authority for that capability. Both checks must pass; neither alone is sufficient.
+
+**Revocation:** Any operator with grant authority for a capability may also revoke it. Revocation is immediate: the next arbitration evaluation for the affected agent fails at Level 3 with `CapabilityDenied`.
+
+#### Level 0 — Human Override Authority
+
+Human override actions (dismiss, freeze, safe mode, mute, lease revocation) are performed at **Level 0** and are **not gated by operator role in v2**. Any person present at the screen who can activate the override controls (RFC 0007 Section 4) may execute a Level 0 action. The rationale is unchanged from the original doctrine (security.md, "Human override"): the human in front of the screen is always the ultimate authority and must never be locked out by a policy system.
+
+**Operator role and override controls (v2 scope):** In v2, the override control surface (RFC 0007 Section 4) is always accessible to the present viewer regardless of role. Role-based restriction of the override UI is a post-v2 governance refinement and is explicitly out of v2 scope.
+
+#### Level 3 — Lease Operations
+
+Lease grant and revocation (RFC 0008) require operator authority for non-default priority leases. The role-to-lease-authority mapping follows the capability table above: `owner` and `admin` may grant `lease:priority:1` (High) leases to agent sessions. `lease:priority:0` (Critical) remains runtime-internal per RFC 0008 §2.1 and is not operator-grantable. `member` and `guest` principals have no lease-management authority.
+
+For standard priority (`lease:priority:2`) and below, lease grants are governed purely by the agent's session capability grants; no additional operator role check is applied.
+
+---
+
+### A1.4 Audit Integration
+
+Role-based operations are recorded in the capability grant audit log (Section 13.3). Two new event types are added:
+
+```json
+{
+  "event": "role_grant",
+  "principal_id": "principal-abc",
+  "role": "admin",
+  "granted_by": "principal-xyz",
+  "granted_at_us": 1234567890000
+}
+```
+
+```json
+{
+  "event": "role_revoke",
+  "principal_id": "principal-abc",
+  "role": "admin",
+  "revoked_by": "principal-xyz",
+  "revoked_at_us": 1234567891000,
+  "reason": "admin_action"
+}
+```
+
+Role changes are subject to the same retention and local append-only log policy as capability grant/revoke events (signoff C17: 90-day default, operator-configurable, daily rotation, schema versioned).
+
+---
+
+### A1.5 Cross-RFC Interaction Addendum
+
+This amendment extends the cross-RFC interaction table (Section 15):
+
+| RFC | Interaction |
+|-----|-------------|
+| RFC 0005 (Session Protocol) | Session handshake establishes capability grants; authorizing-principal role is validated at that point. `SessionInit` does not carry a role field — roles are a runtime identity store concern, not a per-session wire field. |
+| RFC 0008 (Lease Governance) | Lease priority grants above Standard require operator role authority per A1.3. The `lease:priority:<N>` capability (Section 8.1) is the existing mechanism; this amendment specifies which roles may authorize its grant. |
+| `openspec/changes/v2-embodied-media-presence/specs/identity-and-roles/` | The `identity-and-roles` capability spec (hud-ora8.2.5) is the authoritative source for role definitions, user-directory schema, role-to-capability binding tables, and the principal identity wire format. This amendment is the policy-arbitration surface of that spec; the full role model lives there. |
+
+**v2 non-enforcement note:** Federation-aware `PrincipalOrigin::Federated` fields are defined but the runtime rejects federated principals at load time. Any federation policy enforcement (cross-operator role merge, federated capability delegation) is deferred to a post-v2 phase and requires a separate RFC amendment at that time.
+
+*End of Amendment 1.*
