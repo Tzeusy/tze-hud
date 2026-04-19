@@ -292,9 +292,40 @@ These items are out of scope for this spike and should be tracked as separate be
 
 ---
 
+## 8. Monitoring Update (2026-04-19)
+
+**Status check on webrtc-rs issue #774:**
+
+As of 2026-04-19, the upstream issue remains **OPEN**. PR #786 ("Fix IPV6 ICE gather failure issue") was opened on 2026-04-10 and is currently **not yet merged**. The PR addresses DNS resolution hangs during ICE gathering rather than the original IPv6 candidate drop symptom, but it is linked to close issue #774.
+
+**PR #786 details:**
+- Introduces a 3-second timeout on STUN server hostname resolution to prevent indefinite blocking during ICE gather.
+- Does not directly fix the IPv6 host candidate filtering bug described in §1.1, but may resolve the DNS hang that manifests during IPv6 gather attempts.
+- Last activity: 2026-04-10 (9 days before this monitoring update).
+- Status: Open, not merged to main.
+
+**Release status:**
+- No v0.20.0-alpha.2 has been released.
+- The latest webrtc-rs release remains v0.20.0-alpha.1 (2026-03-01), which still ships with the broken IPv6 gather.
+- Stable releases remain at v0.17.1 (2026-02-06).
+
+**G1 gate assessment:**
+- **If phase 4b uses webrtc-rs v0.20:** Gate G1 (§5) is **NOT YET SATISFIED**. Issue #774 is still open; PR #786 (which may address it) is not merged. Phase 4b cannot proceed on v0.20 until PR #786 is merged, released, and verified.
+- **If phase 4b uses webrtc-rs v0.17.x:** Gate G1 does not apply. The IPv6 regression is v0.20-specific.
+- **If phase 4b uses str0m:** Gate G1 does not apply. No equivalent IPv6 bug in str0m.
+
+**Recommendation for phase 4b decision:**
+Given that PR #786 is pending and issue #774 remains unresolved as of 2026-04-19, the phase 4b team should:
+1. If timeline permits: Wait for PR #786 to merge and land in a release; re-test the IPv6 gather scenario with the patched version.
+2. If timeline is critical: Proceed on webrtc-rs v0.17.x (stable, no IPv6 regression) or switch to str0m (no equivalent bug).
+3. Monitor PR #786 weekly; escalate if the PR stalls beyond 2026-05-01.
+
+---
+
 ## Sources
 
 - webrtc-rs issue #774 (IPv6 ICE gather, v0.20 alpha): https://github.com/webrtc-rs/webrtc/issues/774
+- webrtc-rs PR #786 (Fix IPv6 ICE gather failure, pending): https://github.com/webrtc-rs/webrtc/pull/786
 - webrtc-rs issue #781 (TCP ICE, v0.20 alpha): https://github.com/webrtc-rs/webrtc/issues/781
 - webrtc-rs v0.20.0-alpha.1 announcement: https://webrtc.rs/blog/2026/03/01/webrtc-v0.20.0-alpha.1-async-webrtc-on-sansio.html
 - str0m issue #723 (STUN/TURN server support request, open): https://github.com/algesten/str0m/issues/723
