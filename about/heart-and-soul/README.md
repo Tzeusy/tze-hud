@@ -47,4 +47,6 @@ Without the magnet, you get a flux diagram where every arrow points somewhere di
 
 12. **[v1.md](v1.md)** — What v1 ships and what it defers. Scope boundary for the first working system.
 
+13. **[v2.md](v2.md)** — The V2 Program: four phases extending tze_hud into the media plane, embodied presence, device-profile execution, and end-to-end operations. What V2 IS, what it explicitly is NOT, and the RFC/doctrine sequencing that gates it.
+
 Note: The component shape language (design tokens, component profiles, visual extensibility) is documented in **presence.md** §"Component shape language" and **architecture.md** §"Text rendering policy and design tokens". The detailed specification lives in `openspec/changes/component-shape-language/`. The corresponding RFC is 0012 in `about/legends-and-lore/`.
