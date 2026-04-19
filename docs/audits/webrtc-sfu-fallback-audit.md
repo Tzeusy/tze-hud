@@ -124,10 +124,10 @@ str0m's simulcast support is the strongest pure-Rust implementation available. I
 | H.264 | RTP depacketization present | str0m handles RTP framing; encode/decode is caller's responsibility (GStreamer) |
 | VP8 | RTP depacketization present | |
 | VP9 | RTP depacketization present | VP9 SVC metadata passthrough; layer selection is external |
-| AV1 | **Not natively supported** | AV1 RTP packetization (RFC 7798 successor) is not in str0m 0.18. Gap vs. webrtc-rs which registers AV1 by default |
+| AV1 | **Present** (since v0.15.0) | AV1 RTP packetizer/depacketizer added in v0.15.0 (PR #819, Jan 2026); refined through v0.17.0. Functionally equivalent to webrtc-rs's default AV1 registration. |
 | Opus | RTP depacketization present | Standard Opus framing |
 
-**AV1 gap**: AV1 is deferred per D18, but if AV1 is admitted before phase 4 completes, str0m would not support it. This is the same limitation documented in the webrtc-rs audit section 7.1 for str0m. Track: https://github.com/algesten/str0m/issues.
+**AV1 status**: AV1 RTP packetization is present in str0m 0.18 — it was added in v0.15.0 and stabilised through v0.16.1 and v0.17.0 bug-fix passes. The earlier claim that AV1 was absent was incorrect. AV1 remains deferred per D18 for v2 scope, so this gap does not affect the phase 4b recommendation regardless.
 
 ### 1.6 API Ergonomics
 
@@ -211,7 +211,7 @@ Estimated migration scope: 2–4 person-weeks for the phase 4 transport layer, a
 | API stability | Stable (minor breaking between versions, not volatile) | Alpha — API still changing |
 | Tokio coupling | None (integrator's choice) | Optional (Tokio or smol) |
 | Simulcast | Present, SFU-first | In-progress (RID/MID interceptors per hud-g89zs spike) |
-| AV1 | Not present | Registered by default |
+| AV1 | Present (since v0.15.0) | Registered by default |
 | TURN-over-TCP | Not fully validated | Open issue (#781 in v0.20 alpha) |
 | Stars | ~550 | Inherits webrtc-rs ~5,000 |
 | Production validation | Lookback (SFU deployment) | Not yet (alpha) |
@@ -338,10 +338,10 @@ Either way, the underlying WebRTC transport remains webrtc-rs (or str0m fallback
 | API | REST + WHIP/WHEP (WebRTC-HTTP Ingestion/Egress Protocol) |
 | Rust SDK | **None official** — REST API integration only |
 | License | Proprietary SaaS |
-| Pricing | $0.05/GB media relayed (no free tier for production scale; Cloudflare Workers free tier adjacent) |
+| Pricing | $0.05/GB egress; first 1,000 GB/month free (Realtime SFU tier, as of Apr 2026) |
 | Protocol | Standard WebRTC (ICE/DTLS/SRTP under the hood); WHIP for push, WHEP for pull |
 | TURN | Cloudflare's global Anycast network |
-| Docs | https://developers.cloudflare.com/calls/ |
+| Docs | https://developers.cloudflare.com/realtime/ (rebranded from /calls/ in 2026) |
 
 ### 3.2 What Cloudflare Calls Is
 
@@ -399,11 +399,11 @@ Cloudflare Calls introduces stronger vendor lock-in than LiveKit:
 
 | Tier | Cost | Notes |
 |---|---|---|
-| Development | $0.05/GB media relayed | Development traffic is typically <10 GB/month; ~$0.50–$5/month during development |
-| Production | $0.05/GB | No monthly cap; no free tier beyond Cloudflare Workers free plan which does not cover Calls |
+| Development | $0.05/GB egress; first 1,000 GB/month free | Development traffic is typically <10 GB/month; well within free tier |
+| Production | $0.05/GB beyond 1,000 GB free | Monthly free allowance reduces cost floor substantially vs. initial audit estimate |
 | TURN | Included | Cloudflare's Anycast TURN is included in the per-GB rate |
 
-**Comparison to LiveKit Cloud**: LiveKit Cloud has a free developer tier (up to a threshold of concurrent rooms); Cloudflare Calls charges from the first byte. For development and low-volume demos, LiveKit Cloud has a lower cost floor.
+**Comparison to LiveKit Cloud**: LiveKit Cloud has a free developer tier (up to a threshold of concurrent rooms); Cloudflare Realtime SFU also has a free tier (1,000 GB/month). Both are low-cost for development. LiveKit retains the advantage for self-host flexibility.
 
 ### 3.7 Integration Pattern for tze_hud
 
@@ -440,7 +440,7 @@ Cloudflare Calls is **not a transport library fallback**. It cannot replace webr
 | **Direct webrtc-rs substitute** | Yes | No | No |
 | **Simulcast** | Present (SFU-first) | Handled by LiveKit Server | Handled by CF Server |
 | **SVC** | Not implemented | Not documented | Not documented |
-| **AV1** | Not supported | Depends on libwebrtc | Depends on CF server |
+| **AV1** | Present (since v0.15.0) | Depends on libwebrtc | Depends on CF server |
 | **License** | MIT | Apache-2.0 | Proprietary SaaS |
 | **Self-host** | N/A (library) | Apache-2.0 server available | No |
 | **Maintainer durability** | Single maintainer + community | Backed by LiveKit Inc. | Backed by Cloudflare |
@@ -528,7 +528,7 @@ These gates align with the hud-g89zs spike scope — the spike should be expande
 |---|---|---|
 | **str0m TURN-over-TCP validation** | P1 (phase 4 pre-condition) | Confirm TCP TURN works in str0m before invoking as fallback; add to hud-g89zs spike scope or create separate bead |
 | **str0m simulcast browser interop test** | P1 (if fallback invoked) | Extend hud-fpq51 simulcast plan to include str0m variant; parallel to webrtc-rs simulcast track |
-| **AV1 RTP packetization in str0m** | P3 (track only) | Monitor str0m GitHub for AV1 support; if AV1 is required pre-phase-4 close, this becomes a blocker |
+| **AV1 RTP packetization in str0m** | ~~P3~~ Resolved | AV1 packetizer/depacketizer present since v0.15.0; no gap to track. AV1 is still deferred per D18 regardless. |
 | **RFC 0018 WHIP signaling adapter spec** | P1 (phase 4b gate per F29) | The cloud-relay signaling adapter (WHIP/LiveKit protocol) must be specced before phase 4b implementation begins; transport library choice does not affect this |
 | **LiveKit Server self-host deployment guide** | P2 (post-v2) | For production cost management; not a v2 gate |
 
@@ -544,7 +544,7 @@ These gates align with the hud-g89zs spike scope — the spike should be expande
 | **C15 vendor** | LiveKit Cloud preferred; Cloudflare Calls acceptable fallback |
 | **LiveKit Rust SDK** | Not a transport fallback; not recommended (libwebrtc FFI, architectural mismatch) |
 | **Cloudflare Calls** | Not a transport fallback; SaaS SFU for C15 vendor decision only |
-| **Key gap in str0m** | AV1 support absent; acceptable while AV1 is deferred per D18 |
+| **Key gap in str0m** | No AV1 gap — AV1 RTP packetization present since v0.15.0. Primary gap: TURN-over-TCP validation pending. |
 | **Key validation gate** | str0m simulcast interop test (Chrome/Firefox) before phase 4b opens |
 
 **Primary verdict**: Monitor webrtc-rs v0.20 progress via hud-g89zs. If the spike returns complete simulcast interceptors and a stable API, stay on webrtc-rs v0.20. If the spike reveals slippage, adopt str0m 0.18 — the architectural cost is low, the pure-Rust posture is preserved, and the migration path is well-understood.
@@ -559,8 +559,8 @@ These gates align with the hud-g89zs spike scope — the spike should be expande
 - LiveKit Rust SDKs: https://github.com/livekit/rust-sdks
 - LiveKit Server: https://github.com/livekit/livekit
 - LiveKit Cloud pricing: https://livekit.io/cloud
-- Cloudflare Calls documentation: https://developers.cloudflare.com/calls/
-- Cloudflare Calls pricing: https://developers.cloudflare.com/calls/pricing/
+- Cloudflare Realtime documentation: https://developers.cloudflare.com/realtime/ (rebranded from Cloudflare Calls in 2026)
+- Cloudflare Realtime SFU pricing: https://developers.cloudflare.com/realtime/sfu/
 - WHIP RFC draft (WebRTC-HTTP Ingestion Protocol): https://datatracker.ietf.org/doc/html/draft-ietf-wish-whip
 - WHEP RFC draft (WebRTC-HTTP Egress Protocol): https://datatracker.ietf.org/doc/html/draft-murillo-whep
 - webrtc-rs audit (predecessor): `docs/audits/webrtc-rs-audit.md`
