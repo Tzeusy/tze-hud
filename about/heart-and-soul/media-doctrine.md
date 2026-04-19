@@ -69,12 +69,12 @@ that because policy evaluation runs in the same stack that governs subtitles and
 notifications.
 
 **It never keeps going when the budget says stop.** The degradation ladder governs
-media explicitly: resolution → framerate → second stream → freeze-and-no-input →
+media explicitly: framerate → resolution → second stream → freeze-and-no-input →
 tear down media (keep session) → revoke embodied → disconnect. The order is doctrine,
 not implementation preference. Agents may not initiate their own degradation; the
 runtime degrades and reports.
 
-**It never record content silently.** Recording is a separate capability, a separate
+**It never records content silently.** Recording is a separate capability, a separate
 operator grant, and a separate doctrine concern (see the forthcoming `recording-ethics.md`).
 The media plane carries live streams; recording policy governs whether any of that
 is persisted.
