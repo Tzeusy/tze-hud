@@ -394,3 +394,13 @@ Unlike GStreamer's pipeline state machine (well-documented, library-managed), `V
 - v2 signoff packet (D18, D19, B11): `openspec/changes/v2-embodied-media-presence/signoff-packet.md`
 - v2 media doctrine: `about/heart-and-soul/media-doctrine.md`
 - RFC 0002 §2.8 Media Worker Boundary: `about/legends-and-lore/rfcs/0002-runtime-kernel.md`
+
+---
+
+## Monitoring Update (2026-04-19)
+
+**GStreamer iOS Discourse #3760 Status:** The static library linking blocker documented in the December 2024 Discourse thread remains unresolved. The official GStreamer position (per contributor comments) remains "not yet possible" for production Rust + iOS integration. No workarounds have been published; the experimental proof-of-concept mentioned in December 2024 is still marked as "very much a work in progress."
+
+**Upstream MR/Issue Status:** GitLab issue #507 ("framework/static libraries are not usable with Xcode/Apple Clang's automatic linking") is the canonical blocker. Direct access to the issue is restricted, but the Discourse thread and related static-linking documentation confirm the issue remains open with no public resolution timeline announced. Cerbero iOS build support remains unchanged: Rust is not enabled for iOS targets, listed as "will be enabled in the future."
+
+**Recommendation:** Continue using VideoToolbox + libvpx for phase 3 iOS as PRIMARY-PATH-VIDEOTOOLBOX. Re-evaluate GStreamer iOS after phase 3 ships only if the upstream issue is closed with a Rust-compatible solution. Monitor Discourse quarterly for public announcements, but do not plan on GStreamer iOS becoming available for v2 shipping timeline.
