@@ -927,10 +927,10 @@ Capability grants and revocations (Section 11.4) require an authorizing operator
 | Grant `overlay_privileges` or `high_priority_z_order` | Yes | Yes | No | No |
 | Grant `exceed_default_budgets` (requires user prompt, RFC 0009 §8.1) | Yes | Yes | No | No |
 | Grant `stream_media`, `resident_mcp` | Yes | Yes | No | No |
-| Manage other principals' role assignments | Yes | Admin → Member/Guest only | No | No |
+| Manage other principals' role assignments | Yes | Admin → Member/Guest only (targets must not be Owner or Admin) | No | No |
 | Promote a principal to `owner` | Yes | No | No | No |
 
-**Conjunctive check:** A capability grant is accepted at Level 3 only if (a) the agent holds the required capability, AND (b) the authorizing operator principal holds a role with grant authority for that capability. Both checks must pass; neither alone is sufficient.
+**Conjunctive check:** A capability grant is accepted at Level 3 only if (a) the requested capability is within the set the agent's profile may receive (not restricted by presence level or session type), AND (b) the authorizing operator principal holds a role with grant authority for that capability. Both checks must pass; neither alone is sufficient.
 
 **Revocation:** Any operator with grant authority for a capability may also revoke it. Revocation is immediate: the next arbitration evaluation for the affected agent fails at Level 3 with `CapabilityDenied`.
 
@@ -942,7 +942,7 @@ Human override actions (dismiss, freeze, safe mode, mute, lease revocation) are 
 
 #### Level 3 — Lease Operations
 
-Lease grant and revocation (RFC 0008) require operator authority for non-default priority leases. The role-to-lease-authority mapping follows the capability table above: `owner` and `admin` may grant `lease:priority:0` (Critical) and `lease:priority:1` (High) leases. `member` and `guest` principals have no lease-management authority.
+Lease grant and revocation (RFC 0008) require operator authority for non-default priority leases. The role-to-lease-authority mapping follows the capability table above: `owner` and `admin` may grant `lease:priority:1` (High) leases to agent sessions. `lease:priority:0` (Critical) remains runtime-internal per RFC 0008 §2.1 and is not operator-grantable. `member` and `guest` principals have no lease-management authority.
 
 For standard priority (`lease:priority:2`) and below, lease grants are governed purely by the agent's session capability grants; no additional operator role check is applied.
 
