@@ -189,6 +189,28 @@ message UpdateTileInputModeMutation {
   TileInputModeProto input_mode = 2;
 }
 
+// Register or replace local-first scroll config for a tile. Enables
+// adapter-driven scroll via SetScrollOffsetMutation. Renderer/coalescer
+// plumbing shipped in hud-w5ih (PR #489); this is the session-protocol
+// exposure of that surface.
+message RegisterTileScrollMutation {
+  bytes tile_id        = 1;
+  bool  scrollable_x   = 2;
+  bool  scrollable_y   = 3;
+  // -1.0 = unset sentinel (no x-clamp); >= 0.0 = content width pixels.
+  float content_width  = 4;
+  // -1.0 = unset sentinel (no y-clamp); >= 0.0 = content height pixels.
+  float content_height = 5;
+}
+
+// Set the tile-local scroll offset. Clamped by the tile's scroll config.
+// Requires a prior RegisterTileScrollMutation on the same tile.
+message SetScrollOffsetMutation {
+  bytes tile_id  = 1;
+  float offset_x = 2;
+  float offset_y = 3;
+}
+
 message MutationProto {
   oneof mutation {
     CreateTileMutation          create_tile            = 1;
@@ -201,6 +223,8 @@ message MutationProto {
     UpdateTileOpacityMutation   update_tile_opacity    = 8;
     UpdateTileInputModeMutation update_tile_input_mode = 9;
     PublishToTileMutation       publish_to_tile        = 10;
+    RegisterTileScrollMutation  register_tile_scroll   = 11;
+    SetScrollOffsetMutation     set_scroll_offset      = 12;
   }
 }
 

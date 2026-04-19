@@ -1,198 +1,227 @@
 # Text Stream Portal — UX Refinement Handover
 
-Date: 2026-04-18
-Author: Claude (session transcript), ready for resumption in a fresh session.
+Date: 2026-04-19 (update; originally opened 2026-04-18)
+Status: **in progress — not complete.**
 
-## Prompt for the next session
+## Current state (2026-04-19)
 
-> Resume iterating UX of the text-stream-portal exemplar against a live Windows
-> HUD. Start by reading `docs/text-stream-refinement.md` for full state.
-> The blocker to solve first is the "light blue text boxes" — the INPUT and
-> OUTPUT pane surfaces still read as light blue on the live HUD even though
-> the script writes `(0.0, 0.0, 0.0, 0.96)` to both `INPUT_PANE_BG_RGBA` and
-> `OUTPUT_PANE_BG_RGBA` in
-> `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py`. See the
-> "Open blocker" section below for hypotheses to test. Do NOT reopen hud-dih4
-> (click routing) or hud-w5ih (scroll binding) — those are correctly deferred.
+The two-pane portal UX lands on the HUD with all the operator-requested
+styling tokens applied. The render-path bug that made HitRegion nodes paint
+blue over content tiles has been fixed. The session-protocol surface for
+scroll now exists end-to-end. What's still open is listed at the bottom.
 
-## Where the work is
+### What now lives in the repo
 
-- Exemplar script: `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py`
-  - Renders a two-pane portal (INPUT left, OUTPUT right) via the resident
-    `HudSession` gRPC stream
-  - Uses `agent-alpha` for capability grants (from
-    `C:\tze_hud\tze_hud.toml` on Windows)
-  - PSK is in `.env` (both `MCP_TEST_PSK` and `TZE_HUD_PSK` = 64-char hex
-    matching the `TzeHudOverlay` scheduled task's `--psk` flag)
-- Transcript artifacts: `test_results/text-stream-portal-split-v*.json`
-- Check-in point: the Skill still needs its "Text Stream Portals Exemplar
-  Scenario" section updated with final CLI + human-acceptance table after
-  this iteration completes. It currently still says "pending exemplar
-  script" even though the script exists.
-- `docs/exemplar-manual-review-checklist.md` row 11 needs UX-tweak entries
-  recorded once we're happy with the render.
+Two exemplar scripts under `.claude/skills/user-test/scripts/`:
 
-## What's working
+- **`text_stream_portal_exemplar.py`** — the two-pane UX demo.
+  860×680 content-layer tile at the right edge, rounded 14px, z=220. Header
+  (52px) + footer (30px) chrome strips, INPUT pane on the left with eyebrow
+  label, composer box (white 0.05 inset + 1px border, green caret stub),
+  placeholder text, submit-hint strip (`Enter submit · Shift+Enter newline ·
+  Esc cancel`). OUTPUT pane on the right with TRANSCRIPT eyebrow and the
+  markdown body. **Equal 50/50 split** between panes separated by a **fat
+  6px drag divider** with a centred 2×44px grip bar and an 8px-wide
+  `portal-pane-resize` HitRegion for future drag. Panes render at **95%
+  black opacity** per the latest operator preference (iterated from 80% →
+  90% → 95% over the session). All chrome tokens are still at the top of
+  the file; iterate there.
 
-1. **Deploy + launch**: `TzeHudOverlay` scheduled task on
-   `tzehouse-windows.parrot-hen.ts.net` runs `C:\tze_hud\tze_hud.exe
-   --window-mode overlay`. Transparent overlay path is healthy.
-2. **Authentication**: Use `agent-id=agent-alpha` (registered in the Windows
-   toml with caps `create_tiles, modify_own_tiles, access_input_events`);
-   `upload_resource` is NOT granted so avoid resource upload paths.
-3. **gRPC mutation pattern**: `set_tile_root` must be submitted as a
-   separate batch before `add_node` calls, so the caller can read
-   `MutationResult.created_ids[0]` and use that server-assigned id as
-   `parent_id` for subsequent children. Batching `set_tile_root +
-   add_node` in one call fails with "node not found" even though
-   `presence_card_exemplar.py` appears to do this — the server rewrites
-   the root id. Fix lives in the `publish_portal` helper.
-4. **z-order**: restart the HUD between runs (orphaned tiles hold
-   `z_order=220` during grace period; subsequent runs get
-   `z-order conflict`). Use `ssh tzeus@... "taskkill /F /IM tze_hud.exe"`
-   then `schtasks /Run /TN TzeHudOverlay` + `sleep 6`.
+- **`text_stream_scroll_exemplar.py`** — hud-w5ih Transcript Interaction
+  Contract test. Four phases: (1) mount long transcript + RegisterTileScroll,
+  (2) four SetScrollOffset steps, (3) five appends mid-scroll with offset
+  preserved, (4) return-to-tail.
 
-## Open blocker (RESOLVED 2026-04-18)
+Both scripts use `HudClient` from `hud_grpc_client.py` and follow the
+split-batch `set_tile_root` → `add_node` pattern (see Gotchas).
 
-Root cause: `NodeData::HitRegion` rendered an opaque
-`[0.2, 0.3, 0.5, 1.0]` rectangle in its default (non-hover/non-press)
-state. The three hit regions in the exemplar (`composer_focus`,
-`scroll_hit`, `submit_hit`) land exactly under the three "light blue"
-boxes the user reported: "type a reply…", "Exemplar Manual Review
-Checklist", "Enter submit…". The opaque blue sat on top of the pane
-backgrounds regardless of pane alpha.
+### Engine work that landed this session
 
-Fix: `crates/tze_hud_compositor/src/renderer.rs`
-- `tile_background_color` now returns `None` when the tile root is a
-  HitRegion (it's a logical affordance, not a visual node).
-- `render_node` NodeData::HitRegion only emits a rect when hovered or
-  pressed, using the input-model spec's local-feedback tints
-  (`spec.md:220`): hovered = `[1.0, 1.0, 1.0, 0.10]` (add 0.1 white),
-  pressed = `[0.0, 0.0, 0.0, 0.15]` (multiply by 0.85 approximation).
+1. **HitRegion rendering fix** (`crates/tze_hud_compositor/src/renderer.rs`).
+   `tile_background_color` returns `None` when the tile root is a HitRegion;
+   `render_node` only emits a visible rect in hover/pressed state using the
+   input-model spec's local-feedback tints (`spec.md:220`): hover = add 0.1
+   white, pressed = multiply by 0.85. Unblocks the "light blue boxes"
+   symptom.
+2. **Scroll mutations in the session protocol**. `RegisterTileScrollMutation`
+   + `SetScrollOffsetMutation` added to `types.proto` (tags 11, 12);
+   `SceneMutation::RegisterTileScroll` + `SetScrollOffset` variants added in
+   `tze_hud_scene/src/mutation.rs` (namespace-checked); both paths
+   translated in `session_server.rs`; Python stubs regenerated. Renderer /
+   coalescer plumbing was already shipped by hud-w5ih (PR #489); this is the
+   agent-facing exposure that was missing.
+3. **Windows build regression fix** (`element_store.rs`). Removed stray
+   `.ok()` before `map_err` that broke the Windows cross-compile target.
+4. **Bead `hud-r52v`** (TextMarkdownNode inline color runs) filed + specs /
+   RFCs cross-referenced. Appears to have shipped in the intervening day —
+   recent commits (`hud-vwggh`, `hud-qu8k4`, `hud-9pmd`, `hud-rxfc`) all
+   touch `color_run_spans`. Verify separately before building on it.
 
-Tests updated (`crates/tze_hud_runtime/tests/pixel_readback.rs`):
-- `test_color_14_overlay_passthrough_regions_near_background` — HitRegion
-  content tile is now invisible, so at (400,300) we see the clear
-  background darkened by the overlay ≈ [58, 58, 82, 255].
-- `test_color_17_chatty_dashboard_touch_transparent_tiles` — 50 HitRegion
-  tiles are now invisible, so at (400,300) we see BG_SRGB = [64, 64, 89, 255].
+### Pixel-readback tests updated
 
-Both tests pass locally.
+`crates/tze_hud_runtime/tests/pixel_readback.rs`:
+- `test_color_14_overlay_passthrough_regions_near_background` — expected
+  pixel now `[58, 58, 82, 255]` (clear bg darkened by overlay, since the
+  HitRegion content tile no longer paints blue).
+- `test_color_17_chatty_dashboard_touch_transparent_tiles` — expected pixel
+  now `BG_SRGB = [64, 64, 89, 255]` (50 HitRegion tiles are invisible).
 
-Also worth noting but not relevant to the fix: `from_text_markdown_node`
-at `crates/tze_hud_compositor/src/text.rs:360` never reads
-`node.background`. It only affects the `text` glyph-rendering pass. The
-background rect IS still drawn in `render_node`'s `NodeData::TextMarkdown`
-branch (renderer.rs:6107), which reads `tm.background` correctly. So the
-exemplar's `background: [0, 0, 0, 0]` on text nodes does the right thing
-(no background rect emitted).
+Both pass locally.
 
-## What was shipped this session (not yet committed)
+## What's NOT complete
 
-Modified files (uncommitted, in the main checkout):
-- `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py` — new
-  ~500-line exemplar script with split-layout portal, submit hints, scroll
-  hit region, server-assigned-root-id pattern
+- **Drag-to-resize the pane divider**: the visual affordance + HitRegion are
+  there but drag can't actually move the divider until `hud-dih4` (pointer
+  capture on content-layer tiles) lands. Right now INPUT_PANE_W is a
+  compile-time constant.
+- **Composer typing / submit**: the composer is placeholder-only. No text
+  input path exists for agent-authored tiles in v1; needs the same pointer /
+  focus / keyboard plumbing as drag.
+- **Wheel / keyboard scroll**: scroll-through-gesture requires both hud-dih4
+  (pointer capture) and `hud-6bbe` (wheel+keyboard wiring, per PR #489
+  closeout note). Today only adapter-driven scroll via `SetScrollOffset`
+  works; the scroll exemplar demonstrates that path.
+- **`docs/exemplar-manual-review-checklist.md` row 11** — still needs the
+  final UX-tweak sign-off row entered once a human confirms the two-pane
+  render on the live HUD.
+- **`.claude/skills/user-test/SKILL.md`** — the "Text Stream Portals
+  Exemplar Scenario" section still reads "pending exemplar script" even
+  though both scripts now exist. Needs: CLI, phase table, and Human
+  Acceptance Criteria (matching the shape used for presence-card /
+  subtitle / status-bar exemplars).
+- **User-visible confirmation of the latest render**. The last on-screen
+  check by the operator happened just before the mid-session file
+  replacement; after restoring the two-pane design the script did publish
+  successfully, but the operator hasn't reconfirmed that it matches their
+  mental model of the design.
 
-Earlier commits in this session (already pushed to `origin/main`):
-- `ad3f802` — initial SKILL.md section for text-stream-portals
-- `4722126` — initial exemplar-manual-review-checklist row 11
-- `79fa541` — correction: docs marked impl-complete (was wrong to call it
-  "pre-implementation" — epic hud-t98e shipped the pilot)
+## Renderer fix detail (resolved)
 
-Beads filed this session:
-- **hud-dih4** P1 feature — "Enable pointer event capture on content-layer
-  tiles for transparent overlay." Root cause for no clicks / no drag / no
-  scroll-input. Affects presence-card, progress/gauge widgets too.
-- **hud-w5ih** P2 feature — "Local-first scroll offset for resident raw-tile
-  portals." Blocked-by `hud-dih4`. Wires scroll-offset binding into the
-  renderer per the Transcript Interaction Contract.
+Root cause of the "light blue boxes": `NodeData::HitRegion` rendered an
+opaque `[0.2, 0.3, 0.5, 1.0]` rectangle in its default state. The three hit
+regions in the exemplar (`composer_focus`, `scroll_hit`, `submit_hit`)
+landed exactly under the three boxes the operator reported ("type a
+reply…", "Exemplar Manual Review Checklist", "Enter submit…"). Opaque blue
+sat on top of the pane backgrounds regardless of pane alpha.
+
+Fix in `crates/tze_hud_compositor/src/renderer.rs`:
+- `tile_background_color` returns `None` for HitRegion root nodes.
+- `render_node` HitRegion branch only emits a rect on hover/pressed state,
+  using the spec-compliant tints.
+
+Secondary note, not the root cause: `from_text_markdown_node` at
+`crates/tze_hud_compositor/src/text.rs:360` never reads `node.background` —
+only the `render_node` `NodeData::TextMarkdown` branch does (renderer.rs
+~6107). The exemplar's `background: [0, 0, 0, 0]` on text nodes does the
+right thing (no background rect emitted).
 
 ## Decisions that landed via operator feedback
 
-1. **Layout**: `[INPUT left | OUTPUT right]` split (operator preference).
-   No bottom-chat-style input.
-2. **Icons**: ASCII only — unicode `↵ ⇧ esc` rendered as `[]` boxes in
-   the font. Current hint: `Enter submit · Shift+Enter newline · Esc cancel`.
-3. **Backdrop**: "black with 80% opacity instead of gray frosted glass."
-   Now at 96% due to bleed-through complaint — revisit per user intent.
-4. **Distinct tints requested** earlier (indigo for input, sage for output);
-   operator then said both looked light blue and asked for pure black.
-   Currently pure black at 96%. User still sees light blue → something
-   upstream tints text-node areas.
-5. **No drag-to-reposition** for content-layer tiles today. The
-   `hud-bs2q` epic (drag handles) was scoped to chrome layer via RFC 0004
-   §3.0. Bringing drag to resident portals is out of scope; filed under
-   the pointer-capture bead as a dependency.
+1. **Layout**: `[INPUT left | OUTPUT right]` 50/50 split with a fat 6px drag
+   divider between them. No bottom-chat-style input.
+2. **Icons**: ASCII only — unicode `↵ ⇧ esc` rendered as `[]` boxes in the
+   font. Current hint: `Enter submit · Shift+Enter newline · Esc cancel`.
+3. **Backdrop opacity**: iterated 80% → 90% → 95%. Currently 95%. User has
+   not asked for further adjustment.
+4. **Pane tinting**: earlier indigo/sage tints were discarded — operator
+   wanted pure black panes once the blue-tint bug was fixed.
+5. **No drag-to-reposition** for content-layer tiles today (same as
+   `hud-bs2q` drag-handle epic scoping).
 
-## Current portal chrome (all tweakable at the top of the script)
+## Current portal chrome tokens (all tweakable at the top of the script)
 
-- Size: `PORTAL_W=860, PORTAL_H=680`
+- `PORTAL_W=860, PORTAL_H=680, PORTAL_RADIUS=14`
 - Position: right-edge, `x = tab_width - PORTAL_W - 28`, `y = 120`,
   `z_order = 220` (bump if orphan z-conflict)
 - Root backdrop: `(0, 0, 0, 0.30)` — light portal frame only
-- Header / footer strips: `(0, 0, 0, 0.50)` — mid-density chrome
-- Pane backgrounds (both panes, currently under investigation): `(0, 0, 0, 0.96)`
+- Header / footer strips: `(0, 0, 0, 0.50)`
+- Pane backgrounds (INPUT + OUTPUT): `(0, 0, 0, 0.95)`
 - Composer inset (inside input pane): white `(1, 1, 1, 0.05)` + 1px white
   border quads, green caret
-- Typography: title 17px, subtitle 11px, body 13px, meta/hint 10–11px,
-  eyebrow 10px uppercase
+- Pane divider: `PANE_DIVIDER_W=6.0`, `INPUT_PANE_W = (PORTAL_W -
+  PANE_DIVIDER_W) / 2.0 = 427.0`, divider fill `(1,1,1,0.14)`, grip
+  `(1,1,1,0.40)` at 2×44px
+- Typography: title 17, subtitle 11, body 13, meta/hint 10–11, eyebrow 10
 
 ## How to resume
 
 1. Read this file.
 2. Read `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py`
-   (~500 lines).
-3. Inspect the diagnostic targets in `renderer.rs` / `text.rs` named above.
-4. Sanity check the blue-tint with the red-pane diagnostic
-   (`INPUT_PANE_BG_RGBA = (0.5, 0, 0, 0.96)` + restart HUD + re-render).
-5. Don't commit uncommitted changes yet — land the UX first, then commit
-   the script + update `.claude/skills/user-test/SKILL.md` Text Stream
-   Portals section with real CLI/phases/HAC and update
-   `docs/exemplar-manual-review-checklist.md` row 11 with UX tweaks.
+   (~675 lines) and `text_stream_scroll_exemplar.py` (~349 lines).
+3. If iterating the visual UX, tweak the constants at the top of
+   `text_stream_portal_exemplar.py` and re-run (repro commands below). No
+   rebuild needed — only the Python client changes.
+4. If iterating the scroll contract, the `scroll_exemplar` covers the four
+   Transcript Interaction phases.
+5. Remaining housekeeping: update `docs/exemplar-manual-review-checklist.md`
+   row 11 and `.claude/skills/user-test/SKILL.md` Text Stream Portals
+   section once you're happy with the render.
 
 ## Repro commands
 
 ```bash
-# Kill + relaunch HUD (needed between runs to clear orphan tiles)
+# Kill + relaunch HUD (clears orphan tiles at same z-order)
 ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes tzeus@tzehouse-windows.parrot-hen.ts.net \
   "taskkill /F /IM tze_hud.exe"
-sleep 3
 ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes tzeus@tzehouse-windows.parrot-hen.ts.net \
   "schtasks /Run /TN TzeHudOverlay"
-sleep 6
+# Wait until MCP HTTP responds, then render.
+set -a && source /home/tze/gt/tze_hud/mayor/rig/.env && set +a
 
-# Run baseline render
-cd /home/tze/gt/tze_hud/mayor/rig
-set -a && source .env && set +a
-cd .claude/skills/user-test/scripts
-python3 text_stream_portal_exemplar.py \
+# Two-pane UX render
+python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --target tzehouse-windows.parrot-hen.ts.net:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc /home/tze/gt/tze_hud/mayor/rig/docs/exemplar-manual-review-checklist.md \
   --tab-width 1920 \
   --phases baseline \
-  --baseline-hold-s 60 \
-  --max-lines 80 \
-  --transcript-out /home/tze/gt/tze_hud/mayor/rig/test_results/text-stream-portal-split-next.json
+  --baseline-hold-s 30 \
+  --max-lines 80
+
+# hud-w5ih scroll contract test
+python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_stream_scroll_exemplar.py \
+  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --psk-env TZE_HUD_PSK \
+  --agent-id agent-alpha
 ```
 
 ## Gotchas discovered the hard way
 
-- Default PSK `tze-hud-key` is rejected in strict mode; the
-  `TzeHudOverlay` task embeds a 64-char hex PSK in its `--psk` flag.
-  `.env` must match.
-- `agent-id` must match a `[agents.registered.*]` entry in the Windows
-  toml — unregistered agents get `caps=[]` and `request_lease` fails
-  with `PERMISSION_DENIED`.
-- `set_tile_root` in a single `apply_mutations` batch with
-  `add_node` children fails with "node not found" — the server
-  rewrites the root id. Split into a dedicated `submit_mutation_batch`
-  call and read `MutationResult.created_ids[0]`.
-- HUD restart is required between exemplar runs to clear orphan tiles
-  at the same z-order. Orphan grace period is longer than operator
-  iteration cycle.
-- `presence_card_exemplar.py` fails with `upload_resource` capability
-  not granted — it's wired to upload avatar PNGs, but agent-alpha
-  doesn't have that cap. Not needed for portal testing.
+- Default PSK `tze-hud-key` is rejected in strict mode; the `TzeHudOverlay`
+  task embeds a 64-char hex PSK in its `--psk` flag. `.env` must match.
+- `agent-id` must match a `[agents.registered.*]` entry in the Windows toml
+  — unregistered agents get `caps=[]` and `request_lease` fails with
+  `PERMISSION_DENIED`.
+- `set_tile_root` in a single batch with `add_node` children fails — the
+  server rewrites the root id, so `parent_id` ends up pointing to a
+  nonexistent node and the atomic-batch rejection drops the `set_tile_root`
+  too. Split into a dedicated `submit_mutation_batch`, read
+  `MutationResult.created_ids[0]`, and use it as `parent_id` for subsequent
+  `add_node` calls.
+- The `ServerMessage` oneof field is `mutation_result`, not `batch_result`;
+  the `MutationResult` field is `accepted`, not `applied`. Reading the wrong
+  names silently yields default-False and hides real rejection reasons.
+- HUD restart is required between exemplar runs to clear orphan tiles at
+  the same z-order.
+- `presence_card_exemplar.py` fails with `upload_resource` capability not
+  granted on `agent-alpha`. Not relevant for portal testing.
+- `MoveFileExW` in `element_store.rs` returns `windows::core::Result<()>`
+  directly in the 0.58 crate; `.ok()` turns Result into Option and breaks
+  the subsequent `.map_err`. Drop the `.ok()`. Has regressed more than once
+  this session — watch for it on the Windows cross-compile.
+
+## Related beads
+
+- `hud-r52v` — TextMarkdownNode inline color runs. Filed this epic, docs
+  cross-referenced. Recent commits (`hud-vwggh`, `hud-qu8k4`, `hud-9pmd`,
+  `hud-rxfc`) all look like the implementation landed; verify before
+  building atop.
+- `hud-dih4` — pointer capture on content-layer tiles. Still open. Blocks
+  drag-resize and composer typing.
+- `hud-w5ih` — local-first scroll offset for resident raw-tile portals.
+  **Closed** (PR #489); renderer/coalescer plumbing shipped. The
+  session-protocol mutation exposure that was missing from that bead landed
+  in this session (see "Engine work" above).
+- `hud-6bbe` — wheel+keyboard wiring for scroll. Per hud-w5ih closeout
+  note, tracks the input-layer complement of the mutation path now shipped.

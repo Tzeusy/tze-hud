@@ -248,6 +248,24 @@ pub enum SceneMutation {
     LeaveSyncGroup {
         tile_id: SceneId,
     },
+    // ── Scroll mutations (require ModifyOwnTiles) ──────────────────────
+    /// Register or replace local-first scroll config for a tile.
+    /// Enables adapter-driven scroll via `SetScrollOffset`.
+    /// Renderer/coalescer/clamp plumbing shipped in hud-w5ih (PR #489).
+    RegisterTileScroll {
+        tile_id: SceneId,
+        scrollable_x: bool,
+        scrollable_y: bool,
+        content_width: Option<f32>,
+        content_height: Option<f32>,
+    },
+    /// Set the tile-local scroll offset. Clamped by the tile's scroll config
+    /// (content_width / content_height). Requires a prior `RegisterTileScroll`.
+    SetScrollOffset {
+        tile_id: SceneId,
+        offset_x: f32,
+        offset_y: f32,
+    },
 }
 
 impl SceneMutation {
@@ -277,6 +295,8 @@ impl SceneMutation {
             SceneMutation::DeleteSyncGroup { .. } => "DeleteSyncGroup",
             SceneMutation::JoinSyncGroup { .. } => "JoinSyncGroup",
             SceneMutation::LeaveSyncGroup { .. } => "LeaveSyncGroup",
+            SceneMutation::RegisterTileScroll { .. } => "RegisterTileScroll",
+            SceneMutation::SetScrollOffset { .. } => "SetScrollOffset",
         }
     }
 }
@@ -568,7 +588,11 @@ impl SceneGraph {
             | SceneMutation::AddNode { tile_id, .. }
             | SceneMutation::UpdateNodeContent { tile_id, .. }
             | SceneMutation::JoinSyncGroup { tile_id, .. }
-            | SceneMutation::LeaveSyncGroup { tile_id } => tiles.get(tile_id).map(|t| t.lease_id),
+            | SceneMutation::LeaveSyncGroup { tile_id }
+            | SceneMutation::RegisterTileScroll { tile_id, .. }
+            | SceneMutation::SetScrollOffset { tile_id, .. } => {
+                tiles.get(tile_id).map(|t| t.lease_id)
+            }
             // Tab mutations, zone mutations, sync group mutations other than
             // tile-targeting ones: no per-mutation lease check at Stage 1.
             _ => None,
@@ -854,6 +878,55 @@ impl SceneGraph {
             }
             SceneMutation::LeaveSyncGroup { tile_id } => {
                 self.leave_sync_group(*tile_id)?;
+                Ok(vec![])
+            }
+            // ── Scroll mutations ─────────────────────────────────────────
+            SceneMutation::RegisterTileScroll {
+                tile_id,
+                scrollable_x,
+                scrollable_y,
+                content_width,
+                content_height,
+            } => {
+                let tile = self
+                    .tiles
+                    .get(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                if tile.namespace != namespace {
+                    return Err(ValidationError::NamespaceMismatch {
+                        tile_id: *tile_id,
+                        tile_namespace: tile.namespace.clone(),
+                        agent_namespace: namespace.to_string(),
+                    });
+                }
+                self.register_tile_scroll_config(
+                    *tile_id,
+                    TileScrollConfig {
+                        scrollable_x: *scrollable_x,
+                        scrollable_y: *scrollable_y,
+                        content_width: *content_width,
+                        content_height: *content_height,
+                    },
+                )?;
+                Ok(vec![])
+            }
+            SceneMutation::SetScrollOffset {
+                tile_id,
+                offset_x,
+                offset_y,
+            } => {
+                let tile = self
+                    .tiles
+                    .get(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                if tile.namespace != namespace {
+                    return Err(ValidationError::NamespaceMismatch {
+                        tile_id: *tile_id,
+                        tile_namespace: tile.namespace.clone(),
+                        agent_namespace: namespace.to_string(),
+                    });
+                }
+                self.set_tile_scroll_offset_local(*tile_id, *offset_x, *offset_y)?;
                 Ok(vec![])
             }
         }

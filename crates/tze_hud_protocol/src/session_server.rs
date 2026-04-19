@@ -271,6 +271,12 @@ fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
                 Mutation::ClearWidget(_) => {}
                 // UpdateNodeContent is a content update — StateStream
                 Mutation::UpdateNodeContent(_) => {}
+                // Scroll mutations: config register is Transactional (structural),
+                // offset updates are StateStream (rate-limited local feedback).
+                Mutation::RegisterTileScroll(_) => {
+                    return InboundTrafficClass::Transactional;
+                }
+                Mutation::SetScrollOffset(_) => {}
             }
         }
     }
@@ -3535,6 +3541,55 @@ async fn handle_mutation_batch(
                     }
                 }
             }
+            Some(crate::proto::mutation_proto::Mutation::RegisterTileScroll(rts)) => {
+                match bytes_to_scene_id(&rts.tile_id) {
+                    Ok(tile_id) => {
+                        // -1.0 sentinel = unset (no clamp); >= 0.0 = clamp limit.
+                        let content_width = if rts.content_width >= 0.0 {
+                            Some(rts.content_width)
+                        } else {
+                            None
+                        };
+                        let content_height = if rts.content_height >= 0.0 {
+                            Some(rts.content_height)
+                        } else {
+                            None
+                        };
+                        scene_mutations.push(SceneMutation::RegisterTileScroll {
+                            tile_id,
+                            scrollable_x: rts.scrollable_x,
+                            scrollable_y: rts.scrollable_y,
+                            content_width,
+                            content_height,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = rts.tile_id.len(),
+                            "RegisterTileScroll: invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::SetScrollOffset(sso)) => {
+                match bytes_to_scene_id(&sso.tile_id) {
+                    Ok(tile_id) => {
+                        scene_mutations.push(SceneMutation::SetScrollOffset {
+                            tile_id,
+                            offset_x: sso.offset_x,
+                            offset_y: sso.offset_y,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = sso.tile_id.len(),
+                            "SetScrollOffset: invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
             None => {}
         }
     }
@@ -4005,6 +4060,52 @@ async fn apply_queued_batch_to_scene(
                         tracing::warn!(
                             tile_id_len = utim.tile_id.len(),
                             "UpdateTileInputMode (queued): invalid tile_id length; mutation skipped"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::RegisterTileScroll(rts)) => {
+                match bytes_to_scene_id(&rts.tile_id) {
+                    Ok(tile_id) => {
+                        let content_width = if rts.content_width >= 0.0 {
+                            Some(rts.content_width)
+                        } else {
+                            None
+                        };
+                        let content_height = if rts.content_height >= 0.0 {
+                            Some(rts.content_height)
+                        } else {
+                            None
+                        };
+                        scene_mutations.push(SceneMutation::RegisterTileScroll {
+                            tile_id,
+                            scrollable_x: rts.scrollable_x,
+                            scrollable_y: rts.scrollable_y,
+                            content_width,
+                            content_height,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = rts.tile_id.len(),
+                            "RegisterTileScroll (queued): invalid tile_id length; mutation skipped"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::SetScrollOffset(sso)) => {
+                match bytes_to_scene_id(&sso.tile_id) {
+                    Ok(tile_id) => {
+                        scene_mutations.push(SceneMutation::SetScrollOffset {
+                            tile_id,
+                            offset_x: sso.offset_x,
+                            offset_y: sso.offset_y,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = sso.tile_id.len(),
+                            "SetScrollOffset (queued): invalid tile_id length; mutation skipped"
                         );
                     }
                 }
