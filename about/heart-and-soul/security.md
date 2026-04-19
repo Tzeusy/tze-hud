@@ -51,6 +51,19 @@ Topology visibility is policy-driven (see privacy.md). By default, agents see on
 
 Cross-agent data sharing is opt-in: an agent can publish state to a shared namespace that other agents can read. The runtime mediates this — agents do not have direct access to each other's memory or streams.
 
+## In-process media and runtime workers
+
+The compositor is a single trusted OS process (see RFC 0002 §1.1 "Single-Process Model"). Agents reach it across gRPC and MCP wires; they never load code into it. Media decode, scheduling, and watchdog work happen on tokio tasks and library-managed threads — notably GStreamer's pipeline thread pool and WebRTC's transport threads — inside that one process, not in subprocesses. This is intentional and compatible with the agent-isolation posture above:
+
+- The trust boundary this document governs is the **agent-runtime wire**, not an internal thread boundary inside the runtime. In-process workers sit entirely on the trusted side of that boundary.
+- Cross-agent isolation invariants (no read of another agent's tiles, input events, media streams, or leases) are properties the **runtime mediates between agents**. They do not depend on per-agent process separation; they depend on the runtime correctly tagging streams with their owning session and denying cross-session reads. An in-process worker pool is no weaker here than the gRPC server's own tokio runtime.
+- Resource governance — texture memory, bandwidth, concurrent streams, CPU time, and active leases — is enforced by the in-process budget watchdog using the warning → throttle → revocation cascade described in §"Resource governance" below. E24's budget watchdog and per-stream session attribution are the implementation of that cascade for the media class of work.
+- GPU device ownership remains exclusive to the compositor thread (RFC 0002 §2.8 "Future: Media Worker Boundary"). Media workers deliver decoded frames over a bounded ring buffer and never access the wgpu device directly.
+
+The v1 architecture ratified this design in RFC 0002 §1.1 (Single-Process Model) and §2.8 (Media Worker Boundary), which reserves in-process GStreamer and WebRTC threads explicitly. E24's tokio-task layer sits above the GStreamer pipeline pool, orchestrating pipeline lifecycle and enforcing budgets — consistent with that boundary.
+
+Subprocess isolation of codecs is a legitimate post-v2 defense-in-depth hardening if the threat model later admits untrusted-codec or agent-supplied-decoder cases (see hud-lezjj). v2's bounded-ingress scope from trusted-codec sources does not require it.
+
 ## Resource governance
 
 Capability scopes govern what an agent can do. Resource budgets govern how much.
