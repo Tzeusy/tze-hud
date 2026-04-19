@@ -26,6 +26,8 @@ This change defines a v2 program centered on four capability expansions:
 - `media-plane`: WebRTC signaling, media ingress/egress, stream lifecycle, media clocks, and operator-governed activation.
 - `embodied-presence`: embodied-capability negotiation, richer session/device semantics, and coordinated media/presence behavior.
 - `device-profile-execution`: exercised mobile/glasses runtime profiles with explicit upstream-composition and degradation contracts.
+- `identity-and-roles`: role definitions (owner/admin/member/guest), user directory schema, and role-to-capability binding. Added post-signoff per C12/signoff-packet.md spec→decision mapping.
+- `identity-portability`: device-reboot-persistent embodied identity with user-initiated cryptographic export/import for device migration. No cloud identity anchor. Added post-signoff per B9/signoff-packet.md spec→decision mapping.
 
 ### Modified capabilities
 
