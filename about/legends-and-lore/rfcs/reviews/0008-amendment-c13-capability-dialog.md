@@ -197,7 +197,7 @@ An operator principal with grant authority (RFC 0009 A1.3: `owner` or `admin` ro
 2. The `revoked_by` and `revoked_at_us` fields are populated.
 3. Any session-capability cache entries for the same agent+capability in active sessions are also cleared.
 4. If the agent currently holds a lease with that capability in its `capability_scope`, the capability is removed from the scope on the next lease evaluation cycle. If the lease scope would be empty after removal, the lease is revoked with `RevokeReason::CAPABILITY_REVOKED` (a new revoke reason value added by this amendment; see §A6).
-5. An audit event `capability_revoked` is emitted (§A5).
+5. An audit event `capability_remember_revoke` is emitted (§A5).
 
 #### A3.5 Storage
 
@@ -263,13 +263,13 @@ Implementations MUST ensure that the remember-record and session-cache lookups i
 
 Per C17 (signoff packet: mandatory audit events including capability grants/denials), the following three event types are added to the capability grant audit log (RFC 0009 SS13.3).
 
-#### A5.1 `capability_granted`
+#### A5.1 `capability_dialog_grant`
 
-Emitted when an operator grants a C13 capability through the dialog (whether or not "remember" is checked).
+Emitted when an operator grants a C13 capability through the dialog (whether or not "remember" is checked). Named `capability_dialog_grant` to distinguish from the existing `capability_grant` event in RFC 0009 SS13.3 (which covers session-handshake grants).
 
 ```json
 {
-  "event": "capability_granted",
+  "event": "capability_dialog_grant",
   "agent_namespace": "agent-id-string",
   "capability": "media-ingress",
   "granted_by": "principal-uuid",
@@ -283,7 +283,7 @@ If `remember_written` is `true`, the `CapabilityRememberRecord.expires_at_us` is
 
 ```json
 {
-  "event": "capability_granted",
+  "event": "capability_dialog_grant",
   "agent_namespace": "agent-id-string",
   "capability": "media-ingress",
   "granted_by": "principal-uuid",
@@ -294,13 +294,13 @@ If `remember_written` is `true`, the `CapabilityRememberRecord.expires_at_us` is
 }
 ```
 
-#### A5.2 `capability_remembered`
+#### A5.2 `capability_remember`
 
 Emitted when a 7-day remember record is successfully written (i.e., the operator checked "Remember for 7 days" and clicked "Grant").
 
 ```json
 {
-  "event": "capability_remembered",
+  "event": "capability_remember",
   "agent_namespace": "agent-id-string",
   "capability": "microphone-ingress",
   "granted_by": "principal-uuid",
@@ -309,13 +309,13 @@ Emitted when a 7-day remember record is successfully written (i.e., the operator
 }
 ```
 
-#### A5.3 `capability_revoked`
+#### A5.3 `capability_remember_revoke`
 
-Emitted when an operator manually revokes a remember record or when a capability is removed from a lease's scope as a result of revocation (§A3.4).
+Emitted when an operator manually revokes a remember record or when a capability is removed from a lease's scope as a result of revocation (§A3.4). Named `capability_remember_revoke` to distinguish from the existing `capability_revoke` event in RFC 0009 SS13.3 (which covers session-level capability revocations).
 
 ```json
 {
-  "event": "capability_revoked",
+  "event": "capability_remember_revoke",
   "agent_namespace": "agent-id-string",
   "capability": "cloud-relay",
   "revoked_by": "principal-uuid",
@@ -426,4 +426,4 @@ The following row is addended to the §18 related RFCs table in RFC 0008:
 
 | Round | Date | Reviewer | Focus | Changes |
 |-------|------|----------|-------|---------|
-| A1 | 2026-04-19 | hud-ora8.1.11 | Amendment: C13 capability dialog + 7-day remember | Added §A1 capability taxonomy (8 C13 capabilities). Added §A2 per-session operator dialog flow (dialog state machine, session capability cache). Added §A3 7-day remember data model (scope, expiry, revocation, storage). Added §A4 insertion into lease grant flow (new evaluation step 0). Added §A5 audit events (`capability_granted`, `capability_remembered`, `capability_revoked`). Added §A6 wire protocol additions (4 new `DenyReason` values, 1 new `RevokeReason` value, `capability_dialog_timeout_ms` config). Added §A7 role-based operator interaction (owner/admin grant; member/guest cannot grant). Added §A8 cross-reference to hud-ora8.2.5. Full amendment document: `about/legends-and-lore/rfcs/reviews/0008-amendment-c13-capability-dialog.md` (issue hud-ora8.1.11). |
+| A1 | 2026-04-19 | hud-ora8.1.11 | Amendment: C13 capability dialog + 7-day remember | Added §A1 capability taxonomy (8 C13 capabilities). Added §A2 per-session operator dialog flow (dialog state machine, session capability cache). Added §A3 7-day remember data model (scope, expiry, revocation, storage). Added §A4 insertion into lease grant flow (new evaluation step 0). Added §A5 audit events (`capability_dialog_grant`, `capability_remember`, `capability_remember_revoke`). Added §A6 wire protocol additions (4 new `DenyReason` values, 1 new `RevokeReason` value, `capability_dialog_timeout_ms` config). Added §A7 role-based operator interaction (owner/admin grant; member/guest cannot grant). Added §A8 cross-reference to hud-ora8.2.5. Full amendment document: `about/legends-and-lore/rfcs/reviews/0008-amendment-c13-capability-dialog.md` (issue hud-ora8.1.11). |
