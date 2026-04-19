@@ -236,9 +236,10 @@ extension semantics to this layer that must be preserved:
    `WidgetAssetRegister` / `WidgetAssetRegisterResult` field assignments.
    MUST NOT be renumbered or reused.
 
-5. **`ServerMessage` fields 50–51** — `MediaIngressOpenResult` and
-   `MediaIngressState` as allocated in §A1 of this amendment. Once allocated
-   by hud-ora8.1.23, these numbers MUST NOT be reused for a different purpose.
+5. **`ServerMessage` fields 50–52** — `MediaIngressOpenResult`,
+   `MediaIngressState`, and `MediaIngressCloseNotice` as allocated in §A1 of
+   this amendment. Once allocated by hud-ora8.1.23, these numbers MUST NOT be
+   reused for a different purpose.
 
 6. **`ClientMessage` fields 50–51** — `MediaIngressOpen` and
    `MediaIngressClose` as allocated in §A1. Same protection applies.
@@ -289,10 +290,13 @@ v2 program). That task MUST:
 2. Add `reserved` declarations for any field numbers in the 50–99 range that
    are not yet allocated, to prevent accidental wire-format reuse.
 3. Extend `ZonePublish` at field 25 additively with
-   `present_at_wall_us` (field 6), `expires_at_wall_us` (field 7), and
-   `content_classification` (field 8) per
+   `present_at_wall_us` (field 7), `expires_at_wall_us` (field 8), and
+   `content_classification` (field 9) per
    `docs/reconciliations/webrtc_media_v1_protocol_schema_snapshot_deltas.md`
-   §"session.proto deltas".
+   §"session.proto deltas". Note: the delta doc specifies fields 6/7/8, but
+   `element_id` was added at field 6 after the delta doc was written
+   (hud-bs2q.3, commit 7427da6). The correct safe starting field is 7; the
+   delta doc is superseded by this amendment for field numbering.
 4. Extend `ZoneContent` oneof with `StaticImageRef` (field 5) and
    `VideoSurfaceRef` (field 6) per the `types.proto` deltas in the same doc.
 5. Confirm that `WidgetPublishResult.request_sequence` (field 1) is NOT
