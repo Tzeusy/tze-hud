@@ -206,7 +206,7 @@ Since VideoToolbox provides no VP9 hardware decode on iOS (confirmed via Apple D
 
 | Option | Crate | Status | Notes |
 |---|---|---|---|
-| libvpx software decode | `vpx` / `vpx-encode` | Active; bindgen-based | libvpx is the reference VP9 implementation. The `vpx-encode` crate provides VP8/VP9 encode; a companion decode path via `vpx_codec_vp9_cx_algo` is available at the C API level. Requires linking `libvpx` as a static lib on iOS (no system `libvpx` on iOS). |
+| libvpx software decode | `vpx` / `vpx-encode` | Active; bindgen-based | libvpx is the reference VP9 implementation. The `vpx-encode` crate provides VP8/VP9 encode; for decode, use the `vpx_codec_vp9_dx_algo` interface at the C API level (`cx_algo` is the encoder; `dx_algo` is the decoder). Requires linking `libvpx` as a static lib on iOS (no system `libvpx` on iOS). |
 | dav1d (for AV1 post-v2) | `dav1d-rs` | Active | AV1 only; relevant post-v2 when AV1 is admitted. |
 | OpenH264 (H.264 fallback) | `openh264-rs` | Active | H.264 only; not needed since VT covers H.264 in hardware. |
 
