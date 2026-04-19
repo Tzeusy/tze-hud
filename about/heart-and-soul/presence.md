@@ -327,6 +327,26 @@ The agent holds a long-lived session: subscribes to scene state, receives events
 
 The agent has resident presence plus timed media and bidirectional interaction: streams audio/video, receives touch or button events, aligns text or highlights to media clocks, participates as a live entity. This requires separate media and control planes. Highest trust required — the agent has real-time media access and interactive capabilities.
 
+## Single-embodied-agent rule (A4 amendment)
+
+> **Doctrine amendment.** This section was added as part of the v2 embodied-media-presence program (decision A4). It deliberately precedes RFC 0015 (embodied presence, forthcoming), which will define the wire-level contract. The doctrine here governs any implementation of that RFC.
+
+At most one embodied agent may be active at any time within a session. This is not a resource limit — it is a coherence invariant. Presence is bounded: bidirectional media, real-time input, and live embodiment require a single, unambiguous locus of control. A display surface that can simultaneously host two embodied agents has no clear owner for focus, gesture arbitration, or media priority. The sovereignty doctrine requires the runtime to always have a clear answer to "who is embodied right now?"
+
+### Behavior on a second embodied request
+
+When an agent requests embodied presence and an embodied slot is already occupied, the runtime **rejects** the incoming request. It does not queue it. Queuing implies the first agent's embodiment will eventually be pre-empted by a background waiter — this creates hidden priority inversions and violates the lease-governance principle that displacement is explicit and operator-visible. A rejected agent receives a clear error indicating the embodied slot is occupied and may retry after the current occupant relinquishes or is revoked.
+
+The operator or an orchestrator agent with elevated privileges may explicitly reclaim the embodied slot by revoking the current occupant's lease. That revocation follows standard lease-governance semantics (tiered: soft with grace period, then hard). Once the slot is free, a new embodied agent may request it.
+
+### Multi-agent embodied is post-v2
+
+Multi-agent embodied presence — multiple agents simultaneously holding embodied leases — is explicitly out of scope for both v1 and v2. It is not merely deferred; it requires a substantially different presence model (per-embodiment media plane isolation, independent focus graphs, cross-embodiment arbitration rules) that would expand the protocol surface beyond what the v2 program validates. Implementations must not anticipate this capability.
+
+### Embodied slot as a lease-governed capability
+
+The embodied-agent slot is a lease-governed capability, not a free resource. Acquiring embodied presence requires the `embodied` capability in the session's lease grant (RFC 0008 Amendment). The runtime enforces this at session admission: a session without the `embodied` capability cannot request embodied presence regardless of what media capabilities it holds. Revocation of the `embodied` capability mid-session triggers the same teardown path as lease expiry — media surfaces are cleared, the session drops to resident presence, and the embodied slot is released for the next claimant.
+
 ## Leases: presence requires governance
 
 If an LLM is a first-class citizen, it must also be a governed citizen.
