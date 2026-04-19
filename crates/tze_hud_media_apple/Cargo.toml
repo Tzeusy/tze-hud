@@ -24,3 +24,7 @@ objc2-foundation = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true }
+
+[build-dependencies]
+# No external build-time crates required — the build.rs shells out to
+# the libvpx configure script and make, both standard on macOS/Xcode hosts.
