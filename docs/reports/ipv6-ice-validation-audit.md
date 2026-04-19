@@ -257,6 +257,43 @@ Phase 4b does not require a working NAT64 end-to-end test (lab availability is l
 - Statement of whether NAT64 connectivity has been validated.
 - If not validated: a known-gap note in the phase 4b release notes and a follow-up bead for post-ship validation.
 
+### G5a — Cloudflare NAT64 client reachability
+
+**Cloudflare TURN IPv4-only constraint (§4.3):**
+Cloudflare Realtime TURN does not issue IPv6 relay addresses; all allocated relay addresses are IPv4-only per RFC 6156 (REQUESTED-ADDRESS-FAMILY not supported). On an IPv6-only client (no dual-stack, NAT64 gateway present), the returned IPv4 relay address is unreachable *unless* the NAT64 gateway translates the IPv4 address back to an IPv6 literal.
+
+**NAT64 traversal mechanism:**
+A well-configured NAT64 gateway (RFC 6146) with DNS64 (RFC 6147) should translate arbitrary IPv4 addresses (including Cloudflare's IPv4 TURN relay addresses) to IPv6-mapped literals in the 64:ff9b::/96 well-known prefix or a site-specific /96 prefix. However, this translation depends on:
+1. The NAT64 gateway's DNS64 synthesis supporting AAAA synthesis for arbitrary IPv4 addresses (not just well-known public services like Google DNS 8.8.8.8).
+2. The IPv6-only client being configured to use the NAT64 gateway's resolver (or having DNSSEC validation disabled if local synthesis is used).
+3. The NAT64 gateway forwarding synthesized addresses correctly to the underlying IPv4 stack.
+
+In practice, many ISP and mobile NAT64 deployments are incomplete (DNS64 synthesis only covers specific whitelisted services or public DNS names, not arbitrary IPv4 literals returned by TURN servers).
+
+**Phase 4b validation steps (if Cloudflare is the chosen cloud-relay vendor):**
+
+1. **Enumerate target NAT64 deployments**: Document which IPv6-only / NAT64 networks are likely in the target user base.
+   - Enterprise environments: NAT64 is rare (enterprises typically use dual-stack or IPv4).
+   - ISP/mobile carriers: NAT64 is increasing in some regions (e.g., certain European ISPs, some Asian mobile carriers) to handle IPv6-only-first migration.
+   - Home lab / testing: Simple NAT64 gateway setups (e.g., Tayga, Jool) exist but are not representative of production ISP configurations.
+
+2. **Test path**: If phase 4b selects Cloudflare for cloud-relay:
+   - Configure tze_hud peer to connect to Cloudflare's WHIP endpoint over IPv6-only (either via isolated IPv6-only network or NAT64 gateway).
+   - Verify that the Cloudflare TURN relay address (IPv4) is reachable by the tze_hud peer.
+   - Confirm that ICE connectivity is established via the relay (not just via host candidates or srflx).
+   - Test against at least one representative NAT64 network (e.g., an ISP NAT64 provider in the same geographic region as target users, or a lab NAT64 gateway with DNS64 enabled).
+
+3. **Fallback options if Cloudflare NAT64 path fails**:
+   - **Use LiveKit Cloud instead** (recommended): LiveKit's TURN infrastructure is dual-stack; IPv6-only clients receive IPv6 relay addresses. No NAT64 translation required.
+   - **Use a self-hosted TURN server with dual-stack**: Deploy a coturn instance with both IPv4 and IPv6 relay address pools.
+   - **Require dual-stack ISP connectivity for Cloudflare**: Document that Cloudflare Realtime TURN is not recommended for IPv6-only deployments; advise users to ensure dual-stack connectivity or switch to LiveKit Cloud.
+
+**Gate criterion for phase 4b:**
+Phase 4b is **SHIP-READY** (G5a satisfied) if **either**:
+- NAT64 client-to-Cloudflare-TURN path has been validated on at least 1 representative NAT64 network (verified in phase 4b test matrix), **OR**
+- Phase 4b has committed to LiveKit Cloud as the cloud-relay vendor (which sidesteps the IPv4-only TURN issue because LiveKit returns IPv6 relay addresses for IPv6 clients), **OR**
+- Cloudflare is explicitly out-of-scope for NAT64 clients (documented as known limitation in phase 4b release notes; follow-up validation bead filed for post-ship).
+
 ---
 
 ## 6. Discovered Follow-Ups
@@ -265,6 +302,7 @@ These items are out of scope for this spike and should be tracked as separate be
 
 | Item | Priority recommendation | Notes |
 |---|---|---|
+| Cloudflare TURN NAT64 reachability validation (G5a) | P2 | Phase 4b gate item: validate NAT64-to-Cloudflare-TURN path on representative network, or declare fallback to LiveKit Cloud. Required before SHIP if Cloudflare is selected as cloud-relay vendor. Cross-ref: hud-hudxj (PR #551 review), hud-rw3je (TURN client integration, PR #557). |
 | Safari macOS IPv6-only / NAT64 test in CI harness | P2 | Requires a macOS NAT64 lab setup; not blocking for initial cloud-relay but needed before wide deployment |
 | webrtc-rs issue #774 watch — monitor PR when filed | P1 (if v0.20 path is pursued) | Assign to whoever monitors the webrtc-rs v0.20 pipeline bead |
 | NAT64 end-to-end validation bead | P3 | File after phase 4b ships; document as known gap |
@@ -285,8 +323,9 @@ These items are out of scope for this spike and should be tracked as separate be
 | Safari macOS IPv6 ICE | **Highest risk** — conservative gather, IPv4 preference, HAPPY_EYEBALLS influence |
 | LiveKit Cloud IPv6 relay | **Supported** — coturn-based TURN, dual-stack endpoints |
 | Cloudflare Calls IPv6 relay | **Partial** — Anycast dual-stack for client-to-server; relay addresses issued as IPv4-only (RFC 6156 not supported) |
+| Cloudflare NAT64 client reachability (G5a) | **Medium risk** — NAT64 translation of IPv4 relay addresses dependent on gateway DNS64 synthesis quality; requires phase 4b validation or fallback to LiveKit Cloud |
 | WHIP + IPv6 candidates | **No gap** — protocol-agnostic; verify in hud-amf17 canary |
-| Phase 4b ship criteria met | **Not yet** — Safari validation pending; #774 open for v0.20 path |
+| Phase 4b ship criteria met | **Not yet** — Safari validation pending; #774 open for v0.20 path; G5a gate (Cloudflare NAT64 posture) requires declaration |
 
 **Recommendation**: Phase 4b cloud-relay can begin implementation. The IPv6 gate criteria (§5) are well-defined and achievable. The Safari macOS dual-stack end-to-end test (G3) is the most labor-intensive gate; it should be scheduled early in the phase 4b integration harness sprint, not deferred to the final sign-off.
 
