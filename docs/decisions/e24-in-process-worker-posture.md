@@ -141,7 +141,7 @@ This verdict is narrow. It does **not** claim:
   and an E25 degradation ladder that can shed media entirely when a
   stream misbehaves. A future tightening to per-codec sandbox processes
   remains a legitimate post-v2 hardening item (see
-  `docs/decisions/codec-cve-sandbox-hardening-v3.md`, bead `hud-lezjj`),
+  docs/decisions/codec-cve-sandbox-hardening-v3.md, bead hud-lezjj),
   but it does not block phase 1.
 - That subprocess isolation is the wrong *eventual* answer. If a future
   threat model (e.g., codecs from untrusted upstreams, agent-supplied
