@@ -815,8 +815,8 @@ explicit manual verification step.
 | 9 | `cargo ndk -t x86_64-linux-android -p 28 build` links gstreamer-full without errors | CI Gate 5 | Yes | Pending |
 | 10 | `HAVE_NDKMEDIA` active in `libgstandroidmedia.so` (NDK codec wrapper symbols present) | CI Gate 6 | Yes | Pending |
 | 11 | `build.rs` ABI-to-directory mapping handles both `arm64-v8a` and `x86_64` | Review of build.rs | Manual | Pending |
-| 12 | `gst_android_init()` call site exists in Android JNI entry point before `gst_init()` | Code review of JNI_OnLoad | Manual | Pending (phase 3 impl) |
-| 13 | On-device: `amcvideodec` element registered (`gst_element_factory_find("amcvideodec")` not null) | On-device logcat check | Device-only | Pending (phase 3) |
+| 12 | `gst_android_init()` call site exists in Android JNI entry point before `gst_init()` | Code review of JNI_OnLoad | Manual | Blocked (see `docs/reports/android-phase3-gate-validation-2026-04-21.md`) |
+| 13 | On-device: `amcvideodec` element registered (`gst_element_factory_find("amcvideodec")` not null) | On-device logcat check | Device-only | Blocked (see `docs/reports/android-phase3-gate-validation-2026-04-21.md`) |
 
 Items 1–10 are validated by the GitHub Actions workflow in Section 4.
 Items 11–13 require phase 3 implementation work or on-device verification.
