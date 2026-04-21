@@ -34,28 +34,33 @@
 //! sender lives in the callback (VT thread). The receiver is returned to the
 //! caller and consumed by a Tokio task in the compositor.
 //!
-//! ## Stub Notice
-//!
-//! The current implementation is a **design skeleton**. The unsafe FFI calls
-//! to `objc2-video-toolbox` types are present as commented-out pseudocode with
-//! `// TODO(hud-l0h6t):` markers. A future Apple-host worker replaces the
-//! pseudocode with real bindings.
-//!
-//! The skeleton compiles on Apple targets (the `objc2-video-toolbox` dependency
-//! is in scope) but the `open()` constructor returns
-//! [`VtError::UnsupportedCodec`] with a `"stub — not yet implemented"` message
-//! until the TODO stubs are filled in.
-
 #![cfg(target_vendor = "apple")]
 
+use std::ffi::c_void;
+use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use objc2_core_foundation::CFRetained;
+use objc2_core_media::{
+    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime,
+    CMVideoFormatDescriptionCreateFromH264ParameterSets,
+    CMVideoFormatDescriptionCreateFromHEVCParameterSets, kCMTimeInvalid,
+};
+use objc2_core_video::{
+    CVImageBuffer, CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane,
+    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    CVPixelBufferUnlockBaseAddress,
+};
+use objc2_video_toolbox::{
+    VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
+    VTDecompressionSession,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use crate::error::VtError;
-use crate::format::{Codec, VideoFormat};
+use crate::format::{CodecParameters, VideoFormat};
 use crate::frame::{DecodedFrame, nv12_byte_count};
 
 // ---------------------------------------------------------------------------
@@ -97,11 +102,8 @@ struct CallbackState {
 /// `VtDecodeSession` is `Send` but not `Sync`. Move it to the media worker
 /// task that submits NAL frames; keep the `Receiver` in the compositor task.
 pub struct VtDecodeSession {
-    // TODO(hud-l0h6t): Replace `*mut ()` with the real `VTDecompressionSessionRef`
-    // type from `objc2-video-toolbox` once building on an Apple host.
-    //
-    //   session_ref: objc2_video_toolbox::VTDecompressionSessionRef,
-    _session_ref: *mut (),
+    session_ref: NonNull<VTDecompressionSession>,
+    format_desc: NonNull<CMFormatDescription>,
 
     /// Raw pointer to the heap-allocated `CallbackState`. Reclaimed in `Drop`.
     callback_state_ptr: *mut CallbackState,
@@ -177,89 +179,57 @@ impl VtDecodeSession {
         });
         let callback_state_ptr = Box::into_raw(callback_state);
 
-        // TODO(hud-l0h6t): Replace the stub below with real VideoToolbox calls.
-        //
-        // --- Apple-host implementation sketch ---
-        //
-        // Step 1: Build CMVideoFormatDescription from SPS/PPS.
-        //
-        //   let format_desc = match format.codec() {
-        //       Codec::H264 => {
-        //           let CodecParameters::H264 { ref sps, ref pps } = format.parameters;
-        //           let param_sets = [sps.as_ptr(), pps.as_ptr()];
-        //           let param_sizes = [sps.len(), pps.len()];
-        //           let mut desc: CMVideoFormatDescriptionRef = ptr::null_mut();
-        //           let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
-        //               kCFAllocatorDefault,
-        //               2,
-        //               param_sets.as_ptr(),
-        //               param_sizes.as_ptr(),
-        //               4, // NAL unit header length (AVCC)
-        //               &mut desc,
-        //           );
-        //           if status != 0 {
-        //               // Reclaim state before returning error.
-        //               drop(unsafe { Box::from_raw(callback_state_ptr) });
-        //               return Err(VtError::InvalidFormat {
-        //                   detail: format!("CMVideoFormatDescriptionCreateFromH264ParameterSets \
-        //                                   returned OSStatus {status}"),
-        //               });
-        //           }
-        //           desc
-        //       }
-        //       Codec::Hevc => { /* analogous for HEVC */ todo!() }
-        //   };
-        //
-        // Step 2: Configure decoder pixel buffer attributes.
-        //   Request NV12 (kCVPixelFormatType_420YpCbCr8BiPlanarFullRange = 875704422).
-        //
-        //   let pixel_fmt = CFNumber::from(875704422i32);
-        //   let attrs = CFDictionary::from_pairs(&[
-        //       (kCVPixelBufferPixelFormatTypeKey, pixel_fmt.as_CFType()),
-        //   ]);
-        //
-        // Step 3: Set up VTDecompressionOutputCallbackRecord.
-        //
-        //   let callback_record = VTDecompressionOutputCallbackRecord {
-        //       decompressionOutputCallback: Some(vt_output_callback),
-        //       decompressionOutputRefCon: callback_state_ptr as *mut _,
-        //   };
-        //
-        // Step 4: Call VTDecompressionSessionCreate.
-        //
-        //   let mut session_ref: VTDecompressionSessionRef = ptr::null_mut();
-        //   let decoder_spec = CFDictionary::from_pairs(&[
-        //       (kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder,
-        //        kCFBooleanTrue),
-        //   ]);
-        //   let status = VTDecompressionSessionCreate(
-        //       kCFAllocatorDefault,
-        //       format_desc,
-        //       decoder_spec.as_concrete_TypeRef(),
-        //       attrs.as_concrete_TypeRef(),
-        //       &callback_record,
-        //       &mut session_ref,
-        //   );
-        //   if status != 0 {
-        //       drop(unsafe { Box::from_raw(callback_state_ptr) });
-        //       return Err(VtError::SessionCreateFailed { os_status: status });
-        //   }
-        //
-        // Return the real session ref instead of null:
-        //   Ok((Self { _session_ref: session_ref as *mut (), callback_state_ptr, invalidated }, receiver))
+        let format_desc = match unsafe { create_format_description(&format) } {
+            Ok(desc) => desc,
+            Err(err) => {
+                // SAFETY: `callback_state_ptr` is uniquely owned at this point.
+                let _ = unsafe { Box::from_raw(callback_state_ptr) };
+                return Err(err);
+            }
+        };
 
-        // Stub: return an error until the Apple-host worker fills in the TODOs.
-        //
-        // SAFETY: We own callback_state_ptr — reconstruct the Box and drop it
-        // cleanly so we don't leak heap memory.
-        let _ = unsafe { Box::from_raw(callback_state_ptr) };
+        let callback_record = VTDecompressionOutputCallbackRecord {
+            decompressionOutputCallback: Some(vt_output_callback),
+            decompressionOutputRefCon: callback_state_ptr.cast::<c_void>(),
+        };
 
-        Err(VtError::UnsupportedCodec {
-            codec: format!(
-                "{} (stub — fill in hud-l0h6t TODOs on an Apple host)",
-                format.codec().name()
-            ),
-        })
+        let mut session_ptr: *mut VTDecompressionSession = ptr::null_mut();
+        // SAFETY:
+        // - `format_desc` is a valid retained CoreFoundation object.
+        // - callback refcon points to a valid `CallbackState`.
+        // - output pointer points to stack storage for session result.
+        let status = unsafe {
+            VTDecompressionSession::create(
+                None,
+                &format_desc,
+                None,
+                None,
+                &callback_record,
+                NonNull::from(&mut session_ptr),
+            )
+        };
+        if status != 0 {
+            // SAFETY: `callback_state_ptr` is uniquely owned at this point.
+            let _ = unsafe { Box::from_raw(callback_state_ptr) };
+            return Err(VtError::SessionCreateFailed { os_status: status });
+        }
+        let Some(session_ref) = NonNull::new(session_ptr) else {
+            // SAFETY: `callback_state_ptr` is uniquely owned at this point.
+            let _ = unsafe { Box::from_raw(callback_state_ptr) };
+            return Err(VtError::SessionCreateFailed { os_status: -1 });
+        };
+
+        // SAFETY: `session_ref` returned from `VTDecompressionSessionCreate` has +1 retain count.
+        let session_retained = unsafe { CFRetained::from_raw(session_ref) };
+        Ok((
+            Self {
+                session_ref: CFRetained::into_raw(session_retained),
+                format_desc: CFRetained::into_raw(format_desc),
+                callback_state_ptr,
+                invalidated,
+            },
+            receiver,
+        ))
     }
 
     /// Submit one AVCC-format NAL frame for asynchronous decode.
@@ -294,88 +264,103 @@ impl VtDecodeSession {
             "submitting NAL frame to VTDecompressionSession"
         );
 
-        // TODO(hud-l0h6t): Replace the stub below with real VideoToolbox calls.
-        //
-        // --- Apple-host implementation sketch ---
-        //
-        // Step 1: Wrap NALU bytes in a CMBlockBuffer.
-        //
-        //   let mut block_buf: CMBlockBufferRef = ptr::null_mut();
-        //   // CMBlockBufferCreateWithMemoryBlock copies the bytes.
-        //   let status = CMBlockBufferCreateWithMemoryBlock(
-        //       kCFAllocatorDefault,
-        //       ptr::null_mut(),   // memoryBlock (null = allocate)
-        //       nalu.len(),
-        //       kCFAllocatorDefault,
-        //       ptr::null(),       // custom block source
-        //       0,                 // offset
-        //       nalu.len(),
-        //       0,                 // flags
-        //       &mut block_buf,
-        //   );
-        //   if status != 0 {
-        //       return Err(VtError::BlockBufferCreateFailed { os_status: status });
-        //   }
-        //   let status = CMBlockBufferReplaceDataBytes(
-        //       nalu.as_ptr() as *const _,
-        //       block_buf,
-        //       0,
-        //       nalu.len(),
-        //   );
-        //   // ... error handling ...
-        //
-        // Step 2: Build CMSampleBuffer timing info.
-        //
-        //   let pts_secs = presentation_ts_ns as f64 / 1_000_000_000.0;
-        //   let timing = CMSampleTimingInfo {
-        //       duration: CMTimeMakeWithSeconds(0.0, 90000),
-        //       presentationTimeStamp: CMTimeMakeWithSeconds(pts_secs, 90000),
-        //       decodeTimeStamp: kCMTimeInvalid,
-        //   };
-        //
-        // Step 3: Create CMSampleBuffer.
-        //
-        //   let mut sample_buf: CMSampleBufferRef = ptr::null_mut();
-        //   let status = CMSampleBufferCreate(
-        //       kCFAllocatorDefault,
-        //       block_buf,
-        //       1,      // dataReady
-        //       None,   // makeDataReadyCallback
-        //       ptr::null_mut(),
-        //       self.format_desc,   // stored in session struct
-        //       1,      // numSamples
-        //       1,      // numSampleTimingEntries
-        //       &timing,
-        //       1,      // numSampleSizeEntries
-        //       &nalu.len(),
-        //       &mut sample_buf,
-        //   );
-        //   if status != 0 {
-        //       CFRelease(block_buf as *const _);
-        //       return Err(VtError::SampleBufferCreateFailed { os_status: status });
-        //   }
-        //
-        // Step 4: Decode.
-        //
-        //   let flags: VTDecodeFrameFlags =
-        //       kVTDecodeFrame_EnableAsynchronousDecompression |
-        //       kVTDecodeFrame_EnableTemporalProcessing;
-        //   let mut info_flags: VTDecodeInfoFlags = 0;
-        //   let status = VTDecompressionSessionDecodeFrame(
-        //       self._session_ref as VTDecompressionSessionRef,
-        //       sample_buf,
-        //       flags,
-        //       ptr::null_mut(), // sourceFrameRefCon (not used)
-        //       &mut info_flags,
-        //   );
-        //   CFRelease(sample_buf as *const _);
-        //   CFRelease(block_buf as *const _);
-        //   if status != 0 {
-        //       return Err(VtError::DecodeSubmitFailed { os_status: status });
-        //   }
+        if nalu.is_empty() {
+            return Err(VtError::InvalidFormat {
+                detail: "AVCC frame payload is empty".into(),
+            });
+        }
 
-        // Stub — no real implementation until hud-l0h6t TODOs are filled.
-        warn!("VtDecodeSession::decode_frame is a stub; no frame will be produced");
+        let mut block_buf_ptr: *mut CMBlockBuffer = ptr::null_mut();
+        // SAFETY: output pointer references stack storage; all nullable pointers are null.
+        let status = unsafe {
+            CMBlockBuffer::create_with_memory_block(
+                None,
+                ptr::null_mut(),
+                nalu.len(),
+                None,
+                ptr::null(),
+                0,
+                nalu.len(),
+                0,
+                NonNull::from(&mut block_buf_ptr),
+            )
+        };
+        if status != 0 {
+            return Err(VtError::BlockBufferCreateFailed { os_status: status });
+        }
+        let Some(block_buf_nonnull) = NonNull::new(block_buf_ptr) else {
+            return Err(VtError::BlockBufferCreateFailed { os_status: -1 });
+        };
+        // SAFETY: `CMBlockBufferCreateWithMemoryBlock` returns a retained object.
+        let block_buf = unsafe { CFRetained::from_raw(block_buf_nonnull) };
+
+        // SAFETY: `nalu` is a live slice for the duration of this call.
+        let source_bytes = unsafe { NonNull::new_unchecked(nalu.as_ptr() as *mut c_void) };
+        // SAFETY: Source bytes are valid and destination buffer is retained.
+        let status =
+            unsafe { CMBlockBuffer::replace_data_bytes(source_bytes, &block_buf, 0, nalu.len()) };
+        if status != 0 {
+            return Err(VtError::BlockBufferCreateFailed { os_status: status });
+        }
+
+        let pts_secs = presentation_ts_ns as f64 / 1_000_000_000.0;
+        let timing = CMSampleTimingInfo {
+            duration: unsafe { CMTime::with_seconds(0.0, 90_000) },
+            presentationTimeStamp: unsafe { CMTime::with_seconds(pts_secs, 90_000) },
+            decodeTimeStamp: unsafe { kCMTimeInvalid },
+        };
+
+        let sample_sizes = [nalu.len()];
+        let mut sample_buf_ptr: *mut CMSampleBuffer = ptr::null_mut();
+        // SAFETY: output pointer references stack storage and all pointed-to arrays outlive call.
+        let status = unsafe {
+            CMSampleBuffer::create(
+                None,
+                Some(&block_buf),
+                true,
+                None,
+                ptr::null_mut(),
+                Some(self.format_desc.as_ref()),
+                1,
+                1,
+                &timing,
+                1,
+                sample_sizes.as_ptr(),
+                NonNull::from(&mut sample_buf_ptr),
+            )
+        };
+        if status != 0 {
+            return Err(VtError::SampleBufferCreateFailed { os_status: status });
+        }
+        let Some(sample_buf_nonnull) = NonNull::new(sample_buf_ptr) else {
+            return Err(VtError::SampleBufferCreateFailed { os_status: -1 });
+        };
+        // SAFETY: `CMSampleBufferCreate` returns a retained object.
+        let sample_buf = unsafe { CFRetained::from_raw(sample_buf_nonnull) };
+
+        let decode_flags = VTDecodeFrameFlags::Frame_EnableAsynchronousDecompression
+            | VTDecodeFrameFlags::Frame_EnableTemporalProcessing;
+        let mut info_flags = VTDecodeInfoFlags::empty();
+        // SAFETY: session/sample pointers are valid retained objects.
+        let status = unsafe {
+            self.session_ref.as_ref().decode_frame(
+                &sample_buf,
+                decode_flags,
+                ptr::null_mut(),
+                &mut info_flags,
+            )
+        };
+        if status != 0 {
+            return Err(VtError::DecodeSubmitFailed { os_status: status });
+        }
+
+        if info_flags.contains(VTDecodeInfoFlags::FrameDropped) {
+            warn!(
+                pts_ns = presentation_ts_ns,
+                "VT decode dropped frame synchronously"
+            );
+        }
+
         Ok(())
     }
 }
@@ -384,31 +369,24 @@ impl Drop for VtDecodeSession {
     fn drop(&mut self) {
         self.invalidated.store(true, Ordering::Release);
 
-        // TODO(hud-l0h6t): Uncomment on Apple host.
-        //
-        //   // SAFETY: VTDecompressionSessionInvalidate is safe to call from any
-        //   // thread. It blocks until all pending decode callbacks have completed,
-        //   // guaranteeing that the callback will not fire after this call returns.
-        //   // We may then safely reclaim the callback state.
-        //   unsafe {
-        //       VTDecompressionSessionInvalidate(
-        //           self._session_ref as VTDecompressionSessionRef
-        //       );
-        //       CFRelease(self._session_ref as *const _);
-        //   }
+        // SAFETY: `session_ref` was created by `VTDecompressionSessionCreate`.
+        // Invalidate blocks until pending callbacks complete.
+        unsafe {
+            self.session_ref.as_ref().invalidate();
+        }
 
         // SAFETY: `callback_state_ptr` was created via `Box::into_raw` in
         // `VtDecodeSession::open` and is not accessed after invalidation.
-        // `VTDecompressionSessionInvalidate` (called above in real impl) ensures
+        // `VTDecompressionSessionInvalidate` (called above) ensures
         // no further callbacks fire before we reclaim the Box.
-        //
-        // In the stub path we never actually created a valid session, so this
-        // block is unreachable (open() returns Err before constructing Self).
-        // The raw pointer is null in the stub to make the safety argument trivially
-        // correct: we never call Box::from_raw on a null pointer.
         if !self.callback_state_ptr.is_null() {
             let _ = unsafe { Box::from_raw(self.callback_state_ptr) };
         }
+
+        // SAFETY: pointers came from `CFRetained::into_raw` in `open`.
+        let _ = unsafe { CFRetained::from_raw(self.session_ref) };
+        // SAFETY: pointer came from `CFRetained::into_raw` in `open`.
+        let _ = unsafe { CFRetained::from_raw(self.format_desc) };
 
         debug!("VtDecodeSession dropped and invalidated");
     }
@@ -431,79 +409,197 @@ impl Drop for VtDecodeSession {
 ///   success (`status == 0`). On error, `image_buffer` may be null.
 /// - This function must be non-blocking (`try_send`, no mutex acquisition).
 ///
-/// TODO(hud-l0h6t): Wire up the real `extern "C"` signature from objc2-video-toolbox
-/// on an Apple host. The function body below is a complete behavioral sketch.
 #[allow(dead_code)]
-unsafe extern "C" fn vt_output_callback(
-    refcon: *mut std::ffi::c_void,
-    // TODO(hud-l0h6t): Replace `*mut ()` with real VT types:
-    //   source_frame_refcon: *mut std::ffi::c_void,
-    //   status: OSStatus,
-    //   info_flags: VTDecodeInfoFlags,
-    //   image_buffer: CVImageBufferRef,
-    //   presentation_time_stamp: CMTime,
-    //   presentation_duration: CMTime,
+unsafe extern "C-unwind" fn vt_output_callback(
+    refcon: *mut c_void,
+    _source_frame_refcon: *mut c_void,
+    status: i32,
+    _info_flags: VTDecodeInfoFlags,
+    image_buffer: *mut CVImageBuffer,
+    presentation_time_stamp: CMTime,
+    _presentation_duration: CMTime,
 ) {
-    // TODO(hud-l0h6t): Actual callback body for Apple host:
-    //
-    //   if status != 0 {
-    //       error!(os_status = status, "VT decode callback error");
-    //       return;
-    //   }
-    //   if image_buffer.is_null() {
-    //       warn!("VT decode callback: null image_buffer on success status");
-    //       return;
-    //   }
-    //
-    //   // SAFETY: refcon is a valid `*mut CallbackState` for the lifetime of
-    //   // the session (see safety contract above).
-    //   let state = &*(refcon as *mut CallbackState);
-    //
-    //   if state.invalidated.load(Ordering::Relaxed) {
-    //       return;
-    //   }
-    //
-    //   // Lock the CVPixelBuffer for CPU read access.
-    //   // kCVPixelBufferLock_ReadOnly = 1.
-    //   let cv_return = CVPixelBufferLockBaseAddress(image_buffer, 1);
-    //   if cv_return != 0 {
-    //       error!(cv_return, "CVPixelBufferLockBaseAddress failed");
-    //       return;
-    //   }
-    //
-    //   // Copy NV12 pixel data: Y plane then UV plane.
-    //   let y_base = CVPixelBufferGetBaseAddressOfPlane(image_buffer, 0) as *const u8;
-    //   let uv_base = CVPixelBufferGetBaseAddressOfPlane(image_buffer, 1) as *const u8;
-    //   let y_row_bytes = CVPixelBufferGetBytesPerRowOfPlane(image_buffer, 0);
-    //   let uv_row_bytes = CVPixelBufferGetBytesPerRowOfPlane(image_buffer, 1);
-    //   let w = state.width as usize;
-    //   let h = state.height as usize;
-    //
-    //   let mut pixels = Vec::with_capacity(nv12_byte_count(state.width, state.height));
-    //   // Copy Y plane row by row (stride may be wider than width).
-    //   for row in 0..h {
-    //       let src = y_base.add(row * y_row_bytes);
-    //       pixels.extend_from_slice(std::slice::from_raw_parts(src, w));
-    //   }
-    //   // Copy UV plane row by row.
-    //   for row in 0..(h + 1) / 2 {
-    //       let src = uv_base.add(row * uv_row_bytes);
-    //       pixels.extend_from_slice(std::slice::from_raw_parts(src, w));
-    //   }
-    //
-    //   CVPixelBufferUnlockBaseAddress(image_buffer, 1);
-    //
-    //   // Derive presentation timestamp in nanoseconds from CMTime.
-    //   let pts_ns = ((presentation_time_stamp.value as f64 /
-    //                   presentation_time_stamp.timescale as f64) * 1_000_000_000.0) as u64;
-    //
-    //   let frame = DecodedFrame::new(state.width, state.height, pts_ns, pixels);
-    //
-    //   // Non-blocking send — drop frame if compositor is behind.
-    //   if let Err(_dropped) = state.sender.try_send(frame) {
-    //       warn!("VT frame dropped: compositor channel full (capacity={})", FRAME_CHANNEL_CAPACITY);
-    //   }
+    if status != 0 {
+        error!(os_status = status, "VT decode callback error");
+        return;
+    }
+    if refcon.is_null() {
+        error!("VT decode callback: null refcon");
+        return;
+    }
+    if image_buffer.is_null() {
+        warn!("VT decode callback: null image_buffer on success status");
+        return;
+    }
 
-    // Stub: refcon is unused in stub path.
-    let _ = refcon;
+    // SAFETY: `refcon` is valid for the session lifetime (contract above).
+    let state = unsafe { &*(refcon as *mut CallbackState) };
+    if state.invalidated.load(Ordering::Relaxed) {
+        return;
+    }
+
+    // SAFETY: Callback only receives image buffers from VT decode output.
+    let pixel_buffer = unsafe { &*(image_buffer as *mut CVPixelBuffer) };
+    let lock_flags = CVPixelBufferLockFlags::ReadOnly;
+    // SAFETY: `pixel_buffer` is valid for callback duration.
+    let cv_return = unsafe { CVPixelBufferLockBaseAddress(pixel_buffer, lock_flags) };
+    if cv_return != 0 {
+        error!(cv_return, "CVPixelBufferLockBaseAddress failed");
+        return;
+    }
+
+    // SAFETY: Buffer is locked; plane access is valid while locked.
+    let y_base = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0) as *const u8;
+    let uv_base = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1) as *const u8;
+    let y_row_bytes = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+    let uv_row_bytes = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+
+    if y_base.is_null() || uv_base.is_null() {
+        // SAFETY: Balanced unlock for successful lock above.
+        let _ = unsafe { CVPixelBufferUnlockBaseAddress(pixel_buffer, lock_flags) };
+        warn!("VT decode callback: missing NV12 plane base pointers");
+        return;
+    }
+
+    let w = state.width as usize;
+    let h = state.height as usize;
+    let mut pixels = Vec::with_capacity(nv12_byte_count(state.width, state.height));
+
+    for row in 0..h {
+        // SAFETY: row bounds are derived from frame dimensions and row stride.
+        let src = unsafe { y_base.add(row * y_row_bytes) };
+        // SAFETY: each row copies exactly `w` visible pixels.
+        let row_bytes = unsafe { std::slice::from_raw_parts(src, w) };
+        pixels.extend_from_slice(row_bytes);
+    }
+    for row in 0..h.div_ceil(2) {
+        // SAFETY: row bounds are derived from frame dimensions and row stride.
+        let src = unsafe { uv_base.add(row * uv_row_bytes) };
+        // SAFETY: each UV row has `w` bytes for NV12.
+        let row_bytes = unsafe { std::slice::from_raw_parts(src, w) };
+        pixels.extend_from_slice(row_bytes);
+    }
+
+    // SAFETY: Balanced unlock for successful lock above.
+    let _ = unsafe { CVPixelBufferUnlockBaseAddress(pixel_buffer, lock_flags) };
+
+    let pts_ns = cm_time_to_ns(presentation_time_stamp);
+    let frame = DecodedFrame::new(state.width, state.height, pts_ns, pixels);
+
+    if let Err(send_err) = state.sender.try_send(frame) {
+        match send_err {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                warn!(
+                    "VT frame dropped: compositor channel full (capacity={})",
+                    FRAME_CHANNEL_CAPACITY
+                );
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                warn!("VT frame dropped: compositor channel closed");
+            }
+        }
+    }
+}
+
+fn cm_time_to_ns(ts: CMTime) -> u64 {
+    if ts.timescale <= 0 || ts.value < 0 {
+        return 0;
+    }
+    let value = ts.value as u128;
+    let timescale = ts.timescale as u128;
+    let nanos = value.saturating_mul(1_000_000_000u128) / timescale;
+    nanos.min(u64::MAX as u128) as u64
+}
+
+unsafe fn create_format_description(
+    format: &VideoFormat,
+) -> Result<CFRetained<CMFormatDescription>, VtError> {
+    match &format.parameters {
+        CodecParameters::H264 { sps, pps } => {
+            let mut param_set_pointers = [
+                NonNull::new(sps.as_ptr() as *mut u8).ok_or_else(|| VtError::InvalidFormat {
+                    detail: "empty H264 SPS parameter set".into(),
+                })?,
+                NonNull::new(pps.as_ptr() as *mut u8).ok_or_else(|| VtError::InvalidFormat {
+                    detail: "empty H264 PPS parameter set".into(),
+                })?,
+            ];
+            let mut param_set_sizes = [sps.len(), pps.len()];
+            let mut desc_ptr: *const CMFormatDescription = ptr::null();
+
+            // SAFETY: pointers reference stack arrays with matching lengths.
+            let status = unsafe {
+                CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                    None,
+                    param_set_pointers.len(),
+                    NonNull::new(param_set_pointers.as_mut_ptr())
+                        .expect("array pointer is non-null"),
+                    NonNull::new(param_set_sizes.as_mut_ptr()).expect("array pointer is non-null"),
+                    4,
+                    NonNull::from(&mut desc_ptr),
+                )
+            };
+            if status != 0 {
+                return Err(VtError::InvalidFormat {
+                    detail: format!(
+                        "CMVideoFormatDescriptionCreateFromH264ParameterSets returned OSStatus {status}"
+                    ),
+                });
+            }
+
+            let Some(desc_nonnull) = NonNull::new(desc_ptr as *mut CMFormatDescription) else {
+                return Err(VtError::InvalidFormat {
+                    detail: "CMVideoFormatDescriptionCreateFromH264ParameterSets returned null description"
+                        .into(),
+                });
+            };
+            // SAFETY: CoreMedia create function returns retained description (+1).
+            Ok(unsafe { CFRetained::from_raw(desc_nonnull) })
+        }
+        CodecParameters::Hevc { vps, sps, pps } => {
+            let mut param_set_pointers = [
+                NonNull::new(vps.as_ptr() as *mut u8).ok_or_else(|| VtError::InvalidFormat {
+                    detail: "empty HEVC VPS parameter set".into(),
+                })?,
+                NonNull::new(sps.as_ptr() as *mut u8).ok_or_else(|| VtError::InvalidFormat {
+                    detail: "empty HEVC SPS parameter set".into(),
+                })?,
+                NonNull::new(pps.as_ptr() as *mut u8).ok_or_else(|| VtError::InvalidFormat {
+                    detail: "empty HEVC PPS parameter set".into(),
+                })?,
+            ];
+            let mut param_set_sizes = [vps.len(), sps.len(), pps.len()];
+            let mut desc_ptr: *const CMFormatDescription = ptr::null();
+
+            // SAFETY: pointers reference stack arrays with matching lengths.
+            let status = unsafe {
+                CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                    None,
+                    param_set_pointers.len(),
+                    NonNull::new(param_set_pointers.as_mut_ptr())
+                        .expect("array pointer is non-null"),
+                    NonNull::new(param_set_sizes.as_mut_ptr()).expect("array pointer is non-null"),
+                    4,
+                    None,
+                    NonNull::from(&mut desc_ptr),
+                )
+            };
+            if status != 0 {
+                return Err(VtError::InvalidFormat {
+                    detail: format!(
+                        "CMVideoFormatDescriptionCreateFromHEVCParameterSets returned OSStatus {status}"
+                    ),
+                });
+            }
+
+            let Some(desc_nonnull) = NonNull::new(desc_ptr as *mut CMFormatDescription) else {
+                return Err(VtError::InvalidFormat {
+                    detail: "CMVideoFormatDescriptionCreateFromHEVCParameterSets returned null description"
+                        .into(),
+                });
+            };
+            // SAFETY: CoreMedia create function returns retained description (+1).
+            Ok(unsafe { CFRetained::from_raw(desc_nonnull) })
+        }
+    }
 }

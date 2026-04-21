@@ -17,6 +17,7 @@ tracing = { workspace = true }
 # Only pulled in on apple targets; the workspace stays compilable on Linux.
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = "0.6"
+objc2-core-foundation = "0.3"
 objc2-video-toolbox = "0.3"
 objc2-core-media = "0.3"
 objc2-core-video = "0.3"
