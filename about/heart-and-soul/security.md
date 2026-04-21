@@ -62,7 +62,7 @@ The compositor is a single trusted OS process (see RFC 0002 §1.1 "Single-Proces
 
 The v1 architecture ratified this design in RFC 0002 §1.1 (Single-Process Model) and §2.8 (Media Worker Boundary), which reserves in-process GStreamer and WebRTC threads explicitly. E24's tokio-task layer sits above the GStreamer pipeline pool, orchestrating pipeline lifecycle and enforcing budgets — consistent with that boundary.
 
-Subprocess isolation of codecs is a legitimate post-v2 defense-in-depth hardening if the threat model later admits untrusted-codec or agent-supplied-decoder cases (see hud-lezjj). v2's bounded-ingress scope from trusted-codec sources does not require it.
+Subprocess isolation of codecs is a legitimate post-v2 defense-in-depth hardening if the threat model later admits untrusted-codec or agent-supplied-decoder cases (see `docs/decisions/codec-cve-sandbox-hardening-v3.md`, bead `hud-lezjj`). v2's bounded-ingress scope from trusted-codec sources does not require it.
 
 ## Resource governance
 

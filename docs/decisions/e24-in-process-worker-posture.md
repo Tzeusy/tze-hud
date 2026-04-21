@@ -140,8 +140,9 @@ This verdict is narrow. It does **not** claim:
   0002), aggressive E24 budget limits, watchdog-driven decoder restart,
   and an E25 degradation ladder that can shed media entirely when a
   stream misbehaves. A future tightening to per-codec sandbox processes
-  remains a legitimate post-v2 hardening item, but it does not block
-  phase 1.
+  remains a legitimate post-v2 hardening item (see
+  docs/decisions/codec-cve-sandbox-hardening-v3.md, bead hud-lezjj),
+  but it does not block phase 1.
 - That subprocess isolation is the wrong *eventual* answer. If a future
   threat model (e.g., codecs from untrusted upstreams, agent-supplied
   decoder plugins) appears, revisit. v2's scope is bounded ingress from
