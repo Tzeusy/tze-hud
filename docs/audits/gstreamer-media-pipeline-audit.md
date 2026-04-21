@@ -654,7 +654,7 @@ Before any media pipeline ships to users, tze_hud maintainers must subscribe to 
 
 ### Cross-Reference
 
-- **Codec-level memory safety hardening**: See `hud-lezjj` (defense-in-depth sandboxing and subprocess isolation for codec workers), tracked as post-v2 work.
+- **Codec-level memory safety hardening**: See `docs/decisions/codec-cve-sandbox-hardening-v3.md` (bead `hud-lezjj`) for the trigger conditions and design constraints around post-v2 per-codec sandbox workers.
 - **Media plane degradation policy**: See E25 in the v2 signoff packet for the full graceful degradation ladder.
 
 ---
