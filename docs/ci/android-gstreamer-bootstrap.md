@@ -796,11 +796,14 @@ conversion still use JNI. See Section 5.3 and `docs/reports/gstreamer-1.26-ndk-m
 
 ---
 
-## 7. Pre-Phase-3 Gate Checklist
+## 7. Phase-3 Gate Checklist
 
-The following items must ALL pass before the phase 3 Android implementation bead
-opens. Each item maps to a CI gate in the workflow above (Section 4) or to an
-explicit manual verification step.
+Pre-Phase-3 open condition: items 1-11 must pass before the phase 3 Android
+implementation bead opens. Each item maps to a CI gate in the workflow above
+(Section 4) or to an explicit manual verification step.
+
+Phase-3 integration/exit condition: items 12-13 are intentionally blocked until
+phase 3 implementation and on-device runtime validation exist.
 
 | # | Gate | Verification | CI? | Status |
 |---|---|---|---|---|
