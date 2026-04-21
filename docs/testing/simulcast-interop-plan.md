@@ -4,8 +4,31 @@
 **Parent audit:** `hud-ora8.1.17` (webrtc-rs library audit, PR #523)
 **Date:** 2026-04-19
 **Amended:** 2026-04-19 by `hud-khx6u` — added §7 str0m fallback path; renumbered §7–9 to §8–10
-**Status:** Design document — Phase 4 pre-flight, test harness not yet implemented
+**Amended:** 2026-04-21 by `hud-fpq51` worker — added Phase 4 gate-tracker snapshot and follow-up status table after PR #538 merge
+**Status:** Design document + gate tracker — pre-flight follow-ups mostly complete; test harness not yet implemented
 **Blocks:** Phase 4b bidirectional AV ship
+
+---
+
+## 0. Phase 4 Gate-Tracker Snapshot (2026-04-21)
+
+`hud-fpq51` remains open as the gate tracker after PR #538 merged. This section
+tracks which prerequisite design/chore follow-ups are complete versus what still
+needs to happen before the Phase 4b simulcast interop gate can be executed.
+
+| Follow-up from this plan | Bead(s) / artifact(s) | 2026-04-21 status |
+|---|---|---|
+| v0.20 simulcast readiness spike | `hud-g89zs`, `docs/reports/webrtc-rs-v0.20-simulcast-readiness.md` | Complete (NO-GO today; re-check at Phase 4 kickoff) |
+| SFU vendor adapter seam | `hud-s2j0l`, `docs/reports/sfu-vendor-adapter-seam.md` | Complete |
+| Safari macOS CI lane design | `hud-clwaj`, `docs/ci/safari-simulcast-interop-runner.md`, inactive workflow stub | Complete (design + stub only) |
+| IPv6 ICE cloud-relay risk audit | `hud-0bqk8`, `docs/reports/ipv6-ice-validation-audit.md` | Complete |
+| str0m fallback TURN-over-TCP validation | `hud-kjody`, `docs/reports/str0m-turn-over-tcp-validation.md` | Complete (CONDITIONAL-GO; still requires Phase 4b TURN integration work if fallback path is used) |
+
+Remaining gate items for this bead are implementation-time, not pre-flight design:
+
+1. At Phase 4 kickoff, re-validate webrtc-rs v0.20 simulcast readiness signals (§2, §7, §9).
+2. Implement the harness crate and browser bridge described in §5.
+3. Execute the full browser x codec matrix and record hard/soft-gate outcomes per §6.
 
 ---
 
@@ -640,42 +663,23 @@ implemented until Phase 4 kickoff.
 
 ---
 
-## 10. Discovered Gaps and Follow-Ups
+## 10. Follow-Up Status (replaces pre-flight discovered-gaps list)
 
-The following items surfaced during the design of this plan and are out of scope
-for this document but should be tracked as phase 4 beads:
+The original discovered-gaps list from 2026-04-19 has been converted into a
+status view so this document can function as a live gate tracker:
 
-1. **SFU vendor adapter seam in the test harness** — The harness must be able to
-   work with both LiveKit and Cloudflare Calls until C15 vendor selection is made.
-   This requires an abstract signaling adapter. File as a sub-bead of the phase 4
-   harness implementation bead.
-
-2. **v0.20 simulcast RID/MID interceptor readiness** — The phase 4 kickoff bead
-   must include a one-day spike to verify that webrtc-rs v0.20's simulcast
-   implementation is sufficiently complete for the harness. If not, the bead
-   must escalate with a decision on whether to patch webrtc-rs, contribute
-   upstream, or fall back to v0.17 with a limited simulcast scope.
-
-3. **str0m as fallback if webrtc-rs v0.20 simulcast is incomplete** — The
-   `hud-ora8.1.17` audit identified `str0m` as a credible fallback. The decision
-   tree (§7.1) now governs invocation. When invoked, §7 applies in full.
-
-4. **Safari macOS runner in CI** — Safari interop requires a `macos-latest` GitHub
-   Actions runner. CI configuration does not currently have this lane. Add as a
-   phase 4 chore.
-
-5. **IPv6 ICE validation** — `hud-ora8.1.17` audit issue #774 (IPv6 ICE gather
-   in v0.20 alpha). IPv6 browser paths must be validated before phase 4b cloud-
-   relay ships, particularly for Safari on macOS (which defaults to IPv6-preferred
-   ICE candidate ordering). File as a phase 4 pre-condition bead parallel to this
-   interop plan.
-
-6. **TURN client integration bead** — Per hud-kjody CONDITIONAL-GO, tze_hud must
-   schedule an explicit bead for the external TURN client integration before Phase 4b
-   cloud-relay harness cells run. Estimated scope: 3–5 days (2–3 days for UDP TURN;
-   1–2 additional days for TCP/TLS wrapping). If LiveKit Cloud is the C15 vendor,
-   verify at kickoff whether LiveKit's managed TURN infrastructure covers TCP/TLS
-   relay — if yes, the bead scope reduces to UDP-only validation.
+1. **SFU vendor adapter seam** — completed by `hud-s2j0l` (PR #552 merged).
+2. **v0.20 simulcast readiness spike** — completed by `hud-g89zs` (PR #543 merged);
+   result remains NO-GO until kickoff re-check.
+3. **str0m fallback path analysis** — completed across `hud-1ee3a` audit +
+   `hud-kjody` TURN-over-TCP validation; invoke only if §7 trigger conditions hold.
+4. **Safari macOS runner plan** — completed by `hud-clwaj` (PR #553 merged)
+   with workflow stub and runbook; activation remains a Phase 4 implementation step.
+5. **IPv6 ICE validation** — completed by `hud-0bqk8` (PR #551 merged); keep
+   cloud-relay vendor-specific gate checks in the Phase 4b closeout packet.
+6. **TURN client integration implementation** — still pending as a Phase 4b
+   execution bead (required when the selected relay path cannot rely solely on
+   managed TURN posture).
 
 ---
 
