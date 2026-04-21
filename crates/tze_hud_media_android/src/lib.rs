@@ -224,6 +224,7 @@ mod platform {
             src: *const c_void,
             size: usize,
         ) -> usize;
+        fn gst_mini_object_unref(mini_object: *mut c_void);
         fn gst_app_src_push_buffer(appsrc: *mut GstAppSrc, buffer: *mut GstBuffer) -> c_int;
         fn gst_app_sink_try_pull_sample(appsink: *mut GstAppSink, timeout: u64) -> *mut GstSample;
         fn gst_sample_unref(sample: *mut GstSample);
@@ -391,6 +392,32 @@ mod platform {
         /// If `with_video_overlay_sink` is true, a tee branch with `glimagesink`
         /// (`video_sink`) is added for optional ANativeWindow handoff.
         pub fn new_h264(with_video_overlay_sink: bool) -> Result<Self, AndroidMediaError> {
+            struct PendingHandles {
+                pipeline: NonNull<GstElement>,
+                appsrc: Option<NonNull<GstElement>>,
+                appsink: Option<NonNull<GstElement>>,
+                video_sink: Option<NonNull<GstElement>>,
+            }
+
+            impl Drop for PendingHandles {
+                fn drop(&mut self) {
+                    // SAFETY: any handles set here were acquired by this constructor and
+                    // must be released if construction fails before ownership transfers.
+                    unsafe {
+                        if let Some(appsrc) = self.appsrc {
+                            gst_object_unref(appsrc.as_ptr().cast::<GstObject>());
+                        }
+                        if let Some(appsink) = self.appsink {
+                            gst_object_unref(appsink.as_ptr().cast::<GstObject>());
+                        }
+                        if let Some(video_sink) = self.video_sink {
+                            gst_object_unref(video_sink.as_ptr().cast::<GstObject>());
+                        }
+                        gst_object_unref(self.pipeline.as_ptr().cast::<GstObject>());
+                    }
+                }
+            }
+
             let tracker = bootstrap()
                 .lock()
                 .map_err(|_| AndroidMediaError::FfiFailure {
@@ -427,20 +454,29 @@ mod platform {
                     detail: c_error_to_string(err),
                 })?;
 
-            let appsrc = lookup_element(pipeline, "ingress")?;
-            let appsink = lookup_element(pipeline, "egress")?;
-            let video_sink = if with_video_overlay_sink {
+            let mut pending = PendingHandles {
+                pipeline,
+                appsrc: None,
+                appsink: None,
+                video_sink: None,
+            };
+
+            pending.appsrc = Some(lookup_element(pipeline, "ingress")?);
+            pending.appsink = Some(lookup_element(pipeline, "egress")?);
+            pending.video_sink = if with_video_overlay_sink {
                 Some(lookup_element(pipeline, "video_sink")?)
             } else {
                 None
             };
 
-            Ok(Self {
+            let bridge = Self {
                 pipeline,
-                appsrc: appsrc.cast(),
-                appsink: appsink.cast(),
-                video_sink,
-            })
+                appsrc: pending.appsrc.expect("set above").cast(),
+                appsink: pending.appsink.expect("set above").cast(),
+                video_sink: pending.video_sink,
+            };
+            std::mem::forget(pending);
+            Ok(bridge)
         }
 
         /// Sets pipeline state to `PLAYING`.
@@ -477,6 +513,8 @@ mod platform {
                 )
             };
             if filled != data.len() {
+                // SAFETY: `buffer` is still exclusively owned by this function on fill failure.
+                unsafe { gst_mini_object_unref(buffer.as_ptr().cast::<c_void>()) };
                 return Err(AndroidMediaError::PushFailed {
                     detail: format!(
                         "gst_buffer_fill wrote {filled} bytes, expected {}",
@@ -545,11 +583,22 @@ mod platform {
     use super::AndroidMediaError;
     use std::ffi::c_void;
 
+    /// Non-Android JNI stub; always returns 0.
+    ///
+    /// # Safety
+    /// This function is an FFI entry point and may be called by foreign code
+    /// with arbitrary pointers. On non-Android builds it ignores all inputs.
+    #[unsafe(no_mangle)]
     #[allow(non_snake_case)]
     pub unsafe extern "system" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> i32 {
         0
     }
 
+    /// Non-Android stub for `gst_android_init`.
+    ///
+    /// # Safety
+    /// Signature matches the Android FFI API. Pointers are ignored because this
+    /// platform path always returns `UnsupportedPlatform`.
     pub unsafe fn run_gst_android_init(
         _env: *mut c_void,
         _context: *mut c_void,
