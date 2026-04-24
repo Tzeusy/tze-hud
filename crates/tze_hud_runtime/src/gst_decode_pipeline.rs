@@ -49,7 +49,7 @@
 
 #![cfg(feature = "gstreamer")]
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -89,7 +89,7 @@ fn ensure_gst_init() -> Result<(), gst::glib::Error> {
 /// - `gst::Pipeline` is `Send + Sync` (GStreamer objects are refcounted and
 ///   thread-safe after construction).
 /// - `gst_app::AppSink` is likewise `Send + Sync`.
-/// - `current_dimensions` is protected by a `Mutex`.
+/// - `current_dimensions` is `Option<(u32, u32)>`, which is `Send + Sync`.
 pub struct GstDecodePipeline {
     /// The running GStreamer pipeline.
     pipeline: gst::Pipeline,
@@ -97,7 +97,7 @@ pub struct GstDecodePipeline {
     appsink: gst_app::AppSink,
     /// Dimensions negotiated from caps after the first sample arrives.
     /// `None` until the pipeline has produced at least one frame.
-    current_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
+    current_dimensions: Option<(u32, u32)>,
 }
 
 impl GstDecodePipeline {
@@ -163,7 +163,7 @@ impl GstDecodePipeline {
         Ok(Self {
             pipeline,
             appsink,
-            current_dimensions: Arc::new(Mutex::new(None)),
+            current_dimensions: None,
         })
     }
 
@@ -227,33 +227,27 @@ impl MediaDecodePipeline for GstDecodePipeline {
 
         // Update cached dimensions from this sample's caps.
         if let Some(dims) = Self::dimensions_from_sample(&sample) {
-            if let Ok(mut guard) = self.current_dimensions.lock() {
-                *guard = Some(dims);
-            }
+            self.current_dimensions = Some(dims);
         }
 
-        let (width, height) = self
-            .current_dimensions
-            .lock()
-            .ok()
-            .and_then(|g| *g)?;
+        let (width, height) = self.current_dimensions?;
 
         let buffer = sample.buffer()?;
         let map = buffer.map_readable().ok()?;
 
         let expected_len = (width as usize).saturating_mul(height as usize).saturating_mul(4);
-        if map.len() < expected_len {
+        if map.len() != expected_len {
             tracing::warn!(
                 actual_len = map.len(),
                 expected_len,
-                "GstDecodePipeline: buffer shorter than expected; skipping frame"
+                "GstDecodePipeline: buffer size mismatch (possible row padding); skipping frame"
             );
             return None;
         }
 
         // Copy the RGBA bytes out of the GStreamer buffer into an owned Vec so
         // the buffer map (and the underlying GstBuffer) can be released.
-        let rgba = map[..expected_len].to_vec();
+        let rgba = map.to_vec();
 
         // Use the GStreamer presentation-time-stamp (PTS) if available;
         // fall back to 0 if the buffer carries no PTS.
@@ -275,7 +269,7 @@ impl MediaDecodePipeline for GstDecodePipeline {
     /// Returns `None` until the pipeline has produced at least one frame and
     /// caps negotiation has completed.
     fn frame_dimensions(&self) -> Option<(u32, u32)> {
-        self.current_dimensions.lock().ok().and_then(|g| *g)
+        self.current_dimensions
     }
 }
 
