@@ -215,8 +215,7 @@ mod tests {
         // The error message must mention the invalid dimension (0).
         assert!(
             err.to_string().contains("0"),
-            "expected '0' in error: {}",
-            err
+            "expected '0' in error: {err}"
         );
     }
 
