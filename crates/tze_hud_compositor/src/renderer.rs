@@ -2230,6 +2230,33 @@ impl Compositor {
     /// Available only when the `v2_preview` feature is active.  In v1 builds
     /// this method does not exist; the render path always shows the dark
     /// placeholder quad.
+    ///
+    /// # Colour-space contract — sRGB vs BT.709 (hud-ndo7o)
+    ///
+    /// The texture is created with `wgpu::TextureFormat::Rgba8UnormSrgb`, which
+    /// causes the GPU sampler to apply the **sRGB EOTF** (gamma ≈ 2.2 curve) to
+    /// every texel on read.  However, GStreamer's
+    /// `videoconvert ! video/x-raw,format=RGBA` pipeline outputs pixels encoded
+    /// with the **BT.709 transfer function**, which is close to sRGB but not
+    /// identical (BT.709 uses a linear segment below 0.018 and a power exponent
+    /// of 0.45, versus sRGB's 0.0031308 breakpoint and 1/2.4 exponent).  The
+    /// result is a mild gamma mismatch — sampled colours will appear slightly
+    /// brighter than a reference display would show.
+    ///
+    /// This approximation is acceptable for initial integration.  Two forward-fix
+    /// paths are available:
+    ///
+    /// 1. **GStreamer side** — insert a BT.709 → sRGB gamma conversion in the
+    ///    decode stage (e.g. a `videobalance` element or custom GLSL kernel)
+    ///    before the appsink, so the bytes written into `VideoFrame::rgba` are
+    ///    already sRGB-encoded.
+    /// 2. **Compositor side** — switch to `Rgba8Unorm` (bypasses the GPU sRGB
+    ///    EOTF) and apply the BT.709 inverse EOTF in a fragment shader, keeping
+    ///    the data in linear light for downstream compositing.
+    ///
+    /// See also: `crates/tze_hud_runtime/src/gst_decode_pipeline.rs` module-level
+    /// rustdoc, which describes the same mismatch from the decode-pipeline side.
+    /// Tracking: hud-ndo7o.
     #[cfg(feature = "v2_preview")]
     pub fn upload_video_frame(
         &mut self,
