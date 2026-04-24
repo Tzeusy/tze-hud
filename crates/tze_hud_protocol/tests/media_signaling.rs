@@ -12,6 +12,9 @@
 //!    content_classification) round-trip intact.
 //! 5. Field number allocation assertions: the right enum variant is produced by
 //!    the right oneof field number (guards against protobuf field-number drift).
+//! 6. Bidirectional Rust-type ↔ proto conversion for VideoSurfaceRef (hud-quiig):
+//!    scene_zone_content_to_proto / proto_zone_content_to_scene round-trips using
+//!    the ZoneContent::VideoSurfaceRef(SceneId) scene type (RFC 0014 §2.7).
 //!
 //! Acceptance criteria mapped to issue hud-ora8.1.23:
 //! - AC1: session-protocol delta merged via RFC 0005 amendment (doc change; tested here indirectly)
@@ -1152,4 +1155,140 @@ fn transport_descriptor_future_cloud_relay_mode() {
         decoded.mode, 3,
         "FUTURE_CLOUD_RELAY (mode=3) MUST round-trip (wire-reserved for phase 4b)"
     );
+}
+
+// ─── hud-quiig: VideoSurfaceRef Rust-type ↔ proto bidirectional conversion ───
+//
+// These tests exercise scene_zone_content_to_proto and proto_zone_content_to_scene
+// (convert.rs) for ZoneContent::VideoSurfaceRef(SceneId), not just the prost-level
+// encode/decode path covered by zone_content_video_surface_ref_roundtrip above.
+//
+// Key contract (RFC 0014 §2.7; WM-S2b snapshot exclusion rules):
+// - surface_id is the 16-byte LE UUIDv7 assigned by MediaIngressOpenResult.
+// - expires_at_wall_us and content_classification are snapshot parity fields that
+//   live on ZonePublishRecordProto (fields 6-7); they are ZEROED inside ZoneContent
+//   on the scene_zone_content_to_proto path to keep ZoneContent clean of publication
+//   state. They are ignored (not used) on the proto_zone_content_to_scene path.
+// - A malformed or empty surface_id MUST decode as None (fail-fast, not panic).
+
+use tze_hud_protocol::convert::{proto_zone_content_to_scene, scene_zone_content_to_proto};
+use tze_hud_scene::types::{SceneId, ZoneContent as SceneZoneContent};
+// Note: SceneZoneContent aliases tze_hud_scene::types::ZoneContent to distinguish it
+// from the proto ZoneContent (tze_hud_protocol::proto::ZoneContent) already in scope.
+
+#[test]
+fn video_surface_ref_scene_to_proto_round_trip() {
+    // Encode a ZoneContent::VideoSurfaceRef(SceneId) to proto, then decode back.
+    // The surface_id (LE bytes) MUST survive the full Rust-type ↔ proto path.
+    let surface_id = SceneId::new();
+    let scene_content = SceneZoneContent::VideoSurfaceRef(surface_id);
+
+    let proto_content = scene_zone_content_to_proto(&scene_content);
+    let restored = proto_zone_content_to_scene(&proto_content)
+        .expect("VideoSurfaceRef MUST decode from a valid 16-byte surface_id");
+
+    assert_eq!(
+        restored,
+        scene_content,
+        "ZoneContent::VideoSurfaceRef(SceneId) MUST survive scene→proto→scene round-trip"
+    );
+}
+
+#[test]
+fn video_surface_ref_proto_to_scene_round_trip() {
+    // Encode from proto side first, then verify the Rust scene type is correct.
+    // Mirrors how the session server processes incoming zone publishes.
+    let surface_id = SceneId::new();
+    let le_bytes = surface_id.to_bytes_le().to_vec();
+
+    let proto_content = tze_hud_protocol::proto::ZoneContent {
+        payload: Some(ZonePayload::VideoSurfaceRef(VideoSurfaceRef {
+            surface_id: le_bytes,
+            // Snapshot parity fields: present even in proto; ignored by convert.rs
+            // (they travel as ZonePublishRecordProto.fields 6-7, not in ZoneContent).
+            expires_at_wall_us: 0,
+            content_classification: String::new(),
+        })),
+    };
+
+    let scene_content = proto_zone_content_to_scene(&proto_content)
+        .expect("valid 16-byte surface_id MUST decode to ZoneContent::VideoSurfaceRef");
+
+    assert_eq!(
+        scene_content,
+        SceneZoneContent::VideoSurfaceRef(surface_id),
+        "proto VideoSurfaceRef MUST decode to ZoneContent::VideoSurfaceRef with the correct SceneId"
+    );
+}
+
+#[test]
+fn video_surface_ref_snapshot_parity_fields_zeroed_in_zone_content() {
+    // WM-S2b snapshot exclusion: expires_at_wall_us and content_classification
+    // MUST be zeroed/empty inside ZoneContent (not publication state) when encoded
+    // via scene_zone_content_to_proto. They belong on ZonePublishRecordProto fields 6-7.
+    let surface_id = SceneId::new();
+    let proto_content = scene_zone_content_to_proto(&SceneZoneContent::VideoSurfaceRef(surface_id));
+
+    match proto_content.payload {
+        Some(ZonePayload::VideoSurfaceRef(ref v)) => {
+            assert_eq!(
+                v.expires_at_wall_us, 0,
+                "expires_at_wall_us MUST be 0 in ZoneContent (lives on ZonePublishRecordProto field 6)"
+            );
+            assert!(
+                v.content_classification.is_empty(),
+                "content_classification MUST be empty in ZoneContent (lives on ZonePublishRecordProto field 7)"
+            );
+            assert_eq!(
+                v.surface_id.len(),
+                16,
+                "surface_id MUST be exactly 16 bytes (UUIDv7 LE)"
+            );
+        }
+        other => panic!(
+            "scene_zone_content_to_proto MUST produce VideoSurfaceRef variant, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn video_surface_ref_malformed_surface_id_returns_none() {
+    // Fail-fast contract: a VideoSurfaceRef with wrong-length surface_id MUST
+    // decode as None (not panic). Guards against malformed wire inputs.
+    for bad_len in [0usize, 8, 15, 17, 32] {
+        let proto_content = tze_hud_protocol::proto::ZoneContent {
+            payload: Some(ZonePayload::VideoSurfaceRef(VideoSurfaceRef {
+                surface_id: vec![0xAB_u8; bad_len],
+                expires_at_wall_us: 0,
+                content_classification: String::new(),
+            })),
+        };
+        assert_eq!(
+            proto_zone_content_to_scene(&proto_content),
+            None,
+            "malformed surface_id ({bad_len} bytes) MUST decode as None"
+        );
+    }
+}
+
+#[test]
+fn video_surface_ref_null_surface_id_round_trip() {
+    // The null/absent sentinel (all-zero SceneId) MUST round-trip correctly
+    // per RFC 0001 §1.1 — it is a valid value, not an error.
+    let null_id = SceneId::null();
+    let scene_content = SceneZoneContent::VideoSurfaceRef(null_id);
+
+    let proto_content = scene_zone_content_to_proto(&scene_content);
+    let restored = proto_zone_content_to_scene(&proto_content)
+        .expect("null SceneId (all-zero) is a valid surface_id and MUST decode");
+
+    assert_eq!(
+        restored,
+        scene_content,
+        "null SceneId MUST survive round-trip as ZoneContent::VideoSurfaceRef"
+    );
+    if let SceneZoneContent::VideoSurfaceRef(id) = restored {
+        assert!(id.is_null(), "restored SceneId MUST be null");
+    }
 }
