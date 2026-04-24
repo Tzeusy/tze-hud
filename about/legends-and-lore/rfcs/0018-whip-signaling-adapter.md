@@ -379,8 +379,14 @@ RFC 0014 §4.2 contains the following TBD:
   see §4.3).
 - `runtime_sdp_offer` (field 6 of `MediaIngressOpenResult`) is used **only** when the
   runtime is the SDP offerer (runtime-initiated offer path, §4.2 second bullet).
-- `runtime_sdp_answer` (field 9, this RFC) is used when the agent provided an offer and the
-  runtime (via WHIP) obtained an SDP answer from the SFU.
+- `runtime_sdp_answer` (field 9, this RFC) reserves the field for agent-initiated-offer paths
+  where the SDP answer is available at admit time. **In the FUTURE_CLOUD_RELAY path it is
+  always empty in `MediaIngressOpenResult`**: the WHIP POST is triggered by the agent's
+  subsequent `CloudRelayOpen` (CM 80), so the SDP answer can only arrive after
+  `MediaIngressOpenResult` has already been sent. The SDP answer is delivered via
+  `CloudRelayOpenResult.sdp_answer` (SM 80, field 3). Field 9 in `MediaIngressOpenResult`
+  is therefore reserved for a future inline-WHIP admission path where the SDP exchange
+  completes before the admit result is emitted.
 - The two fields are mutually exclusive per stream; the proto wiring task (hud-ora8.1.23)
   MUST ensure this constraint is documented in the proto comment.
 
@@ -449,11 +455,12 @@ phase 4f (bidirectional AV egress) and future extension.
 message MediaIngressOpenResult {
   // ... existing fields 1–8 from RFC 0014 §2.3.2 ...
 
-  // SDP answer from the runtime (via WHIP SFU) when the agent supplied an
-  // SDP offer in TransportDescriptor.agent_sdp_offer. Populated when:
-  //   admitted = true AND transport.mode = FUTURE_CLOUD_RELAY AND
-  //   the WHIP POST has completed and returned an SDP answer.
-  // Empty in all other cases.
+  // SDP answer field reserved for agent-initiated-offer paths where the
+  // SDP exchange completes synchronously at admit time (e.g., a future
+  // inline-WHIP admission variant). In the current FUTURE_CLOUD_RELAY path
+  // this field is ALWAYS EMPTY in MediaIngressOpenResult: WHIP POST is
+  // triggered by the subsequent CloudRelayOpen (CM 80) and the SDP answer
+  // is delivered via CloudRelayOpenResult.sdp_answer (SM 80, field 3).
   // MUST NOT be populated alongside runtime_sdp_offer (fields are mutually
   // exclusive per stream).
   // Subject to §9 SDP security scrutiny identically to runtime_sdp_offer.
@@ -628,6 +635,7 @@ However, the `hook` and `oidc` token sources SHOULD include:
 | 405 Method Not Allowed | Any: WHIP endpoint does not support the method | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Config error; endpoint URL wrong |
 | 429 Too Many Requests | POST: SFU rate limit | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Backoff is NOT implemented (see §9.4 DoS) |
 | 503 Service Unavailable | POST: SFU unavailable | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Operator should configure a fallback endpoint |
+| 4xx / 5xx (other) | POST/PATCH/DELETE: any HTTP error code not listed above (e.g., 409 Conflict, 422 Unprocessable Entity, 500 Internal Server Error, 502 Bad Gateway) | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | "POST failed" semantics apply to all unlisted 4xx/5xx; adapter logs response status and body |
 | Timeout (no response) | POST/PATCH/DELETE: network timeout | `WHIP_TIMEOUT` | `TRANSPORT_FAILURE` | See §3.1 timeout policy |
 | ICE failure (post-WHIP) | ICE gathering or consent check failure on relay path | `ICE_FAILURE` | `TRANSPORT_FAILURE` | After SDP exchange, before media flows |
 | DTLS failure (post-WHIP) | DTLS handshake failure on relay path | `DTLS_FAILURE` | `TRANSPORT_FAILURE` | |
@@ -943,7 +951,7 @@ implementation beads may be created. The table below is empty at draft time.
 | Round | Date | Reviewer | Role | Focus | Verdict | Notes |
 |-------|------|----------|------|-------|---------|-------|
 | A0 | 2026-04-19 | hud-amf17 | author (agent worker) | Draft authored from F29 signoff packet + hud-1ee3a SFU fallback audit + hud-g89zs simulcast readiness + RFC 0014 (open PR #530). Resolved RFC 0014 §4.2 TBD on `runtime_sdp_answer` field shape. WHIP adapter specified as vendor-neutral (LiveKit + Cloudflare Calls). str0m fallback transport is compatible with no changes. | AUTHOR | Open questions flagged: ICE restart via PATCH (LiveKit only), simulcast in WHIP SDP (post-hud-fpq51), SRTP decryption posture disclosure. |
-| R1 | — | (external reviewer 1) | external | (to be assigned) | — | — |
+| R1 | 2026-04-24 | hud-im4p1 (PR reviewer worker) | external | Thread triage: (1) proto comment for `runtime_sdp_answer` corrected — field is always empty in FUTURE_CLOUD_RELAY; SDP answer delivery is via `CloudRelayOpenResult.sdp_answer`; §4.1 updated with explicit delivery-path split. (2) Error table §6.1 extended with catch-all 4xx/5xx row covering 409/422/500/502. Independent review of proto field numbering, SDP security, error mapping, RFC 0014 state machine integration, and RFC 0005 session envelope. | LGTM (with fixes applied) | F29 gate partially satisfied — 1 external reviewer sign-off on record. See review notes. |
 | (as needed) | — | — | — | — | — | — |
 
 Sign-off criteria for reviewers:
