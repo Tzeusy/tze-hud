@@ -408,14 +408,15 @@ pub fn scene_zone_content_to_proto(c: &ZoneContent) -> proto::ZoneContent {
             resource_id: resource_id.as_bytes().to_vec(),
         }),
         // VideoSurfaceRef → VideoSurfaceRef proto: encode the 16-byte surface ID (RFC 0014 §2.7).
-        // Snapshot parity: expires_at_wall_us and content_classification are transport-internal
-        // and MUST NOT appear in scene content snapshots (WM-S2b snapshot exclusion requirements).
-        // They are carried on ZonePublishRecordProto instead (zone_publish_record_to_proto).
+        // Snapshot parity: expires_at_wall_us and content_classification are snapshot parity fields
+        // defined on VideoSurfaceRef (WM-S2b types.proto delta), but per WM-S2b snapshot exclusion
+        // rules they are NOT carried inside ZoneContent; they live on ZonePublishRecordProto
+        // (fields 6-7) and are zeroed here to keep ZoneContent clean of publication state.
         ZoneContent::VideoSurfaceRef(scene_id) => {
             Payload::VideoSurfaceRef(proto::VideoSurfaceRef {
                 surface_id: scene_id.to_bytes_le().to_vec(),
-                expires_at_wall_us: 0, // Not carried in ZoneContent; see ZonePublishRecordProto
-                content_classification: String::new(),
+                expires_at_wall_us: 0, // Not carried in ZoneContent; see ZonePublishRecordProto.expires_at_wall_us
+                content_classification: String::new(), // Not carried in ZoneContent; see ZonePublishRecordProto.content_classification
             })
         }
     };

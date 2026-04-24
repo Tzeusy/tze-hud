@@ -2894,23 +2894,24 @@ async fn handle_client_message(
         }
 
         // ── Media plane (RFC 0014 §2.2.1) — v1 runtime stubs ────────────────
-        // The v1 runtime does not implement media plane signaling. All media
-        // ingress, SDP, ICE, pause/resume, and cloud-relay messages are rejected
-        // with CAPABILITY_NOT_IMPLEMENTED per RFC 0014 §1.2 scope / §2.4 code table.
+        // The v1 runtime does not implement media plane signaling.
         // These stubs are wire-complete; the implementation is deferred to v2.
+        //
+        // Transactional messages (RFC 0014 §2.4): reject with CAPABILITY_NOT_IMPLEMENTED
+        // so agents can distinguish a soft rejection from a hard protocol violation.
+        // Ephemeral realtime messages (MediaIceCandidate): silently dropped to avoid
+        // outbound channel saturation — ICE candidates can arrive at high frequency and
+        // an error per candidate would be wasteful (an earlier MediaIngressOpen rejection
+        // already signals the capability is unavailable).
         ClientPayload::MediaIngressOpen(_)
         | ClientPayload::MediaIngressClose(_)
         | ClientPayload::MediaSdpAnswer(_)
-        | ClientPayload::MediaIceCandidate(_)
         | ClientPayload::MediaEgressOpen(_)
         | ClientPayload::MediaPauseRequest(_)
         | ClientPayload::MediaResumeRequest(_)
         | ClientPayload::CloudRelayOpen(_)
         | ClientPayload::CloudRelayClose(_) => {
             // Reject with CAPABILITY_NOT_IMPLEMENTED (RFC 0014 §2.4).
-            // The runtime sends a structured RuntimeError so the agent can
-            // distinguish a soft rejection (wrong version/capability) from a
-            // hard protocol violation. The media plane is v2 scope only.
             let _ = tx
                 .send(Ok(ServerMessage {
                     sequence: session.next_server_seq(),
@@ -2930,6 +2931,10 @@ async fn handle_client_message(
                 }))
                 .await;
         }
+
+        // Ephemeral realtime: silently drop ICE candidates in v1 stub to avoid
+        // outbound error flooding if an agent mistakenly sends them (RFC 0014 §2.4).
+        ClientPayload::MediaIceCandidate(_) => {}
     }
 }
 
