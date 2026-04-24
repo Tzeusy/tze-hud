@@ -468,7 +468,7 @@ Response: `200 OK` with `{ "sessionDescription": { "type": "answer", "sdp": "...
 
 2. **`SfuVendorConfig` branch.** The adapter harness checks `media.cloud_relay.vendor`:
    - `livekit` or `generic_whip` → use §3.2 trickle PATCH flow.
-   - `cloudflare_realtime` → use `PUT /renegotiate` flow; suppress trickle ICE delivery.
+   - `cloudflare_realtime` → use `PUT /renegotiate` flow; MUST suppress trickle ICE delivery.
    `CloudflareRealtimeAdapter::trickle_ice` returns `AdapterError::UnsupportedOperation`
    to signal this branch explicitly rather than silently dropping candidates.
 
@@ -477,10 +477,10 @@ Response: `200 OK` with `{ "sessionDescription": { "type": "answer", "sdp": "...
    `update_simulcast_layer` which issues a `PUT /renegotiate` with a revised SDP offer
    reflecting the new layer configuration.
 
-4. **Timeout.** The renegotiate PUT is bounded by
+4. **Timeout.** The renegotiate PUT MUST be bounded by
    `media.cloud_relay.cf_renegotiate_timeout_secs` (default: 5s, matching the field
    `renegotiate_timeout` in `CloudflareRealtimeAdapterConfig`). On timeout →
-   `WHIP_SERVER_ERROR` close reason.
+   `WHIP_TIMEOUT` close reason.
 
 Cross-reference: `docs/reports/sfu-vendor-adapter-seam.md` §3.2
 "CloudflareRealtimeAdapter" (hud-s2j0l, merged PR #552) contains the full
@@ -719,7 +719,7 @@ message CloudRelayCloseNotice {
 enum CloudRelayCloseReason {
   CLOUD_RELAY_CLOSE_REASON_UNSPECIFIED = 0;
   WHIP_POST_FAILED        = 1;  // SFU rejected the WHIP POST (see §6 HTTP error table)
-  WHIP_TIMEOUT            = 2;  // WHIP POST or ICE establishment timed out
+  WHIP_TIMEOUT            = 2;  // WHIP POST/PATCH/DELETE or CF renegotiate PUT timed out; also covers ICE establishment timeout
   WHIP_RESOURCE_EXPIRED   = 3;  // SFU returned 404 on PATCH/DELETE
   ICE_FAILURE             = 4;  // ICE failed on the relay path specifically
   DTLS_FAILURE            = 5;  // DTLS handshake failure on relay path
