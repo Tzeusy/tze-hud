@@ -34,4 +34,6 @@ pub use renderer::{Compositor, CompositorError, ImageTextureEntry};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
 pub use text::{TextItem, TextRasterizer};
 pub use video_surface::{VideoRenderState, VideoSurfaceMap};
+#[cfg(feature = "v2_preview")]
+pub use video_surface::{MediaDecodePipeline, SyntheticTestPipeline, VideoFrame};
 pub use widget::{WidgetRenderer, interpolate_param};
