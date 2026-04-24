@@ -13,6 +13,7 @@
 - `about/heart-and-soul/security.md` §"Cloud-relay trust boundary" and §"In-process media and runtime workers"
 - `docs/audits/webrtc-sfu-fallback-audit.md` (hud-1ee3a) — str0m as fallback transport; WHIP integration pattern for LiveKit/Cloudflare
 - `docs/reports/webrtc-rs-v0.20-simulcast-readiness.md` (hud-g89zs) — NO-GO verdict for v0.20 alpha; fallback context
+- `docs/reports/sfu-vendor-adapter-seam.md` (hud-s2j0l) — dual-adapter design; LiveKit (WHIP) vs Cloudflare Realtime (proprietary JSON REST) seam specification
 - `openspec/changes/v2-embodied-media-presence/signoff-packet.md` — C15 vendor decision, F29 gate, E25 ladder
 **Parent program:** v2-embodied-media-presence (phase 4b)
 **Forward references:**
@@ -61,11 +62,17 @@ signaling choice:
    convention, not a transport." The audit confirmed this is low-effort to implement on top
    of str0m's existing SDP handling. The same holds for webrtc-rs v0.20 if it stabilizes.
 
-2. **WHIP is natively supported by both C15 vendor candidates.** LiveKit Server exposes a
-   WHIP endpoint (`/rtc/whip/{room}`). Cloudflare Calls exposes WHIP for push ingest. Using
-   WHIP means tze_hud's signaling adapter is **SFU-agnostic** — the same adapter code targets
-   LiveKit, Cloudflare Calls, and any WHIP-compliant SFU, so the C15 vendor decision (deferred
-   to phase 4b kickoff) does not create a forked adapter.
+2. **LiveKit Server exposes a native WHIP endpoint.** LiveKit Server exposes
+   `/rtc/whip/{room}` and is IETF RFC 9725 compliant. Cloudflare Realtime SFU uses a
+   **proprietary JSON REST API** (POST `/sessions/new` + POST `/tracks/new` with SDP embedded
+   in a JSON body) — it does NOT natively speak WHIP. A WHIP-compatible sidecar
+   (`cloudflare/realtime-examples/whip-whep-server`) exists as an operator-deployed optional
+   adapter, but the native Cloudflare Realtime API is proprietary and incompatible with RFC
+   9725. As a result, the runtime maintains **two adapter paths** (§2.5): a WHIP adapter for
+   LiveKit and any WHIP-compliant SFU, and a proprietary JSON REST adapter for Cloudflare
+   Realtime. The C15 vendor decision (deferred to phase 4b kickoff) determines which path
+   is activated in production, but both are specified here to avoid forked implementations
+   at kickoff time.
 
 The simulcast readiness report (hud-g89zs) returned NO-GO for webrtc-rs v0.20 as of April 2026.
 If str0m is invoked as the fallback at phase 4b kickoff, the WHIP HTTP layer is tze_hud's
@@ -90,7 +97,7 @@ Without a specified WHIP adapter:
 |-------------|----------|
 | Phase 4b signaling bridge between gRPC session plane and external SFU | §3 WHIP HTTP Lifecycle |
 | Resolve RFC 0014 §4.2 TBD: `runtime_sdp_answer` field shape | §4.1 SDP Offer/Answer Resolution |
-| SFU-agnostic adapter (C15 vendor-neutral) | §2.2 Vendor Neutrality |
+| Dual-adapter design (LiveKit WHIP + Cloudflare proprietary JSON REST); C15 vendor-aware | §2.2 Vendor Protocol Profiles, §2.5 Adapter Paths |
 | Authentication model for WHIP endpoint (bearer token) | §5 Authentication Model |
 | Resource URL lifecycle (Location header, DELETE, PATCH for trickle ICE) | §3.3 Resource Management |
 | Error mapping: HTTP status codes → `MediaIngressCloseNotice` close reasons | §6 Error Mapping |
@@ -136,9 +143,11 @@ This RFC specifies, normatively:
 
 This RFC deliberately does not cover:
 
-1. **SFU server implementation.** tze_hud is the WHIP *client*; the SFU (LiveKit, Cloudflare
-   Calls, or another WHIP-compliant server) implements the WHIP *resource server*. SFU
-   configuration, room management, and participant routing are operator concerns.
+1. **SFU server implementation.** tze_hud is the signaling client; the SFU (LiveKit via WHIP,
+   Cloudflare Realtime via proprietary JSON REST, or another WHIP-compliant server) is the
+   remote resource server. SFU configuration, room management, and participant routing are
+   operator concerns. For Cloudflare Realtime, the native signaling protocol is proprietary
+   JSON REST — not WHIP; see §2.2 and §2.5.
 2. **WHEP (WebRTC-HTTP Egress Protocol).** WHEP is the pull/egress counterpart to WHIP.
    Phase 4b scope is push ingest (`FUTURE_CLOUD_RELAY` = pushing tze_hud's local stream to
    a relay SFU). WHEP covers pulling a remote stream *from* the SFU into tze_hud; this is
@@ -159,9 +168,11 @@ This RFC deliberately does not cover:
    Agents see only the RFC 0014 `FUTURE_CLOUD_RELAY` transport mode over the existing session
    stream. No agent-facing WHIP surface is exposed.
 2. A WHIP server implementation inside tze_hud. tze_hud is a pure WHIP client.
-3. SFU-specific API calls beyond WHIP. LiveKit's gRPC room management API and Cloudflare
-   Calls' session API are optional operator-configuration paths; the WHIP signaling adapter
-   requires only the WHIP endpoint URL to function.
+3. SFU-specific management APIs. LiveKit's gRPC room management API is an optional
+   operator-configuration path (see §2.5a); for Cloudflare Realtime SFU the proprietary
+   JSON REST signaling is a first-class adapter path (§2.5b), not an extension of WHIP.
+   The adapter seam (§2.5) isolates these per-vendor differences from the runtime's
+   media session state machine.
 
 ---
 
@@ -222,36 +233,129 @@ Key WHIP properties (per RFC 9725):
 WHIP is explicitly *not* a media transport — ICE, DTLS, and SRTP continue to operate on UDP
 (or TCP TURN relay) as in any WebRTC session. WHIP only carries the SDP signaling.
 
-### 2.2 Vendor Neutrality
+### 2.2 Vendor Protocol Profiles
 
-The WHIP adapter is designed to be vendor-neutral. Both C15 candidates expose WHIP:
+The two C15 SFU vendor candidates use **different signaling protocols** at the HTTP level.
+This RFC specifies both adapter paths explicitly. See §2.5 for the per-path protocol flows.
 
-| SFU | WHIP endpoint | Notes |
-|-----|--------------|-------|
-| LiveKit Server (self-host or cloud) | `/rtc/whip/{room}` | Room created via LiveKit API before WHIP POST; token is a LiveKit JWT |
-| Cloudflare Calls | Cloudflare API + WHIP endpoint per session | Session created via REST before WHIP POST; token is a Cloudflare API token |
+| SFU | Signaling protocol | Standards compliance | Notes |
+|-----|--------------------|---------------------|-------|
+| LiveKit Server (self-host or cloud) | WHIP (IETF RFC 9725) via `/rtc/whip/{room}` | Standards-compliant | Room created via LiveKit API before WHIP POST; token is a LiveKit JWT |
+| Cloudflare Realtime SFU | Proprietary JSON REST: POST `/sessions/new` + POST `/tracks/new` (SDP embedded in JSON body) | Proprietary — NOT WHIP | Session created via CF REST API; SDP answer returned in JSON, not `Content-Type: application/sdp`. No `Location` header; teardown via `PUT /tracks/close`, not HTTP DELETE |
 
-The WHIP adapter code is identical for both paths. The differences are:
-- **Pre-session setup**: LiveKit requires a room creation API call; Cloudflare requires a
-  session creation REST call. Both return an SFU-specific resource identifier that is embedded
-  in the WHIP endpoint URL or included in the token. This pre-session setup is an operator
-  deployment concern, configured via `media.cloud_relay.endpoint_url` and
-  `media.cloud_relay.session_init_hook`.
-- **Token format**: LiveKit uses JWT; Cloudflare uses an API token. Both are delivered to the
-  adapter as a bearer token string via the authentication model in §5.
+**Cloudflare WHIP clarification:** Cloudflare does NOT natively expose a WHIP (RFC 9725)
+endpoint for the Realtime SFU. An operator-deployable sidecar
+(`cloudflare/realtime-examples/whip-whep-server`) translates WHIP into Cloudflare's
+proprietary API, but this sidecar is NOT part of the Cloudflare Realtime SFU product. The
+native Cloudflare Realtime SFU signaling is proprietary and requires a dedicated adapter.
+
+This corrects the original §2.2 draft claim that "Cloudflare Calls exposes WHIP for push
+ingest" — that claim is false per the CF WHIP correction (hud-ejhnm, PR #550, merged).
+Cross-reference: `docs/reports/sfu-vendor-adapter-seam.md` (hud-s2j0l) §1.1.
+
+The runtime config key `media.cloud_relay.vendor` selects the adapter path:
+- `livekit` → WHIP adapter (§2.5a)
+- `cloudflare_realtime` → Cloudflare proprietary JSON REST adapter (§2.5b)
+- `generic_whip` → WHIP adapter for any WHIP-compliant SFU
 
 ### 2.3 Transport Library Neutrality
 
-The WHIP adapter does not depend on a specific WebRTC transport library. Whether phase 4b
+The signaling adapters do not depend on a specific WebRTC transport library. Whether phase 4b
 uses webrtc-rs v0.20 or str0m (per the fallback decision matrix in hud-1ee3a §4.2), the
-WHIP HTTP transaction is identical:
+adapter seam is identical from the transport library's perspective:
 
 1. The transport library generates an SDP offer (via its offer-creation API).
-2. The WHIP adapter sends the SDP offer via HTTP POST and receives the SDP answer.
+2. The appropriate adapter (WHIP or CF JSON REST per §2.5) sends the SDP offer and receives
+   the SDP answer from the SFU.
 3. The transport library processes the SDP answer (via its answer-processing API).
 4. ICE proceeds normally.
 
 The adapter owns only step 2. Steps 1, 3, and 4 are the transport library's API surface.
+
+**ICE mode constraint:** The WHIP adapter (§2.5a) supports trickle ICE via HTTP PATCH.
+The Cloudflare proprietary adapter (§2.5b) requires full-gathering SDP — trickle ICE is
+not available on the native CF Realtime API. The runtime MUST ensure ICE gathering completes
+before issuing the CF `tracks/new` POST.
+
+### 2.4 `whip-whep-server` Sidecar (Out of Scope)
+
+Cloudflare provides an open-source `cloudflare/realtime-examples/whip-whep-server` that
+operator-deploys a WHIP-to-CF-REST translation proxy. When this sidecar is present, tze_hud
+MAY target it with the WHIP adapter (§2.5a), treating it as a `generic_whip` endpoint.
+
+This RFC does NOT require or specify the sidecar. Operators who deploy it configure
+`media.cloud_relay.vendor = generic_whip` and point `endpoint_url` at the sidecar.
+The native Cloudflare Realtime adapter (§2.5b) is for operators who use the Cloudflare API
+directly without a sidecar.
+
+### 2.5 Adapter Paths
+
+Two adapter paths are defined. Both expose the same internal seam to the runtime's media
+session state machine; signaling differences are entirely contained within the adapter.
+
+#### 2.5a WHIP Adapter (LiveKit and WHIP-compliant SFUs)
+
+```
+tze_hud runtime
+    │
+    │  POST {endpoint_url}
+    │  Content-Type: application/sdp
+    │  Authorization: Bearer {livekit-jwt}
+    │  body: SDP offer
+    │ ──────────────────────────────────────► LiveKit Server (WHIP resource server)
+    │
+    │  HTTP 201 Created
+    │  Location: {resource_url}
+    │  Content-Type: application/sdp
+    │  body: SDP answer
+    │ ◄──────────────────────────────────────
+    │
+    │  [trickle ICE via PATCH to {resource_url}]
+    │  [teardown via DELETE to {resource_url}]
+```
+
+- Follows IETF RFC 9725 exactly.
+- SDP answer is returned directly in the HTTP 201 body (`Content-Type: application/sdp`).
+- `Location` header carries the resource URL for PATCH/DELETE.
+- Trickle ICE via `PATCH {resource_url}` with `Content-Type: application/trickle-ice-sdpfrag`.
+- Teardown via `DELETE {resource_url}`.
+- Used for `media.cloud_relay.vendor = livekit` or `generic_whip`.
+
+#### 2.5b Cloudflare Realtime Proprietary JSON REST Adapter
+
+```
+tze_hud runtime
+    │
+    │  POST /apps/{appId}/sessions/new
+    │  Content-Type: application/json   {}
+    │ ──────────────────────────────────────► Cloudflare Realtime SFU
+    │  { "sessionId": "<uuid>" }
+    │ ◄──────────────────────────────────────
+    │
+    │  POST /apps/{appId}/sessions/{sessionId}/tracks/new
+    │  Content-Type: application/json
+    │  body: { "sessionDescription": { "type": "offer", "sdp": "..." }, "tracks": [...] }
+    │ ──────────────────────────────────────►
+    │  { "sessionDescription": { "type": "answer", "sdp": "..." }, "tracks": [...] }
+    │ ◄──────────────────────────────────────
+    │
+    │  [ICE renegotiate via PUT /sessions/{sessionId}/renegotiate — NOT trickle PATCH]
+    │  [teardown via PUT /sessions/{sessionId}/tracks/close — NOT DELETE]
+```
+
+- Does NOT follow RFC 9725. No `Content-Type: application/sdp`. No `Location` header.
+- SDP answer is embedded in a JSON body at `sessionDescription.sdp`.
+- Session identified by `sessionId` (not a resource URL).
+- Trickle ICE is NOT supported; full-gathering SDP is required.
+- Teardown via `PUT /tracks/close` (not HTTP DELETE).
+- Used for `media.cloud_relay.vendor = cloudflare_realtime`.
+- Full adapter design: `docs/reports/sfu-vendor-adapter-seam.md` §3.2 (hud-s2j0l).
+
+**Error implications:** The CF adapter error taxonomy partially diverges from the WHIP error
+table in §6. Section §6.1 maps both paths. Four additional `CloudRelayCloseReason` codes are
+to be added to the §4.3 enum at phase 4b amendment (A2): `WHIP_RATE_LIMITED`,
+`WHIP_SERVER_ERROR`, `WHIP_PROTOCOL_VIOLATION`, `WHIP_BAD_REQUEST` — these will apply to
+both adapter paths and are tracked in hud-6t5hj.
 
 ---
 
@@ -379,27 +483,40 @@ RFC 0014 §4.2 contains the following TBD:
   see §4.3).
 - `runtime_sdp_offer` (field 6 of `MediaIngressOpenResult`) is used **only** when the
   runtime is the SDP offerer (runtime-initiated offer path, §4.2 second bullet).
-- `runtime_sdp_answer` (field 9, this RFC) reserves the field for agent-initiated-offer paths
-  where the SDP answer is available at admit time. **In the FUTURE_CLOUD_RELAY path it is
-  always empty in `MediaIngressOpenResult`**: the WHIP POST is triggered by the agent's
-  subsequent `CloudRelayOpen` (CM 80), so the SDP answer can only arrive after
-  `MediaIngressOpenResult` has already been sent. The SDP answer is delivered via
-  `CloudRelayOpenResult.sdp_answer` (SM 80, field 3). Field 9 in `MediaIngressOpenResult`
-  is therefore reserved for a future inline-WHIP admission path where the SDP exchange
-  completes before the admit result is emitted.
+- `runtime_sdp_answer` (field 9, this RFC) is used **only on the direct-ingress path**
+  (transport modes other than `FUTURE_CLOUD_RELAY`) when the agent provided an SDP offer and
+  the runtime obtained an answer from the local peer-connection stack without a cloud-relay
+  hop. See delivery path clarification below.
 - The two fields are mutually exclusive per stream; the proto wiring task (hud-ora8.1.23)
   MUST ensure this constraint is documented in the proto comment.
+
+**Cloud-relay SDP answer delivery path (Amendment 2 — hud-4mdir):**
+For `transport.mode = FUTURE_CLOUD_RELAY`, the `MediaIngressOpenResult` does NOT carry the
+SFU's SDP answer in `runtime_sdp_answer` (field 9). The two-step cloud-relay open flow
+means `MediaIngressOpenResult` is emitted when the stream is admitted — before the WHIP
+POST completes. The SFU's SDP answer arrives asynchronously and is delivered to the agent
+via `CloudRelayOpenResult.sdp_answer` (field 3 of `CloudRelayOpenResult`, ServerMessage
+field 80, §4.3).
+
+Therefore:
+- `runtime_sdp_answer` (field 9 of `MediaIngressOpenResult`) is **ALWAYS EMPTY** for
+  `transport.mode = FUTURE_CLOUD_RELAY`. Agents MUST NOT wait for it on that path.
+- The actual SDP answer for cloud-relay is in `CloudRelayOpenResult.sdp_answer` (§4.3,
+  ServerMessage field 80, field 3 of the message).
+- Phase 4b agents MUST branch on `transport.mode`: if `FUTURE_CLOUD_RELAY`, await
+  `CloudRelayOpenResult` for the SDP answer; otherwise use `runtime_sdp_answer` from
+  `MediaIngressOpenResult`.
 
 **Rationale for distinct field:** Semantic overloading (`runtime_sdp_offer` used as an
 "answer") would confuse agents implementing the offer/answer state machine and make protocol
 analysis ambiguous in audit logs. A named `runtime_sdp_answer` field is explicit and
-self-documenting.
+self-documenting. The cloud-relay delivery split (via `CloudRelayOpenResult`) reflects the
+asynchronous nature of the WHIP HTTP round-trip.
 
 **Impact on phase 1 (direct WebRTC path):** The direct WebRTC path in phase 1 uses
 runtime-initiated offer exclusively (RFC 0014 §4.2 default). `runtime_sdp_answer` is
-populated only in the WHIP/cloud-relay path. Phase 1 agents do not need to handle it.
-Phase 4b agents MUST handle both fields (the runtime selects the path based on the
-`MediaTransportMode` in `TransportDescriptor`).
+populated only on direct-ingress paths where the agent offered. Phase 1 agents do not need
+to handle it. Phase 4b agents MUST handle the split described above.
 
 ### 4.2 SDP Generation in the WHIP Context
 
@@ -440,7 +557,7 @@ Fields 82–89 (client) are unallocated in phase 4b.
 
 | Field | Message | Traffic Class | Description |
 |-------|---------|--------------|-------------|
-| 80 | `CloudRelayOpenResult` | Transactional | Result of WHIP POST + ICE/DTLS establishment. Carries `sdp_answer` (field 3 — the SDP answer from the SFU, delivered here not in `MediaIngressOpenResult`; see §4.1), WHIP resource URL (for operator audit only; agents do not send PATCH/DELETE directly), and the stream's cloud-relay `relay_epoch` for reconnect. |
+| 80 | `CloudRelayOpenResult` | Transactional | Result of WHIP POST + ICE/DTLS establishment. Carries `sdp_answer` (field 3; the SFU's SDP answer — authoritative for cloud-relay per §4.1), WHIP resource URL (for operator audit only; agents do not send PATCH/DELETE directly), and the stream's cloud-relay `relay_epoch` for reconnect. |
 | 81 | `CloudRelayCloseNotice` | Transactional | Runtime-initiated cloud-relay path teardown. Carries `CloudRelayCloseReason` (§6). Distinct from `MediaIngressCloseNotice`: cloud-relay teardown (step 5) leaves the stream alive on direct path if the runtime can fall back; `MediaIngressCloseNotice` terminates the stream. |
 | 82 | `CloudRelayStateUpdate` | State-stream | Coalescible update: relay-path RTT, packet loss to SFU, relay epoch health. Latest-wins. |
 
@@ -455,14 +572,21 @@ phase 4f (bidirectional AV egress) and future extension.
 message MediaIngressOpenResult {
   // ... existing fields 1–8 from RFC 0014 §2.3.2 ...
 
-  // SDP answer field reserved for agent-initiated-offer paths where the
-  // SDP exchange completes synchronously at admit time (e.g., a future
-  // inline-WHIP admission variant). In the current FUTURE_CLOUD_RELAY path
-  // this field is ALWAYS EMPTY in MediaIngressOpenResult: WHIP POST is
-  // triggered by the subsequent CloudRelayOpen (CM 80) and the SDP answer
-  // is delivered via CloudRelayOpenResult.sdp_answer (SM 80, field 3).
+  // SDP answer from the runtime when the agent supplied an SDP offer in
+  // TransportDescriptor.agent_sdp_offer on the DIRECT-INGRESS path only.
+  //
+  // DELIVERY SPLIT — populated vs. empty:
+  //   Direct-ingress paths (transport.mode != FUTURE_CLOUD_RELAY):
+  //     Populated when admitted = true and agent provided an SDP offer.
+  //   Cloud-relay path (transport.mode = FUTURE_CLOUD_RELAY):
+  //     ALWAYS EMPTY in MediaIngressOpenResult. The WHIP POST to the SFU
+  //     completes asynchronously after admission. The SFU's SDP answer is
+  //     delivered via CloudRelayOpenResult.sdp_answer (ServerMessage field 80,
+  //     field 3 of CloudRelayOpenResult). Agents MUST NOT wait for this field
+  //     on the cloud-relay path; await CloudRelayOpenResult instead.
+  //
   // MUST NOT be populated alongside runtime_sdp_offer (fields are mutually
-  // exclusive per stream).
+  // exclusive per stream — runtime is either offerer or answerer, not both).
   // Subject to §9 SDP security scrutiny identically to runtime_sdp_offer.
   bytes runtime_sdp_answer = 9;
 }
@@ -502,10 +626,14 @@ message CloudRelayOpenResult {
   // true = relay path established; false = relay path failed.
   bool established = 2;
 
-  // SDP answer from the SFU (via WHIP POST), delivered to the agent so it
-  // can complete the offer/answer exchange on its local peer connection.
-  // Populated when established = true.
-  // This is the agent-facing delivery of the runtime_sdp_answer (§4.1).
+  // SDP answer from the SFU (via WHIP POST or CF /tracks/new JSON response),
+  // delivered to the agent so it can complete the offer/answer exchange on
+  // its local peer connection. Populated when established = true.
+  //
+  // This is the authoritative SDP answer delivery vehicle for the
+  // FUTURE_CLOUD_RELAY path. MediaIngressOpenResult.runtime_sdp_answer
+  // (field 9) is ALWAYS EMPTY for cloud-relay; this field is the answer.
+  // See RFC 0018 §4.1 (Amendment 2, hud-4mdir) for the delivery split.
   bytes sdp_answer = 3;
 
   // Relay epoch: stable identifier for this specific relay path instance.
@@ -592,8 +720,8 @@ bearer token to the WHIP adapter through the following chain:
 - **Short-lived tokens** (recommended): LiveKit JWTs default to 1 hour; Cloudflare tokens
   should be scoped to the session lifetime. The adapter does not refresh tokens mid-session.
   If a PATCH or DELETE fails with `401 Unauthorized`, the adapter logs the event, transitions
-  the stream to `CLOSING` with `CLOUD_RELAY_CLOSE_REASON_CAPABILITY_REVOKED`, and does not
-  retry with a refreshed token. Token refresh is a pre-session concern.
+  the stream to `CLOSING` with `WHIP_POST_FAILED` (§6.1 — 401 row covers POST/PATCH/DELETE),
+  and does not retry with a refreshed token. Token refresh is a pre-session concern.
 
 - **Hook-mode rotation**: if `bearer_token_source = hook`, the hook is called once per
   `CloudRelayOpen` (per stream admission). The hook is NOT called for PATCH or DELETE —
@@ -633,9 +761,11 @@ However, the `hook` and `oidc` token sources SHOULD include:
 | 403 Forbidden | POST: token valid but room/capability denied | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | SFU policy rejection; operator must fix config |
 | 404 Not Found | PATCH/DELETE: resource URL expired | `WHIP_RESOURCE_EXPIRED` | `TRANSPORT_FAILURE` | Resource expired; stream terminated |
 | 405 Method Not Allowed | Any: WHIP endpoint does not support the method | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Config error; endpoint URL wrong |
+| 409 Conflict | POST: session state conflict (CF adapter only) | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | CF Realtime: session already exists or state machine conflict; operator must retry with a new session |
+| 422 Unprocessable Entity | POST: SDP negotiation rejected by SFU | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Adapter logs the response body; does not retry |
 | 429 Too Many Requests | POST: SFU rate limit | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Backoff is NOT implemented (see §9.4 DoS) |
 | 503 Service Unavailable | POST: SFU unavailable | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Operator should configure a fallback endpoint |
-| 4xx / 5xx (other) | POST/PATCH/DELETE: any HTTP error code not listed above (e.g., 409 Conflict, 422 Unprocessable Entity, 500 Internal Server Error, 502 Bad Gateway) | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | "POST failed" semantics apply to all unlisted 4xx/5xx; adapter logs response status and body |
+| 5xx (non-503) | POST/PATCH/DELETE: unexpected server error | `WHIP_POST_FAILED` | `TRANSPORT_FAILURE` | Catch-all for server-side failures not covered by specific rows; adapter logs status and body |
 | Timeout (no response) | POST/PATCH/DELETE: network timeout | `WHIP_TIMEOUT` | `TRANSPORT_FAILURE` | See §3.1 timeout policy |
 | ICE failure (post-WHIP) | ICE gathering or consent check failure on relay path | `ICE_FAILURE` | `TRANSPORT_FAILURE` | After SDP exchange, before media flows |
 | DTLS failure (post-WHIP) | DTLS handshake failure on relay path | `DTLS_FAILURE` | `TRANSPORT_FAILURE` | |
@@ -950,8 +1080,9 @@ implementation beads may be created. The table below is empty at draft time.
 
 | Round | Date | Reviewer | Role | Focus | Verdict | Notes |
 |-------|------|----------|------|-------|---------|-------|
-| A0 | 2026-04-19 | hud-amf17 | author (agent worker) | Draft authored from F29 signoff packet + hud-1ee3a SFU fallback audit + hud-g89zs simulcast readiness + RFC 0014 (open PR #530). Resolved RFC 0014 §4.2 TBD on `runtime_sdp_answer` field shape. WHIP adapter specified as vendor-neutral (LiveKit + Cloudflare Calls). str0m fallback transport is compatible with no changes. | AUTHOR | Open questions flagged: ICE restart via PATCH (LiveKit only), simulcast in WHIP SDP (post-hud-fpq51), SRTP decryption posture disclosure. |
-| R1 | 2026-04-24 | hud-im4p1 (PR reviewer worker) | external | Thread triage: (1) proto comment for `runtime_sdp_answer` corrected — field is always empty in FUTURE_CLOUD_RELAY; SDP answer delivery is via `CloudRelayOpenResult.sdp_answer`; §4.1 updated with explicit delivery-path split. (2) Error table §6.1 extended with catch-all 4xx/5xx row covering 409/422/500/502. Independent review of proto field numbering, SDP security, error mapping, RFC 0014 state machine integration, and RFC 0005 session envelope. | LGTM (with fixes applied) | F29 gate partially satisfied — 1 external reviewer sign-off on record. See review notes. |
+| A0 | 2026-04-19 | hud-amf17 | author (agent worker) | Draft authored from F29 signoff packet + hud-1ee3a SFU fallback audit + hud-g89zs simulcast readiness + RFC 0014 (open PR #530). Resolved RFC 0014 §4.2 TBD on `runtime_sdp_answer` field shape. WHIP adapter specified as vendor-neutral (LiveKit + Cloudflare Calls). str0m fallback transport is compatible with no changes. | AUTHOR | Open questions flagged: ICE restart via PATCH (LiveKit only), simulcast in WHIP SDP (post-hud-fpq51), SRTP decryption posture disclosure. Note: §2.2 contained an error (Cloudflare WHIP claim) corrected in A1. |
+| A1 | 2026-04-19 | hud-ojxka | amendment worker | Three amendments applied: (1) Dual-adapter correction per PR #550 (hud-ejhnm) — §1.2, §2.2, §2.3, §2.4, §2.5 added with explicit WHIP (LiveKit) vs Cloudflare proprietary JSON REST protocol flows; cross-reference to `docs/reports/sfu-vendor-adapter-seam.md` added. (2) `runtime_sdp_answer` delivery path clarification (hud-4mdir) — §4.1 text and §4.3 proto comment updated to make explicit that `runtime_sdp_answer` is ALWAYS EMPTY for `FUTURE_CLOUD_RELAY`; `CloudRelayOpenResult.sdp_answer` is the authoritative delivery vehicle for cloud-relay SDP answers. (3) §6.1 error table catch-all rows added for 409 Conflict, 422 Unprocessable Entity, and 5xx (non-503). | AMENDMENT | F29 gate (≥1 external reviewer) still required and still blocks phase 4b bead creation. |
+| R1 | — | (external reviewer 1) | external | (to be assigned) | — | — |
 | (as needed) | — | — | — | — | — | — |
 
 Sign-off criteria for reviewers:
@@ -962,8 +1093,10 @@ Sign-off criteria for reviewers:
   `MediaIngressOpenResult` is unambiguous and backward-compatible (field 9 is unallocated
   in RFC 0014; all existing implementations see empty bytes, which is a valid zero-value
   for the bytes type).
-- Vendor neutrality (§2.2): adapter design is confirmed as compatible with both LiveKit
-  WHIP and Cloudflare Calls WHIP without forking.
+- Dual-adapter design (§2.2, §2.5): the two adapter paths (WHIP for LiveKit; proprietary
+  JSON REST for Cloudflare Realtime) are correctly specified. The Cloudflare WHIP claim
+  from the A0 draft has been corrected (§2.2). The adapter seam isolates both paths from
+  the media session state machine.
 - Authentication model (§5): bearer token delivery and rotation are sufficient for production
   deployment; token is never logged.
 - Error mapping (§6): every relevant WHIP HTTP status code is mapped to a defined
@@ -997,6 +1130,9 @@ Sign-off criteria for reviewers:
   integration pattern; LiveKit/Cloudflare Calls C15 vendor assessment
 - `docs/reports/webrtc-rs-v0.20-simulcast-readiness.md` (hud-g89zs) — NO-GO verdict for
   v0.20 alpha; context for str0m fallback invocation at phase 4b
+- `docs/reports/sfu-vendor-adapter-seam.md` (hud-s2j0l) — full dual-adapter design spec;
+  `SfuVendorAdapter` trait, `WhipAdapter` (LiveKit), `CloudflareRealtimeAdapter` (proprietary
+  JSON REST), error taxonomy, harness selection mechanism, test matrix
 - `openspec/changes/v2-embodied-media-presence/signoff-packet.md` — C15 vendor decision,
   F29 gate (≥1 reviewer for RFC 0018), E25 ladder order, D18 budgets
 - `openspec/changes/v2-embodied-media-presence/procurement.md` — GPU runner, SFU vendor
