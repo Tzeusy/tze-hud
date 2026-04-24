@@ -180,7 +180,7 @@ pub use media_admission::{
     MIN_GPU_TEXTURE_HEADROOM_BYTES, MediaActivationGate, MediaAuditSink, MediaCapabilityConfig,
     MediaTransport, NoopMediaAuditSink, OperatorRole, REMEMBER_TTL_US, SessionCapabilityCache,
     SessionCapabilityGrant, SignalingRateLimiter, now_us as media_now_us,
-    runtime_level_to_e25_step,
+    now_us_monotonic as media_now_us_monotonic, runtime_level_to_e25_step,
 };
 pub use quiet_hours::{
     GateDecision, QuietHoursConfig, QuietHoursGate, ZoneContentionPolicy, ZoneQueue,
