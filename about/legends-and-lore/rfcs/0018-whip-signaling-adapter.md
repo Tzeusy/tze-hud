@@ -353,8 +353,9 @@ tze_hud runtime
 
 **Error implications:** The CF adapter error taxonomy partially diverges from the WHIP error
 table in §6. Section §6.1 maps both paths. Four additional `CloudRelayCloseReason` codes are
-introduced for CF-specific errors: `WHIP_RATE_LIMITED`, `WHIP_SERVER_ERROR`,
-`WHIP_PROTOCOL_VIOLATION`, `WHIP_BAD_REQUEST` — these apply to both adapter paths.
+to be added to the §4.3 enum at phase 4b amendment (A2): `WHIP_RATE_LIMITED`,
+`WHIP_SERVER_ERROR`, `WHIP_PROTOCOL_VIOLATION`, `WHIP_BAD_REQUEST` — these will apply to
+both adapter paths and are tracked in hud-6t5hj.
 
 ---
 
@@ -556,7 +557,7 @@ Fields 82–89 (client) are unallocated in phase 4b.
 
 | Field | Message | Traffic Class | Description |
 |-------|---------|--------------|-------------|
-| 80 | `CloudRelayOpenResult` | Transactional | Result of WHIP POST + ICE/DTLS establishment. Carries `runtime_sdp_answer` (§4.1), WHIP resource URL (for operator audit only; agents do not send PATCH/DELETE directly), and the stream's cloud-relay `relay_epoch` for reconnect. |
+| 80 | `CloudRelayOpenResult` | Transactional | Result of WHIP POST + ICE/DTLS establishment. Carries `sdp_answer` (field 3; the SFU's SDP answer — authoritative for cloud-relay per §4.1), WHIP resource URL (for operator audit only; agents do not send PATCH/DELETE directly), and the stream's cloud-relay `relay_epoch` for reconnect. |
 | 81 | `CloudRelayCloseNotice` | Transactional | Runtime-initiated cloud-relay path teardown. Carries `CloudRelayCloseReason` (§6). Distinct from `MediaIngressCloseNotice`: cloud-relay teardown (step 5) leaves the stream alive on direct path if the runtime can fall back; `MediaIngressCloseNotice` terminates the stream. |
 | 82 | `CloudRelayStateUpdate` | State-stream | Coalescible update: relay-path RTT, packet loss to SFU, relay epoch health. Latest-wins. |
 
@@ -719,8 +720,8 @@ bearer token to the WHIP adapter through the following chain:
 - **Short-lived tokens** (recommended): LiveKit JWTs default to 1 hour; Cloudflare tokens
   should be scoped to the session lifetime. The adapter does not refresh tokens mid-session.
   If a PATCH or DELETE fails with `401 Unauthorized`, the adapter logs the event, transitions
-  the stream to `CLOSING` with `CLOUD_RELAY_CLOSE_REASON_CAPABILITY_REVOKED`, and does not
-  retry with a refreshed token. Token refresh is a pre-session concern.
+  the stream to `CLOSING` with `WHIP_POST_FAILED` (§6.1 — 401 row covers POST/PATCH/DELETE),
+  and does not retry with a refreshed token. Token refresh is a pre-session concern.
 
 - **Hook-mode rotation**: if `bearer_token_source = hook`, the hook is called once per
   `CloudRelayOpen` (per stream admission). The hook is NOT called for PATCH or DELETE —
