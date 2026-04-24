@@ -992,6 +992,13 @@ non-primary streams. Step 7 freezes presentation. Step 8 tears down all
 media while preserving the session. Steps 9–10 are terminal for
 embodied/session.
 
+**Step 5 causation note:** The media plane does NOT unilaterally fire step 5. The
+`STREAMING → CLOSING` transition for cloud-relayed streams is driven by RFC 0018
+cloud-relay trust-boundary logic (or an operator action); the media plane responds
+to `CloudRelayOpen` (ClientMessage 80) / `CloudRelayOpenResult` (ServerMessage 80)
+and emits `MediaDegradationNotice(step=5, …)` for correlated observability — it
+does not initiate the cloud-relay transition on its own.
+
 ### 5.3 Trigger Authority
 
 Exactly aligned with E25 trigger semantics and RFC 0002 A1 §A4:
