@@ -9,8 +9,11 @@
 //!
 //! 1. **Capability gate** (§A2.1): `media-ingress` granted, dialog / 7-day remember passed
 //!    per RFC 0008 A1 §A2.
-//! 2. **Budget headroom** (§A2.2): pool slot available; per-session stream limit
+//! 2. **Budget headroom** (§A2.2): per-session stream limit
 //!    (`max_concurrent_media_streams`, default 1); global GPU texture headroom ≥ 128 MiB.
+//!    Note: worker pool slot availability (RFC 0002 A1 §A2.2) is checked by the caller before
+//!    invoking the activation gate — it is not rechecked here. E25 step ≥ 8 also blocks
+//!    new admissions (maps to `POOL_EXHAUSTED` wire reject code).
 //! 3. **Role authority** (§A2.3): capability grant authorized by `owner` or `admin` role
 //!    per RFC 0009 A1.
 //!
@@ -520,6 +523,12 @@ impl MediaActivationGate {
     ///
     /// Returns `false` (and emits an audit deny event) if the session has
     /// exceeded 10 `MediaIngressOpen` requests/second (RFC 0014 §9.5).
+    ///
+    /// **Wire-layer contract (RFC 0014 §9.5):** When this method returns `false`,
+    /// the gRPC handler MUST reject the wire request with the `INVALID_ARGUMENT`
+    /// reject code. The audit event records `SignalingRateLimitExceeded` as an
+    /// internal discriminant for structured logging; that code does not appear
+    /// in the wire protocol's §2.4 reject-code table.
     pub fn check_signaling_rate(
         &mut self,
         session_id: &str,
