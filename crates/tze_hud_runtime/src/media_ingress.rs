@@ -430,6 +430,13 @@ pub struct MediaIngressStateMachine {
 
     /// Current E25 degradation step (0 = none; 1–7 = active).
     degradation_step: u32,
+
+    /// Backoff hint (µs) populated when `InitiateClose { reason: BudgetWatchdog,
+    /// retry_after_us: Some(n) }` fires.  Cleared to `None` on any non-BudgetWatchdog
+    /// close and on entry to terminal states.  Exposed via `close_retry_after_us()` so
+    /// the wire layer can read it back when building the `MediaIngressCloseNotice` proto
+    /// without re-parsing the originating event (RFC 0014 §6.3 A1).
+    close_retry_after_us: Option<u64>,
 }
 
 impl MediaIngressStateMachine {
@@ -453,6 +460,7 @@ impl MediaIngressStateMachine {
             state: MediaSessionState::Admitted,
             pause_trigger: None,
             degradation_step: 0,
+            close_retry_after_us: None,
         }
     }
 
@@ -469,6 +477,15 @@ impl MediaIngressStateMachine {
     /// Current E25 degradation step (0 = none, 1–7 = active).
     pub fn degradation_step(&self) -> u32 {
         self.degradation_step
+    }
+
+    /// Backoff hint set when `InitiateClose { reason: BudgetWatchdog, retry_after_us: Some(n) }`
+    /// last fired.  `None` for non-BudgetWatchdog closes and before any close event.
+    ///
+    /// The wire layer reads this after `apply()` returns to populate
+    /// `MediaIngressCloseNotice.retry_after_us` (RFC 0014 §6.3 A1).
+    pub fn close_retry_after_us(&self) -> Option<u64> {
+        self.close_retry_after_us
     }
 
     /// If the stream is `PAUSED`, returns the pause trigger.
@@ -693,13 +710,25 @@ impl MediaIngressStateMachine {
                 // degradation context.
                 self.pause_trigger = None;
                 self.degradation_step = 0;
-                if *reason == MediaCloseReason::BudgetWatchdog
-                    && retry_after_us.is_none_or(|v| v == 0)
-                {
-                    warn!(
-                        stream_epoch = self.stream_epoch,
-                        "InitiateClose(BudgetWatchdog) missing non-zero retry_after_us hint (RFC 0014 §6.3 A1)"
-                    );
+                if *reason == MediaCloseReason::BudgetWatchdog {
+                    if retry_after_us.is_none_or(|v| v == 0) {
+                        warn!(
+                            stream_epoch = self.stream_epoch,
+                            "InitiateClose(BudgetWatchdog) missing non-zero retry_after_us hint (RFC 0014 §6.3 A1)"
+                        );
+                    }
+                    // Store hint so wire layer can read via close_retry_after_us()
+                    // without re-parsing the originating event.
+                    self.close_retry_after_us = *retry_after_us;
+                } else {
+                    if retry_after_us.is_some() {
+                        warn!(
+                            stream_epoch = self.stream_epoch,
+                            reason = reason.as_str(),
+                            "InitiateClose called with non-watchdog reason but carries retry_after_us hint (RFC 0014 §6.3 A1)"
+                        );
+                    }
+                    self.close_retry_after_us = None;
                 }
                 self.state = MediaSessionState::Closing;
             }
@@ -1842,8 +1871,14 @@ mod tests {
             retry_after_us: Some(5_000_000), // 5 seconds
         });
         assert_transition(&outcome, MediaSessionState::Streaming, MediaSessionState::Closing);
+        // Hint MUST be stored for wire layer consumption.
+        assert_eq!(
+            m.close_retry_after_us(),
+            Some(5_000_000),
+            "close_retry_after_us MUST hold the hint after BudgetWatchdog close"
+        );
 
-        // Non-BudgetWatchdog reasons must use None (no hint).
+        // Non-BudgetWatchdog reasons must clear the hint (None).
         let mut m = new_machine();
         m.apply(MediaSessionEvent::TransportEstablished);
         let outcome = m.apply(MediaSessionEvent::InitiateClose {
@@ -1851,6 +1886,11 @@ mod tests {
             retry_after_us: None,
         });
         assert_transition(&outcome, MediaSessionState::Streaming, MediaSessionState::Closing);
+        assert_eq!(
+            m.close_retry_after_us(),
+            None,
+            "close_retry_after_us MUST be None for non-BudgetWatchdog close"
+        );
     }
 
     // ─── MediaSessionState helpers ─────────────────────────────────────────────
