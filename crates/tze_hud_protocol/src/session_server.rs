@@ -233,11 +233,12 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
         // ── Media plane (RFC 0014 §2.2.2) ────────────────────────────────────
         // Transactional: admission, teardown, degradation, pause/resume notices,
         // SDP offer — never dropped, must be reliably delivered.
+        // NOTE: ServerPayload::MediaEgressOpenResult (field 66) is plain `reserved`
+        // in the proto — no variant exists until phase 4 egress is defined.
         ServerPayload::MediaIngressOpenResult(_)
         | ServerPayload::MediaIngressCloseNotice(_)
         | ServerPayload::MediaSdpOffer(_)
         | ServerPayload::MediaDegradationNotice(_)
-        | ServerPayload::MediaEgressOpenResult(_)
         | ServerPayload::MediaPauseNotice(_)
         | ServerPayload::MediaResumeNotice(_) => TrafficClass::Transactional,
 
@@ -2903,10 +2904,13 @@ async fn handle_client_message(
         // outbound channel saturation — ICE candidates can arrive at high frequency and
         // an error per candidate would be wasteful (an earlier MediaIngressOpen rejection
         // already signals the capability is unavailable).
+        // NOTE: ClientPayload::MediaEgressOpen (field 64) is plain `reserved` in the
+        // proto — no variant exists until phase 4 egress is defined. Any bytes at
+        // field 64 are treated as an unrecognised payload by prost and will not match
+        // this arm; the outer fallthrough handler covers that case.
         ClientPayload::MediaIngressOpen(_)
         | ClientPayload::MediaIngressClose(_)
         | ClientPayload::MediaSdpAnswer(_)
-        | ClientPayload::MediaEgressOpen(_)
         | ClientPayload::MediaPauseRequest(_)
         | ClientPayload::MediaResumeRequest(_)
         | ClientPayload::CloudRelayOpen(_)

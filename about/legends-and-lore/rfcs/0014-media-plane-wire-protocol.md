@@ -239,7 +239,7 @@ time it is touched (tracked as discovered work for task hud-ora8.1.23).
 | 61 | `MediaIngressClose` | Transactional | Agent-initiated teardown intent. Idempotent w.r.t. already-terminated streams. |
 | 62 | `MediaSdpAnswer` | Transactional | Agent-side SDP answer in response to a runtime-initiated `MediaSdpOffer` (§4.2). Subject to §9 SDP security scrutiny. |
 | 63 | `MediaIceCandidate` | Ephemeral realtime | ICE candidate exchange during transport establishment. Latest-wins coalescing permitted per candidate family. |
-| 64 | `MediaEgressOpen` | Transactional | **Reserved for phase 4** (bidirectional AV). Agent requests an outbound media stream (voice synthesis, agent-emitted audio). Wire-reserved in v2; runtime rejects with `CAPABILITY_NOT_IMPLEMENTED`. |
+| 64 | `reserved 64` | — | **Reserved for phase 4** (bidirectional AV egress). No message type assigned; plain proto `reserved` prevents accidental reuse. |
 | 65 | `MediaPauseRequest` | Transactional | Agent requests its own stream transition from `STREAMING` to `PAUSED` (§3.3) without teardown. |
 | 66 | `MediaResumeRequest` | Transactional | Agent requests its own stream transition from `PAUSED` back to `STREAMING`. |
 
@@ -255,7 +255,7 @@ Fields 67–79 (client) are unallocated. Do not fill gaps speculatively.
 | 63 | `MediaSdpOffer` | Transactional | Runtime-side SDP offer presented to the agent during transport establishment (see §4.2). |
 | 64 | `MediaIceCandidate` | Ephemeral realtime | ICE candidate from runtime. Same semantics as client field 63. |
 | 65 | `MediaDegradationNotice` | Transactional | Per-stream notice that the runtime has advanced this stream's degradation step (E25 ladder step, current resolution/framerate, recovery conditions). Delivered in addition to the global `DegradationNotice` (RFC 0005 field 46), which remains unchanged. |
-| 66 | `MediaEgressOpenResult` | Transactional | **Reserved for phase 4** (paired with client field 64). Wire-reserved in v2. |
+| 66 | `reserved 66` | — | **Reserved for phase 4** (paired with client field 64). No message type assigned; plain proto `reserved` prevents accidental reuse. |
 | 67 | `MediaPauseNotice` | Transactional | Runtime-initiated pause (operator request, policy trigger, or agent's `MediaPauseRequest` ack). |
 | 68 | `MediaResumeNotice` | Transactional | Counterpart to `MediaPauseNotice`. |
 
@@ -523,7 +523,7 @@ at the ErrorCode layer where possible).
 | `CAPABILITY_DIALOG_DENIED` | RFC 0008 A1 §A6 | Operator denied capability dialog |
 | `CAPABILITY_DIALOG_TIMEOUT` | RFC 0008 A1 §A6 | Dialog timed out; no operator present |
 | `CAPABILITY_NOT_ENABLED` | RFC 0008 A1 §A6 | Capability disabled at deployment level |
-| `CAPABILITY_NOT_IMPLEMENTED` | RFC 0008 A1 §A6 | e.g., `federated-send` in v2; `MediaEgressOpen` in v2 |
+| `CAPABILITY_NOT_IMPLEMENTED` | RFC 0008 A1 §A6 | e.g., `federated-send` in v2; use of reserved field 64 (egress) in v2 |
 | `CODEC_UNSUPPORTED` | §2.5 | None of the declared codec preferences intersect the runtime set |
 | `SURFACE_NOT_FOUND` | §2.3.1 | Zone or tile binding does not resolve |
 | `SURFACE_OCCUPIED` | §2.3.1 | Surface already bound to another stream with incompatible policy |
@@ -1180,8 +1180,9 @@ dialog all apply per RFC 0008 A1.
 ### 7.6 Audio emit (phase 4)
 
 `audio-emit` (agent-authored audio output) is phase 4 scope. The
-`MediaEgressOpen` / `MediaEgressOpenResult` wire fields are reserved
-(§2.2.1 field 64, §2.2.2 field 66) but runtime rejects with
+Wire fields 64 (client) and 66 (server) are plain `reserved` entries
+(§2.2.1, §2.2.2); no message type is defined until the phase-4 design is
+finalised. Any client sending bytes at field 64 will be rejected with
 `CAPABILITY_NOT_IMPLEMENTED` in v2 phase 1. Full egress wire is owned by a
 forthcoming phase-4 RFC (likely RFC 0017 covers audit; phase-4f bidi AV
 owns its own RFC, TBD).
@@ -1482,8 +1483,9 @@ addressed by a post-v2 subprocess-isolation hardening.
 7. **Spatial audio (E22 phase 4 refinement).** Degradation step 1 already
    places it at the top of the E25 ladder; phase 1 ships without spatial
    audio.
-8. **Voice synthesis / agent audio egress (`audio-emit`, `MediaEgressOpen`).**
-   Wire-reserved at fields 64/66; rejected in v2 phase 1.
+8. **Voice synthesis / agent audio egress (`audio-emit`).** Wire fields 64/66
+   are plain `reserved`; no message type defined until the phase-4 design
+   is finalised. Rejected in v2 phase 1.
 9. **Recording wire** (RFC 0017, phase 4a). Extends this RFC at fields
    80–99.
 10. **Cloud-relay SFU attach** (RFC 0018, phase 4b). Extends this RFC at
