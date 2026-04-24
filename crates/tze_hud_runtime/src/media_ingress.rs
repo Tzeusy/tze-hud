@@ -612,6 +612,10 @@ impl MediaIngressStateMachine {
                 self.state = MediaSessionState::Streaming;
             }
 
+            // RFC 0014 §3.3: SafeModeResume only resumes streams that were
+            // paused by SAFE_MODE.  If the stream was paused by a different
+            // trigger (e.g., OPERATOR_REQUEST), the event is silently dropped
+            // so the operator's intent is preserved.
             MediaSessionEvent::SafeModeResume => {
                 if self.state != MediaSessionState::Paused {
                     return TransitionOutcome::NotApplicable {
@@ -619,16 +623,39 @@ impl MediaIngressStateMachine {
                         event: event.name(),
                     };
                 }
+                let trigger = self.pause_trigger.unwrap_or(MediaPauseTrigger::SafeMode);
+                if trigger != MediaPauseTrigger::SafeMode {
+                    debug!(
+                        stream_epoch = self.stream_epoch,
+                        pause_trigger = trigger.as_str(),
+                        "SafeModeResume ignored: stream not paused by SAFE_MODE"
+                    );
+                    return TransitionOutcome::Dropped;
+                }
                 self.pause_trigger = None;
                 self.state = MediaSessionState::Streaming;
             }
 
+            // RFC 0014 §3.3: PolicyQuietHoursResume only resumes streams that
+            // were paused by POLICY_QUIET_HOURS.  If the stream was paused by a
+            // different trigger, the event is silently dropped.
             MediaSessionEvent::PolicyQuietHoursResume => {
                 if self.state != MediaSessionState::Paused {
                     return TransitionOutcome::NotApplicable {
                         state: self.state,
                         event: event.name(),
                     };
+                }
+                let trigger = self
+                    .pause_trigger
+                    .unwrap_or(MediaPauseTrigger::PolicyQuietHours);
+                if trigger != MediaPauseTrigger::PolicyQuietHours {
+                    debug!(
+                        stream_epoch = self.stream_epoch,
+                        pause_trigger = trigger.as_str(),
+                        "PolicyQuietHoursResume ignored: stream not paused by POLICY_QUIET_HOURS"
+                    );
+                    return TransitionOutcome::Dropped;
                 }
                 self.pause_trigger = None;
                 self.state = MediaSessionState::Streaming;
@@ -1238,6 +1265,89 @@ mod tests {
             MediaSessionState::Streaming,
         );
         assert!(m.pause_trigger().is_none());
+    }
+
+    // RFC 0014 §3.3: SafeModeResume MUST be silently dropped when the stream
+    // was paused by a trigger other than SAFE_MODE (e.g., operator pause or
+    // agent pause).  The operator's or agent's pause intent must not be
+    // cleared by a background safe-mode exit event.
+
+    #[test]
+    fn test_safe_mode_resume_dropped_for_operator_pause() {
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        m.apply(MediaSessionEvent::OperatorPause);
+        let outcome = m.apply(MediaSessionEvent::SafeModeResume);
+        assert_eq!(
+            outcome,
+            TransitionOutcome::Dropped,
+            "SafeModeResume must be dropped when paused by operator"
+        );
+        assert_eq!(m.state(), MediaSessionState::Paused);
+        assert_eq!(m.pause_trigger(), Some(MediaPauseTrigger::OperatorRequest));
+    }
+
+    #[test]
+    fn test_safe_mode_resume_dropped_for_agent_pause() {
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        m.apply(MediaSessionEvent::AgentPauseRequest);
+        let outcome = m.apply(MediaSessionEvent::SafeModeResume);
+        assert_eq!(
+            outcome,
+            TransitionOutcome::Dropped,
+            "SafeModeResume must be dropped when paused by agent"
+        );
+        assert_eq!(m.state(), MediaSessionState::Paused);
+    }
+
+    // Row: PAUSED → STREAMING (PolicyQuietHoursResume)
+
+    #[test]
+    fn test_quiet_hours_resume_clears_quiet_hours_pause() {
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        m.apply(MediaSessionEvent::PolicyQuietHoursPause);
+        let outcome = m.apply(MediaSessionEvent::PolicyQuietHoursResume);
+        assert_transition(
+            &outcome,
+            MediaSessionState::Paused,
+            MediaSessionState::Streaming,
+        );
+        assert!(m.pause_trigger().is_none());
+    }
+
+    // RFC 0014 §3.3: PolicyQuietHoursResume MUST be silently dropped when the
+    // stream was paused by a different trigger.
+
+    #[test]
+    fn test_quiet_hours_resume_dropped_for_operator_pause() {
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        m.apply(MediaSessionEvent::OperatorPause);
+        let outcome = m.apply(MediaSessionEvent::PolicyQuietHoursResume);
+        assert_eq!(
+            outcome,
+            TransitionOutcome::Dropped,
+            "PolicyQuietHoursResume must be dropped when paused by operator"
+        );
+        assert_eq!(m.state(), MediaSessionState::Paused);
+        assert_eq!(m.pause_trigger(), Some(MediaPauseTrigger::OperatorRequest));
+    }
+
+    #[test]
+    fn test_quiet_hours_resume_dropped_for_safe_mode_pause() {
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        m.apply(MediaSessionEvent::SafeModePause);
+        let outcome = m.apply(MediaSessionEvent::PolicyQuietHoursResume);
+        assert_eq!(
+            outcome,
+            TransitionOutcome::Dropped,
+            "PolicyQuietHoursResume must be dropped when paused by safe-mode"
+        );
+        assert_eq!(m.state(), MediaSessionState::Paused);
+        assert_eq!(m.pause_trigger(), Some(MediaPauseTrigger::SafeMode));
     }
 
     // Row: any non-terminal → CLOSING (InitiateClose)
