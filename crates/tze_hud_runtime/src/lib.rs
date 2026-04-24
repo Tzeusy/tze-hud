@@ -92,6 +92,7 @@ pub mod event_bus;
 pub mod font_loader;
 pub mod headless;
 pub mod mcp;
+pub mod media_ingress;
 pub mod pipeline;
 pub mod quiet_hours;
 pub mod reload_triggers;
@@ -216,6 +217,11 @@ pub use admission::{
     DEFAULT_MAX_RESIDENT_SESSIONS, DEFAULT_MAX_TOTAL_SESSIONS, HARD_MAX_GUEST_SESSIONS,
     HARD_MAX_RESIDENT_SESSIONS, HARD_MAX_TOTAL_SESSIONS, HotConnectSnapshot, LimitKind,
     ResourceExhaustedDetail, SessionLimits,
+};
+pub use media_ingress::{
+    MediaAdmissionError, MediaAdmissionOutcome, MediaAdmissionRejectCode, MediaAdmissionRequest,
+    MediaCloseReason, MediaDegradationTrigger, MediaIngressStateMachine, MediaPauseTrigger,
+    MediaSessionEvent, MediaSessionState, TransitionOutcome, check_media_admission,
 };
 pub use pipeline::{
     DEFAULT_POST_REVOCATION_CLEANUP_DELAY_MS, FramePipeline, HitTestSnapshot,
