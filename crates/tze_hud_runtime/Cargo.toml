@@ -10,6 +10,15 @@ headless = ["tze_hud_compositor/headless"]
 ## unrestricted capability grants. MUST NOT be enabled in production builds.
 ## Safe to enable in tests (which also compile under `cfg(test)`) and examples.
 dev-mode = []
+## Enable the GStreamer appsink-backed MediaDecodePipeline.
+## Requires system packages: libgstreamer1.0-dev + libgstreamer-plugins-base1.0-dev.
+## Without this feature the `gst_decode_pipeline` module is absent and
+## `cargo check --workspace` succeeds on hosts without GStreamer headers.
+gstreamer = [
+    "dep:gstreamer",
+    "dep:gstreamer-app",
+    "tze_hud_compositor/v2_preview",
+]
 
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
@@ -33,6 +42,12 @@ toml = { workspace = true }
 uuid = { workspace = true }
 arc-swap = { workspace = true }
 statig = { workspace = true }
+
+# GStreamer — optional; activated by the `gstreamer` feature flag.
+# Declared directly (not from workspace) because workspace deps cannot be
+# marked optional per Cargo restrictions.
+gstreamer = { version = "0.23", optional = true }
+gstreamer-app = { version = "0.23", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

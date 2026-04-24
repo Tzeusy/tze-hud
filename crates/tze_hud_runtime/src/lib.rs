@@ -82,6 +82,8 @@
 
 pub mod admission;
 pub mod agent_events;
+#[cfg(feature = "gstreamer")]
+pub mod gst_decode_pipeline;
 pub mod attention_budget;
 pub mod budget;
 pub mod channels;
