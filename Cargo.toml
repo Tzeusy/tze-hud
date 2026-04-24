@@ -81,6 +81,8 @@ thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
 blake3 = "1"
 arc-swap = "1"
+# State machines (v2 media plane)
+statig = "0.4"
 
 [profile.release]
 lto = true

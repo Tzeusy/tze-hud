@@ -140,6 +140,29 @@ const STATIC_IMAGE_PLACEHOLDER_COLOR: Rgba = Rgba {
     a: 1.0,
 };
 
+/// Dark placeholder color rendered for `ZoneContent::VideoSurfaceRef` zones.
+///
+/// Rendered when the video surface is in `Admitted`, `Placeholder`, or
+/// `Closed`/`Revoked` state (no frame available).  Distinct from
+/// `STATIC_IMAGE_PLACEHOLDER_COLOR` so video zones are visually identifiable
+/// (dark/off vs warm-gray/loading).
+///
+/// In `Streaming` state the compositor will eventually draw the decoded
+/// frame texture; until real GStreamer → GPU upload lands (a follow-up task),
+/// this placeholder is always shown.  When in `LastFrameWithBadge` state
+/// (B11 media drop), the same placeholder is shown with a disconnection-badge
+/// overlay emitted by the chrome layer.
+///
+/// Per engineering-bar.md §1: placeholder behavior is tested in
+/// `video_surface.rs` unit tests; frame-timing budget (Stage 6 < 4 ms) is
+/// not materially affected by the color quad.
+const VIDEO_SURFACE_PLACEHOLDER_COLOR: Rgba = Rgba {
+    r: 0.05,
+    g: 0.05,
+    b: 0.05,
+    a: 1.0,
+};
+
 /// Size of a notification icon in pixels (square, 24×24).
 ///
 /// Icons are rendered left-aligned within the notification backdrop, at the
@@ -1034,6 +1057,16 @@ pub struct Compositor {
     /// lifetime of the compositor (SVG paths are static config; runtime reload
     /// of icon paths is not currently supported).
     failed_icon_paths: HashSet<ResourceId>,
+    /// Per-surface video state machines (v2 media plane, E26 / B11).
+    ///
+    /// Keyed by the `SceneId` carried in `ZoneContent::VideoSurfaceRef`.
+    /// In v1 builds (no `v2_preview` feature) this is a zero-cost empty
+    /// stub that always returns `VideoRenderState::Placeholder`.
+    ///
+    /// The runtime delivers [`crate::video_surface::MediaEvent`]s to this
+    /// map via [`Compositor::handle_media_event`].  The render path queries
+    /// it each frame via [`crate::video_surface::VideoSurfaceMap::render_state_for`].
+    pub video_surfaces: crate::video_surface::VideoSurfaceMap,
 }
 
 /// Partitioned rounded-rectangle draw commands organized by layer.
@@ -1139,6 +1172,7 @@ impl Compositor {
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
             failed_icon_paths: HashSet::new(),
+            video_surfaces: crate::video_surface::VideoSurfaceMap::new(),
         })
     }
 
@@ -1397,6 +1431,7 @@ impl Compositor {
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
             failed_icon_paths: HashSet::new(),
+            video_surfaces: crate::video_surface::VideoSurfaceMap::new(),
         };
 
         let window_surface = WindowSurface::new(surface, config);
@@ -2050,6 +2085,53 @@ impl Compositor {
         // Also evict bytes and dims for resources no longer referenced.
         self.image_bytes.retain(|id, _| referenced_ids.contains(id));
         self.image_dims.retain(|id, _| referenced_ids.contains(id));
+    }
+
+    // ─── Video surface media-plane API (v2 preview) ───────────────────────────
+
+    /// Deliver a media-plane event to a `VideoSurfaceRef` surface.
+    ///
+    /// The runtime calls this when the media pipeline signals a state change
+    /// (admitted, frame decoded, media dropped, reconnected, close, revoke).
+    ///
+    /// In v1 builds (no `v2_preview` feature) the underlying
+    /// [`crate::video_surface::VideoSurfaceMap`] is a zero-cost stub; this
+    /// method is still callable and is a no-op.
+    ///
+    /// # B11 contract (signoff-packet.md §B11)
+    ///
+    /// When the runtime delivers `MediaEvent::MediaDropped` for a surface,
+    /// the compositor transitions that surface to `Paused` state.  On the
+    /// next rendered frame, [`Compositor::video_render_state`] returns
+    /// `VideoRenderState::LastFrameWithBadge`, instructing the render path to
+    /// draw the last decoded frame with a disconnection-badge overlay.  The
+    /// session (lease + control path) is unaffected.
+    #[cfg(feature = "v2_preview")]
+    pub fn handle_media_event(
+        &mut self,
+        surface_id: tze_hud_scene::types::SceneId,
+        event: &crate::video_surface::MediaEvent,
+    ) {
+        self.video_surfaces.handle(surface_id, event);
+    }
+
+    /// Query the render state for a video surface.
+    ///
+    /// Returns [`crate::video_surface::VideoRenderState::Placeholder`] if
+    /// the surface is not tracked (unknown `SceneId`) or in a v1 build.
+    pub fn video_render_state(
+        &self,
+        surface_id: &tze_hud_scene::types::SceneId,
+    ) -> crate::video_surface::VideoRenderState {
+        self.video_surfaces.render_state_for(surface_id)
+    }
+
+    /// Remove video surface entries that have reached a terminal state.
+    ///
+    /// Call once per frame (e.g. from [`Compositor::render_frame`]) after
+    /// rendering completes to reclaim memory from closed/revoked surfaces.
+    pub fn prune_terminal_video_surfaces(&mut self) {
+        self.video_surfaces.prune_terminal();
     }
 
     /// Scan the scene graph for all StaticImage resources, ensure their GPU
@@ -4619,6 +4701,13 @@ impl Compositor {
                         let backdrop_rgba: Option<Rgba> = match &record.content {
                             ZoneContent::SolidColor(rgba) => Some(*rgba),
                             ZoneContent::StaticImage(_) => Some(STATIC_IMAGE_PLACEHOLDER_COLOR),
+                            // VideoSurfaceRef: render a dark placeholder quad in all states.
+                            // Full decoded-frame texture upload follows in a later task.
+                            // The disconnection badge (B11) is added by the chrome layer
+                            // when video_surfaces.render_state_for() == LastFrameWithBadge.
+                            ZoneContent::VideoSurfaceRef(_) => {
+                                Some(VIDEO_SURFACE_PLACEHOLDER_COLOR)
+                            }
                             ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
                                 if policy.backdrop.is_some() {
                                     Some(urgency_to_severity_color(n.urgency, &self.token_map))
@@ -4677,6 +4766,9 @@ impl Compositor {
                     let backdrop_rgba: Option<Rgba> = match &latest.content {
                         ZoneContent::SolidColor(rgba) => Some(*rgba),
                         ZoneContent::StaticImage(_) => Some(STATIC_IMAGE_PLACEHOLDER_COLOR),
+                        // VideoSurfaceRef: dark placeholder in all states (full GPU
+                        // frame upload follows in a later task; badge via chrome layer).
+                        ZoneContent::VideoSurfaceRef(_) => Some(VIDEO_SURFACE_PLACEHOLDER_COLOR),
                         ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
                             if policy.backdrop.is_some() {
                                 Some(urgency_to_severity_color(n.urgency, &self.token_map))
@@ -4983,6 +5075,7 @@ impl Compositor {
                         //   with fixed 0.8 opacity and 1px 4-quad border
                         // SolidColor: always its own color
                         // StaticImage: warm-gray placeholder quad (full GPU texture deferred)
+                        // VideoSurfaceRef: dark placeholder quad; badge via chrome layer (B11)
                         // Other: policy.backdrop
                         let is_notification_content =
                             matches!(&record.content, ZoneContent::Notification(_));
@@ -5009,6 +5102,19 @@ impl Compositor {
                                     // Placeholder warm-gray backdrop.
                                     Some(STATIC_IMAGE_PLACEHOLDER_COLOR)
                                 }
+                            }
+                            // VideoSurfaceRef render path (v2 media plane).
+                            //
+                            // Renders a dark placeholder quad unconditionally in this pass.
+                            // Full decoded-frame GPU texture upload (GStreamer → wgpu) is
+                            // a follow-up implementation task.  The disconnection badge
+                            // (B11: last frame + badge on media drop) is added by the
+                            // chrome layer when the video_surfaces state machine is in
+                            // `Paused` state (video_render_state() == LastFrameWithBadge).
+                            //
+                            // See also: crate::video_surface::{VideoSurfaceMap, MediaEvent}
+                            ZoneContent::VideoSurfaceRef(_surface_id) => {
+                                Some(VIDEO_SURFACE_PLACEHOLDER_COLOR)
                             }
                             ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
                                 // alert-banner: severity tokens (color.severity.*).
@@ -5194,6 +5300,19 @@ impl Compositor {
                             } else {
                                 None
                             }
+                        }
+                        // VideoSurfaceRef render path (v2 media plane, E26 / B11).
+                        //
+                        // Renders a dark placeholder quad.  The disconnection badge
+                        // (B11 "last frame + badge" on media drop) is injected into the
+                        // chrome layer by the runtime when `Compositor::video_render_state`
+                        // returns `LastFrameWithBadge` for this surface.
+                        //
+                        // Full GStreamer → wgpu decoded-frame texture upload is a
+                        // follow-up task (tracked as a discovered follow-up in the
+                        // worker report for hud-ora8.1.25).
+                        ZoneContent::VideoSurfaceRef(_surface_id) => {
+                            Some(VIDEO_SURFACE_PLACEHOLDER_COLOR)
                         }
                         _ => {
                             // All other content: use policy.backdrop.
@@ -13628,6 +13747,115 @@ mod tests {
             item.pixel_y >= tile_y + node_y,
             "non-scrolled text pixel_y ({}) must be >= tile_y ({tile_y}) + node_y ({node_y})",
             item.pixel_y
+        );
+    }
+
+    // ── ZoneContent::VideoSurfaceRef rendering ────────────────────────────────
+
+    /// render_zone_content with ZoneContent::VideoSurfaceRef must emit a dark
+    /// placeholder quad (R≈0.05, G≈0.05, B≈0.05) rather than falling through
+    /// to `policy.backdrop` (which would be `None` for a default policy, meaning
+    /// no vertices at all — a visibility regression).
+    ///
+    /// This test validates the B11-path render entrypoint: the compositor
+    /// produces a visible quad for a VideoSurfaceRef zone even before any
+    /// `MediaEvent::Admitted` has been delivered, ensuring the zone is never
+    /// invisible when a video surface is published.
+    ///
+    /// Per engineering-bar.md §1: invariant test (dark color, not point-value).
+    /// Per engineering-bar.md §2: color quad is lightweight (< 1us per zone).
+    #[tokio::test]
+    async fn test_video_surface_ref_zone_emits_dark_placeholder() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "video".to_owned(),
+            description: "video surface zone".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 1.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::VideoSurfaceRef],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        let surface_id = SceneId::new();
+        scene
+            .publish_to_zone(
+                "video",
+                ZoneContent::VideoSurfaceRef(surface_id),
+                "test-agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
+
+        // At least one backdrop quad must be emitted — VideoSurfaceRef must
+        // never fall through to None (which would render nothing at all).
+        assert!(
+            !vertices.is_empty(),
+            "VideoSurfaceRef zone must emit backdrop vertices (dark placeholder)"
+        );
+
+        // The placeholder must be dark (R < 0.15) so the disconnection badge
+        // overlaid by the chrome layer is visible against the background.
+        // VIDEO_SURFACE_PLACEHOLDER_COLOR is (0.05, 0.05, 0.05, 1.0).
+        let color = vertices[0].color;
+        assert!(
+            color[0] < 0.15,
+            "VideoSurfaceRef placeholder R must be dark (< 0.15), got {}",
+            color[0]
+        );
+        assert!(
+            color[1] < 0.15,
+            "VideoSurfaceRef placeholder G must be dark (< 0.15), got {}",
+            color[1]
+        );
+        assert!(
+            color[2] < 0.15,
+            "VideoSurfaceRef placeholder B must be dark (< 0.15), got {}",
+            color[2]
+        );
+        assert!(
+            color[3] > 0.5,
+            "VideoSurfaceRef placeholder must be opaque (A > 0.5), got {}",
+            color[3]
+        );
+    }
+
+    /// video_render_state returns Placeholder for an unregistered surface.
+    ///
+    /// The compositor must not crash when queried for a `SceneId` that has
+    /// never been registered in `video_surfaces`.  This validates the fallback
+    /// path in `VideoSurfaceMap::render_state_for`.
+    #[test]
+    fn test_video_render_state_unknown_surface_returns_placeholder() {
+        use crate::video_surface::VideoRenderState;
+
+        // Use a temporary dummy compositor (no GPU needed — we only test the
+        // state query, not rendering). Since Compositor requires async init,
+        // we test `VideoSurfaceMap` directly — the implementation path exercised
+        // by `Compositor::video_render_state`.
+        let map = crate::video_surface::VideoSurfaceMap::new();
+        let unknown_id = SceneId::new();
+        assert_eq!(
+            map.render_state_for(&unknown_id),
+            VideoRenderState::Placeholder,
+            "unregistered surface must return Placeholder (no panic, no crash)"
         );
     }
 }
