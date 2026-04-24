@@ -318,10 +318,15 @@ impl MediaCapabilityConfig {
     }
 }
 
-// ─── Admission Request ────────────────────────────────────────────────────────
+// ─── Activation Gate Request ──────────────────────────────────────────────────
 
-/// A media admission request — all inputs the gate needs to evaluate.
-pub struct MediaAdmissionRequest<'a> {
+/// A media activation gate request — all inputs the gate needs to evaluate.
+///
+/// Named `ActivationGateRequest` (previously `MediaAdmissionRequest`) to follow
+/// the `MediaActivationGate` parent struct naming and avoid collision with
+/// `media_ingress::MediaAdmissionRequest` (the RFC 0014 §6.1 admission gate
+/// contract types).
+pub struct ActivationGateRequest<'a> {
     /// Session identifier.
     pub session_id: &'a str,
     /// Agent namespace making the request.
@@ -344,11 +349,16 @@ pub struct MediaAdmissionRequest<'a> {
     pub capability_in_session_grants: bool,
 }
 
-// ─── Admission Outcome ────────────────────────────────────────────────────────
+// ─── Activation Gate Outcome ──────────────────────────────────────────────────
 
-/// Outcome of a media admission evaluation.
+/// Outcome of a media activation gate evaluation.
+///
+/// Named `ActivationGateOutcome` (previously `MediaAdmissionOutcome`) to follow
+/// the `MediaActivationGate` parent struct naming and avoid collision with
+/// `media_ingress::MediaAdmissionOutcome` (the RFC 0014 §6.1 admission gate
+/// contract types).
 #[derive(Debug, PartialEq, Eq)]
-pub enum MediaAdmissionOutcome {
+pub enum ActivationGateOutcome {
     /// Admission approved. Stream may proceed.
     Admitted,
     /// Admission denied. Contains the stable rejection code.
@@ -361,11 +371,16 @@ pub enum MediaAdmissionOutcome {
     DialogRequired,
 }
 
-// ─── Admission Error ──────────────────────────────────────────────────────────
+// ─── Activation Gate Error ────────────────────────────────────────────────────
 
 /// Error type for activation gate failures (internal faults, not admission denials).
+///
+/// Named `ActivationGateError` (previously `MediaAdmissionError`) to follow the
+/// `MediaActivationGate` parent struct naming and avoid collision with
+/// `media_ingress::MediaAdmissionError` (the RFC 0014 §6.1 admission gate
+/// contract types).
 #[derive(Debug, Error)]
-pub enum MediaAdmissionError {
+pub enum ActivationGateError {
     /// The sink failed to emit the audit event within the 100ms latency bound.
     #[error("audit event emission failed: {0}")]
     AuditEmitFailed(String),
@@ -624,12 +639,12 @@ impl MediaActivationGate {
     ///
     /// An audit event is emitted for every decision (grant or deny).
     ///
-    /// Returns `MediaAdmissionOutcome::Admitted` on success.
+    /// Returns `ActivationGateOutcome::Admitted` on success.
     pub fn evaluate(
         &mut self,
-        req: &MediaAdmissionRequest<'_>,
+        req: &ActivationGateRequest<'_>,
         now_us: u64,
-    ) -> MediaAdmissionOutcome {
+    ) -> ActivationGateOutcome {
         // ── Step 0: C13 dialog gate ───────────────────────────────────────────
         if C13_CAPABILITIES.contains(&req.capability) {
             match self.evaluate_dialog_gate(
@@ -640,11 +655,11 @@ impl MediaActivationGate {
             ) {
                 Err(reject_code) => {
                     self.deny(req, reject_code.clone(), now_us);
-                    return MediaAdmissionOutcome::Denied(reject_code);
+                    return ActivationGateOutcome::Denied(reject_code);
                 }
                 Ok(false) => {
                     // Dialog required — caller must present dialog and re-evaluate.
-                    return MediaAdmissionOutcome::DialogRequired;
+                    return ActivationGateOutcome::DialogRequired;
                 }
                 Ok(true) => {} // gate passes, continue
             }
@@ -654,7 +669,7 @@ impl MediaActivationGate {
         // The requested capability must be in the session's granted capability set.
         if !req.capability_in_session_grants {
             self.deny(req, MediaRejectCode::CapabilityRequired, now_us);
-            return MediaAdmissionOutcome::Denied(MediaRejectCode::CapabilityRequired);
+            return ActivationGateOutcome::Denied(MediaRejectCode::CapabilityRequired);
         }
 
         // ── E25 ladder check: block new admissions at step ≥ 8 ───────────────
@@ -662,32 +677,32 @@ impl MediaActivationGate {
         // New admissions must be refused until the runtime recovers.
         if req.e25_level >= 8 {
             self.deny(req, MediaRejectCode::PoolExhausted, now_us);
-            return MediaAdmissionOutcome::Denied(MediaRejectCode::PoolExhausted);
+            return ActivationGateOutcome::Denied(MediaRejectCode::PoolExhausted);
         }
 
         // ── C15 trust boundary: cloud-relay transport check ───────────────────
         if req.transport == MediaTransport::CloudRelay && !self.config.cloud_relay_enabled {
             self.deny(req, MediaRejectCode::TrustBoundaryViolation, now_us);
-            return MediaAdmissionOutcome::Denied(MediaRejectCode::TrustBoundaryViolation);
+            return ActivationGateOutcome::Denied(MediaRejectCode::TrustBoundaryViolation);
         }
 
         // ── Step 2a: Per-session stream count limit ───────────────────────────
         if req.current_stream_count >= self.config.max_concurrent_streams {
             self.deny(req, MediaRejectCode::StreamLimitExceeded, now_us);
-            return MediaAdmissionOutcome::Denied(MediaRejectCode::StreamLimitExceeded);
+            return ActivationGateOutcome::Denied(MediaRejectCode::StreamLimitExceeded);
         }
 
         // ── Step 2b: GPU texture headroom check ───────────────────────────────
         if req.gpu_texture_headroom_bytes < MIN_GPU_TEXTURE_HEADROOM_BYTES {
             self.deny(req, MediaRejectCode::GpuTextureHeadroomInsufficient, now_us);
-            return MediaAdmissionOutcome::Denied(MediaRejectCode::GpuTextureHeadroomInsufficient);
+            return ActivationGateOutcome::Denied(MediaRejectCode::GpuTextureHeadroomInsufficient);
         }
 
         // ── Step 3: Role authority check (defense-in-depth) ───────────────────
         // Admission requires operator role `owner` or `admin` (RFC 0009 A1 §A1.3).
         if !req.operator_role.may_grant_media_capability() {
             self.deny(req, MediaRejectCode::RoleInsufficient, now_us);
-            return MediaAdmissionOutcome::Denied(MediaRejectCode::RoleInsufficient);
+            return ActivationGateOutcome::Denied(MediaRejectCode::RoleInsufficient);
         }
 
         // ── All gates passed — admit ──────────────────────────────────────────
@@ -707,7 +722,7 @@ impl MediaActivationGate {
             capability: req.capability.to_string(),
             timestamp_us: now_us,
         });
-        MediaAdmissionOutcome::Admitted
+        ActivationGateOutcome::Admitted
     }
 
     // ── State mutation helpers ────────────────────────────────────────────────
@@ -975,7 +990,7 @@ impl MediaActivationGate {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
-    fn deny(&self, req: &MediaAdmissionRequest<'_>, code: MediaRejectCode, now_us: u64) {
+    fn deny(&self, req: &ActivationGateRequest<'_>, code: MediaRejectCode, now_us: u64) {
         warn!(
             subsystem = "media_admission",
             session_id = req.session_id,
@@ -1076,8 +1091,8 @@ mod tests {
         session_id: &'a str,
         agent_namespace: &'a str,
         stream_epoch: &'a str,
-    ) -> MediaAdmissionRequest<'a> {
-        MediaAdmissionRequest {
+    ) -> ActivationGateRequest<'a> {
+        ActivationGateRequest {
             session_id,
             agent_namespace,
             stream_epoch,
@@ -1255,7 +1270,7 @@ mod tests {
         let (mut gate, sink) = make_gate_preloaded_cache("sess-1", "agent-a");
         let req = admitted_request("sess-1", "agent-a", "epoch-1");
         let outcome = gate.evaluate(&req, NOW);
-        assert_eq!(outcome, MediaAdmissionOutcome::Admitted);
+        assert_eq!(outcome, ActivationGateOutcome::Admitted);
         let events = sink.drain();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_name(), "media_admission_grant");
@@ -1269,7 +1284,7 @@ mod tests {
         let outcome = gate.evaluate(&req, NOW);
         assert_eq!(
             outcome,
-            MediaAdmissionOutcome::Denied(MediaRejectCode::CapabilityRequired)
+            ActivationGateOutcome::Denied(MediaRejectCode::CapabilityRequired)
         );
         let events = sink.drain();
         assert_eq!(events.len(), 1);
@@ -1284,7 +1299,7 @@ mod tests {
         let outcome = gate.evaluate(&req, NOW);
         assert_eq!(
             outcome,
-            MediaAdmissionOutcome::Denied(MediaRejectCode::StreamLimitExceeded)
+            ActivationGateOutcome::Denied(MediaRejectCode::StreamLimitExceeded)
         );
         let events = sink.drain();
         assert!(
@@ -1302,7 +1317,7 @@ mod tests {
         let outcome = gate.evaluate(&req, NOW);
         assert_eq!(
             outcome,
-            MediaAdmissionOutcome::Denied(MediaRejectCode::GpuTextureHeadroomInsufficient)
+            ActivationGateOutcome::Denied(MediaRejectCode::GpuTextureHeadroomInsufficient)
         );
         let events = sink.drain();
         assert!(
@@ -1320,7 +1335,7 @@ mod tests {
         let outcome = gate.evaluate(&req, NOW);
         assert_eq!(
             outcome,
-            MediaAdmissionOutcome::Denied(MediaRejectCode::RoleInsufficient)
+            ActivationGateOutcome::Denied(MediaRejectCode::RoleInsufficient)
         );
         let events = sink.drain();
         assert!(
@@ -1338,7 +1353,7 @@ mod tests {
         let outcome = gate.evaluate(&req, NOW);
         assert_eq!(
             outcome,
-            MediaAdmissionOutcome::Denied(MediaRejectCode::PoolExhausted)
+            ActivationGateOutcome::Denied(MediaRejectCode::PoolExhausted)
         );
         let events = sink.drain();
         assert!(
@@ -1360,7 +1375,7 @@ mod tests {
         let outcome = gate.evaluate(&req, NOW);
         assert_eq!(
             outcome,
-            MediaAdmissionOutcome::Denied(MediaRejectCode::TrustBoundaryViolation)
+            ActivationGateOutcome::Denied(MediaRejectCode::TrustBoundaryViolation)
         );
         let events = sink.drain();
         assert!(
@@ -1379,7 +1394,7 @@ mod tests {
         // No session cache — dialog required.
         let req = admitted_request("sess-2", "agent-b", "epoch-1");
         let outcome = gate.evaluate(&req, NOW);
-        assert_eq!(outcome, MediaAdmissionOutcome::DialogRequired);
+        assert_eq!(outcome, ActivationGateOutcome::DialogRequired);
         // No audit event for DialogRequired (dialog not yet resolved).
         assert_eq!(sink.len(), 0);
     }

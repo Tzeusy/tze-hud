@@ -172,15 +172,15 @@ pub use event_bus::{
 pub use headless::HeadlessRuntime;
 pub use mcp::{McpServerConfig, start_mcp_http_server};
 pub use media_admission::{
-    C13_CAPABILITIES, CAPABILITY_AGENT_TO_AGENT_MEDIA, CAPABILITY_AUDIO_EMIT,
-    CAPABILITY_CLOUD_RELAY, CAPABILITY_EXTERNAL_TRANSCODE, CAPABILITY_FEDERATED_SEND,
-    CAPABILITY_MEDIA_INGRESS, CAPABILITY_MICROPHONE_INGRESS, CAPABILITY_RECORDING,
-    CapabilityRememberRecord, CollectingMediaAuditSink, DEFAULT_DIALOG_TIMEOUT_MS,
-    DEFAULT_MAX_CONCURRENT_MEDIA_STREAMS, MAX_SIGNALING_REQUESTS_PER_SECOND,
-    MIN_GPU_TEXTURE_HEADROOM_BYTES, MediaActivationGate, MediaAuditSink, MediaCapabilityConfig,
-    MediaTransport, NoopMediaAuditSink, OperatorRole, REMEMBER_TTL_US, SessionCapabilityCache,
-    SessionCapabilityGrant, SignalingRateLimiter, now_us as media_now_us,
-    now_us_monotonic as media_now_us_monotonic, runtime_level_to_e25_step,
+    ActivationGateError, ActivationGateOutcome, ActivationGateRequest, C13_CAPABILITIES,
+    CAPABILITY_AGENT_TO_AGENT_MEDIA, CAPABILITY_AUDIO_EMIT, CAPABILITY_CLOUD_RELAY,
+    CAPABILITY_EXTERNAL_TRANSCODE, CAPABILITY_FEDERATED_SEND, CAPABILITY_MEDIA_INGRESS,
+    CAPABILITY_MICROPHONE_INGRESS, CAPABILITY_RECORDING, CapabilityRememberRecord,
+    CollectingMediaAuditSink, DEFAULT_DIALOG_TIMEOUT_MS, DEFAULT_MAX_CONCURRENT_MEDIA_STREAMS,
+    MAX_SIGNALING_REQUESTS_PER_SECOND, MIN_GPU_TEXTURE_HEADROOM_BYTES, MediaActivationGate,
+    MediaAuditSink, MediaCapabilityConfig, MediaTransport, NoopMediaAuditSink, OperatorRole,
+    REMEMBER_TTL_US, SessionCapabilityCache, SessionCapabilityGrant, SignalingRateLimiter,
+    now_us as media_now_us, now_us_monotonic as media_now_us_monotonic, runtime_level_to_e25_step,
 };
 pub use quiet_hours::{
     GateDecision, QuietHoursConfig, QuietHoursGate, ZoneContentionPolicy, ZoneQueue,
