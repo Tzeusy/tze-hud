@@ -531,6 +531,10 @@ impl MediaIngressStateMachine {
             }
 
             // ── STREAMING/DEGRADED → PAUSED ────────────────────────────────
+            // Note: pausing clears `degradation_step`.  If a stream is paused
+            // while DEGRADED, the E25 ladder context is reset; upon resume the
+            // stream returns to STREAMING at step 0.  The runtime re-evaluates
+            // the degradation ladder independently after the stream is live again.
             MediaSessionEvent::AgentPauseRequest => {
                 if !self.state.is_active() {
                     return TransitionOutcome::NotApplicable {
@@ -538,6 +542,7 @@ impl MediaIngressStateMachine {
                         event: event.name(),
                     };
                 }
+                self.degradation_step = 0;
                 self.pause_trigger = Some(MediaPauseTrigger::AgentRequest);
                 self.state = MediaSessionState::Paused;
             }
@@ -549,6 +554,7 @@ impl MediaIngressStateMachine {
                         event: event.name(),
                     };
                 }
+                self.degradation_step = 0;
                 self.pause_trigger = Some(MediaPauseTrigger::OperatorRequest);
                 self.state = MediaSessionState::Paused;
             }
@@ -560,6 +566,7 @@ impl MediaIngressStateMachine {
                         event: event.name(),
                     };
                 }
+                self.degradation_step = 0;
                 self.pause_trigger = Some(MediaPauseTrigger::SafeMode);
                 self.state = MediaSessionState::Paused;
             }
@@ -571,6 +578,7 @@ impl MediaIngressStateMachine {
                         event: event.name(),
                     };
                 }
+                self.degradation_step = 0;
                 self.pause_trigger = Some(MediaPauseTrigger::PolicyQuietHours);
                 self.state = MediaSessionState::Paused;
             }
@@ -671,6 +679,10 @@ impl MediaIngressStateMachine {
                         "InitiateClose called with revocation reason; use Revoke instead"
                     );
                 }
+                // Clear per-active-state bookkeeping: CLOSING has no pause or
+                // degradation context.
+                self.pause_trigger = None;
+                self.degradation_step = 0;
                 self.state = MediaSessionState::Closing;
             }
 
@@ -687,6 +699,10 @@ impl MediaIngressStateMachine {
 
             // ── any non-terminal → REVOKED ─────────────────────────────────
             MediaSessionEvent::Revoke(reason) => {
+                // Clear per-active-state bookkeeping: neither CLOSING nor REVOKED
+                // has pause or degradation context.
+                self.pause_trigger = None;
+                self.degradation_step = 0;
                 if !reason.is_revocation() {
                     // Caller has a bug: non-revocation close reason sent via
                     // `Revoke`.  Demote to `InitiateClose` semantics.
