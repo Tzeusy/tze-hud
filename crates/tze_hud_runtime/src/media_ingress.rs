@@ -321,7 +321,17 @@ pub enum MediaSessionEvent {
 
     /// Teardown trigger from any non-terminal state → `CLOSING`.
     /// Carries the reason; revocation paths use a separate variant.
-    InitiateClose(MediaCloseReason),
+    ///
+    /// `retry_after_us`: optional backoff hint for [`MediaCloseReason::BudgetWatchdog`]
+    /// closes.  When `reason == BudgetWatchdog`, this field MUST be `Some(non-zero)`;
+    /// the value (microseconds) is forwarded into the wire `MediaIngressCloseNotice`
+    /// so the agent can back off before retrying admission (RFC 0014 §6.3 A1).
+    /// For all other close reasons the field MUST be `None`.
+    InitiateClose {
+        reason: MediaCloseReason,
+        /// Backoff hint in microseconds; `Some` only for `BudgetWatchdog`, `None` otherwise.
+        retry_after_us: Option<u64>,
+    },
 
     /// `R`: Ring buffer drained AND GStreamer EOS confirmed.
     /// `CLOSING → CLOSED`.
@@ -348,7 +358,7 @@ impl MediaSessionEvent {
             Self::OperatorResume => "OperatorResume",
             Self::SafeModeResume => "SafeModeResume",
             Self::PolicyQuietHoursResume => "PolicyQuietHoursResume",
-            Self::InitiateClose(_) => "InitiateClose",
+            Self::InitiateClose { .. } => "InitiateClose",
             Self::DrainComplete => "DrainComplete",
             Self::Revoke(_) => "Revoke",
         }
@@ -420,6 +430,13 @@ pub struct MediaIngressStateMachine {
 
     /// Current E25 degradation step (0 = none; 1–7 = active).
     degradation_step: u32,
+
+    /// Backoff hint (µs) populated when `InitiateClose { reason: BudgetWatchdog,
+    /// retry_after_us: Some(n) }` fires.  Cleared to `None` on any non-BudgetWatchdog
+    /// close and on entry to terminal states.  Exposed via `close_retry_after_us()` so
+    /// the wire layer can read it back when building the `MediaIngressCloseNotice` proto
+    /// without re-parsing the originating event (RFC 0014 §6.3 A1).
+    close_retry_after_us: Option<u64>,
 }
 
 impl MediaIngressStateMachine {
@@ -443,6 +460,7 @@ impl MediaIngressStateMachine {
             state: MediaSessionState::Admitted,
             pause_trigger: None,
             degradation_step: 0,
+            close_retry_after_us: None,
         }
     }
 
@@ -459,6 +477,15 @@ impl MediaIngressStateMachine {
     /// Current E25 degradation step (0 = none, 1–7 = active).
     pub fn degradation_step(&self) -> u32 {
         self.degradation_step
+    }
+
+    /// Backoff hint set when `InitiateClose { reason: BudgetWatchdog, retry_after_us: Some(n) }`
+    /// last fired.  `None` for non-BudgetWatchdog closes and before any close event.
+    ///
+    /// The wire layer reads this after `apply()` returns to populate
+    /// `MediaIngressCloseNotice.retry_after_us` (RFC 0014 §6.3 A1).
+    pub fn close_retry_after_us(&self) -> Option<u64> {
+        self.close_retry_after_us
     }
 
     /// If the stream is `PAUSED`, returns the pause trigger.
@@ -670,7 +697,7 @@ impl MediaIngressStateMachine {
             }
 
             // ── any non-terminal → CLOSING ─────────────────────────────────
-            MediaSessionEvent::InitiateClose(reason) => {
+            MediaSessionEvent::InitiateClose { reason, retry_after_us } => {
                 if reason.is_revocation() {
                     // Caller should use `Revoke` for revocation paths.
                     warn!(
@@ -683,6 +710,26 @@ impl MediaIngressStateMachine {
                 // degradation context.
                 self.pause_trigger = None;
                 self.degradation_step = 0;
+                if *reason == MediaCloseReason::BudgetWatchdog {
+                    if retry_after_us.is_none_or(|v| v == 0) {
+                        warn!(
+                            stream_epoch = self.stream_epoch,
+                            "InitiateClose(BudgetWatchdog) missing non-zero retry_after_us hint (RFC 0014 §6.3 A1)"
+                        );
+                    }
+                    // Store hint so wire layer can read via close_retry_after_us()
+                    // without re-parsing the originating event.
+                    self.close_retry_after_us = *retry_after_us;
+                } else {
+                    if retry_after_us.is_some() {
+                        warn!(
+                            stream_epoch = self.stream_epoch,
+                            reason = reason.as_str(),
+                            "InitiateClose called with non-watchdog reason but carries retry_after_us hint (RFC 0014 §6.3 A1)"
+                        );
+                    }
+                    self.close_retry_after_us = None;
+                }
                 self.state = MediaSessionState::Closing;
             }
 
@@ -1372,9 +1419,7 @@ mod tests {
     fn test_any_non_terminal_to_closing_via_agent() {
         // From ADMITTED
         let mut m = new_machine();
-        let outcome = m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::AgentClosed,
-        ));
+        let outcome = m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
         assert_transition(
             &outcome,
             MediaSessionState::Admitted,
@@ -1384,9 +1429,7 @@ mod tests {
         // From STREAMING
         let mut m = new_machine();
         m.apply(MediaSessionEvent::TransportEstablished);
-        let outcome = m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::AgentClosed,
-        ));
+        let outcome = m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
         assert_transition(
             &outcome,
             MediaSessionState::Streaming,
@@ -1397,9 +1440,7 @@ mod tests {
         let mut m = new_machine();
         m.apply(MediaSessionEvent::TransportEstablished);
         m.apply(MediaSessionEvent::AgentPauseRequest);
-        let outcome = m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::ScheduleExpired,
-        ));
+        let outcome = m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::ScheduleExpired, retry_after_us: None });
         assert_transition(
             &outcome,
             MediaSessionState::Paused,
@@ -1412,9 +1453,7 @@ mod tests {
     #[test]
     fn test_closing_to_closed_on_drain() {
         let mut m = new_machine();
-        m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::AgentClosed,
-        ));
+        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
         let outcome = m.apply(MediaSessionEvent::DrainComplete);
         assert_transition(
             &outcome,
@@ -1464,9 +1503,7 @@ mod tests {
     #[test]
     fn test_terminal_closed_rejects_all_events() {
         let mut m = new_machine();
-        m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::AgentClosed,
-        ));
+        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
         m.apply(MediaSessionEvent::DrainComplete);
         assert!(m.state().is_terminal());
 
@@ -1475,7 +1512,7 @@ mod tests {
             MediaSessionEvent::AgentPauseRequest,
             MediaSessionEvent::AgentResumeRequest,
             MediaSessionEvent::DegradationRecovered,
-            MediaSessionEvent::InitiateClose(MediaCloseReason::AgentClosed),
+            MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None },
             MediaSessionEvent::DrainComplete,
             MediaSessionEvent::Revoke(MediaCloseReason::LeaseRevoked),
         ] {
@@ -1818,6 +1855,44 @@ mod tests {
         }
     }
 
+    // ─── BudgetWatchdog retry_after_us hint (RFC 0014 §6.3 A1) ──────────────────
+
+    /// RFC 0014 §6.3 A1: `InitiateClose { BudgetWatchdog, retry_after_us: Some(n) }`
+    /// MUST transition to CLOSING and carry the hint through to the wire layer.
+    /// This test verifies the state machine correctly accepts the event and transitions,
+    /// and that other reasons do not carry a retry hint.
+    #[test]
+    fn test_budget_watchdog_close_carries_retry_after_us() {
+        // BUDGET_WATCHDOG with a non-zero hint: valid per RFC 0014 §6.3 A1.
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        let outcome = m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::BudgetWatchdog,
+            retry_after_us: Some(5_000_000), // 5 seconds
+        });
+        assert_transition(&outcome, MediaSessionState::Streaming, MediaSessionState::Closing);
+        // Hint MUST be stored for wire layer consumption.
+        assert_eq!(
+            m.close_retry_after_us(),
+            Some(5_000_000),
+            "close_retry_after_us MUST hold the hint after BudgetWatchdog close"
+        );
+
+        // Non-BudgetWatchdog reasons must clear the hint (None).
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        let outcome = m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::AgentClosed,
+            retry_after_us: None,
+        });
+        assert_transition(&outcome, MediaSessionState::Streaming, MediaSessionState::Closing);
+        assert_eq!(
+            m.close_retry_after_us(),
+            None,
+            "close_retry_after_us MUST be None for non-BudgetWatchdog close"
+        );
+    }
+
     // ─── MediaSessionState helpers ─────────────────────────────────────────────
 
     #[test]
@@ -1917,9 +1992,7 @@ mod tests {
         assert_transition(&o, MediaSessionState::Paused, MediaSessionState::Streaming);
 
         // 6. Agent closes stream
-        let o = m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::AgentClosed,
-        ));
+        let o = m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
         assert_transition(&o, MediaSessionState::Streaming, MediaSessionState::Closing);
 
         // 7. Ring buffer drained
@@ -1942,9 +2015,7 @@ mod tests {
     fn property_terminal_state_is_absorbing() {
         // Reach CLOSED via normal path.
         let mut m = new_machine();
-        m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::AgentClosed,
-        ));
+        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
         m.apply(MediaSessionEvent::DrainComplete);
         assert!(m.state().is_terminal());
 
@@ -1957,7 +2028,7 @@ mod tests {
             MediaSessionEvent::SafeModeResume,
             MediaSessionEvent::PolicyQuietHoursResume,
             MediaSessionEvent::DrainComplete,
-            MediaSessionEvent::InitiateClose(MediaCloseReason::AgentClosed),
+            MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None },
             MediaSessionEvent::Revoke(MediaCloseReason::LeaseRevoked),
         ];
 
@@ -2043,9 +2114,7 @@ mod tests {
         assert_eq!(m.degradation_step(), 0);
 
         // After close, zero.
-        m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::AgentClosed,
-        ));
+        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
         m.apply(MediaSessionEvent::DrainComplete);
         assert_eq!(m.degradation_step(), 0);
     }
@@ -2075,9 +2144,7 @@ mod tests {
         // Path 2: STREAMING → CLOSING → CLOSED (agent close)
         let mut m = MediaIngressStateMachine::new(101);
         m.apply(MediaSessionEvent::TransportEstablished);
-        m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::AgentClosed,
-        ));
+        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
         m.apply(MediaSessionEvent::DrainComplete);
         assert_eq!(m.state(), MediaSessionState::Closed);
 
@@ -2089,9 +2156,7 @@ mod tests {
             trigger: MediaDegradationTrigger::RuntimeLadderAdvance,
         });
         // Simulate step 8 teardown: E25 step 8 = DEGRADATION_TEARDOWN
-        m.apply(MediaSessionEvent::InitiateClose(
-            MediaCloseReason::DegradationTeardown,
-        ));
+        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::DegradationTeardown, retry_after_us: None });
         m.apply(MediaSessionEvent::DrainComplete);
         assert_eq!(m.state(), MediaSessionState::Closed);
 

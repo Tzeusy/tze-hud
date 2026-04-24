@@ -419,10 +419,17 @@ enum MediaSessionState {
 // Runtime-initiated termination notice. Delivered before stream teardown
 // so the agent knows why the stream is ending. Always paired with a final
 // MediaIngressState carrying state=CLOSED or REVOKED.
+//
+// retry_after_us (field 4, optional): backoff hint added in Amendment A1.
+//   MUST be set (non-zero) when reason == BUDGET_WATCHDOG.
+//   Absent or 0 means "no hint; use an implementation-defined default".
+//   Value is microseconds the agent SHOULD wait before retrying admission.
+//   Agents MUST ignore this field for all other close reasons.
 message MediaIngressCloseNotice {
-  uint64 stream_epoch                 = 1;
-  MediaCloseReason reason             = 2;
-  string detail                       = 3;  // Human-readable context
+  uint64           stream_epoch    = 1;
+  MediaCloseReason reason         = 2;
+  string           detail         = 3;  // Human-readable context
+  optional uint64  retry_after_us = 4;  // Backoff hint (µs); MUST be set for BUDGET_WATCHDOG (A1)
 }
 
 enum MediaCloseReason {
@@ -1102,6 +1109,26 @@ wire state `CLOSING` for its stream). Wire signal:
 A watchdog-triggered close does NOT automatically advance the global
 degradation level. It is per-stream.
 
+**Amendment A1 — `retry_after_us` backoff hint.**  When closing with
+`BUDGET_WATCHDOG`, the runtime MUST populate `MediaIngressCloseNotice.retry_after_us`
+with a non-zero value (microseconds).  The value represents the minimum interval the
+agent SHOULD wait before re-attempting admission on the same or a new stream.  Without
+this hint, agents that act on `BUDGET_WATCHDOG` immediately may hot-loop the admission
+gate, creating burst load on the budget subsystem precisely when the system is already
+under resource pressure.
+
+Semantics of `retry_after_us`:
+- **Set (non-zero):** the agent SHOULD wait at least this many microseconds before
+  calling `MediaIngressOpen` again.  Agents MAY add jitter on top of the hint.
+- **Absent or zero:** no guidance available; the agent SHOULD apply an
+  implementation-defined exponential back-off (recommended minimum: 1 s).
+- The field is **ignored** for all close reasons other than `BUDGET_WATCHDOG`.
+
+The runtime SHOULD derive the hint value from whichever resource threshold
+triggered the watchdog (e.g., a 10 s CPU-time window might suggest a 10 s
+retry interval).  A safe default when the threshold origin is unclear is 5 s
+(5 000 000 µs).
+
 ### 6.4 Pool Contraction Under Budget Pressure
 
 Per RFC 0002 A1 §A3.3, at runtime degradation Level 2+ the effective pool
@@ -1509,6 +1536,12 @@ draft time; reviewers add rows at sign-off.
 | R3 | — | (external reviewer 1) | external | (to be assigned) | — | — |
 | R4 | — | (external reviewer 2) | external | (to be assigned) | — | — |
 | (as needed) | — | — | — | — | — | — |
+
+### Amendments
+
+| ID | Date | Author | Scope | Summary |
+|----|------|--------|-------|---------|
+| A1 | 2026-04-24 | hud-3kfax | §2.3.4, §6.3 | Added optional `retry_after_us` (uint64, field 4) to `MediaIngressCloseNotice`. MUST be set (non-zero) when `reason == BUDGET_WATCHDOG`; absent or zero means "no hint". Prevents agents from hot-looping the admission gate after a watchdog close. Proto and Rust `MediaSessionEvent::InitiateClose` updated; existing field numbers unchanged. |
 
 Sign-off criteria for reviewers:
 
