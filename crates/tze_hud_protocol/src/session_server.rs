@@ -229,6 +229,32 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
 
         // Element repositioned event — transactional (drag completion / reset-to-default)
         ServerPayload::ElementRepositioned(_) => TrafficClass::Transactional,
+
+        // ── Media plane (RFC 0014 §2.2.2) ────────────────────────────────────
+        // Transactional: admission, teardown, degradation, pause/resume notices,
+        // SDP offer — never dropped, must be reliably delivered.
+        ServerPayload::MediaIngressOpenResult(_)
+        | ServerPayload::MediaIngressCloseNotice(_)
+        | ServerPayload::MediaSdpOffer(_)
+        | ServerPayload::MediaDegradationNotice(_)
+        | ServerPayload::MediaEgressOpenResult(_)
+        | ServerPayload::MediaPauseNotice(_)
+        | ServerPayload::MediaResumeNotice(_) => TrafficClass::Transactional,
+
+        // State-stream: per-stream health/degradation updates (coalescible, latest-wins)
+        ServerPayload::MediaIngressState(_) => TrafficClass::StateStream,
+
+        // Ephemeral realtime: ICE candidates (latest-wins per candidate family)
+        ServerPayload::MediaIceCandidate(_) => TrafficClass::Ephemeral,
+
+        // ── Phase 4b cloud-relay (RFC 0018 §4.3) ─────────────────────────────
+        // Transactional: relay open result and close notice
+        ServerPayload::CloudRelayOpenResult(_) | ServerPayload::CloudRelayCloseNotice(_) => {
+            TrafficClass::Transactional
+        }
+
+        // State-stream: relay path health (coalescible, latest-wins)
+        ServerPayload::CloudRelayStateUpdate(_) => TrafficClass::StateStream,
     }
 }
 
@@ -2865,6 +2891,44 @@ async fn handle_client_message(
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {
             // Protocol violation: ignore (or could send RuntimeError)
+        }
+
+        // ── Media plane (RFC 0014 §2.2.1) — v1 runtime stubs ────────────────
+        // The v1 runtime does not implement media plane signaling. All media
+        // ingress, SDP, ICE, pause/resume, and cloud-relay messages are rejected
+        // with CAPABILITY_NOT_IMPLEMENTED per RFC 0014 §1.2 scope / §2.4 code table.
+        // These stubs are wire-complete; the implementation is deferred to v2.
+        ClientPayload::MediaIngressOpen(_)
+        | ClientPayload::MediaIngressClose(_)
+        | ClientPayload::MediaSdpAnswer(_)
+        | ClientPayload::MediaIceCandidate(_)
+        | ClientPayload::MediaEgressOpen(_)
+        | ClientPayload::MediaPauseRequest(_)
+        | ClientPayload::MediaResumeRequest(_)
+        | ClientPayload::CloudRelayOpen(_)
+        | ClientPayload::CloudRelayClose(_) => {
+            // Reject with CAPABILITY_NOT_IMPLEMENTED (RFC 0014 §2.4).
+            // The runtime sends a structured RuntimeError so the agent can
+            // distinguish a soft rejection (wrong version/capability) from a
+            // hard protocol violation. The media plane is v2 scope only.
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: session.next_server_seq(),
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(
+                        crate::proto::session::server_message::Payload::RuntimeError(
+                            crate::proto::session::RuntimeError {
+                                error_code: "CAPABILITY_NOT_IMPLEMENTED".to_string(),
+                                message: "media plane signaling is not implemented in v1"
+                                    .to_string(),
+                                context: "media-plane v2 RFC 0014".to_string(),
+                                hint: String::new(),
+                                error_code_enum: crate::proto::session::ErrorCode::Unknown as i32,
+                            },
+                        ),
+                    ),
+                }))
+                .await;
         }
     }
 }
@@ -8168,6 +8232,10 @@ mod tests {
                 element_id: Vec::new(),
                 merge_key: String::new(),
                 breakpoints: Vec::new(),
+                // Snapshot parity fields (WM-S2b session.proto delta §fields 7-9); 0/empty = no constraint.
+                present_at_wall_us: 0,
+                expires_at_wall_us: 0,
+                content_classification: String::new(),
             })),
         })
         .await
@@ -11311,6 +11379,9 @@ mod tests {
                 element_id: Vec::new(),
                 merge_key: String::new(),
                 breakpoints: Vec::new(),
+                present_at_wall_us: 0,
+                expires_at_wall_us: 0,
+                content_classification: String::new(),
             })),
         })
         .await
@@ -11420,6 +11491,9 @@ mod tests {
                 element_id: Vec::new(),
                 merge_key: String::new(),
                 breakpoints: Vec::new(),
+                present_at_wall_us: 0,
+                expires_at_wall_us: 0,
+                content_classification: String::new(),
             })),
         })
         .await
