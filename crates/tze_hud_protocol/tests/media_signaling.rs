@@ -560,6 +560,7 @@ fn media_ingress_state_roundtrip_server_field_61() {
 
 #[test]
 fn media_ingress_close_notice_roundtrip_server_field_62() {
+    // Base case: no retry_after_us hint (non-watchdog close).
     let msg = ServerMessage {
         sequence: 3,
         timestamp_wall_us: 0,
@@ -568,6 +569,7 @@ fn media_ingress_close_notice_roundtrip_server_field_62() {
                 stream_epoch: 1,
                 reason: 6, // BUDGET_WATCHDOG
                 detail: "CPU threshold exceeded".to_string(),
+                retry_after_us: None,
             },
         )),
     };
@@ -580,9 +582,47 @@ fn media_ingress_close_notice_roundtrip_server_field_62() {
             );
             assert_eq!(notice.reason, 6, "BUDGET_WATCHDOG reason MUST survive");
             assert_eq!(notice.detail, "CPU threshold exceeded");
+            assert_eq!(
+                notice.retry_after_us, None,
+                "absent retry_after_us MUST decode as None"
+            );
         }
         other => panic!(
             "expected MediaIngressCloseNotice at field 62, got {:?}",
+            other
+        ),
+    }
+}
+
+/// RFC 0014 §6.3 A1: retry_after_us field MUST round-trip when set for BUDGET_WATCHDOG.
+#[test]
+fn media_ingress_close_notice_retry_after_us_roundtrip() {
+    let hint_us: u64 = 5_000_000; // 5 seconds
+    let msg = ServerMessage {
+        sequence: 4,
+        timestamp_wall_us: 0,
+        payload: Some(ServerPayload::MediaIngressCloseNotice(
+            MediaIngressCloseNotice {
+                stream_epoch: 2,
+                reason: 6, // BUDGET_WATCHDOG
+                detail: "ring-buffer 75% sustained".to_string(),
+                retry_after_us: Some(hint_us),
+            },
+        )),
+    };
+    let decoded = round_trip(&msg);
+    match decoded.payload {
+        Some(ServerPayload::MediaIngressCloseNotice(notice)) => {
+            assert_eq!(notice.stream_epoch, 2);
+            assert_eq!(notice.reason, 6, "BUDGET_WATCHDOG");
+            assert_eq!(
+                notice.retry_after_us,
+                Some(hint_us),
+                "retry_after_us MUST survive proto round-trip (RFC 0014 §6.3 A1)"
+            );
+        }
+        other => panic!(
+            "expected MediaIngressCloseNotice, got {:?}",
             other
         ),
     }
