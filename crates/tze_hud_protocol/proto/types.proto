@@ -249,12 +249,33 @@ message StatusBarPayload {
   map<string, string> entries = 1;  // key → display string
 }
 
+// Content-addressed static image reference (field 5 in ZoneContent oneof).
+// `resource_id` is the 32-byte BLAKE3 hash identifying a resource uploaded via
+// ResourceUploadStart (RFC 0011).
+message StaticImageRef {
+  bytes resource_id = 1;  // 32-byte BLAKE3 content hash (ResourceIdProto.bytes); MUST NOT be empty
+}
+
+// Runtime-assigned surface reference for zone-bound media streams (field 6 in
+// ZoneContent oneof). Materialised by the compositor when a MediaIngressOpen is
+// admitted for a zone-bound stream (RFC 0014 §2.3.1, §2.7). The `surface_id`
+// echoes MediaIngressOpenResult.assigned_surface_id and is stable for the
+// lifetime of the stream's stream_epoch. Carries declarative publication state
+// only; transport internals MUST NOT appear here (WM-S2b snapshot exclusion).
+message VideoSurfaceRef {
+  bytes  surface_id             = 1;  // 16-byte UUIDv7 runtime-assigned surface identity
+  uint64 expires_at_wall_us     = 2;  // Absolute expiry UTC µs (0 = no expiry); snapshot parity
+  string content_classification = 3;  // Empty = unclassified (RFC 0009 A1 viewer-class filter)
+}
+
 message ZoneContent {
   oneof payload {
-    string              stream_text  = 1;
-    NotificationPayload notification = 2;
-    StatusBarPayload    status_bar   = 3;
-    Rgba                solid_color  = 4;
+    string              stream_text       = 1;
+    NotificationPayload notification      = 2;
+    StatusBarPayload    status_bar        = 3;
+    Rgba                solid_color       = 4;
+    StaticImageRef      static_image_ref  = 5;  // Content-addressed static image (WM-S2b types.proto delta)
+    VideoSurfaceRef     video_surface_ref = 6;  // Zone-bound media surface (RFC 0014 §2.7; WM-S2b types.proto delta)
   }
 }
 
@@ -365,11 +386,18 @@ message ZoneDefinitionProto {
 }
 
 message ZonePublishRecordProto {
-  string      zone_name           = 1;
-  string      publisher_namespace = 2;
-  ZoneContent content             = 3;
-  uint64      published_at_wall_us = 4;  // UTC wall clock timestamp in microseconds
-  string      merge_key           = 5;  // Empty if not MergeByKey
+  string          zone_name             = 1;
+  string          publisher_namespace   = 2;
+  ZoneContent     content               = 3;
+  uint64          published_at_wall_us  = 4;  // UTC wall clock timestamp in microseconds
+  string          merge_key             = 5;  // Empty if not MergeByKey
+
+  // Snapshot parity fields (WM-S2b types.proto delta §4). Required so that
+  // SceneSnapshot carries complete publication state for reconnect reconciliation
+  // without transport internals (RFC 0014 §3.6, WM-S2b snapshot inclusion rules).
+  uint64          expires_at_wall_us    = 6;  // Absolute expiry UTC µs (0 = no expiry)
+  string          content_classification = 7; // Empty = unclassified (RFC 0009 A1 viewer-class)
+  repeated uint64 breakpoints           = 8;  // StreamText reveal breakpoints (byte offsets); empty = reveal all at once
 }
 
 message ZoneRegistrySnapshotProto {

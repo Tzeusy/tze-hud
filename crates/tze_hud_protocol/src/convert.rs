@@ -354,6 +354,24 @@ pub fn proto_zone_content_to_scene(c: &proto::ZoneContent) -> Option<ZoneContent
             entries: sb.entries.clone(),
         })),
         Payload::SolidColor(c) => Some(ZoneContent::SolidColor(proto_rgba_to_scene(c))),
+        // StaticImageRef → ZoneContent::StaticImage (WM-S2b types.proto delta; RFC 0011 resource identity).
+        // The resource_id carries the 32-byte BLAKE3 hash identifying the uploaded resource.
+        Payload::StaticImageRef(r) => {
+            if r.resource_id.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&r.resource_id);
+                Some(ZoneContent::StaticImage(ResourceId::from_bytes(arr)))
+            } else {
+                // Malformed resource_id: treat as absent (fail-fast on decode would
+                // require a Result return; callers rely on None = "skip").
+                None
+            }
+        }
+        // VideoSurfaceRef → ZoneContent::VideoSurfaceRef (WM-S2b types.proto delta; RFC 0014 §2.7).
+        // The surface_id carries the 16-byte UUIDv7 (little-endian) assigned by MediaIngressOpenResult.
+        Payload::VideoSurfaceRef(v) => {
+            SceneId::from_bytes_le(&v.surface_id).map(ZoneContent::VideoSurfaceRef)
+        }
     }
 }
 
@@ -385,11 +403,21 @@ pub fn scene_zone_content_to_proto(c: &ZoneContent) -> proto::ZoneContent {
             b: c.b,
             a: c.a,
         }),
-        // StaticImage and VideoSurfaceRef: schema defined; full proto encoding is post-v1.
-        // Leave payload unset rather than encoding as StreamText, which would mislead
-        // consumers into treating a resource ID as displayable text.
-        ZoneContent::StaticImage(_) | ZoneContent::VideoSurfaceRef(_) => {
-            return proto::ZoneContent { payload: None };
+        // StaticImage → StaticImageRef: encode the 32-byte BLAKE3 hash (WM-S2b types.proto delta).
+        ZoneContent::StaticImage(resource_id) => Payload::StaticImageRef(proto::StaticImageRef {
+            resource_id: resource_id.as_bytes().to_vec(),
+        }),
+        // VideoSurfaceRef → VideoSurfaceRef proto: encode the 16-byte surface ID (RFC 0014 §2.7).
+        // Snapshot parity: expires_at_wall_us and content_classification are snapshot parity fields
+        // defined on VideoSurfaceRef (WM-S2b types.proto delta), but per WM-S2b snapshot exclusion
+        // rules they are NOT carried inside ZoneContent; they live on ZonePublishRecordProto
+        // (fields 6-7) and are zeroed here to keep ZoneContent clean of publication state.
+        ZoneContent::VideoSurfaceRef(scene_id) => {
+            Payload::VideoSurfaceRef(proto::VideoSurfaceRef {
+                surface_id: scene_id.to_bytes_le().to_vec(),
+                expires_at_wall_us: 0, // Not carried in ZoneContent; see ZonePublishRecordProto.expires_at_wall_us
+                content_classification: String::new(), // Not carried in ZoneContent; see ZonePublishRecordProto.content_classification
+            })
         }
     };
     proto::ZoneContent {
@@ -654,6 +682,11 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
 }
 
 /// Convert a scene ZonePublishRecord to a protobuf ZonePublishRecordProto.
+///
+/// Snapshot parity fields (WM-S2b §4, RFC 0014 §3.6): `expires_at_wall_us`,
+/// `content_classification`, and `breakpoints` are included so that
+/// `SceneSnapshot.snapshot_json` carries complete declarative publication state
+/// for reconnect reconciliation without transport internals.
 pub fn zone_publish_record_to_proto(r: &ZonePublishRecord) -> proto::ZonePublishRecordProto {
     proto::ZonePublishRecordProto {
         zone_name: r.zone_name.clone(),
@@ -661,6 +694,10 @@ pub fn zone_publish_record_to_proto(r: &ZonePublishRecord) -> proto::ZonePublish
         content: Some(scene_zone_content_to_proto(&r.content)),
         published_at_wall_us: r.published_at_wall_us,
         merge_key: r.merge_key.clone().unwrap_or_default(),
+        // Snapshot parity fields (WM-S2b types.proto delta §4).
+        expires_at_wall_us: r.expires_at_wall_us.unwrap_or(0),
+        content_classification: r.content_classification.clone().unwrap_or_default(),
+        breakpoints: r.breakpoints.clone(),
     }
 }
 
