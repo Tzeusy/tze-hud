@@ -6,12 +6,17 @@
 //! Satisfies DR-V8: Soak and leak test resource monitoring.
 
 pub mod collector;
+pub mod media_audit;
 pub mod publish_load;
 pub mod record;
 pub mod resource_monitor;
 pub mod validation;
 
 pub use collector::{FrameRecorder, TelemetryCollector};
+pub use media_audit::{
+    DegradationStep, DegradationTrigger, MediaAuditEvent, MediaCloseReason, MediaRejectCode,
+    OperatorOverrideKind,
+};
 pub use publish_load::{
     ByteAccountingMode, PublishLoadArtifact, PublishLoadCalibrationStatus, PublishLoadIdentity,
     PublishLoadMetrics, PublishLoadMode, PublishLoadThresholds, PublishLoadTraceability,
