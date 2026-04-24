@@ -542,7 +542,10 @@ impl MediaActivationGate {
         if !limiter.admit(now_us) {
             warn!(
                 subsystem = "media_admission",
-                session_id, agent_namespace, "signaling rate limit exceeded"
+                session_id,
+                agent_namespace,
+                metric.media_admission_deny_total = 1u64,
+                "signaling rate limit exceeded"
             );
             self.sink.emit(MediaAuditEvent::MediaAdmissionDeny {
                 session_id: session_id.to_string(),
