@@ -365,15 +365,21 @@ message MediaIngressOpenResult {
   // the agent's declared preferences. Populated when admitted=true.
   MediaCodec  selected_codec          = 5;
 
-  // SDP offer from runtime, if the runtime is initiating SDP. Empty when
-  // the agent provided the offer in MediaIngressOpen.transport (§4.2).
-  // Transport carrier — inspect with §4.3 semantics; MUST NOT be interpreted
-  // as raw SDP bytes without §9 SDP-security scrutiny.
+  // SDP offer from runtime, if the runtime is initiating SDP (runtime-initiated
+  // offer path; §4.2). Empty when the agent provided the offer in
+  // MediaIngressOpen.transport. Transport carrier — inspect with §4.3
+  // semantics; MUST NOT be interpreted as raw SDP bytes without §9 scrutiny.
   bytes  runtime_sdp_offer            = 6;
 
   // Populated when admitted=false.
   string reject_reason                = 7;   // Human-readable
   string reject_code                  = 8;   // Machine-readable; see §2.4
+
+  // SDP answer from runtime, populated when the agent initiated the offer
+  // (agent-initiated offer path; §4.2). Empty when runtime initiated the
+  // offer (in that case the answer comes from the agent as MediaSdpAnswer).
+  // Subject to §9 SDP-security scrutiny before consumption.
+  bytes  runtime_sdp_answer           = 9;
 }
 ```
 
@@ -397,13 +403,13 @@ message MediaIngressState {
 
 enum MediaSessionState {
   MEDIA_SESSION_STATE_UNSPECIFIED = 0;
-  ADMITTED                        = 1;
-  STREAMING                       = 2;
-  DEGRADED                        = 3;
-  PAUSED                          = 4;
-  CLOSING                         = 5;
-  CLOSED                          = 6;  // Terminal
-  REVOKED                         = 7;  // Terminal
+  MEDIA_SESSION_STATE_ADMITTED    = 1;
+  MEDIA_SESSION_STATE_STREAMING   = 2;
+  MEDIA_SESSION_STATE_DEGRADED    = 3;
+  MEDIA_SESSION_STATE_PAUSED      = 4;
+  MEDIA_SESSION_STATE_CLOSING     = 5;
+  MEDIA_SESSION_STATE_CLOSED      = 6;  // Terminal
+  MEDIA_SESSION_STATE_REVOKED     = 7;  // Terminal
 }
 ```
 
@@ -637,13 +643,13 @@ defines both.
 
 | State | Description | Terminal? | Wire state (§2.3.3) |
 |-------|-------------|-----------|---------------------|
-| `ADMITTED` | `MediaIngressOpenResult.admitted = true` sent; SDP/ICE transport being established | No | `ADMITTED` |
-| `STREAMING` | Transport established; decoded frames flowing through ring buffer to compositor | No | `STREAMING` |
-| `DEGRADED` | Stream active but running below nominal quality due to E25 ladder step | No | `DEGRADED` |
-| `PAUSED` | Stream admitted and previously streaming; frames suspended (by agent, operator, or safe mode) | No | `PAUSED` |
-| `CLOSING` | Teardown initiated; DRAINING in worker lifecycle (RFC 0002 A1 §A1); final frames being consumed from ring buffer | No | `CLOSING` |
-| `CLOSED` | Worker TERMINATED; all resources freed; stream cannot resume; agent may request fresh admission | Yes | `CLOSED` |
-| `REVOKED` | Terminal failure path: capability revoked, lease revoked, or embodiment revoked. Distinct from `CLOSED` for audit clarity | Yes | `REVOKED` |
+| `ADMITTED` | `MediaIngressOpenResult.admitted = true` sent; SDP/ICE transport being established | No | `MEDIA_SESSION_STATE_ADMITTED` |
+| `STREAMING` | Transport established; decoded frames flowing through ring buffer to compositor | No | `MEDIA_SESSION_STATE_STREAMING` |
+| `DEGRADED` | Stream active but running below nominal quality due to E25 ladder step | No | `MEDIA_SESSION_STATE_DEGRADED` |
+| `PAUSED` | Stream admitted and previously streaming; frames suspended (by agent, operator, or safe mode) | No | `MEDIA_SESSION_STATE_PAUSED` |
+| `CLOSING` | Teardown initiated; DRAINING in worker lifecycle (RFC 0002 A1 §A1); final frames being consumed from ring buffer | No | `MEDIA_SESSION_STATE_CLOSING` |
+| `CLOSED` | Worker TERMINATED; all resources freed; stream cannot resume; agent may request fresh admission | Yes | `MEDIA_SESSION_STATE_CLOSED` |
+| `REVOKED` | Terminal failure path: capability revoked, lease revoked, or embodiment revoked. Distinct from `CLOSED` for audit clarity | Yes | `MEDIA_SESSION_STATE_REVOKED` |
 
 ### 3.2 State Machine Diagram
 
@@ -745,7 +751,7 @@ threshold crossing), `O` = operator (human override), `A` = agent request.
 |------|----|-------|---------|-------------|-------|
 | (start) | `ADMITTED` | R | `MediaIngressOpenResult.admitted=true` | Field 60 | §6.1 admission gate passed |
 | (start) | (rejected; no state) | R | `admitted=false` | Field 60 | Reject codes in §2.4 |
-| `ADMITTED` | `STREAMING` | R | transport established (SDP + ICE + DTLS/SRTP) | `MediaIngressState(STREAMING)` | §4 signaling complete |
+| `ADMITTED` | `STREAMING` | R | transport established (SDP + ICE + DTLS/SRTP) | `MediaIngressState(MEDIA_SESSION_STATE_STREAMING)` | §4 signaling complete |
 | `ADMITTED` | `CLOSING` | R | transport negotiation failed within transport_timeout (default 10s) | `MediaIngressCloseNotice(TRANSPORT_FAILURE)` | §4.4 |
 | `STREAMING` | `DEGRADED` | R | E25 ladder step 1–7 advanced on this stream | `MediaDegradationNotice` | §5 |
 | `DEGRADED` | `STREAMING` | R | E25 recovery (frame-time guardian under threshold; budget recovered) | `MediaDegradationNotice(ladder_step=0)` | §5.4 hysteresis |
@@ -753,7 +759,7 @@ threshold crossing), `O` = operator (human override), `A` = agent request.
 | `STREAMING` / `DEGRADED` | `PAUSED` | O | operator chrome pause | `MediaPauseNotice(OPERATOR_REQUEST)` | |
 | `STREAMING` / `DEGRADED` | `PAUSED` | R | RFC 0005 §3.7 safe mode entry | `MediaPauseNotice(SAFE_MODE)` | all active media streams pause |
 | `STREAMING` / `DEGRADED` | `PAUSED` | R | attention policy (RFC 0009 level 4) quiet hours | `MediaPauseNotice(POLICY_QUIET_HOURS)` | applies per-stream by content_classification |
-| `PAUSED` | `STREAMING` | A | `MediaResumeRequest` | `MediaResumeNotice(AGENT_REQUEST)` | allowed only if original pause trigger was `AGENT_REQUEST` |
+| `PAUSED` | `STREAMING` | A | `MediaResumeRequest` | `MediaResumeNotice(AGENT_REQUEST)` | **Allowed only if original pause trigger was `AGENT_REQUEST`.** The runtime MUST NOT honour a `MediaResumeRequest` when the stream was paused by `OPERATOR_REQUEST`, `SAFE_MODE`, or `POLICY_QUIET_HOURS`. An attempt to resume such a stream MUST be silently dropped (no error, no state change); the stream remains `PAUSED` until the appropriate non-agent resume trigger fires. |
 | `PAUSED` | `STREAMING` | O | operator chrome resume | `MediaResumeNotice(OPERATOR_REQUEST)` | clears any pause trigger |
 | `PAUSED` | `STREAMING` | R | safe mode exit | `MediaResumeNotice(SAFE_MODE)` | paired with RFC 0005 `SessionResumed` |
 | `PAUSED` | `STREAMING` | R | quiet-hours window closed | `MediaResumeNotice(POLICY_QUIET_HOURS)` | |
@@ -764,8 +770,8 @@ threshold crossing), `O` = operator (human override), `A` = agent request.
 | (any non-terminal) | `CLOSING` | W | decoder pipeline failure | `MediaIngressCloseNotice(DECODER_FAILURE)` | |
 | (any non-terminal) | `CLOSING` | R | pool preemption (RFC 0002 A1 §A3.2) | `MediaIngressCloseNotice(PREEMPTED)` | |
 | (any non-terminal) | `CLOSING` | R | E25 step 8 DEGRADATION_TEARDOWN | `MediaIngressCloseNotice(DEGRADATION_TEARDOWN)` | |
-| `CLOSING` | `CLOSED` | R | ring buffer drained AND pipeline EOS confirmed | `MediaIngressState(CLOSED)` | drain_timeout default 500ms; force-clear on timeout |
-| (any non-terminal) | `REVOKED` | O | capability revoked mid-session (RFC 0008 A1 §A3.4) | `MediaIngressCloseNotice(CAPABILITY_REVOKED)` → `MediaIngressState(REVOKED)` | |
+| `CLOSING` | `CLOSED` | R | ring buffer drained AND pipeline EOS confirmed | `MediaIngressState(MEDIA_SESSION_STATE_CLOSED)` | drain_timeout default 500ms; force-clear on timeout |
+| (any non-terminal) | `REVOKED` | O | capability revoked mid-session (RFC 0008 A1 §A3.4) | `MediaIngressCloseNotice(CAPABILITY_REVOKED)` → `MediaIngressState(MEDIA_SESSION_STATE_REVOKED)` | |
 | (any non-terminal) | `REVOKED` | R | owning lease revoked (RFC 0008 §3) | `MediaIngressCloseNotice(LEASE_REVOKED)` | |
 | (any non-terminal) | `REVOKED` | R | embodiment revoked (E25 step 9) | `MediaIngressCloseNotice(EMBODIMENT_REVOKED)` | RFC 0015 presence demote |
 | (any non-terminal) | `REVOKED` | R | session disconnected, grace period expired | `MediaIngressCloseNotice(SESSION_DISCONNECTED)` | RFC 0005 §6 grace |
@@ -776,7 +782,7 @@ threshold crossing), `O` = operator (human override), `A` = agent request.
 The media session lifetime is strictly subordinate to the owning agent
 session:
 
-- If the owning session transitions to `Closed` (RFC 0005 §1.1), all its
+- If the owning session transitions to `CLOSED` (RFC 0005 §1.1), all its
   media sessions transition to `REVOKED` after the session reconnect grace
   period expires (RFC 0005 §6), unless the session was suspended (safe
   mode), in which case media sessions transition to `PAUSED` and remain
@@ -794,12 +800,18 @@ session:
 Per E26, state machines in v2 use the `statig` crate. The state machine in
 §3.2 maps to a `statig` hierarchical state machine with:
 
-- top-level states: `ADMITTED`, `STREAMING`, `DEGRADED`, `PAUSED`, `CLOSING`,
-  `CLOSED`, `REVOKED`.
-- `STREAMING` and `DEGRADED` share a parent superstate `ACTIVE` whose guard
-  ensures transport is healthy; pause triggers fire on the parent.
-- `CLOSED` and `REVOKED` are terminal; the `statig` machine rejects any
-  post-terminal transition.
+- top-level states map to `MediaSessionState` wire values:
+  `MEDIA_SESSION_STATE_ADMITTED`, `MEDIA_SESSION_STATE_STREAMING`,
+  `MEDIA_SESSION_STATE_DEGRADED`, `MEDIA_SESSION_STATE_PAUSED`,
+  `MEDIA_SESSION_STATE_CLOSING`, `MEDIA_SESSION_STATE_CLOSED`,
+  `MEDIA_SESSION_STATE_REVOKED`. The Rust `statig` implementation uses
+  short variant names internally; wire serialization MUST use the
+  `MediaSessionState` enum above.
+- `MEDIA_SESSION_STATE_STREAMING` and `MEDIA_SESSION_STATE_DEGRADED` share
+  a parent superstate `ACTIVE` whose guard ensures transport is healthy;
+  pause triggers fire on the parent.
+- `MEDIA_SESSION_STATE_CLOSED` and `MEDIA_SESSION_STATE_REVOKED` are
+  terminal; the `statig` machine rejects any post-terminal transition.
 - transitions carry a typed event enum mirroring the §3.3 "Trigger" column.
 
 The implementation crate MUST serialize the state onto the wire using
@@ -846,15 +858,13 @@ Both offer-in-client-open and offer-from-runtime patterns are supported:
 
 - **Agent-initiated offer:** agent puts an SDP offer in
   `TransportDescriptor.agent_sdp_offer` on `MediaIngressOpen`. Runtime
-  validates and, on admission, emits `MediaIngressOpenResult` with an SDP
-  answer carried in the result (TBD: extend §2.3.2 with
-  `runtime_sdp_answer`; phase-1 implementation may choose to return the
-  answer in `MediaIngressOpenResult.runtime_sdp_offer` semantically as an
-  "answer" when the agent offered — clarity improvement owned by
-  hud-ora8.1.23's proto wiring task).
+  validates and, on admission, emits `MediaIngressOpenResult` with the SDP
+  answer in `MediaIngressOpenResult.runtime_sdp_answer` (field 9; §2.3.2).
+  `runtime_sdp_offer` (field 6) is empty in this path.
 - **Runtime-initiated offer:** agent omits `agent_sdp_offer`. Runtime emits
   `MediaSdpOffer` (field 63) after admission. Agent replies with
-  `MediaSdpAnswer` (field 62).
+  `MediaSdpAnswer` (field 62). `MediaIngressOpenResult.runtime_sdp_answer`
+  (field 9) is empty in this path.
 
 Exactly one pattern is used per stream. Mixing is rejected with
 `TRANSPORT_NEGOTIATION_FAILED`.
@@ -1204,12 +1214,12 @@ media session** state, not the per-worker internal state. Mapping:
 | Worker state (RFC 0002 A1) | Media session state (this RFC) |
 |-----------------------------|----------------------------------|
 | (pre-spawn gate) | (pre-`ADMITTED`; admission gate evaluation) |
-| SPAWNING | `ADMITTED` (transport being established) |
-| RUNNING (transport healthy) | `STREAMING` or `DEGRADED` |
-| RUNNING (paused) | `PAUSED` |
-| DRAINING | `CLOSING` |
-| TERMINATED | `CLOSED` |
-| FAILED | `REVOKED` or `CLOSED` with `TRANSPORT_FAILURE`/`DECODER_FAILURE` |
+| SPAWNING | `MEDIA_SESSION_STATE_ADMITTED` (transport being established) |
+| RUNNING (transport healthy) | `MEDIA_SESSION_STATE_STREAMING` or `MEDIA_SESSION_STATE_DEGRADED` |
+| RUNNING (paused) | `MEDIA_SESSION_STATE_PAUSED` |
+| DRAINING | `MEDIA_SESSION_STATE_CLOSING` |
+| TERMINATED | `MEDIA_SESSION_STATE_CLOSED` |
+| FAILED | `MEDIA_SESSION_STATE_REVOKED` or `MEDIA_SESSION_STATE_CLOSED` with `TRANSPORT_FAILURE`/`DECODER_FAILURE` |
 
 This RFC MUST NOT introduce a worker state skip (e.g., jumping from
 SPAWNING to TERMINATED without DRAINING). RFC 0002 A1 §A1 state invariants
@@ -1346,8 +1356,11 @@ Per security.md §"Agent isolation" and RFC 0002 A1 §A5.1:
 Sources and mitigations:
 
 - **Signaling flood.** Bounded by traffic-class contract + per-session
-  signaling rate limit (implementation-defined; suggested 10 opens/s per
-  session).
+  signaling rate limit: the runtime MUST enforce a maximum of **10
+  `MediaIngressOpen` requests per session per second** (sliding window).
+  Requests exceeding this limit MUST be rejected with `INVALID_ARGUMENT`
+  and the excess counted toward the session's resource governance warning
+  threshold (security.md §"Resource governance").
 - **SDP parser DoS.** Size/complexity bounds in §4.6.
 - **ICE candidate storm.** Candidate-count limit in §4.6.
 - **Pool exhaustion by bogus admissions.** Pool has admission gate; per-session
@@ -1404,12 +1417,12 @@ addressed by a post-v2 subprocess-isolation hardening.
 
 ### 10.1 Open Questions
 
-1. **Media signaling answer field shape.** §4.2 notes that
-   `MediaIngressOpenResult.runtime_sdp_offer` may be semantically used as
-   an "answer" when the agent offered. Clarity: should
-   `MediaIngressOpenResult` carry a distinct `runtime_sdp_answer` field
-   or should the two be conflated by convention? Tracking for the proto
-   wiring task (hud-ora8.1.23) to resolve before shipping.
+1. **Media signaling answer field shape.** ~~Resolved in this RFC~~:
+   `MediaIngressOpenResult` carries a distinct `runtime_sdp_answer` field
+   (field 9; §2.3.2) for the agent-initiated offer path.
+   `runtime_sdp_offer` (field 6) remains for the runtime-initiated offer
+   path. The two fields are mutually exclusive; exactly one is populated per
+   stream per path. hud-ora8.1.23 (proto wiring task) MUST implement field 9.
 2. **Operator-visible indicator wire shape.** The C14 recording indicator
    and C13 capability dialog require chrome-layer UX; their wire surface
    to chrome is owned by RFC 0007 and future RFC 0017 (recording). This
@@ -1474,8 +1487,10 @@ draft time; reviewers add rows at sign-off.
 | Round | Date | Reviewer | Role | Focus | Verdict | Notes |
 |-------|------|----------|------|-------|---------|-------|
 | A0 | 2026-04-19 | hud-ora8.1.8 | author (agent worker) | Draft authored from signoff packet + amendments (RFC 0002 A1, RFC 0005 A1, RFC 0008 A1, RFC 0009 A1) + doctrine (media-doctrine, failure, security, v2) + audits (gstreamer, cpal). Field allocations 60–79 selected to avoid persistent-movable-elements collision at 50–51. | AUTHOR | §2.2 erratum flagged for RFC 0005 A1 relocation. Discovered work: proto wiring task hud-ora8.1.23 must use 60–79, not 50–52; hud-lezjj codec CVE defense-in-depth remains tracked. |
-| R1 | — | (external reviewer 1) | external | (to be assigned) | — | — |
-| R2 | — | (external reviewer 2) | external | (to be assigned) | — | — |
+| R1 | 2026-04-19 | hud-veuv5 | agent reviewer 1 | Cross-checked field allocation safety, erratum accuracy, E25 ladder mapping (10 steps), state machine completeness, reconnect semantics, cross-agent isolation, RFC 0002/0005/0008/0009 A1 cross-references. | APPROVE WITH COMMENTS | S1: SDP answer field shape left as TBD (resolved in follow-up edit). S2: MediaEgressOpen at field 64 should be plain `reserved 64;`. S3: PAUSED→STREAMING MUST NOT normative language missing. S4: MediaSessionState enum values should be prefixed. Plus 6 minor concerns (M1–M6). |
+| R2 | 2026-04-24 | hud-4a0uk | agent reviewer 2 (this review) | Independent review + applied fixes: S1 resolved (added runtime_sdp_answer field 9; §2.3.2 / §4.2 settled), S3 resolved (MUST NOT normative added to transition table), S4 resolved (MediaSessionState enum prefixed throughout), M4 resolved (rate limit made normative), M5 resolved (CLOSED casing typo). S2/M1/M2/M3/M6 deferred as follow-ups. | APPROVE WITH COMMENTS | F29 gate requires ≥2 EXTERNAL reviewer sign-offs; both R1 and R2 are agent reviews. External human sign-offs still pending before merge. |
+| R3 | — | (external reviewer 1) | external | (to be assigned) | — | — |
+| R4 | — | (external reviewer 2) | external | (to be assigned) | — | — |
 | (as needed) | — | — | — | — | — | — |
 
 Sign-off criteria for reviewers:
