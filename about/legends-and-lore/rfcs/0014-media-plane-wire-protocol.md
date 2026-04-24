@@ -1152,9 +1152,14 @@ Runtime-owned per cpal audit (`cpal-audio-io-crate-audit.md`):
 Glass-to-glass latency budgets from D18 are video-oriented (p50 ≤150ms /
 p99 ≤400ms). Audio-specific targets:
 
-- **Audio latency target (phase 1):** ≤ 50ms mouth-to-ear under shared-mode
-  WASAPI / ALSA / PulseAudio / CoreAudio. Exclusive-mode paths (WASAPI
-  exclusive via ASIO) are post-v2.
+- **Audio latency target (phase 1):** SHOULD be ≤ 50ms mouth-to-ear under
+  shared-mode WASAPI / ALSA / PulseAudio / CoreAudio. Exclusive-mode paths
+  (WASAPI exclusive via ASIO) are post-v2.
+
+  > **Note:** This target is SHOULD, not MUST, until the mouth-to-ear
+  > validation harness lands. Once the harness specified in open question OQ4
+  > (§10.1) is implemented, this target will be promoted back to MUST.
+
 - **Lip-sync drift:** ±40 ms (D18).
 
 ### 7.5 Microphone ingress (post-v1 capability)
@@ -1435,10 +1440,13 @@ addressed by a post-v2 subprocess-isolation hardening.
    reboots or only within a session? Phase 1 position: `stream_epoch` is
    session-scoped and NOT durable across a full session teardown. Revisit
    in RFC 0015.
-4. **Audio-only latency budget validation.** §7.4 asserts a 50ms target
-   without a dedicated measurement harness. Phase 1 validation
-   (validation-operations spec) needs a mouth-to-ear harness; this is
-   tracked as discovered work for the validation-operations bead graph.
+4. **Audio-only latency budget validation (OQ4).** §7.4 targets ≤ 50ms
+   mouth-to-ear but lacks a dedicated measurement harness. The 50ms target
+   is therefore a SHOULD (not MUST) until this harness lands — see the
+   demotion note in §7.4. Phase 1 validation (validation-operations spec)
+   needs a mouth-to-ear harness; this is tracked as discovered work for the
+   validation-operations bead graph. Once the harness ships, §7.4 will be
+   updated to promote the target back to MUST.
 5. **Single-embodied-agent invariant and media pool.** With the
    single-embodied-agent rule (A4), can a resident agent and the single
    embodied agent each hold concurrent media streams? Yes, subject to the
