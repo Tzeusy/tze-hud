@@ -411,6 +411,10 @@ async fn publish_zone_content_via_grpc(
                     element_id: Vec::new(),
                     merge_key: String::new(),
                     breakpoints: Vec::new(),
+                    // Snapshot parity fields (WM-S2b session.proto delta §fields 7-9); 0/empty = no constraint.
+                    present_at_wall_us: 0,
+                    expires_at_wall_us: 0,
+                    content_classification: String::new(),
                 },
             )),
         })
