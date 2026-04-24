@@ -541,6 +541,17 @@ impl MediaIngressStateMachine {
                         event: event.name(),
                     };
                 }
+                // RFC 0014 §5.2 E25 ladder: steps 1-7 are in-ladder
+                // degradations. Step 0 is STREAMING (not a degraded state).
+                // Steps 8-10 trigger teardown via separate events
+                // (InitiateClose, Revoke) and MUST NOT be set through
+                // DegradationAdvanced.
+                if !(1..=7).contains(step) {
+                    return TransitionOutcome::NotApplicable {
+                        state: self.state,
+                        event: event.name(),
+                    };
+                }
                 self.degradation_step = *step;
                 self.state = MediaSessionState::Degraded;
             }
@@ -1135,6 +1146,103 @@ mod tests {
             MediaSessionState::Degraded,
         );
         assert_eq!(m.degradation_step(), 3);
+    }
+
+    // Bounds validation: DegradationAdvanced step must be in [1, 7]
+
+    #[test]
+    fn test_degradation_advanced_step_zero_rejected() {
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        let outcome = m.apply(MediaSessionEvent::DegradationAdvanced {
+            step: 0,
+            trigger: MediaDegradationTrigger::RuntimeLadderAdvance,
+        });
+        assert_eq!(
+            outcome,
+            TransitionOutcome::NotApplicable {
+                state: MediaSessionState::Streaming,
+                event: "DegradationAdvanced",
+            },
+            "step=0 (STREAMING level) must be rejected"
+        );
+        // Machine must remain in STREAMING with step still 0.
+        assert_eq!(m.state(), MediaSessionState::Streaming);
+        assert_eq!(m.degradation_step(), 0);
+    }
+
+    #[test]
+    fn test_degradation_advanced_step_eight_rejected() {
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        let outcome = m.apply(MediaSessionEvent::DegradationAdvanced {
+            step: 8,
+            trigger: MediaDegradationTrigger::RuntimeLadderAdvance,
+        });
+        assert_eq!(
+            outcome,
+            TransitionOutcome::NotApplicable {
+                state: MediaSessionState::Streaming,
+                event: "DegradationAdvanced",
+            },
+            "step=8 (teardown level, must use InitiateClose/Revoke) must be rejected"
+        );
+        assert_eq!(m.state(), MediaSessionState::Streaming);
+        assert_eq!(m.degradation_step(), 0);
+    }
+
+    #[test]
+    fn test_degradation_advanced_step_max_u32_rejected() {
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        let outcome = m.apply(MediaSessionEvent::DegradationAdvanced {
+            step: u32::MAX,
+            trigger: MediaDegradationTrigger::RuntimeLadderAdvance,
+        });
+        assert_eq!(
+            outcome,
+            TransitionOutcome::NotApplicable {
+                state: MediaSessionState::Streaming,
+                event: "DegradationAdvanced",
+            },
+            "step=u32::MAX must be rejected"
+        );
+        assert_eq!(m.state(), MediaSessionState::Streaming);
+        assert_eq!(m.degradation_step(), 0);
+    }
+
+    #[test]
+    fn test_degradation_advanced_step_one_accepted() {
+        // Lower bound of the valid E25 ladder range.
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        let outcome = m.apply(MediaSessionEvent::DegradationAdvanced {
+            step: 1,
+            trigger: MediaDegradationTrigger::RuntimeLadderAdvance,
+        });
+        assert_transition(
+            &outcome,
+            MediaSessionState::Streaming,
+            MediaSessionState::Degraded,
+        );
+        assert_eq!(m.degradation_step(), 1);
+    }
+
+    #[test]
+    fn test_degradation_advanced_step_seven_accepted() {
+        // Upper bound of the valid E25 ladder range.
+        let mut m = new_machine();
+        m.apply(MediaSessionEvent::TransportEstablished);
+        let outcome = m.apply(MediaSessionEvent::DegradationAdvanced {
+            step: 7,
+            trigger: MediaDegradationTrigger::RuntimeLadderAdvance,
+        });
+        assert_transition(
+            &outcome,
+            MediaSessionState::Streaming,
+            MediaSessionState::Degraded,
+        );
+        assert_eq!(m.degradation_step(), 7);
     }
 
     // Row: DEGRADED → STREAMING (DegradationRecovered)
@@ -2149,14 +2257,24 @@ mod tests {
         assert_eq!(m.state(), MediaSessionState::Closed);
 
         // Path 3: DEGRADED → CLOSING → CLOSED (degradation teardown)
+        //
+        // E25 step 7 is the highest in-ladder degradation step. When the
+        // runtime decides teardown is warranted it issues a separate
+        // InitiateClose(DegradationTeardown) event — DegradationAdvanced only
+        // carries steps 1-7.
         let mut m = MediaIngressStateMachine::new(102);
         m.apply(MediaSessionEvent::TransportEstablished);
         m.apply(MediaSessionEvent::DegradationAdvanced {
-            step: 8,
+            step: 7,
             trigger: MediaDegradationTrigger::RuntimeLadderAdvance,
         });
-        // Simulate step 8 teardown: E25 step 8 = DEGRADATION_TEARDOWN
-        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::DegradationTeardown, retry_after_us: None });
+        assert_eq!(m.state(), MediaSessionState::Degraded);
+        // E25 step 8 maps to DEGRADATION_TEARDOWN, delivered as a separate
+        // InitiateClose event rather than through DegradationAdvanced.
+        m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::DegradationTeardown,
+            retry_after_us: None,
+        });
         m.apply(MediaSessionEvent::DrainComplete);
         assert_eq!(m.state(), MediaSessionState::Closed);
 
