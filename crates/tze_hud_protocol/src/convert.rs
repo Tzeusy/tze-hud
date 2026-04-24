@@ -847,6 +847,10 @@ pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPo
         } else {
             None
         },
+        // media_disconnect_badge_color is config-layer only (design token).
+        // It is NOT transmitted via proto — badge color is resolved at profile
+        // load time and is not a per-publish payload field.
+        media_disconnect_badge_color: None,
     }
 }
 

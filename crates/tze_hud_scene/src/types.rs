@@ -1694,6 +1694,18 @@ pub struct RenderingPolicy {
     /// `None` (the default) means axis-aligned flat rect (existing behaviour).
     #[serde(default)]
     pub backdrop_radius: Option<f32>,
+    /// Color for the media-disconnection badge overlay drawn by the chrome layer
+    /// on `ZoneContent::VideoSurfaceRef` zones when
+    /// `VideoRenderState::LastFrameWithBadge` is active (B11).
+    ///
+    /// Populated from the `color.media.disconnect_badge` design token at profile
+    /// load time.  `None` (the default) causes the chrome layer to fall back to
+    /// the built-in default badge color.
+    ///
+    /// **Never hardcoded in the compositor** — this field is the single place
+    /// token-resolved badge color flows into the render path.
+    #[serde(default)]
+    pub media_disconnect_badge_color: Option<Rgba>,
 }
 
 /// Contention policy — what happens when multiple agents publish to the same zone.
