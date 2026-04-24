@@ -44,6 +44,7 @@ tze_hud_scene = { path = "../tze_hud_scene" }
 tze_hud_compositor = { path = "../tze_hud_compositor" }
 tokio = { workspace = true }
 blake3 = { workspace = true }
+proptest = { workspace = true }
 
 [[test]]
 name = "pixel_readback"
