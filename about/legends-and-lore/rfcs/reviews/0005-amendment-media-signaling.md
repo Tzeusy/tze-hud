@@ -9,6 +9,37 @@
 
 ---
 
+> **ERRATUM (2026-04-24) — Field Allocations in §A1 and §9.2 Superseded**
+>
+> The `ClientMessage` fields 50–51 (`MediaIngressOpen`, `MediaIngressClose`) and
+> `ServerMessage` fields 50–52 (`MediaIngressOpenResult`, `MediaIngressState`,
+> `MediaIngressCloseNotice`) allocated in §A1 and recorded in §9.2 of this
+> amendment are **invalid and must not be implemented**.
+>
+> **Root cause:** Fields 50 and 51 on `ServerMessage` were concurrently consumed
+> by the persistent-movable-elements work: `list_elements_response` took
+> `ServerMessage` field 50 and `element_repositioned` took field 51. The Amendment
+> A1 allocations therefore collide with in-use field numbers.
+>
+> **Authoritative replacement:** RFC 0014 (Media Plane Wire Protocol) §2.2
+> relocates all v2 media signaling messages to the **60–79 range** (both
+> directions). The 80–99 range is reserved for phase 4 sub-epics; RFC 0018
+> §4.3 has since allocated fields 80–81 (client: `CloudRelayOpen`,
+> `CloudRelayClose`) and 80–82 (server: `CloudRelayOpenResult`,
+> `CloudRelayCloseNotice`, `CloudRelayStateUpdate`) for phase 4b cloud-relay.
+>
+> Any implementation of the media signaling messages described here **MUST use
+> the field numbers from RFC 0014 §2.2**, not the numbers written in this document.
+> RFC 0014 §2.2 is the single authoritative field registry for all post-v1 media
+> signaling envelope fields.
+>
+> Task 1.2 of the v2 program (PR #574 / #575, issue hud-ora8.1.23) wires the
+> authoritative 60–79 range into `session.proto`. All references to fields 50–52
+> (server) and 50–51 (client) for media messages in this document should be read
+> as 60–62 (server) and 60–61 (client) respectively.
+
+---
+
 ## Scope and Purpose
 
 This amendment extends RFC 0005 (Session/Protocol) to specify how media
