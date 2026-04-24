@@ -84,8 +84,8 @@ arc-swap = "1"
 # State machines (v2 media plane)
 statig = "0.4"
 
-# GStreamer bindings (non-optional workspace entry — individual crates opt-in
-# via their own [dependencies] section with `optional = true`).
+# GStreamer bindings — declared here so crates can reference them via
+# `{ workspace = true, optional = true }`.
 # System packages required: libgstreamer1.0-dev + libgstreamer-plugins-base1.0-dev.
 gstreamer = "0.23"
 gstreamer-app = "0.23"

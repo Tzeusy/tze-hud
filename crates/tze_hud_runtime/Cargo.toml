@@ -44,10 +44,10 @@ arc-swap = { workspace = true }
 statig = { workspace = true }
 
 # GStreamer — optional; activated by the `gstreamer` feature flag.
-# Declared directly (not from workspace) because workspace deps cannot be
-# marked optional per Cargo restrictions.
-gstreamer = { version = "0.23", optional = true }
-gstreamer-app = { version = "0.23", optional = true }
+# Cargo 1.74+ supports `{ workspace = true, optional = true }` so we use the
+# workspace declaration instead of re-specifying the version here.
+gstreamer = { workspace = true, optional = true }
+gstreamer-app = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
