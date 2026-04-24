@@ -28,7 +28,7 @@ use tze_hud_protocol::proto::session::{
     MediaIceCandidate, MediaIngressClose, MediaIngressCloseNotice, MediaIngressOpen,
     MediaIngressOpenResult, MediaIngressState, MediaPauseNotice, MediaPauseRequest,
     MediaResumeNotice, MediaResumeRequest, MediaSdpAnswer, MediaSdpOffer, ServerMessage,
-    TransportDescriptor, WidgetPublish, WidgetPublishResult, ZonePublish, ZonePublishResult,
+    TransportDescriptor, WidgetPublishResult, ZonePublish, ZonePublishResult,
 };
 use tze_hud_protocol::proto::zone_content::Payload as ZonePayload;
 use tze_hud_protocol::proto::{
