@@ -106,7 +106,6 @@ message ClientMessage {
     MediaIngressClose   media_ingress_close   = 61;  // Transactional: agent-initiated teardown
     MediaSdpAnswer      media_sdp_answer      = 62;  // Transactional: agent SDP answer (RFC 0014 §4.2)
     MediaIceCandidate   media_ice_candidate   = 63;  // Ephemeral realtime: ICE candidate exchange
-    MediaEgressOpen     media_egress_open     = 64;  // Reserved for phase 4 (bidirectional AV egress)
     MediaPauseRequest   media_pause_request   = 65;  // Transactional: agent requests stream pause
     MediaResumeRequest  media_resume_request  = 66;  // Transactional: agent requests stream resume
 
@@ -115,6 +114,12 @@ message ClientMessage {
     CloudRelayOpen  cloud_relay_open  = 80;  // Transactional: activate cloud-relay path
     CloudRelayClose cloud_relay_close = 81;  // Transactional: close cloud-relay path
   }
+
+  // Field 64 (MediaEgressOpen) is reserved for phase 4 bidirectional AV egress
+  // (RFC 0014 §2.2.1). Undefined in the current schema; wire-reserved to prevent
+  // accidental reuse before the phase 4 design is finalised.
+  reserved 64;
+  reserved "media_egress_open";
 }
 
 // ─── Server -> Client envelope ────────────────────────────────────────────────
@@ -224,7 +229,6 @@ message ServerMessage {
     MediaSdpOffer           media_sdp_offer            = 63;  // Transactional: runtime SDP offer (RFC 0014 §4.2)
     MediaIceCandidate       media_ice_candidate        = 64;  // Ephemeral realtime: ICE candidate from runtime
     MediaDegradationNotice  media_degradation_notice   = 65;  // Transactional: per-stream E25 ladder step
-    MediaEgressOpenResult   media_egress_open_result   = 66;  // Reserved for phase 4 (bidirectional AV egress)
     MediaPauseNotice        media_pause_notice         = 67;  // Transactional: stream paused
     MediaResumeNotice       media_resume_notice        = 68;  // Transactional: stream resumed
 
@@ -244,6 +248,12 @@ message ServerMessage {
   // to align with the spec. Reserved to prevent accidental reuse.
   reserved 32;
   reserved "subscription_ack";
+
+  // Field 66 (MediaEgressOpenResult) is reserved for phase 4 bidirectional AV egress
+  // (RFC 0014 §2.2.2). Undefined in the current schema; wire-reserved to prevent
+  // accidental reuse before the phase 4 design is finalised.
+  reserved 66;
+  reserved "media_egress_open_result";
 }
 
 // ─── Authentication credentials (RFC 0005 §1.4) ──────────────────────────────
@@ -1115,12 +1125,6 @@ message MediaIceCandidate {
   uint32 sdp_mline_index = 4;
 }
 
-// Reserved for phase 4 bidirectional AV egress (ClientMessage field 64).
-// Runtime rejects with CAPABILITY_NOT_IMPLEMENTED in v2 phase 1 (RFC 0014 §7.6).
-message MediaEgressOpen {
-  uint64 stream_epoch = 1;  // Reserved; unused in phase 1
-}
-
 // Agent requests its own stream transition from STREAMING to PAUSED (ClientMessage field 65).
 message MediaPauseRequest {
   uint64 stream_epoch = 1;
@@ -1213,12 +1217,6 @@ enum MediaDegradationTrigger {
   WATCHDOG_PER_STREAM         = 2;  // Per-stream watchdog threshold (RFC 0014 §5.3)
   OPERATOR_MANUAL             = 3;  // Human override at chrome
   CAPABILITY_POLICY           = 4;  // Capability/policy revocation forced a step
-}
-
-// Reserved for phase 4 bidirectional AV egress result (ServerMessage field 66).
-// Runtime always responds with CAPABILITY_NOT_IMPLEMENTED in v2 phase 1.
-message MediaEgressOpenResult {
-  uint64 stream_epoch = 1;  // Reserved; unused in phase 1
 }
 
 // Runtime-initiated or ack of agent-initiated stream pause (ServerMessage field 67).

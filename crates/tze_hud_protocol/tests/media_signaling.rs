@@ -24,10 +24,10 @@ use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
 use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
 use tze_hud_protocol::proto::session::{
     ClientMessage, CloudRelayClose, CloudRelayCloseNotice, CloudRelayOpen, CloudRelayOpenResult,
-    CloudRelayStateUpdate, MediaDegradationNotice, MediaEgressOpen, MediaEgressOpenResult,
-    MediaIceCandidate, MediaIngressClose, MediaIngressCloseNotice, MediaIngressOpen,
-    MediaIngressOpenResult, MediaIngressState, MediaPauseNotice, MediaPauseRequest,
-    MediaResumeNotice, MediaResumeRequest, MediaSdpAnswer, MediaSdpOffer, ServerMessage,
+    CloudRelayStateUpdate, MediaDegradationNotice, MediaIceCandidate, MediaIngressClose,
+    MediaIngressCloseNotice, MediaIngressOpen, MediaIngressOpenResult, MediaIngressState,
+    MediaPauseNotice, MediaPauseRequest, MediaResumeNotice, MediaResumeRequest, MediaSdpAnswer,
+    MediaSdpOffer, ServerMessage,
     TransportDescriptor, WidgetPublishResult, ZonePublish, ZonePublishResult,
 };
 use tze_hud_protocol::proto::zone_content::Payload as ZonePayload;
@@ -398,22 +398,24 @@ fn media_ice_candidate_roundtrip_client_field_63() {
 }
 
 #[test]
-fn media_egress_open_reserved_client_field_64() {
-    // Phase 4 reserved; wire-shape must round-trip even though runtime rejects.
+fn media_egress_open_client_field_64_is_reserved() {
+    // RFC 0014 §2.2.1: client field 64 (MediaEgressOpen) is plain `reserved` —
+    // no message type is defined until the phase-4 egress design is finalised.
+    // This test documents the reserved status by verifying that a ClientMessage
+    // with no payload round-trips cleanly (there is no enum variant to construct).
+    //
+    // When phase 4 egress is designed, this test should be replaced with a
+    // full round-trip test for the then-defined message.
     let msg = ClientMessage {
         sequence: 5,
         timestamp_wall_us: 0,
-        payload: Some(ClientPayload::MediaEgressOpen(MediaEgressOpen {
-            stream_epoch: 0,
-        })),
+        payload: None,
     };
     let decoded = round_trip(&msg);
-    match decoded.payload {
-        Some(ClientPayload::MediaEgressOpen(_)) => {
-            // Field 64 reserved for phase 4; wire shape round-trips correctly.
-        }
-        other => panic!("expected MediaEgressOpen at field 64, got {:?}", other),
-    }
+    assert!(
+        decoded.payload.is_none(),
+        "field 64 is reserved; a ClientMessage without a payload should decode payload as None"
+    );
 }
 
 #[test]
@@ -645,23 +647,24 @@ fn media_degradation_notice_roundtrip_server_field_65() {
 }
 
 #[test]
-fn media_egress_open_result_reserved_server_field_66() {
-    // Phase 4 reserved; wire-shape must round-trip.
+fn media_egress_open_result_server_field_66_is_reserved() {
+    // RFC 0014 §2.2.2: server field 66 (MediaEgressOpenResult) is plain `reserved` —
+    // no message type is defined until the phase-4 egress design is finalised.
+    // This test documents the reserved status by verifying that a ServerMessage
+    // with no payload round-trips cleanly (there is no enum variant to construct).
+    //
+    // When phase 4 egress is designed, this test should be replaced with a
+    // full round-trip test for the then-defined message.
     let msg = ServerMessage {
         sequence: 6,
         timestamp_wall_us: 0,
-        payload: Some(ServerPayload::MediaEgressOpenResult(
-            MediaEgressOpenResult { stream_epoch: 0 },
-        )),
+        payload: None,
     };
     let decoded = round_trip(&msg);
-    match decoded.payload {
-        Some(ServerPayload::MediaEgressOpenResult(_)) => {} // Reserved; round-trips correctly
-        other => panic!(
-            "expected MediaEgressOpenResult at field 66, got {:?}",
-            other
-        ),
-    }
+    assert!(
+        decoded.payload.is_none(),
+        "field 66 is reserved; a ServerMessage without a payload should decode payload as None"
+    );
 }
 
 #[test]
