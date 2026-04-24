@@ -610,7 +610,7 @@ Fields 82–89 (client) are unallocated in phase 4b.
 
 | Field | Message | Traffic Class | Description |
 |-------|---------|--------------|-------------|
-| 80 | `CloudRelayOpenResult` | Transactional | Result of WHIP POST + ICE/DTLS establishment. Carries `runtime_sdp_answer` (§4.1), WHIP resource URL (for operator audit only; agents do not send PATCH/DELETE directly), and the stream's cloud-relay `relay_epoch` for reconnect. |
+| 80 | `CloudRelayOpenResult` | Transactional | Result of WHIP POST + ICE/DTLS establishment. Carries `sdp_answer` (§4.1) and `relay_epoch` for reconnect correlation. WHIP resource URL is retained internally by the runtime for lifecycle management and operator telemetry only; it is not exposed to agents (Amendment A3, §10 OQ5 resolution). |
 | 81 | `CloudRelayCloseNotice` | Transactional | Runtime-initiated cloud-relay path teardown. Carries `CloudRelayCloseReason` (§6). Distinct from `MediaIngressCloseNotice`: cloud-relay teardown (step 5) leaves the stream alive on direct path if the runtime can fall back; `MediaIngressCloseNotice` terminates the stream. |
 | 82 | `CloudRelayStateUpdate` | State-stream | Coalescible update: relay-path RTT, packet loss to SFU, relay epoch health. Latest-wins. |
 
@@ -694,11 +694,16 @@ message CloudRelayOpenResult {
   // is stable across relay path reconnects for the same stream).
   uint64 relay_epoch = 4;
 
-  // WHIP resource URL as reported by the SFU (Location header).
-  // Included for operator-level audit and chrome display only.
-  // Agents MUST NOT send HTTP PATCH or DELETE to this URL directly —
-  // the runtime owns the relay path lifecycle.
-  string relay_resource_url = 5;
+  // Field 5 is reserved. relay_resource_url was removed in Amendment A3
+  // (hud-04043, 2026-04-24) — see §10 OQ5 resolution and
+  // docs/decisions/relay-resource-url-agent-exposure.md.
+  // The URL is retained internally by the runtime for WHIP lifecycle
+  // management and operator telemetry (audit log, hashed in
+  // cloud_relay_drop / cloud_relay_teardown events per §7.3 and §9.6).
+  // Agents have no functional need for the raw URL; relay_epoch serves
+  // all agent-side correlation purposes. Field number reserved to prevent
+  // accidental reuse.
+  reserved 5;
 
   // Failure code when established = false.
   string close_reason_code = 6;  // §6 code table
@@ -1122,12 +1127,34 @@ code. Bearer token is never logged (§9.1).
    (using LiveKit's gRPC admin API) as an alternative to the hook? Deferred: hook is
    sufficient for phase 4b; native integration is post-v2.
 
-5. **`relay_resource_url` confidentiality.** The WHIP resource URL is a capability token —
+5. **`relay_resource_url` confidentiality.** ~~The WHIP resource URL is a capability token —
    sending it to the agent (`CloudRelayOpenResult.relay_resource_url`) for chrome display is
    a minor information exposure (the URL alone does not grant access without the bearer token,
    but it reveals the SFU endpoint structure). Consider omitting from the agent-facing message
    and retaining only in operator-facing telemetry. Deferred: include for now, revisit at
-   security review.
+   security review.~~
+
+   **Resolved — Amendment A3 (hud-04043, 2026-04-24): OMIT.**
+
+   `relay_resource_url` has been removed from the agent-facing `CloudRelayOpenResult`.
+   Field 5 is now `reserved 5;`. Full analysis and tradeoff record in
+   `docs/decisions/relay-resource-url-agent-exposure.md`.
+
+   Summary of reasoning:
+   - Agents have no functional need for the URL. `relay_epoch` covers all agent-side
+     correlation. `CloudRelayStateUpdate` (field 82) covers observability. The "chrome
+     display" use case cited in the original OQ is not a specified requirement and is
+     uncompelling given that agents have no business rendering raw SFU endpoint URLs.
+   - The URL leaks SFU vendor identity (URL path shape distinguishes LiveKit from
+     Cloudflare Realtime), regional routing topology, and — on the CF Realtime adapter
+     path — the active session management handle, which has broader mutation surface
+     than a WHIP Location URL.
+   - Hardening alternatives (KEEP, REDACT with opaque handle) were considered and
+     rejected. KEEP has no justification. REDACT produces a field with zero agent
+     utility (no display value without the real URL; `relay_epoch` already provides
+     correlation). OMIT is clean: no agent capability is lost.
+   - Operator telemetry retains the full URL internally (hashed in agent-correlated
+     audit events per §7.3 and §9.6; unhashed in operator-only log sink per RFC 0019).
 
 ---
 
@@ -1141,6 +1168,7 @@ implementation beads may be created. The table below is empty at draft time.
 | A0 | 2026-04-19 | hud-amf17 | author (agent worker) | Draft authored from F29 signoff packet + hud-1ee3a SFU fallback audit + hud-g89zs simulcast readiness + RFC 0014 (open PR #530). Resolved RFC 0014 §4.2 TBD on `runtime_sdp_answer` field shape. WHIP adapter specified as vendor-neutral (LiveKit + Cloudflare Calls). str0m fallback transport is compatible with no changes. | AUTHOR | Open questions flagged: ICE restart via PATCH (LiveKit only), simulcast in WHIP SDP (post-hud-fpq51), SRTP decryption posture disclosure. Note: §2.2 contained an error (Cloudflare WHIP claim) corrected in A1. |
 | A1 | 2026-04-19 | hud-ojxka | amendment worker | Three amendments applied: (1) Dual-adapter correction per PR #550 (hud-ejhnm) — §1.2, §2.2, §2.3, §2.4, §2.5 added with explicit WHIP (LiveKit) vs Cloudflare proprietary JSON REST protocol flows; cross-reference to `docs/reports/sfu-vendor-adapter-seam.md` added. (2) `runtime_sdp_answer` delivery path clarification (hud-4mdir) — §4.1 text and §4.3 proto comment updated to make explicit that `runtime_sdp_answer` is ALWAYS EMPTY for `FUTURE_CLOUD_RELAY`; `CloudRelayOpenResult.sdp_answer` is the authoritative delivery vehicle for cloud-relay SDP answers. (3) §6.1 error table catch-all rows added for 409 Conflict, 422 Unprocessable Entity, and 5xx (non-503). | AMENDMENT | F29 gate (≥1 external reviewer) still required and still blocks phase 4b bead creation. |
 | A2 | 2026-04-19 | hud-6t5hj | amendment worker | Two amendments applied: (1) [hud-6t5hj] Added 4 `CloudRelayCloseReason` enum variants referenced in §2.5b but missing from §4.3 proto: `WHIP_RATE_LIMITED` (HTTP 429, field 12), `WHIP_SERVER_ERROR` (HTTP 5xx non-503, field 13), `WHIP_PROTOCOL_VIOLATION` (caller-side protocol misuse, field 14), `WHIP_BAD_REQUEST` (HTTP 400, field 15). Updated §6.1 error table to map 400, 429, 5xx (non-503), and 405/protocol errors to the specific new codes rather than the generic `WHIP_POST_FAILED`. Variants match the `AdapterError` taxonomy in `docs/reports/sfu-vendor-adapter-seam.md` §4.1. (2) [hud-7lehd] Added §3.2.1 "Cloudflare Realtime adapter: PUT /renegotiate" documenting the proprietary `PUT /sessions/{sessionId}/renegotiate` path, the `SfuVendorConfig` branch point, full-ICE gathering requirement, simulcast layer control via renegotiate, and cross-reference to `docs/reports/sfu-vendor-adapter-seam.md` §3.2. Refs: hud-6t5hj + hud-7lehd. | AMENDMENT | F29 gate (≥1 external reviewer) still required and still blocks phase 4b bead creation. |
+| A3 | 2026-04-24 | hud-04043 | amendment worker | Resolved §10 OQ5 (`relay_resource_url` confidentiality): OMIT verdict. `relay_resource_url` removed from agent-facing `CloudRelayOpenResult`; proto field 5 changed to `reserved 5;`. §10 OQ5 text updated with resolution block and full rationale. Decision record at `docs/decisions/relay-resource-url-agent-exposure.md`. Rationale: agents have no functional need for the URL (`relay_epoch` covers all agent-side correlation); the URL leaks SFU vendor identity, regional topology, and — on the CF Realtime path — the active session management handle. KEEP and REDACT-with-opaque-handle alternatives considered and rejected (see decision record). Operator telemetry retains the full URL internally per §7.3 and §9.6. | AMENDMENT | F29 gate (≥1 external reviewer) still required and still blocks phase 4b bead creation. |
 | R1 | — | (external reviewer 1) | external | (to be assigned) | — | — |
 | (as needed) | — | — | — | — | — | — |
 
