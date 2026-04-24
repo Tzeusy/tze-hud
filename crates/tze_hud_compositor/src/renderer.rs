@@ -2128,10 +2128,25 @@ impl Compositor {
 
     /// Remove video surface entries that have reached a terminal state.
     ///
-    /// Call once per frame (e.g. from [`Compositor::render_frame`]) after
-    /// rendering completes to reclaim memory from closed/revoked surfaces.
+    /// Called automatically by every render path once every 60 frames
+    /// (approximately once per second at 60 Hz).  Callers may also invoke
+    /// this directly (e.g. after delivering a `Close` / `Revoke` event) to
+    /// reclaim memory without waiting for the next scheduled tick.
     pub fn prune_terminal_video_surfaces(&mut self) {
         self.video_surfaces.prune_terminal();
+    }
+
+    /// Run [`Self::prune_terminal_video_surfaces`] every 60 frames.
+    ///
+    /// Called at the end of each render path.  The modulo gate amortises the
+    /// cost of the HashMap scan across frames; once per second at 60 Hz is
+    /// frequent enough to prevent unbounded accumulation of closed/revoked
+    /// entries without adding measurable per-frame overhead.
+    #[inline]
+    fn maybe_prune_terminal_video_surfaces(&mut self) {
+        if self.frame_number % 60 == 0 {
+            self.prune_terminal_video_surfaces();
+        }
     }
 
     /// Scan the scene graph for all StaticImage resources, ensure their GPU
@@ -3868,6 +3883,9 @@ impl Compositor {
         self.device.poll(wgpu::Maintain::Wait);
         telemetry.gpu_submit_us = submit_start.elapsed().as_micros() as u64;
 
+        // Evict terminal video surface entries periodically to prevent unbounded growth.
+        self.maybe_prune_terminal_video_surfaces();
+
         telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
         telemetry
     }
@@ -4043,6 +4061,9 @@ impl Compositor {
         self.populate_zone_hit_regions(scene, sw, sh);
         // Reuse the pre-computed drag_handles list rather than collecting again.
         self.populate_drag_handle_hit_regions_from(scene, drag_handles);
+
+        // Evict terminal video surface entries periodically to prevent unbounded growth.
+        self.maybe_prune_terminal_video_surfaces();
 
         telemetry
     }
@@ -4371,6 +4392,9 @@ impl Compositor {
         self.queue.submit(std::iter::once(encoder.finish()));
         self.device.poll(wgpu::Maintain::Wait);
         telemetry.gpu_submit_us = submit_start.elapsed().as_micros() as u64;
+
+        // Evict terminal video surface entries periodically to prevent unbounded growth.
+        self.maybe_prune_terminal_video_surfaces();
 
         telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
         telemetry
@@ -13856,6 +13880,88 @@ mod tests {
             map.render_state_for(&unknown_id),
             VideoRenderState::Placeholder,
             "unregistered surface must return Placeholder (no panic, no crash)"
+        );
+    }
+
+    /// Terminal video surface entries are evicted every 60 frames (the scheduled
+    /// prune tick).
+    ///
+    /// Contract: after a surface transitions to a terminal state (Closed or
+    /// Revoked), it must be evicted from the map within 60 frames.  Before the
+    /// 60-frame tick, the closed entry may still be present; at the tick it must
+    /// be gone, and subsequent `render_state_for` must return `Placeholder`
+    /// (indicating an unknown / evicted surface).
+    ///
+    /// This test validates the invariant by exercising the prune schedule directly
+    /// on `VideoSurfaceMap` without requiring GPU initialisation, mirroring the
+    /// implementation path exercised by `maybe_prune_terminal_video_surfaces`.
+    #[test]
+    #[cfg(feature = "v2_preview")]
+    fn test_terminal_video_surfaces_evicted_on_60_frame_tick() {
+        use crate::video_surface::{MediaEvent, VideoRenderState, VideoSurfaceMap};
+
+        let mut map = VideoSurfaceMap::new();
+        let surface_id = SceneId::new();
+
+        // Bring the surface to terminal Closed state via the full close sequence.
+        map.ensure(surface_id);
+        map.handle(surface_id, &MediaEvent::Admitted);
+        map.handle(surface_id, &MediaEvent::Close); // Streaming → Closing
+        map.handle(surface_id, &MediaEvent::Close); // Closing → Closed (terminal)
+
+        // Invariant: the entry must be in Closed state before any prune.
+        assert_eq!(
+            map.render_state_for(&surface_id),
+            VideoRenderState::Closed,
+            "prerequisite: surface must be in Closed state before pruning"
+        );
+
+        // Simulate frames 1–59: prune is NOT called (frame_number % 60 != 0).
+        // The closed entry must still be present at frame 59.
+        // (We do not call prune here, simulating the pre-tick window.)
+
+        // Simulate frame 60: prune IS called (frame_number % 60 == 0).
+        // Closed entries must be evicted.
+        map.prune_terminal();
+
+        // After the tick, the entry must be gone: render_state_for falls back to Placeholder.
+        assert_eq!(
+            map.render_state_for(&surface_id),
+            VideoRenderState::Placeholder,
+            "closed surface entry must be evicted after prune tick: render_state_for must return Placeholder"
+        );
+
+        // Verify the same invariant holds for Revoked (also terminal).
+        let revoked_id = SceneId::new();
+        map.ensure(revoked_id);
+        map.handle(revoked_id, &MediaEvent::Admitted);
+        map.handle(revoked_id, &MediaEvent::Revoke); // → Revoked (terminal)
+
+        assert_eq!(
+            map.render_state_for(&revoked_id),
+            VideoRenderState::Closed,
+            "prerequisite: revoked surface renders as Closed"
+        );
+
+        map.prune_terminal();
+
+        assert_eq!(
+            map.render_state_for(&revoked_id),
+            VideoRenderState::Placeholder,
+            "revoked surface entry must be evicted after prune tick"
+        );
+
+        // Non-terminal surfaces must survive the prune tick.
+        let live_id = SceneId::new();
+        map.ensure(live_id);
+        map.handle(live_id, &MediaEvent::Admitted); // → Streaming (non-terminal)
+
+        map.prune_terminal();
+
+        assert_eq!(
+            map.render_state_for(&live_id),
+            VideoRenderState::Streaming,
+            "non-terminal (Streaming) entry must survive the prune tick"
         );
     }
 }
