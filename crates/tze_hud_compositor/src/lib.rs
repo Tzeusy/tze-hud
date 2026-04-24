@@ -25,6 +25,7 @@ pub mod pipeline;
 pub mod renderer;
 pub mod surface;
 pub mod text;
+pub mod video_surface;
 pub mod widget;
 
 pub use adapter::{AdapterSelectionError, PlatformBackends, select_gpu_adapter};
@@ -32,4 +33,5 @@ pub use pipeline::{ChromeDrawCmd, RoundedRectDrawCmd, TexturedRectVertex};
 pub use renderer::{Compositor, CompositorError, ImageTextureEntry};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
 pub use text::{TextItem, TextRasterizer};
+pub use video_surface::{VideoRenderState, VideoSurfaceMap};
 pub use widget::{WidgetRenderer, interpolate_param};

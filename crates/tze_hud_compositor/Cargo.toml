@@ -6,6 +6,9 @@ edition.workspace = true
 
 [features]
 headless = []
+# v2 media plane — video surface render path (E26, B11).
+# Code landing waits until v1 tagged v1.0.0 per F27 (signoff-packet.md).
+v2_preview = []
 
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
@@ -18,6 +21,7 @@ tracing = { workspace = true }
 glyphon = { workspace = true }
 resvg = { workspace = true }
 tiny-skia = { workspace = true }
+statig = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
