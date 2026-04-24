@@ -480,6 +480,9 @@ fn handle_initiate_close(
 fn handle_revoke(shared: &mut MediaIngress, reason: &MediaCloseReason) -> Outcome<State> {
     shared.pause_trigger = None;
     shared.degradation_step = 0;
+    // Clear any BudgetWatchdog backoff hint: revocation supersedes a graceful
+    // close and the hint is no longer meaningful once revoked.
+    shared.close_retry_after_us = None;
     if !reason.is_revocation() {
         warn!(
             stream_epoch = shared.stream_epoch,
