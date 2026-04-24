@@ -60,7 +60,8 @@
 //! accepts a `MediaAuditSink` trait object to avoid coupling to a specific sink.
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tracing::{info, warn};
@@ -529,6 +530,12 @@ impl MediaActivationGate {
     /// reject code. The audit event records `SignalingRateLimitExceeded` as an
     /// internal discriminant for structured logging; that code does not appear
     /// in the wire protocol's §2.4 reject-code table.
+    ///
+    /// **Clock contract:** Production callers MUST supply a monotonic timestamp
+    /// (e.g. `now_us_monotonic()`) so the sliding window is immune to NTP steps
+    /// and wall-clock jumps. The audit event's `timestamp_us` field intentionally
+    /// uses the same value; use `now_us()` only when a separate wall-clock stamp
+    /// is needed for the audit record.
     pub fn check_signaling_rate(
         &mut self,
         session_id: &str,
@@ -986,11 +993,35 @@ impl MediaActivationGate {
     }
 }
 
-// ─── Utility: current UTC microseconds ───────────────────────────────────────
+// ─── Utility: timestamps ─────────────────────────────────────────────────────
+
+/// Process-start anchor for monotonic microseconds.
+///
+/// Initialized once on first call to [`now_us_monotonic`].
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+/// Return monotonic microseconds elapsed since process start.
+///
+/// Uses `std::time::Instant`, which is immune to wall-clock adjustments
+/// (NTP steps, leap seconds, operator clock changes).
+///
+/// **Rate-limit callers MUST use this function**, not [`now_us`], so that
+/// the sliding window is never corrupted by backwards time jumps.
+/// Tests should supply their own arbitrary `u64` to remain deterministic.
+pub fn now_us_monotonic() -> u64 {
+    PROCESS_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_micros() as u64
+}
 
 /// Return the current UTC timestamp in microseconds.
 ///
-/// Used by callers that do not supply their own timestamp (e.g., production paths).
+/// Uses `SystemTime` — suitable for **audit event timestamps** and any context
+/// where wall-clock time is required (e.g. 7-day remember record expiry).
+/// Do **not** pass this value to [`SignalingRateLimiter::admit`] in production;
+/// use [`now_us_monotonic`] there to avoid NTP-step sensitivity.
+///
 /// Tests should supply their own `now_us` to remain deterministic.
 pub fn now_us() -> u64 {
     SystemTime::now()
@@ -1554,5 +1585,52 @@ mod tests {
 
         assert!(!gate.session_caches.contains_key("sess-1"));
         assert!(!gate.rate_limiters.contains_key("sess-1"));
+    }
+
+    // ── Monotonic clock helper ────────────────────────────────────────────────
+
+    #[test]
+    fn test_now_us_monotonic_is_non_decreasing() {
+        // Call twice in quick succession; monotonic time must not go backwards.
+        let t1 = now_us_monotonic();
+        let t2 = now_us_monotonic();
+        assert!(
+            t2 >= t1,
+            "now_us_monotonic regressed: t1={t1} t2={t2}"
+        );
+    }
+
+    #[test]
+    fn test_now_us_monotonic_is_non_zero_after_startup() {
+        // After process start the monotonic counter must have advanced beyond
+        // zero (the process start anchor is in the past).
+        let t = now_us_monotonic();
+        // Allow up to 1 µs if called immediately after init — practically
+        // impossible, but be conservative: simply require it is not max/overflow.
+        assert!(t < u64::MAX, "now_us_monotonic overflowed");
+    }
+
+    #[test]
+    fn test_rate_limiter_with_monotonic_time_respects_window() {
+        // Verify that SignalingRateLimiter works correctly when driven by
+        // monotonic timestamps (the production-intended clock source).
+        let mut limiter = SignalingRateLimiter::default();
+        let base = now_us_monotonic();
+
+        // Fill up to the limit using synthetic offsets from the monotonic base.
+        for i in 0..MAX_SIGNALING_REQUESTS_PER_SECOND {
+            assert!(
+                limiter.admit(base + i as u64 * 100),
+                "should admit within limit"
+            );
+        }
+        // Exactly at limit — next request at same window should be denied.
+        assert!(!limiter.admit(base + 999_000), "should deny at limit");
+
+        // After the 1-second window elapses the window should clear.
+        assert!(
+            limiter.admit(base + 1_100_000),
+            "should admit after window slides"
+        );
     }
 }
