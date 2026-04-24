@@ -68,12 +68,13 @@ pub enum VideoRenderState {
 
 /// A decoded video frame held as raw RGBA8 bytes.
 ///
-/// In a full implementation the compositor would upload these bytes to a
-/// `wgpu::Texture` (analogous to [`crate::renderer::ImageTextureEntry`]).
-/// This type carries the minimum needed to test B11 state semantics and the
-/// frame-timing path without requiring a live GStreamer pipeline.
+/// Produced by a [`MediaDecodePipeline`] and consumed by the compositor's
+/// `upload_video_frame` method, which uploads the bytes to a `wgpu::Texture`
+/// and binds it for use in the render pass.
 ///
-/// Full GStreamer → wgpu texture upload is a follow-up task.
+/// RGBA8 matches the `wgpu::TextureFormat::Rgba8UnormSrgb` format used by the
+/// existing image-texture pipeline, so the same bind-group layout and sampler
+/// are reused (no new pipeline required).
 #[cfg(feature = "v2_preview")]
 #[derive(Clone, Debug)]
 pub struct VideoFrame {
@@ -85,6 +86,124 @@ pub struct VideoFrame {
     pub height: u32,
     /// Monotonic wall-clock timestamp of this frame in microseconds.
     pub presented_at_us: u64,
+}
+
+// ─── MediaDecodePipeline trait ────────────────────────────────────────────────
+
+/// A decode pipeline that produces [`VideoFrame`]s for a single surface.
+///
+/// Implementations may use GStreamer appsrc/appsink, a synthetic test pattern
+/// generator, or any other source.  The trait is object-safe so it can be
+/// stored in a `Box<dyn MediaDecodePipeline>`.
+///
+/// # Contract
+///
+/// - `next_frame` is called at most once per compositor frame (≤ 60 Hz).
+/// - Returning `None` means no new frame is available; the compositor
+///   continues to display the last uploaded texture (or the dark placeholder
+///   if no texture has been uploaded yet).
+/// - Returning `Some(frame)` implies the caller will upload the frame to the
+///   GPU and display it on the next present tick.
+/// - The pipeline is responsible for back-pressure; dropping frames rather
+///   than blocking is the expected policy.
+///
+/// # GStreamer note
+///
+/// The production implementation will wrap a GStreamer `appsink` element
+/// connected to a `videotestsrc ! videoconvert ! appsink` pipeline (or a
+/// real media source).  The `appsink` callback copies the sample's buffer
+/// into a `VideoFrame` and posts it to a `std::sync::Mutex<Option<VideoFrame>>`
+/// ring slot; `next_frame` drains that slot.  That implementation lives in the
+/// runtime crate and connects to this trait.  The trait itself has no GStreamer
+/// dependency so the compositor remains FFI-free.
+#[cfg(feature = "v2_preview")]
+pub trait MediaDecodePipeline: Send + Sync {
+    /// Poll for the next decoded frame.
+    ///
+    /// Returns `Some(frame)` if a new frame is available, `None` otherwise.
+    /// Must not block.
+    fn next_frame(&mut self) -> Option<VideoFrame>;
+
+    /// Return the nominal frame dimensions for this pipeline.
+    ///
+    /// Used to pre-size the compositor's texture cache entry and to validate
+    /// frames returned by [`next_frame`].  Returns `None` if the dimensions
+    /// are not yet known (e.g. pre-negotiation).
+    fn frame_dimensions(&self) -> Option<(u32, u32)>;
+}
+
+// ─── SyntheticTestPipeline ────────────────────────────────────────────────────
+
+/// A synthetic test-pattern pipeline that generates solid-color frames.
+///
+/// Simulates the output of a GStreamer `videotestsrc ! videoconvert` pipeline
+/// without requiring GStreamer to be installed.  Used in unit tests and
+/// integration smoke tests.
+///
+/// # Pattern
+///
+/// Each call to [`next_frame`] produces one RGBA8 frame filled with a fixed
+/// test color (default: opaque medium gray, `#808080FF`).  The frame counter
+/// is incremented so callers can verify liveness.
+///
+/// # ENV gate
+///
+/// The compositor's `upload_video_frame` path activates when the
+/// `TZE_HUD_SYNTHETIC_DECODE=1` environment variable is set.  This keeps the
+/// v1 fallback path (dark placeholder) intact by default.
+#[cfg(feature = "v2_preview")]
+pub struct SyntheticTestPipeline {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// RGBA8 fill color: `[R, G, B, A]`.
+    pub fill_color: [u8; 4],
+    /// Monotonic frame counter, incremented on each `next_frame` call.
+    pub frame_count: u64,
+}
+
+#[cfg(feature = "v2_preview")]
+impl SyntheticTestPipeline {
+    /// Create a pipeline that generates `width × height` frames filled with
+    /// `fill_color` (RGBA8).
+    pub fn new(width: u32, height: u32, fill_color: [u8; 4]) -> Self {
+        Self {
+            width,
+            height,
+            fill_color,
+            frame_count: 0,
+        }
+    }
+
+    /// Convenience constructor for a medium-gray test pattern.
+    pub fn gray(width: u32, height: u32) -> Self {
+        Self::new(width, height, [0x80, 0x80, 0x80, 0xFF])
+    }
+}
+
+#[cfg(feature = "v2_preview")]
+impl MediaDecodePipeline for SyntheticTestPipeline {
+    fn next_frame(&mut self) -> Option<VideoFrame> {
+        let pixel_count = (self.width as usize).saturating_mul(self.height as usize);
+        let byte_count = pixel_count.saturating_mul(4);
+        if byte_count == 0 {
+            return None;
+        }
+        let rgba = self.fill_color.iter().copied().cycle().take(byte_count).collect();
+        let frame_count = self.frame_count;
+        self.frame_count += 1;
+        Some(VideoFrame {
+            rgba,
+            width: self.width,
+            height: self.height,
+            presented_at_us: frame_count,
+        })
+    }
+
+    fn frame_dimensions(&self) -> Option<(u32, u32)> {
+        Some((self.width, self.height))
+    }
 }
 
 /// Events that drive the `VideoSurface` state machine.
@@ -760,6 +879,137 @@ mod tests {
             map.render_state_for(&id),
             VideoRenderState::Placeholder,
             "v1 stub must always return Placeholder"
+        );
+    }
+
+    // ── MediaDecodePipeline / SyntheticTestPipeline ───────────────────────────
+
+    /// SyntheticTestPipeline::next_frame returns frames with correct dimensions.
+    ///
+    /// Per engineering-bar.md §1: validates the invariant that frame dimensions
+    /// always match the pipeline's configured width/height, regardless of how
+    /// many frames have been produced.
+    #[test]
+    #[cfg(feature = "v2_preview")]
+    fn synthetic_pipeline_frame_dimensions_match_config() {
+        let mut pipeline = SyntheticTestPipeline::gray(320, 240);
+        for _ in 0..5 {
+            let frame = pipeline.next_frame().expect("SyntheticTestPipeline must always produce a frame");
+            assert_eq!(
+                frame.width, 320,
+                "frame width must match pipeline config"
+            );
+            assert_eq!(
+                frame.height, 240,
+                "frame height must match pipeline config"
+            );
+            assert_eq!(
+                frame.rgba.len(),
+                320 * 240 * 4,
+                "frame byte count must be width × height × 4"
+            );
+        }
+    }
+
+    /// SyntheticTestPipeline::frame_dimensions returns the configured size.
+    #[test]
+    #[cfg(feature = "v2_preview")]
+    fn synthetic_pipeline_reports_frame_dimensions() {
+        let pipeline = SyntheticTestPipeline::new(640, 360, [0xFF, 0x00, 0x00, 0xFF]);
+        assert_eq!(
+            pipeline.frame_dimensions(),
+            Some((640, 360)),
+            "frame_dimensions must return configured size"
+        );
+    }
+
+    /// SyntheticTestPipeline fill color is honored in produced frames.
+    ///
+    /// Validates that the RGBA fill color propagates to every pixel in the
+    /// produced frame, confirming the synthetic pattern round-trip.
+    #[test]
+    #[cfg(feature = "v2_preview")]
+    fn synthetic_pipeline_fill_color_round_trip() {
+        let fill = [0xDE, 0xAD, 0xBE, 0xEF];
+        let mut pipeline = SyntheticTestPipeline::new(4, 4, fill);
+        let frame = pipeline.next_frame().expect("must produce a frame");
+        let expected: Vec<u8> = fill.iter().copied().cycle().take(4 * 4 * 4).collect();
+        assert_eq!(
+            frame.rgba, expected,
+            "every pixel must match the configured fill color"
+        );
+    }
+
+    /// SyntheticTestPipeline frame counter increments monotonically.
+    ///
+    /// Uses `presented_at_us` as the frame counter (as documented in the impl).
+    /// Validates that successive frames have strictly increasing counters so
+    /// callers can detect stale frames without timestamps.
+    #[test]
+    #[cfg(feature = "v2_preview")]
+    fn synthetic_pipeline_frame_counter_is_monotonic() {
+        let mut pipeline = SyntheticTestPipeline::gray(8, 8);
+        let mut prev = None::<u64>;
+        for _ in 0..10 {
+            let frame = pipeline.next_frame().expect("must produce a frame");
+            if let Some(p) = prev {
+                assert!(
+                    frame.presented_at_us > p,
+                    "frame counter must be strictly increasing: prev={p} curr={}",
+                    frame.presented_at_us
+                );
+            }
+            prev = Some(frame.presented_at_us);
+        }
+    }
+
+    /// Mock MediaDecodePipeline: trait object safety and unit-test wiring.
+    ///
+    /// Validates that a simple mock can be stored as `Box<dyn MediaDecodePipeline>`
+    /// and that `next_frame` is dispatched correctly through the trait object.
+    #[test]
+    #[cfg(feature = "v2_preview")]
+    fn mock_pipeline_via_trait_object() {
+        struct MockPipeline {
+            frames_to_emit: u32,
+        }
+        impl MediaDecodePipeline for MockPipeline {
+            fn next_frame(&mut self) -> Option<VideoFrame> {
+                if self.frames_to_emit == 0 {
+                    return None;
+                }
+                self.frames_to_emit -= 1;
+                Some(VideoFrame {
+                    rgba: vec![0xFF, 0x00, 0xFF, 0xFF],
+                    width: 1,
+                    height: 1,
+                    presented_at_us: 0,
+                })
+            }
+            fn frame_dimensions(&self) -> Option<(u32, u32)> {
+                Some((1, 1))
+            }
+        }
+
+        let mut pipeline: Box<dyn MediaDecodePipeline> =
+            Box::new(MockPipeline { frames_to_emit: 3 });
+
+        // First 3 calls: frames available.
+        for i in 0..3 {
+            assert!(
+                pipeline.next_frame().is_some(),
+                "call {i}: expected Some(frame)"
+            );
+        }
+        // Fourth call: exhausted.
+        assert!(
+            pipeline.next_frame().is_none(),
+            "exhausted pipeline must return None"
+        );
+        assert_eq!(
+            pipeline.frame_dimensions(),
+            Some((1, 1)),
+            "frame_dimensions must be accessible through trait object"
         );
     }
 }
