@@ -57,8 +57,16 @@ fn arb_event() -> BoxedStrategy<MediaSessionEvent> {
         (1u32..=7u32, arb_degradation_trigger()).prop_map(|(step, trigger)| {
             MediaSessionEvent::DegradationAdvanced { step, trigger }
         }),
-        // InitiateClose — all close reasons.
-        arb_close_reason().prop_map(MediaSessionEvent::InitiateClose),
+        // InitiateClose — all close reasons; retry_after_us follows BudgetWatchdog
+        // semantics: Some(1) for BudgetWatchdog, None otherwise.
+        arb_close_reason().prop_map(|reason| {
+            let retry_after_us = if reason == MediaCloseReason::BudgetWatchdog {
+                Some(1_000_000)
+            } else {
+                None
+            };
+            MediaSessionEvent::InitiateClose { reason, retry_after_us }
+        }),
         // Revoke — all close reasons (machine handles non-revocation ones too).
         arb_close_reason().prop_map(MediaSessionEvent::Revoke),
     ]
@@ -146,7 +154,7 @@ proptest! {
     ) {
         let mut m = MediaIngressStateMachine::new(1);
         // Drive to CLOSED.
-        m.apply(MediaSessionEvent::InitiateClose(MediaCloseReason::AgentClosed));
+        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
         m.apply(MediaSessionEvent::DrainComplete);
         assert!(m.state().is_terminal(), "setup: machine must be terminal");
 
