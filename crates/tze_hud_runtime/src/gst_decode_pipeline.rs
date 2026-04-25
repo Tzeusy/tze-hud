@@ -151,14 +151,12 @@ impl GstDecodePipeline {
         appsink.set_drop(true);
         appsink.set_sync(false);
 
-        pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|_| {
-                gst::glib::Error::new(
-                    gst::glib::FileError::Failed,
-                    "failed to set pipeline to PLAYING state",
-                )
-            })?;
+        pipeline.set_state(gst::State::Playing).map_err(|_| {
+            gst::glib::Error::new(
+                gst::glib::FileError::Failed,
+                "failed to set pipeline to PLAYING state",
+            )
+        })?;
 
         Ok(Self {
             pipeline,
@@ -182,9 +180,7 @@ impl GstDecodePipeline {
     /// Returns an error if GStreamer initialisation fails or any required plugin
     /// (`videotestsrc`, `videoconvert`, `appsink`) is not installed.
     pub fn new_from_test_src() -> Result<Self, gst::glib::Error> {
-        Self::new(
-            "videotestsrc ! videoconvert ! video/x-raw,format=RGBA ! appsink name=appsink0",
-        )
+        Self::new("videotestsrc ! videoconvert ! video/x-raw,format=RGBA ! appsink name=appsink0")
     }
 
     /// Extract `(width, height)` from a GStreamer `Sample`'s caps.
@@ -221,9 +217,7 @@ impl MediaDecodePipeline for GstDecodePipeline {
     /// to the negotiated resolution.
     fn next_frame(&mut self) -> Option<VideoFrame> {
         // Non-blocking pull.  `None` means no sample is ready yet.
-        let sample = self
-            .appsink
-            .try_pull_sample(gst::ClockTime::ZERO)?;
+        let sample = self.appsink.try_pull_sample(gst::ClockTime::ZERO)?;
 
         // Update cached dimensions from this sample's caps.
         if let Some(dims) = Self::dimensions_from_sample(&sample) {
@@ -235,7 +229,9 @@ impl MediaDecodePipeline for GstDecodePipeline {
         let buffer = sample.buffer()?;
         let map = buffer.map_readable().ok()?;
 
-        let expected_len = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+        let expected_len = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
         if map.len() != expected_len {
             tracing::warn!(
                 actual_len = map.len(),
@@ -251,10 +247,7 @@ impl MediaDecodePipeline for GstDecodePipeline {
 
         // Use the GStreamer presentation-time-stamp (PTS) if available;
         // fall back to 0 if the buffer carries no PTS.
-        let presented_at_us = buffer
-            .pts()
-            .map(|pts| pts.useconds())
-            .unwrap_or(0);
+        let presented_at_us = buffer.pts().map(|pts| pts.useconds()).unwrap_or(0);
 
         Some(VideoFrame {
             rgba,
@@ -372,7 +365,13 @@ mod tests {
             "frame_dimensions() must return Some after a successful pull"
         );
         let (w, h) = dims.unwrap();
-        assert_eq!(w, frame.width, "frame_dimensions width must match frame.width");
-        assert_eq!(h, frame.height, "frame_dimensions height must match frame.height");
+        assert_eq!(
+            w, frame.width,
+            "frame_dimensions width must match frame.width"
+        );
+        assert_eq!(
+            h, frame.height,
+            "frame_dimensions height must match frame.height"
+        );
     }
 }

@@ -1813,6 +1813,7 @@ fn roundtrip_rendering_policy_convert_all_fields_populated() {
         overflow: Some(TextOverflow::Ellipsis),
         key_icon_map: Default::default(),
         backdrop_radius: None,
+        media_disconnect_badge_color: None,
     };
 
     let proto = rendering_policy_to_proto(&original);
@@ -1873,6 +1874,7 @@ fn roundtrip_rendering_policy_convert_all_new_fields_none() {
         overflow: None,
         key_icon_map: Default::default(),
         backdrop_radius: None,
+        media_disconnect_badge_color: None,
     };
 
     let proto = rendering_policy_to_proto(&original);

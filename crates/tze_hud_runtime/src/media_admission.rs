@@ -1609,10 +1609,7 @@ mod tests {
         // Call twice in quick succession; monotonic time must not go backwards.
         let t1 = now_us_monotonic();
         let t2 = now_us_monotonic();
-        assert!(
-            t2 >= t1,
-            "now_us_monotonic regressed: t1={t1} t2={t2}"
-        );
+        assert!(t2 >= t1, "now_us_monotonic regressed: t1={t1} t2={t2}");
     }
 
     #[test]
