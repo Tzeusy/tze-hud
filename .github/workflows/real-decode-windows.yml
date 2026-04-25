@@ -215,8 +215,11 @@ jobs:
           # x86_64-pc-windows-msvc is the default on Windows; explicit for clarity.
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (see ci.yml — PR #606 incident).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
         if: env.GPU_LOCK_ACQUIRED == 'true'
+        timeout-minutes: 10
 
       # ── Verify GStreamer SDK is present on D18 ──────────────────────────────
       # The SDK is pre-installed at provisioning time (see runbook §3).
