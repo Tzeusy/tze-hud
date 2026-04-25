@@ -3177,13 +3177,17 @@ fn dispatch_pointer_event(
         .unwrap_or_default()
         .as_micros() as u64;
 
+    // Monotonic microseconds since process start — same clock source used by
+    // the keyboard and scene-graph event paths (see `nanoseconds_since_start`).
+    let timestamp_mono_us = nanoseconds_since_start() / 1_000;
+
     let event = match dispatch.kind {
         AgentDispatchKind::PointerDown => {
             InputEvent::PointerDown(tze_hud_protocol::proto::PointerDownEvent {
                 tile_id: tile_id_bytes,
                 node_id: node_id_bytes,
                 interaction_id: dispatch.interaction_id,
-                timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                timestamp_mono_us,
                 device_id: dispatch.device_id.to_string(),
                 local_x: dispatch.local_x,
                 local_y: dispatch.local_y,
@@ -3197,7 +3201,7 @@ fn dispatch_pointer_event(
                 tile_id: tile_id_bytes,
                 node_id: node_id_bytes,
                 interaction_id: dispatch.interaction_id,
-                timestamp_mono_us: 0,
+                timestamp_mono_us,
                 device_id: dispatch.device_id.to_string(),
                 local_x: dispatch.local_x,
                 local_y: dispatch.local_y,
@@ -3210,7 +3214,7 @@ fn dispatch_pointer_event(
                 tile_id: tile_id_bytes,
                 node_id: node_id_bytes,
                 interaction_id: dispatch.interaction_id,
-                timestamp_mono_us: 0,
+                timestamp_mono_us,
                 device_id: dispatch.device_id.to_string(),
                 local_x: dispatch.local_x,
                 local_y: dispatch.local_y,
@@ -5095,6 +5099,99 @@ redaction_style = "blank"
         assert_eq!(
             tile.bounds.y, 300.0,
             "tile Y must not change after a tap on the drag handle"
+        );
+    }
+
+    // ── dispatch_pointer_event: timestamp_mono_us wiring (hud-cz5mw) ─────────
+
+    /// Build a minimal [`AgentDispatch`] for the given kind.
+    fn make_agent_dispatch(kind: tze_hud_input::AgentDispatchKind) -> tze_hud_input::AgentDispatch {
+        use tze_hud_scene::SceneId;
+        tze_hud_input::AgentDispatch {
+            namespace: "test-agent".to_string(),
+            tile_id: SceneId::new(),
+            node_id: SceneId::new(),
+            interaction_id: "test-interaction".to_string(),
+            local_x: 1.0,
+            local_y: 2.0,
+            display_x: 10.0,
+            display_y: 20.0,
+            device_id: 0,
+            kind,
+            capture_released_reason: None,
+        }
+    }
+
+    /// Extract `timestamp_mono_us` from a received `EventBatch` containing one
+    /// pointer event.  Panics with a descriptive message if the batch or event
+    /// is not what was expected.
+    fn extract_pointer_timestamp(batch: &tze_hud_protocol::proto::EventBatch) -> u64 {
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+        assert_eq!(
+            batch.events.len(),
+            1,
+            "batch must contain exactly one event"
+        );
+        match &batch.events[0].event {
+            Some(InputEvent::PointerDown(ev)) => ev.timestamp_mono_us,
+            Some(InputEvent::PointerMove(ev)) => ev.timestamp_mono_us,
+            Some(InputEvent::PointerUp(ev)) => ev.timestamp_mono_us,
+            other => panic!("expected pointer event, got: {other:?}"),
+        }
+    }
+
+    /// `dispatch_pointer_event` must set `timestamp_mono_us > 0` for PointerDown,
+    /// PointerMove, and PointerUp (gap from hud-zffvp now closed).
+    #[test]
+    fn dispatch_pointer_event_timestamp_mono_us_is_non_zero() {
+        use tze_hud_input::AgentDispatchKind;
+
+        let (tx, mut rx) =
+            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let tx_opt = Some(tx);
+
+        for kind in [
+            AgentDispatchKind::PointerDown,
+            AgentDispatchKind::PointerMove,
+            AgentDispatchKind::PointerUp,
+        ] {
+            let label = format!("{kind:?}");
+            dispatch_pointer_event(&tx_opt, make_agent_dispatch(kind));
+            let (_ns, batch) = rx.try_recv().expect("event must be sent on the channel");
+            let ts = extract_pointer_timestamp(&batch);
+            assert!(
+                ts > 0,
+                "{label}: timestamp_mono_us must be non-zero (monotonic clock wired)"
+            );
+        }
+    }
+
+    /// Two consecutive `dispatch_pointer_event` calls must produce monotonically
+    /// increasing `timestamp_mono_us` values, confirming the clock source is
+    /// truly monotonic and not stuck at zero.
+    #[test]
+    fn dispatch_pointer_event_timestamp_mono_us_is_monotonic() {
+        use tze_hud_input::AgentDispatchKind;
+
+        let (tx, mut rx) =
+            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let tx_opt = Some(tx);
+
+        dispatch_pointer_event(&tx_opt, make_agent_dispatch(AgentDispatchKind::PointerDown));
+        let (_ns, batch1) = rx.try_recv().expect("first event must be sent");
+        let ts1 = extract_pointer_timestamp(&batch1);
+
+        // A small sleep ensures the monotonic clock advances between calls.
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        dispatch_pointer_event(&tx_opt, make_agent_dispatch(AgentDispatchKind::PointerMove));
+        let (_ns, batch2) = rx.try_recv().expect("second event must be sent");
+        let ts2 = extract_pointer_timestamp(&batch2);
+
+        assert!(
+            ts2 > ts1,
+            "timestamp_mono_us must be strictly increasing across consecutive dispatches \
+             (ts1={ts1}, ts2={ts2})"
         );
     }
 }
