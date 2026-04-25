@@ -450,12 +450,81 @@ file is gone on the Windows box before starting an interactive session.
 
 ### 7.6 Follow-up work
 
-- **Native lock support in `tze_hud.exe`** — the runtime should write/release
-  the GPU lock automatically. Until then, use the helper scripts (§7.3).
-- **Lock-aware `run_hud.ps1` wrapper** — integrates `gpu-lock-start.ps1` into
-  the HUD launch sequence so sessions can never start without acquiring the lock.
+- **Native lock support in `tze_hud.exe`** (hud-940e4) — the runtime should
+  write/release the GPU lock automatically. Until then, use `run_hud.ps1` (§7.7).
 
 See `docs/design/tzehouse-windows-gpu-scheduling.md §7` for the full follow-up list.
+
+### 7.7 Lock-aware HUD launcher — `scripts/windows/run_hud.ps1`
+
+**Bead**: hud-oooc9  
+**Status**: IMPLEMENTED
+
+`scripts/windows/run_hud.ps1` is the short-term bridge that integrates GPU lock
+acquisition into the HUD launch sequence.  Use it instead of triggering the
+scheduled task manually.
+
+#### What it does
+
+1. **Pre-flight**: verifies the `TzeHudOverlay` scheduled task exists.
+2. **Acquire lock**: calls `gpu-lock-start.ps1 -SessionType interactive`.
+   If the CI lock is held by a live process, exits immediately with code 1 and
+   a clear message — the session cannot start.
+3. **Launch**: triggers `schtasks /Run /TN TzeHudOverlay` via
+   `Start-ScheduledTask`.  The HUD still runs as the scheduled task (as `tzeus`
+   on the interactive desktop) — this is mandatory for overlay transparency.
+4. **Monitor**: polls until `tze_hud.exe` disappears from the process list.
+5. **Release** (try/finally — runs even on Ctrl-C): calls
+   `gpu-lock-release.ps1` so the lock is always cleaned up.
+
+#### Usage
+
+Deploy `scripts/windows/run_hud.ps1` and `scripts/ci/windows/gpu-lock-*.ps1`
+to the same directory tree on tzehouse-windows (e.g. `C:\tze_hud\scripts\`).
+The wrapper resolves the lock helpers via a relative path (`../ci/windows/`).
+
+```powershell
+# Preferred: use run_hud.ps1 instead of triggering the task manually
+C:\tze_hud\scripts\windows\run_hud.ps1
+
+# Dry-run (validates task existence and lock state without launching):
+C:\tze_hud\scripts\windows\run_hud.ps1 -WhatIf
+
+# Custom task name or poll interval:
+C:\tze_hud\scripts\windows\run_hud.ps1 -TaskName TzeHudOverlay -PollIntervalSec 5
+```
+
+#### Edge cases handled
+
+| Scenario | Behaviour |
+|---|---|
+| CI lock held by live PID | Exit 1, clear message, no launch |
+| `TzeHudOverlay` task missing | Exit 3, registration reminder |
+| `tze_hud.exe` does not appear within 30 s | Exit 4, lock released |
+| Ctrl-C / unhandled error | `finally` block releases GPU lock |
+| Lock release PID mismatch | Auto-retry with `-Force` |
+
+#### Scheduled task registration (one-time)
+
+The scheduled task must exist before using the wrapper.  Register it once:
+
+```powershell
+# Run as tzeus (must own the interactive desktop session)
+Register-ScheduledTask -TaskName "TzeHudOverlay" `
+  -Action (New-ScheduledTaskAction `
+    -Execute "C:\tze_hud\tze_hud.exe" `
+    -Argument "--window-mode overlay" `
+    -WorkingDirectory "C:\tze_hud") `
+  -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries) `
+  -Force
+```
+
+#### Superseded by hud-940e4
+
+`run_hud.ps1` is a thin operational bridge.  When hud-940e4 (native runtime
+lock support) lands, `tze_hud.exe` will write and release the GPU lock itself.
+At that point this wrapper is no longer needed for lock management, though the
+scheduled-task launch path remains mandatory for transparency.
 
 ---
 
