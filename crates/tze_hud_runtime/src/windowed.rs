@@ -421,11 +421,12 @@ struct WindowedRuntimeState {
     /// Cloned from the `HudSessionImpl` after creation. `None` when gRPC is
     /// disabled (grpc_port == 0) or before network services start.
     ///
-    /// Used by the windowed runtime to dispatch `ScrollOffsetChangedEvent` to
-    /// agents after wheel/keyboard scroll events update a scrollable tile.
-    /// Each `(namespace, EventBatch)` pair is delivered only to the session
-    /// handler whose namespace matches, filtered by `INPUT_EVENTS` subscription.
-    scroll_event_tx:
+    /// Used by the windowed runtime to dispatch any `EventBatch` to agents —
+    /// scroll offset changes, keyboard down/up/character events, and future
+    /// input event types.  Each `(namespace, EventBatch)` pair is delivered
+    /// only to the session handler whose namespace matches, filtered by
+    /// `INPUT_EVENTS` subscription.
+    input_event_tx:
         Option<tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>>,
 }
 
@@ -1322,7 +1323,7 @@ impl WinitApp {
                 },
                 &mut scene,
             ) {
-                dispatch_scroll_offset_event(&self.state.scroll_event_tx, &scene, ev);
+                dispatch_scroll_offset_event(&self.state.input_event_tx, &scene, ev);
             }
         }
     }
@@ -1348,7 +1349,7 @@ impl WinitApp {
                 .input_processor
                 .process_keyboard_scroll(x, y, delta_y, &mut scene)
             {
-                dispatch_scroll_offset_event(&self.state.scroll_event_tx, &scene, ev);
+                dispatch_scroll_offset_event(&self.state.input_event_tx, &scene, ev);
             }
         }
     }
@@ -1357,7 +1358,7 @@ impl WinitApp {
 
     /// Translate a raw key-down event through the `KeyboardProcessor`, log it,
     /// and broadcast the resulting `KeyboardDispatch` over the `INPUT_EVENTS`
-    /// gRPC channel via `scroll_event_tx`.
+    /// gRPC channel via `input_event_tx`.
     ///
     /// If `current_owner` is `FocusOwner::None` (no focused agent session),
     /// `KeyboardProcessor::process_key_down` returns `None` and the event is
@@ -1403,7 +1404,7 @@ impl WinitApp {
                 kind = ?dispatch.kind,
                 "keyboard: KeyDown dispatched to agent"
             );
-            dispatch_keyboard_event(&self.state.scroll_event_tx, dispatch);
+            dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
         }
     }
 
@@ -1444,7 +1445,7 @@ impl WinitApp {
                 kind = ?dispatch.kind,
                 "keyboard: KeyUp dispatched to agent"
             );
-            dispatch_keyboard_event(&self.state.scroll_event_tx, dispatch);
+            dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
         }
     }
 
@@ -1488,7 +1489,7 @@ impl WinitApp {
                 kind = ?dispatch.kind,
                 "keyboard: Character dispatched to agent"
             );
-            dispatch_keyboard_event(&self.state.scroll_event_tx, dispatch);
+            dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
         }
     }
 
@@ -2195,7 +2196,7 @@ impl WindowedRuntime {
         // runtime for gRPC server, MCP bridge, session management."
         //
         // gRPC server is disabled when grpc_port == 0 (per WindowedConfig docs).
-        let (mut network_rt, mut network_handles, element_repositioned_tx, scroll_event_tx) =
+        let (mut network_rt, mut network_handles, element_repositioned_tx, input_event_tx) =
             start_network_services(
                 cfg.grpc_port,
                 &cfg.psk,
@@ -2294,7 +2295,7 @@ impl WindowedRuntime {
             current_monitor_index: 0,
             global_tokens: startup_compositor_tokens,
             element_repositioned_tx,
-            scroll_event_tx,
+            input_event_tx,
         };
 
         let mut app = WinitApp { state: app_state };
@@ -2508,9 +2509,10 @@ fn start_network_services(
     // Clone the broadcast senders before moving the service into the gRPC task.
     // The windowed runtime holds these senders to:
     // - broadcast ElementRepositionedEvents from the sync chrome-layer reset path.
-    // - inject ScrollOffsetChangedEvent batches after wheel/keyboard scroll events.
+    // - inject EventBatch payloads (scroll, keyboard, and future input events)
+    //   on the input_event_tx channel after windowed input is processed.
     let element_repositioned_tx = service.element_repositioned_tx.clone();
-    let scroll_event_tx = service.input_event_tx.clone();
+    let input_event_tx = service.input_event_tx.clone();
 
     // Wire RuntimeService (ReloadConfig RPC) alongside HudSession.
     let runtime_svc = RuntimeServiceImpl::new(Arc::clone(&runtime_context));
@@ -2535,7 +2537,7 @@ fn start_network_services(
         Some(network_rt),
         vec![handle],
         Some(element_repositioned_tx),
-        Some(scroll_event_tx),
+        Some(input_event_tx),
     ))
 }
 
@@ -2545,7 +2547,7 @@ fn start_network_services(
 ///
 /// Looks up the owning namespace from the scene graph, constructs an
 /// `EventBatch` with a single `ScrollOffsetChangedEvent` envelope, and sends it
-/// on the `scroll_event_tx` broadcast channel.  The session handler delivers the
+/// on the `input_event_tx` broadcast channel.  The session handler delivers the
 /// batch only when the agent is subscribed to `INPUT_EVENTS` — the subscription
 /// gate is enforced in `subscriptions::filter_event_batch`, not here.
 ///
