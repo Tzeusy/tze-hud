@@ -58,9 +58,9 @@ BG_RGBA = (0.0, 0.0, 0.0, 0.30)              # light portal frame only
 HEADER_BG_RGBA = (0.0, 0.0, 0.0, 0.50)       # header slightly denser than frame
 DIVIDER_RGBA = (1.0, 1.0, 1.0, 0.10)
 FOOTER_BG_RGBA = (0.0, 0.0, 0.0, 0.50)
-# Input + output panes: black at 90% opacity.
-INPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.90)
-OUTPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.90)
+# Input + output panes: black at 95% opacity.
+INPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
+OUTPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
 COMPOSER_BG_RGBA = (1.0, 1.0, 1.0, 0.05)
 COMPOSER_BORDER_RGBA = (1.0, 1.0, 1.0, 0.12)
 SUBMIT_HINT_RGBA = (0.54, 0.60, 0.68, 0.90)
@@ -89,10 +89,8 @@ FOOTER_H = 30.0
 DIVIDER_H = 1.0
 ACTIVITY_DOT_SIZE = 8.0
 
-# Equal 50/50 split with a fat draggable divider between panes. Drag-resize
-# needs pointer capture on content-layer tiles (hud-dih4); until then the
-# divider renders as a visual affordance and hovers tint the handle once
-# input reaches the node.
+# Equal 50/50 split with a fat divider between panes. Runtime pointer capture
+# exists, but resize-on-drag still needs portal-side geometry mutation logic.
 PANE_DIVIDER_W = 6.0
 INPUT_PANE_W = (PORTAL_W - PANE_DIVIDER_W) / 2.0
 PANE_DIVIDER_RGBA = (1.0, 1.0, 1.0, 0.14)

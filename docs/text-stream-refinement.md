@@ -1,9 +1,9 @@
 # Text Stream Portal — UX Refinement Handover
 
-Date: 2026-04-19 (update; originally opened 2026-04-18)
+Date: 2026-04-25 (update; originally opened 2026-04-18)
 Status: **in progress — not complete.**
 
-## Current state (2026-04-19 pm)
+## Current state (2026-04-25)
 
 The previous revision of this doc claimed the HitRegion render fix had
 landed; on inspection it had never been committed. Operator feedback on the
@@ -11,9 +11,9 @@ live HUD confirmed the symptom ("background is still pale blue") — the
 default HitRegion branch in `renderer.rs` was still painting opaque
 `[0.2, 0.3, 0.5, 1.0]` over the pane backgrounds.
 
-This update actually lands the fix, updates pixel-readback tests 14 + 17 to
-match the new behaviour, and drops pane opacity from 0.95 → 0.90 per the
-operator's latest preference.
+This update keeps the HitRegion render fix, reconciles the exemplar constants
+with the intended pane opacity, and raises the input/output pane backgrounds to
+0.95 per the operator's latest preference.
 
 **Interactivity status** — `hud-dih4` (pointer capture on content-layer
 tiles, PR #490) and `hud-6bbe` (wheel + PgUp/PgDn wiring, PR #497) are both
@@ -38,9 +38,9 @@ One exemplar script under `.claude/skills/user-test/scripts/`:
   Esc cancel`). OUTPUT pane on the right with TRANSCRIPT eyebrow and the
   markdown body. **Equal 50/50 split** between panes separated by a **fat
   6px drag divider** with a centred 2×44px grip bar and an 8px-wide
-  `portal-pane-resize` HitRegion for future drag. Panes render at **90%
-  black opacity** per the operator's 2026-04-19 pm preference (iterated
-  80% → 90% → 95% → back to 90%). All chrome tokens are still at the top
+  `portal-pane-resize` HitRegion for future drag. Panes render at **95%
+  black opacity** per the operator's 2026-04-25 preference (iterated
+  80% → 90% → 95%). All chrome tokens are still at the top
   of the file; iterate there. The former separate hud-w5ih scroll contract
   exemplar is now the `scroll` phase: mount long output + RegisterTileScroll,
   four SetScrollOffset steps, five appends mid-scroll with offset preserved,
@@ -106,13 +106,14 @@ pixel_readback --features "headless dev-mode" -- test_color_14 test_color_17`
   is not wired — moving the handle still needs code that consumes the
   captured drag and adjusts `INPUT_PANE_W` at runtime. File a bead when the
   engine redeploy confirms pointer capture is landing.
+- **Drag-to-move portal tile**: not wired today. Pointer capture exists, but
+  the live windowed/content-layer path does not turn a header/title-bar drag
+  into tile bounds mutation and geometry persistence. Tracked as `hud-9yfce`.
 - **Composer typing / submit**: the composer is placeholder-only.  No text
   input path exists for agent-authored content-layer tiles in v1 — key
   events currently reach the runtime but there is no plumbing from a
   focused HitRegion to a mutable text buffer that can be re-rendered via
-  MutationBatch. This is a new piece of work, not blocked on any existing
-  bead; needs a dedicated epic (propose: "composer-input pipeline —
-  HitRegion.focused → CommandInputEvent → agent mutation batch").
+  MutationBatch. Tracked as `hud-opkvq`.
 - **Wheel / keyboard scroll exercised through the exemplar**: the engine
   path is in place (PR #497). The portal exemplar's `scroll` phase proves
   the adapter-driven `SetScrollOffset` path; a future pass should still
@@ -169,7 +170,7 @@ right thing (no background rect emitted).
   `z_order = 220` (bump if orphan z-conflict)
 - Root backdrop: `(0, 0, 0, 0.30)` — light portal frame only
 - Header / footer strips: `(0, 0, 0, 0.50)`
-- Pane backgrounds (INPUT + OUTPUT): `(0, 0, 0, 0.90)`
+- Pane backgrounds (INPUT + OUTPUT): `(0, 0, 0, 0.95)`
 - Composer inset (inside input pane): white `(1, 1, 1, 0.05)` + 1px white
   border quads, green caret
 - Pane divider: `PANE_DIVIDER_W=6.0`, `INPUT_PANE_W = (PORTAL_W -
@@ -252,5 +253,5 @@ python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_str
   am session (see "Engine work" above).
 - `hud-6bbe` — **CLOSED** (PR #497). Wheel + PgUp/PgDn wired through
   `process_keyboard_scroll`.
-- Needed new bead — composer text input pipeline (no existing bead tracks
-  this).
+- `hud-opkvq` — click-focus and keyboard input for the portal composer.
+- `hud-9yfce` — drag-to-move support for text stream portal tiles.
