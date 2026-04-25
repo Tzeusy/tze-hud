@@ -391,6 +391,99 @@ async fn pointer_event_not_delivered_to_unsubscribed_agent() {
     );
 }
 
+/// AC 6: when `node_id` is nil (tile-level hit, no specific node), the wire-format
+/// `node_id` field must be empty bytes — not 16 zero bytes.
+///
+/// This mirrors the proto field-presence convention established by FocusLostEvent,
+/// FocusGainedEvent, and CaptureReleasedEvent (see PR #610 / hud-jtnop): an absent
+/// optional ID is represented as an empty `bytes` field, not as a nil UUID serialized
+/// to 16 zero bytes.
+///
+/// Covers all three pointer event kinds since they share the same `node_id` encoding
+/// path in `dispatch_pointer_event`.
+#[tokio::test]
+async fn pointer_event_with_nil_node_id_serializes_empty_bytes() {
+    let (mut client, _server, input_event_tx) = start_server().await;
+    let (_tx, mut stream) =
+        perform_handshake_with_input(&mut client, "nil-node-id-pointer-agent").await;
+
+    let tile_id = tile_id_fixture();
+    // Explicitly empty node_id bytes — the "nil / absent" encoding.
+    let nil_node_id: Vec<u8> = Vec::new();
+    let batch = pointer_down_batch(tile_id.clone(), nil_node_id.clone());
+    let _ = input_event_tx.send(("nil-node-id-pointer-agent".to_string(), batch));
+
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("timed out waiting for PointerDownEvent (nil node_id)")
+        .unwrap()
+        .unwrap();
+
+    match msg.payload {
+        Some(ServerPayload::EventBatch(batch)) => {
+            assert_eq!(batch.events.len(), 1, "batch must contain exactly 1 event");
+            match &batch.events[0].event {
+                Some(InputEvent::PointerDown(ev)) => {
+                    assert_eq!(ev.tile_id, tile_id, "tile_id must round-trip");
+                    assert!(
+                        ev.node_id.is_empty(),
+                        "nil node_id must serialize to empty bytes, got {:?}",
+                        ev.node_id
+                    );
+                }
+                other => panic!("expected PointerDown, got: {other:?}"),
+            }
+        }
+        other => panic!("expected EventBatch, got: {other:?}"),
+    }
+}
+
+/// AC 7: when `node_id` is non-nil, the wire-format `node_id` field must be exactly
+/// 16 bytes (the UUID byte representation).
+///
+/// Verifies that the nil-guard added in hud-yp963 does not break the normal
+/// (non-nil) serialization path.
+#[tokio::test]
+async fn pointer_event_with_node_id_serializes_16_bytes() {
+    let (mut client, _server, input_event_tx) = start_server().await;
+    let (_tx, mut stream) =
+        perform_handshake_with_input(&mut client, "non-nil-node-id-pointer-agent").await;
+
+    let tile_id = tile_id_fixture();
+    let node_id = tile_id_fixture(); // non-nil: a freshly generated UUID
+    assert_eq!(node_id.len(), 16, "fixture must produce a 16-byte UUID");
+    let batch = pointer_down_batch(tile_id.clone(), node_id.clone());
+    let _ = input_event_tx.send(("non-nil-node-id-pointer-agent".to_string(), batch));
+
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("timed out waiting for PointerDownEvent (non-nil node_id)")
+        .unwrap()
+        .unwrap();
+
+    match msg.payload {
+        Some(ServerPayload::EventBatch(batch)) => {
+            assert_eq!(batch.events.len(), 1, "batch must contain exactly 1 event");
+            match &batch.events[0].event {
+                Some(InputEvent::PointerDown(ev)) => {
+                    assert_eq!(ev.tile_id, tile_id, "tile_id must round-trip");
+                    assert_eq!(
+                        ev.node_id, node_id,
+                        "non-nil node_id must serialize to 16 bytes and round-trip"
+                    );
+                    assert_eq!(
+                        ev.node_id.len(),
+                        16,
+                        "non-nil node_id must be exactly 16 bytes"
+                    );
+                }
+                other => panic!("expected PointerDown, got: {other:?}"),
+            }
+        }
+        other => panic!("expected EventBatch, got: {other:?}"),
+    }
+}
+
 /// AC 5: pointer events are routed only to the owning namespace.
 ///
 /// A second agent subscribed to INPUT_EVENTS under a different namespace must
