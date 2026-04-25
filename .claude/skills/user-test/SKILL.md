@@ -836,12 +836,12 @@ persistent — `auto_clear_ms=None` on this zone) for phases 1–3.
 
 ## Text Stream Portals Exemplar Scenario
 
-**Status: implementation complete, live user-test exemplar pending.** The
+**Status: implementation complete, live user-test exemplar available.** The
 phase-0 raw-tile pilot shipped via epic `hud-t98e` (see
 `docs/reports/hud-t98e-text-stream-portals.md`). All 13 normative requirements
 in `openspec/specs/text-stream-portals/spec.md` are covered by integration
 tests; gen-2 reconciliation (PR #441) confirmed 13/13 coverage. What remains
-is a live user-test exemplar script plus recorded manual visual sign-off.
+is recorded manual visual sign-off.
 
 ### Existing automated coverage (do not duplicate)
 
@@ -869,12 +869,34 @@ Evidence artifact: `docs/evidence/text-stream-portals/validation-2026-04-16.md`.
 - **External adapter, authenticated** — local adapter processes pass through
   existing capability grants; no implicit local trust.
 
-### What the live exemplar still needs to exercise
+### CLI
 
-A `text_stream_portal_exemplar.py` (not yet authored) should drive the
-resident raw-tile pilot against a live HUD — following the same shape as
-`presence_card_exemplar.py` — and produce operator-visible proof for axes
-that integration tests cannot validate alone:
+```bash
+python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
+  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --psk-env TZE_HUD_PSK \
+  --agent-id agent-alpha \
+  --doc docs/exemplar-manual-review-checklist.md \
+  --tab-width 1920 \
+  --phases baseline,scroll \
+  --baseline-hold-s 30 \
+  --max-lines 80
+```
+
+Optional `--phases` values:
+
+| Phase | What it exercises | Operator-visible proof |
+|---|---|---|
+| `baseline` | Two-pane INPUT/OUTPUT portal composition | Portal appears at right edge with header, composer, divider, transcript body, and footer |
+| `scroll` | Transcript Interaction Contract | OUTPUT pane registers scroll, steps through transcript data, preserves mid-scroll window while tail lines append, then returns to latest output |
+| `streaming` | Low-latency text interaction | OUTPUT body grows in ordered chunks |
+| `rapid` | Coalescing coherence smoke | Rapid publish pressure does not collapse the retained window to one latest line |
+
+### Live Validation Axes
+
+`text_stream_portal_exemplar.py` drives the resident raw-tile pilot against a
+live HUD and produces operator-visible proof for axes that integration tests
+cannot validate alone:
 
 | Axis | Spec requirement | What the operator should see |
 |------|------------------|------------------------------|
@@ -895,16 +917,18 @@ that integration tests cannot validate alone:
 - Portal-specific transport RPCs outside the primary session stream
 - Runtime ownership of external process or tmux lifecycle
 
-### When the exemplar script lands
+### Human Acceptance Criteria
 
-1. Add `text_stream_portal_exemplar.py` under
-   `.claude/skills/user-test/scripts/`, following `presence_card_exemplar.py`
-   (uses primary `HudSession` stream, emits per-step JSON transcript to
-   `test_results/`).
-2. Replace this section with CLI, phase table, and Human Acceptance Criteria
-   once the script is implemented.
-3. Update `docs/exemplar-manual-review-checklist.md` row 11 with the manual
-   visual sign-off result.
+- The portal stays in the content layer and remains below chrome.
+- The OUTPUT pane text is readable and bounded within the portal.
+- During `scroll`, the visible output window advances in steps, appended tail
+  lines do not force an unsolicited jump, and return-to-tail shows the newest
+  output.
+- During `streaming`, output arrives incrementally rather than as a single
+  snapshot replace.
+- During `rapid`, the pane remains coherent under fast updates.
+- Manual review notes and any UX tweaks are recorded in
+  `docs/exemplar-manual-review-checklist.md` row 11.
 
 ## Behavior Rules
 

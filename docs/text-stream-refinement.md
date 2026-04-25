@@ -28,7 +28,7 @@ complete".
 
 ### What now lives in the repo
 
-Two exemplar scripts under `.claude/skills/user-test/scripts/`:
+One exemplar script under `.claude/skills/user-test/scripts/`:
 
 - **`text_stream_portal_exemplar.py`** — the two-pane UX demo.
   860×680 content-layer tile at the right edge, rounded 14px, z=220. Header
@@ -41,14 +41,12 @@ Two exemplar scripts under `.claude/skills/user-test/scripts/`:
   `portal-pane-resize` HitRegion for future drag. Panes render at **90%
   black opacity** per the operator's 2026-04-19 pm preference (iterated
   80% → 90% → 95% → back to 90%). All chrome tokens are still at the top
-  of the file; iterate there.
+  of the file; iterate there. The former separate hud-w5ih scroll contract
+  exemplar is now the `scroll` phase: mount long output + RegisterTileScroll,
+  four SetScrollOffset steps, five appends mid-scroll with offset preserved,
+  then return-to-tail.
 
-- **`text_stream_scroll_exemplar.py`** — hud-w5ih Transcript Interaction
-  Contract test. Four phases: (1) mount long transcript + RegisterTileScroll,
-  (2) four SetScrollOffset steps, (3) five appends mid-scroll with offset
-  preserved, (4) return-to-tail.
-
-Both scripts use `HudClient` from `hud_grpc_client.py` and follow the
+The script uses `HudClient` from `hud_grpc_client.py` and follows the
 split-batch `set_tile_root` → `add_node` pattern (see Gotchas).
 
 ### Engine work that landed this session
@@ -116,17 +114,15 @@ pixel_readback --features "headless dev-mode" -- test_color_14 test_color_17`
   bead; needs a dedicated epic (propose: "composer-input pipeline —
   HitRegion.focused → CommandInputEvent → agent mutation batch").
 - **Wheel / keyboard scroll exercised through the exemplar**: the engine
-  path is in place (PR #497). What's missing is an exemplar phase that
-  actually drives the wheel / PgUp / PgDn to prove the path; today the
-  scroll exemplar drives `SetScrollOffset` via the adapter.
+  path is in place (PR #497). The portal exemplar's `scroll` phase proves
+  the adapter-driven `SetScrollOffset` path; a future pass should still
+  drive actual wheel / PgUp / PgDn input against the live HUD.
 - **`docs/exemplar-manual-review-checklist.md` row 11** — still needs the
   final UX-tweak sign-off row entered once a human confirms the two-pane
   render on the live HUD.
-- **`.claude/skills/user-test/SKILL.md`** — the "Text Stream Portals
-  Exemplar Scenario" section still reads "pending exemplar script" even
-  though both scripts now exist. Needs: CLI, phase table, and Human
-  Acceptance Criteria (matching the shape used for presence-card /
-  subtitle / status-bar exemplars).
+- **`.claude/skills/user-test/SKILL.md`** — now documents the unified
+  `text_stream_portal_exemplar.py` CLI and phase table. Keep it in sync as
+  the portal phases evolve.
 - **User-visible confirmation of the latest render**. The last on-screen
   check by the operator happened just before the mid-session file
   replacement; after restoring the two-pane design the script did publish
@@ -184,13 +180,12 @@ right thing (no background rect emitted).
 ## How to resume
 
 1. Read this file.
-2. Read `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py`
-   (~675 lines) and `text_stream_scroll_exemplar.py` (~349 lines).
+2. Read `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py`.
 3. If iterating the visual UX, tweak the constants at the top of
    `text_stream_portal_exemplar.py` and re-run (repro commands below). No
    rebuild needed — only the Python client changes.
-4. If iterating the scroll contract, the `scroll_exemplar` covers the four
-   Transcript Interaction phases.
+4. If iterating the scroll contract, use the portal exemplar's `scroll`
+   phase; it covers the four Transcript Interaction phases.
 5. Remaining housekeeping: update `docs/exemplar-manual-review-checklist.md`
    row 11 and `.claude/skills/user-test/SKILL.md` Text Stream Portals
    section once you're happy with the render.
@@ -213,15 +208,9 @@ python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_str
   --agent-id agent-alpha \
   --doc /home/tze/gt/tze_hud/mayor/rig/docs/exemplar-manual-review-checklist.md \
   --tab-width 1920 \
-  --phases baseline \
+  --phases baseline,scroll \
   --baseline-hold-s 30 \
   --max-lines 80
-
-# hud-w5ih scroll contract test
-python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_stream_scroll_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
-  --psk-env TZE_HUD_PSK \
-  --agent-id agent-alpha
 ```
 
 ## Gotchas discovered the hard way

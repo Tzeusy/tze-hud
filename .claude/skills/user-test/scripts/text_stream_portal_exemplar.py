@@ -16,6 +16,8 @@ Layout:
 
 Phases:
   - baseline  : render full chrome + transcript viewport, then hold
+  - scroll    : register output scroll, step through transcript, append tail,
+                then return to latest output
   - streaming : clear transcript, reveal content in ordered chunks
   - rapid     : rapid-replace stress (coalescing-coherence smoke)
 
@@ -109,6 +111,15 @@ DEFAULT_PSK_ENV = "TZE_HUD_PSK"
 DEFAULT_TARGET = "tzehouse-windows.parrot-hen.ts.net:50051"
 DEFAULT_DOC = "docs/exemplar-manual-review-checklist.md"
 DEFAULT_TRANSCRIPT_PATH = "test_results/text-stream-portal-latest.json"
+MAX_MARKDOWN_BYTES = 65535
+
+# ─── Scroll contract tokens ──────────────────────────────────────────────────
+
+SCROLL_TOTAL_LINES = 80
+SCROLL_VISIBLE_LINES = 14
+SCROLL_STEP_PX = 40.0
+SCROLL_LINE_PX = 20.0
+SCROLL_PHASE_PAUSE_S = 2.5
 
 # ─── Content helpers ──────────────────────────────────────────────────────────
 
@@ -118,6 +129,18 @@ def load_transcript_slice(doc_path: str, max_lines: int) -> str:
     raw = Path(doc_path).read_text(encoding="utf-8")
     lines = raw.splitlines()
     return "\n".join(lines[:max_lines])
+
+
+def bounded_transcript(lines: list[str], start: int, max_lines: int) -> str:
+    """Return a viewport-sized markdown window within the protocol byte budget."""
+    end = min(start + max_lines, len(lines))
+    start = min(start, end)
+    while start < end:
+        joined = "\n".join(lines[start:end])
+        if len(joined.encode("utf-8")) <= MAX_MARKDOWN_BYTES:
+            return joined
+        start += 1
+    return ""
 
 
 def make_solid_color_node(
@@ -409,6 +432,37 @@ async def publish_portal(
         await client.add_node(lease_id, tile_id, child, parent_id=root_id)
 
 
+def register_tile_scroll_mutation(
+    tile_id: bytes,
+    *,
+    scrollable_y: bool = True,
+    content_height: float = -1.0,
+) -> types_pb2.MutationProto:
+    return types_pb2.MutationProto(
+        register_tile_scroll=types_pb2.RegisterTileScrollMutation(
+            tile_id=tile_id,
+            scrollable_x=False,
+            scrollable_y=scrollable_y,
+            content_width=-1.0,
+            content_height=content_height,
+        )
+    )
+
+
+def set_scroll_offset_mutation(
+    tile_id: bytes,
+    offset_x: float,
+    offset_y: float,
+) -> types_pb2.MutationProto:
+    return types_pb2.MutationProto(
+        set_scroll_offset=types_pb2.SetScrollOffsetMutation(
+            tile_id=tile_id,
+            offset_x=offset_x,
+            offset_y=offset_y,
+        )
+    )
+
+
 def emit_step_event(
     transcript: list[dict[str, Any]],
     step_index: int,
@@ -466,6 +520,125 @@ async def run_baseline(
         "expected_visual": "portal tile visible; body text readable",
     }, hold_s=hold_s, lines=total_lines)
     await asyncio.sleep(hold_s)
+
+
+async def run_scroll(
+    client: HudClient, lease_id: bytes, tile_id: bytes,
+    transcript: list[dict[str, Any]],
+) -> None:
+    """Exercise the transcript interaction contract inside the portal output pane."""
+    emit_step_event(transcript, 4, "started", {
+        "code": "scroll",
+        "title": "Output scroll contract",
+        "action": "mount long output, register scroll, step offset, append tail, return",
+        "expected_visual": "OUTPUT pane scrolls through bounded transcript data, then returns to latest lines",
+    })
+
+    history = [
+        f"[{i:03d}] Stream output line {i}: {'data ' * 8}".rstrip()
+        for i in range(SCROLL_TOTAL_LINES)
+    ]
+    await client.submit_mutation_batch(
+        lease_id,
+        [register_tile_scroll_mutation(
+            tile_id,
+            scrollable_y=True,
+            content_height=float(len(history) * SCROLL_LINE_PX),
+        )],
+    )
+    viewport_start = 0
+    await publish_portal(
+        client, lease_id, tile_id,
+        title="Exemplar Review Portal",
+        subtitle="Transcript Interaction Contract",
+        body=bounded_transcript(history, viewport_start, SCROLL_VISIBLE_LINES),
+        footer_meta=(
+            f"scroll  •  lines {viewport_start + 1}-"
+            f"{viewport_start + SCROLL_VISIBLE_LINES} / {len(history)}"
+        ),
+        include_tile_setup=True,
+    )
+    emit_step_event(transcript, 4, "checkpoint", {
+        "code": "scroll:mount",
+        "title": "Mount long output",
+        "action": "registered vertical scroll config and mounted bounded output",
+        "expected_visual": "OUTPUT pane shows first transcript window within portal bounds",
+    }, visible_lines=SCROLL_VISIBLE_LINES, total_lines=len(history))
+    await asyncio.sleep(SCROLL_PHASE_PAUSE_S)
+
+    scroll_offset = 0.0
+    for step in range(4):
+        scroll_offset += SCROLL_STEP_PX
+        viewport_start = min(
+            len(history) - SCROLL_VISIBLE_LINES,
+            int(scroll_offset // SCROLL_LINE_PX),
+        )
+        await client.submit_mutation_batch(
+            lease_id,
+            [set_scroll_offset_mutation(tile_id, 0.0, scroll_offset)],
+        )
+        await publish_portal(
+            client, lease_id, tile_id,
+            title="Exemplar Review Portal",
+            subtitle="Transcript Interaction Contract",
+            body=bounded_transcript(history, viewport_start, SCROLL_VISIBLE_LINES),
+            footer_meta=(
+                f"scroll_y={scroll_offset:.0f}px  •  lines "
+                f"{viewport_start + 1}-{viewport_start + SCROLL_VISIBLE_LINES}"
+            ),
+            include_tile_setup=False,
+        )
+        emit_step_event(transcript, 4, "checkpoint", {
+            "code": "scroll:offset",
+            "title": "Scroll output window",
+            "action": f"set scroll_y={scroll_offset:.0f}px",
+            "expected_visual": "OUTPUT pane advances through transcript while chrome remains readable",
+        }, scroll_y=scroll_offset, viewport_start=viewport_start, scroll_step=step + 1)
+        await asyncio.sleep(0.5)
+
+    await asyncio.sleep(SCROLL_PHASE_PAUSE_S)
+    mid_scroll = scroll_offset
+    for i in range(5):
+        history.append(f"[NEW-{i:02d}] Tail append at t+{i}: live output arriving")
+        await publish_portal(
+            client, lease_id, tile_id,
+            title="Exemplar Review Portal",
+            subtitle="Transcript Interaction Contract",
+            body=bounded_transcript(history, viewport_start, SCROLL_VISIBLE_LINES),
+            footer_meta=(
+                f"mid-scroll append  •  held scroll_y={mid_scroll:.0f}px  •  "
+                f"tail={len(history)} lines"
+            ),
+            include_tile_setup=False,
+        )
+        emit_step_event(transcript, 4, "checkpoint", {
+            "code": "scroll:append",
+            "title": "Append while mid-scroll",
+            "action": f"append line {len(history) - 1} while preserving scroll_y",
+            "expected_visual": "visible output window does not jump to the tail",
+        }, scroll_y=mid_scroll, total_lines=len(history))
+        await asyncio.sleep(0.6)
+
+    await client.submit_mutation_batch(
+        lease_id,
+        [set_scroll_offset_mutation(tile_id, 0.0, 0.0)],
+    )
+    tail_start = max(0, len(history) - SCROLL_VISIBLE_LINES)
+    await publish_portal(
+        client, lease_id, tile_id,
+        title="Exemplar Review Portal",
+        subtitle="Transcript Interaction Contract",
+        body=bounded_transcript(history, tail_start, SCROLL_VISIBLE_LINES),
+        footer_meta=f"tail  •  lines {tail_start + 1}-{len(history)} / {len(history)}",
+        include_tile_setup=False,
+    )
+    emit_step_event(transcript, 4, "completed", {
+        "code": "scroll",
+        "title": "Output scroll contract",
+        "action": "returned scroll offset to tail",
+        "expected_visual": "latest appended lines are visible in OUTPUT pane",
+    }, tail_start=tail_start, total_lines=len(history))
+    await asyncio.sleep(SCROLL_PHASE_PAUSE_S)
 
 
 async def run_streaming(
@@ -592,6 +765,8 @@ async def run_scenario(args: argparse.Namespace) -> int:
                     client, lease_id, tile_id, body, transcript,
                     args.baseline_hold_s,
                 )
+            elif phase == "scroll":
+                await run_scroll(client, lease_id, tile_id, transcript)
             elif phase == "streaming":
                 await run_streaming(
                     client, lease_id, tile_id, body, transcript,
@@ -649,8 +824,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--doc", default=DEFAULT_DOC)
     p.add_argument("--max-lines", type=int, default=120)
     p.add_argument("--tab-width", type=float, default=1920.0)
-    p.add_argument("--phases", default="baseline",
-                   help="Comma list: baseline,streaming,rapid")
+    p.add_argument("--phases", default="baseline,scroll",
+                   help="Comma list: baseline,scroll,streaming,rapid")
     p.add_argument("--baseline-hold-s", type=float, default=20.0)
     p.add_argument("--stream-chunks", type=int, default=6)
     p.add_argument("--stream-interval-s", type=float, default=1.5)

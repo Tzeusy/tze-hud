@@ -335,7 +335,7 @@ _(to be filled during review)_
 **Archived change:** `openspec/changes/archive/2026-04-17-text-stream-portals/` (spec/RFC planning only; implementation tracked under `hud-t98e`)
 **RFC:** 0013 (see `about/legends-and-lore/`)
 
-**Status:** integration-pass. Phase-0 raw-tile pilot shipped across `hud-t98e.1` / `.2` / `.3` / `.4` (PRs #427, #429, #432, #435), with follow-up closures `hud-r11x` (PR #437) and `hud-r9u0` (PR #438). Gen-2 reconciliation `hud-fomr` (PR #441) confirmed full 13/13 spec requirement coverage. Live user-test exemplar script and manual visual sign-off are the remaining closeout items.
+**Status:** integration-pass. Phase-0 raw-tile pilot shipped across `hud-t98e.1` / `.2` / `.3` / `.4` (PRs #427, #429, #432, #435), with follow-up closures `hud-r11x` (PR #437) and `hud-r9u0` (PR #438). Gen-2 reconciliation `hud-fomr` (PR #441) confirmed full 13/13 spec requirement coverage. The live user-test exemplar now exists at `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py`; manual visual sign-off remains the closeout item.
 
 ### Capability summary
 
@@ -395,9 +395,9 @@ Integration tests prove structure; these axes still need operator-visible proof 
 
 ### Closeout path
 
-1. Author `text_stream_portal_exemplar.py` under `.claude/skills/user-test/scripts/`, following `presence_card_exemplar.py` (uses primary `HudSession` stream, emits per-step JSON transcript to `test_results/`).
-2. Update the user-test skill (`.claude/skills/user-test/SKILL.md`) with CLI, phases, and a Human Acceptance Criteria table once the script exists.
-3. Run the exemplar against the live Windows HUD, record PASS/FAIL per live validation axis above, then move this row to `done`.
+1. Run `text_stream_portal_exemplar.py --phases baseline,scroll` against the live Windows HUD.
+2. Record PASS/FAIL per live validation axis above, including the OUTPUT-pane scroll phase.
+3. Move this row to `done` only after evidence-backed manual sign-off is recorded.
 
 ### UX Tweaks
 
