@@ -33,6 +33,7 @@ use crate::pipeline::{
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use crate::text::{TextItem, TextRasterizer};
 use crate::widget::WidgetRenderer;
+use tze_hud_input::{DRAG_OPACITY_BOOST, DRAG_Z_ORDER_BOOST};
 use tze_hud_scene::DegradationLevel;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::resolve_token_placeholders;
@@ -2845,7 +2846,7 @@ impl Compositor {
         let mut items: Vec<TextItem> = Vec::new();
 
         // ── TextMarkdownNode tiles ────────────────────────────────────────────
-        for tile in &scene.visible_tiles() {
+        for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
             if let Some(root_id) = tile.root_node {
                 // Compute scroll offset once per tile and pass it down so text
                 // glyph positions track the scrolled content (Bounded Transcript
@@ -4118,8 +4119,8 @@ impl Compositor {
 
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
-        // Collect visible tiles
-        let tiles = scene.visible_tiles();
+        // Collect visible tiles, re-sorted with drag-z-order boost applied.
+        let tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
         telemetry.tile_count = tiles.len() as u32;
         telemetry.node_count = scene.node_count() as u32;
         telemetry.active_leases = scene.leases.len() as u32;
@@ -4307,8 +4308,8 @@ impl Compositor {
 
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
-        // Collect visible tiles
-        let tiles = scene.visible_tiles();
+        // Collect visible tiles, re-sorted with drag-z-order boost applied.
+        let tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
         telemetry.tile_count = tiles.len() as u32;
         telemetry.node_count = scene.node_count() as u32;
         telemetry.active_leases = scene.leases.len() as u32;
@@ -4518,7 +4519,8 @@ impl Compositor {
         self.evict_unused_image_textures(&image_refs);
 
         // ── Pass 1: Content (background + agent tiles) ──────────────────────
-        let tiles = scene.visible_tiles();
+        // Re-sort with drag-z-order boost so the dragged tile renders on top.
+        let tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
         telemetry.tile_count = tiles.len() as u32;
         telemetry.node_count = scene.node_count() as u32;
         telemetry.active_leases = scene.leases.len() as u32;
@@ -5258,7 +5260,7 @@ impl Compositor {
         scene: &SceneGraph,
     ) -> Vec<crate::pipeline::RoundedRectDrawCmd> {
         let mut cmds = Vec::new();
-        for tile in &scene.visible_tiles() {
+        for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
             if let Some(root_id) = tile.root_node {
                 // Compute scroll offset once per tile rather than on every
                 // recursive node visit — it is constant across all nodes in
@@ -6601,11 +6603,57 @@ impl Compositor {
         }
     }
 
+    // ─── Drag-boost helpers ───────────────────────────────────────────────────
+
+    /// Return the effective sort key for a tile, applying `DRAG_Z_ORDER_BOOST`
+    /// when the tile is in the `Activated` drag phase.
+    ///
+    /// The boost raises the dragged tile above its peers in painter's-algorithm
+    /// order (back-to-front).  `saturating_add` prevents wraparound for tiles
+    /// already near `u32::MAX`.
+    ///
+    /// Per `tze_hud_input::drag::DRAG_Z_ORDER_BOOST` (0x1000).
+    fn effective_tile_z_order(tile: &Tile, scene: &SceneGraph) -> u32 {
+        if scene.is_drag_active(tile.id) {
+            tile.z_order.saturating_add(DRAG_Z_ORDER_BOOST)
+        } else {
+            tile.z_order
+        }
+    }
+
+    /// Return the effective opacity for a tile, applying `DRAG_OPACITY_BOOST`
+    /// (clamped to 1.0) when the tile is in the `Activated` drag phase.
+    ///
+    /// `DRAG_OPACITY_BOOST` is currently 1.0 (no visible change), but is applied
+    /// faithfully so future changes to the constant take effect without a code
+    /// change in the compositor.
+    ///
+    /// Per `tze_hud_input::drag::DRAG_OPACITY_BOOST`.
+    fn effective_tile_opacity(tile: &Tile, scene: &SceneGraph) -> f32 {
+        if scene.is_drag_active(tile.id) {
+            (tile.opacity * DRAG_OPACITY_BOOST).min(1.0)
+        } else {
+            tile.opacity
+        }
+    }
+
+    /// Re-sort a slice of tile references by effective z-order (back to front),
+    /// applying `DRAG_Z_ORDER_BOOST` to the dragged tile's sort key.
+    ///
+    /// This does not mutate the scene; it returns a new owned `Vec<&Tile>` with
+    /// the drag-boosted ordering.  The original `z_order` fields are unchanged.
+    fn sort_tiles_with_drag_boost<'a>(tiles: Vec<&'a Tile>, scene: &SceneGraph) -> Vec<&'a Tile> {
+        let mut sorted = tiles;
+        sorted.sort_by_key(|t| Self::effective_tile_z_order(t, scene));
+        sorted
+    }
+
     /// Determine the background fill color for a tile based on its root content.
     ///
     /// Returns `None` when the tile's rounded root node should be solely
     /// responsible for its own backdrop shape.
     fn tile_background_color(&self, tile: &Tile, scene: &SceneGraph) -> Option<[f32; 4]> {
+        let opacity = Self::effective_tile_opacity(tile, scene);
         if let Some(root_id) = tile.root_node
             && let Some(node) = scene.nodes.get(&root_id)
         {
@@ -6620,7 +6668,7 @@ impl Compositor {
                     if let Some(bg) = &tm.background {
                         return Some(bg.to_array());
                     }
-                    return Some([0.15, 0.15, 0.25, tile.opacity]);
+                    return Some([0.15, 0.15, 0.25, opacity]);
                 }
                 NodeData::HitRegion(_) => {
                     // HitRegion is an invisible interaction primitive. Its visible
@@ -6630,11 +6678,11 @@ impl Compositor {
                 }
                 NodeData::StaticImage(_) => {
                     // Tile background for image tiles: near-black with slight tint
-                    return Some([0.05, 0.05, 0.05, tile.opacity]);
+                    return Some([0.05, 0.05, 0.05, opacity]);
                 }
             }
         }
-        Some([0.1, 0.1, 0.2, tile.opacity])
+        Some([0.1, 0.1, 0.2, opacity])
     }
 
     /// Render a node and its children within a tile.
@@ -6772,7 +6820,7 @@ impl Compositor {
                         w: dw,
                         h: dh,
                         uv_rect,
-                        tint: [1.0, 1.0, 1.0, tile.opacity],
+                        tint: [1.0, 1.0, 1.0, Self::effective_tile_opacity(tile, scene)],
                     });
                 } else {
                     // Fallback: warm-gray placeholder when bytes not registered.
@@ -13865,6 +13913,165 @@ mod tests {
         assert_eq!(
             cleared_count, idle_count,
             "after clearing drag, vertex count must return to idle level"
+        );
+    }
+
+    // ─── Drag z-order + opacity boost unit tests [hud-17c8p] ─────────────────
+
+    /// A tile in the `Activated` drag phase MUST be sorted last (highest
+    /// effective z-order, front-most) among tiles, regardless of its declared
+    /// `z_order` value.
+    ///
+    /// Acceptance: `sort_tiles_with_drag_boost` places the dragged tile after
+    /// a tile with a higher declared `z_order` once the drag boost is applied.
+    #[test]
+    fn drag_z_order_boost_raises_tile_above_peers() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("agent-a", 60_000, vec![]);
+
+        // Tile A: lower z_order (renders behind by default).
+        let tile_a = scene
+            .create_tile(
+                tab,
+                "tile-a",
+                lease,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                5, // z_order = 5
+            )
+            .unwrap();
+
+        // Tile B: higher z_order (renders in front by default).
+        let tile_b = scene
+            .create_tile(
+                tab,
+                "tile-b",
+                lease,
+                Rect::new(50.0, 50.0, 100.0, 100.0),
+                10, // z_order = 10
+            )
+            .unwrap();
+
+        // Without any active drag: tile A (z=5) sorts before tile B (z=10).
+        let sorted = Compositor::sort_tiles_with_drag_boost(scene.visible_tiles(), &scene);
+        assert_eq!(
+            sorted[0].id, tile_a,
+            "without drag: lower z_order tile must sort first"
+        );
+        assert_eq!(
+            sorted[1].id, tile_b,
+            "without drag: higher z_order tile must sort last"
+        );
+
+        // Activate drag for tile A (z=5 → 5 + 0x1000 = 4101, exceeds tile B's z=10).
+        scene.set_drag_active(tile_a);
+
+        let sorted_with_drag =
+            Compositor::sort_tiles_with_drag_boost(scene.visible_tiles(), &scene);
+        assert_eq!(
+            sorted_with_drag[0].id, tile_b,
+            "with drag active on tile A: tile B (z=10) must sort first (further back)"
+        );
+        assert_eq!(
+            sorted_with_drag[1].id, tile_a,
+            "with drag active on tile A: tile A must sort last (front-most, boosted)"
+        );
+
+        // Clear drag: restore original order.
+        scene.clear_drag_active(tile_a);
+        let sorted_cleared = Compositor::sort_tiles_with_drag_boost(scene.visible_tiles(), &scene);
+        assert_eq!(
+            sorted_cleared[0].id, tile_a,
+            "after drag cleared: original order restored"
+        );
+        assert_eq!(
+            sorted_cleared[1].id, tile_b,
+            "after drag cleared: original order restored"
+        );
+    }
+
+    /// `effective_tile_opacity` MUST multiply `tile.opacity` by `DRAG_OPACITY_BOOST`
+    /// (clamped to 1.0) when the tile is drag-active, and return `tile.opacity`
+    /// unchanged when no drag is active.
+    ///
+    /// With `DRAG_OPACITY_BOOST = 1.0` the result equals `tile.opacity` in both
+    /// branches, but the path through the boost is exercised so future constant
+    /// changes take effect without a code change.
+    #[test]
+    fn drag_opacity_boost_applied_faithfully() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("agent-a", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(tab, "tile-a", lease, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+
+        let tile = scene.tiles.get(&tile_id).unwrap();
+
+        // Idle: effective opacity equals tile.opacity.
+        let idle_opacity = Compositor::effective_tile_opacity(tile, &scene);
+        assert!(
+            (idle_opacity - tile.opacity).abs() < 1e-5,
+            "idle: effective opacity must equal tile.opacity ({:.4} != {:.4})",
+            idle_opacity,
+            tile.opacity
+        );
+
+        // Drag active: effective opacity is tile.opacity * DRAG_OPACITY_BOOST, ≤ 1.0.
+        scene.set_drag_active(tile_id);
+        let tile = scene.tiles.get(&tile_id).unwrap();
+        let drag_opacity = Compositor::effective_tile_opacity(tile, &scene);
+        let expected = (tile.opacity * DRAG_OPACITY_BOOST).min(1.0);
+        assert!(
+            (drag_opacity - expected).abs() < 1e-5,
+            "drag active: effective opacity must be tile.opacity * DRAG_OPACITY_BOOST clamped \
+             ({:.4} != {:.4})",
+            drag_opacity,
+            expected
+        );
+        assert!(
+            drag_opacity <= 1.0,
+            "effective drag opacity must never exceed 1.0 (got {drag_opacity:.4})"
+        );
+    }
+
+    /// Verifies that `effective_tile_z_order` returns the boosted key for an
+    /// active-drag tile and the raw `z_order` otherwise.
+    #[test]
+    fn effective_tile_z_order_returns_boosted_key_during_drag() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("agent-a", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(tab, "tile-a", lease, Rect::new(0.0, 0.0, 100.0, 100.0), 42)
+            .unwrap();
+
+        let tile = scene.tiles.get(&tile_id).unwrap();
+
+        // Idle: no boost.
+        let idle_key = Compositor::effective_tile_z_order(tile, &scene);
+        assert_eq!(
+            idle_key, 42,
+            "idle: effective z_order must equal tile.z_order"
+        );
+
+        // Drag active: boost applied.
+        scene.set_drag_active(tile_id);
+        let tile = scene.tiles.get(&tile_id).unwrap();
+        let drag_key = Compositor::effective_tile_z_order(tile, &scene);
+        assert_eq!(
+            drag_key,
+            42u32.saturating_add(DRAG_Z_ORDER_BOOST),
+            "drag active: effective z_order must be z_order + DRAG_Z_ORDER_BOOST"
+        );
+
+        // Clear drag: key returns to raw value.
+        scene.clear_drag_active(tile_id);
+        let tile = scene.tiles.get(&tile_id).unwrap();
+        let cleared_key = Compositor::effective_tile_z_order(tile, &scene);
+        assert_eq!(
+            cleared_key, 42,
+            "after drag cleared: effective z_order returns to raw value"
         );
     }
 
