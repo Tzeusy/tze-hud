@@ -150,6 +150,13 @@ struct DragReleasedData {
     namespace: String,
 }
 
+fn sync_scene_display_area(scene: &mut tze_hud_scene::graph::SceneGraph, width: u32, height: u32) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    scene.display_area = tze_hud_scene::Rect::new(0.0, 0.0, width as f32, height as f32);
+}
+
 /// Drive the drag-handle long-press state machine for a single pointer event.
 ///
 /// Must be called while both the `SharedState` lock **and** the inner scene
@@ -854,6 +861,15 @@ impl ApplicationHandler for WinitApp {
             surface_height,
             "windowed: resolved surface dimensions from window.inner_size() (physical pixels)"
         );
+        if surface_width > 0 && surface_height > 0 {
+            self.state.config.window.width = surface_width;
+            self.state.config.window.height = surface_height;
+            if let Ok(state) = self.state.shared_state.try_lock() {
+                if let Ok(mut scene) = state.scene.try_lock() {
+                    sync_scene_display_area(&mut scene, surface_width, surface_height);
+                }
+            }
+        }
         // Diagnostic: write surface resolution so remote operators can verify.
         let _ = std::fs::write(
             "C:\\tze_hud\\logs\\surface_diag.txt",
@@ -1138,6 +1154,19 @@ impl ApplicationHandler for WinitApp {
 
             // ── Resize ─────────────────────────────────────────────────────
             WindowEvent::Resized(physical_size) => {
+                if physical_size.width > 0 && physical_size.height > 0 {
+                    self.state.config.window.width = physical_size.width;
+                    self.state.config.window.height = physical_size.height;
+                    if let Ok(state) = self.state.shared_state.try_lock() {
+                        if let Ok(mut scene) = state.scene.try_lock() {
+                            sync_scene_display_area(
+                                &mut scene,
+                                physical_size.width,
+                                physical_size.height,
+                            );
+                        }
+                    }
+                }
                 if let Some(surface) = &self.state.window_surface {
                     tracing::info!(
                         width = physical_size.width,
@@ -4496,6 +4525,26 @@ redaction_style = "blank"
         };
         assert_eq!(w, 2560, "configured size must be used when actual is zero");
         assert_eq!(h, 1440, "configured size must be used when actual is zero");
+    }
+
+    #[test]
+    fn scene_display_area_sync_uses_actual_surface_size() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+
+        super::sync_scene_display_area(&mut scene, 2560, 1440);
+
+        assert_eq!(scene.display_area.width, 2560.0);
+        assert_eq!(scene.display_area.height, 1440.0);
+    }
+
+    #[test]
+    fn scene_display_area_sync_ignores_zero_dimensions() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+
+        super::sync_scene_display_area(&mut scene, 0, 1440);
+
+        assert_eq!(scene.display_area.width, 1920.0);
+        assert_eq!(scene.display_area.height, 1080.0);
     }
 
     // ── DPI scaling correctness (hud-22by) ────────────────────────────────────

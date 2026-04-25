@@ -1130,12 +1130,19 @@ async def run_scenario(args: argparse.Namespace) -> int:
         }, target=args.target, doc=args.doc, phases=args.phases)
 
         await client.connect()
+        scene_width, scene_height = client.scene_display_area or (args.tab_width, args.tab_height)
+        emit_step_event(transcript, 0, "checkpoint", {
+            "code": "scene:display-area",
+            "title": "Scene display area resolved",
+            "action": "use live scene dimensions for portal placement and drag bounds",
+            "expected_visual": "portal can be dragged across the full HUD surface",
+        }, scene_width=scene_width, scene_height=scene_height)
         lease_ttl_ms = max(600_000, int(args.baseline_hold_s * 1000) + 120_000)
         lease_id = await client.request_lease(ttl_ms=lease_ttl_ms)
         portal_x = (
             args.portal_x
             if args.portal_x is not None
-            else args.tab_width - PORTAL_W - PORTAL_X_FROM_RIGHT
+            else scene_width - PORTAL_W - PORTAL_X_FROM_RIGHT
         )
         tiles = await create_portal_tiles(
             client=client,
@@ -1155,8 +1162,8 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 body_full=body,
                 initial_portal_x=portal_x,
                 initial_portal_y=PORTAL_Y,
-                tab_width=args.tab_width,
-                tab_height=args.tab_height,
+                tab_width=scene_width,
+                tab_height=scene_height,
             )
         )
 
@@ -1214,6 +1221,8 @@ async def run_scenario(args: argparse.Namespace) -> int:
             write_transcript(args.transcript_out, {
                 "target": args.target,
                 "doc": args.doc,
+                "scene_width": scene_width,
+                "scene_height": scene_height,
                 "portal_w": PORTAL_W,
                 "portal_h": PORTAL_H,
                 "steps": transcript,

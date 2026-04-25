@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -576,6 +577,8 @@ class HudClient:
         self.namespace: Optional[str] = None
         self.heartbeat_interval_ms: Optional[int] = None
         self.granted_capabilities: list[str] = []
+        self.scene_snapshot_json: Optional[str] = None
+        self.scene_display_area: Optional[tuple[float, float]] = None
         self._response_queue: asyncio.Queue = asyncio.Queue()
         self._deferred_responses: list[Any] = []
         self._response_wait_lock = asyncio.Lock()
@@ -640,6 +643,30 @@ class HudClient:
         self.granted_capabilities = list(est.granted_capabilities)
         print(f"  [grpc] Session established: namespace={self.namespace}, "
               f"caps={self.granted_capabilities}", flush=True)
+
+        snapshot_resp = await self._wait_for("scene_snapshot", timeout=5.0)
+        self.scene_snapshot_json = snapshot_resp.scene_snapshot.snapshot_json
+        self.scene_display_area = self._extract_scene_display_area(self.scene_snapshot_json)
+        if self.scene_display_area is not None:
+            w, h = self.scene_display_area
+            print(f"  [grpc] Scene display area: {w:g}x{h:g}", flush=True)
+
+    @staticmethod
+    def _extract_scene_display_area(snapshot_json: str) -> Optional[tuple[float, float]]:
+        try:
+            snapshot = json.loads(snapshot_json)
+        except json.JSONDecodeError:
+            return None
+        display_area = snapshot.get("display_area") or snapshot.get("displayArea")
+        if not isinstance(display_area, dict):
+            return None
+        width = display_area.get("width")
+        height = display_area.get("height")
+        if not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        return float(width), float(height)
 
     async def _request_iterator(self):
         """Async generator that yields ClientMessages from the send queue."""
