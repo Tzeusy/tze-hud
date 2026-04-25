@@ -423,8 +423,9 @@ def build_input_scroll_nodes(
 ) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
     input_rect, _ = portal_pane_rects()
     text_inset = 12.0
+    hit_h = input_rect.h + scroll_max_y_for_text(composer_text, input_rect.h, SCROLL_LINE_PX)
     root = make_solid_color_node(*TEXT_WINDOW_BG_RGBA, 0.0, 0.0, input_rect.w, input_rect.h)
-    hit = make_hit_region(COMPOSER_INTERACTION_ID, 0.0, 0.0, input_rect.w, input_rect.h)
+    hit = make_hit_region(COMPOSER_INTERACTION_ID, 0.0, 0.0, input_rect.w, hit_h)
     text_node = make_text_node(
         composer_text or composer_placeholder,
         text_inset,
@@ -446,8 +447,9 @@ def build_input_scroll_nodes(
 
 def build_output_scroll_nodes(body: str) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
     _, output_rect = portal_pane_rects()
+    hit_h = output_rect.h + scroll_max_y_for_text(body, output_rect.h, SCROLL_LINE_PX)
     root = make_solid_color_node(*TEXT_WINDOW_BG_RGBA, 0.0, 0.0, output_rect.w, output_rect.h)
-    hit = make_hit_region(SCROLL_INTERACTION_ID, 0.0, 0.0, output_rect.w, output_rect.h)
+    hit = make_hit_region(SCROLL_INTERACTION_ID, 0.0, 0.0, output_rect.w, hit_h)
     body_node = make_text_node(
         body,
         0.0,
