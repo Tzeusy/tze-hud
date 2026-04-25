@@ -516,9 +516,10 @@ impl MediaIngress {
         match event {
             MediaSessionEvent::TransportEstablished => Transition(State::streaming()),
             MediaSessionEvent::TransportNegotiationFailed => Transition(State::closing()),
-            MediaSessionEvent::InitiateClose { reason, retry_after_us } => {
-                handle_initiate_close(self, reason, retry_after_us)
-            }
+            MediaSessionEvent::InitiateClose {
+                reason,
+                retry_after_us,
+            } => handle_initiate_close(self, reason, retry_after_us),
             MediaSessionEvent::Revoke(reason) => handle_revoke(self, reason),
             _ => {
                 self.signal = Some(HandlerSignal::NotApplicable);
@@ -574,9 +575,10 @@ impl MediaIngress {
                 self.pause_trigger = Some(MediaPauseTrigger::PolicyQuietHours);
                 Transition(State::paused())
             }
-            MediaSessionEvent::InitiateClose { reason, retry_after_us } => {
-                handle_initiate_close(self, reason, retry_after_us)
-            }
+            MediaSessionEvent::InitiateClose {
+                reason,
+                retry_after_us,
+            } => handle_initiate_close(self, reason, retry_after_us),
             MediaSessionEvent::Revoke(reason) => handle_revoke(self, reason),
             _ => {
                 self.signal = Some(HandlerSignal::NotApplicable);
@@ -625,9 +627,10 @@ impl MediaIngress {
                 self.pause_trigger = Some(MediaPauseTrigger::PolicyQuietHours);
                 Transition(State::paused())
             }
-            MediaSessionEvent::InitiateClose { reason, retry_after_us } => {
-                handle_initiate_close(self, reason, retry_after_us)
-            }
+            MediaSessionEvent::InitiateClose {
+                reason,
+                retry_after_us,
+            } => handle_initiate_close(self, reason, retry_after_us),
             MediaSessionEvent::Revoke(reason) => handle_revoke(self, reason),
             _ => {
                 self.signal = Some(HandlerSignal::NotApplicable);
@@ -707,9 +710,10 @@ impl MediaIngress {
                     Handled
                 }
             }
-            MediaSessionEvent::InitiateClose { reason, retry_after_us } => {
-                handle_initiate_close(self, reason, retry_after_us)
-            }
+            MediaSessionEvent::InitiateClose {
+                reason,
+                retry_after_us,
+            } => handle_initiate_close(self, reason, retry_after_us),
             MediaSessionEvent::Revoke(reason) => handle_revoke(self, reason),
             _ => {
                 self.signal = Some(HandlerSignal::NotApplicable);
@@ -1660,7 +1664,10 @@ mod tests {
     fn test_any_non_terminal_to_closing_via_agent() {
         // From ADMITTED
         let mut m = new_machine();
-        let outcome = m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
+        let outcome = m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::AgentClosed,
+            retry_after_us: None,
+        });
         assert_transition(
             &outcome,
             MediaSessionState::Admitted,
@@ -1670,7 +1677,10 @@ mod tests {
         // From STREAMING
         let mut m = new_machine();
         m.apply(MediaSessionEvent::TransportEstablished);
-        let outcome = m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
+        let outcome = m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::AgentClosed,
+            retry_after_us: None,
+        });
         assert_transition(
             &outcome,
             MediaSessionState::Streaming,
@@ -1681,7 +1691,10 @@ mod tests {
         let mut m = new_machine();
         m.apply(MediaSessionEvent::TransportEstablished);
         m.apply(MediaSessionEvent::AgentPauseRequest);
-        let outcome = m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::ScheduleExpired, retry_after_us: None });
+        let outcome = m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::ScheduleExpired,
+            retry_after_us: None,
+        });
         assert_transition(
             &outcome,
             MediaSessionState::Paused,
@@ -1694,7 +1707,10 @@ mod tests {
     #[test]
     fn test_closing_to_closed_on_drain() {
         let mut m = new_machine();
-        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
+        m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::AgentClosed,
+            retry_after_us: None,
+        });
         let outcome = m.apply(MediaSessionEvent::DrainComplete);
         assert_transition(
             &outcome,
@@ -1744,7 +1760,10 @@ mod tests {
     #[test]
     fn test_terminal_closed_rejects_all_events() {
         let mut m = new_machine();
-        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
+        m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::AgentClosed,
+            retry_after_us: None,
+        });
         m.apply(MediaSessionEvent::DrainComplete);
         assert!(m.state().is_terminal());
 
@@ -1753,7 +1772,10 @@ mod tests {
             MediaSessionEvent::AgentPauseRequest,
             MediaSessionEvent::AgentResumeRequest,
             MediaSessionEvent::DegradationRecovered,
-            MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None },
+            MediaSessionEvent::InitiateClose {
+                reason: MediaCloseReason::AgentClosed,
+                retry_after_us: None,
+            },
             MediaSessionEvent::DrainComplete,
             MediaSessionEvent::Revoke(MediaCloseReason::LeaseRevoked),
         ] {
@@ -2111,7 +2133,11 @@ mod tests {
             reason: MediaCloseReason::BudgetWatchdog,
             retry_after_us: Some(5_000_000), // 5 seconds
         });
-        assert_transition(&outcome, MediaSessionState::Streaming, MediaSessionState::Closing);
+        assert_transition(
+            &outcome,
+            MediaSessionState::Streaming,
+            MediaSessionState::Closing,
+        );
         // Hint MUST be stored for wire layer consumption.
         assert_eq!(
             m.close_retry_after_us(),
@@ -2126,7 +2152,11 @@ mod tests {
             reason: MediaCloseReason::AgentClosed,
             retry_after_us: None,
         });
-        assert_transition(&outcome, MediaSessionState::Streaming, MediaSessionState::Closing);
+        assert_transition(
+            &outcome,
+            MediaSessionState::Streaming,
+            MediaSessionState::Closing,
+        );
         assert_eq!(
             m.close_retry_after_us(),
             None,
@@ -2233,7 +2263,10 @@ mod tests {
         assert_transition(&o, MediaSessionState::Paused, MediaSessionState::Streaming);
 
         // 6. Agent closes stream
-        let o = m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
+        let o = m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::AgentClosed,
+            retry_after_us: None,
+        });
         assert_transition(&o, MediaSessionState::Streaming, MediaSessionState::Closing);
 
         // 7. Ring buffer drained
@@ -2256,7 +2289,10 @@ mod tests {
     fn property_terminal_state_is_absorbing() {
         // Reach CLOSED via normal path.
         let mut m = new_machine();
-        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
+        m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::AgentClosed,
+            retry_after_us: None,
+        });
         m.apply(MediaSessionEvent::DrainComplete);
         assert!(m.state().is_terminal());
 
@@ -2269,7 +2305,10 @@ mod tests {
             MediaSessionEvent::SafeModeResume,
             MediaSessionEvent::PolicyQuietHoursResume,
             MediaSessionEvent::DrainComplete,
-            MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None },
+            MediaSessionEvent::InitiateClose {
+                reason: MediaCloseReason::AgentClosed,
+                retry_after_us: None,
+            },
             MediaSessionEvent::Revoke(MediaCloseReason::LeaseRevoked),
         ];
 
@@ -2355,7 +2394,10 @@ mod tests {
         assert_eq!(m.degradation_step(), 0);
 
         // After close, zero.
-        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
+        m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::AgentClosed,
+            retry_after_us: None,
+        });
         m.apply(MediaSessionEvent::DrainComplete);
         assert_eq!(m.degradation_step(), 0);
     }
@@ -2385,7 +2427,10 @@ mod tests {
         // Path 2: STREAMING → CLOSING → CLOSED (agent close)
         let mut m = MediaIngressStateMachine::new(101);
         m.apply(MediaSessionEvent::TransportEstablished);
-        m.apply(MediaSessionEvent::InitiateClose { reason: MediaCloseReason::AgentClosed, retry_after_us: None });
+        m.apply(MediaSessionEvent::InitiateClose {
+            reason: MediaCloseReason::AgentClosed,
+            retry_after_us: None,
+        });
         m.apply(MediaSessionEvent::DrainComplete);
         assert_eq!(m.state(), MediaSessionState::Closed);
 

@@ -1837,8 +1837,7 @@ mod tests {
 
         // Simulate one video zone in LastFrameWithBadge state.
         let video_zone = video_zone_rect(100.0, 200.0, 640.0, 360.0);
-        let cmds =
-            renderer.render_chrome_with_video_badges(1920.0, 1080.0, &[(video_zone, None)]);
+        let cmds = renderer.render_chrome_with_video_badges(1920.0, 1080.0, &[(video_zone, None)]);
 
         // Must produce more commands than base (at least scrim + icon = +2).
         assert!(

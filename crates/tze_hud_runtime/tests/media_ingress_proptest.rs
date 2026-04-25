@@ -65,7 +65,10 @@ fn arb_event() -> BoxedStrategy<MediaSessionEvent> {
             } else {
                 None
             };
-            MediaSessionEvent::InitiateClose { reason, retry_after_us }
+            MediaSessionEvent::InitiateClose {
+                reason,
+                retry_after_us,
+            }
         }),
         // Revoke — all close reasons (machine handles non-revocation ones too).
         arb_close_reason().prop_map(MediaSessionEvent::Revoke),

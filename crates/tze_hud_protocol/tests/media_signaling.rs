@@ -30,8 +30,8 @@ use tze_hud_protocol::proto::session::{
     CloudRelayStateUpdate, MediaDegradationNotice, MediaIceCandidate, MediaIngressClose,
     MediaIngressCloseNotice, MediaIngressOpen, MediaIngressOpenResult, MediaIngressState,
     MediaPauseNotice, MediaPauseRequest, MediaResumeNotice, MediaResumeRequest, MediaSdpAnswer,
-    MediaSdpOffer, ServerMessage,
-    TransportDescriptor, WidgetPublishResult, ZonePublish, ZonePublishResult,
+    MediaSdpOffer, ServerMessage, TransportDescriptor, WidgetPublishResult, ZonePublish,
+    ZonePublishResult,
 };
 use tze_hud_protocol::proto::zone_content::Payload as ZonePayload;
 use tze_hud_protocol::proto::{
@@ -624,10 +624,7 @@ fn media_ingress_close_notice_retry_after_us_roundtrip() {
                 "retry_after_us MUST survive proto round-trip (RFC 0014 §6.3 A1)"
             );
         }
-        other => panic!(
-            "expected MediaIngressCloseNotice, got {:?}",
-            other
-        ),
+        other => panic!("expected MediaIngressCloseNotice, got {:?}", other),
     }
 }
 
@@ -1188,8 +1185,7 @@ fn video_surface_ref_scene_to_proto_round_trip() {
         .expect("VideoSurfaceRef MUST decode from a valid 16-byte surface_id");
 
     assert_eq!(
-        restored,
-        scene_content,
+        restored, scene_content,
         "ZoneContent::VideoSurfaceRef(SceneId) MUST survive scene→proto→scene round-trip"
     );
 }
@@ -1284,8 +1280,7 @@ fn video_surface_ref_null_surface_id_round_trip() {
         .expect("null SceneId (all-zero) is a valid surface_id and MUST decode");
 
     assert_eq!(
-        restored,
-        scene_content,
+        restored, scene_content,
         "null SceneId MUST survive round-trip as ZoneContent::VideoSurfaceRef"
     );
     if let SceneZoneContent::VideoSurfaceRef(id) = restored {

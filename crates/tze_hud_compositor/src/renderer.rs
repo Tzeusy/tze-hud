@@ -2375,10 +2375,7 @@ impl Compositor {
     ///
     /// No-op if no texture is cached for `surface_id`.
     #[cfg(feature = "v2_preview")]
-    pub fn evict_video_frame_texture(
-        &mut self,
-        surface_id: &tze_hud_scene::types::SceneId,
-    ) {
+    pub fn evict_video_frame_texture(&mut self, surface_id: &tze_hud_scene::types::SceneId) {
         if self.video_frame_cache.remove(surface_id).is_some() {
             tracing::debug!(
                 surface_id = %surface_id,
@@ -2412,7 +2409,12 @@ impl Compositor {
     ///
     /// Returns an empty `Vec` in v1 builds (feature gate handled at call site).
     #[cfg(feature = "v2_preview")]
-    fn collect_video_frame_cmds(&self, scene: &SceneGraph, sw: f32, sh: f32) -> Vec<VideoFrameDrawCmd> {
+    fn collect_video_frame_cmds(
+        &self,
+        scene: &SceneGraph,
+        sw: f32,
+        sh: f32,
+    ) -> Vec<VideoFrameDrawCmd> {
         use crate::video_surface::VideoRenderState;
 
         let mut cmds = Vec::new();
@@ -2513,16 +2515,22 @@ impl Compositor {
             };
 
             let verts = textured_rect_vertices(
-                cmd.x, cmd.y, cmd.w, cmd.h,
-                sw, sh,
+                cmd.x,
+                cmd.y,
+                cmd.w,
+                cmd.h,
+                sw,
+                sh,
                 [0.0, 0.0, 1.0, 1.0], // full UV rect
                 cmd.tint,
             );
-            let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("video_quad_buf"),
-                contents: bytemuck::cast_slice(&verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            let vertex_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("video_quad_buf"),
+                    contents: bytemuck::cast_slice(&verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
 
             pass.set_bind_group(0, &entry.bind_group, &[]);
             pass.set_vertex_buffer(0, vertex_buf.slice(..));

@@ -356,10 +356,8 @@ pub fn build_media_disconnect_badge_cmds(
         .min(bounds.width * 0.4)
         .min(bounds.height * 0.4);
     if badge_sz > 0.0 {
-        let badge_x =
-            bounds.x + bounds.width - badge_sz - MEDIA_DISCONNECT_BADGE_MARGIN_PX;
-        let badge_y =
-            bounds.y + bounds.height - badge_sz - MEDIA_DISCONNECT_BADGE_MARGIN_PX;
+        let badge_x = bounds.x + bounds.width - badge_sz - MEDIA_DISCONNECT_BADGE_MARGIN_PX;
+        let badge_y = bounds.y + bounds.height - badge_sz - MEDIA_DISCONNECT_BADGE_MARGIN_PX;
         // Clamp to stay within zone bounds.
         let badge_x = badge_x.max(bounds.x);
         let badge_y = badge_y.max(bounds.y);
@@ -991,7 +989,10 @@ mod tests {
         let scrim = &cmds[0];
         assert_eq!(scrim.x, bounds.x, "scrim x must match zone x");
         assert_eq!(scrim.y, bounds.y, "scrim y must match zone y");
-        assert_eq!(scrim.width, bounds.width, "scrim must cover full zone width");
+        assert_eq!(
+            scrim.width, bounds.width,
+            "scrim must cover full zone width"
+        );
         assert_eq!(
             scrim.height, bounds.height,
             "scrim must cover full zone height"

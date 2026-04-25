@@ -233,9 +233,7 @@ mod windows_impl {
     /// that is still "alive" — the CI job is still accounting for the PID).
     fn pid_is_alive(pid: u32) -> bool {
         use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::{
-            PROCESS_QUERY_LIMITED_INFORMATION, OpenProcess,
-        };
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
         // SAFETY: OpenProcess with a well-known access mask is safe. The resulting
         // handle (if any) is closed immediately via CloseHandle.
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
@@ -261,10 +259,7 @@ mod windows_impl {
                 tracing::info!("[gpu-lock] Lock file absent or unreadable; nothing to release.");
             }
             Some(fields) => {
-                let file_pid: u32 = fields
-                    .get("PID")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
+                let file_pid: u32 = fields.get("PID").and_then(|v| v.parse().ok()).unwrap_or(0);
                 if file_pid != owner_pid {
                     tracing::warn!(
                         our_pid = owner_pid,
@@ -279,10 +274,7 @@ mod windows_impl {
                         "[gpu-lock] Failed to remove lock file; it will become stale."
                     );
                 } else {
-                    tracing::info!(
-                        pid = owner_pid,
-                        "[gpu-lock] Lock released."
-                    );
+                    tracing::info!(pid = owner_pid, "[gpu-lock] Lock released.");
                 }
             }
         }
@@ -326,10 +318,8 @@ mod windows_impl {
                     let _ = std::fs::remove_file(lock_path);
                 }
                 Some(fields) => {
-                    let existing_pid: u32 = fields
-                        .get("PID")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
+                    let existing_pid: u32 =
+                        fields.get("PID").and_then(|v| v.parse().ok()).unwrap_or(0);
                     let existing_type = fields
                         .get("SESSION_TYPE")
                         .cloned()
@@ -338,10 +328,7 @@ mod windows_impl {
                         .get("STARTED_AT")
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string());
-                    let existing_desc = fields
-                        .get("DESCRIPTION")
-                        .cloned()
-                        .unwrap_or_default();
+                    let existing_desc = fields.get("DESCRIPTION").cloned().unwrap_or_default();
 
                     tracing::info!(
                         session_type = %existing_type,
@@ -469,13 +456,7 @@ mod tests {
             description: "nightly run".to_string(),
         };
         let s = conflict.to_string();
-        assert!(
-            s.contains("12345"),
-            "Display should include PID: {s}"
-        );
-        assert!(
-            s.contains("ci"),
-            "Display should include session type: {s}"
-        );
+        assert!(s.contains("12345"), "Display should include PID: {s}");
+        assert!(s.contains("ci"), "Display should include session type: {s}");
     }
 }

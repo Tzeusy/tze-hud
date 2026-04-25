@@ -190,7 +190,13 @@ impl MediaDecodePipeline for SyntheticTestPipeline {
         if byte_count == 0 {
             return None;
         }
-        let rgba = self.fill_color.iter().copied().cycle().take(byte_count).collect();
+        let rgba = self
+            .fill_color
+            .iter()
+            .copied()
+            .cycle()
+            .take(byte_count)
+            .collect();
         let frame_count = self.frame_count;
         self.frame_count += 1;
         Some(VideoFrame {
@@ -894,15 +900,11 @@ mod tests {
     fn synthetic_pipeline_frame_dimensions_match_config() {
         let mut pipeline = SyntheticTestPipeline::gray(320, 240);
         for _ in 0..5 {
-            let frame = pipeline.next_frame().expect("SyntheticTestPipeline must always produce a frame");
-            assert_eq!(
-                frame.width, 320,
-                "frame width must match pipeline config"
-            );
-            assert_eq!(
-                frame.height, 240,
-                "frame height must match pipeline config"
-            );
+            let frame = pipeline
+                .next_frame()
+                .expect("SyntheticTestPipeline must always produce a frame");
+            assert_eq!(frame.width, 320, "frame width must match pipeline config");
+            assert_eq!(frame.height, 240, "frame height must match pipeline config");
             assert_eq!(
                 frame.rgba.len(),
                 320 * 240 * 4,
