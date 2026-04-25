@@ -63,7 +63,7 @@ FOOTER_BG_RGBA = (0.0, 0.0, 0.0, 0.50)
 # Input + output panes: black at 95% opacity.
 INPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
 OUTPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
-COMPOSER_BG_RGBA = (1.0, 1.0, 1.0, 0.05)
+TEXT_WINDOW_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
 COMPOSER_BORDER_RGBA = (1.0, 1.0, 1.0, 0.12)
 SUBMIT_HINT_RGBA = (0.54, 0.60, 0.68, 0.90)
 EYEBROW_RGBA = (0.70, 0.76, 0.84, 0.90)
@@ -312,7 +312,7 @@ def build_portal_nodes(
     composer_w = input_pane_w - composer_inset * 2.0
     composer_h = pane_h - 40.0 - 44.0  # leave room for submit-hint strip
     composer_bg = make_solid_color_node(
-        *COMPOSER_BG_RGBA,
+        *TEXT_WINDOW_BG_RGBA,
         composer_x, composer_y, composer_w, composer_h,
         radius=10.0,
     )
@@ -376,6 +376,14 @@ def build_portal_nodes(
         output_pane_w - PADDING_X * 2.0, 14.0,
         EYEBROW_FONT, EYEBROW_RGBA,
     )
+    _, output_rect = portal_pane_rects()
+    output_text_window_bg = make_solid_color_node(
+        *TEXT_WINDOW_BG_RGBA,
+        output_rect.x,
+        output_rect.y,
+        output_rect.w,
+        output_rect.h,
+    )
     # ── Footer ────────────────────────────────────────────────────────────
     footer_divider = make_solid_color_node(
         *DIVIDER_RGBA, 0.0, PORTAL_H - FOOTER_H - DIVIDER_H,
@@ -402,7 +410,7 @@ def build_portal_nodes(
         # divider (fat drag handle)
         pane_divider, pane_divider_grip, pane_resize_hit,
         # output pane
-        output_pane_bg, output_eyebrow,
+        output_pane_bg, output_eyebrow, output_text_window_bg,
         # footer
         footer_divider, footer_bg, footer_node,
     ]

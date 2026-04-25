@@ -35,7 +35,7 @@ One exemplar script under `.claude/skills/user-test/scripts/`:
   tile sits at z=220, while transparent input/transcript scroll-capture tiles
   sit above the two text boxes so mouse wheel input only targets those boxes.
   Header (52px) + footer (30px) chrome strips, INPUT pane on the left with eyebrow
-  label, composer box (white 0.05 inset + 1px border, green caret stub),
+  label, composer text window (black 0.95 backing + 1px border, green caret stub),
   placeholder text, submit-hint strip (`Enter submit · Shift+Enter newline ·
   Esc cancel`). OUTPUT pane on the right with TRANSCRIPT eyebrow and the
   markdown body. **Equal 50/50 split** between panes separated by a **fat
@@ -177,8 +177,8 @@ right thing (no background rect emitted).
 - Pane backgrounds (INPUT + OUTPUT): `(0, 0, 0, 0.95)`
 - Scroll routing: the frame tile is non-scrollable; composer and transcript
   body are separate transparent capture tiles at `PORTAL_Z + 1`
-- Composer inset (inside input pane): white `(1, 1, 1, 0.05)` + 1px white
-  border quads, green caret
+- Text windows (composer + transcript body): black `(0, 0, 0, 0.95)`.
+  Composer keeps 1px white border quads and green caret.
 - Pane divider: `PANE_DIVIDER_W=6.0`, `INPUT_PANE_W = (PORTAL_W -
   PANE_DIVIDER_W) / 2.0 = 427.0`, divider fill `(1,1,1,0.14)`, grip
   `(1,1,1,0.40)` at 2×44px
