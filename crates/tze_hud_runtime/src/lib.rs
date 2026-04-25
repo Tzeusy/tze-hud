@@ -82,6 +82,7 @@
 
 pub mod admission;
 pub mod agent_events;
+pub mod gpu_lock;
 #[cfg(feature = "gstreamer")]
 pub mod gst_decode_pipeline;
 pub mod attention_budget;
@@ -281,3 +282,7 @@ pub use reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
 
 // ── Widget startup integration ────────────────────────────────────────────────
 pub use widget_startup::{collect_tab_name_to_id, init_widget_registry};
+
+// ── GPU lock (Windows GPU scheduling policy, hud-940e4) ───────────────────────
+// Cross-platform: GpuLock::acquire() is a no-op on non-Windows targets.
+pub use gpu_lock::{GpuLock, GpuLockConflict, GpuLockGuard};

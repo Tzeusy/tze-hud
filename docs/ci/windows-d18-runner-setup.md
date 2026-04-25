@@ -448,12 +448,27 @@ If you need to cancel an in-progress CI job that holds the lock, cancel it in
 GitHub Actions → the "Release GPU lock" step may not have run → verify the lock
 file is gone on the Windows box before starting an interactive session.
 
-### 7.6 Follow-up work
+### 7.6 Native lock support — IMPLEMENTED (hud-940e4)
 
-- **Native lock support in `tze_hud.exe`** (hud-940e4) — the runtime should
-  write/release the GPU lock automatically. Until then, use `run_hud.ps1` (§7.7).
+`tze_hud.exe` now acquires and releases the GPU lock automatically at startup
+and shutdown. The manual helper script workflow (§7.3) is **no longer required**
+for interactive sessions — it remains the fallback path for the CI workflow.
 
-See `docs/design/tzehouse-windows-gpu-scheduling.md §7` for the full follow-up list.
+**What changed:**
+- `crates/tze_hud_runtime/src/gpu_lock.rs` — new module, Windows-only logic.
+- `app/tze_hud_app/src/main.rs` — `GpuLock::acquire()` called before GPU init.
+- Startup refuses (exit 1 + clear message) if a live CI lock is found.
+- Stale locks (dead PID) are silently taken over.
+- Lock released on clean shutdown, panic unwind, and SIGTERM/SIGINT.
+- Non-Windows: no-op (Linux/macOS builds unaffected).
+
+**Operator note:** The `gpu-lock-start.ps1` / `gpu-lock-release.ps1` scripts
+remain deployable as operator tools (e.g., for manual inspection or forced
+release). See `docs/design/tzehouse-windows-gpu-scheduling.md §7` for details.
+
+**Lock-aware `run_hud.ps1` wrapper** (hud-oooc9) is still tracked as a separate
+bead — it integrates `gpu-lock-start.ps1` into the HUD launch sequence for
+scripted/legacy launch paths.
 
 ### 7.7 Lock-aware HUD launcher — `scripts/windows/run_hud.ps1`
 

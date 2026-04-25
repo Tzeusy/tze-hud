@@ -67,6 +67,7 @@
 //! ```
 
 use tze_hud_config::{reload_config, resolve_config_path};
+use tze_hud_runtime::gpu_lock::GpuLock;
 use tze_hud_runtime::window::{WindowConfig, WindowMode};
 use tze_hud_runtime::windowed::{WindowedConfig, WindowedRuntime};
 
@@ -407,6 +408,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("error: {e}");
         std::process::exit(1);
     });
+
+    // ── GPU lock (Windows scheduling policy, hud-940e4) ───────────────────────
+    // Acquire the interactive GPU lock before claiming the GPU adapter.
+    // On non-Windows this is a no-op (returns Ok(None)).
+    // On Windows:
+    //   - lock absent        → acquire and hold for process lifetime.
+    //   - lock stale (dead)  → log warning, take over, hold for lifetime.
+    //   - lock live (CI run) → hard refusal; exit with a clear error message.
+    //   - I/O error          → log warning, continue without lock (fail-safe).
+    let _gpu_lock_guard = match GpuLock::acquire() {
+        Ok(guard) => guard,
+        Err(conflict) => {
+            eprintln!("error: {conflict}");
+            eprintln!(
+                "hint: A CI real-decode job or another tze_hud session is using the GPU. \
+Wait for it to finish, then retry. See docs/design/tzehouse-windows-gpu-scheduling.md."
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Resolve config file path and read its contents.
     // The resolved path is logged so operators can confirm which file is in use.
