@@ -270,15 +270,45 @@ The following steps cannot be automated from this agent context and require inte
 
 ---
 
-## 7. Follow-Up Work (out of scope for this bead)
+## 7. Follow-Up Work
 
-The following items are discovered from implementing this policy and should become their own beads:
+### 7.1 Native lock support in `tze_hud.exe` — IMPLEMENTED (hud-940e4)
 
-1. **Native lock support in `tze_hud.exe`**: The runtime should write and release the GPU lock file automatically at startup and shutdown. This removes the reliance on the manual helper script for interactive sessions and closes the gap where a user starts `tze_hud.exe` directly (not via the helper).
+Native GPU lock support has been added to the runtime. `tze_hud.exe` now automatically
+acquires and releases `C:\ProgramData\tze_hud\gpu.lock` on startup and shutdown.
 
-2. **Lock-aware `run_hud.ps1` wrapper**: A Windows PowerShell wrapper that checks for CI lock, acquires interactive lock, starts `tze_hud.exe`, and releases the lock on process exit. This is a thin shell — the right short-term fix before native runtime support is added.
+**Implementation**: `crates/tze_hud_runtime/src/gpu_lock.rs`
 
-3. **GitHub Actions workflow-level job cancellation on CI→interactive conflict**: Currently the CI job skips (exit 0). A more visible policy would cancel any currently-queued jobs when an interactive session starts. This requires runner-side GitHub API calls.
+- `GpuLock::acquire()` is called in `app/tze_hud_app/src/main.rs` before GPU
+  adapter initialisation.
+- On Windows: writes `SESSION_TYPE=interactive`, `PID=<getpid>`, `STARTED_AT=<RFC3339>`,
+  `DESCRIPTION=tze_hud.exe interactive session`.
+- Pre-write check: if the lock exists and the PID is alive (via `OpenProcess`),
+  refuses startup with a clear error message. If the PID is dead, logs a warning
+  and takes over.
+- On Drop: re-reads the lock, verifies PID ownership, deletes the file. Does not
+  blow away a lock that changed hands.
+- Panic hook: installed at acquire time so an unwind also releases the lock.
+- Fail-safe: I/O errors (missing dir, permissions) are logged as warnings and do
+  not prevent startup — only a live conflicting lock causes a hard refusal.
+- Cross-platform: on non-Windows targets, `GpuLock::acquire()` returns `Ok(None)`
+  (zero-cost no-op). No call-site `#[cfg]` guards needed.
+
+The PowerShell helper scripts (`gpu-lock-start.ps1`, `gpu-lock-release.ps1`) remain
+in place as the fallback path for the CI workflow and for manual operator use.
+
+### 7.2 Lock-aware `run_hud.ps1` wrapper (tracked as separate bead — hud-oooc9)
+
+A Windows PowerShell wrapper that checks for CI lock, acquires interactive lock,
+starts `tze_hud.exe`, and releases the lock on process exit. Now superseded for
+the interactive-session side by the native support above, but still useful for
+scripted launch scenarios that predate the native lock.
+
+### 7.3 GitHub Actions workflow-level job cancellation on CI→interactive conflict
+
+Currently the CI job skips (exit 0). A more visible policy would cancel any
+currently-queued jobs when an interactive session starts. This requires runner-side
+GitHub API calls.
 
 ---
 
