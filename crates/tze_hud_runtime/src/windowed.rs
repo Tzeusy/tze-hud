@@ -1551,7 +1551,14 @@ impl WinitApp {
                 }
                 // secondary dispatches (e.g. CaptureReleased following PointerUp)
                 for d in result.extra_dispatches {
-                    dispatch_pointer_event(&self.state.input_event_tx, d);
+                    if d.kind == tze_hud_input::AgentDispatchKind::CaptureReleased {
+                        // CaptureReleased is a focus/lease lifecycle event, not a pointer
+                        // event.  Route it through the FOCUS_EVENTS channel so subscribed
+                        // agents receive a CaptureReleasedEvent proto envelope.
+                        dispatch_capture_released_event(&self.state.input_event_tx, d);
+                    } else {
+                        dispatch_pointer_event(&self.state.input_event_tx, d);
+                    }
                 }
             } else {
                 drag_released = None;
@@ -3155,8 +3162,9 @@ fn dispatch_focus_event(
 ///
 /// All other `AgentDispatchKind` values are silently ignored — only
 /// `PointerDown`, `PointerMove`, and `PointerUp` are dispatched here.
-/// `PointerEnter`, `PointerLeave`, `Activated`, and capture variants are
-/// handled by dedicated dispatch paths (or are not yet wired).
+/// `PointerEnter`, `PointerLeave`, `Activated` are not yet wired.
+/// `CaptureReleased` is routed to `dispatch_capture_released_event` by the
+/// caller (it belongs to `FOCUS_EVENTS`, not `INPUT_EVENTS`).
 ///
 /// Delivery is best-effort (fire-and-forget): errors (no receivers, channel
 /// lagged) are silently ignored, matching the scroll and keyboard patterns.
@@ -3223,8 +3231,9 @@ fn dispatch_pointer_event(
                 button: 0, // primary button; multi-button not yet tracked in AgentDispatch
             })
         }
-        // All other variants (PointerEnter, PointerLeave, Activated, Capture*,
-        // PointerCancel) are handled by separate dispatch paths or are not yet wired.
+        // All other variants (PointerEnter, PointerLeave, Activated, PointerCancel)
+        // are not yet wired.  CaptureReleased is pre-filtered by the caller and
+        // routed to dispatch_capture_released_event instead.
         _ => return,
     };
 
@@ -3239,6 +3248,78 @@ fn dispatch_pointer_event(
     // channel lagged) are silently ignored — PointerMove is ephemeral;
     // PointerDown/Up are transactional but the broadcast channel is best-effort
     // from the runtime side (consistent with keyboard and scroll patterns).
+    let _ = tx.send((dispatch.namespace, batch));
+}
+
+/// Broadcast a `CaptureReleasedEvent` to the owning agent via the `FOCUS_EVENTS`
+/// gRPC channel.
+///
+/// Called when `InputProcessor` produces a `CaptureReleased` dispatch in
+/// `extra_dispatches` (e.g. after `PointerUp` with `release_on_up=true`).
+///
+/// `CaptureReleased` is a focus/lease lifecycle event, not a pointer event, so
+/// it belongs on the `FOCUS_EVENTS` channel (RFC 0004 §8.3, subscriptions.rs
+/// §`is_focus_variant`).  Agents that subscribe to `FOCUS_EVENTS` with the
+/// `access_input_events` capability will receive it.
+///
+/// Delivery is best-effort (fire-and-forget): errors (no receivers, channel
+/// lagged) are silently ignored.
+fn dispatch_capture_released_event(
+    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    dispatch: tze_hud_input::AgentDispatch,
+) {
+    let Some(tx) = tx else { return };
+
+    use tze_hud_input::{AgentDispatchKind, CaptureReleasedReason};
+    use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+    debug_assert_eq!(
+        dispatch.kind,
+        AgentDispatchKind::CaptureReleased,
+        "dispatch_capture_released_event called with non-CaptureReleased kind"
+    );
+
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    let proto_reason = match dispatch.capture_released_reason {
+        Some(CaptureReleasedReason::AgentReleased) => {
+            tze_hud_protocol::proto::CaptureReleasedReason::AgentReleased
+        }
+        Some(CaptureReleasedReason::PointerUp) => {
+            tze_hud_protocol::proto::CaptureReleasedReason::PointerUp
+        }
+        Some(CaptureReleasedReason::RuntimeRevoked) => {
+            tze_hud_protocol::proto::CaptureReleasedReason::RuntimeRevoked
+        }
+        Some(CaptureReleasedReason::LeaseRevoked) => {
+            tze_hud_protocol::proto::CaptureReleasedReason::LeaseRevoked
+        }
+        None => tze_hud_protocol::proto::CaptureReleasedReason::Unspecified,
+    };
+
+    let tile_id_bytes = dispatch.tile_id.as_uuid().as_bytes().to_vec();
+    let node_id_bytes = dispatch.node_id.as_uuid().as_bytes().to_vec();
+
+    let batch = EventBatch {
+        frame_number: 0, // synthetic — not tied to a compositor frame
+        batch_ts_us: now_us,
+        events: vec![InputEnvelope {
+            event: Some(InputEvent::CaptureReleased(
+                tze_hud_protocol::proto::CaptureReleasedEvent {
+                    tile_id: tile_id_bytes,
+                    node_id: node_id_bytes,
+                    timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                    device_id: dispatch.device_id.to_string(),
+                    reason: proto_reason as i32,
+                },
+            )),
+        }],
+    };
+
+    // Broadcast to FOCUS_EVENTS subscribers.  Errors are silently ignored.
     let _ = tx.send((dispatch.namespace, batch));
 }
 
