@@ -1431,10 +1431,7 @@ impl ComposerBuffer {
     /// - All other events → no-op.
     ///
     /// Returns `Some(submitted)` on Enter, `None` otherwise.
-    fn apply_dispatch(
-        &mut self,
-        dispatch: &tze_hud_input::KeyboardDispatch,
-    ) -> Option<String> {
+    fn apply_dispatch(&mut self, dispatch: &tze_hud_input::KeyboardDispatch) -> Option<String> {
         use tze_hud_input::KeyboardDispatchKind;
         match &dispatch.kind {
             KeyboardDispatchKind::Character { character, .. } => {
@@ -1453,7 +1450,11 @@ impl ComposerBuffer {
                     "Enter" => {
                         let submitted = self.draft.trim().to_string();
                         self.draft.clear();
-                        if submitted.is_empty() { None } else { Some(submitted) }
+                        if submitted.is_empty() {
+                            None
+                        } else {
+                            Some(submitted)
+                        }
                     }
                     _ => None,
                 }
@@ -1500,20 +1501,22 @@ fn click_to_focus_grants_focus_to_composer_hit_region() {
 
     // Add the composer HitRegionNode as the tile root.
     let composer_node_id = tze_hud_scene::SceneId::new();
-    scene.set_tile_root(
-        tile_id,
-        Node {
-            id: composer_node_id,
-            children: vec![],
-            data: NodeData::HitRegion(HitRegionNode {
-                bounds: Rect::new(0.0, EXPANDED_H - 42.0, EXPANDED_W - 20.0, 28.0),
-                interaction_id: INTERACTION_REPLY.to_string(),
-                accepts_focus: true,
-                accepts_pointer: true,
-                ..Default::default()
-            }),
-        },
-    ).expect("set tile root");
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: composer_node_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, EXPANDED_H - 42.0, EXPANDED_W - 20.0, 28.0),
+                    interaction_id: INTERACTION_REPLY.to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .expect("set tile root");
 
     let mut input_processor = InputProcessor::new();
     let mut focus_manager = FocusManager::new();
@@ -1597,20 +1600,22 @@ fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
     scene.tiles.get_mut(&tile_id).unwrap().input_mode = InputMode::Capture;
 
     let composer_node_id = tze_hud_scene::SceneId::new();
-    scene.set_tile_root(
-        tile_id,
-        Node {
-            id: composer_node_id,
-            children: vec![],
-            data: NodeData::HitRegion(HitRegionNode {
-                bounds: Rect::new(0.0, EXPANDED_H - 42.0, EXPANDED_W - 20.0, 28.0),
-                interaction_id: INTERACTION_REPLY.to_string(),
-                accepts_focus: true,
-                accepts_pointer: true,
-                ..Default::default()
-            }),
-        },
-    ).expect("set tile root");
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: composer_node_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, EXPANDED_H - 42.0, EXPANDED_W - 20.0, 28.0),
+                    interaction_id: INTERACTION_REPLY.to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .expect("set tile root");
 
     // Click-to-focus: wire focus onto the composer node.
     let mut input_processor = InputProcessor::new();
@@ -1633,7 +1638,10 @@ fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
 
     assert_eq!(
         focus_manager.current_owner(tab_id),
-        &FocusOwner::Node { tile_id, node_id: composer_node_id },
+        &FocusOwner::Node {
+            tile_id,
+            node_id: composer_node_id
+        },
         "pre-condition: composer node must be focused"
     );
 
@@ -1647,14 +1655,20 @@ fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
 
     // Type "hello" via CharacterEvent payloads.
     for ch in ["h", "e", "l", "l", "o"] {
-        let raw = RawCharacterEvent { character: ch.to_string(), timestamp_mono_us: ts };
+        let raw = RawCharacterEvent {
+            character: ch.to_string(),
+            timestamp_mono_us: ts,
+        };
         if let Some(dispatch) = kb.process_character(&raw, &focus_owner, &ns_fn) {
             assert_eq!(dispatch.tile_id, tile_id);
             assert_eq!(dispatch.node_id, Some(composer_node_id));
             buffer.apply_dispatch(&dispatch);
         }
     }
-    assert_eq!(buffer.draft, "hello", "draft must accumulate typed characters");
+    assert_eq!(
+        buffer.draft, "hello",
+        "draft must accumulate typed characters"
+    );
 
     // Backspace: erase last character.
     let backspace = RawKeyDownEvent {
@@ -1671,7 +1685,10 @@ fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
 
     // Type " world" (space then "world").
     for ch in [" ", "w", "o", "r", "l", "d"] {
-        let raw = RawCharacterEvent { character: ch.to_string(), timestamp_mono_us: ts };
+        let raw = RawCharacterEvent {
+            character: ch.to_string(),
+            timestamp_mono_us: ts,
+        };
         if let Some(dispatch) = kb.process_character(&raw, &focus_owner, &ns_fn) {
             buffer.apply_dispatch(&dispatch);
         }

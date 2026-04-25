@@ -1689,9 +1689,21 @@ mod tests {
 
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
-        let node_id = add_hit_region(&mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true);
+        let node_id = add_hit_region(
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
+        );
 
         fm.on_click(tab_id, tile_id, Some(node_id), &scene);
 
@@ -1712,9 +1724,21 @@ mod tests {
 
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
-        let node_id = add_hit_region(&mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true);
+        let node_id = add_hit_region(
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
+        );
         fm.on_click(tab_id, tile_id, Some(node_id), &scene);
 
         fm.remove_tab(tab_id);

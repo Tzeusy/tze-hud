@@ -1060,9 +1060,7 @@ impl ApplicationHandler for WinitApp {
                 let key_code_str = physical_key_to_key_code_str(&event.physical_key);
                 let logical_key_str = logical_key_to_str(&event.logical_key);
                 let mods = winit_mods_to_keyboard_modifiers(self.state.modifiers);
-                let timestamp_mono_us = tze_hud_scene::MonoUs(
-                    nanoseconds_since_start() / 1_000,
-                );
+                let timestamp_mono_us = tze_hud_scene::MonoUs(nanoseconds_since_start() / 1_000);
 
                 if event.state == ElementState::Pressed || event.repeat {
                     let raw = RawKeyDownEvent {
@@ -1208,7 +1206,10 @@ impl WinitApp {
                     )
                 } else {
                     // No active tab — fall back to focus-unaware processing.
-                    let r = self.state.input_processor.process(&pointer_event, &mut scene);
+                    let r = self
+                        .state
+                        .input_processor
+                        .process(&pointer_event, &mut scene);
                     (r, None)
                 };
 
@@ -1385,10 +1386,10 @@ impl WinitApp {
             }
             None
         };
-        if let Some(dispatch) = self
-            .state
-            .keyboard_processor
-            .process_key_down(raw, &focus_owner, namespace_fn)
+        if let Some(dispatch) =
+            self.state
+                .keyboard_processor
+                .process_key_down(raw, &focus_owner, namespace_fn)
         {
             tracing::debug!(
                 namespace = %dispatch.namespace,
@@ -1422,10 +1423,10 @@ impl WinitApp {
             }
             None
         };
-        if let Some(dispatch) = self
-            .state
-            .keyboard_processor
-            .process_key_up(raw, &focus_owner, namespace_fn)
+        if let Some(dispatch) =
+            self.state
+                .keyboard_processor
+                .process_key_up(raw, &focus_owner, namespace_fn)
         {
             tracing::debug!(
                 namespace = %dispatch.namespace,
@@ -1462,10 +1463,10 @@ impl WinitApp {
             }
             None
         };
-        if let Some(dispatch) = self
-            .state
-            .keyboard_processor
-            .process_character(raw, &focus_owner, namespace_fn)
+        if let Some(dispatch) =
+            self.state
+                .keyboard_processor
+                .process_character(raw, &focus_owner, namespace_fn)
         {
             tracing::debug!(
                 namespace = %dispatch.namespace,
