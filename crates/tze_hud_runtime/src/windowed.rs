@@ -421,11 +421,12 @@ struct WindowedRuntimeState {
     /// Cloned from the `HudSessionImpl` after creation. `None` when gRPC is
     /// disabled (grpc_port == 0) or before network services start.
     ///
-    /// Used by the windowed runtime to dispatch `ScrollOffsetChangedEvent` to
-    /// agents after wheel/keyboard scroll events update a scrollable tile.
-    /// Each `(namespace, EventBatch)` pair is delivered only to the session
-    /// handler whose namespace matches, filtered by `INPUT_EVENTS` subscription.
-    scroll_event_tx:
+    /// Used by the windowed runtime to dispatch any `EventBatch` to agents —
+    /// scroll offset changes, keyboard down/up/character events, and future
+    /// input event types.  Each `(namespace, EventBatch)` pair is delivered
+    /// only to the session handler whose namespace matches, filtered by
+    /// `INPUT_EVENTS` subscription.
+    input_event_tx:
         Option<tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>>,
 }
 
@@ -1322,7 +1323,7 @@ impl WinitApp {
                 },
                 &mut scene,
             ) {
-                dispatch_scroll_offset_event(&self.state.scroll_event_tx, &scene, ev);
+                dispatch_scroll_offset_event(&self.state.input_event_tx, &scene, ev);
             }
         }
     }
@@ -1348,21 +1349,26 @@ impl WinitApp {
                 .input_processor
                 .process_keyboard_scroll(x, y, delta_y, &mut scene)
             {
-                dispatch_scroll_offset_event(&self.state.scroll_event_tx, &scene, ev);
+                dispatch_scroll_offset_event(&self.state.input_event_tx, &scene, ev);
             }
         }
     }
 
     // ── Keyboard drain helpers ────────────────────────────────────────────
 
-    /// Translate a raw key-down event through the `KeyboardProcessor` and log
-    /// the resulting `KeyboardDispatch` to the tracing subsystem.
+    /// Translate a raw key-down event through the `KeyboardProcessor`, log it,
+    /// and broadcast the resulting `KeyboardDispatch` over the `INPUT_EVENTS`
+    /// gRPC channel via `input_event_tx`.
     ///
-    /// In the current implementation the dispatch is logged only; full delivery
-    /// to the owning agent over gRPC is wired in the agent-event pipeline
-    /// (see follow-up for `hud-9yfce` session-level keyboard event delivery).
-    /// The focus state is correctly maintained in `focus_manager` so the
-    /// dispatch target is accurate.
+    /// If `current_owner` is `FocusOwner::None` (no focused agent session),
+    /// `KeyboardProcessor::process_key_down` returns `None` and the event is
+    /// silently dropped — there is no recipient to deliver to.
+    ///
+    /// Delivery is best-effort (fire-and-forget): if the channel has no
+    /// receivers (gRPC disabled, agent not subscribed) the broadcast error is
+    /// silently ignored, consistent with the transactional keyboard-event
+    /// contract where dropped delivery is an infrastructure gap, not a
+    /// data-loss policy.
     fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
         let active_tab = if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(scene) = state.scene.try_lock() {
@@ -1398,10 +1404,14 @@ impl WinitApp {
                 kind = ?dispatch.kind,
                 "keyboard: KeyDown dispatched to agent"
             );
+            dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
         }
     }
 
-    /// Translate a raw key-up event through the `KeyboardProcessor`.
+    /// Translate a raw key-up event through the `KeyboardProcessor`, log it,
+    /// and broadcast it over the `INPUT_EVENTS` gRPC channel.
+    ///
+    /// Events are dropped silently when `current_owner` is `FocusOwner::None`.
     fn dispatch_key_up_event(&mut self, raw: &RawKeyUpEvent) {
         let active_tab = if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(scene) = state.scene.try_lock() {
@@ -1435,13 +1445,17 @@ impl WinitApp {
                 kind = ?dispatch.kind,
                 "keyboard: KeyUp dispatched to agent"
             );
+            dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
         }
     }
 
-    /// Translate a raw post-IME character event through the `KeyboardProcessor`.
+    /// Translate a raw post-IME character event through the `KeyboardProcessor`,
+    /// log it, and broadcast it over the `INPUT_EVENTS` gRPC channel.
     ///
     /// Called both from `WindowEvent::Ime(Ime::Commit)` (IME path) and from
     /// `Key::Character` in `WindowEvent::KeyboardInput` (direct input path).
+    ///
+    /// Events are dropped silently when `current_owner` is `FocusOwner::None`.
     fn dispatch_character_event(&mut self, raw: &RawCharacterEvent) {
         let active_tab = if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(scene) = state.scene.try_lock() {
@@ -1475,6 +1489,7 @@ impl WinitApp {
                 kind = ?dispatch.kind,
                 "keyboard: Character dispatched to agent"
             );
+            dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
         }
     }
 
@@ -2181,7 +2196,7 @@ impl WindowedRuntime {
         // runtime for gRPC server, MCP bridge, session management."
         //
         // gRPC server is disabled when grpc_port == 0 (per WindowedConfig docs).
-        let (mut network_rt, mut network_handles, element_repositioned_tx, scroll_event_tx) =
+        let (mut network_rt, mut network_handles, element_repositioned_tx, input_event_tx) =
             start_network_services(
                 cfg.grpc_port,
                 &cfg.psk,
@@ -2280,7 +2295,7 @@ impl WindowedRuntime {
             current_monitor_index: 0,
             global_tokens: startup_compositor_tokens,
             element_repositioned_tx,
-            scroll_event_tx,
+            input_event_tx,
         };
 
         let mut app = WinitApp { state: app_state };
@@ -2494,9 +2509,10 @@ fn start_network_services(
     // Clone the broadcast senders before moving the service into the gRPC task.
     // The windowed runtime holds these senders to:
     // - broadcast ElementRepositionedEvents from the sync chrome-layer reset path.
-    // - inject ScrollOffsetChangedEvent batches after wheel/keyboard scroll events.
+    // - inject EventBatch payloads (scroll, keyboard, and future input events)
+    //   on the input_event_tx channel after windowed input is processed.
     let element_repositioned_tx = service.element_repositioned_tx.clone();
-    let scroll_event_tx = service.input_event_tx.clone();
+    let input_event_tx = service.input_event_tx.clone();
 
     // Wire RuntimeService (ReloadConfig RPC) alongside HudSession.
     let runtime_svc = RuntimeServiceImpl::new(Arc::clone(&runtime_context));
@@ -2521,7 +2537,7 @@ fn start_network_services(
         Some(network_rt),
         vec![handle],
         Some(element_repositioned_tx),
-        Some(scroll_event_tx),
+        Some(input_event_tx),
     ))
 }
 
@@ -2531,7 +2547,7 @@ fn start_network_services(
 ///
 /// Looks up the owning namespace from the scene graph, constructs an
 /// `EventBatch` with a single `ScrollOffsetChangedEvent` envelope, and sends it
-/// on the `scroll_event_tx` broadcast channel.  The session handler delivers the
+/// on the `input_event_tx` broadcast channel.  The session handler delivers the
 /// batch only when the agent is subscribed to `INPUT_EVENTS` — the subscription
 /// gate is enforced in `subscriptions::filter_event_batch`, not here.
 ///
@@ -2576,6 +2592,99 @@ fn dispatch_scroll_offset_event(
     // namespace matches and INPUT_EVENTS is active. Errors (no receivers,
     // channel full) are silently ignored — scroll events are ephemeral.
     let _ = tx.send((namespace, batch));
+}
+
+/// Broadcast a [`tze_hud_input::KeyboardDispatch`] to the owning agent via the
+/// `INPUT_EVENTS` gRPC channel.
+///
+/// Converts the `KeyboardDispatch` to the appropriate proto envelope
+/// (`KeyDownEvent`, `KeyUpEvent`, or `CharacterEvent`), wraps it in an
+/// `EventBatch`, and sends it on the broadcast channel.  The session handler
+/// delivers the batch only when the agent is subscribed to `INPUT_EVENTS` —
+/// the subscription gate is enforced in `subscriptions::filter_event_batch`.
+///
+/// Keyboard events are transactional (never dropped by design), but the
+/// broadcast channel is best-effort from the runtime side: if no receiver is
+/// connected (gRPC disabled, no agent subscribed to INPUT_EVENTS), the send
+/// error is silently discarded.  This matches the existing scroll-event
+/// pattern and is consistent with the `FocusOwner::None` early-return in the
+/// dispatch helpers (no broadcast when no focused session).
+fn dispatch_keyboard_event(
+    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    dispatch: tze_hud_input::KeyboardDispatch,
+) {
+    let Some(tx) = tx else { return };
+
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    let tile_id_bytes = dispatch.tile_id.as_uuid().as_bytes().to_vec();
+    let node_id_bytes = dispatch
+        .node_id
+        .map(|id| id.as_uuid().as_bytes().to_vec())
+        .unwrap_or_default();
+
+    use tze_hud_input::KeyboardDispatchKind;
+    use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+    let event = match dispatch.kind {
+        KeyboardDispatchKind::KeyDown {
+            key_code,
+            key,
+            modifiers,
+            repeat,
+            timestamp_mono_us,
+        } => InputEvent::KeyDown(tze_hud_protocol::proto::KeyDownEvent {
+            tile_id: tile_id_bytes,
+            node_id: node_id_bytes,
+            timestamp_mono_us: timestamp_mono_us.0,
+            key_code,
+            key,
+            repeat,
+            ctrl: modifiers.ctrl,
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+            meta: modifiers.meta,
+        }),
+        KeyboardDispatchKind::KeyUp {
+            key_code,
+            key,
+            modifiers,
+            timestamp_mono_us,
+        } => InputEvent::KeyUp(tze_hud_protocol::proto::KeyUpEvent {
+            tile_id: tile_id_bytes,
+            node_id: node_id_bytes,
+            timestamp_mono_us: timestamp_mono_us.0,
+            key_code,
+            key,
+            ctrl: modifiers.ctrl,
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+            meta: modifiers.meta,
+        }),
+        KeyboardDispatchKind::Character {
+            character,
+            timestamp_mono_us,
+        } => InputEvent::Character(tze_hud_protocol::proto::CharacterEvent {
+            tile_id: tile_id_bytes,
+            node_id: node_id_bytes,
+            timestamp_mono_us: timestamp_mono_us.0,
+            character,
+        }),
+    };
+
+    let batch = EventBatch {
+        frame_number: 0, // synthetic — not tied to a compositor frame
+        batch_ts_us: now_us,
+        events: vec![InputEnvelope { event: Some(event) }],
+    };
+
+    // Broadcast to all session handler tasks; each one delivers only if the
+    // namespace matches and INPUT_EVENTS is subscribed. Errors (no receivers,
+    // channel lagged) are silently ignored.
+    let _ = tx.send((dispatch.namespace, batch));
 }
 
 /// Push an `InputEvent` into the ring buffer, dropping the oldest if full.
