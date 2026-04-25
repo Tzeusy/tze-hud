@@ -3178,7 +3178,15 @@ fn dispatch_pointer_event(
     use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
 
     let tile_id_bytes = dispatch.tile_id.as_uuid().as_bytes().to_vec();
-    let node_id_bytes = dispatch.node_id.as_uuid().as_bytes().to_vec();
+    // Send empty bytes when no specific node was hit (tile-level pointer event).
+    // This matches the proto field-presence convention used by FocusLostEvent,
+    // FocusGainedEvent, and CaptureReleasedEvent: absent field = empty Vec,
+    // not 16 zero bytes.
+    let node_id_bytes = if dispatch.node_id.is_nil() {
+        Vec::new()
+    } else {
+        dispatch.node_id.as_uuid().as_bytes().to_vec()
+    };
 
     let now_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
