@@ -160,8 +160,9 @@ right thing (no background rect emitted).
    not asked for further adjustment.
 4. **Pane tinting**: earlier indigo/sage tints were discarded — operator
    wanted pure black panes once the blue-tint bug was fixed.
-5. **No drag-to-reposition** for content-layer tiles today (same as
-   `hud-bs2q` drag-handle epic scoping).
+5. **Drag-to-reposition is in scope** for the text stream portal. The portal
+   should gain a header/title-bar move affordance that updates tile bounds and
+   preserves scroll/composer hit behaviour after moving. Tracked as `hud-9yfce`.
 
 ## Current portal chrome tokens (all tweakable at the top of the script)
 
