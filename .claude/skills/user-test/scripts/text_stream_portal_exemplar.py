@@ -423,7 +423,8 @@ def build_input_scroll_nodes(
 ) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
     input_rect, _ = portal_pane_rects()
     text_inset = 12.0
-    root = make_hit_region(COMPOSER_INTERACTION_ID, 0.0, 0.0, input_rect.w, input_rect.h)
+    root = make_solid_color_node(*TEXT_WINDOW_BG_RGBA, 0.0, 0.0, input_rect.w, input_rect.h)
+    hit = make_hit_region(COMPOSER_INTERACTION_ID, 0.0, 0.0, input_rect.w, input_rect.h)
     text_node = make_text_node(
         composer_text or composer_placeholder,
         text_inset,
@@ -440,12 +441,13 @@ def build_input_scroll_nodes(
         8.0,
         2.0,
     )
-    return root, [text_node, caret]
+    return root, [hit, text_node, caret]
 
 
 def build_output_scroll_nodes(body: str) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
     _, output_rect = portal_pane_rects()
-    root = make_hit_region(SCROLL_INTERACTION_ID, 0.0, 0.0, output_rect.w, output_rect.h)
+    root = make_solid_color_node(*TEXT_WINDOW_BG_RGBA, 0.0, 0.0, output_rect.w, output_rect.h)
+    hit = make_hit_region(SCROLL_INTERACTION_ID, 0.0, 0.0, output_rect.w, output_rect.h)
     body_node = make_text_node(
         body,
         0.0,
@@ -455,7 +457,7 @@ def build_output_scroll_nodes(body: str) -> tuple[types_pb2.NodeProto, list[type
         BODY_FONT,
         BODY_RGBA,
     )
-    return root, [body_node]
+    return root, [hit, body_node]
 
 
 async def set_root_with_children(
