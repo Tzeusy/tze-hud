@@ -82,7 +82,6 @@
 
 pub mod admission;
 pub mod agent_events;
-pub mod gpu_lock;
 pub mod attention_budget;
 pub mod budget;
 pub mod channels;
@@ -91,6 +90,7 @@ pub mod degradation;
 pub mod element_store;
 pub mod event_bus;
 pub mod font_loader;
+pub mod gpu_lock;
 #[cfg(feature = "gstreamer")]
 pub mod gst_decode_pipeline;
 pub mod headless;
