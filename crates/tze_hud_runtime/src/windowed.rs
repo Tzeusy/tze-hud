@@ -91,8 +91,8 @@ use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{Compositor, CompositorSurface, WindowSurface};
 use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{
-    FocusManager, FocusTransition, InputProcessor, KeyboardProcessor, PointerEvent,
-    PointerEventKind, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
+    DragEventOutcome, FocusManager, FocusTransition, InputProcessor, KeyboardProcessor,
+    PointerEvent, PointerEventKind, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
 };
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
@@ -105,7 +105,8 @@ use tze_hud_scene::HitResult;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{
-    DragHandleContextMenuState, WidgetParameterValue, ZoneContent, ZoneInteractionKind,
+    DragHandleContextMenuState, DragHandleElementKind, WidgetParameterValue, ZoneContent,
+    ZoneInteractionKind,
 };
 use tze_hud_telemetry::TelemetryCollector;
 
@@ -125,6 +126,219 @@ use crate::widget_hover::{
 use crate::widget_runtime_registration::process_pending_widget_svgs;
 use crate::window::{HitRegion, WindowConfig, WindowMode};
 use crate::window::{resolve_window_mode, should_capture_pointer_event};
+
+// ── Drag-to-move: data carried out of the scene-lock for post-lock work ──────
+
+/// Payload returned by [`apply_drag_handle_pointer_event`] when a drag is
+/// completed and the geometry must be persisted outside the scene lock.
+struct DragReleasedData {
+    /// Scene-level ID of the element that was dragged.
+    element_id: tze_hud_scene::SceneId,
+    /// Final snapped+clamped top-left X in display pixels.
+    final_x: f32,
+    /// Final snapped+clamped top-left Y in display pixels.
+    final_y: f32,
+    /// Element width in display pixels (unchanged during drag).
+    width: f32,
+    /// Element height in display pixels (unchanged during drag).
+    height: f32,
+    /// Display width at time of release, used for `GeometryPolicy::Relative` normalisation.
+    display_width: f32,
+    /// Display height at time of release.
+    display_height: f32,
+    /// Agent namespace that owns the tile, used for `ElementRepositionedEvent` routing.
+    namespace: String,
+}
+
+/// Drive the drag-handle long-press state machine for a single pointer event.
+///
+/// Must be called while both the `SharedState` lock **and** the inner scene
+/// `Mutex<SceneGraph>` are held (i.e., inside the lock block in
+/// [`WinitApp::enqueue_pointer_event`]).
+///
+/// Returns `Some(DragReleasedData)` when a drag completes and the caller must
+/// persist the new geometry after releasing the locks.  Returns `None` for all
+/// other outcomes (including in-flight moves, which are written directly to
+/// `scene.tiles`).
+///
+/// ## Hysteresis and click-focus coexistence
+///
+/// The state machine uses a 250 ms long-press threshold (mouse/pointer) or 1000 ms
+/// (touch) before activating the drag.  A quick press-release cycle (tap/click)
+/// never reaches the `Activated` phase and therefore does not interfere with the
+/// click-to-focus path wired in [`WinitApp::enqueue_pointer_event`].
+#[allow(clippy::too_many_arguments)]
+fn apply_drag_handle_pointer_event(
+    input_processor: &mut InputProcessor,
+    pointer_event: &PointerEvent,
+    result_hit: &HitResult,
+    scene: &mut tze_hud_scene::graph::SceneGraph,
+    display_width: f32,
+    display_height: f32,
+) -> Option<DragReleasedData> {
+    let device_id = pointer_event.device_id;
+
+    // Determine which drag handle (if any) was hit on this event.
+    let hit_drag_info: Option<(&str, tze_hud_scene::SceneId, DragHandleElementKind)> =
+        match result_hit {
+            HitResult::ZoneInteraction {
+                interaction_id,
+                kind:
+                    ZoneInteractionKind::DragHandle {
+                        element_id,
+                        element_kind,
+                    },
+                ..
+            } => Some((interaction_id.as_str(), *element_id, *element_kind)),
+            _ => None,
+        };
+
+    // On PointerDown on a drag handle, start accumulating.
+    if pointer_event.kind == PointerEventKind::Down {
+        if let Some((interaction_id, element_id, element_kind)) = hit_drag_info {
+            let element_bounds = scene
+                .tiles
+                .get(&element_id)
+                .map(|t| t.bounds)
+                .unwrap_or_else(|| tze_hud_scene::Rect::new(0.0, 0.0, 0.0, 0.0));
+            let outcome = input_processor.process_drag_handle_pointer(
+                pointer_event,
+                interaction_id,
+                element_id,
+                element_kind,
+                element_bounds,
+                display_width,
+                display_height,
+            );
+            tracing::trace!(
+                element_id = %element_id,
+                x = pointer_event.x,
+                y = pointer_event.y,
+                ?outcome,
+                "drag-handle: PointerDown accumulating"
+            );
+        }
+        return None;
+    }
+
+    // On PointerMove or PointerUp, check for an in-flight drag on this device.
+    let drag_info = input_processor
+        .drag_states
+        .get(&device_id)
+        .map(|s| (s.interaction_id.clone(), s.element_id, s.element_kind));
+
+    let Some((interaction_id, element_id, element_kind)) = drag_info else {
+        // No drag in progress for this device — nothing to do.
+        return None;
+    };
+
+    // Snapshot element bounds; element_id is the tile being dragged.
+    let element_bounds = scene
+        .tiles
+        .get(&element_id)
+        .map(|t| t.bounds)
+        .unwrap_or_else(|| tze_hud_scene::Rect::new(0.0, 0.0, 0.0, 0.0));
+
+    let outcome = input_processor.process_drag_handle_pointer(
+        pointer_event,
+        &interaction_id,
+        element_id,
+        element_kind,
+        element_bounds,
+        display_width,
+        display_height,
+    );
+
+    match outcome {
+        DragEventOutcome::Idle | DragEventOutcome::Accumulating { .. } => {
+            // Nothing to do locally.
+            None
+        }
+        DragEventOutcome::Activated { element_id, .. } => {
+            tracing::debug!(
+                element_id = %element_id,
+                "drag-handle: drag activated — element follows pointer"
+            );
+            None
+        }
+        DragEventOutcome::Cancelled => {
+            tracing::trace!(
+                element_id = %element_id,
+                "drag-handle: drag cancelled (tap or moved beyond tolerance)"
+            );
+            None
+        }
+        DragEventOutcome::Moved {
+            element_id: eid,
+            new_x,
+            new_y,
+            ..
+        } => {
+            // Update tile bounds directly (chrome-layer bypass — no lease check).
+            if let Some(tile) = scene.tiles.get_mut(&eid) {
+                let old = tile.bounds;
+                tile.bounds.x = new_x;
+                tile.bounds.y = new_y;
+                scene.version += 1;
+                tracing::trace!(
+                    element_id = %eid,
+                    old_x = old.x,
+                    old_y = old.y,
+                    new_x,
+                    new_y,
+                    "drag-handle: tile moved"
+                );
+            }
+            None
+        }
+        DragEventOutcome::Released {
+            element_id: eid,
+            final_x,
+            final_y,
+            element_kind: _,
+        } => {
+            let (width, height) = scene
+                .tiles
+                .get(&eid)
+                .map(|t| (t.bounds.width, t.bounds.height))
+                .unwrap_or((0.0, 0.0));
+
+            // Apply final position to tile bounds.
+            if let Some(tile) = scene.tiles.get_mut(&eid) {
+                tile.bounds.x = final_x;
+                tile.bounds.y = final_y;
+                scene.version += 1;
+            }
+
+            let namespace = scene
+                .tiles
+                .get(&eid)
+                .map(|t| t.namespace.clone())
+                .unwrap_or_default();
+
+            tracing::debug!(
+                element_id = %eid,
+                final_x,
+                final_y,
+                width,
+                height,
+                "drag-handle: drag released — persisting geometry"
+            );
+
+            // Return data the caller will use to persist after releasing locks.
+            Some(DragReleasedData {
+                element_id: eid,
+                final_x,
+                final_y,
+                width,
+                height,
+                display_width,
+                display_height,
+                namespace,
+            })
+        }
+    }
+}
 
 fn zone_hit_regions_to_overlay_regions(scene: &SceneGraph) -> Vec<HitRegion> {
     scene
@@ -1185,6 +1399,11 @@ impl WinitApp {
         // Acquire the scene lock directly (without going through SharedState) so that
         // the main-thread input path does not contend with session handlers that hold
         // both the SharedState lock and the scene lock.
+        //
+        // `drag_released` carries the geometry payload that must be persisted to the
+        // element store after the locks are released (avoids holding locks during
+        // disk I/O in the `DragEventOutcome::Released` path).
+        let drag_released: Option<DragReleasedData>;
         if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(mut scene) = state.scene.try_lock() {
                 // ── Click-to-focus (Stage 2) ─────────────────────────────────
@@ -1285,17 +1504,125 @@ impl WinitApp {
                                     "zone action: callback queued for agent delivery"
                                 );
                             }
-                            ZoneInteractionKind::DragHandle { .. } => {}
+                            ZoneInteractionKind::DragHandle { .. } => {
+                                // Handled by the drag state machine below — not here.
+                            }
                         }
                     }
                 }
+
+                // ── Drag-to-move: long-press drag state machine ──────────────
+                // Drives the per-device long-press drag recogniser.  On Down on a
+                // drag handle, starts accumulating.  On Move/Up while a drag is
+                // active, moves the tile (Moved) or finalises it (Released).
+                //
+                // Hysteresis: the 250 ms hold threshold means a quick tap (click)
+                // never reaches Activated, so click-to-focus (wired above) is
+                // unaffected.  Movement > 10dp during accumulation cancels the
+                // long-press recognition (Cancelled).
+                let display_w = self.state.config.window.width as f32;
+                let display_h = self.state.config.window.height as f32;
+                drag_released = apply_drag_handle_pointer_event(
+                    &mut self.state.input_processor,
+                    &pointer_event,
+                    &result.hit,
+                    &mut scene,
+                    display_w,
+                    display_h,
+                );
 
                 // Local feedback patch (result.local_patch) would be sent to the
                 // compositor via a local-patch channel in the full pipeline. For the
                 // initial windowed runtime, the compositor reads the scene state
                 // directly on the next frame.
                 let _ = result;
+            } else {
+                drag_released = None;
             }
+        } else {
+            drag_released = None;
+        }
+
+        // ── Post-lock: persist geometry override after drag release ───────────
+        // The drag state machine has already updated tile.bounds for live visual
+        // feedback.  Here we also write the geometry_override to the element store
+        // (durable) and broadcast an ElementRepositionedEvent so subscribers know
+        // the tile moved.
+        if let Some(released) = drag_released {
+            self.persist_drag_release(released);
+        }
+    }
+
+    /// Persist the geometry override for a completed drag and broadcast an
+    /// `ElementRepositionedEvent`.
+    ///
+    /// Called after all scene locks are released to avoid holding locks during
+    /// disk I/O (element store atomic write + fsync).
+    fn persist_drag_release(&mut self, released: DragReleasedData) {
+        use tze_hud_input::InputProcessor;
+        use tze_hud_scene::element_store::ElementType;
+
+        let (store_snapshot, persist_path, new_geometry) = {
+            let Ok(mut state) = self.state.shared_state.try_lock() else {
+                tracing::warn!("persist_drag_release: could not acquire shared_state lock");
+                return;
+            };
+
+            let new_geometry = tze_hud_input::drag::final_position_to_geometry(
+                released.final_x,
+                released.final_y,
+                released.width,
+                released.height,
+                released.display_width,
+                released.display_height,
+            );
+
+            InputProcessor::persist_drag_geometry(
+                &mut state.element_store,
+                ElementType::Tile,
+                &released.namespace,
+                released.final_x,
+                released.final_y,
+                released.width,
+                released.height,
+                released.display_width,
+                released.display_height,
+            );
+
+            let store_snapshot = state.element_store.clone();
+            let persist_path = state.element_store_path.clone();
+            (store_snapshot, persist_path, new_geometry)
+        };
+
+        // Persist element store on a background thread (avoids blocking the
+        // winit event loop with sync disk I/O).
+        if let Some(path) = persist_path {
+            std::thread::spawn(move || {
+                if let Err(e) = store_snapshot.persist_to_path_atomic(&path) {
+                    tracing::warn!(
+                        error = %e,
+                        "persist_drag_release: element store persist failed"
+                    );
+                }
+            });
+        }
+
+        // Broadcast ElementRepositionedEvent so gRPC subscribers are notified.
+        if let Some(ref tx) = self.state.element_repositioned_tx {
+            let event = tze_hud_protocol::proto::ElementRepositionedEvent {
+                element_id: released.element_id.as_uuid().as_bytes().to_vec(),
+                new_geometry: Some(tze_hud_protocol::convert::geometry_policy_to_proto(
+                    &new_geometry,
+                )),
+                previous_geometry: None,
+            };
+            tx.send(event).unwrap_or_default();
+            tracing::debug!(
+                element_id = %released.element_id,
+                final_x = released.final_x,
+                final_y = released.final_y,
+                "ElementRepositionedEvent broadcast after drag release"
+            );
         }
     }
 
@@ -4133,6 +4460,308 @@ redaction_style = "blank"
             scene.zone_registry.active_for_zone("alert-banner").len(),
             1,
             "action interaction must NOT remove the notification"
+        );
+    }
+
+    // ── Drag-to-move: long-press drag moves a text stream portal tile [hud-9yfce] ──
+
+    /// Build a scene with a single text-stream-portal-like tile plus the
+    /// corresponding drag handle hit region registered in the chrome layer.
+    ///
+    /// Returns `(scene, tile_id, element_id, interaction_id)`.
+    fn scene_with_drag_handle_tile(
+        initial_x: f32,
+        initial_y: f32,
+        tile_w: f32,
+        tile_h: f32,
+    ) -> (
+        SceneGraph,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        String,
+    ) {
+        use tze_hud_scene::types::DragHandleElementKind;
+        use tze_hud_scene::{Capability, DragHandleHitRegion, HitRegionNode};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).expect("tab must be created");
+        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(initial_x, initial_y, tile_w, tile_h),
+                1,
+            )
+            .expect("tile must be created");
+
+        // The element_id for a tile is its scene id (used in drag handle).
+        let element_id = tile_id;
+
+        // Register a drag handle hit region above the tile (as the compositor would).
+        let interaction_id = format!(
+            "drag-handle:{:032x}",
+            element_id
+                .to_bytes_le()
+                .iter()
+                .fold(0u128, |acc, &b| (acc << 8) | b as u128)
+        );
+        let handle_bounds = Rect::new(
+            initial_x + tile_w / 2.0 - 20.0, // centred above tile
+            initial_y - 10.0,
+            40.0,
+            20.0,
+        );
+        scene.drag_handle_hit_regions.push(DragHandleHitRegion {
+            element_id,
+            element_kind: DragHandleElementKind::Tile,
+            bounds: handle_bounds,
+            interaction_id: interaction_id.clone(),
+            hit_region: HitRegionNode {
+                bounds: handle_bounds,
+                interaction_id: interaction_id.clone(),
+                accepts_pointer: true,
+                ..Default::default()
+            },
+            tab_order: 0,
+        });
+
+        (scene, tile_id, element_id, interaction_id)
+    }
+
+    /// A long-press drag on a tile's drag handle must move the tile's bounds and
+    /// return a `DragReleasedData` payload when the pointer is released.
+    ///
+    /// Acceptance criteria for hud-9yfce:
+    /// - `Moved` outcome during pointer-move updates `tile.bounds` immediately.
+    /// - `Released` outcome on pointer-up produces persist data.
+    /// - Click-focus is unaffected: a short tap (no long-press) produces no move.
+    #[test]
+    fn drag_to_move_long_press_moves_tile_bounds() {
+        use std::thread;
+        use std::time::Duration;
+        use tze_hud_input::{InputProcessor, PointerEvent};
+
+        let (mut scene, tile_id, element_id, _interaction_id) =
+            scene_with_drag_handle_tile(400.0, 300.0, 600.0, 200.0);
+
+        // The drag handle was placed at:
+        //   x = 400 + 600/2 - 20 = 680, y = 300 - 10 = 290, w=40, h=20
+        // So the handle spans x: 680..720, y: 290..310.
+        let handle_cx = 700.0_f32; // centre of the handle
+        let handle_cy = 300.0_f32;
+
+        let mut processor = InputProcessor::new();
+
+        // ── Step 1: PointerDown on the drag handle ────────────────────────────
+        let down = PointerEvent {
+            x: handle_cx,
+            y: handle_cy,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        // process() produces the HitResult for the drag handle.
+        let result_down = processor.process(&down, &mut scene);
+        assert!(
+            result_down.hit.is_zone_interaction(),
+            "pointer-down on drag handle must produce ZoneInteraction hit"
+        );
+
+        // Drive the drag state machine — should start accumulating.
+        let released_on_down = super::apply_drag_handle_pointer_event(
+            &mut processor,
+            &down,
+            &result_down.hit,
+            &mut scene,
+            1920.0,
+            1080.0,
+        );
+        assert!(
+            released_on_down.is_none(),
+            "PointerDown must not trigger release"
+        );
+        assert!(
+            processor.drag_states.contains_key(&0),
+            "drag state must be created for device 0 after PointerDown on handle"
+        );
+
+        // ── Step 2: Wait for long-press threshold (250 ms) ───────────────────
+        thread::sleep(Duration::from_millis(260));
+
+        // ── Step 3: PointerMove — first move activates the drag, second moves tile ──
+        //
+        // The state machine on the first PointerMove after the threshold transitions
+        // Accumulating → Activated (returns `Activated`, not `Moved` yet).  The
+        // grab offset is recorded at activation.  Subsequent PointerMove events
+        // return `Moved` and update the tile bounds.
+        let move1 = PointerEvent {
+            x: handle_cx + 5.0, // small nudge triggers Activated
+            y: handle_cy,
+            kind: PointerEventKind::Move,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result_move1 = processor.process(&move1, &mut scene);
+        let released_on_move1 = super::apply_drag_handle_pointer_event(
+            &mut processor,
+            &move1,
+            &result_move1.hit,
+            &mut scene,
+            1920.0,
+            1080.0,
+        );
+        assert!(
+            released_on_move1.is_none(),
+            "first PointerMove (Activated) must not trigger release"
+        );
+
+        // Second PointerMove — now in Activated phase, returns Moved.
+        let move2 = PointerEvent {
+            x: handle_cx + 100.0,
+            y: handle_cy + 50.0,
+            kind: PointerEventKind::Move,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result_move2 = processor.process(&move2, &mut scene);
+        let released_on_move2 = super::apply_drag_handle_pointer_event(
+            &mut processor,
+            &move2,
+            &result_move2.hit,
+            &mut scene,
+            1920.0,
+            1080.0,
+        );
+        assert!(
+            released_on_move2.is_none(),
+            "PointerMove must not trigger release"
+        );
+
+        // The tile must have moved from its original position.
+        let tile_after_move = scene.tiles.get(&tile_id).expect("tile must exist");
+        assert_ne!(
+            tile_after_move.bounds.x, 400.0,
+            "tile X must change after drag move"
+        );
+        assert_ne!(
+            tile_after_move.bounds.y, 300.0,
+            "tile Y must change after drag move"
+        );
+
+        // ── Step 4: PointerUp — should release and return persist data ────────
+        // Release at the same position as the last move.
+        let up = PointerEvent {
+            x: handle_cx + 100.0,
+            y: handle_cy + 50.0,
+            kind: PointerEventKind::Up,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result_up = processor.process(&up, &mut scene);
+        let released_on_up = super::apply_drag_handle_pointer_event(
+            &mut processor,
+            &up,
+            &result_up.hit,
+            &mut scene,
+            1920.0,
+            1080.0,
+        );
+
+        let released =
+            released_on_up.expect("PointerUp after activated drag must return released data");
+        assert_eq!(
+            released.element_id, element_id,
+            "released element_id must match the dragged tile"
+        );
+        assert!(
+            released.final_x >= 0.0 && released.final_x + released.width <= 1920.0,
+            "final X must be within display bounds"
+        );
+        assert!(
+            released.final_y >= 0.0 && released.final_y + released.height <= 1080.0,
+            "final Y must be within display bounds"
+        );
+
+        // Drag state must be cleaned up after release.
+        assert!(
+            !processor.drag_states.contains_key(&0),
+            "drag state must be removed after PointerUp"
+        );
+    }
+
+    /// A quick tap (PointerDown immediately followed by PointerUp, no long-press)
+    /// on a drag handle must NOT move the tile — the click-to-focus path must be
+    /// unaffected.
+    ///
+    /// Hysteresis: the 250 ms threshold ensures taps are recognised as clicks,
+    /// not drags.
+    #[test]
+    fn drag_to_move_quick_tap_does_not_move_tile() {
+        use tze_hud_input::{InputProcessor, PointerEvent};
+
+        let (mut scene, tile_id, _element_id, _interaction_id) =
+            scene_with_drag_handle_tile(400.0, 300.0, 600.0, 200.0);
+
+        // Same drag handle position as drag_to_move_long_press_moves_tile_bounds:
+        //   x: 680..720, y: 290..310.
+        let handle_cx = 700.0_f32; // centre of the handle
+        let handle_cy = 300.0_f32;
+
+        let mut processor = InputProcessor::new();
+
+        // PointerDown.
+        let down = PointerEvent {
+            x: handle_cx,
+            y: handle_cy,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result_down = processor.process(&down, &mut scene);
+        let _ = super::apply_drag_handle_pointer_event(
+            &mut processor,
+            &down,
+            &result_down.hit,
+            &mut scene,
+            1920.0,
+            1080.0,
+        );
+
+        // PointerUp immediately — no long-press threshold met.
+        let up = PointerEvent {
+            x: handle_cx,
+            y: handle_cy,
+            kind: PointerEventKind::Up,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result_up = processor.process(&up, &mut scene);
+        let released_on_up = super::apply_drag_handle_pointer_event(
+            &mut processor,
+            &up,
+            &result_up.hit,
+            &mut scene,
+            1920.0,
+            1080.0,
+        );
+
+        // Must NOT return release data — this was a tap, not a drag.
+        assert!(
+            released_on_up.is_none(),
+            "quick tap must not trigger drag release [click-focus coexistence]"
+        );
+
+        // Tile bounds must be unchanged.
+        let tile = scene.tiles.get(&tile_id).expect("tile must exist");
+        assert_eq!(
+            tile.bounds.x, 400.0,
+            "tile X must not change after a tap on the drag handle"
+        );
+        assert_eq!(
+            tile.bounds.y, 300.0,
+            "tile Y must not change after a tap on the drag handle"
         );
     }
 }
