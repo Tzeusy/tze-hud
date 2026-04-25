@@ -2,16 +2,17 @@
 """
 Text Stream Portal exemplar user-test scenario.
 
-Renders a two-pane bounded portal tile (INPUT left · OUTPUT right) on the
+Renders a two-pane bounded portal surface (INPUT left · OUTPUT right) on the
 live HUD via the resident `HudSession` gRPC stream, using only existing scene
 primitives (SolidColor, TextMarkdown, HitRegion). No terminal-emulator node,
 no new node type, no chrome-hosted affordances.
 
 Layout:
   - Equal 50/50 split between INPUT and OUTPUT panes
-  - Fat 6px drag divider (with centred grip bar + hit region) between them;
-    actual resize-on-drag needs pointer capture (hud-dih4) but the visual +
-    HitRegion affordance ships today.
+  - Fat 6px drag divider (with centred grip bar + hit region) between them.
+  - The static frame is one tile; the input composer and transcript body are
+    separate transparent scroll-capture tiles so wheel input cannot move the
+    whole portal.
   - Panes render at 95% black opacity (operator preference).
 
 Phases:
@@ -33,6 +34,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -102,6 +104,22 @@ SCROLL_INTERACTION_ID = "portal-scroll"
 SUBMIT_INTERACTION_ID = "portal-submit"
 COMPOSER_INTERACTION_ID = "portal-composer-focus"
 PANE_RESIZE_INTERACTION_ID = "portal-pane-resize"
+
+
+@dataclass(frozen=True)
+class PaneRect:
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+@dataclass(frozen=True)
+class PortalTiles:
+    frame: bytes
+    input_scroll: bytes
+    output_scroll: bytes
+
 
 # ─── CLI defaults ─────────────────────────────────────────────────────────────
 
@@ -194,6 +212,39 @@ def make_hit_region(
     )
 
 
+def portal_pane_rects() -> tuple[PaneRect, PaneRect]:
+    """Return tile-local scroll-capture rects for input composer and output body."""
+    pane_y = HEADER_H + DIVIDER_H
+    pane_h = PORTAL_H - pane_y - FOOTER_H - DIVIDER_H
+    input_pane_w = INPUT_PANE_W
+    divider_x = input_pane_w
+    output_pane_x = divider_x + PANE_DIVIDER_W
+    output_pane_w = PORTAL_W - output_pane_x
+
+    composer_inset = 14.0
+    composer_x = composer_inset
+    composer_y = pane_y + 40.0
+    composer_w = input_pane_w - composer_inset * 2.0
+    composer_h = pane_h - 40.0 - 44.0
+
+    body_y = pane_y + 40.0
+    body_h = pane_h - 40.0 - 8.0
+    output_body = PaneRect(
+        output_pane_x + PADDING_X,
+        body_y,
+        output_pane_w - PADDING_X * 2.0,
+        body_h,
+    )
+    input_composer = PaneRect(composer_x, composer_y, composer_w, composer_h)
+    return input_composer, output_body
+
+
+def scroll_max_y_for_text(content: str, viewport_h: float, line_px: float) -> float:
+    """Approximate max scroll offset for bounded text in a pane viewport."""
+    line_count = max(1, len(content.splitlines()))
+    return max(0.0, line_count * line_px - viewport_h)
+
+
 def build_portal_nodes(
     title: str,
     subtitle: str,
@@ -202,7 +253,7 @@ def build_portal_nodes(
     composer_text: str = "",
     composer_placeholder: str = "type a reply — Enter to submit",
 ) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
-    """Return (root, children) for a two-pane portal: INPUT left | OUTPUT right."""
+    """Return static frame/chrome nodes for a two-pane portal."""
     root_node = make_solid_color_node(
         *BG_RGBA, 0.0, 0.0, PORTAL_W, PORTAL_H, radius=PORTAL_RADIUS,
     )
@@ -281,27 +332,6 @@ def build_portal_nodes(
         composer_x + composer_w - 1.0, composer_y, 1.0, composer_h,
     )
 
-    text_inset = 12.0
-    composer_text_node = make_text_node(
-        composer_text or composer_placeholder,
-        composer_x + text_inset,
-        composer_y + text_inset,
-        composer_w - text_inset * 2.0,
-        composer_h - text_inset * 2.0,
-        INPUT_FONT,
-        INPUT_TEXT_RGBA if composer_text else INPUT_PLACEHOLDER_RGBA,
-    )
-    caret = make_solid_color_node(
-        *CARET_RGBA,
-        composer_x + text_inset,
-        composer_y + text_inset + INPUT_FONT + 2.0,
-        8.0, 2.0,
-    )
-    composer_focus = make_hit_region(
-        COMPOSER_INTERACTION_ID,
-        composer_x, composer_y, composer_w, composer_h,
-    )
-
     # Submit hint strip at the bottom of the input pane.
     submit_hint_y = composer_y + composer_h + 10.0
     submit_hint = make_text_node(
@@ -346,19 +376,6 @@ def build_portal_nodes(
         output_pane_w - PADDING_X * 2.0, 14.0,
         EYEBROW_FONT, EYEBROW_RGBA,
     )
-    body_y = pane_y + 40.0
-    body_h = pane_h - 40.0 - 8.0
-    body_node = make_text_node(
-        body,
-        output_pane_x + PADDING_X, body_y,
-        output_pane_w - PADDING_X * 2.0, body_h,
-        BODY_FONT, BODY_RGBA,
-    )
-    scroll_hit = make_hit_region(
-        SCROLL_INTERACTION_ID,
-        output_pane_x, body_y, output_pane_w, body_h,
-    )
-
     # ── Footer ────────────────────────────────────────────────────────────
     footer_divider = make_solid_color_node(
         *DIVIDER_RGBA, 0.0, PORTAL_H - FOOTER_H - DIVIDER_H,
@@ -381,41 +398,65 @@ def build_portal_nodes(
         # input pane
         input_pane_bg, input_eyebrow,
         composer_bg, border_t, border_b, border_l, border_r,
-        composer_text_node, caret, composer_focus,
         submit_hint, submit_hit,
         # divider (fat drag handle)
         pane_divider, pane_divider_grip, pane_resize_hit,
         # output pane
-        output_pane_bg, output_eyebrow, body_node, scroll_hit,
+        output_pane_bg, output_eyebrow,
         # footer
         footer_divider, footer_bg, footer_node,
     ]
     return root_node, children
 
 
-async def publish_portal(
+def build_input_scroll_nodes(
+    composer_text: str = "",
+    composer_placeholder: str = "type a reply — Enter to submit",
+) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
+    input_rect, _ = portal_pane_rects()
+    text_inset = 12.0
+    root = make_hit_region(COMPOSER_INTERACTION_ID, 0.0, 0.0, input_rect.w, input_rect.h)
+    text_node = make_text_node(
+        composer_text or composer_placeholder,
+        text_inset,
+        text_inset,
+        input_rect.w - text_inset * 2.0,
+        input_rect.h - text_inset * 2.0,
+        INPUT_FONT,
+        INPUT_TEXT_RGBA if composer_text else INPUT_PLACEHOLDER_RGBA,
+    )
+    caret = make_solid_color_node(
+        *CARET_RGBA,
+        text_inset,
+        text_inset + INPUT_FONT + 2.0,
+        8.0,
+        2.0,
+    )
+    return root, [text_node, caret]
+
+
+def build_output_scroll_nodes(body: str) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
+    _, output_rect = portal_pane_rects()
+    root = make_hit_region(SCROLL_INTERACTION_ID, 0.0, 0.0, output_rect.w, output_rect.h)
+    body_node = make_text_node(
+        body,
+        0.0,
+        0.0,
+        output_rect.w,
+        output_rect.h,
+        BODY_FONT,
+        BODY_RGBA,
+    )
+    return root, [body_node]
+
+
+async def set_root_with_children(
     client: HudClient,
     lease_id: bytes,
     tile_id: bytes,
-    title: str,
-    subtitle: str,
-    body: str,
-    footer_meta: str,
-    include_tile_setup: bool,
+    root: types_pb2.NodeProto,
+    children: list[types_pb2.NodeProto],
 ) -> None:
-    """Publish the portal scene.
-
-    Server rewrites the root id on set_tile_root, so set_tile_root is
-    submitted alone first and the server-assigned id is used as parent_id
-    for subsequent add_node calls. Batching set_tile_root + add_node fails
-    under atomic-batch semantics.
-    """
-    if include_tile_setup:
-        await client.update_tile_opacity(lease_id, tile_id, 1.0)
-        await client.update_tile_input_mode(
-            lease_id, tile_id, types_pb2.TILE_INPUT_MODE_CAPTURE,
-        )
-    root, children = build_portal_nodes(title, subtitle, body, footer_meta)
     mr = await client.submit_mutation_batch(
         lease_id,
         [types_pb2.MutationProto(
@@ -428,6 +469,94 @@ async def publish_portal(
     print(f"  [grpc] Tile root set; server root_id={root_id.hex()[:16]}...", flush=True)
     for child in children:
         await client.add_node(lease_id, tile_id, child, parent_id=root_id)
+
+
+async def publish_portal(
+    client: HudClient,
+    lease_id: bytes,
+    tiles: PortalTiles,
+    title: str,
+    subtitle: str,
+    body: str,
+    footer_meta: str,
+    include_tile_setup: bool,
+    composer_text: str = "",
+) -> None:
+    """Publish the portal scene.
+
+    Server rewrites the root id on set_tile_root, so set_tile_root is
+    submitted alone first and the server-assigned id is used as parent_id
+    for subsequent add_node calls. Batching set_tile_root + add_node fails
+    under atomic-batch semantics.
+    """
+    if include_tile_setup:
+        for tile_id in (tiles.frame, tiles.input_scroll, tiles.output_scroll):
+            await client.update_tile_opacity(lease_id, tile_id, 1.0)
+            await client.update_tile_input_mode(
+                lease_id, tile_id, types_pb2.TILE_INPUT_MODE_CAPTURE,
+            )
+        input_rect, output_rect = portal_pane_rects()
+        await client.submit_mutation_batch(
+            lease_id,
+            [
+                register_tile_scroll_mutation(
+                    tiles.input_scroll,
+                    scrollable_y=True,
+                    content_height=scroll_max_y_for_text(
+                        composer_text, input_rect.h, SCROLL_LINE_PX,
+                    ),
+                ),
+                register_tile_scroll_mutation(
+                    tiles.output_scroll,
+                    scrollable_y=True,
+                    content_height=scroll_max_y_for_text(
+                        body, output_rect.h, SCROLL_LINE_PX,
+                    ),
+                ),
+            ],
+        )
+
+    frame_root, frame_children = build_portal_nodes(title, subtitle, body, footer_meta)
+    await set_root_with_children(client, lease_id, tiles.frame, frame_root, frame_children)
+
+    input_root, input_children = build_input_scroll_nodes(composer_text)
+    await set_root_with_children(client, lease_id, tiles.input_scroll, input_root, input_children)
+
+    output_root, output_children = build_output_scroll_nodes(body)
+    await set_root_with_children(client, lease_id, tiles.output_scroll, output_root, output_children)
+
+
+async def create_portal_tiles(
+    client: HudClient,
+    lease_id: bytes,
+    portal_x: float,
+) -> PortalTiles:
+    input_rect, output_rect = portal_pane_rects()
+    frame = await client.create_tile(
+        lease_id,
+        x=portal_x,
+        y=PORTAL_Y,
+        w=PORTAL_W,
+        h=PORTAL_H,
+        z_order=PORTAL_Z,
+    )
+    input_scroll = await client.create_tile(
+        lease_id,
+        x=portal_x + input_rect.x,
+        y=PORTAL_Y + input_rect.y,
+        w=input_rect.w,
+        h=input_rect.h,
+        z_order=PORTAL_Z + 1,
+    )
+    output_scroll = await client.create_tile(
+        lease_id,
+        x=portal_x + output_rect.x,
+        y=PORTAL_Y + output_rect.y,
+        w=output_rect.w,
+        h=output_rect.h,
+        z_order=PORTAL_Z + 1,
+    )
+    return PortalTiles(frame=frame, input_scroll=input_scroll, output_scroll=output_scroll)
 
 
 def register_tile_scroll_mutation(
@@ -493,18 +622,18 @@ async def heartbeat_loop(client: HudClient, interval_ms: int) -> None:
 
 
 async def run_baseline(
-    client: HudClient, lease_id: bytes, tile_id: bytes,
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
     body_full: str, transcript: list[dict[str, Any]], hold_s: float,
 ) -> None:
     emit_step_event(transcript, 1, "started", {
         "code": "baseline",
         "title": "Baseline render",
         "action": "publish full portal chrome + transcript viewport",
-        "expected_visual": "portal tile appears at right edge with header, body, footer",
+        "expected_visual": "portal surface appears at right edge with header, body, footer",
     })
     total_lines = len(body_full.splitlines())
     await publish_portal(
-        client, lease_id, tile_id,
+        client, lease_id, tiles,
         title="Exemplar Review Portal",
         subtitle="docs/exemplar-manual-review-checklist.md",
         body=body_full,
@@ -515,13 +644,13 @@ async def run_baseline(
         "code": "baseline",
         "title": "Baseline render",
         "action": "hold for operator observation",
-        "expected_visual": "portal tile visible; body text readable",
+        "expected_visual": "portal surface visible; body text readable",
     }, hold_s=hold_s, lines=total_lines)
     await asyncio.sleep(hold_s)
 
 
 async def run_scroll(
-    client: HudClient, lease_id: bytes, tile_id: bytes,
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
     transcript: list[dict[str, Any]],
 ) -> None:
     """Exercise the transcript interaction contract inside the portal output pane."""
@@ -539,14 +668,17 @@ async def run_scroll(
     await client.submit_mutation_batch(
         lease_id,
         [register_tile_scroll_mutation(
-            tile_id,
+            tiles.output_scroll,
             scrollable_y=True,
-            content_height=float(len(history) * SCROLL_LINE_PX),
+            content_height=max(
+                0.0,
+                len(history) * SCROLL_LINE_PX - portal_pane_rects()[1].h,
+            ),
         )],
     )
     viewport_start = 0
     await publish_portal(
-        client, lease_id, tile_id,
+        client, lease_id, tiles,
         title="Exemplar Review Portal",
         subtitle="Transcript Interaction Contract",
         body=bounded_transcript(history, viewport_start, SCROLL_VISIBLE_LINES),
@@ -573,10 +705,10 @@ async def run_scroll(
         )
         await client.submit_mutation_batch(
             lease_id,
-            [set_scroll_offset_mutation(tile_id, 0.0, scroll_offset)],
+            [set_scroll_offset_mutation(tiles.output_scroll, 0.0, scroll_offset)],
         )
         await publish_portal(
-            client, lease_id, tile_id,
+            client, lease_id, tiles,
             title="Exemplar Review Portal",
             subtitle="Transcript Interaction Contract",
             body=bounded_transcript(history, viewport_start, SCROLL_VISIBLE_LINES),
@@ -599,7 +731,7 @@ async def run_scroll(
     for i in range(5):
         history.append(f"[NEW-{i:02d}] Tail append at t+{i}: live output arriving")
         await publish_portal(
-            client, lease_id, tile_id,
+            client, lease_id, tiles,
             title="Exemplar Review Portal",
             subtitle="Transcript Interaction Contract",
             body=bounded_transcript(history, viewport_start, SCROLL_VISIBLE_LINES),
@@ -619,11 +751,11 @@ async def run_scroll(
 
     await client.submit_mutation_batch(
         lease_id,
-        [set_scroll_offset_mutation(tile_id, 0.0, 0.0)],
+        [set_scroll_offset_mutation(tiles.output_scroll, 0.0, 0.0)],
     )
     tail_start = max(0, len(history) - SCROLL_VISIBLE_LINES)
     await publish_portal(
-        client, lease_id, tile_id,
+        client, lease_id, tiles,
         title="Exemplar Review Portal",
         subtitle="Transcript Interaction Contract",
         body=bounded_transcript(history, tail_start, SCROLL_VISIBLE_LINES),
@@ -640,7 +772,7 @@ async def run_scroll(
 
 
 async def run_streaming(
-    client: HudClient, lease_id: bytes, tile_id: bytes,
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
     body_full: str, transcript: list[dict[str, Any]],
     chunks: int, chunk_interval_s: float,
 ) -> None:
@@ -656,7 +788,7 @@ async def run_streaming(
         end = min(len(lines), per_chunk * i) if i < chunks else len(lines)
         partial = "\n".join(lines[:end])
         await publish_portal(
-            client, lease_id, tile_id,
+            client, lease_id, tiles,
             title="Exemplar Review Portal",
             subtitle="docs/exemplar-manual-review-checklist.md",
             body=partial,
@@ -674,7 +806,7 @@ async def run_streaming(
 
 
 async def run_rapid(
-    client: HudClient, lease_id: bytes, tile_id: bytes,
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
     body_full: str, transcript: list[dict[str, Any]],
     cycles: int, interval_ms: int,
 ) -> None:
@@ -692,7 +824,7 @@ async def run_rapid(
     for i in range(cycles):
         body = alt_bodies[i % 2]
         await publish_portal(
-            client, lease_id, tile_id,
+            client, lease_id, tiles,
             title="Exemplar Review Portal",
             subtitle="docs/exemplar-manual-review-checklist.md",
             body=body,
@@ -701,7 +833,7 @@ async def run_rapid(
         )
         await asyncio.sleep(interval_ms / 1000.0)
     await publish_portal(
-        client, lease_id, tile_id,
+        client, lease_id, tiles,
         title="Exemplar Review Portal",
         subtitle="docs/exemplar-manual-review-checklist.md",
         body=body_full,
@@ -744,12 +876,11 @@ async def run_scenario(args: argparse.Namespace) -> int:
 
         await client.connect()
         lease_id = await client.request_lease(ttl_ms=180_000)
-        tile_id = await client.create_tile(
+        portal_x = args.tab_width - PORTAL_W - PORTAL_X_FROM_RIGHT
+        tiles = await create_portal_tiles(
+            client=client,
             lease_id=lease_id,
-            x=args.tab_width - PORTAL_W - PORTAL_X_FROM_RIGHT,
-            y=PORTAL_Y,
-            w=PORTAL_W, h=PORTAL_H,
-            z_order=PORTAL_Z,
+            portal_x=portal_x,
         )
         heartbeat_interval_ms = client.heartbeat_interval_ms or 5_000
         heartbeat_task = asyncio.create_task(
@@ -760,19 +891,19 @@ async def run_scenario(args: argparse.Namespace) -> int:
         for phase in phases:
             if phase == "baseline":
                 await run_baseline(
-                    client, lease_id, tile_id, body, transcript,
+                    client, lease_id, tiles, body, transcript,
                     args.baseline_hold_s,
                 )
             elif phase == "scroll":
-                await run_scroll(client, lease_id, tile_id, transcript)
+                await run_scroll(client, lease_id, tiles, transcript)
             elif phase == "streaming":
                 await run_streaming(
-                    client, lease_id, tile_id, body, transcript,
+                    client, lease_id, tiles, body, transcript,
                     args.stream_chunks, args.stream_interval_s,
                 )
             elif phase == "rapid":
                 await run_rapid(
-                    client, lease_id, tile_id, body, transcript,
+                    client, lease_id, tiles, body, transcript,
                     args.rapid_cycles, args.rapid_interval_ms,
                 )
             else:

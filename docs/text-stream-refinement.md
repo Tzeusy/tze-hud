@@ -31,8 +31,10 @@ complete".
 One exemplar script under `.claude/skills/user-test/scripts/`:
 
 - **`text_stream_portal_exemplar.py`** — the two-pane UX demo.
-  860×680 content-layer tile at the right edge, rounded 14px, z=220. Header
-  (52px) + footer (30px) chrome strips, INPUT pane on the left with eyebrow
+  860×680 content-layer portal surface at the right edge. The static frame
+  tile sits at z=220, while transparent input/transcript scroll-capture tiles
+  sit above the two text boxes so mouse wheel input only targets those boxes.
+  Header (52px) + footer (30px) chrome strips, INPUT pane on the left with eyebrow
   label, composer box (white 0.05 inset + 1px border, green caret stub),
   placeholder text, submit-hint strip (`Enter submit · Shift+Enter newline ·
   Esc cancel`). OUTPUT pane on the right with TRANSCRIPT eyebrow and the
@@ -42,9 +44,9 @@ One exemplar script under `.claude/skills/user-test/scripts/`:
   black opacity** per the operator's 2026-04-25 preference (iterated
   80% → 90% → 95%). All chrome tokens are still at the top
   of the file; iterate there. The former separate hud-w5ih scroll contract
-  exemplar is now the `scroll` phase: mount long output + RegisterTileScroll,
-  four SetScrollOffset steps, five appends mid-scroll with offset preserved,
-  then return-to-tail.
+  exemplar is now the `scroll` phase: mount long output + RegisterTileScroll
+  on the transcript pane tile, four SetScrollOffset steps, five appends
+  mid-scroll with offset preserved, then return-to-tail.
 
 The script uses `HudClient` from `hud_grpc_client.py` and follows the
 split-batch `set_tile_root` → `add_node` pattern (see Gotchas).
@@ -114,10 +116,11 @@ pixel_readback --features "headless dev-mode" -- test_color_14 test_color_17`
   events currently reach the runtime but there is no plumbing from a
   focused HitRegion to a mutable text buffer that can be re-rendered via
   MutationBatch. Tracked as `hud-opkvq`.
-- **Wheel / keyboard scroll exercised through the exemplar**: the engine
-  path is in place (PR #497). The portal exemplar's `scroll` phase proves
-  the adapter-driven `SetScrollOffset` path; a future pass should still
-  drive actual wheel / PgUp / PgDn input against the live HUD.
+- **Wheel / keyboard scroll live sign-off**: the engine path is in place
+  (PR #497). The portal exemplar now scopes scroll registration to transparent
+  input/transcript pane tiles, not the frame tile. A future pass should still
+  drive actual wheel / PgUp / PgDn input against the live HUD and confirm the
+  frame does not move.
 - **`docs/exemplar-manual-review-checklist.md` row 11** — still needs the
   final UX-tweak sign-off row entered once a human confirms the two-pane
   render on the live HUD.
@@ -172,6 +175,8 @@ right thing (no background rect emitted).
 - Root backdrop: `(0, 0, 0, 0.30)` — light portal frame only
 - Header / footer strips: `(0, 0, 0, 0.50)`
 - Pane backgrounds (INPUT + OUTPUT): `(0, 0, 0, 0.95)`
+- Scroll routing: the frame tile is non-scrollable; composer and transcript
+  body are separate transparent capture tiles at `PORTAL_Z + 1`
 - Composer inset (inside input pane): white `(1, 1, 1, 0.05)` + 1px white
   border quads, green caret
 - Pane divider: `PANE_DIVIDER_W=6.0`, `INPUT_PANE_W = (PORTAL_W -
