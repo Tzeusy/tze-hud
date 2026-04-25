@@ -11,12 +11,19 @@
 #   4. Repo label 'run-real-decode' created in GitHub (for label-gated PR runs)
 #   5. Smoke-test: `cargo check -p tze_hud_compositor` passes from D18 runner
 #
-# DUAL-USE CAVEAT (scheduling gap — see hud-ora8.1.20 notes):
+# DUAL-USE SCHEDULING POLICY (implemented — hud-0mo6n):
 #   The tzehouse-windows box is also used for /user-test interactive overlay sessions.
-#   Nightly real-decode jobs MUST NOT race interactive HUD sessions. The nightly trigger
-#   is set to 02:00 SGT (18:00 UTC) to reduce overlap with active use periods, but this
-#   is not a hard guarantee. A scheduling policy bead should be filed to implement a
-#   proper mutex (e.g., a lock file or runner label rotation). See docs/ci/windows-d18-runner-setup.md §7.
+#   Nightly real-decode jobs MUST NOT race interactive HUD sessions.
+#
+#   Policy: file-based GPU lock at %PROGRAMDATA%\tze_hud\gpu.lock.
+#     - The pre-job "Check GPU lock" step below reads the lock file.
+#     - If a live interactive session holds the lock, the job is skipped (exit 0 + warning).
+#     - If the lock is stale (holding PID is dead), it is removed and the job proceeds.
+#     - A final always-run "Release GPU lock" step cleans up after the job.
+#
+#   The nightly trigger is still set to 02:00 SGT (18:00 UTC) as defence-in-depth.
+#   Design doc: docs/design/tzehouse-windows-gpu-scheduling.md
+#   Runbook:    docs/ci/windows-d18-runner-setup.md §7
 #
 # GLASS-TO-GLASS LATENCY CAPTURE:
 #   The D18 p50<=150ms / p99<=400ms glass-to-glass latency harness is tracked in
@@ -50,9 +57,9 @@ on:
     types: [labeled]
 
   # Nightly gate: 02:00 SGT = 18:00 UTC.
-  # Chosen to reduce overlap with interactive /user-test sessions (typically daytime SGT).
-  # SCHEDULING GAP: this is a best-effort window, not a hard exclusive lock.
-  # See docs/ci/windows-d18-runner-setup.md §7 for the open scheduling gap and follow-up bead.
+  # Chosen as defence-in-depth to reduce overlap with interactive /user-test sessions
+  # (typically daytime SGT). The pre-job GPU lock check is the primary mutual-exclusion
+  # mechanism; the time window is secondary. See docs/design/tzehouse-windows-gpu-scheduling.md.
   schedule:
     - cron: "0 18 * * *"
 
@@ -85,26 +92,138 @@ jobs:
       github.event_name == 'schedule' ||
       (github.event_name == 'pull_request' && github.event.label.name == 'run-real-decode')
 
+    # Track whether we acquired the GPU lock so the release step knows what to do.
+    # Set in the "Check GPU lock" step; read in "Release GPU lock".
+    env:
+      GPU_LOCK_ACQUIRED: "false"
+
     steps:
+      # ── GPU lock check (must be FIRST — before any GPU work) ───────────────
+      # Checks %PROGRAMDATA%\tze_hud\gpu.lock for a live interactive session.
+      # If a live session is found, the job is skipped (exit 0 + warning annotation).
+      # If the lock is stale (PID dead), it is removed and we proceed.
+      # Policy: docs/design/tzehouse-windows-gpu-scheduling.md
+      - name: Check GPU lock
+        id: gpu-lock-check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $LockDir  = "C:\ProgramData\tze_hud"
+          $LockFile = "$LockDir\gpu.lock"
+          $TmpFile  = "$LockDir\gpu.lock.tmp"
+          $MyPid    = $PID
+
+          function Write-LockLog([string]$msg) { Write-Host "[gpu-lock] $msg" }
+
+          # Ensure the lock directory exists
+          if (-not (Test-Path $LockDir)) {
+            Write-LockLog "Creating lock directory: $LockDir"
+            New-Item -ItemType Directory -Force -Path $LockDir | Out-Null
+          }
+
+          Write-LockLog "Checking $LockFile ..."
+
+          if (Test-Path $LockFile) {
+            $lines = @{}
+            try {
+              Get-Content $LockFile | ForEach-Object {
+                $parts = $_ -split "=", 2
+                if ($parts.Count -eq 2) { $lines[$parts[0].Trim()] = $parts[1].Trim() }
+              }
+            } catch {
+              Write-LockLog "WARNING: Lock file unreadable. Treating as absent."
+              Remove-Item -Force $LockFile -ErrorAction SilentlyContinue
+              $lines = @{}
+            }
+
+            if ($lines.Count -gt 0) {
+              $lockPid  = [int]($lines["PID"] ?? 0)
+              $lockType = $lines["SESSION_TYPE"] ?? "unknown"
+              $lockDesc = $lines["DESCRIPTION"] ?? ""
+              $lockTime = $lines["STARTED_AT"] ?? "unknown"
+
+              Write-LockLog "Found lock: SESSION_TYPE=$lockType PID=$lockPid STARTED_AT=$lockTime"
+              if ($lockDesc) { Write-LockLog "Description: $lockDesc" }
+
+              if ($lockPid -gt 0) {
+                $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+                if ($proc) {
+                  # Live interactive session — skip this job
+                  Write-LockLog "Process $lockPid is alive ($($proc.ProcessName)). GPU is in use."
+                  Write-LockLog "Skipping nightly real-decode job."
+                  Write-LockLog "Re-run manually when the interactive session is complete."
+                  Write-Host "::warning:: GPU lock held by $lockType session (PID=$lockPid, started=$lockTime). Nightly real-decode job skipped. See docs/design/tzehouse-windows-gpu-scheduling.md"
+                  echo "GPU_LOCK_ACQUIRED=skipped" >> $env:GITHUB_ENV
+                  exit 0
+                } else {
+                  Write-LockLog "Process $lockPid is no longer running. Lock is stale. Removing."
+                  Remove-Item -Force $LockFile -ErrorAction SilentlyContinue
+                }
+              } else {
+                Write-LockLog "WARNING: Lock file has no valid PID. Removing as stale."
+                Remove-Item -Force $LockFile -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
+          # Acquire the CI lock
+          $startedAt = (Get-Date).ToUniversalTime().ToString("o")
+          $runId = "${{ github.run_id }}"
+          $content = @"
+          SESSION_TYPE=ci
+          PID=$MyPid
+          STARTED_AT=$startedAt
+          DESCRIPTION=real-decode-windows nightly run (github.run_id=$runId)
+          "@
+          # Strip leading whitespace from heredoc
+          $content = ($content -split "`n" | ForEach-Object { $_.TrimStart() }) -join "`n"
+
+          try {
+            Set-Content -Path $TmpFile -Value $content -Encoding UTF8
+            Move-Item -Path $TmpFile -Destination $LockFile -Force
+          } catch {
+            Write-LockLog "ERROR: Failed to write lock file: $_"
+            exit 2
+          }
+
+          Write-LockLog "Lock acquired (SESSION_TYPE=ci PID=$MyPid STARTED_AT=$startedAt)."
+          echo "GPU_LOCK_ACQUIRED=true" >> $env:GITHUB_ENV
+
+      # Skip the rest of the job if we were preempted by an interactive session.
+      # Each subsequent step checks this output to decide whether to run.
+      - name: Skip notice (interactive session active)
+        if: env.GPU_LOCK_ACQUIRED == 'skipped'
+        shell: pwsh
+        run: |
+          Write-Host "=== JOB SKIPPED ==="
+          Write-Host "Reason: GPU is held by an active tze_hud interactive session."
+          Write-Host "This job will not perform any GPU work."
+          Write-Host "To run real-decode tests, cancel the interactive session and re-trigger this workflow."
+          Write-Host "Policy: docs/design/tzehouse-windows-gpu-scheduling.md"
+
       # ── Checkout ───────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
+        if: env.GPU_LOCK_ACQUIRED == 'true'
 
       # ── Rust toolchain ─────────────────────────────────────────────────────
       # Use stable MSVC toolchain. The D18 box must have the MSVC toolchain
       # installed (Visual Studio Build Tools 2019+ or later).
       - uses: dtolnay/rust-toolchain@stable
+        if: env.GPU_LOCK_ACQUIRED == 'true'
         with:
           toolchain: "1.88"
           # x86_64-pc-windows-msvc is the default on Windows; explicit for clarity.
           targets: x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
+        if: env.GPU_LOCK_ACQUIRED == 'true'
 
       # ── Verify GStreamer SDK is present on D18 ──────────────────────────────
       # The SDK is pre-installed at provisioning time (see runbook §3).
       # This step fails fast if the environment is not configured correctly,
       # giving a clear error before Cargo build attempts.
       - name: Verify GStreamer SDK environment
+        if: env.GPU_LOCK_ACQUIRED == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -161,6 +280,7 @@ jobs:
       # hardware decode elements may be absent on software-only runs, but this
       # workflow targets the D18 GPU box where they should be present.
       - name: Report GStreamer GPU capabilities
+        if: env.GPU_LOCK_ACQUIRED == 'true'
         shell: pwsh
         run: |
           $gst_root = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
@@ -193,6 +313,7 @@ jobs:
       # Validates compilation before running tests. Compositor depends on gstreamer-rs
       # which requires the SDK. This is the §8 "smoke-test" from the audit.
       - name: cargo check (compositor — validates GStreamer SDK linkage)
+        if: env.GPU_LOCK_ACQUIRED == 'true'
         shell: pwsh
         run: |
           cargo check -p tze_hud_compositor 2>&1
@@ -214,6 +335,7 @@ jobs:
       #
       # Until the test crate exists, this step emits a clear status message.
       - name: Real-decode tests (PLACEHOLDER — harness not yet implemented)
+        if: env.GPU_LOCK_ACQUIRED == 'true'
         shell: pwsh
         run: |
           $decode_target = "${{ github.event.inputs.decode_target || 'smoke' }}"
@@ -247,8 +369,65 @@ jobs:
           Write-Host "Decode target  : ${{ github.event.inputs.decode_target || 'smoke' }}"
           Write-Host "Trigger        : ${{ github.event_name }}"
           Write-Host "Ref            : ${{ github.ref }}"
+          Write-Host "GPU lock state : $env:GPU_LOCK_ACQUIRED"
           Write-Host ""
-          Write-Host "Status: STUB — see real-decode test placeholder step above."
+          if ($env:GPU_LOCK_ACQUIRED -eq "skipped") {
+            Write-Host "Status: SKIPPED — GPU held by interactive tze_hud session."
+            Write-Host "Policy: docs/design/tzehouse-windows-gpu-scheduling.md"
+          } else {
+            Write-Host "Status: STUB — see real-decode test placeholder step above."
+          }
           Write-Host "Setup runbook : docs/ci/windows-d18-runner-setup.md"
           Write-Host "Audit source  : docs/audits/gstreamer-windows-ci-bootstrap.md §4.1/§5"
           Write-Host "Tracked by    : hud-ora8.1.20"
+
+      # ── GPU lock release (always runs — cleanup even on failure) ────────────
+      # Releases the lock acquired in "Check GPU lock".
+      # Skipped if we never acquired the lock (interactive session was active).
+      - name: Release GPU lock
+        if: always() && env.GPU_LOCK_ACQUIRED == 'true'
+        shell: pwsh
+        run: |
+          $LockFile = "C:\ProgramData\tze_hud\gpu.lock"
+          $MyPid    = $PID
+
+          function Write-LockLog([string]$msg) { Write-Host "[gpu-lock] $msg" }
+
+          Write-LockLog "Releasing $LockFile ..."
+
+          if (-not (Test-Path $LockFile)) {
+            Write-LockLog "Lock file does not exist. Nothing to release."
+            exit 0
+          }
+
+          $lines = @{}
+          try {
+            Get-Content $LockFile | ForEach-Object {
+              $parts = $_ -split "=", 2
+              if ($parts.Count -eq 2) { $lines[$parts[0].Trim()] = $parts[1].Trim() }
+            }
+          } catch {
+            Write-LockLog "WARNING: Lock file unreadable. Removing."
+            Remove-Item -Force $LockFile -ErrorAction SilentlyContinue
+            exit 0
+          }
+
+          $lockPid = [int]($lines["PID"] ?? 0)
+          Write-LockLog "Lock PID=$lockPid (this PID=$MyPid)"
+
+          # Note: on Windows, the runner spawns a new powershell.exe for each step,
+          # so $PID here is the release step's PID, not the acquire step's PID.
+          # We compare against SESSION_TYPE=ci to confirm this is our lock.
+          $lockType = $lines["SESSION_TYPE"] ?? "unknown"
+          if ($lockType -ne "ci") {
+            Write-LockLog "WARNING: Lock is type=$lockType, not 'ci'. Not releasing."
+            exit 0
+          }
+
+          try {
+            Remove-Item -Force $LockFile
+            Write-LockLog "Lock released."
+          } catch {
+            Write-LockLog "ERROR: Failed to remove lock file: $_"
+            exit 1
+          }

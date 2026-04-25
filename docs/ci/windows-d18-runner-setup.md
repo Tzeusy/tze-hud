@@ -348,38 +348,114 @@ If any element is missing:
 
 ---
 
-## 7. Dual-Use Scheduling Caveat
+## 7. Dual-Use Scheduling Policy
 
-**SCHEDULING GAP — NOT YET RESOLVED**
+**IMPLEMENTED — hud-0mo6n** — Design doc: `docs/design/tzehouse-windows-gpu-scheduling.md`
 
 The tzehouse-windows box is used for two distinct workloads:
 
 | Workload | Trigger | GPU usage |
 |---|---|---|
 | `/user-test` interactive overlay sessions | Human-initiated, daytime SGT | Active (wgpu compositor, tze_hud.exe) |
-| Real-decode CI jobs (this workflow) | Nightly at 02:00 SGT | Active (GStreamer D3D11/NVDEC) |
+| Real-decode CI jobs | Nightly at 02:00 SGT; PR-label-gated | Active (GStreamer D3D11/NVDEC) |
 
-**The problem**: Both workloads use the GPU. If a CI job runs while an interactive
-HUD session is active, they may race for GPU resources, causing:
-- CI job failures with GPU/DXGI access errors
-- HUD session stuttering or crashes
-- Corrupted decode output in tests
+Both workloads claim the GPU. Concurrent use can cause DXGI device-lost errors,
+HUD session stuttering/crashes, and corrupted decode test output.
 
-**Current mitigation**: The nightly schedule is set to 02:00 SGT (18:00 UTC),
-which reduces overlap with typical daytime interactive use. This is a best-effort
-window, **not a hard exclusive lock**.
+### 7.1 Policy summary
 
-**Open gap**: A proper mutual-exclusion mechanism is needed. Options include:
-- A lock file checked by both the CI job and `/user-test` startup
-- A GitHub Actions runner label rotation (remove `gpu` label when session is active)
-- A custom pre-job script that checks for active HUD sessions before running decode tests
+A **file-based GPU lock** at `C:\ProgramData\tze_hud\gpu.lock` is the primary
+mutual-exclusion mechanism. See full trade-off analysis in the design doc.
 
-**Action item**: File a follow-up bead to implement the scheduling policy.
-The gap is documented here as `OPEN — scheduling policy bead needed`.
+| Aspect | Detail |
+|---|---|
+| Lock path | `C:\ProgramData\tze_hud\gpu.lock` |
+| Lock format | Text: `SESSION_TYPE`, `PID`, `STARTED_AT`, `DESCRIPTION` |
+| CI enforcement | Automated — pre-job step in the workflow |
+| Interactive enforcement | Manual — helper scripts (see §7.3) |
+| On CI→interactive conflict | CI job skips (exit 0) + GitHub warning annotation |
+| Stale lock handling | PID liveness check; remove and proceed if dead |
+| Secondary defence | Nightly window at 02:00 SGT |
 
-In the meantime: **if you are running an interactive `/user-test` session during
-the 02:00 SGT window, manually cancel the nightly workflow run** from GitHub
-Actions to avoid conflicts.
+### 7.2 One-time setup (Tzeusy action required)
+
+Create the lock directory on tzehouse-windows:
+
+```powershell
+# Run once — ensures the directory exists before the first CI run
+New-Item -ItemType Directory -Force "C:\ProgramData\tze_hud"
+```
+
+Verify the directory is writable by the GitHub Actions runner service account:
+
+```powershell
+icacls "C:\ProgramData\tze_hud"
+# %PROGRAMDATA% is typically writable by all standard users (BUILTIN\Users: (OI)(CI)(W))
+# Confirm this is the case on tzehouse-windows before the first nightly run
+```
+
+### 7.3 Interactive session workflow (Tzeusy action required each session)
+
+The helper scripts live at `scripts/ci/windows/` in the repo. Deploy them to
+tzehouse-windows alongside `tze_hud.exe` (e.g., `C:\tze_hud\scripts\`).
+
+**Before starting `tze_hud.exe` for a /user-test session:**
+
+```powershell
+# Check for a CI lock first
+$lock = Get-Content "C:\ProgramData\tze_hud\gpu.lock" -ErrorAction SilentlyContinue
+if ($lock) { Write-Host "GPU lock held:"; $lock }
+
+# Acquire the interactive lock
+C:\tze_hud\scripts\gpu-lock-start.ps1 -SessionType interactive -Description "user-test overlay session"
+# Exit 0 = lock acquired. Exit 1 = CI job is running — do not start the HUD session.
+```
+
+**After ending the /user-test session:**
+
+```powershell
+C:\tze_hud\scripts\gpu-lock-release.ps1
+# If the session ended abnormally and the PID no longer matches:
+C:\tze_hud\scripts\gpu-lock-release.ps1 -Force
+```
+
+### 7.4 CI workflow behaviour
+
+The workflow's "Check GPU lock" step (first step after checkout) handles all
+lock states automatically:
+
+- **No lock** → acquire CI lock, proceed with all GPU steps.
+- **Stale lock (PID dead)** → remove stale lock, acquire CI lock, proceed.
+- **Live interactive lock** → skip job (exit 0) + emit GitHub warning annotation:
+  `GPU lock held by interactive tze_hud session (PID=XXXX). Nightly real-decode job skipped.`
+
+The "Release GPU lock" final step (`if: always()`) releases the CI lock even if
+earlier steps fail.
+
+### 7.5 Emergency overrides
+
+If a CI job is stuck holding the lock (e.g., runner killed mid-job):
+
+```powershell
+# Verify the PID is no longer alive
+Get-Process -Id <PID-from-lock-file> -ErrorAction SilentlyContinue
+
+# If dead, remove the stale lock manually
+Remove-Item -Force "C:\ProgramData\tze_hud\gpu.lock"
+```
+
+If you need to cancel an in-progress CI job that holds the lock, cancel it in
+GitHub Actions → the "Release GPU lock" step may not have run → verify the lock
+file is gone on the Windows box before starting an interactive session.
+
+### 7.6 Follow-up work
+
+- **Native lock support in `tze_hud.exe`** — the runtime should write/release
+  the GPU lock automatically. Until then, use the helper scripts (§7.3).
+- **Lock-aware `run_hud.ps1` wrapper** — integrates `gpu-lock-start.ps1` into
+  the HUD launch sequence so sessions can never start without acquiring the lock.
+
+See `docs/design/tzehouse-windows-gpu-scheduling.md §7` for the full follow-up list.
 
 ---
 
