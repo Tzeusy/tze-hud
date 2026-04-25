@@ -90,7 +90,10 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel}
 use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{Compositor, CompositorSurface, WindowSurface};
 use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
-use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
+use tze_hud_input::{
+    FocusManager, FocusTransition, InputProcessor, KeyboardProcessor, PointerEvent,
+    PointerEventKind, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
+};
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::proto::{EventBatch, InputEnvelope};
@@ -349,6 +352,17 @@ struct WindowedRuntimeState {
     window_surface: Option<Arc<WindowSurface>>,
     /// Input processor for local feedback.
     input_processor: InputProcessor,
+    /// Focus manager — tracks which node / tile has keyboard focus per tab.
+    ///
+    /// Updated on every pointer-down via `InputProcessor::process_with_focus`.
+    /// Consulted by the keyboard drain path to route `KeyboardProcessor` output
+    /// to the correct agent session.
+    focus_manager: FocusManager,
+    /// Keyboard processor — translates raw OS key/char events into typed
+    /// `KeyboardDispatch` descriptors when a node or tile has focus.
+    ///
+    /// Stateless with respect to focus; focus is owned by `focus_manager`.
+    keyboard_processor: KeyboardProcessor,
     /// Telemetry collector.
     telemetry: TelemetryCollector,
     /// Frame pipeline (ArcSwap hit-test snapshot, overflow counters).
@@ -1034,6 +1048,70 @@ impl ApplicationHandler for WinitApp {
                     },
                 };
                 enqueue_input(&self.state.input_ring, input_event);
+
+                // ── Keyboard → KeyboardProcessor drain (Stage 2) ─────────────
+                // Translate the raw OS event to a typed KeyboardDispatch using the
+                // current focus state, then dispatch to the owning agent session.
+                //
+                // The physical_key → DOM-style key_code string and the logical_key
+                // → DOM-style key string are extracted here for RFC 0004 §7.4
+                // compatibility. Only press and repeat events are forwarded (not
+                // key-release events for now — release delivery is a follow-up).
+                let key_code_str = physical_key_to_key_code_str(&event.physical_key);
+                let logical_key_str = logical_key_to_str(&event.logical_key);
+                let mods = winit_mods_to_keyboard_modifiers(self.state.modifiers);
+                let timestamp_mono_us = tze_hud_scene::MonoUs(nanoseconds_since_start() / 1_000);
+
+                if event.state == ElementState::Pressed || event.repeat {
+                    let raw = RawKeyDownEvent {
+                        key_code: key_code_str,
+                        key: logical_key_str.clone(),
+                        modifiers: mods,
+                        repeat: event.repeat,
+                        timestamp_mono_us,
+                    };
+                    self.dispatch_key_down_event(&raw);
+                } else if event.state == ElementState::Released {
+                    let raw = RawKeyUpEvent {
+                        key_code: physical_key_to_key_code_str(&event.physical_key),
+                        key: logical_key_str,
+                        modifiers: mods,
+                        timestamp_mono_us,
+                    };
+                    self.dispatch_key_up_event(&raw);
+                }
+
+                // ── Character input via Key::Character (non-IME path) ────────
+                // When the logical key carries a printable character, produce a
+                // RawCharacterEvent so the KeyboardProcessor character path is
+                // also exercised (handles basic ASCII without an IME active).
+                // IME commit characters arrive via WindowEvent::Ime below.
+                if event.state == ElementState::Pressed {
+                    use winit::keyboard::Key;
+                    if let Key::Character(ch) = event.logical_key.as_ref() {
+                        let raw_char = RawCharacterEvent {
+                            character: ch.to_string(),
+                            timestamp_mono_us,
+                        };
+                        self.dispatch_character_event(&raw_char);
+                    }
+                }
+            }
+
+            // ── IME commit: post-composition character delivery ───────────────
+            // `WindowEvent::Ime(Ime::Commit(text))` is the canonical path for
+            // IME-composed characters (CJK, accented inputs, etc.). In v1 the
+            // commit text is forwarded as a RawCharacterEvent so agents receive
+            // CharacterEvent payloads regardless of input method.
+            //
+            // Preedit events (Ime::Preedit) are v1-reserved and not forwarded.
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                let timestamp_mono_us = tze_hud_scene::MonoUs(nanoseconds_since_start() / 1_000);
+                let raw_char = RawCharacterEvent {
+                    character: text.clone(),
+                    timestamp_mono_us,
+                };
+                self.dispatch_character_event(&raw_char);
             }
 
             // ── Redraw ────────────────────────────────────────────────────
@@ -1109,10 +1187,59 @@ impl WinitApp {
         // both the SharedState lock and the scene lock.
         if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(mut scene) = state.scene.try_lock() {
-                let result = self
-                    .state
-                    .input_processor
-                    .process(&pointer_event, &mut scene);
+                // ── Click-to-focus (Stage 2) ─────────────────────────────────
+                // Use process_with_focus on every pointer event so that a
+                // pointer-down on a focusable HitRegionNode transfers keyboard
+                // focus before the AgentDispatch is produced.  The returned
+                // FocusTransition carries the lost/gained events and a
+                // compositor ring-update hint; we log the transition here.
+                // Full agent-event delivery (FocusGainedEvent / FocusLostEvent
+                // over gRPC) is a follow-up wiring concern; the focus state is
+                // correctly maintained in focus_manager from this point.
+                let active_tab = scene.active_tab;
+                let (result, focus_transition) = if let Some(tab_id) = active_tab {
+                    self.state.input_processor.process_with_focus(
+                        &pointer_event,
+                        &mut scene,
+                        &mut self.state.focus_manager,
+                        tab_id,
+                    )
+                } else {
+                    // No active tab — fall back to focus-unaware processing.
+                    let r = self
+                        .state
+                        .input_processor
+                        .process(&pointer_event, &mut scene);
+                    (r, None)
+                };
+
+                // Log focus transitions for diagnostics (no round-trip required;
+                // local state is already updated in focus_manager).
+                if let Some(FocusTransition {
+                    ref gained,
+                    ref lost,
+                    ..
+                }) = focus_transition
+                {
+                    if let Some((ev, ns)) = gained {
+                        tracing::debug!(
+                            namespace = %ns,
+                            tile_id = ?ev.tile_id,
+                            node_id = ?ev.node_id,
+                            source = ?ev.source,
+                            "click-to-focus: focus gained"
+                        );
+                    }
+                    if let Some((ev, ns)) = lost {
+                        tracing::debug!(
+                            namespace = %ns,
+                            tile_id = ?ev.tile_id,
+                            node_id = ?ev.node_id,
+                            reason = ?ev.reason,
+                            "click-to-focus: focus lost"
+                        );
+                    }
+                }
 
                 // ── Zone interaction dispatch (local feedback first) ──────────
                 // On pointer-up, check whether the hit landed on a compositor-
@@ -1223,6 +1350,131 @@ impl WinitApp {
             {
                 dispatch_scroll_offset_event(&self.state.scroll_event_tx, &scene, ev);
             }
+        }
+    }
+
+    // ── Keyboard drain helpers ────────────────────────────────────────────
+
+    /// Translate a raw key-down event through the `KeyboardProcessor` and log
+    /// the resulting `KeyboardDispatch` to the tracing subsystem.
+    ///
+    /// In the current implementation the dispatch is logged only; full delivery
+    /// to the owning agent over gRPC is wired in the agent-event pipeline
+    /// (see follow-up for `hud-9yfce` session-level keyboard event delivery).
+    /// The focus state is correctly maintained in `focus_manager` so the
+    /// dispatch target is accurate.
+    fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
+        let active_tab = if let Ok(state) = self.state.shared_state.try_lock() {
+            if let Ok(scene) = state.scene.try_lock() {
+                scene.active_tab
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some(tab_id) = active_tab else { return };
+        let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
+
+        // Build a namespace-resolver closure: given a tile_id, return its
+        // agent namespace from the scene.
+        let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
+            if let Ok(state) = self.state.shared_state.try_lock() {
+                if let Ok(scene) = state.scene.try_lock() {
+                    return scene.tiles.get(&tile_id).map(|t| t.namespace.clone());
+                }
+            }
+            None
+        };
+        if let Some(dispatch) =
+            self.state
+                .keyboard_processor
+                .process_key_down(raw, &focus_owner, namespace_fn)
+        {
+            tracing::debug!(
+                namespace = %dispatch.namespace,
+                tile_id = ?dispatch.tile_id,
+                node_id = ?dispatch.node_id,
+                kind = ?dispatch.kind,
+                "keyboard: KeyDown dispatched to agent"
+            );
+        }
+    }
+
+    /// Translate a raw key-up event through the `KeyboardProcessor`.
+    fn dispatch_key_up_event(&mut self, raw: &RawKeyUpEvent) {
+        let active_tab = if let Ok(state) = self.state.shared_state.try_lock() {
+            if let Ok(scene) = state.scene.try_lock() {
+                scene.active_tab
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some(tab_id) = active_tab else { return };
+        let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
+
+        let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
+            if let Ok(state) = self.state.shared_state.try_lock() {
+                if let Ok(scene) = state.scene.try_lock() {
+                    return scene.tiles.get(&tile_id).map(|t| t.namespace.clone());
+                }
+            }
+            None
+        };
+        if let Some(dispatch) =
+            self.state
+                .keyboard_processor
+                .process_key_up(raw, &focus_owner, namespace_fn)
+        {
+            tracing::debug!(
+                namespace = %dispatch.namespace,
+                tile_id = ?dispatch.tile_id,
+                node_id = ?dispatch.node_id,
+                kind = ?dispatch.kind,
+                "keyboard: KeyUp dispatched to agent"
+            );
+        }
+    }
+
+    /// Translate a raw post-IME character event through the `KeyboardProcessor`.
+    ///
+    /// Called both from `WindowEvent::Ime(Ime::Commit)` (IME path) and from
+    /// `Key::Character` in `WindowEvent::KeyboardInput` (direct input path).
+    fn dispatch_character_event(&mut self, raw: &RawCharacterEvent) {
+        let active_tab = if let Ok(state) = self.state.shared_state.try_lock() {
+            if let Ok(scene) = state.scene.try_lock() {
+                scene.active_tab
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some(tab_id) = active_tab else { return };
+        let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
+
+        let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
+            if let Ok(state) = self.state.shared_state.try_lock() {
+                if let Ok(scene) = state.scene.try_lock() {
+                    return scene.tiles.get(&tile_id).map(|t| t.namespace.clone());
+                }
+            }
+            None
+        };
+        if let Some(dispatch) =
+            self.state
+                .keyboard_processor
+                .process_character(raw, &focus_owner, namespace_fn)
+        {
+            tracing::debug!(
+                namespace = %dispatch.namespace,
+                tile_id = ?dispatch.tile_id,
+                node_id = ?dispatch.node_id,
+                kind = ?dispatch.kind,
+                "keyboard: Character dispatched to agent"
+            );
         }
     }
 
@@ -2010,6 +2262,8 @@ impl WindowedRuntime {
             compositor: None,
             window_surface: None,
             input_processor: InputProcessor::new(),
+            focus_manager: FocusManager::new(),
+            keyboard_processor: KeyboardProcessor::new(),
             telemetry: TelemetryCollector::new(),
             pipeline: FramePipeline::new(),
             shutdown,
@@ -2371,6 +2625,56 @@ fn winit_logical_to_str(key: &winit::keyboard::Key) -> String {
         winit::keyboard::Key::Unidentified(native) => format!("Unidentified({native:?})"),
         winit::keyboard::Key::Dead(Some(c)) => format!("Dead({c})"),
         winit::keyboard::Key::Dead(None) => "Dead".to_string(),
+    }
+}
+
+// ─── Keyboard pipeline helpers ────────────────────────────────────────────────
+
+/// Map a winit `PhysicalKey` to the DOM `KeyboardEvent.code`-style string
+/// used by `RawKeyDownEvent.key_code` (RFC 0004 §7.4).
+///
+/// Returns the `KeyCode` variant name (e.g. `"KeyA"`, `"ShiftLeft"`,
+/// `"ArrowDown"`) for identified keys, and `"Unidentified"` for unknown ones.
+fn physical_key_to_key_code_str(key: &winit::keyboard::PhysicalKey) -> String {
+    use winit::keyboard::PhysicalKey;
+    match key {
+        PhysicalKey::Code(code) => format!("{code:?}"),
+        PhysicalKey::Unidentified(_) => "Unidentified".to_string(),
+    }
+}
+
+/// Map a winit logical `Key` to the DOM `KeyboardEvent.key`-style string
+/// used by `RawKeyDownEvent.key` and `RawKeyUpEvent.key` (RFC 0004 §7.4).
+///
+/// For character keys this is the character itself (e.g. `"a"`, `"A"`, `"1"`).
+/// For named keys this is the `NamedKey` variant name (e.g. `"Enter"`,
+/// `"Backspace"`, `"ArrowDown"`). Unknown keys map to `"Unidentified"`.
+fn logical_key_to_str(key: &winit::keyboard::Key) -> String {
+    use winit::keyboard::Key;
+    match key {
+        Key::Character(s) => s.to_string(),
+        Key::Named(named) => format!("{named:?}"),
+        Key::Unidentified(_) => "Unidentified".to_string(),
+        Key::Dead(Some(c)) => format!("Dead({c})"),
+        Key::Dead(None) => "Dead".to_string(),
+    }
+}
+
+/// Convert winit's `ModifiersState` to `KeyboardModifiers` (RFC 0004 §7.4).
+///
+/// CapsLock and NumLock toggle states are not exposed by winit's
+/// `ModifiersState`; they default to `false` here. Full toggle-key tracking
+/// can be added via `WindowEvent::KeyboardInput` state tracking if needed.
+fn winit_mods_to_keyboard_modifiers(
+    mods: winit::keyboard::ModifiersState,
+) -> tze_hud_input::KeyboardModifiers {
+    tze_hud_input::KeyboardModifiers {
+        shift: mods.shift_key(),
+        ctrl: mods.control_key(),
+        alt: mods.alt_key(),
+        meta: mods.super_key(),
+        caps_lock: false, // winit ModifiersState does not expose CapsLock state
+        num_lock: false,  // winit ModifiersState does not expose NumLock state
     }
 }
 
