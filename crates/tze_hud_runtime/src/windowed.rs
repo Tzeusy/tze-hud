@@ -1534,7 +1534,25 @@ impl WinitApp {
                 // compositor via a local-patch channel in the full pipeline. For the
                 // initial windowed runtime, the compositor reads the scene state
                 // directly on the next frame.
-                let _ = result;
+                let _ = result.local_patch;
+
+                // ── Pointer event dispatch to subscribed portal agents ────────
+                // Broadcast PointerDown / PointerMove / PointerUp to agents
+                // that have subscribed to INPUT_EVENTS (requires
+                // `access_input_events` capability).  Only dispatches for
+                // portal-owned hit regions (NodeHit / TileHit) — the
+                // AgentDispatch is only populated by the InputProcessor when a
+                // named hit region matches.  Chrome / ZoneInteraction / Passthrough
+                // hits produce no AgentDispatch and are silently skipped.
+                //
+                // primary dispatch
+                if let Some(d) = result.dispatch {
+                    dispatch_pointer_event(&self.state.input_event_tx, d);
+                }
+                // secondary dispatches (e.g. CaptureReleased following PointerUp)
+                for d in result.extra_dispatches {
+                    dispatch_pointer_event(&self.state.input_event_tx, d);
+                }
             } else {
                 drag_released = None;
             }
@@ -3116,6 +3134,108 @@ fn dispatch_focus_event(
 
         let _ = tx.send((namespace, batch));
     }
+}
+
+/// Broadcast a `PointerDownEvent`, `PointerMoveEvent`, or `PointerUpEvent` to
+/// the owning agent via the `INPUT_EVENTS` gRPC channel.
+///
+/// Converts an [`tze_hud_input::AgentDispatch`] with `kind` in
+/// {`PointerDown`, `PointerMove`, `PointerUp`} to the corresponding proto
+/// envelope, wraps it in an `EventBatch`, and sends it on the broadcast
+/// channel.  The session handler delivers the batch only when the agent is
+/// subscribed to `INPUT_EVENTS` — the subscription gate is enforced in
+/// `subscriptions::filter_event_batch`, not here.
+///
+/// **Throttling**: every `PointerMove` is forwarded as-is to all opted-in
+/// subscribers.  Subscribers that cannot tolerate the full rate should
+/// throttle on the receive side.  This matches the "ephemeral realtime"
+/// message class contract (RFC CLAUDE.md §Four Message Classes) and avoids
+/// imposing a specific rate budget on the dispatch path, which is on the
+/// Stage 2 hot path (< 500 µs p99 per engineering-bar.md §2).
+///
+/// All other `AgentDispatchKind` values are silently ignored — only
+/// `PointerDown`, `PointerMove`, and `PointerUp` are dispatched here.
+/// `PointerEnter`, `PointerLeave`, `Activated`, and capture variants are
+/// handled by dedicated dispatch paths (or are not yet wired).
+///
+/// Delivery is best-effort (fire-and-forget): errors (no receivers, channel
+/// lagged) are silently ignored, matching the scroll and keyboard patterns.
+fn dispatch_pointer_event(
+    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    dispatch: tze_hud_input::AgentDispatch,
+) {
+    let Some(tx) = tx else { return };
+
+    use tze_hud_input::AgentDispatchKind;
+    use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+    let tile_id_bytes = dispatch.tile_id.as_uuid().as_bytes().to_vec();
+    let node_id_bytes = dispatch.node_id.as_uuid().as_bytes().to_vec();
+
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    let event = match dispatch.kind {
+        AgentDispatchKind::PointerDown => {
+            InputEvent::PointerDown(tze_hud_protocol::proto::PointerDownEvent {
+                tile_id: tile_id_bytes,
+                node_id: node_id_bytes,
+                interaction_id: dispatch.interaction_id,
+                timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                device_id: dispatch.device_id.to_string(),
+                local_x: dispatch.local_x,
+                local_y: dispatch.local_y,
+                display_x: dispatch.display_x,
+                display_y: dispatch.display_y,
+                button: 0, // primary button; multi-button not yet tracked in AgentDispatch
+            })
+        }
+        AgentDispatchKind::PointerMove => {
+            InputEvent::PointerMove(tze_hud_protocol::proto::PointerMoveEvent {
+                tile_id: tile_id_bytes,
+                node_id: node_id_bytes,
+                interaction_id: dispatch.interaction_id,
+                timestamp_mono_us: 0,
+                device_id: dispatch.device_id.to_string(),
+                local_x: dispatch.local_x,
+                local_y: dispatch.local_y,
+                display_x: dispatch.display_x,
+                display_y: dispatch.display_y,
+            })
+        }
+        AgentDispatchKind::PointerUp => {
+            InputEvent::PointerUp(tze_hud_protocol::proto::PointerUpEvent {
+                tile_id: tile_id_bytes,
+                node_id: node_id_bytes,
+                interaction_id: dispatch.interaction_id,
+                timestamp_mono_us: 0,
+                device_id: dispatch.device_id.to_string(),
+                local_x: dispatch.local_x,
+                local_y: dispatch.local_y,
+                display_x: dispatch.display_x,
+                display_y: dispatch.display_y,
+                button: 0, // primary button; multi-button not yet tracked in AgentDispatch
+            })
+        }
+        // All other variants (PointerEnter, PointerLeave, Activated, Capture*,
+        // PointerCancel) are handled by separate dispatch paths or are not yet wired.
+        _ => return,
+    };
+
+    let batch = EventBatch {
+        frame_number: 0, // synthetic — not tied to a compositor frame
+        batch_ts_us: now_us,
+        events: vec![InputEnvelope { event: Some(event) }],
+    };
+
+    // Broadcast to all session handler tasks; each one delivers only if the
+    // namespace matches and INPUT_EVENTS is subscribed. Errors (no receivers,
+    // channel lagged) are silently ignored — PointerMove is ephemeral;
+    // PointerDown/Up are transactional but the broadcast channel is best-effort
+    // from the runtime side (consistent with keyboard and scroll patterns).
+    let _ = tx.send((dispatch.namespace, batch));
 }
 
 /// Push an `InputEvent` into the ring buffer, dropping the oldest if full.
