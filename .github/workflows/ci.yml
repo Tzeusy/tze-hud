@@ -47,7 +47,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
       - name: Install protobuf compiler (required by tze_hud_protocol build script)
         run: |
           sudo apt-get update -q
@@ -76,7 +80,11 @@ jobs:
         with:
           toolchain: "1.88"
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
       - name: Install protobuf compiler (required by tze_hud_protocol build script)
         run: |
           sudo apt-get update -q
@@ -105,7 +113,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
       - name: Install Mesa / llvmpipe + protobuf compiler
         run: |
           sudo apt-get update -q
@@ -139,7 +151,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
       - name: Install protobuf compiler (required by tze_hud_protocol build script)
         run: |
           sudo apt-get update -q
@@ -165,7 +181,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
       - name: Install Mesa / llvmpipe + protobuf compiler
         run: |
           sudo apt-get update -q
@@ -205,7 +225,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
       - name: Install Mesa / llvmpipe + protobuf compiler
         run: |
           sudo apt-get update -q
@@ -242,7 +266,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
       - name: Install Mesa / llvmpipe + protobuf compiler
         run: |
           sudo apt-get update -q
@@ -302,7 +330,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
       - name: Install protobuf compiler (required by tze_hud_protocol build script)
         run: |
           sudo apt-get update -q
@@ -382,7 +414,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
-      - uses: Swatinem/rust-cache@v2
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
       - name: Install Mesa / llvmpipe + Vulkan loader + protobuf compiler
         run: |
           sudo apt-get update -q
