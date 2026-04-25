@@ -3066,6 +3066,11 @@ impl Compositor {
                                         pixel_y: slot_y + inset_v,
                                         bounds_width: text_w,
                                         bounds_height: (effective_slot_h - inset_v * 2.0).max(1.0),
+                                        clip_pixel_x: text_x,
+                                        clip_pixel_y: slot_y + inset_v,
+                                        clip_bounds_width: text_w,
+                                        clip_bounds_height: (effective_slot_h - inset_v * 2.0)
+                                            .max(1.0),
                                         font_size_px,
                                         font_family,
                                         font_weight,
@@ -3094,6 +3099,10 @@ impl Compositor {
                                         pixel_y: content_top,
                                         bounds_width: text_w,
                                         bounds_height: title_line_h.max(1.0),
+                                        clip_pixel_x: text_x,
+                                        clip_pixel_y: content_top,
+                                        clip_bounds_width: text_w,
+                                        clip_bounds_height: title_line_h.max(1.0),
                                         font_size_px,
                                         font_family,
                                         font_weight: notif_title_weight,
@@ -3117,6 +3126,10 @@ impl Compositor {
                                         pixel_y: body_top,
                                         bounds_width: text_w,
                                         bounds_height: body_bounds_h,
+                                        clip_pixel_x: text_x,
+                                        clip_pixel_y: body_top,
+                                        clip_bounds_width: text_w,
+                                        clip_bounds_height: body_bounds_h,
                                         font_size_px: body_font_size,
                                         font_family,
                                         font_weight: 400,
@@ -3149,6 +3162,10 @@ impl Compositor {
                                         pixel_y: dismiss_bounds.y + 1.0,
                                         bounds_width: dismiss_bounds.width.max(1.0),
                                         bounds_height: dismiss_bounds.height.max(1.0),
+                                        clip_pixel_x: dismiss_bounds.x,
+                                        clip_pixel_y: dismiss_bounds.y + 1.0,
+                                        clip_bounds_width: dismiss_bounds.width.max(1.0),
+                                        clip_bounds_height: dismiss_bounds.height.max(1.0),
                                         font_size_px: 12.0,
                                         font_family,
                                         font_weight: 700,
@@ -3295,6 +3312,14 @@ impl Compositor {
                                                 - margin_h)
                                                 .max(1.0),
                                             bounds_height: (zh - margin_v * 2.0).max(1.0),
+                                            clip_pixel_x: zx + margin_h + icon_width_reserved,
+                                            clip_pixel_y: zy + margin_v,
+                                            clip_bounds_width: (zw
+                                                - margin_h
+                                                - icon_width_reserved
+                                                - margin_h)
+                                                .max(1.0),
+                                            clip_bounds_height: (zh - margin_v * 2.0).max(1.0),
                                             font_size_px,
                                             font_family,
                                             font_weight,
@@ -3428,6 +3453,14 @@ impl Compositor {
                                             - margin_h)
                                             .max(1.0),
                                         bounds_height: (zh - margin_v * 2.0).max(1.0),
+                                        clip_pixel_x: zx + margin_h + icon_width_reserved,
+                                        clip_pixel_y: zy + margin_v,
+                                        clip_bounds_width: (zw
+                                            - margin_h
+                                            - icon_width_reserved
+                                            - margin_h)
+                                            .max(1.0),
+                                        clip_bounds_height: (zh - margin_v * 2.0).max(1.0),
                                         font_size_px,
                                         font_family,
                                         font_weight,
@@ -3870,11 +3903,24 @@ impl Compositor {
             // Subtract scroll offset so text glyphs move with the scrolled
             // content — matches the geometry pass in `render_node` which already
             // applies `tile.bounds.x - scroll_x` / `tile.bounds.y - scroll_y`.
-            items.push(TextItem::from_text_markdown_node(
+            let mut item = TextItem::from_text_markdown_node(
                 tm,
                 tile.bounds.x - scroll_x,
                 tile.bounds.y - scroll_y,
-            ));
+            );
+            let unscrolled_x = item.pixel_x + scroll_x;
+            let unscrolled_y = item.pixel_y + scroll_y;
+            let clip_left = unscrolled_x.max(tile.bounds.x);
+            let clip_top = unscrolled_y.max(tile.bounds.y);
+            let clip_right =
+                (unscrolled_x + item.bounds_width).min(tile.bounds.x + tile.bounds.width);
+            let clip_bottom =
+                (unscrolled_y + item.bounds_height).min(tile.bounds.y + tile.bounds.height);
+            item.clip_pixel_x = clip_left;
+            item.clip_pixel_y = clip_top;
+            item.clip_bounds_width = (clip_right - clip_left).max(1.0);
+            item.clip_bounds_height = (clip_bottom - clip_top).max(1.0);
+            items.push(item);
         }
 
         for child_id in &node.children {
@@ -14332,6 +14378,14 @@ mod tests {
             "scrolled text ({}) must be above unscrolled text ({})",
             scrolled_item.pixel_y,
             baseline_item.pixel_y
+        );
+        assert!(
+            (scrolled_item.clip_pixel_y - baseline_item.clip_pixel_y).abs() < 0.01,
+            "scroll must not move the text clip rectangle with the glyph origin"
+        );
+        assert!(
+            (scrolled_item.clip_bounds_height - baseline_item.clip_bounds_height).abs() < 0.01,
+            "clip height must remain tied to the viewport, not the scrolled glyph origin"
         );
     }
 

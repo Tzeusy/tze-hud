@@ -260,10 +260,10 @@ impl TextRasterizer {
         for (item, buf) in items.iter().zip(buffers.iter()) {
             let fill_color = item.color;
             let bounds = TextBounds {
-                left: item.pixel_x as i32,
-                top: item.pixel_y as i32,
-                right: (item.pixel_x + item.bounds_width) as i32,
-                bottom: (item.pixel_y + item.bounds_height) as i32,
+                left: item.clip_pixel_x as i32,
+                top: item.clip_pixel_y as i32,
+                right: (item.clip_pixel_x + item.clip_bounds_width) as i32,
+                bottom: (item.clip_pixel_y + item.clip_bounds_height) as i32,
             };
 
             // Outline passes (only when outline is active).
@@ -271,19 +271,12 @@ impl TextRasterizer {
                 if ow > 0.0 {
                     for (dx, dy) in &OUTLINE_DIRS {
                         let offset = ow;
-                        // Offset bounds to match shifted position.
-                        let shifted_bounds = TextBounds {
-                            left: (item.pixel_x + dx * offset) as i32,
-                            top: (item.pixel_y + dy * offset) as i32,
-                            right: (item.pixel_x + dx * offset + item.bounds_width) as i32,
-                            bottom: (item.pixel_y + dy * offset + item.bounds_height) as i32,
-                        };
                         text_areas.push(TextArea {
                             buffer: buf,
                             left: item.pixel_x + dx * offset,
                             top: item.pixel_y + dy * offset,
                             scale: 1.0,
-                            bounds: shifted_bounds,
+                            bounds,
                             default_color: Color::rgba(oc[0], oc[1], oc[2], oc[3]),
                             custom_glyphs: &[],
                         });
@@ -357,6 +350,14 @@ pub struct TextItem {
     pub bounds_width: f32,
     /// Available height for clip.
     pub bounds_height: f32,
+    /// Left edge of the glyph clip rectangle in physical pixels.
+    pub clip_pixel_x: f32,
+    /// Top edge of the glyph clip rectangle in physical pixels.
+    pub clip_pixel_y: f32,
+    /// Width of the glyph clip rectangle in physical pixels.
+    pub clip_bounds_width: f32,
+    /// Height of the glyph clip rectangle in physical pixels.
+    pub clip_bounds_height: f32,
     /// Font size in pixels.
     pub font_size_px: f32,
     /// Font family selection.
@@ -468,6 +469,10 @@ impl TextItem {
             pixel_y: y,
             bounds_width: w,
             bounds_height: h,
+            clip_pixel_x: x,
+            clip_pixel_y: y,
+            clip_bounds_width: w,
+            clip_bounds_height: h,
             font_size_px,
             font_family: node.font_family,
             font_weight: 400, // TextMarkdownNode does not carry weight; default regular.
@@ -537,6 +542,10 @@ impl TextItem {
             pixel_y: y + margin_v,
             bounds_width: (w - margin_h * 2.0).max(1.0),
             bounds_height: (h - margin_v * 2.0).max(1.0),
+            clip_pixel_x: x + margin_h,
+            clip_pixel_y: y + margin_v,
+            clip_bounds_width: (w - margin_h * 2.0).max(1.0),
+            clip_bounds_height: (h - margin_v * 2.0).max(1.0),
             font_size_px,
             font_family,
             font_weight,
@@ -575,6 +584,10 @@ impl TextItem {
             pixel_y: y + margin,
             bounds_width: (w - margin * 2.0).max(1.0),
             bounds_height: (h - margin * 2.0).max(1.0),
+            clip_pixel_x: x + margin,
+            clip_pixel_y: y + margin,
+            clip_bounds_width: (w - margin * 2.0).max(1.0),
+            clip_bounds_height: (h - margin * 2.0).max(1.0),
             font_size_px: font_size_px.clamp(6.0, 200.0),
             font_family: FontFamily::SystemSansSerif,
             font_weight: 400,
@@ -612,6 +625,10 @@ impl TextItem {
             pixel_y: y + margin,
             bounds_width: (w - margin * 2.0).max(1.0),
             bounds_height: (h - margin * 2.0).max(1.0),
+            clip_pixel_x: x + margin,
+            clip_pixel_y: y + margin,
+            clip_bounds_width: (w - margin * 2.0).max(1.0),
+            clip_bounds_height: (h - margin * 2.0).max(1.0),
             font_size_px: font_size_px.clamp(6.0, 200.0),
             font_family: FontFamily::SystemSansSerif,
             font_weight: 400,

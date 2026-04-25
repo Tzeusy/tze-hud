@@ -9,7 +9,8 @@ no new node type, no chrome-hosted affordances.
 
 Layout:
   - Equal 50/50 split between INPUT and OUTPUT panes
-  - Fat 6px drag divider (with centred grip bar + hit region) between them.
+  - Header drag surface moves the whole portal group.
+  - Fat 6px divider (with centred grip bar + hit region) between panes.
   - The static frame is one tile; the input composer and transcript body are
     separate transparent scroll-capture tiles so wheel input cannot move the
     whole portal.
@@ -76,6 +77,7 @@ META_RGBA = (0.66, 0.70, 0.76, 0.82)
 ACTIVITY_DOT_RGBA = (0.48, 0.86, 0.56, 0.92)
 INPUT_TEXT_RGBA = (0.88, 0.92, 0.98, 0.96)
 INPUT_PLACEHOLDER_RGBA = (0.50, 0.55, 0.64, 0.78)
+HEADER_GRIP_RGBA = (1.0, 1.0, 1.0, 0.66)
 
 TITLE_FONT = 17.0
 SUBTITLE_FONT = 11.0
@@ -104,6 +106,7 @@ SCROLL_INTERACTION_ID = "portal-scroll"
 SUBMIT_INTERACTION_ID = "portal-submit"
 COMPOSER_INTERACTION_ID = "portal-composer-focus"
 PANE_RESIZE_INTERACTION_ID = "portal-pane-resize"
+PORTAL_DRAG_INTERACTION_ID = "portal-drag-header"
 
 
 @dataclass(frozen=True)
@@ -128,6 +131,11 @@ DEFAULT_TARGET = "tzehouse-windows.parrot-hen.ts.net:50051"
 DEFAULT_DOC = "docs/exemplar-manual-review-checklist.md"
 DEFAULT_TRANSCRIPT_PATH = "test_results/text-stream-portal-latest.json"
 MAX_MARKDOWN_BYTES = 65535
+DRAG_MAX_SECONDS = 1.5
+INPUT_ROOT_NODE_ID = bytes.fromhex("00112233445566778899aabbccdde001")
+COMPOSER_HIT_NODE_ID = bytes.fromhex("00112233445566778899aabbccdde002")
+COMPOSER_TEXT_NODE_ID = bytes.fromhex("00112233445566778899aabbccdde003")
+COMPOSER_CARET_NODE_ID = bytes.fromhex("00112233445566778899aabbccdde004")
 
 # ─── Scroll contract tokens ──────────────────────────────────────────────────
 
@@ -199,12 +207,14 @@ def make_text_node(
 
 def make_hit_region(
     interaction_id: str, x: float, y: float, w: float, h: float,
+    *,
+    accepts_focus: bool = True,
 ) -> types_pb2.NodeProto:
     return _make_node(
         {
             "hit_region": {
                 "interaction_id": interaction_id,
-                "accepts_focus": True,
+                "accepts_focus": accepts_focus,
                 "accepts_pointer": True,
             },
             "bounds": [x, y, w, h],
@@ -245,6 +255,11 @@ def scroll_max_y_for_text(content: str, viewport_h: float, line_px: float) -> fl
     return max(0.0, line_count * line_px - viewport_h)
 
 
+def scroll_content_height_for_text(content: str, viewport_h: float, line_px: float) -> float:
+    """Approximate full scroll content height for text in a pane viewport."""
+    return viewport_h + scroll_max_y_for_text(content, viewport_h, line_px)
+
+
 def build_portal_nodes(
     title: str,
     subtitle: str,
@@ -283,6 +298,22 @@ def build_portal_nodes(
         PADDING_X, 31.0,
         PORTAL_W - PADDING_X * 2.0,
         16.0, SUBTITLE_FONT, SUBTITLE_RGBA,
+    )
+    grip_w = 42.0
+    grip_h = 4.0
+    header_grip = make_solid_color_node(
+        *HEADER_GRIP_RGBA,
+        (PORTAL_W - grip_w) / 2.0,
+        8.0,
+        grip_w,
+        grip_h,
+        radius=grip_h / 2.0,
+    )
+    portal_drag_hit = make_hit_region(
+        PORTAL_DRAG_INTERACTION_ID,
+        0.0, 0.0,
+        PORTAL_W, HEADER_H,
+        accepts_focus=False,
     )
 
     # ── Pane geometry ─────────────────────────────────────────────────────
@@ -403,6 +434,7 @@ def build_portal_nodes(
     children = [
         # header
         header_bg, header_divider, activity_dot, title_node, subtitle_node,
+        header_grip, portal_drag_hit,
         # input pane
         input_pane_bg, input_eyebrow,
         composer_bg, border_t, border_b, border_l, border_r,
@@ -424,8 +456,13 @@ def build_input_scroll_nodes(
     input_rect, _ = portal_pane_rects()
     text_inset = 12.0
     hit_h = input_rect.h + scroll_max_y_for_text(composer_text, input_rect.h, SCROLL_LINE_PX)
-    root = make_solid_color_node(*TEXT_WINDOW_BG_RGBA, 0.0, 0.0, input_rect.w, input_rect.h)
+    root = make_solid_color_node(
+        *TEXT_WINDOW_BG_RGBA,
+        0.0, 0.0, input_rect.w, input_rect.h,
+        node_id=INPUT_ROOT_NODE_ID,
+    )
     hit = make_hit_region(COMPOSER_INTERACTION_ID, 0.0, 0.0, input_rect.w, hit_h)
+    hit.id = COMPOSER_HIT_NODE_ID
     text_node = make_text_node(
         composer_text or composer_placeholder,
         text_inset,
@@ -434,6 +471,7 @@ def build_input_scroll_nodes(
         input_rect.h - text_inset * 2.0,
         INPUT_FONT,
         INPUT_TEXT_RGBA if composer_text else INPUT_PLACEHOLDER_RGBA,
+        node_id=COMPOSER_TEXT_NODE_ID,
     )
     caret = make_solid_color_node(
         *CARET_RGBA,
@@ -441,13 +479,15 @@ def build_input_scroll_nodes(
         text_inset + INPUT_FONT + 2.0,
         8.0,
         2.0,
+        node_id=COMPOSER_CARET_NODE_ID,
     )
     return root, [hit, text_node, caret]
 
 
 def build_output_scroll_nodes(body: str) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
     _, output_rect = portal_pane_rects()
-    hit_h = output_rect.h + scroll_max_y_for_text(body, output_rect.h, SCROLL_LINE_PX)
+    content_h = scroll_content_height_for_text(body, output_rect.h, SCROLL_LINE_PX)
+    hit_h = content_h
     root = make_solid_color_node(*TEXT_WINDOW_BG_RGBA, 0.0, 0.0, output_rect.w, output_rect.h)
     hit = make_hit_region(SCROLL_INTERACTION_ID, 0.0, 0.0, output_rect.w, hit_h)
     body_node = make_text_node(
@@ -455,11 +495,21 @@ def build_output_scroll_nodes(body: str) -> tuple[types_pb2.NodeProto, list[type
         0.0,
         0.0,
         output_rect.w,
-        output_rect.h,
+        content_h,
         BODY_FONT,
         BODY_RGBA,
     )
     return root, [hit, body_node]
+
+
+def visible_output_text(body: str, offset_y: float, viewport_h: float) -> tuple[str, int]:
+    lines = body.splitlines()
+    if not lines:
+        return "", 0
+    start = max(0, min(int(offset_y // SCROLL_LINE_PX), len(lines) - 1))
+    visible_count = max(1, int(viewport_h // SCROLL_LINE_PX) + 2)
+    end = min(len(lines), start + visible_count)
+    return "\n".join(lines[start:end]), start
 
 
 async def set_root_with_children(
@@ -602,6 +652,44 @@ def set_scroll_offset_mutation(
     )
 
 
+def publish_to_tile_bounds_mutation(
+    tile_id: bytes,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+) -> types_pb2.MutationProto:
+    return types_pb2.MutationProto(
+        publish_to_tile=types_pb2.PublishToTileMutation(
+            element_id=tile_id,
+            bounds=types_pb2.Rect(x=x, y=y, width=w, height=h),
+        )
+    )
+
+
+def portal_bounds_mutations(tiles: PortalTiles, portal_x: float, portal_y: float) -> list[types_pb2.MutationProto]:
+    input_rect, output_rect = portal_pane_rects()
+    return [
+        publish_to_tile_bounds_mutation(
+            tiles.frame, portal_x, portal_y, PORTAL_W, PORTAL_H,
+        ),
+        publish_to_tile_bounds_mutation(
+            tiles.input_scroll,
+            portal_x + input_rect.x,
+            portal_y + input_rect.y,
+            input_rect.w,
+            input_rect.h,
+        ),
+        publish_to_tile_bounds_mutation(
+            tiles.output_scroll,
+            portal_x + output_rect.x,
+            portal_y + output_rect.y,
+            output_rect.w,
+            output_rect.h,
+        ),
+    ]
+
+
 def emit_step_event(
     transcript: list[dict[str, Any]],
     step_index: int,
@@ -631,6 +719,160 @@ async def heartbeat_loop(client: HudClient, interval_ms: int) -> None:
     while True:
         await asyncio.sleep(send_interval_s)
         await client.send_heartbeat()
+
+
+async def portal_interaction_loop(
+    client: HudClient,
+    lease_id: bytes,
+    tiles: PortalTiles,
+    transcript: list[dict[str, Any]],
+    body_full: str,
+    initial_portal_x: float,
+    initial_portal_y: float,
+    tab_width: float,
+    tab_height: float,
+) -> None:
+    """Handle live pointer/keyboard input for manual exemplar review."""
+    portal_x = initial_portal_x
+    portal_y = initial_portal_y
+    composer_text = ""
+    _, output_rect = portal_pane_rects()
+    output_view_start = 0
+    drag: Optional[dict[str, float | str]] = None
+    last_drag_send = 0.0
+
+    async def move_portal(new_x: float, new_y: float) -> None:
+        nonlocal portal_x, portal_y
+        portal_x = max(0.0, min(new_x, max(0.0, tab_width - PORTAL_W)))
+        portal_y = max(0.0, min(new_y, max(0.0, tab_height - PORTAL_H)))
+        await client.submit_mutation_batch(
+            lease_id,
+            portal_bounds_mutations(tiles, portal_x, portal_y),
+            timeout=2.0,
+        )
+
+    async def render_composer() -> None:
+        input_root, input_children = build_input_scroll_nodes(composer_text)
+        await set_root_with_children(
+            client, lease_id, tiles.input_scroll, input_root, input_children,
+        )
+
+    async def record_output_scroll(offset_y: float) -> None:
+        nonlocal output_view_start
+        _, output_view_start = visible_output_text(body_full, offset_y, output_rect.h)
+
+    async def submit_composer() -> None:
+        nonlocal composer_text
+        if composer_text.strip():
+            emit_step_event(transcript, 10, "checkpoint", {
+                "code": "input:submit",
+                "title": "Composer submitted",
+                "action": "operator submitted text from portal composer",
+                "expected_visual": "composer clears after submit",
+            }, submitted=composer_text)
+        composer_text = ""
+        await render_composer()
+
+    while True:
+        batch = await client._event_queue.get()
+        for envelope in batch.events:
+            kind = envelope.WhichOneof("event")
+
+            if kind == "pointer_down":
+                ev = envelope.pointer_down
+                if ev.interaction_id == PORTAL_DRAG_INTERACTION_ID:
+                    drag = {
+                        "device_id": ev.device_id,
+                        "start_x": ev.display_x,
+                        "start_y": ev.display_y,
+                        "portal_x": portal_x,
+                        "portal_y": portal_y,
+                        "started_at": time.monotonic(),
+                    }
+                    emit_step_event(transcript, 9, "checkpoint", {
+                        "code": "drag:start",
+                        "title": "Portal drag started",
+                        "action": "header drag surface received pointer down",
+                        "expected_visual": "portal follows pointer while dragging",
+                    }, display_x=ev.display_x, display_y=ev.display_y)
+                elif ev.interaction_id == COMPOSER_INTERACTION_ID:
+                    emit_step_event(transcript, 10, "checkpoint", {
+                        "code": "input:focus-attempt",
+                        "title": "Composer pointer down",
+                        "action": "input composer received pointer down",
+                        "expected_visual": "keyboard focus should move to composer",
+                    }, display_x=ev.display_x, display_y=ev.display_y)
+
+            elif kind == "pointer_move" and drag is not None:
+                ev = envelope.pointer_move
+                if ev.device_id != drag["device_id"]:
+                    continue
+                now = time.monotonic()
+                if now - float(drag["started_at"]) > DRAG_MAX_SECONDS:
+                    drag = None
+                    emit_step_event(transcript, 9, "checkpoint", {
+                        "code": "drag:end",
+                        "title": "Portal drag ended",
+                        "action": "drag watchdog stopped after missing pointer-up",
+                        "expected_visual": "portal stops following the cursor",
+                    }, portal_x=portal_x, portal_y=portal_y, reason="watchdog")
+                    continue
+                if now - last_drag_send < 1.0 / 30.0:
+                    continue
+                last_drag_send = now
+                dx = ev.display_x - float(drag["start_x"])
+                dy = ev.display_y - float(drag["start_y"])
+                await move_portal(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
+
+            elif kind == "pointer_up" and drag is not None:
+                ev = envelope.pointer_up
+                if ev.device_id == drag["device_id"]:
+                    dx = ev.display_x - float(drag["start_x"])
+                    dy = ev.display_y - float(drag["start_y"])
+                    await move_portal(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
+                    drag = None
+                    emit_step_event(transcript, 9, "checkpoint", {
+                        "code": "drag:end",
+                        "title": "Portal drag ended",
+                        "action": "all portal tiles committed to grouped position",
+                        "expected_visual": "input/output panes remain aligned with portal frame",
+                    }, portal_x=portal_x, portal_y=portal_y)
+
+            elif kind == "character":
+                ev = envelope.character
+                if ev.tile_id != tiles.input_scroll:
+                    continue
+                if ev.character in {"\r", "\n"}:
+                    continue
+                composer_text += ev.character
+                await render_composer()
+
+            elif kind == "key_down":
+                ev = envelope.key_down
+                if ev.tile_id != tiles.input_scroll:
+                    continue
+                if ev.key == "Backspace":
+                    composer_text = composer_text[:-1]
+                    await render_composer()
+                elif ev.key == "Enter":
+                    await submit_composer()
+                elif ev.key == "Escape":
+                    composer_text = ""
+                    await render_composer()
+
+            elif kind == "scroll_offset_changed":
+                ev = envelope.scroll_offset_changed
+                if ev.tile_id != tiles.output_scroll:
+                    continue
+                if abs(ev.offset_y) < 0.5:
+                    continue
+                await record_output_scroll(ev.offset_y)
+                emit_step_event(transcript, 8, "checkpoint", {
+                    "code": "scroll:output",
+                    "title": "Output transcript scrolled",
+                    "action": "portal received local-first scroll offset",
+                    "expected_visual": "output text stays clipped inside transcript box",
+                }, scroll_y=ev.offset_y, viewport_start=output_view_start)
 
 
 async def run_baseline(
@@ -877,6 +1119,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
         initial_subscriptions=["SCENE_TOPOLOGY", "INPUT_EVENTS"],
     )
     heartbeat_task: Optional[asyncio.Task] = None
+    interaction_task: Optional[asyncio.Task] = None
 
     try:
         emit_step_event(transcript, 0, "started", {
@@ -887,8 +1130,13 @@ async def run_scenario(args: argparse.Namespace) -> int:
         }, target=args.target, doc=args.doc, phases=args.phases)
 
         await client.connect()
-        lease_id = await client.request_lease(ttl_ms=180_000)
-        portal_x = args.tab_width - PORTAL_W - PORTAL_X_FROM_RIGHT
+        lease_ttl_ms = max(600_000, int(args.baseline_hold_s * 1000) + 120_000)
+        lease_id = await client.request_lease(ttl_ms=lease_ttl_ms)
+        portal_x = (
+            args.portal_x
+            if args.portal_x is not None
+            else args.tab_width - PORTAL_W - PORTAL_X_FROM_RIGHT
+        )
         tiles = await create_portal_tiles(
             client=client,
             lease_id=lease_id,
@@ -897,6 +1145,19 @@ async def run_scenario(args: argparse.Namespace) -> int:
         heartbeat_interval_ms = client.heartbeat_interval_ms or 5_000
         heartbeat_task = asyncio.create_task(
             heartbeat_loop(client, heartbeat_interval_ms)
+        )
+        interaction_task = asyncio.create_task(
+            portal_interaction_loop(
+                client=client,
+                lease_id=lease_id,
+                tiles=tiles,
+                transcript=transcript,
+                body_full=body,
+                initial_portal_x=portal_x,
+                initial_portal_y=PORTAL_Y,
+                tab_width=args.tab_width,
+                tab_height=args.tab_height,
+            )
         )
 
         phases = [p.strip() for p in (args.phases or "baseline").split(",")]
@@ -939,6 +1200,12 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+        if interaction_task is not None:
+            interaction_task.cancel()
+            try:
+                await interaction_task
+            except asyncio.CancelledError:
+                pass
         try:
             await client.close(reason="portal-exemplar done", expect_resume=False)
         except Exception:
@@ -965,6 +1232,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--doc", default=DEFAULT_DOC)
     p.add_argument("--max-lines", type=int, default=120)
     p.add_argument("--tab-width", type=float, default=1920.0)
+    p.add_argument("--tab-height", type=float, default=1080.0)
+    p.add_argument("--portal-x", type=float, default=None)
     p.add_argument("--phases", default="baseline,scroll",
                    help="Comma list: baseline,scroll,streaming,rapid")
     p.add_argument("--baseline-hold-s", type=float, default=20.0)

@@ -586,6 +586,12 @@ struct WindowedRuntimeState {
     /// Current cursor position (updated by CursorMoved events).
     cursor_x: f32,
     cursor_y: f32,
+    /// True while the primary pointer button is down.
+    ///
+    /// Overlay hit-testing must remain captured during a press/drag sequence so
+    /// Windows delivers the matching button release even if the cursor leaves the
+    /// original hit region.
+    left_button_down: bool,
     /// Winit window handle (Some after window is created).
     window: Option<Arc<Window>>,
     /// Effective window mode after platform fallback resolution.
@@ -672,6 +678,9 @@ impl ApplicationHandler for WinitApp {
             // initialisation path inside resumed().
             self.resumed(event_loop);
         }
+        self.refresh_cursor_position_from_os();
+        self.refresh_widget_hover_tracking();
+        self.update_overlay_cursor_hittest();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -1172,6 +1181,13 @@ impl ApplicationHandler for WinitApp {
                         ElementState::Pressed => PointerEventKind::Down,
                         ElementState::Released => PointerEventKind::Up,
                     };
+                    if state == ElementState::Pressed {
+                        self.state.left_button_down = true;
+                        if let Some(window) = &self.state.window {
+                            window.focus_window();
+                        }
+                        self.update_overlay_cursor_hittest();
+                    }
                     // If the context menu is showing and this is a left-press,
                     // check if it lands on the Reset button.  If so, trigger
                     // the reset; otherwise dismiss the menu (click-outside).
@@ -1179,6 +1195,10 @@ impl ApplicationHandler for WinitApp {
                         self.handle_left_click_with_context_menu();
                     }
                     self.enqueue_pointer_event(kind);
+                    if state == ElementState::Released {
+                        self.state.left_button_down = false;
+                        self.update_overlay_cursor_hittest();
+                    }
                 } else if button == MouseButton::Right && state == ElementState::Released {
                     // Right-click: show context menu if cursor is on a drag handle.
                     self.handle_right_click_on_drag_handle();
@@ -2057,7 +2077,7 @@ impl WinitApp {
             self.state.cursor_x,
             self.state.cursor_y,
             &self.state.hit_regions,
-        );
+        ) || self.state.left_button_down;
         if let Some(window) = &self.state.window {
             if let Err(e) = window.set_cursor_hittest(should_capture) {
                 tracing::trace!(
@@ -2634,6 +2654,7 @@ impl WindowedRuntime {
             shutdown,
             cursor_x: 0.0,
             cursor_y: 0.0,
+            left_button_down: false,
             window: None,
             effective_mode,
             hit_regions: Vec::new(),

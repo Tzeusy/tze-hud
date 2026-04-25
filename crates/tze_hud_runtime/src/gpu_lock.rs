@@ -187,12 +187,11 @@ mod windows_impl {
     /// `tze_hud_runtime` on Windows). Falls back to a fixed placeholder string
     /// if the call fails — the placeholder is still parseable key=value.
     fn utc_now_rfc3339() -> String {
-        use windows::Win32::Foundation::SYSTEMTIME;
-        use windows::Win32::System::Time::GetSystemTime;
+        use windows::Win32::System::SystemInformation::GetSystemTime;
 
-        // SAFETY: SYSTEMTIME is a POD struct; GetSystemTime fills it in-place.
-        let mut st = SYSTEMTIME::default();
-        unsafe { GetSystemTime(&mut st) };
+        // SAFETY: GetSystemTime returns the current UTC SYSTEMTIME and has no
+        // preconditions for callers.
+        let st = unsafe { GetSystemTime() };
 
         format!(
             "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
