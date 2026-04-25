@@ -43,7 +43,7 @@ Suggested bead:
 
 Include:
 
-- v1 deferred validation backlog from archived `v1-mvp-standards/specs/validation-framework/spec.md`.
+- v1 deferred validation backlog from archived `openspec/changes/archive/2026-04-18-v1-mvp-standards/specs/validation-framework/spec.md`.
 - `V1 Validation Backlog Carries Forward` requirements currently in v2 `validation-operations`.
 - Cross-spec conformance audits that are inherited v1 convergence work rather than v2-media-specific evidence.
 - Tasks to reconcile the new standalone delta against `openspec/specs/validation-framework` and any already-landed validation harness artifacts.
