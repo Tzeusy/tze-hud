@@ -18,6 +18,31 @@
 #   documented as GPU-required so teams can opt them out in environments without
 #   llvmpipe (e.g., minimal container images).
 #
+# ── fmt gate contract ────────────────────────────────────────────────────────
+#
+# The `fmt` job runs `cargo fmt --check` (without --all) from the workspace
+# root.  From a workspace root, `cargo fmt` and `cargo fmt --all` are
+# equivalent — both discover and format every file in every workspace member
+# by traversing `mod` declarations from each crate's entry point (lib.rs /
+# main.rs).  Rustfmt operates on the source tree, not the compilation graph,
+# so `#[cfg(target_os = "windows")]` blocks and other cfg-gated code are
+# formatted regardless of the build host.
+#
+# Investigation note (hud-18hth, 2026-04-25):
+#   PR #598 (native GPU lock) introduced fmt violations in gpu_lock.rs inside
+#   a `#[cfg(target_os = "windows")]` block.  The `cargo fmt` CI check
+#   correctly reported FAILURE on that PR.  The violations were merged anyway
+#   because the main branch had no required-status-checks protection.  The
+#   fix was applied in PR #599 during rebase.
+#
+#   Root cause: missing branch protection, NOT a gap in the fmt gate itself.
+#   Branch protection with required status checks has now been enabled on
+#   `main` to prevent future merges over failing CI.
+#
+#   All ten blocking jobs (check, fmt, clippy, test-unit, test-trace,
+#   test-v1-thesis, vertical_slice production boot, canonical app production
+#   boot, vocabulary-lint, dev-mode-guard) are required to pass before merge.
+# ─────────────────────────────────────────────────────────────────────────────
 # Spec ref:
 #   validation-framework/spec.md §CI Requirements (headless, no physical GPU)
 
