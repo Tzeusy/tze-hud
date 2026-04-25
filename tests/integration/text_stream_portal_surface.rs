@@ -1400,3 +1400,329 @@ fn portal_adapter_append_preserves_user_scroll_position() {
         "user scroll_y must be preserved after adapter append; expected {user_scroll_y} got {sy}"
     );
 }
+
+// ─── Click-to-focus + keyboard composer text mutation (hud-opkvq) ─────────────
+//
+// These tests exercise the full click-to-focus → keyboard dispatch → text
+// mutation loop using only the input crate types (no windowed runtime required).
+// They prove:
+//   1. Clicking a composer HitRegionNode grants focus to that node.
+//   2. After focus is granted, KeyboardProcessor produces KeyboardDispatch events
+//      targeting the focused node.
+//   3. The composer agent processes CharacterEvent payloads to mutate its draft
+//      buffer (insert characters, handle Backspace).
+
+/// A minimal in-process simulation of the composer portal agent's text buffer.
+///
+/// In production, this logic lives in the resident portal agent session. Here
+/// we drive it directly to prove the keyboard event contract.
+#[derive(Clone, Debug, Default)]
+struct ComposerBuffer {
+    draft: String,
+}
+
+impl ComposerBuffer {
+    /// Apply a keyboard dispatch from the runtime to the draft buffer.
+    ///
+    /// Handles:
+    /// - `Character` payload → append text to draft.
+    /// - `KeyDown` with `key == "Backspace"` → remove last character.
+    /// - `KeyDown` with `key == "Enter"` → submit (returns `Some(draft)` and clears).
+    /// - All other events → no-op.
+    ///
+    /// Returns `Some(submitted)` on Enter, `None` otherwise.
+    fn apply_dispatch(
+        &mut self,
+        dispatch: &tze_hud_input::KeyboardDispatch,
+    ) -> Option<String> {
+        use tze_hud_input::KeyboardDispatchKind;
+        match &dispatch.kind {
+            KeyboardDispatchKind::Character { character, .. } => {
+                self.draft.push_str(character);
+                None
+            }
+            KeyboardDispatchKind::KeyDown { key, .. } => {
+                match key.as_str() {
+                    "Backspace" => {
+                        // Remove last Unicode scalar value (not last byte).
+                        if let Some(pos) = self.draft.char_indices().next_back().map(|(i, _)| i) {
+                            self.draft.truncate(pos);
+                        }
+                        None
+                    }
+                    "Enter" => {
+                        let submitted = self.draft.trim().to_string();
+                        self.draft.clear();
+                        if submitted.is_empty() { None } else { Some(submitted) }
+                    }
+                    _ => None,
+                }
+            }
+            KeyboardDispatchKind::KeyUp { .. } => None,
+        }
+    }
+}
+
+/// Clicking a composer HitRegionNode with `accepts_focus=true` grants focus
+/// to that node, and subsequent KeyboardProcessor calls target it.
+#[test]
+fn click_to_focus_grants_focus_to_composer_hit_region() {
+    use tze_hud_input::{FocusManager, FocusOwner, InputProcessor, PointerEvent, PointerEventKind};
+    use tze_hud_scene::{Capability, HitRegionNode, InputMode, Node, NodeData, Rect, SceneGraph};
+
+    let namespace = "composer-agent";
+    let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let tab_id = scene.create_tab("Main", 0).expect("tab create");
+    scene.active_tab = Some(tab_id);
+    let lease_id = scene.grant_lease(
+        namespace,
+        120_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+
+    // Create the expanded portal tile in Capture mode (required for keyboard focus).
+    let create = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: namespace.to_string(),
+            lease_id,
+            bounds: portal_bounds(true),
+            z_order: PORTAL_Z_ORDER,
+        }],
+    ));
+    assert!(create.applied);
+    let tile_id = create.created_ids[0];
+
+    // Explicitly set input_mode to Capture so the tile accepts focus.
+    scene.tiles.get_mut(&tile_id).unwrap().input_mode = InputMode::Capture;
+
+    // Add the composer HitRegionNode as the tile root.
+    let composer_node_id = tze_hud_scene::SceneId::new();
+    scene.set_tile_root(
+        tile_id,
+        Node {
+            id: composer_node_id,
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, EXPANDED_H - 42.0, EXPANDED_W - 20.0, 28.0),
+                interaction_id: INTERACTION_REPLY.to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        },
+    ).expect("set tile root");
+
+    let mut input_processor = InputProcessor::new();
+    let mut focus_manager = FocusManager::new();
+    focus_manager.add_tab(tab_id);
+
+    // Before any click, focus must be None.
+    assert_eq!(
+        focus_manager.current_owner(tab_id),
+        &FocusOwner::None,
+        "no click yet — focus must be None"
+    );
+
+    // Simulate a pointer-down inside the composer hit region.
+    // The composer node is at (48 + 0, 160 + EXPANDED_H - 42) in display space.
+    let tile_origin_x = portal_bounds(true).x;
+    let tile_origin_y = portal_bounds(true).y;
+    let click_x = tile_origin_x + EXPANDED_W / 2.0;
+    let click_y = tile_origin_y + EXPANDED_H - 28.0; // inside composer row
+
+    let down = PointerEvent {
+        x: click_x,
+        y: click_y,
+        kind: PointerEventKind::Down,
+        device_id: 0,
+        timestamp: None,
+    };
+
+    let (_result, focus_transition) =
+        input_processor.process_with_focus(&down, &mut scene, &mut focus_manager, tab_id);
+
+    // Focus must have been granted to the composer node.
+    assert!(
+        focus_transition.is_some(),
+        "pointer-down on focusable hit region must produce a focus transition"
+    );
+    assert_eq!(
+        focus_manager.current_owner(tab_id),
+        &FocusOwner::Node {
+            tile_id,
+            node_id: composer_node_id,
+        },
+        "focus must be on the composer hit region node after click"
+    );
+}
+
+/// After click-to-focus, `KeyboardProcessor` produces `KeyboardDispatch`
+/// payloads targeting the focused node, and the `ComposerBuffer` can mutate
+/// its draft text in response.
+#[test]
+fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
+    use tze_hud_input::{
+        FocusManager, FocusOwner, InputProcessor, KeyboardModifiers, KeyboardProcessor,
+        PointerEvent, PointerEventKind, RawCharacterEvent, RawKeyDownEvent,
+    };
+    use tze_hud_scene::{
+        Capability, HitRegionNode, InputMode, MonoUs, Node, NodeData, Rect, SceneGraph,
+    };
+
+    let namespace = "composer-kb-agent";
+    let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
+    let tab_id = scene.create_tab("Main", 0).expect("tab create");
+    scene.active_tab = Some(tab_id);
+    let lease_id = scene.grant_lease(
+        namespace,
+        120_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let create = scene.apply_batch(&make_batch(
+        namespace,
+        lease_id,
+        vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: namespace.to_string(),
+            lease_id,
+            bounds: portal_bounds(true),
+            z_order: PORTAL_Z_ORDER,
+        }],
+    ));
+    assert!(create.applied);
+    let tile_id = create.created_ids[0];
+    scene.tiles.get_mut(&tile_id).unwrap().input_mode = InputMode::Capture;
+
+    let composer_node_id = tze_hud_scene::SceneId::new();
+    scene.set_tile_root(
+        tile_id,
+        Node {
+            id: composer_node_id,
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, EXPANDED_H - 42.0, EXPANDED_W - 20.0, 28.0),
+                interaction_id: INTERACTION_REPLY.to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        },
+    ).expect("set tile root");
+
+    // Click-to-focus: wire focus onto the composer node.
+    let mut input_processor = InputProcessor::new();
+    let mut focus_manager = FocusManager::new();
+    focus_manager.add_tab(tab_id);
+
+    let tile_x = portal_bounds(true).x;
+    let tile_y = portal_bounds(true).y;
+    let click_x = tile_x + EXPANDED_W / 2.0;
+    let click_y = tile_y + EXPANDED_H - 28.0;
+
+    let down = PointerEvent {
+        x: click_x,
+        y: click_y,
+        kind: PointerEventKind::Down,
+        device_id: 0,
+        timestamp: None,
+    };
+    input_processor.process_with_focus(&down, &mut scene, &mut focus_manager, tab_id);
+
+    assert_eq!(
+        focus_manager.current_owner(tab_id),
+        &FocusOwner::Node { tile_id, node_id: composer_node_id },
+        "pre-condition: composer node must be focused"
+    );
+
+    // ── Keyboard drain ────────────────────────────────────────────────────
+    let kb = KeyboardProcessor::new();
+    let focus_owner = focus_manager.current_owner(tab_id).clone();
+    let ns_fn = |_: tze_hud_scene::SceneId| -> Option<String> { Some(namespace.to_string()) };
+
+    let mut buffer = ComposerBuffer::default();
+    let ts = MonoUs(1_000);
+
+    // Type "hello" via CharacterEvent payloads.
+    for ch in ["h", "e", "l", "l", "o"] {
+        let raw = RawCharacterEvent { character: ch.to_string(), timestamp_mono_us: ts };
+        if let Some(dispatch) = kb.process_character(&raw, &focus_owner, &ns_fn) {
+            assert_eq!(dispatch.tile_id, tile_id);
+            assert_eq!(dispatch.node_id, Some(composer_node_id));
+            buffer.apply_dispatch(&dispatch);
+        }
+    }
+    assert_eq!(buffer.draft, "hello", "draft must accumulate typed characters");
+
+    // Backspace: erase last character.
+    let backspace = RawKeyDownEvent {
+        key_code: "Backspace".to_string(),
+        key: "Backspace".to_string(),
+        modifiers: KeyboardModifiers::NONE,
+        repeat: false,
+        timestamp_mono_us: ts,
+    };
+    if let Some(dispatch) = kb.process_key_down(&backspace, &focus_owner, &ns_fn) {
+        buffer.apply_dispatch(&dispatch);
+    }
+    assert_eq!(buffer.draft, "hell", "backspace must remove last character");
+
+    // Type " world" (space then "world").
+    for ch in [" ", "w", "o", "r", "l", "d"] {
+        let raw = RawCharacterEvent { character: ch.to_string(), timestamp_mono_us: ts };
+        if let Some(dispatch) = kb.process_character(&raw, &focus_owner, &ns_fn) {
+            buffer.apply_dispatch(&dispatch);
+        }
+    }
+    assert_eq!(buffer.draft, "hell world");
+
+    // Enter: submit and clear.
+    let enter = RawKeyDownEvent {
+        key_code: "Enter".to_string(),
+        key: "Enter".to_string(),
+        modifiers: KeyboardModifiers::NONE,
+        repeat: false,
+        timestamp_mono_us: ts,
+    };
+    let submitted = if let Some(dispatch) = kb.process_key_down(&enter, &focus_owner, &ns_fn) {
+        buffer.apply_dispatch(&dispatch)
+    } else {
+        None
+    };
+    assert_eq!(
+        submitted.as_deref(),
+        Some("hell world"),
+        "Enter must submit the accumulated draft"
+    );
+    assert!(
+        buffer.draft.is_empty(),
+        "draft must be cleared after Enter submit"
+    );
+}
+
+/// `KeyboardProcessor` returns `None` when no node has focus (FocusOwner::None).
+/// This ensures no spurious dispatches leak before the user clicks the composer.
+#[test]
+fn keyboard_processor_no_dispatch_without_focus() {
+    use tze_hud_input::{FocusOwner, KeyboardModifiers, KeyboardProcessor, RawKeyDownEvent};
+    use tze_hud_scene::MonoUs;
+
+    let kb = KeyboardProcessor::new();
+    let focus = FocusOwner::None;
+    let ns_fn = |_: tze_hud_scene::SceneId| -> Option<String> { Some("agent".to_string()) };
+
+    let raw = RawKeyDownEvent {
+        key_code: "KeyA".to_string(),
+        key: "a".to_string(),
+        modifiers: KeyboardModifiers::NONE,
+        repeat: false,
+        timestamp_mono_us: MonoUs(0),
+    };
+    let dispatch = kb.process_key_down(&raw, &focus, &ns_fn);
+    assert!(
+        dispatch.is_none(),
+        "no focus → KeyboardProcessor must not produce a dispatch"
+    );
+}

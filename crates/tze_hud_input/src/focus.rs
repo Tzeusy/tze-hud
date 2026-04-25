@@ -602,6 +602,19 @@ impl FocusManager {
         &self.trees
     }
 
+    /// Returns the current focus owner for the given tab, or `FocusOwner::None`
+    /// if the tab has no registered tree.
+    ///
+    /// Convenience wrapper over `trees().get(tab_id).map(|t| t.current())`.
+    /// Used by the runtime keyboard drain path to route raw key events to the
+    /// correct focused node without going through the full lifecycle API.
+    pub fn current_owner(&self, tab_id: SceneId) -> &FocusOwner {
+        self.trees
+            .get(&tab_id)
+            .map(|t| t.current())
+            .unwrap_or(&FocusOwner::None)
+    }
+
     // ─── Internal helpers ────────────────────────────────────────────────
 
     /// Get-or-create the focus tree for a tab.
@@ -1634,5 +1647,83 @@ mod tests {
             // We only have one tab, so there's exactly one tree.
             assert_eq!(owners.len(), 1);
         }
+    }
+
+    // ── current_owner convenience accessor ───────────────────────────────────
+
+    /// `current_owner` returns `FocusOwner::None` for an unregistered tab.
+    #[test]
+    fn current_owner_returns_none_for_unknown_tab() {
+        let fm = FocusManager::new();
+        let unknown_tab = SceneId::new();
+        assert_eq!(
+            fm.current_owner(unknown_tab),
+            &FocusOwner::None,
+            "unknown tab must produce FocusOwner::None"
+        );
+    }
+
+    /// `current_owner` returns `FocusOwner::None` for a freshly registered tab
+    /// (no click yet).
+    #[test]
+    fn current_owner_returns_none_before_first_click() {
+        let mut fm = FocusManager::new();
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        fm.add_tab(tab_id);
+
+        assert_eq!(
+            fm.current_owner(tab_id),
+            &FocusOwner::None,
+            "no click yet — owner must be None"
+        );
+    }
+
+    /// After a click on a focusable node, `current_owner` reflects the node.
+    #[test]
+    fn current_owner_reflects_click_to_focus_node() {
+        let mut fm = FocusManager::new();
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        fm.add_tab(tab_id);
+
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+        let node_id = add_hit_region(&mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true);
+
+        fm.on_click(tab_id, tile_id, Some(node_id), &scene);
+
+        assert_eq!(
+            fm.current_owner(tab_id),
+            &FocusOwner::Node { tile_id, node_id },
+            "current_owner must reflect the focused node after click"
+        );
+    }
+
+    /// `current_owner` updates to `FocusOwner::None` after `remove_tab`.
+    #[test]
+    fn current_owner_none_after_tab_removed() {
+        let mut fm = FocusManager::new();
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        fm.add_tab(tab_id);
+
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+        let node_id = add_hit_region(&mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true);
+        fm.on_click(tab_id, tile_id, Some(node_id), &scene);
+
+        fm.remove_tab(tab_id);
+
+        // After removal, the tab_id is no longer in the tree map.
+        assert_eq!(
+            fm.current_owner(tab_id),
+            &FocusOwner::None,
+            "removed tab must appear as FocusOwner::None"
+        );
     }
 }
