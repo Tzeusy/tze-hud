@@ -91,8 +91,8 @@ use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{Compositor, CompositorSurface, WindowSurface};
 use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{
-    DragEventOutcome, FocusManager, FocusTransition, InputProcessor, KeyboardProcessor,
-    PointerEvent, PointerEventKind, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
+    DragEventOutcome, FocusManager, InputProcessor, KeyboardProcessor, PointerEvent,
+    PointerEventKind, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
 };
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
@@ -1412,10 +1412,9 @@ impl WinitApp {
                 // pointer-down on a focusable HitRegionNode transfers keyboard
                 // focus before the AgentDispatch is produced.  The returned
                 // FocusTransition carries the lost/gained events and a
-                // compositor ring-update hint; we log the transition here.
-                // Full agent-event delivery (FocusGainedEvent / FocusLostEvent
-                // over gRPC) is a follow-up wiring concern; the focus state is
-                // correctly maintained in focus_manager from this point.
+                // compositor ring-update hint; we log the transition below and
+                // broadcast FocusGainedEvent / FocusLostEvent to agents via
+                // dispatch_focus_event on the input_event_tx channel.
                 let active_tab = scene.active_tab;
                 let (result, focus_transition) = if let Some(tab_id) = active_tab {
                     self.state.input_processor.process_with_focus(
@@ -1433,15 +1432,11 @@ impl WinitApp {
                     (r, None)
                 };
 
-                // Log focus transitions for diagnostics (no round-trip required;
-                // local state is already updated in focus_manager).
-                if let Some(FocusTransition {
-                    ref gained,
-                    ref lost,
-                    ..
-                }) = focus_transition
-                {
-                    if let Some((ev, ns)) = gained {
+                // Log focus transitions and broadcast FocusGainedEvent /
+                // FocusLostEvent over the FOCUS_EVENTS gRPC channel.
+                // Local state is already updated in focus_manager above.
+                if let Some(ref transition) = focus_transition {
+                    if let Some((ev, ns)) = &transition.gained {
                         tracing::debug!(
                             namespace = %ns,
                             tile_id = ?ev.tile_id,
@@ -1450,7 +1445,7 @@ impl WinitApp {
                             "click-to-focus: focus gained"
                         );
                     }
-                    if let Some((ev, ns)) = lost {
+                    if let Some((ev, ns)) = &transition.lost {
                         tracing::debug!(
                             namespace = %ns,
                             tile_id = ?ev.tile_id,
@@ -1459,6 +1454,9 @@ impl WinitApp {
                             "click-to-focus: focus lost"
                         );
                     }
+                }
+                if let Some(transition) = focus_transition {
+                    dispatch_focus_event(&self.state.input_event_tx, transition);
                 }
 
                 // ── Zone interaction dispatch (local feedback first) ──────────
@@ -3012,6 +3010,112 @@ fn dispatch_keyboard_event(
     // namespace matches and INPUT_EVENTS is subscribed. Errors (no receivers,
     // channel lagged) are silently ignored.
     let _ = tx.send((dispatch.namespace, batch));
+}
+
+/// Broadcast `FocusGainedEvent` and/or `FocusLostEvent` to the owning agents
+/// via the `FOCUS_EVENTS` gRPC channel.
+///
+/// Converts a [`tze_hud_input::FocusTransition`] into proto envelopes and sends
+/// each event as a single-event `EventBatch` on the broadcast channel.  The
+/// session handler delivers each batch only when the agent is subscribed to
+/// `FOCUS_EVENTS` — the subscription gate is enforced in
+/// `subscriptions::filter_event_batch`, not here.
+///
+/// Focus lost is dispatched first (if present) so the agent that relinquished
+/// focus receives its event before the newly-focused agent receives its gained
+/// event, preserving the ordering guarantee in RFC 0004 §8.4.
+///
+/// Delivery is best-effort (fire-and-forget): errors (no receivers, channel
+/// lagged) are silently ignored, matching the keyboard-event broadcast pattern.
+fn dispatch_focus_event(
+    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    transition: tze_hud_input::FocusTransition,
+) {
+    let Some(tx) = tx else { return };
+
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    use tze_hud_input::{FocusLostReason, FocusSource};
+    use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+    // ── FocusLostEvent (dispatched first per RFC 0004 §8.4) ─────────────────
+    if let Some((lost_ev, namespace)) = transition.lost {
+        let tile_id_bytes = lost_ev.tile_id.as_uuid().as_bytes().to_vec();
+        let node_id_bytes = lost_ev
+            .node_id
+            .map(|id| id.as_uuid().as_bytes().to_vec())
+            .unwrap_or_default();
+
+        let proto_reason = match lost_ev.reason {
+            FocusLostReason::ClickElsewhere => {
+                tze_hud_protocol::proto::FocusLostReason::ClickElsewhere
+            }
+            FocusLostReason::TabKey => tze_hud_protocol::proto::FocusLostReason::TabKey,
+            FocusLostReason::Programmatic => tze_hud_protocol::proto::FocusLostReason::Programmatic,
+            FocusLostReason::TileDestroyed => {
+                tze_hud_protocol::proto::FocusLostReason::TileDestroyed
+            }
+            FocusLostReason::TabSwitched => tze_hud_protocol::proto::FocusLostReason::TabSwitched,
+            FocusLostReason::LeaseRevoked => tze_hud_protocol::proto::FocusLostReason::LeaseRevoked,
+            FocusLostReason::AgentDisconnected => {
+                tze_hud_protocol::proto::FocusLostReason::AgentDisconnected
+            }
+            FocusLostReason::CommandInput => tze_hud_protocol::proto::FocusLostReason::CommandInput,
+        };
+
+        let batch = EventBatch {
+            frame_number: 0,
+            batch_ts_us: now_us,
+            events: vec![InputEnvelope {
+                event: Some(InputEvent::FocusLost(
+                    tze_hud_protocol::proto::FocusLostEvent {
+                        tile_id: tile_id_bytes,
+                        node_id: node_id_bytes,
+                        timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                        reason: proto_reason as i32,
+                    },
+                )),
+            }],
+        };
+
+        let _ = tx.send((namespace, batch));
+    }
+
+    // ── FocusGainedEvent ─────────────────────────────────────────────────────
+    if let Some((gained_ev, namespace)) = transition.gained {
+        let tile_id_bytes = gained_ev.tile_id.as_uuid().as_bytes().to_vec();
+        let node_id_bytes = gained_ev
+            .node_id
+            .map(|id| id.as_uuid().as_bytes().to_vec())
+            .unwrap_or_default();
+
+        let proto_source = match gained_ev.source {
+            FocusSource::Click => tze_hud_protocol::proto::FocusSource::Click,
+            FocusSource::TabKey => tze_hud_protocol::proto::FocusSource::TabKey,
+            FocusSource::Programmatic => tze_hud_protocol::proto::FocusSource::Programmatic,
+            FocusSource::CommandInput => tze_hud_protocol::proto::FocusSource::CommandInput,
+        };
+
+        let batch = EventBatch {
+            frame_number: 0,
+            batch_ts_us: now_us,
+            events: vec![InputEnvelope {
+                event: Some(InputEvent::FocusGained(
+                    tze_hud_protocol::proto::FocusGainedEvent {
+                        tile_id: tile_id_bytes,
+                        node_id: node_id_bytes,
+                        timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                        source: proto_source as i32,
+                    },
+                )),
+            }],
+        };
+
+        let _ = tx.send((namespace, batch));
+    }
 }
 
 /// Push an `InputEvent` into the ring buffer, dropping the oldest if full.
