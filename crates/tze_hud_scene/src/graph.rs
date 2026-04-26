@@ -3869,6 +3869,7 @@ impl SceneGraph {
             zone_registry,
             widget_registry,
             active_tab: self.active_tab,
+            display_area: self.display_area,
             checksum: String::new(),
         };
 
@@ -4239,6 +4240,16 @@ mod tests {
         assert_eq!(scene.tile_count(), restored.tile_count());
         assert_eq!(scene.active_tab, restored.active_tab);
         assert_eq!(scene.version, restored.version);
+    }
+
+    #[test]
+    fn take_snapshot_includes_display_area() {
+        let scene = SceneGraph::new(2560.0, 1440.0);
+
+        let snapshot = scene.take_snapshot(1_000, 2_000);
+
+        assert_eq!(snapshot.display_area, Rect::new(0.0, 0.0, 2560.0, 1440.0));
+        assert!(snapshot.verify_checksum());
     }
 
     #[test]

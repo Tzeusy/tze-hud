@@ -549,6 +549,7 @@ fn snapshot_does_not_expose_incremental_diff() {
             active_publications: std::collections::BTreeMap::new(),
         },
         active_tab: None,
+        display_area: Rect::new(0.0, 0.0, 1920.0, 1080.0),
         checksum: String::new(),
     };
     // If this compiles, no SceneDiff field exists (post-v1 constraint satisfied).

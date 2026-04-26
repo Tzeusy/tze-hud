@@ -842,6 +842,12 @@ async def portal_interaction_loop(
                 ev = envelope.character
                 if ev.tile_id != tiles.input_scroll:
                     continue
+                emit_step_event(transcript, 10, "checkpoint", {
+                    "code": "input:character",
+                    "title": "Composer character received",
+                    "action": "runtime delivered character input to composer",
+                    "expected_visual": "typed character appears in composer text window",
+                }, character=ev.character)
                 if ev.character in {"\r", "\n"}:
                     continue
                 composer_text += ev.character
@@ -851,6 +857,12 @@ async def portal_interaction_loop(
                 ev = envelope.key_down
                 if ev.tile_id != tiles.input_scroll:
                     continue
+                emit_step_event(transcript, 10, "checkpoint", {
+                    "code": "input:key-down",
+                    "title": "Composer key down received",
+                    "action": "runtime delivered key input to composer",
+                    "expected_visual": "editing commands affect composer when applicable",
+                }, key=ev.key, key_code=ev.key_code, repeat=ev.repeat)
                 if ev.key == "Backspace":
                     composer_text = composer_text[:-1]
                     await render_composer()
@@ -873,6 +885,28 @@ async def portal_interaction_loop(
                     "action": "portal received local-first scroll offset",
                     "expected_visual": "output text stays clipped inside transcript box",
                 }, scroll_y=ev.offset_y, viewport_start=output_view_start)
+
+            elif kind == "focus_gained":
+                ev = envelope.focus_gained
+                if ev.tile_id != tiles.input_scroll:
+                    continue
+                emit_step_event(transcript, 10, "checkpoint", {
+                    "code": "input:focus-gained",
+                    "title": "Composer focus gained",
+                    "action": "runtime focus manager focused the composer hit region",
+                    "expected_visual": "subsequent keyboard events route to composer",
+                })
+
+            elif kind == "focus_lost":
+                ev = envelope.focus_lost
+                if ev.tile_id != tiles.input_scroll:
+                    continue
+                emit_step_event(transcript, 10, "checkpoint", {
+                    "code": "input:focus-lost",
+                    "title": "Composer focus lost",
+                    "action": "runtime focus manager moved focus away from composer",
+                    "expected_visual": "composer stops receiving keyboard events",
+                })
 
 
 async def run_baseline(
@@ -1116,10 +1150,12 @@ async def run_scenario(args: argparse.Namespace) -> int:
         psk=psk,
         agent_id=args.agent_id,
         capabilities=["create_tiles", "modify_own_tiles", "access_input_events"],
-        initial_subscriptions=["SCENE_TOPOLOGY", "INPUT_EVENTS"],
+        initial_subscriptions=["SCENE_TOPOLOGY", "INPUT_EVENTS", "FOCUS_EVENTS"],
     )
     heartbeat_task: Optional[asyncio.Task] = None
     interaction_task: Optional[asyncio.Task] = None
+    scene_width = args.tab_width
+    scene_height = args.tab_height
 
     try:
         emit_step_event(transcript, 0, "started", {
@@ -1130,7 +1166,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
         }, target=args.target, doc=args.doc, phases=args.phases)
 
         await client.connect()
-        scene_width, scene_height = client.scene_display_area or (args.tab_width, args.tab_height)
+        scene_width, scene_height = client.scene_display_area or (scene_width, scene_height)
         emit_step_event(transcript, 0, "checkpoint", {
             "code": "scene:display-area",
             "title": "Scene display area resolved",

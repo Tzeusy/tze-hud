@@ -2626,11 +2626,19 @@ pub struct SceneGraphSnapshot {
     /// The currently active tab, or None if no tab is active.
     pub active_tab: Option<SceneId>,
 
+    /// Display area used for tile bounds validation and viewport-relative placement.
+    #[serde(default = "default_snapshot_display_area")]
+    pub display_area: Rect,
+
     /// BLAKE3 checksum (32 bytes as hex) of the canonical serialized content.
     ///
     /// Computed over the JSON-serialized bytes of this struct with the
     /// `checksum` field set to the empty string. See [`SceneGraphSnapshot::verify_checksum`].
     pub checksum: String,
+}
+
+fn default_snapshot_display_area() -> Rect {
+    Rect::new(0.0, 0.0, 1920.0, 1080.0)
 }
 
 impl SceneGraphSnapshot {
