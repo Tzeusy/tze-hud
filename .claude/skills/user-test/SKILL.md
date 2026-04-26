@@ -900,6 +900,11 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --max-lines 80
 ```
 
+By default the script explicitly releases its portal lease before closing the
+resident session, so normal exit and Ctrl-C cleanup remove the portal tiles
+without requiring a HUD restart. Use `--leave-lease-on-exit` only when
+deliberately testing orphan/grace behavior.
+
 Optional `--phases` values:
 
 | Phase | What it exercises | Operator-visible proof |

@@ -1154,8 +1154,10 @@ async def run_scenario(args: argparse.Namespace) -> int:
     )
     heartbeat_task: Optional[asyncio.Task] = None
     interaction_task: Optional[asyncio.Task] = None
+    lease_id: Optional[bytes] = None
     scene_width = args.tab_width
     scene_height = args.tab_height
+    cleanup_errors: list[str] = []
 
     try:
         emit_step_event(transcript, 0, "started", {
@@ -1234,7 +1236,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
             "code": "scenario_complete",
             "title": "Text Stream Portal scenario complete",
             "action": "review transcript and capture UX notes",
-            "expected_visual": "portal visible until session closes",
+            "expected_visual": "portal visible until cleanup releases the lease",
         })
     finally:
         if heartbeat_task is not None:
@@ -1249,6 +1251,27 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 await interaction_task
             except asyncio.CancelledError:
                 pass
+        if lease_id is not None and not args.leave_lease_on_exit:
+            try:
+                await asyncio.wait_for(
+                    client.release_lease(lease_id),
+                    timeout=args.cleanup_timeout_s,
+                )
+                emit_step_event(transcript, 100, "completed", {
+                    "code": "cleanup:lease-release",
+                    "title": "Portal lease released",
+                    "action": "release the lease before closing the session",
+                    "expected_visual": "all portal tiles are removed from the HUD",
+                })
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                cleanup_errors.append(detail)
+                emit_step_event(transcript, 100, "failed", {
+                    "code": "cleanup:lease-release",
+                    "title": "Portal lease release failed",
+                    "action": "attempted to release the portal lease before session close",
+                    "expected_visual": "portal may remain until runtime orphan cleanup or HUD restart",
+                }, error=detail)
         try:
             await client.close(reason="portal-exemplar done", expect_resume=False)
         except Exception:
@@ -1261,6 +1284,8 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 "scene_height": scene_height,
                 "portal_w": PORTAL_W,
                 "portal_h": PORTAL_H,
+                "lease_release_on_exit": not args.leave_lease_on_exit,
+                "cleanup_errors": cleanup_errors,
                 "steps": transcript,
             })
 
@@ -1286,6 +1311,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stream-interval-s", type=float, default=1.5)
     p.add_argument("--rapid-cycles", type=int, default=12)
     p.add_argument("--rapid-interval-ms", type=int, default=80)
+    p.add_argument("--cleanup-timeout-s", type=float, default=5.0)
+    p.add_argument(
+        "--leave-lease-on-exit",
+        action="store_true",
+        help="Skip explicit lease release on exit; only use when testing orphan/grace behavior",
+    )
     p.add_argument("--transcript-out", default=DEFAULT_TRANSCRIPT_PATH)
     return p.parse_args()
 

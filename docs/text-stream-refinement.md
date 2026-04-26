@@ -200,7 +200,8 @@ right thing (no background rect emitted).
 ## Repro commands
 
 ```bash
-# Kill + relaunch HUD (clears orphan tiles at same z-order)
+# Optional: kill + relaunch HUD if a previous run used --leave-lease-on-exit
+# or crashed before cleanup.
 ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes tzeus@tzehouse-windows.parrot-hen.ts.net \
   "taskkill /F /IM tze_hud.exe"
 ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes tzeus@tzehouse-windows.parrot-hen.ts.net \
@@ -224,6 +225,9 @@ python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_str
 
 - Default PSK `tze-hud-key` is rejected in strict mode; the `TzeHudOverlay`
   task embeds a 64-char hex PSK in its `--psk` flag. `.env` must match.
+- The portal exemplar now releases its lease on exit by default, so ordinary
+  Ctrl-C should remove the portal immediately. Use `--leave-lease-on-exit`
+  only when intentionally testing the orphan/grace cleanup path.
 - `agent-id` must match a `[agents.registered.*]` entry in the Windows toml
   — unregistered agents get `caps=[]` and `request_lease` fails with
   `PERMISSION_DENIED`.
