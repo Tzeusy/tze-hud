@@ -157,6 +157,40 @@ fn sync_scene_display_area(scene: &mut tze_hud_scene::graph::SceneGraph, width: 
     scene.display_area = tze_hud_scene::Rect::new(0.0, 0.0, width as f32, height as f32);
 }
 
+fn normalize_mouse_wheel_delta(delta: &MouseScrollDelta) -> (f32, f32) {
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => (-x * 40.0, -y * 40.0),
+        MouseScrollDelta::PixelDelta(pos) => (-(pos.x as f32), -(pos.y as f32)),
+    }
+}
+
+fn focus_window_for_text_input(window: &Window) {
+    window.focus_window();
+    window.set_ime_allowed(true);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::c_void;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{BringWindowToTop, SetForegroundWindow};
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return;
+        };
+        let hwnd = HWND(handle.hwnd.get() as *mut c_void);
+
+        // SAFETY: The HWND is owned by this winit window on the event-loop thread.
+        unsafe {
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+}
+
 /// Drive the drag-handle long-press state machine for a single pointer event.
 ///
 /// Must be called while both the `SharedState` lock **and** the inner scene
@@ -1213,7 +1247,7 @@ impl ApplicationHandler for WinitApp {
                     if state == ElementState::Pressed {
                         self.state.left_button_down = true;
                         if let Some(window) = &self.state.window {
-                            window.focus_window();
+                            focus_window_for_text_input(window);
                         }
                         self.update_overlay_cursor_hittest();
                     }
@@ -1236,10 +1270,7 @@ impl ApplicationHandler for WinitApp {
 
             // ── Pointer: wheel scroll ────────────────────────────────────────
             WindowEvent::MouseWheel { delta, .. } => {
-                let (delta_x, delta_y) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (x * 40.0, y * 40.0),
-                    MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
-                };
+                let (delta_x, delta_y) = normalize_mouse_wheel_delta(&delta);
                 self.enqueue_scroll_event(delta_x, delta_y);
             }
 
@@ -4545,6 +4576,21 @@ redaction_style = "blank"
 
         assert_eq!(scene.display_area.width, 1920.0);
         assert_eq!(scene.display_area.height, 1080.0);
+    }
+
+    #[test]
+    fn mouse_wheel_delta_positive_line_scrolls_toward_top() {
+        let (x, y) = super::normalize_mouse_wheel_delta(&MouseScrollDelta::LineDelta(0.0, 1.0));
+
+        assert_eq!(x, 0.0);
+        assert_eq!(y, -40.0);
+    }
+
+    #[test]
+    fn mouse_wheel_delta_negative_line_scrolls_down_transcript() {
+        let (_, y) = super::normalize_mouse_wheel_delta(&MouseScrollDelta::LineDelta(0.0, -1.0));
+
+        assert_eq!(y, 40.0);
     }
 
     // ── DPI scaling correctness (hud-22by) ────────────────────────────────────
