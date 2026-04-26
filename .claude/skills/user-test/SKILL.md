@@ -230,6 +230,7 @@ Recommended sequence:
 2. List widgets first (`--list-widgets`) to discover available widget types and instances.
 3. Publish the full widget message batch.
 4. Return per-message results (success/failure, applied params, and errors).
+5. For manual user-test runs that touch durable widget instances, clear them at the end with `--cleanup-on-exit` or the cleanup fixture below. This prevents stale widget state from remaining on the HUD after interrupted or partial tests.
 
 Example:
 
@@ -238,10 +239,20 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
   --messages-file /tmp/hud-widget-messages.json \
-  --list-widgets
+  --list-widgets \
+  --cleanup-on-exit
 ```
 
 If `list_widgets` returns no instances, skip widget publishing and report that no widgets are registered (the HUD binary may predate widget support).
+
+To clear stale widget state explicitly, run:
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/widget-cleanup.json
+```
 
 ### Step 5: Widget Reactivity Test (Gauge Cycling)
 
@@ -272,7 +283,8 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
   --messages-file .claude/skills/user-test/scripts/status-indicator-enum-cycle-test.json \
-  --delay-ms 1000
+  --delay-ms 1000 \
+  --cleanup-on-exit
 ```
 
 The status indicator should visually cycle through:
@@ -290,7 +302,8 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
   --messages-file .claude/skills/user-test/scripts/status-indicator-theme-cycle-test.json \
-  --delay-ms 1200
+  --delay-ms 1200 \
+  --cleanup-on-exit
 ```
 
 Expected progression (same `status=online`, different theme):
@@ -307,7 +320,8 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
   --messages-file .claude/skills/user-test/scripts/status-indicator-label-update-test.json \
-  --delay-ms 1000
+  --delay-ms 1000 \
+  --cleanup-on-exit
 ```
 
 Expected label progression: "Butler" → "Codex" → (empty). The badge remains online/green. Label changes are primarily visible in the tooltip content (not always-on icon text); verify by hovering long enough to reveal the tooltip.
@@ -338,7 +352,8 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
   --messages-file .claude/skills/user-test/scripts/progress-bar-step.json \
-  --delay-ms 1000
+  --delay-ms 1000 \
+  --cleanup-on-exit
 ```
 
 At each step, prompt the tester to confirm the expected visual state:
@@ -370,7 +385,8 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
   --messages-file .claude/skills/user-test/scripts/progress-bar-color-sweep.json \
-  --delay-ms 1000
+  --delay-ms 1000 \
+  --cleanup-on-exit
 ```
 
 The bar cycles through: blue -> green -> yellow -> red -> blue (reset) -> clear (empty). Each transition should produce a visible smooth color animation over 300ms. Confirm that the fill color matches expectations at each step before the next publish fires, and that after the final clear action the bar is fully empty with no residual fill or label.
@@ -386,7 +402,8 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
   --messages-file .claude/skills/user-test/scripts/progress-bar-rapidfire-100-5s.json \
-  --delay-ms 50
+  --delay-ms 50 \
+  --cleanup-on-exit --cleanup-delay-ms 3000
 ```
 
 Fixture details (`progress-bar-rapidfire-100-5s.json`):

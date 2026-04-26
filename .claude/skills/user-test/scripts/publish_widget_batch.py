@@ -81,6 +81,54 @@ def load_messages(path: str) -> list[dict[str, Any]]:
     return out
 
 
+def parse_widget_names(raw: str) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw.split(","):
+        name = item.strip()
+        if name and name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
+
+
+def message_widget_names(messages: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for msg in messages:
+        name = msg.get("widget_name")
+        if isinstance(name, str) and name and name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
+
+
+def clear_widgets(url: str, token: str, widgets: list[str], namespace: str, starting_request_id: int) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    req_id = starting_request_id
+    for widget_name in widgets:
+        response = rpc_call(
+            url,
+            token,
+            "clear_widget",
+            {
+                "widget_name": widget_name,
+                "namespace": namespace,
+            },
+            req_id,
+        )
+        results.append(
+            {
+                "request_id": req_id,
+                "action": "clear",
+                "widget_name": widget_name,
+                "response": response,
+            }
+        )
+        req_id += 1
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Publish MCP widget message batch")
     parser.add_argument("--url", required=True, help="MCP HTTP URL, e.g. http://host:9090")
@@ -90,6 +138,17 @@ def main() -> int:
     parser.add_argument("--ttl-us", type=int, default=60_000_000, help="Default TTL in microseconds")
     parser.add_argument("--delay-ms", type=int, default=0, help="Delay between publishes")
     parser.add_argument("--list-widgets", action="store_true", help="Call list_widgets before publishing")
+    parser.add_argument(
+        "--cleanup-on-exit",
+        action="store_true",
+        help="Clear widgets after the batch exits, including KeyboardInterrupt and error paths",
+    )
+    parser.add_argument(
+        "--cleanup-widgets",
+        default="",
+        help="Comma-separated widget instance names to clear on exit; defaults to widgets touched by the batch",
+    )
+    parser.add_argument("--cleanup-delay-ms", type=int, default=0, help="Delay before cleanup-on-exit clears widgets")
     args = parser.parse_args()
 
     token = os.getenv(args.psk_env, "")
@@ -97,6 +156,8 @@ def main() -> int:
         print(f"ERROR: env var {args.psk_env} is empty or unset", file=sys.stderr)
         return 2
 
+    messages: list[dict[str, Any]] = []
+    exit_code = 0
     try:
         if args.list_widgets:
             widgets = rpc_call(args.url, token, "list_widgets", {}, 1)
@@ -142,7 +203,7 @@ def main() -> int:
                 time.sleep(args.delay_ms / 1000.0)
 
         print(json.dumps({"published": results}, ensure_ascii=True))
-        return 0
+        exit_code = 0
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(
@@ -156,13 +217,30 @@ def main() -> int:
             ),
             file=sys.stderr,
         )
-        return 3
+        exit_code = 3
     except urllib.error.URLError as e:
         print(json.dumps({"error": "url_error", "detail": str(e)}, ensure_ascii=True), file=sys.stderr)
-        return 4
+        exit_code = 4
+    except KeyboardInterrupt:
+        print(json.dumps({"error": "interrupted"}, ensure_ascii=True), file=sys.stderr)
+        exit_code = 130
     except Exception as e:
         print(json.dumps({"error": "exception", "detail": str(e)}, ensure_ascii=True), file=sys.stderr)
-        return 5
+        exit_code = 5
+    finally:
+        if args.cleanup_on_exit:
+            cleanup_widgets = parse_widget_names(args.cleanup_widgets) or message_widget_names(messages)
+            if cleanup_widgets:
+                if args.cleanup_delay_ms > 0:
+                    time.sleep(args.cleanup_delay_ms / 1000.0)
+                try:
+                    cleanup_results = clear_widgets(args.url, token, cleanup_widgets, args.namespace, 1000)
+                    print(json.dumps({"cleanup": cleanup_results}, ensure_ascii=True))
+                except Exception as e:
+                    print(json.dumps({"error": "cleanup_failed", "detail": str(e)}, ensure_ascii=True), file=sys.stderr)
+                    if exit_code == 0:
+                        exit_code = 6
+    return exit_code
 
 
 if __name__ == "__main__":
