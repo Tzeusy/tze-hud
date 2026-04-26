@@ -45,7 +45,7 @@ sys.path.insert(0, _SCRIPT_DIR)
 sys.path.insert(0, os.path.join(_SCRIPT_DIR, "proto_gen"))
 
 from hud_grpc_client import HudClient, _make_node  # noqa: E402
-from proto_gen import types_pb2  # noqa: E402
+from proto_gen import events_pb2, types_pb2  # noqa: E402
 
 
 # ─── Portal chrome tokens (iterate here) ──────────────────────────────────────
@@ -132,10 +132,6 @@ DEFAULT_DOC = "docs/exemplar-manual-review-checklist.md"
 DEFAULT_TRANSCRIPT_PATH = "test_results/text-stream-portal-latest.json"
 MAX_MARKDOWN_BYTES = 65535
 DRAG_MAX_SECONDS = 1.5
-INPUT_ROOT_NODE_ID = bytes.fromhex("00112233445566778899aabbccdde001")
-COMPOSER_HIT_NODE_ID = bytes.fromhex("00112233445566778899aabbccdde002")
-COMPOSER_TEXT_NODE_ID = bytes.fromhex("00112233445566778899aabbccdde003")
-COMPOSER_CARET_NODE_ID = bytes.fromhex("00112233445566778899aabbccdde004")
 
 # ─── Scroll contract tokens ──────────────────────────────────────────────────
 
@@ -459,10 +455,8 @@ def build_input_scroll_nodes(
     root = make_solid_color_node(
         *TEXT_WINDOW_BG_RGBA,
         0.0, 0.0, input_rect.w, input_rect.h,
-        node_id=INPUT_ROOT_NODE_ID,
     )
     hit = make_hit_region(COMPOSER_INTERACTION_ID, 0.0, 0.0, input_rect.w, hit_h)
-    hit.id = COMPOSER_HIT_NODE_ID
     text_node = make_text_node(
         composer_text or composer_placeholder,
         text_inset,
@@ -471,7 +465,6 @@ def build_input_scroll_nodes(
         input_rect.h - text_inset * 2.0,
         INPUT_FONT,
         INPUT_TEXT_RGBA if composer_text else INPUT_PLACEHOLDER_RGBA,
-        node_id=COMPOSER_TEXT_NODE_ID,
     )
     caret = make_solid_color_node(
         *CARET_RGBA,
@@ -479,7 +472,6 @@ def build_input_scroll_nodes(
         text_inset + INPUT_FONT + 2.0,
         8.0,
         2.0,
-        node_id=COMPOSER_CARET_NODE_ID,
     )
     return root, [hit, text_node, caret]
 
@@ -518,7 +510,13 @@ async def set_root_with_children(
     tile_id: bytes,
     root: types_pb2.NodeProto,
     children: list[types_pb2.NodeProto],
+    mutation_lock: Optional[asyncio.Lock] = None,
 ) -> None:
+    if mutation_lock is not None:
+        async with mutation_lock:
+            await set_root_with_children(client, lease_id, tile_id, root, children)
+        return
+
     mr = await client.submit_mutation_batch(
         lease_id,
         [types_pb2.MutationProto(
@@ -543,6 +541,8 @@ async def publish_portal(
     footer_meta: str,
     include_tile_setup: bool,
     composer_text: str = "",
+    output_scroll_content: Optional[str] = None,
+    mutation_lock: Optional[asyncio.Lock] = None,
 ) -> None:
     """Publish the portal scene.
 
@@ -558,6 +558,7 @@ async def publish_portal(
                 lease_id, tile_id, types_pb2.TILE_INPUT_MODE_CAPTURE,
             )
         input_rect, output_rect = portal_pane_rects()
+        output_scroll_body = output_scroll_content if output_scroll_content is not None else body
         await client.submit_mutation_batch(
             lease_id,
             [
@@ -572,20 +573,26 @@ async def publish_portal(
                     tiles.output_scroll,
                     scrollable_y=True,
                     content_height=scroll_max_y_for_text(
-                        body, output_rect.h, SCROLL_LINE_PX,
+                        output_scroll_body, output_rect.h, SCROLL_LINE_PX,
                     ),
                 ),
             ],
         )
 
     frame_root, frame_children = build_portal_nodes(title, subtitle, body, footer_meta)
-    await set_root_with_children(client, lease_id, tiles.frame, frame_root, frame_children)
+    await set_root_with_children(
+        client, lease_id, tiles.frame, frame_root, frame_children, mutation_lock,
+    )
 
     input_root, input_children = build_input_scroll_nodes(composer_text)
-    await set_root_with_children(client, lease_id, tiles.input_scroll, input_root, input_children)
+    await set_root_with_children(
+        client, lease_id, tiles.input_scroll, input_root, input_children, mutation_lock,
+    )
 
     output_root, output_children = build_output_scroll_nodes(body)
-    await set_root_with_children(client, lease_id, tiles.output_scroll, output_root, output_children)
+    await set_root_with_children(
+        client, lease_id, tiles.output_scroll, output_root, output_children, mutation_lock,
+    )
 
 
 async def create_portal_tiles(
@@ -731,6 +738,7 @@ async def portal_interaction_loop(
     initial_portal_y: float,
     tab_width: float,
     tab_height: float,
+    mutation_lock: asyncio.Lock,
 ) -> None:
     """Handle live pointer/keyboard input for manual exemplar review."""
     portal_x = initial_portal_x
@@ -740,26 +748,50 @@ async def portal_interaction_loop(
     output_view_start = 0
     drag: Optional[dict[str, float | str]] = None
     last_drag_send = 0.0
+    last_output_scroll_y: Optional[float] = None
 
     async def move_portal(new_x: float, new_y: float) -> None:
         nonlocal portal_x, portal_y
         portal_x = max(0.0, min(new_x, max(0.0, tab_width - PORTAL_W)))
         portal_y = max(0.0, min(new_y, max(0.0, tab_height - PORTAL_H)))
-        await client.submit_mutation_batch(
-            lease_id,
-            portal_bounds_mutations(tiles, portal_x, portal_y),
-            timeout=2.0,
-        )
+        async with mutation_lock:
+            await client.submit_mutation_batch(
+                lease_id,
+                portal_bounds_mutations(tiles, portal_x, portal_y),
+                timeout=2.0,
+            )
 
     async def render_composer() -> None:
         input_root, input_children = build_input_scroll_nodes(composer_text)
         await set_root_with_children(
             client, lease_id, tiles.input_scroll, input_root, input_children,
+            mutation_lock,
         )
 
-    async def record_output_scroll(offset_y: float) -> None:
+    async def render_output_scroll(offset_y: float) -> None:
         nonlocal output_view_start
-        _, output_view_start = visible_output_text(body_full, offset_y, output_rect.h)
+        visible_body, output_view_start = visible_output_text(body_full, offset_y, output_rect.h)
+        output_root, output_children = build_output_scroll_nodes(visible_body)
+        await set_root_with_children(
+            client, lease_id, tiles.output_scroll, output_root, output_children,
+            mutation_lock,
+        )
+
+    async def finish_drag(reason: str, display_x: Optional[float] = None, display_y: Optional[float] = None) -> None:
+        nonlocal drag
+        if drag is None:
+            return
+        if display_x is not None and display_y is not None:
+            dx = display_x - float(drag["start_x"])
+            dy = display_y - float(drag["start_y"])
+            await move_portal(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
+        drag = None
+        emit_step_event(transcript, 9, "checkpoint", {
+            "code": "drag:end",
+            "title": "Portal drag ended",
+            "action": "all portal tiles committed to grouped position",
+            "expected_visual": "input/output panes remain aligned with portal frame",
+        }, portal_x=portal_x, portal_y=portal_y, reason=reason)
 
     async def submit_composer() -> None:
         nonlocal composer_text
@@ -775,6 +807,7 @@ async def portal_interaction_loop(
 
     while True:
         batch = await client._event_queue.get()
+        pending_output_scroll_y: Optional[float] = None
         for envelope in batch.events:
             kind = envelope.WhichOneof("event")
 
@@ -809,13 +842,7 @@ async def portal_interaction_loop(
                     continue
                 now = time.monotonic()
                 if now - float(drag["started_at"]) > DRAG_MAX_SECONDS:
-                    drag = None
-                    emit_step_event(transcript, 9, "checkpoint", {
-                        "code": "drag:end",
-                        "title": "Portal drag ended",
-                        "action": "drag watchdog stopped after missing pointer-up",
-                        "expected_visual": "portal stops following the cursor",
-                    }, portal_x=portal_x, portal_y=portal_y, reason="watchdog")
+                    await finish_drag("watchdog")
                     continue
                 if now - last_drag_send < 1.0 / 30.0:
                     continue
@@ -827,16 +854,18 @@ async def portal_interaction_loop(
             elif kind == "pointer_up" and drag is not None:
                 ev = envelope.pointer_up
                 if ev.device_id == drag["device_id"]:
-                    dx = ev.display_x - float(drag["start_x"])
-                    dy = ev.display_y - float(drag["start_y"])
-                    await move_portal(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
-                    drag = None
-                    emit_step_event(transcript, 9, "checkpoint", {
-                        "code": "drag:end",
-                        "title": "Portal drag ended",
-                        "action": "all portal tiles committed to grouped position",
-                        "expected_visual": "input/output panes remain aligned with portal frame",
-                    }, portal_x=portal_x, portal_y=portal_y)
+                    await finish_drag("pointer_up", ev.display_x, ev.display_y)
+
+            elif kind == "pointer_cancel" and drag is not None:
+                ev = envelope.pointer_cancel
+                if ev.device_id == drag["device_id"]:
+                    await finish_drag("pointer_cancel")
+
+            elif kind == "capture_released" and drag is not None:
+                ev = envelope.capture_released
+                if ev.device_id == drag["device_id"]:
+                    reason_name = events_pb2.CaptureReleasedReason.Name(ev.reason)
+                    await finish_drag(f"capture_released:{reason_name}")
 
             elif kind == "character":
                 ev = envelope.character
@@ -878,13 +907,7 @@ async def portal_interaction_loop(
                     continue
                 if abs(ev.offset_y) < 0.5:
                     continue
-                await record_output_scroll(ev.offset_y)
-                emit_step_event(transcript, 8, "checkpoint", {
-                    "code": "scroll:output",
-                    "title": "Output transcript scrolled",
-                    "action": "portal received local-first scroll offset",
-                    "expected_visual": "output text stays clipped inside transcript box",
-                }, scroll_y=ev.offset_y, viewport_start=output_view_start)
+                pending_output_scroll_y = ev.offset_y
 
             elif kind == "focus_gained":
                 ev = envelope.focus_gained
@@ -908,10 +931,23 @@ async def portal_interaction_loop(
                     "expected_visual": "composer stops receiving keyboard events",
                 })
 
+        if pending_output_scroll_y is not None:
+            if last_output_scroll_y is not None and abs(pending_output_scroll_y - last_output_scroll_y) < 0.5:
+                continue
+            last_output_scroll_y = pending_output_scroll_y
+            await render_output_scroll(pending_output_scroll_y)
+            emit_step_event(transcript, 8, "checkpoint", {
+                "code": "scroll:output",
+                "title": "Output transcript scrolled",
+                "action": "portal received local-first scroll offset",
+                "expected_visual": "output text stays clipped inside transcript box",
+            }, scroll_y=pending_output_scroll_y, viewport_start=output_view_start)
+
 
 async def run_baseline(
     client: HudClient, lease_id: bytes, tiles: PortalTiles,
     body_full: str, transcript: list[dict[str, Any]], hold_s: float,
+    mutation_lock: asyncio.Lock,
 ) -> None:
     emit_step_event(transcript, 1, "started", {
         "code": "baseline",
@@ -927,6 +963,7 @@ async def run_baseline(
         body=body_full,
         footer_meta=f"lines 1-{total_lines}  •  content-layer  •  live",
         include_tile_setup=True,
+        mutation_lock=mutation_lock,
     )
     emit_step_event(transcript, 1, "completed", {
         "code": "baseline",
@@ -940,6 +977,7 @@ async def run_baseline(
 async def run_scroll(
     client: HudClient, lease_id: bytes, tiles: PortalTiles,
     transcript: list[dict[str, Any]],
+    mutation_lock: asyncio.Lock,
 ) -> None:
     """Exercise the transcript interaction contract inside the portal output pane."""
     emit_step_event(transcript, 4, "started", {
@@ -975,6 +1013,8 @@ async def run_scroll(
             f"{viewport_start + SCROLL_VISIBLE_LINES} / {len(history)}"
         ),
         include_tile_setup=True,
+        output_scroll_content="\n".join(history),
+        mutation_lock=mutation_lock,
     )
     emit_step_event(transcript, 4, "checkpoint", {
         "code": "scroll:mount",
@@ -1005,6 +1045,7 @@ async def run_scroll(
                 f"{viewport_start + 1}-{viewport_start + SCROLL_VISIBLE_LINES}"
             ),
             include_tile_setup=False,
+            mutation_lock=mutation_lock,
         )
         emit_step_event(transcript, 4, "checkpoint", {
             "code": "scroll:offset",
@@ -1028,6 +1069,7 @@ async def run_scroll(
                 f"tail={len(history)} lines"
             ),
             include_tile_setup=False,
+            mutation_lock=mutation_lock,
         )
         emit_step_event(transcript, 4, "checkpoint", {
             "code": "scroll:append",
@@ -1049,6 +1091,7 @@ async def run_scroll(
         body=bounded_transcript(history, tail_start, SCROLL_VISIBLE_LINES),
         footer_meta=f"tail  •  lines {tail_start + 1}-{len(history)} / {len(history)}",
         include_tile_setup=False,
+        mutation_lock=mutation_lock,
     )
     emit_step_event(transcript, 4, "completed", {
         "code": "scroll",
@@ -1063,6 +1106,7 @@ async def run_streaming(
     client: HudClient, lease_id: bytes, tiles: PortalTiles,
     body_full: str, transcript: list[dict[str, Any]],
     chunks: int, chunk_interval_s: float,
+    mutation_lock: asyncio.Lock,
 ) -> None:
     emit_step_event(transcript, 2, "started", {
         "code": "streaming",
@@ -1082,6 +1126,7 @@ async def run_streaming(
             body=partial,
             footer_meta=f"streaming  •  lines 1-{end} / {len(lines)}",
             include_tile_setup=False,
+            mutation_lock=mutation_lock,
         )
         if i < chunks:
             await asyncio.sleep(chunk_interval_s)
@@ -1097,6 +1142,7 @@ async def run_rapid(
     client: HudClient, lease_id: bytes, tiles: PortalTiles,
     body_full: str, transcript: list[dict[str, Any]],
     cycles: int, interval_ms: int,
+    mutation_lock: asyncio.Lock,
 ) -> None:
     emit_step_event(transcript, 3, "started", {
         "code": "rapid",
@@ -1118,6 +1164,7 @@ async def run_rapid(
             body=body,
             footer_meta=f"rapid  •  cycle {i+1}/{cycles}",
             include_tile_setup=False,
+            mutation_lock=mutation_lock,
         )
         await asyncio.sleep(interval_ms / 1000.0)
     await publish_portal(
@@ -1127,6 +1174,7 @@ async def run_rapid(
         body=body_full,
         footer_meta=f"rapid-settled  •  lines 1-{len(lines)}",
         include_tile_setup=False,
+        mutation_lock=mutation_lock,
     )
     emit_step_event(transcript, 3, "completed", {
         "code": "rapid",
@@ -1158,6 +1206,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
     scene_width = args.tab_width
     scene_height = args.tab_height
     cleanup_errors: list[str] = []
+    mutation_lock = asyncio.Lock()
 
     try:
         emit_step_event(transcript, 0, "started", {
@@ -1202,6 +1251,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 initial_portal_y=PORTAL_Y,
                 tab_width=scene_width,
                 tab_height=scene_height,
+                mutation_lock=mutation_lock,
             )
         )
 
@@ -1210,19 +1260,19 @@ async def run_scenario(args: argparse.Namespace) -> int:
             if phase == "baseline":
                 await run_baseline(
                     client, lease_id, tiles, body, transcript,
-                    args.baseline_hold_s,
+                    args.baseline_hold_s, mutation_lock,
                 )
             elif phase == "scroll":
-                await run_scroll(client, lease_id, tiles, transcript)
+                await run_scroll(client, lease_id, tiles, transcript, mutation_lock)
             elif phase == "streaming":
                 await run_streaming(
                     client, lease_id, tiles, body, transcript,
-                    args.stream_chunks, args.stream_interval_s,
+                    args.stream_chunks, args.stream_interval_s, mutation_lock,
                 )
             elif phase == "rapid":
                 await run_rapid(
                     client, lease_id, tiles, body, transcript,
-                    args.rapid_cycles, args.rapid_interval_ms,
+                    args.rapid_cycles, args.rapid_interval_ms, mutation_lock,
                 )
             else:
                 emit_step_event(transcript, -1, "skipped", {
@@ -1251,6 +1301,15 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 await interaction_task
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                cleanup_errors.append(f"interaction_task: {detail}")
+                emit_step_event(transcript, 98, "failed", {
+                    "code": "interaction:task-error",
+                    "title": "Portal interaction loop failed",
+                    "action": "continue cleanup despite interaction task failure",
+                    "expected_visual": "portal lease cleanup still runs",
+                }, error=detail)
         if lease_id is not None and not args.leave_lease_on_exit:
             try:
                 await asyncio.wait_for(
