@@ -2683,10 +2683,21 @@ impl Compositor {
 
         let registry = &scene.widget_registry;
 
-        // Collect instances that need texture updates.
+        // Collect instances that need texture updates. Widgets without active
+        // publications are not visible; clear their cached texture so clear/TTL
+        // removal takes effect on the next frame instead of rendering defaults.
         let instance_names: Vec<String> = registry.instances.keys().cloned().collect();
 
         for instance_name in instance_names {
+            let has_active_publication = registry
+                .active_publishes
+                .get(&instance_name)
+                .is_some_and(|publishes| !publishes.is_empty());
+            if !has_active_publication {
+                wr.remove_texture(&instance_name);
+                continue;
+            }
+
             let instance = match registry.instances.get(&instance_name) {
                 Some(i) => i.clone(),
                 None => continue,
@@ -4944,15 +4955,15 @@ impl Compositor {
             None => return,
         };
 
-        // Check if there are any instances with cached textures.
-        if registry.instances.is_empty() {
+        // Check if there are any active widget instances with cached textures.
+        if registry.active_publishes.is_empty() {
             return;
         }
 
         let any_textured = registry
-            .instances
-            .keys()
-            .any(|name| wr.texture_entry(name).is_some());
+            .active_publishes
+            .iter()
+            .any(|(name, publishes)| !publishes.is_empty() && wr.texture_entry(name).is_some());
         if !any_textured {
             return;
         }

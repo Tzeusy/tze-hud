@@ -881,10 +881,18 @@ impl WidgetRenderer {
     ) {
         use wgpu::util::DeviceExt;
 
-        // Sort instances by z_order (all widgets use WIDGET_TILE_Z_MIN base +
-        // their declared order, so any ordering works for now).
-        let mut instances: Vec<&tze_hud_scene::types::WidgetInstance> =
-            registry.instances.values().collect();
+        // Sort active instances by z_order (all widgets use WIDGET_TILE_Z_MIN
+        // base + their declared order, so any ordering works for now).
+        let mut instances: Vec<&tze_hud_scene::types::WidgetInstance> = registry
+            .instances
+            .values()
+            .filter(|instance| {
+                registry
+                    .active_publishes
+                    .get(&instance.instance_name)
+                    .is_some_and(|publishes| !publishes.is_empty())
+            })
+            .collect();
         instances.sort_by_key(|_i| WIDGET_TILE_Z_MIN);
 
         render_pass.set_pipeline(&self.texture_pipeline);
@@ -949,6 +957,10 @@ impl WidgetRenderer {
 
     pub fn texture_entry_mut(&mut self, instance_name: &str) -> Option<&mut WidgetTextureEntry> {
         self.textures.get_mut(instance_name)
+    }
+
+    pub fn remove_texture(&mut self, instance_name: &str) {
+        self.textures.remove(instance_name);
     }
 
     /// Returns true if any widget instance has an active animation (needs re-rasterize).

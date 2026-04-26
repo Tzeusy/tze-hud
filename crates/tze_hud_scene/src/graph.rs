@@ -3680,13 +3680,24 @@ impl SceneGraph {
     /// Revocation Clears Widget Publications. Mirrors
     /// [`clear_zone_publications_for_namespace`] for the widget registry.
     pub fn clear_widget_publications_for_namespace(&mut self, namespace: &str) {
-        for publishes in self.widget_registry.active_publishes.values_mut() {
+        let mut touched_widgets = Vec::new();
+        for (widget_name, publishes) in self.widget_registry.active_publishes.iter_mut() {
+            let before = publishes.len();
             publishes.retain(|r| r.publisher_namespace != namespace);
+            if publishes.len() != before {
+                touched_widgets.push(widget_name.clone());
+            }
         }
         // Remove empty entries for cleanliness
         self.widget_registry
             .active_publishes
             .retain(|_, v| !v.is_empty());
+        if !touched_widgets.is_empty() {
+            for widget_name in touched_widgets {
+                self.refresh_widget_current_params(&widget_name);
+            }
+            self.version += 1;
+        }
     }
 
     /// Per spec: "ClearWidget clears all publications by the agent in the specified widget."
@@ -3708,13 +3719,28 @@ impl SceneGraph {
             let before = publishes.len();
             publishes.retain(|r| r.publisher_namespace != publisher_namespace);
             if publishes.len() != before {
+                if publishes.is_empty() {
+                    self.widget_registry.active_publishes.remove(widget_name);
+                }
+                self.refresh_widget_current_params(widget_name);
                 self.version += 1;
-            }
-            if publishes.is_empty() {
-                self.widget_registry.active_publishes.remove(widget_name);
             }
         }
         Ok(())
+    }
+
+    fn refresh_widget_current_params(&mut self, widget_name: &str) {
+        let tab_id = match self.widget_registry.instances.get(widget_name) {
+            Some(instance) => instance.tab_id,
+            None => return,
+        };
+        let effective_params = match self.widget_registry.get_occupancy(widget_name, tab_id) {
+            Some(occupancy) => occupancy.effective_params,
+            None => return,
+        };
+        if let Some(instance) = self.widget_registry.instances.get_mut(widget_name) {
+            instance.current_params = effective_params;
+        }
     }
 
     /// Map ZoneContent to its ZoneMediaType, if deterministic.
@@ -3957,14 +3983,19 @@ impl SceneGraph {
     pub fn drain_expired_widget_publications(&mut self) -> usize {
         let now_us = self.clock.now_us();
         let mut total_removed = 0usize;
+        let mut touched_widgets = Vec::new();
 
-        for publishes in self.widget_registry.active_publishes.values_mut() {
+        for (widget_name, publishes) in self.widget_registry.active_publishes.iter_mut() {
             let before = publishes.len();
             publishes.retain(|r| match r.expires_at_wall_us {
                 Some(exp) => exp > now_us,
                 None => true,
             });
-            total_removed += before - publishes.len();
+            let removed = before - publishes.len();
+            if removed > 0 {
+                total_removed += removed;
+                touched_widgets.push(widget_name.clone());
+            }
         }
 
         // Clean up empty entries and bump version if anything changed.
@@ -3972,6 +4003,9 @@ impl SceneGraph {
             self.widget_registry
                 .active_publishes
                 .retain(|_, v| !v.is_empty());
+            for widget_name in touched_widgets {
+                self.refresh_widget_current_params(&widget_name);
+            }
             self.version += 1;
         }
 
@@ -9451,6 +9485,69 @@ mod spec_scenarios {
             0,
             "agent.a's publication should be cleared"
         );
+        match scene.widget_registry.instances["gauge"]
+            .current_params
+            .get("level")
+        {
+            Some(WidgetParameterValue::F32(v)) => {
+                assert!(
+                    (*v - 0.0).abs() < f32::EPSILON,
+                    "level should reset to default after clear, got {v}"
+                )
+            }
+            other => panic!("expected default F32 level after clear, got {other:?}"),
+        }
+    }
+
+    /// WHEN the top stacked widget publication is cleared THEN current_params
+    /// refresh to the remaining publication instead of retaining stale pixels.
+    #[test]
+    fn clear_widget_for_publisher_refreshes_current_params_from_remaining_publish() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::Stack { max_depth: 4 });
+
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.3),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.7),
+                )]),
+                "agent.b",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        scene
+            .clear_widget_for_publisher("gauge", "agent.b")
+            .unwrap();
+
+        match scene.widget_registry.instances["gauge"]
+            .current_params
+            .get("level")
+        {
+            Some(WidgetParameterValue::F32(v)) => {
+                assert!(
+                    (*v - 0.3).abs() < f32::EPSILON,
+                    "level should refresh to remaining publication, got {v}"
+                )
+            }
+            other => panic!("expected remaining F32 level after clear, got {other:?}"),
+        }
     }
 
     /// WHEN clear_widget_for_publisher is called with a different namespace
@@ -9611,6 +9708,20 @@ mod spec_scenarios {
             0,
             "agent.a's mem-gauge pub should be cleared"
         );
+        match scene.widget_registry.instances["mem-gauge"]
+            .current_params
+            .get("level")
+        {
+            Some(WidgetParameterValue::F32(v)) => {
+                assert!(
+                    (*v - 0.0).abs() < f32::EPSILON,
+                    "mem-gauge should reset to default, got {v}"
+                )
+            }
+            other => {
+                panic!("expected default level for mem-gauge after namespace clear, got {other:?}")
+            }
+        }
     }
 
     /// WHEN ClearWidget is sent as a scene mutation batch
