@@ -9,7 +9,7 @@ One topology seam worth tracking explicitly is low-latency streamed text interac
 | Map | Description |
 |-----|-------------|
 | `components.md` | Component inventory: crates, binaries, and their boundaries |
-| `data-flow.md` | How data moves through the three protocol planes |
+| `data-flow.md` | How data moves through the three protocol planes, including the text stream portal pilot flow |
 | `runtime-widget-asset-topology.md` | Runtime widget SVG register/upload ingress, durable store topology, startup re-index path, and budget hooks |
 | `operations/` | Deployment topology, operator checklists, runtime binary spec |
 

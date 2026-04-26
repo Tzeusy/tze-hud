@@ -204,7 +204,80 @@ does not trigger rollback.
 
 ---
 
-## 7. Frame Pipeline Summary
+## 7. Text Stream Portal Pilot Flow
+
+Phase-0 text stream portals are resident raw-tile compositions over the primary
+`HudSession` stream. They are not a new runtime transport, not a terminal
+emulator, and not a chrome-layer shell feature.
+
+```
+Operator / Windows input
+  │
+  │ pointer, wheel, keyboard, clipboard
+  ▼
+tze_hud_runtime::windowed
+  │
+  │ (1) pointer hit-test + focus transition through tze_hud_input
+  │ (2) Windows pointer capture/release for header drag continuity
+  │ (3) keyboard dispatch to the focused composer tile
+  │ (4) Ctrl+V clipboard read -> RawCharacterEvent
+  ▼
+tze_hud_protocol::session_server
+  │
+  │ input/focus/scroll events over the session event channel
+  │ existing MutationBatch responses share this channel, so short
+  │ typing bursts need channel headroom
+  ▼
+resident portal adapter / user-test script
+  │
+  │ owns portal state:
+  │ - output transcript viewport and scroll offset
+  │ - composer text buffer, cursor, placeholder, caret blink
+  │ - header drag position
+  │ - submit/clear behavior
+  │
+  │ sends scene updates as existing MutationBatch messages:
+  │ - frame tile root + decorative nodes
+  │ - transparent capture tiles for header, composer, transcript
+  │ - TextMarkdownNode updates for transcript/composer
+  │ - SolidColorNode caret updates
+  ▼
+tze_hud_scene -> tze_hud_compositor
+  │
+  │ render existing node types only:
+  │ SolidColor, TextMarkdown, HitRegion
+  ▼
+HUD overlay
+```
+
+Important current seams:
+
+- Composer text uses `TextMarkdownNode.color_runs` as a literal full-span
+  marker so markdown characters remain visible and the protocol conversion can
+  select monospace rendering until `font_family` exists in the proto.
+- Normal printable input should be sourced from runtime character events.
+  The current Windows path does not emit a separate character event for Space,
+  so the portal adapter synthesizes only Space from key-down fallback.
+- Portal drag is content-layer tile movement, not OS window movement. Mouse
+  wheel should affect the transcript/composer capture tile under the cursor or
+  do nothing; it should not move the overlay window.
+- The scroll contract is a subset of the portal flow: the OUTPUT transcript
+  pane owns the scrollable viewport, and the old standalone scroll exemplar is
+  covered by the portal's `scroll` phase.
+
+**Key files:** `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py`,
+`.claude/skills/user-test/scripts/hud_grpc_client.py`,
+`crates/tze_hud_runtime/src/windowed.rs`,
+`crates/tze_hud_protocol/src/session_server.rs`,
+`crates/tze_hud_protocol/src/convert.rs`.
+
+**Cross-references:** `about/legends-and-lore/rfcs/0013-text-stream-portals.md`,
+`openspec/specs/text-stream-portals/spec.md`,
+`docs/text-stream-refinement.md`.
+
+---
+
+## 8. Frame Pipeline Summary
 
 8-stage pipeline (RFC 0002 section 3.2), four thread groups, strict budgets:
 
@@ -232,7 +305,7 @@ enforcement ladder (Normal -> Warning -> Throttled -> Revoked), post-revocation 
 
 ---
 
-## 8. Media Plane Data Flow
+## 9. Media Plane Data Flow
 
 Capability-gated (`media-ingress`). Activates only when an agent holds a valid
 `media-ingress` capability grant (RFC 0008 Amendment A1, RFC 0009 Amendment A1).
@@ -241,7 +314,7 @@ Cross-agent isolation is enforced by `session_id` tagging on `DecodedFrameReady`
 messages — the compositor thread refuses to blit a frame tagged with session A's
 `session_id` into session B's tile.
 
-### 8a. Video ingress: WebRTC → GStreamer → compositor surface
+### 9a. Video ingress: WebRTC → GStreamer → compositor surface
 
 ```
                     ┌─────────────────────────────────────────┐
@@ -318,7 +391,7 @@ Agent (remote)                         │ MediaIngressOpen (gRPC, RFC 0005 A1)
   │                     └─────────────────────────────────────────────┘
 ```
 
-### 8b. Audio ingress: GStreamer Opus decode → cpal output
+### 9b. Audio ingress: GStreamer Opus decode → cpal output
 
 ```
   SessionCoordinator (tokio task)
@@ -351,7 +424,7 @@ Agent (remote)                         │ MediaIngressOpen (gRPC, RFC 0005 A1)
   └────────────────────────────────────────────────────────────────┘
 ```
 
-### 8c. Trust boundaries and isolation summary
+### 9c. Trust boundaries and isolation summary
 
 | Boundary | Where | Enforcement |
 |---|---|---|
@@ -391,7 +464,8 @@ Agent (remote)                         │ MediaIngressOpen (gRPC, RFC 0005 A1)
 | Resource store | `legends-and-lore/rfcs/0011-resource-store.md` |
 | Widget asset topology | `lay-and-land/runtime-widget-asset-topology.md` |
 | Security doctrine | `heart-and-soul/security.md` |
-| Media plane data flow | §8 (this document) |
+| Text stream portal pilot flow | §7 (this document) |
+| Media plane data flow | §9 (this document) |
 | Media worker lifecycle | `legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md` |
 | Audio-routing crate audit | `docs/audits/cpal-audio-io-crate-audit.md` |
 | GStreamer pipeline audit | `docs/audits/gstreamer-media-pipeline-audit.md` |

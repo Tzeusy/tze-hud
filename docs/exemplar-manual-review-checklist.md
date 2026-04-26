@@ -17,7 +17,7 @@ Reviewed: 2026-04-09
 | 8 | [Gauge Widget](#8-gauge-widget) | **done** | Automation batch + manual visual sign-off completed on 2026-04-09 (ultra-minimal track, hover-only readout/label, tuned spacing/colors) |
 | 9 | [Progress Bar](#9-progress-bar) | **automation-pass** | Step + color-sweep batches passed on 2026-04-09; manual visual sign-off pending |
 | 10 | [Status Indicator](#10-status-indicator) | **automation-pass** | Enum/theme/label/validation batches passed on 2026-04-09; manual visual sign-off pending |
-| 11 | [Text Stream Portals](#11-text-stream-portals) | **integration-pass** | Phase-0 pilot shipped via epic `hud-t98e`; 13/13 spec requirements covered by integration tests (gen-2 reconciliation, PR #441). Live user-test exemplar script + manual visual sign-off still pending. |
+| 11 | [Text Stream Portals](#11-text-stream-portals) | **live-refinement** | Phase-0 pilot shipped via epic `hud-t98e`; live `/user-test` now covers two-pane portal, scroll subset, header drag, focus, composer editing, paste, and cleanup. Final polish remains around caret geometry and input feel. |
 
 ---
 
@@ -335,7 +335,7 @@ _(to be filled during review)_
 **Archived change:** `openspec/changes/archive/2026-04-17-text-stream-portals/` (spec/RFC planning only; implementation tracked under `hud-t98e`)
 **RFC:** 0013 (see `about/legends-and-lore/`)
 
-**Status:** integration-pass. Phase-0 raw-tile pilot shipped across `hud-t98e.1` / `.2` / `.3` / `.4` (PRs #427, #429, #432, #435), with follow-up closures `hud-r11x` (PR #437) and `hud-r9u0` (PR #438). Gen-2 reconciliation `hud-fomr` (PR #441) confirmed full 13/13 spec requirement coverage. The live user-test exemplar now exists at `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py`; manual visual sign-off remains the closeout item.
+**Status:** live-refinement. Phase-0 raw-tile pilot shipped across `hud-t98e.1` / `.2` / `.3` / `.4` (PRs #427, #429, #432, #435), with follow-up closures `hud-r11x` (PR #437) and `hud-r9u0` (PR #438). Gen-2 reconciliation `hud-fomr` (PR #441) confirmed full 13/13 spec requirement coverage. The live `/user-test` exemplar at `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py` now includes the scroll contract as the OUTPUT transcript pane plus header drag, focus, composer editing, paste, and cleanup. Final manual sign-off remains open for caret geometry and input feel.
 
 ### Capability summary
 
@@ -348,16 +348,18 @@ A governed, low-latency **text stream portal** — not a terminal host, not a ch
 - Content-layer surface rendering below chrome — no chrome-hosted affordances or shell-owned portal controls.
 - External adapter authenticates through existing capability grants — no implicit local trust, no runtime ownership of tmux/process lifecycle.
 
-### Design Review (pending live run)
+### Design Review (live refinement)
 
-- [ ] Tile size, viewport bounds, and stack position feel right for peripheral text presence
-- [ ] Output streaming reveal timing feels natural (incremental, not snapshot replace)
+- [x] Tile size, viewport bounds, and stack position feel right for peripheral text presence
+- [x] Output streaming reveal timing feels natural (incremental, not snapshot replace)
 - [ ] Unread/activity indicator remains ambient — does not escalate interruption class on backlog growth
-- [ ] Scroll input feels local-first (offset updates before adapter ack)
-- [ ] Reply submission affordance reads as transactional, not coalescible
+- [x] Scroll input feels local-first (offset updates before adapter ack)
+- [x] Reply submission affordance reads as transactional, not coalescible
 - [ ] Redaction treatment preserves portal geometry without leaking transcript content
 - [ ] Safe-mode / freeze visual is indistinguishable from generic queue-pressure state (no portal-specific leakage)
-- [ ] Orphan/disconnect freeze and grace-expiry cleanup match presence-card precedent
+- [x] Orphan/disconnect cleanup path removes stale portal tiles during ordinary `/user-test` exit
+- [ ] Caret geometry remains stable after long markdown paste and near right-edge line ends
+- [ ] Composer focus/input feel remains stable for normal typing (`hello world`) and Space handling
 
 ### Automated coverage (complete)
 
@@ -370,20 +372,21 @@ Integration tests in `tests/integration/`:
 
 Evidence: `docs/evidence/text-stream-portals/validation-2026-04-16.md`. Spec-to-test requirement matrix: see the closeout report's compliance table.
 
-### Live validation axes (pending operator run)
+### Live validation axes (partially signed off)
 
 Integration tests prove structure; these axes still need operator-visible proof during a live HUD run:
 
 | Axis | Spec requirement | What the operator should see |
 |------|------------------|------------------------------|
-| Streaming reveal | Low-Latency Text Interaction | Output arrives as ordered incremental updates, not snapshot replace |
-| Local-first scroll | Transcript Interaction Contract | Scroll offset visibly updates before any adapter ack |
-| Bounded viewport | Bounded Transcript Viewport | Retained window stays within on-screen bounds as transcript grows |
+| Streaming reveal | Low-Latency Text Interaction | PASS in live refinement — output arrives as ordered incremental updates, not snapshot replace |
+| Local-first scroll | Transcript Interaction Contract | PASS in live refinement — OUTPUT pane scrolls independently of the overlay window |
+| Bounded viewport | Bounded Transcript Viewport | PASS after scroll clipping/refinement — retained window stays within on-screen bounds as transcript grows |
 | Coalescing coherence | Coherent Transcript Coalescing | Under rapid-publish pressure, retained window never collapses to only latest line |
 | Redaction | Governance / Privacy / Override | Portal geometry preserved; transcript content suppressed under viewer policy |
 | Safe mode | Governance / Privacy / Override | Portal updates suspend under safe mode like other content surfaces |
-| Orphan path | Governance / Privacy / Override | Disconnected portal freezes at last coherent state; grace expiry removes it |
+| Orphan path | Governance / Privacy / Override | PASS for ordinary `/user-test` cleanup; explicit orphan/grace behavior still needs a dedicated run |
 | Ambient attention | Ambient Portal Attention Defaults | Unread backlog does not auto-escalate interruption class |
+| Composer input | Reply Submission | ACTIVE POLISH — click focus, normal typing, paste, Home/End, arrows, and word operations are implemented; Space/focus feel is still being validated |
 
 ### Out of scope
 
@@ -397,11 +400,21 @@ Integration tests prove structure; these axes still need operator-visible proof 
 
 1. Run `text_stream_portal_exemplar.py --phases baseline,scroll` against the live Windows HUD.
 2. Record PASS/FAIL per live validation axis above, including the OUTPUT-pane scroll phase.
-3. Move this row to `done` only after evidence-backed manual sign-off is recorded.
+3. Re-test long markdown paste caret placement and ordinary `hello world` typing.
+4. Move this row to `done` only after evidence-backed manual sign-off is recorded.
 
 ### UX Tweaks
 
-_(to be filled during live visual review)_
+- Merged the former standalone scroll contract exemplar into the text stream
+  portal OUTPUT pane; scroll is now a subset of the portal contract.
+- Added header drag-to-reposition for the content-layer portal surface.
+- Added click-to-focus composer editing with placeholder hiding, blinking
+  caret, submit/clear behavior, paste, arrow/Home/End movement, and word
+  navigation/delete.
+- Raised pane/text-window opacity to 95% black and kept the rest of the chrome
+  lighter.
+- Added cleanup for ordinary `/user-test` exits so stale portal/progress/status
+  artifacts do not linger on the HUD.
 
 ---
 

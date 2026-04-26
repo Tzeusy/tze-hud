@@ -38,7 +38,8 @@ access the wgpu GPU device directly.
 - Audio-routing crate selection rationale: `docs/audits/cpal-audio-io-crate-audit.md` (issue hud-ora8.1.19)
 - E24 in-process posture verdict: `docs/decisions/e24-in-process-worker-posture.md`
 - Capability gate: `about/legends-and-lore/rfcs/reviews/0008-amendment-c13-capability-dialog.md`
-- Media-plane data-flow diagram: `about/lay-and-land/data-flow.md` §8
+- Text stream portal pilot flow: `about/lay-and-land/data-flow.md` §7
+- Media-plane data-flow diagram: `about/lay-and-land/data-flow.md` §9
 
 ### App binary (1)
 
@@ -198,7 +199,8 @@ tze_hud_runtime
 - **Validation framework**: `about/heart-and-soul/validation.md`
 - **Runtime widget asset topology**: `about/lay-and-land/runtime-widget-asset-topology.md`
 - **Operator checklists**: `about/lay-and-land/operations/`
-- **Media plane data-flow**: `about/lay-and-land/data-flow.md` §8
+- **Text stream portal pilot flow**: `about/lay-and-land/data-flow.md` §7
+- **Media plane data-flow**: `about/lay-and-land/data-flow.md` §9
 - **E24 in-process posture verdict**: `docs/decisions/e24-in-process-worker-posture.md`
 - **Audio-routing crate audit**: `docs/audits/cpal-audio-io-crate-audit.md`
 - **GStreamer pipeline audit**: `docs/audits/gstreamer-media-pipeline-audit.md`

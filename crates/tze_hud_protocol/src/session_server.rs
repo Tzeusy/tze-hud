@@ -1425,11 +1425,12 @@ impl StreamSession {
     }
 }
 
-/// Broadcast channel capacity for transactional server-push messages (DegradationNotice, etc.).
+/// Broadcast channel capacity for transactional server-push messages.
 ///
-/// A capacity of 32 ensures that if a session is briefly slow to consume messages it
-/// still receives all degradation notices without the sender blocking.
-const BROADCAST_CHANNEL_CAPACITY: usize = 32;
+/// Runtime-injected input events use this channel as well as degradation and
+/// revocation notices. Keep enough headroom for short key/pointer bursts while
+/// a session handler is also processing mutation responses.
+const BROADCAST_CHANNEL_CAPACITY: usize = 1024;
 
 // ─── Capability Revocation Event ─────────────────────────────────────────────
 

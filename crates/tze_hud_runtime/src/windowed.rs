@@ -164,31 +164,137 @@ fn normalize_mouse_wheel_delta(delta: &MouseScrollDelta) -> (f32, f32) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn hwnd_for_window(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::HWND;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(HWND(handle.hwnd.get() as *mut c_void))
+}
+
 fn focus_window_for_text_input(window: &Window) {
     window.focus_window();
     window.set_ime_allowed(true);
 
     #[cfg(target_os = "windows")]
     {
-        use std::ffi::c_void;
-        use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{BringWindowToTop, SetForegroundWindow};
-        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-        let Ok(handle) = window.window_handle() else {
-            return;
-        };
-        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-            return;
-        };
-        let hwnd = HWND(handle.hwnd.get() as *mut c_void);
-
-        // SAFETY: The HWND is owned by this winit window on the event-loop thread.
-        unsafe {
-            let _ = BringWindowToTop(hwnd);
-            let _ = SetForegroundWindow(hwnd);
+        if let Some(hwnd) = hwnd_for_window(window) {
+            // SAFETY: The HWND is owned by this winit window on the event-loop thread.
+            unsafe {
+                let _ = BringWindowToTop(hwnd);
+                let _ = SetForegroundWindow(hwnd);
+            }
         }
     }
+}
+
+fn begin_os_mouse_capture(window: &Window) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
+
+        if let Some(hwnd) = hwnd_for_window(window) {
+            // SAFETY: The HWND is owned by this winit window on the event-loop thread.
+            unsafe {
+                let _ = SetCapture(hwnd);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
+}
+
+fn end_os_mouse_capture() {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+
+        // SAFETY: Releases mouse capture for the current thread if held.
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+    }
+}
+
+fn left_mouse_button_is_physically_down() -> Option<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+
+        // SAFETY: GetAsyncKeyState reads the current global key state.
+        let state = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
+        Some((state & 0x8000u16 as i16) != 0)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_clipboard_text() -> Option<String> {
+    use windows::Win32::Foundation::{HGLOBAL, HWND};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    };
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+
+    const CF_UNICODETEXT_FORMAT: u32 = 13;
+
+    // SAFETY: Clipboard access is confined to the window event-loop thread.
+    unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT_FORMAT).is_err() {
+            return None;
+        }
+        if OpenClipboard(HWND::default()).is_err() {
+            return None;
+        }
+
+        struct ClipboardGuard;
+        impl Drop for ClipboardGuard {
+            fn drop(&mut self) {
+                // SAFETY: Balances a successful OpenClipboard call.
+                unsafe {
+                    let _ = CloseClipboard();
+                }
+            }
+        }
+        let _guard = ClipboardGuard;
+
+        let handle = GetClipboardData(CF_UNICODETEXT_FORMAT).ok()?;
+        let hglobal = HGLOBAL(handle.0);
+        let ptr = GlobalLock(hglobal);
+        if ptr.is_null() {
+            return None;
+        }
+
+        let mut len = 0usize;
+        let wide = ptr as *const u16;
+        while *wide.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(wide, len);
+        let text = String::from_utf16_lossy(slice);
+        let _ = GlobalUnlock(hglobal);
+
+        if text.is_empty() { None } else { Some(text) }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_windows_clipboard_text() -> Option<String> {
+    None
 }
 
 /// Drive the drag-handle long-press state machine for a single pointer event.
@@ -720,6 +826,7 @@ impl ApplicationHandler for WinitApp {
             self.resumed(event_loop);
         }
         self.refresh_cursor_position_from_os();
+        self.synthesize_left_release_if_physically_up();
         self.refresh_widget_hover_tracking();
         self.update_overlay_cursor_hittest();
     }
@@ -1234,6 +1341,9 @@ impl ApplicationHandler for WinitApp {
                 self.state.cursor_x = position.x as f32;
                 self.state.cursor_y = position.y as f32;
 
+                if self.synthesize_left_release_if_physically_up() {
+                    return;
+                }
                 self.enqueue_pointer_event(PointerEventKind::Move);
             }
 
@@ -1245,9 +1355,14 @@ impl ApplicationHandler for WinitApp {
                         ElementState::Released => PointerEventKind::Up,
                     };
                     if state == ElementState::Pressed {
+                        if self.state.left_button_down {
+                            self.enqueue_pointer_event(PointerEventKind::Up);
+                            end_os_mouse_capture();
+                        }
                         self.state.left_button_down = true;
                         if let Some(window) = &self.state.window {
                             focus_window_for_text_input(window);
+                            begin_os_mouse_capture(window);
                         }
                         self.update_overlay_cursor_hittest();
                     }
@@ -1260,6 +1375,7 @@ impl ApplicationHandler for WinitApp {
                     self.enqueue_pointer_event(kind);
                     if state == ElementState::Released {
                         self.state.left_button_down = false;
+                        end_os_mouse_capture();
                         self.update_overlay_cursor_hittest();
                     }
                 } else if button == MouseButton::Right && state == ElementState::Released {
@@ -1356,6 +1472,11 @@ impl ApplicationHandler for WinitApp {
                 let logical_key_str = logical_key_to_str(&event.logical_key);
                 let mods = winit_mods_to_keyboard_modifiers(self.state.modifiers);
                 let timestamp_mono_us = tze_hud_scene::MonoUs(nanoseconds_since_start() / 1_000);
+                let paste_shortcut_pressed = event.state == ElementState::Pressed
+                    && !event.repeat
+                    && (mods.ctrl || mods.meta)
+                    && !mods.alt
+                    && logical_key_str.eq_ignore_ascii_case("v");
 
                 if event.state == ElementState::Pressed || event.repeat {
                     let raw = RawKeyDownEvent {
@@ -1376,12 +1497,22 @@ impl ApplicationHandler for WinitApp {
                     self.dispatch_key_up_event(&raw);
                 }
 
+                if paste_shortcut_pressed {
+                    if let Some(text) = read_windows_clipboard_text() {
+                        let raw_char = RawCharacterEvent {
+                            character: text,
+                            timestamp_mono_us,
+                        };
+                        self.dispatch_character_event(&raw_char);
+                    }
+                }
+
                 // ── Character input via Key::Character (non-IME path) ────────
                 // When the logical key carries a printable character, produce a
                 // RawCharacterEvent so the KeyboardProcessor character path is
                 // also exercised (handles basic ASCII without an IME active).
                 // IME commit characters arrive via WindowEvent::Ime below.
-                if event.state == ElementState::Pressed {
+                if event.state == ElementState::Pressed && !mods.ctrl && !mods.meta && !mods.alt {
                     use winit::keyboard::Key;
                     if let Key::Character(ch) = event.logical_key.as_ref() {
                         let raw_char = RawCharacterEvent {
@@ -1432,6 +1563,19 @@ impl ApplicationHandler for WinitApp {
 }
 
 impl WinitApp {
+    fn synthesize_left_release_if_physically_up(&mut self) -> bool {
+        if self.state.left_button_down
+            && matches!(left_mouse_button_is_physically_down(), Some(false))
+        {
+            self.enqueue_pointer_event(PointerEventKind::Up);
+            self.state.left_button_down = false;
+            end_os_mouse_capture();
+            self.update_overlay_cursor_hittest();
+            return true;
+        }
+        false
+    }
+
     /// Enqueue a pointer event into the input ring buffer.
     ///
     /// Maps a `PointerEventKind` to the corresponding `InputEventKind` variant
@@ -1800,27 +1944,14 @@ impl WinitApp {
     /// contract where dropped delivery is an infrastructure gap, not a
     /// data-loss policy.
     fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
-        let active_tab = if let Ok(state) = self.state.shared_state.try_lock() {
-            if let Ok(scene) = state.scene.try_lock() {
-                scene.active_tab
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
         // Build a namespace-resolver closure: given a tile_id, return its
         // agent namespace from the scene.
         let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
-            if let Ok(state) = self.state.shared_state.try_lock() {
-                if let Ok(scene) = state.scene.try_lock() {
-                    return scene.tiles.get(&tile_id).map(|t| t.namespace.clone());
-                }
-            }
-            None
+            self.namespace_for_keyboard_tile(tile_id)
         };
         if let Some(dispatch) =
             self.state
@@ -1843,25 +1974,12 @@ impl WinitApp {
     ///
     /// Events are dropped silently when `current_owner` is `FocusOwner::None`.
     fn dispatch_key_up_event(&mut self, raw: &RawKeyUpEvent) {
-        let active_tab = if let Ok(state) = self.state.shared_state.try_lock() {
-            if let Ok(scene) = state.scene.try_lock() {
-                scene.active_tab
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
         let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
-            if let Ok(state) = self.state.shared_state.try_lock() {
-                if let Ok(scene) = state.scene.try_lock() {
-                    return scene.tiles.get(&tile_id).map(|t| t.namespace.clone());
-                }
-            }
-            None
+            self.namespace_for_keyboard_tile(tile_id)
         };
         if let Some(dispatch) =
             self.state
@@ -1887,25 +2005,12 @@ impl WinitApp {
     ///
     /// Events are dropped silently when `current_owner` is `FocusOwner::None`.
     fn dispatch_character_event(&mut self, raw: &RawCharacterEvent) {
-        let active_tab = if let Ok(state) = self.state.shared_state.try_lock() {
-            if let Ok(scene) = state.scene.try_lock() {
-                scene.active_tab
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
         let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
-            if let Ok(state) = self.state.shared_state.try_lock() {
-                if let Ok(scene) = state.scene.try_lock() {
-                    return scene.tiles.get(&tile_id).map(|t| t.namespace.clone());
-                }
-            }
-            None
+            self.namespace_for_keyboard_tile(tile_id)
         };
         if let Some(dispatch) =
             self.state
@@ -1921,6 +2026,18 @@ impl WinitApp {
             );
             dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
         }
+    }
+
+    fn active_tab_for_keyboard_dispatch(&self) -> Option<tze_hud_scene::SceneId> {
+        let state = self.state.shared_state.blocking_lock();
+        let scene = state.scene.blocking_lock();
+        scene.active_tab
+    }
+
+    fn namespace_for_keyboard_tile(&self, tile_id: tze_hud_scene::SceneId) -> Option<String> {
+        let state = self.state.shared_state.blocking_lock();
+        let scene = state.scene.blocking_lock();
+        scene.tiles.get(&tile_id).map(|tile| tile.namespace.clone())
     }
 
     /// Update the active hit-regions for overlay input passthrough.
@@ -2048,8 +2165,15 @@ impl WinitApp {
 
         // Pointer capture includes explicit static regions plus compositor-managed
         // zone interaction regions (notification dismiss/action affordances).
-        self.state.hit_regions =
-            dynamic_hit_regions.unwrap_or_else(|| self.state.static_hit_regions.clone());
+        //
+        // If the scene lock is briefly unavailable, keep the last known dynamic
+        // regions. Dropping to the usually-empty static set makes overlay
+        // hit-testing flicker to passthrough during mutation bursts.
+        if let Some(dynamic_hit_regions) = dynamic_hit_regions {
+            self.state.hit_regions = dynamic_hit_regions;
+        } else if self.state.hit_regions.is_empty() {
+            self.state.hit_regions = self.state.static_hit_regions.clone();
+        }
     }
 
     /// Tick widget hover trackers and apply local parameter mutations.

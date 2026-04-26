@@ -33,8 +33,10 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -69,6 +71,7 @@ COMPOSER_BORDER_RGBA = (1.0, 1.0, 1.0, 0.12)
 SUBMIT_HINT_RGBA = (0.54, 0.60, 0.68, 0.90)
 EYEBROW_RGBA = (0.70, 0.76, 0.84, 0.90)
 CARET_RGBA = (0.48, 0.86, 0.56, 0.95)
+STATIC_CARET_RGBA = (0.48, 0.86, 0.56, 0.0)
 
 TITLE_RGBA = (0.98, 0.99, 1.0, 1.0)
 SUBTITLE_RGBA = (0.78, 0.82, 0.88, 0.88)
@@ -119,9 +122,18 @@ class PaneRect:
 
 @dataclass(frozen=True)
 class PortalTiles:
+    capture_backstop: bytes
     frame: bytes
     input_scroll: bytes
     output_scroll: bytes
+    tab_width: float
+    tab_height: float
+
+
+@dataclass(frozen=True)
+class ComposerVisualLine:
+    text: str
+    positions: tuple[tuple[int, float], ...]
 
 
 # ─── CLI defaults ─────────────────────────────────────────────────────────────
@@ -130,8 +142,28 @@ DEFAULT_PSK_ENV = "TZE_HUD_PSK"
 DEFAULT_TARGET = "tzehouse-windows.parrot-hen.ts.net:50051"
 DEFAULT_DOC = "docs/exemplar-manual-review-checklist.md"
 DEFAULT_TRANSCRIPT_PATH = "test_results/text-stream-portal-latest.json"
+DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/ecdsa_home")
 MAX_MARKDOWN_BYTES = 65535
-DRAG_MAX_SECONDS = 1.5
+DRAG_MAX_SECONDS = 1.25
+DRAG_IDLE_RELEASE_SECONDS = 0.35
+KEY_ECHO_TIMEOUT_SECONDS = 1.0
+COMPOSER_RENDER_DEBOUNCE_SECONDS = 0.02
+COMPOSER_CARET_BLINK_SECONDS = 0.45
+COMPOSER_CARET_W = 2.0
+COMPOSER_CARET_H = INPUT_FONT + 5.0
+COMPOSER_WRAP_CHAR_W = INPUT_FONT * 0.57
+COMPOSER_CARET_CHAR_W = INPUT_FONT * 0.54
+COMPOSER_TEXT_RENDER_MARGIN_X = 6.0
+COMPOSER_TEXT_RENDER_MARGIN_Y = 6.0
+COMPOSER_WRAP_SAFETY_PX = INPUT_FONT * 2.0
+COMPOSER_HIT_PAD = 18.0
+COMPOSER_NODE_IDS = {
+    "root": uuid.uuid4().bytes,
+    "hit": uuid.uuid4().bytes,
+    "text": uuid.uuid4().bytes,
+    "caret": uuid.uuid4().bytes,
+}
+COMPOSER_RUNTIME_NODE_IDS: dict[str, bytes] = {}
 
 # ─── Scroll contract tokens ──────────────────────────────────────────────────
 
@@ -140,6 +172,7 @@ SCROLL_VISIBLE_LINES = 14
 SCROLL_STEP_PX = 40.0
 SCROLL_LINE_PX = 20.0
 SCROLL_PHASE_PAUSE_S = 2.5
+COMPOSER_LINE_PX = INPUT_FONT * 1.4
 
 # ─── Content helpers ──────────────────────────────────────────────────────────
 
@@ -149,6 +182,305 @@ def load_transcript_slice(doc_path: str, max_lines: int) -> str:
     raw = Path(doc_path).read_text(encoding="utf-8")
     lines = raw.splitlines()
     return "\n".join(lines[:max_lines])
+
+
+def normalize_composer_input(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def composer_key_fallback_text(key: str) -> Optional[str]:
+    """Return printable text for key-downs that do not emit Character events."""
+    if key == "Space":
+        return " "
+    return None
+
+
+def composer_wrap_char_width_px(ch: str) -> float:
+    """Approximate SystemMonospace advance for visual caret placement."""
+    if ch == "\t":
+        return COMPOSER_WRAP_CHAR_W * 4.0
+    return COMPOSER_WRAP_CHAR_W
+
+
+def composer_caret_char_width_px(ch: str) -> float:
+    if ch == "\t":
+        return COMPOSER_CARET_CHAR_W * 4.0
+    return COMPOSER_CARET_CHAR_W
+
+
+def composer_wrap_text_width_px(text: str) -> float:
+    return sum(composer_wrap_char_width_px(ch) for ch in text)
+
+
+def composer_visual_lines(
+    text: str,
+    max_width_px: float,
+) -> list[ComposerVisualLine]:
+    lines: list[ComposerVisualLine] = []
+    line_chars: list[str] = []
+    positions: list[tuple[int, float]] = [(0, 0.0)]
+    wrap_line_width = 0.0
+    caret_line_width = 0.0
+
+    def add_position(index: int) -> None:
+        if positions and positions[-1][0] == index:
+            return
+        positions.append((index, caret_line_width))
+
+    def finish_line() -> None:
+        lines.append(ComposerVisualLine("".join(line_chars), tuple(positions)))
+
+    def start_line(index: int) -> None:
+        nonlocal line_chars, positions, wrap_line_width, caret_line_width
+        finish_line()
+        line_chars = []
+        wrap_line_width = 0.0
+        caret_line_width = 0.0
+        positions = [(index, 0.0)]
+
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\n":
+            add_position(i)
+            start_line(i + 1)
+            i += 1
+            continue
+
+        if ch.isspace():
+            wrap_ch_width = composer_wrap_char_width_px(ch)
+            if wrap_line_width > 0.0 and wrap_line_width + wrap_ch_width > max_width_px:
+                start_line(i + 1)
+                i += 1
+                continue
+            add_position(i)
+            line_chars.append(ch)
+            wrap_line_width += wrap_ch_width
+            caret_line_width += composer_caret_char_width_px(ch)
+            i += 1
+            continue
+
+        word_end = i + 1
+        while word_end < len(text) and not text[word_end].isspace():
+            word_end += 1
+        word = text[i:word_end]
+        word_width = composer_wrap_text_width_px(word)
+        if wrap_line_width > 0.0 and wrap_line_width + word_width > max_width_px:
+            start_line(i)
+
+        while i < word_end:
+            ch = text[i]
+            wrap_ch_width = composer_wrap_char_width_px(ch)
+            if wrap_line_width > 0.0 and wrap_line_width + wrap_ch_width > max_width_px:
+                start_line(i)
+            add_position(i)
+            line_chars.append(ch)
+            wrap_line_width += wrap_ch_width
+            caret_line_width += composer_caret_char_width_px(ch)
+            i += 1
+
+    add_position(len(text))
+    finish_line()
+    return lines
+
+
+def composer_wrapped_layout(
+    text: str,
+    cursor: int,
+    max_width_px: float,
+) -> tuple[str, float, int]:
+    """Return explicit visual wrapping plus caret x/row for the raw cursor."""
+    cursor = max(0, min(cursor, len(text)))
+    lines = composer_visual_lines(text, max_width_px)
+    cursor_x = 0.0
+    cursor_row = 0
+    for row, line in enumerate(lines):
+        for index, x in line.positions:
+            if index == cursor:
+                cursor_x = x
+                cursor_row = row
+                break
+        else:
+            continue
+        break
+    else:
+        cursor_row = len(lines) - 1
+        cursor_x = lines[-1].positions[-1][1]
+
+    return "\n".join(line.text for line in lines), cursor_x, cursor_row
+
+
+def composer_text_area_width_px() -> float:
+    composer_rect = input_composer_local_rect()
+    text_inset = 12.0
+    return max(
+        0.0,
+        composer_rect.w
+        - text_inset * 2.0
+        - COMPOSER_TEXT_RENDER_MARGIN_X * 2.0
+        - COMPOSER_CARET_W,
+    )
+
+
+def composer_wrap_area_width_px() -> float:
+    # The compositor still applies glyphon word wrap to the pre-wrapped string.
+    # Keep our explicit lines narrower so glyphon does not add an extra row.
+    return max(0.0, composer_text_area_width_px() - COMPOSER_WRAP_SAFETY_PX)
+
+
+def composer_display_text(
+    text: str,
+    cursor: int,
+    *,
+    focused: bool,
+) -> tuple[str, bool]:
+    """Render composer text and report whether it should use placeholder styling."""
+    cursor = max(0, min(cursor, len(text)))
+    if not text and not focused:
+        return "", True
+    display_text, _, _ = composer_wrapped_layout(
+        text,
+        cursor,
+        composer_wrap_area_width_px(),
+    )
+    return display_text, False
+
+
+def composer_caret_layout(text: str, cursor: int) -> tuple[float, int]:
+    _, cursor_x, cursor_row = composer_wrapped_layout(
+        text,
+        cursor,
+        composer_wrap_area_width_px(),
+    )
+    return cursor_x, cursor_row
+
+
+def composer_cursor_for_vertical_move(
+    text: str,
+    cursor: int,
+    delta_rows: int,
+    preferred_x: Optional[float],
+) -> tuple[int, float]:
+    """Move the raw cursor vertically through the explicit visual line model."""
+    lines = composer_visual_lines(text, composer_wrap_area_width_px())
+    _, current_x, current_row = composer_wrapped_layout(
+        text,
+        cursor,
+        composer_wrap_area_width_px(),
+    )
+    target_x = current_x if preferred_x is None else preferred_x
+    target_row = max(0, min(current_row + delta_rows, len(lines) - 1))
+    if target_row == current_row:
+        return cursor, target_x
+    target_positions = lines[target_row].positions or ((0, 0.0),)
+    target_cursor, _ = min(
+        target_positions,
+        key=lambda position: (abs(position[1] - target_x), position[0]),
+    )
+    return target_cursor, target_x
+
+
+def composer_word_delete_start(text: str, cursor: int) -> int:
+    """Return the cursor position after deleting the previous word cluster."""
+    cursor = max(0, min(cursor, len(text)))
+    if cursor == 0:
+        return 0
+    i = cursor
+    while i > 0 and not (text[i - 1].isalnum() or text[i - 1] == "_"):
+        i -= 1
+    while i > 0 and (text[i - 1].isalnum() or text[i - 1] == "_"):
+        i -= 1
+    return i
+
+
+def composer_word_forward_end(text: str, cursor: int) -> int:
+    """Return the cursor position after advancing over the next word cluster."""
+    cursor = max(0, min(cursor, len(text)))
+    i = cursor
+    while i < len(text) and not (text[i].isalnum() or text[i] == "_"):
+        i += 1
+    while i < len(text) and (text[i].isalnum() or text[i] == "_"):
+        i += 1
+    return i
+
+
+def target_host(target: str) -> str:
+    return target.rsplit(":", 1)[0] if ":" in target else target
+
+
+async def read_windows_clipboard(
+    host: str,
+    *,
+    user: str,
+    ssh_key: str,
+    timeout_s: float,
+) -> str:
+    if not host:
+        return ""
+    cmd = [
+        "ssh",
+        "-i", ssh_key,
+        "-o", "BatchMode=yes",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "StrictHostKeyChecking=no",
+        f"{user}@{host}",
+        "powershell -NoProfile -Command \"Get-Clipboard -Raw\"",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except (OSError, asyncio.TimeoutError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return stdout.decode("utf-8", errors="replace").replace("\r\n", "\n").rstrip("\n")
+
+
+async def read_windows_left_button_down(
+    host: str,
+    *,
+    user: str,
+    ssh_key: str,
+    timeout_s: float,
+) -> Optional[bool]:
+    if not host:
+        return None
+    ps = (
+        "Add-Type -Namespace Win32 -Name User32 -MemberDefinition "
+        "'[DllImport(\"user32.dll\")] public static extern short GetAsyncKeyState(int vKey);'; "
+        "$s=[Win32.User32]::GetAsyncKeyState(1); "
+        "if (($s -band -32768) -ne 0) { 'down' } else { 'up' }"
+    )
+    cmd = [
+        "ssh",
+        "-i", ssh_key,
+        "-o", "BatchMode=yes",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "StrictHostKeyChecking=no",
+        f"{user}@{host}",
+        f"powershell -NoProfile -Command \"{ps}\"",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except (OSError, asyncio.TimeoutError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    value = stdout.decode("utf-8", errors="replace").strip().lower()
+    if value == "down":
+        return True
+    if value == "up":
+        return False
+    return None
 
 
 def bounded_transcript(lines: list[str], start: int, max_lines: int) -> str:
@@ -184,6 +516,7 @@ def make_text_node(
     content: str, x: float, y: float, w: float, h: float,
     font_px: float, rgba: tuple[float, float, float, float],
     node_id: Optional[bytes] = None,
+    preserve_markdown: bool = False,
 ) -> types_pb2.NodeProto:
     # Explicit transparent background overrides any default RenderingPolicy
     # backdrop for TextMarkdown nodes.
@@ -196,6 +529,12 @@ def make_text_node(
         },
         "bounds": [x, y, w, h],
     }
+    if preserve_markdown and content:
+        data["text_markdown"]["color_runs"] = [{
+            "start_byte": 0,
+            "end_byte": len(content.encode("utf-8")),
+            "color": list(rgba),
+        }]
     if node_id is not None:
         data["id"] = node_id
     return _make_node(data)
@@ -205,23 +544,30 @@ def make_hit_region(
     interaction_id: str, x: float, y: float, w: float, h: float,
     *,
     accepts_focus: bool = True,
+    auto_capture: bool = False,
+    release_on_up: bool = False,
+    node_id: Optional[bytes] = None,
 ) -> types_pb2.NodeProto:
-    return _make_node(
-        {
-            "hit_region": {
-                "interaction_id": interaction_id,
-                "accepts_focus": accepts_focus,
-                "accepts_pointer": True,
-            },
-            "bounds": [x, y, w, h],
-        }
-    )
+    data: dict[str, Any] = {
+        "hit_region": {
+            "interaction_id": interaction_id,
+            "accepts_focus": accepts_focus,
+            "accepts_pointer": True,
+            "auto_capture": auto_capture,
+            "release_on_up": release_on_up,
+        },
+        "bounds": [x, y, w, h],
+    }
+    if node_id is not None:
+        data["id"] = node_id
+    return _make_node(data)
 
 
 def portal_pane_rects() -> tuple[PaneRect, PaneRect]:
     """Return tile-local scroll-capture rects for input composer and output body."""
     pane_y = HEADER_H + DIVIDER_H
     pane_h = PORTAL_H - pane_y - FOOTER_H - DIVIDER_H
+    input_pane_x = 0.0
     input_pane_w = INPUT_PANE_W
     divider_x = input_pane_w
     output_pane_x = divider_x + PANE_DIVIDER_W
@@ -232,6 +578,10 @@ def portal_pane_rects() -> tuple[PaneRect, PaneRect]:
     composer_y = pane_y + 40.0
     composer_w = input_pane_w - composer_inset * 2.0
     composer_h = pane_h - 40.0 - 44.0
+    tile_x = max(input_pane_x, composer_x - COMPOSER_HIT_PAD)
+    tile_y = max(pane_y, composer_y - COMPOSER_HIT_PAD)
+    tile_right = min(input_pane_x + input_pane_w, composer_x + composer_w + COMPOSER_HIT_PAD)
+    tile_bottom = min(pane_y + pane_h, composer_y + composer_h + COMPOSER_HIT_PAD)
 
     body_y = pane_y + 40.0
     body_h = pane_h - 40.0 - 8.0
@@ -241,8 +591,26 @@ def portal_pane_rects() -> tuple[PaneRect, PaneRect]:
         output_pane_w - PADDING_X * 2.0,
         body_h,
     )
-    input_composer = PaneRect(composer_x, composer_y, composer_w, composer_h)
+    input_composer = PaneRect(tile_x, tile_y, tile_right - tile_x, tile_bottom - tile_y)
     return input_composer, output_body
+
+
+def input_composer_local_rect() -> PaneRect:
+    """Return the visible composer box relative to the enlarged input tile."""
+    input_tile, _ = portal_pane_rects()
+    pane_y = HEADER_H + DIVIDER_H
+    pane_h = PORTAL_H - pane_y - FOOTER_H - DIVIDER_H
+    composer_inset = 14.0
+    composer_x = composer_inset
+    composer_y = pane_y + 40.0
+    composer_w = INPUT_PANE_W - composer_inset * 2.0
+    composer_h = pane_h - 40.0 - 44.0
+    return PaneRect(
+        composer_x - input_tile.x,
+        composer_y - input_tile.y,
+        composer_w,
+        composer_h,
+    )
 
 
 def scroll_max_y_for_text(content: str, viewport_h: float, line_px: float) -> float:
@@ -295,8 +663,8 @@ def build_portal_nodes(
         PORTAL_W - PADDING_X * 2.0,
         16.0, SUBTITLE_FONT, SUBTITLE_RGBA,
     )
-    grip_w = 42.0
-    grip_h = 4.0
+    grip_w = 92.0
+    grip_h = 6.0
     header_grip = make_solid_color_node(
         *HEADER_GRIP_RGBA,
         (PORTAL_W - grip_w) / 2.0,
@@ -310,6 +678,8 @@ def build_portal_nodes(
         0.0, 0.0,
         PORTAL_W, HEADER_H,
         accepts_focus=False,
+        auto_capture=True,
+        release_on_up=True,
     )
 
     # ── Pane geometry ─────────────────────────────────────────────────────
@@ -448,32 +818,98 @@ def build_portal_nodes(
 def build_input_scroll_nodes(
     composer_text: str = "",
     composer_placeholder: str = "type a reply — Enter to submit",
+    *,
+    node_ids: Optional[dict[str, bytes]] = None,
 ) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
+    node_ids = node_ids or COMPOSER_NODE_IDS
     input_rect, _ = portal_pane_rects()
+    composer_rect = input_composer_local_rect()
     text_inset = 12.0
-    hit_h = input_rect.h + scroll_max_y_for_text(composer_text, input_rect.h, SCROLL_LINE_PX)
+    hit_h = input_rect.h + scroll_max_y_for_text(composer_text, composer_rect.h, SCROLL_LINE_PX)
     root = make_solid_color_node(
-        *TEXT_WINDOW_BG_RGBA,
+        0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, input_rect.w, input_rect.h,
+        node_id=node_ids.get("root"),
     )
-    hit = make_hit_region(COMPOSER_INTERACTION_ID, 0.0, 0.0, input_rect.w, hit_h)
+    hit = make_hit_region(
+        COMPOSER_INTERACTION_ID,
+        0.0, 0.0, input_rect.w, hit_h,
+        node_id=node_ids.get("hit"),
+    )
     text_node = make_text_node(
         composer_text or composer_placeholder,
-        text_inset,
-        text_inset,
-        input_rect.w - text_inset * 2.0,
-        input_rect.h - text_inset * 2.0,
+        composer_rect.x + text_inset,
+        composer_rect.y + text_inset,
+        composer_rect.w - text_inset * 2.0,
+        composer_rect.h - text_inset * 2.0,
         INPUT_FONT,
         INPUT_TEXT_RGBA if composer_text else INPUT_PLACEHOLDER_RGBA,
+        node_id=node_ids.get("text"),
     )
-    caret = make_solid_color_node(
-        *CARET_RGBA,
-        text_inset,
-        text_inset + INPUT_FONT + 2.0,
-        8.0,
-        2.0,
+    caret = build_composer_caret_node(
+        "",
+        0,
+        focused=False,
+        caret_visible=False,
+        node_id=node_ids.get("caret"),
     )
     return root, [hit, text_node, caret]
+
+
+def build_composer_text_node(
+    composer_text: str = "",
+    composer_placeholder: str = "type a reply — Enter to submit",
+    *,
+    placeholder_style: bool = False,
+    node_id: Optional[bytes] = None,
+) -> types_pb2.NodeProto:
+    composer_rect = input_composer_local_rect()
+    text_inset = 12.0
+    content = composer_placeholder if placeholder_style else composer_text
+    return make_text_node(
+        content,
+        composer_rect.x + text_inset,
+        composer_rect.y + text_inset,
+        composer_rect.w - text_inset * 2.0,
+        composer_rect.h - text_inset * 2.0,
+        INPUT_FONT,
+        INPUT_PLACEHOLDER_RGBA if placeholder_style else INPUT_TEXT_RGBA,
+        node_id=node_id,
+        preserve_markdown=not placeholder_style,
+    )
+
+
+def build_composer_caret_node(
+    composer_text: str,
+    cursor: int,
+    *,
+    focused: bool,
+    caret_visible: bool,
+    node_id: Optional[bytes] = None,
+) -> types_pb2.NodeProto:
+    composer_rect = input_composer_local_rect()
+    text_inset = 12.0
+    cursor_x, line_index = composer_caret_layout(composer_text, cursor)
+    caret_x = composer_rect.x + text_inset + min(
+        COMPOSER_TEXT_RENDER_MARGIN_X + cursor_x,
+        max(0.0, composer_rect.w - text_inset * 2.0 - COMPOSER_CARET_W),
+    )
+    caret_y = (
+        composer_rect.y
+        + text_inset
+        + COMPOSER_TEXT_RENDER_MARGIN_Y
+        + line_index * COMPOSER_LINE_PX
+    )
+    rgba = CARET_RGBA if focused and caret_visible else STATIC_CARET_RGBA
+    return make_solid_color_node(
+        *rgba,
+        caret_x,
+        caret_y,
+        COMPOSER_CARET_W,
+        COMPOSER_CARET_H,
+        radius=COMPOSER_CARET_W / 2.0,
+        node_id=node_id,
+    )
 
 
 def build_output_scroll_nodes(body: str) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
@@ -511,11 +947,10 @@ async def set_root_with_children(
     root: types_pb2.NodeProto,
     children: list[types_pb2.NodeProto],
     mutation_lock: Optional[asyncio.Lock] = None,
-) -> None:
+) -> tuple[bytes, list[bytes]]:
     if mutation_lock is not None:
         async with mutation_lock:
-            await set_root_with_children(client, lease_id, tile_id, root, children)
-        return
+            return await set_root_with_children(client, lease_id, tile_id, root, children)
 
     mr = await client.submit_mutation_batch(
         lease_id,
@@ -527,8 +962,10 @@ async def set_root_with_children(
     )
     root_id = mr.created_ids[0] if mr.created_ids else root.id
     print(f"  [grpc] Tile root set; server root_id={root_id.hex()[:16]}...", flush=True)
+    child_ids: list[bytes] = []
     for child in children:
-        await client.add_node(lease_id, tile_id, child, parent_id=root_id)
+        child_ids.append(await client.add_node(lease_id, tile_id, child, parent_id=root_id))
+    return root_id, child_ids
 
 
 async def publish_portal(
@@ -552,7 +989,12 @@ async def publish_portal(
     under atomic-batch semantics.
     """
     if include_tile_setup:
-        for tile_id in (tiles.frame, tiles.input_scroll, tiles.output_scroll):
+        for tile_id in (
+            tiles.capture_backstop,
+            tiles.frame,
+            tiles.input_scroll,
+            tiles.output_scroll,
+        ):
             await client.update_tile_opacity(lease_id, tile_id, 1.0)
             await client.update_tile_input_mode(
                 lease_id, tile_id, types_pb2.TILE_INPUT_MODE_CAPTURE,
@@ -566,7 +1008,7 @@ async def publish_portal(
                     tiles.input_scroll,
                     scrollable_y=True,
                     content_height=scroll_max_y_for_text(
-                        composer_text, input_rect.h, SCROLL_LINE_PX,
+                        composer_text, input_composer_local_rect().h, SCROLL_LINE_PX,
                     ),
                 ),
                 register_tile_scroll_mutation(
@@ -579,15 +1021,28 @@ async def publish_portal(
             ],
         )
 
+    backstop_root, backstop_children = build_capture_backstop_nodes(
+        PORTAL_W,
+        PORTAL_H,
+    )
+    await set_root_with_children(
+        client, lease_id, tiles.capture_backstop, backstop_root, backstop_children,
+        mutation_lock,
+    )
+
     frame_root, frame_children = build_portal_nodes(title, subtitle, body, footer_meta)
     await set_root_with_children(
         client, lease_id, tiles.frame, frame_root, frame_children, mutation_lock,
     )
 
     input_root, input_children = build_input_scroll_nodes(composer_text)
-    await set_root_with_children(
+    _, input_child_ids = await set_root_with_children(
         client, lease_id, tiles.input_scroll, input_root, input_children, mutation_lock,
     )
+    if len(input_child_ids) >= 3:
+        COMPOSER_RUNTIME_NODE_IDS["hit"] = input_child_ids[0]
+        COMPOSER_RUNTIME_NODE_IDS["text"] = input_child_ids[1]
+        COMPOSER_RUNTIME_NODE_IDS["caret"] = input_child_ids[2]
 
     output_root, output_children = build_output_scroll_nodes(body)
     await set_root_with_children(
@@ -599,8 +1054,18 @@ async def create_portal_tiles(
     client: HudClient,
     lease_id: bytes,
     portal_x: float,
+    tab_width: float,
+    tab_height: float,
 ) -> PortalTiles:
     input_rect, output_rect = portal_pane_rects()
+    capture_backstop = await client.create_tile(
+        lease_id,
+        x=portal_x,
+        y=PORTAL_Y,
+        w=PORTAL_W,
+        h=PORTAL_H,
+        z_order=PORTAL_Z - 100,
+    )
     frame = await client.create_tile(
         lease_id,
         x=portal_x,
@@ -625,7 +1090,14 @@ async def create_portal_tiles(
         h=output_rect.h,
         z_order=PORTAL_Z + 1,
     )
-    return PortalTiles(frame=frame, input_scroll=input_scroll, output_scroll=output_scroll)
+    return PortalTiles(
+        capture_backstop=capture_backstop,
+        frame=frame,
+        input_scroll=input_scroll,
+        output_scroll=output_scroll,
+        tab_width=tab_width,
+        tab_height=tab_height,
+    )
 
 
 def register_tile_scroll_mutation(
@@ -678,6 +1150,9 @@ def portal_bounds_mutations(tiles: PortalTiles, portal_x: float, portal_y: float
     input_rect, output_rect = portal_pane_rects()
     return [
         publish_to_tile_bounds_mutation(
+            tiles.capture_backstop, portal_x, portal_y, PORTAL_W, PORTAL_H,
+        ),
+        publish_to_tile_bounds_mutation(
             tiles.frame, portal_x, portal_y, PORTAL_W, PORTAL_H,
         ),
         publish_to_tile_bounds_mutation(
@@ -695,6 +1170,18 @@ def portal_bounds_mutations(tiles: PortalTiles, portal_x: float, portal_y: float
             output_rect.h,
         ),
     ]
+
+
+def build_capture_backstop_nodes(tab_width: float, tab_height: float) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
+    root = make_solid_color_node(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, tab_width, tab_height)
+    hit = make_hit_region(
+        "portal-capture-backstop",
+        0.0, 0.0,
+        tab_width,
+        tab_height,
+        accepts_focus=False,
+    )
+    return root, [hit]
 
 
 def emit_step_event(
@@ -739,16 +1226,32 @@ async def portal_interaction_loop(
     tab_width: float,
     tab_height: float,
     mutation_lock: asyncio.Lock,
+    clipboard_host: str,
+    clipboard_user: str,
+    clipboard_ssh_key: str,
+    clipboard_timeout_s: float,
 ) -> None:
     """Handle live pointer/keyboard input for manual exemplar review."""
     portal_x = initial_portal_x
     portal_y = initial_portal_y
     composer_text = ""
+    composer_cursor = 0
+    composer_cursor_goal_x: Optional[float] = None
+    composer_focused = False
     _, output_rect = portal_pane_rects()
     output_view_start = 0
     drag: Optional[dict[str, float | str]] = None
     last_drag_send = 0.0
     last_output_scroll_y: Optional[float] = None
+    pending_key_echoes: list[dict[str, float | str]] = []
+    suppressed_shortcut_chars: list[dict[str, float | str]] = []
+    pending_paste_requests: list[dict[str, float | int]] = []
+    next_paste_request_id = 0
+    composer_render_task: Optional[asyncio.Task[None]] = None
+    composer_render_dirty = False
+    composer_last_dirty_at = 0.0
+    composer_caret_visible = True
+    composer_blink_task: Optional[asyncio.Task[None]] = None
 
     async def move_portal(new_x: float, new_y: float) -> None:
         nonlocal portal_x, portal_y
@@ -761,12 +1264,92 @@ async def portal_interaction_loop(
                 timeout=2.0,
             )
 
-    async def render_composer() -> None:
-        input_root, input_children = build_input_scroll_nodes(composer_text)
-        await set_root_with_children(
-            client, lease_id, tiles.input_scroll, input_root, input_children,
-            mutation_lock,
+    async def render_composer_once() -> None:
+        text_node_id = COMPOSER_RUNTIME_NODE_IDS.get("text", COMPOSER_NODE_IDS["text"])
+        caret_node_id = COMPOSER_RUNTIME_NODE_IDS.get("caret", COMPOSER_NODE_IDS["caret"])
+        display_text, placeholder_style = composer_display_text(
+            composer_text,
+            composer_cursor,
+            focused=composer_focused,
         )
+        text_node = build_composer_text_node(
+            display_text,
+            placeholder_style=placeholder_style,
+            node_id=text_node_id,
+        )
+        caret_node = build_composer_caret_node(
+            composer_text,
+            composer_cursor,
+            focused=composer_focused,
+            caret_visible=composer_caret_visible,
+            node_id=caret_node_id,
+        )
+        if mutation_lock is not None:
+            async with mutation_lock:
+                await client.update_node_content(
+                    lease_id, tiles.input_scroll, text_node_id, text_node,
+                )
+                await client.update_node_content(
+                    lease_id, tiles.input_scroll, caret_node_id, caret_node,
+                )
+        else:
+            await client.update_node_content(
+                lease_id, tiles.input_scroll, text_node_id, text_node,
+            )
+            await client.update_node_content(
+                lease_id, tiles.input_scroll, caret_node_id, caret_node,
+            )
+        print(
+            "  [grpc] Composer text/caret updated: "
+            f"{text_node_id.hex()[:16]}.../{caret_node_id.hex()[:16]}...",
+            flush=True,
+        )
+
+    async def composer_render_worker() -> None:
+        nonlocal composer_render_dirty, composer_render_task
+        try:
+            while True:
+                composer_render_dirty = False
+                while True:
+                    quiet_for = time.monotonic() - composer_last_dirty_at
+                    remaining = COMPOSER_RENDER_DEBOUNCE_SECONDS - quiet_for
+                    if remaining <= 0.0:
+                        break
+                    await asyncio.sleep(remaining)
+                await render_composer_once()
+                if not composer_render_dirty:
+                    break
+        finally:
+            composer_render_task = None
+
+    def request_composer_render() -> None:
+        nonlocal composer_render_dirty, composer_render_task, composer_last_dirty_at
+        composer_render_dirty = True
+        composer_last_dirty_at = time.monotonic()
+        if composer_render_task is None or composer_render_task.done():
+            composer_render_task = asyncio.create_task(composer_render_worker())
+
+    async def composer_blink_worker() -> None:
+        nonlocal composer_blink_task, composer_caret_visible
+        try:
+            while composer_focused:
+                await asyncio.sleep(COMPOSER_CARET_BLINK_SECONDS)
+                if not composer_focused:
+                    break
+                composer_caret_visible = not composer_caret_visible
+                request_composer_render()
+        finally:
+            composer_blink_task = None
+
+    def set_composer_focus(focused: bool) -> None:
+        nonlocal composer_blink_task, composer_caret_visible, composer_focused
+        if composer_focused == focused:
+            return
+        composer_focused = focused
+        composer_caret_visible = True
+        request_composer_render()
+        if focused and (composer_blink_task is None or composer_blink_task.done()):
+            composer_blink_task = asyncio.create_task(composer_blink_worker())
 
     async def render_output_scroll(offset_y: float) -> None:
         nonlocal output_view_start
@@ -794,26 +1377,137 @@ async def portal_interaction_loop(
         }, portal_x=portal_x, portal_y=portal_y, reason=reason)
 
     async def submit_composer() -> None:
-        nonlocal composer_text
+        nonlocal composer_cursor, composer_cursor_goal_x, composer_text
         if composer_text.strip():
             emit_step_event(transcript, 10, "checkpoint", {
                 "code": "input:submit",
                 "title": "Composer submitted",
                 "action": "operator submitted text from portal composer",
                 "expected_visual": "composer clears after submit",
-            }, submitted=composer_text)
+        }, submitted=composer_text)
         composer_text = ""
-        await render_composer()
+        composer_cursor = 0
+        composer_cursor_goal_x = None
+        request_composer_render()
+
+    def prune_pending_key_echoes() -> None:
+        now = time.monotonic()
+        pending_key_echoes[:] = [
+            pending for pending in pending_key_echoes
+            if now - float(pending["at"]) < KEY_ECHO_TIMEOUT_SECONDS
+        ]
+        suppressed_shortcut_chars[:] = [
+            pending for pending in suppressed_shortcut_chars
+            if now - float(pending["at"]) < KEY_ECHO_TIMEOUT_SECONDS
+        ]
+        pending_paste_requests[:] = [
+            pending for pending in pending_paste_requests
+            if now - float(pending["at"]) < KEY_ECHO_TIMEOUT_SECONDS
+        ]
+
+    def consume_key_echo(character: str) -> bool:
+        prune_pending_key_echoes()
+        for index, pending in enumerate(pending_key_echoes):
+            if character == pending["text"]:
+                del pending_key_echoes[index]
+                return True
+        return False
+
+    def suppress_shortcut_character(character: str) -> None:
+        if character:
+            suppressed_shortcut_chars.append({
+                "text": character,
+                "at": time.monotonic(),
+            })
+
+    def consume_suppressed_shortcut_character(character: str) -> bool:
+        prune_pending_key_echoes()
+        for index, pending in enumerate(suppressed_shortcut_chars):
+            if character == pending["text"]:
+                del suppressed_shortcut_chars[index]
+                return True
+        return False
+
+    def consume_pending_paste_request() -> bool:
+        prune_pending_key_echoes()
+        if pending_paste_requests:
+            pending_paste_requests.pop(0)
+            return True
+        return False
+
+    async def fallback_paste_request(request_id: int) -> None:
+        await asyncio.sleep(0.18)
+        for index, pending in enumerate(pending_paste_requests):
+            if int(pending["id"]) == request_id:
+                del pending_paste_requests[index]
+                pasted = await paste_windows_clipboard()
+                if pasted:
+                    pending_key_echoes.append({
+                        "text": pasted,
+                        "at": time.monotonic(),
+                    })
+                return
+
+    async def paste_windows_clipboard() -> str:
+        nonlocal composer_cursor, composer_cursor_goal_x, composer_text
+        pasted = await read_windows_clipboard(
+            clipboard_host,
+            user=clipboard_user,
+            ssh_key=clipboard_ssh_key,
+            timeout_s=clipboard_timeout_s,
+        )
+        pasted = normalize_composer_input(pasted)
+        if not pasted:
+            emit_step_event(transcript, 10, "checkpoint", {
+                "code": "input:paste-empty",
+                "title": "Composer paste empty",
+                "action": "clipboard read returned no text",
+                "expected_visual": "composer text remains unchanged",
+            })
+            return ""
+        composer_text = (
+            composer_text[:composer_cursor]
+            + pasted
+            + composer_text[composer_cursor:]
+        )
+        composer_cursor += len(pasted)
+        composer_cursor_goal_x = None
+        emit_step_event(transcript, 10, "checkpoint", {
+            "code": "input:paste",
+            "title": "Composer pasted clipboard",
+            "action": "inserted Windows clipboard text at cursor",
+            "expected_visual": "clipboard text appears once in composer",
+        }, chars=len(pasted), lines=len(pasted.splitlines()))
+        request_composer_render()
+        return pasted
 
     while True:
-        batch = await client._event_queue.get()
+        try:
+            timeouts: list[float] = []
+            if drag is not None:
+                last_activity_at = float(drag.get("last_activity_at", drag["started_at"]))
+                timeouts.append(
+                    max(0.0, DRAG_IDLE_RELEASE_SECONDS - (time.monotonic() - last_activity_at))
+                )
+            timeout = min(timeouts) if timeouts else None
+            batch = await asyncio.wait_for(client._event_queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            prune_pending_key_echoes()
+            if drag is not None:
+                last_activity_at = float(drag.get("last_activity_at", drag["started_at"]))
+                if time.monotonic() - last_activity_at >= DRAG_IDLE_RELEASE_SECONDS:
+                    await finish_drag("idle_release")
+            continue
         pending_output_scroll_y: Optional[float] = None
         for envelope in batch.events:
             kind = envelope.WhichOneof("event")
+            prune_pending_key_echoes()
 
             if kind == "pointer_down":
                 ev = envelope.pointer_down
                 if ev.interaction_id == PORTAL_DRAG_INTERACTION_ID:
+                    if drag is not None:
+                        await finish_drag("superseded:pointer_down")
                     drag = {
                         "device_id": ev.device_id,
                         "start_x": ev.display_x,
@@ -821,6 +1515,7 @@ async def portal_interaction_loop(
                         "portal_x": portal_x,
                         "portal_y": portal_y,
                         "started_at": time.monotonic(),
+                        "last_activity_at": time.monotonic(),
                     }
                     emit_step_event(transcript, 9, "checkpoint", {
                         "code": "drag:start",
@@ -829,6 +1524,8 @@ async def portal_interaction_loop(
                         "expected_visual": "portal follows pointer while dragging",
                     }, display_x=ev.display_x, display_y=ev.display_y)
                 elif ev.interaction_id == COMPOSER_INTERACTION_ID:
+                    if drag is not None:
+                        await finish_drag("superseded:composer_focus")
                     emit_step_event(transcript, 10, "checkpoint", {
                         "code": "input:focus-attempt",
                         "title": "Composer pointer down",
@@ -847,6 +1544,7 @@ async def portal_interaction_loop(
                 if now - last_drag_send < 1.0 / 30.0:
                     continue
                 last_drag_send = now
+                drag["last_activity_at"] = now
                 dx = ev.display_x - float(drag["start_x"])
                 dy = ev.display_y - float(drag["start_y"])
                 await move_portal(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
@@ -871,16 +1569,32 @@ async def portal_interaction_loop(
                 ev = envelope.character
                 if ev.tile_id != tiles.input_scroll:
                     continue
+                character = normalize_composer_input(ev.character)
+                suppressed_shortcut = consume_suppressed_shortcut_character(character)
+                consumed_echo = consume_key_echo(character)
+                from_paste_request = consume_pending_paste_request()
                 emit_step_event(transcript, 10, "checkpoint", {
                     "code": "input:character",
                     "title": "Composer character received",
                     "action": "runtime delivered character input to composer",
                     "expected_visual": "typed character appears in composer text window",
-                }, character=ev.character)
-                if ev.character in {"\r", "\n"}:
+                }, character=character, consumed_echo=consumed_echo,
+                   suppressed_shortcut=suppressed_shortcut,
+                   from_paste_request=from_paste_request)
+                if character in {"\r", "\n"}:
                     continue
-                composer_text += ev.character
-                await render_composer()
+                if suppressed_shortcut:
+                    continue
+                if consumed_echo:
+                    continue
+                composer_cursor_goal_x = None
+                composer_text = (
+                    composer_text[:composer_cursor]
+                    + character
+                    + composer_text[composer_cursor:]
+                )
+                composer_cursor += len(character)
+                request_composer_render()
 
             elif kind == "key_down":
                 ev = envelope.key_down
@@ -891,15 +1605,134 @@ async def portal_interaction_loop(
                     "title": "Composer key down received",
                     "action": "runtime delivered key input to composer",
                     "expected_visual": "editing commands affect composer when applicable",
-                }, key=ev.key, key_code=ev.key_code, repeat=ev.repeat)
-                if ev.key == "Backspace":
-                    composer_text = composer_text[:-1]
-                    await render_composer()
+                }, key=ev.key, key_code=ev.key_code, repeat=ev.repeat,
+                   ctrl=ev.ctrl, shift=ev.shift, alt=ev.alt, meta=ev.meta)
+                if ev.key == "Backspace" and (ev.ctrl or ev.alt):
+                    composer_cursor_goal_x = None
+                    pending_key_echoes.clear()
+                    word_start = composer_word_delete_start(composer_text, composer_cursor)
+                    if word_start < composer_cursor:
+                        composer_text = (
+                            composer_text[:word_start]
+                            + composer_text[composer_cursor:]
+                        )
+                        composer_cursor = word_start
+                    request_composer_render()
+                elif ev.key == "Backspace":
+                    composer_cursor_goal_x = None
+                    pending_key_echoes.clear()
+                    if composer_cursor > 0:
+                        composer_text = (
+                            composer_text[:composer_cursor - 1]
+                            + composer_text[composer_cursor:]
+                        )
+                        composer_cursor -= 1
+                    request_composer_render()
+                elif ev.key == "Delete":
+                    composer_cursor_goal_x = None
+                    pending_key_echoes.clear()
+                    if composer_cursor < len(composer_text):
+                        composer_text = (
+                            composer_text[:composer_cursor]
+                            + composer_text[composer_cursor + 1:]
+                        )
+                    request_composer_render()
+                elif ev.key == "Home":
+                    composer_cursor_goal_x = None
+                    composer_cursor = 0
+                    request_composer_render()
+                elif ev.key == "End":
+                    composer_cursor_goal_x = None
+                    composer_cursor = len(composer_text)
+                    request_composer_render()
+                elif ev.key == "ArrowLeft" and (ev.ctrl or ev.alt):
+                    composer_cursor_goal_x = None
+                    composer_cursor = composer_word_delete_start(composer_text, composer_cursor)
+                    request_composer_render()
+                elif ev.key == "ArrowLeft":
+                    composer_cursor_goal_x = None
+                    composer_cursor = max(0, composer_cursor - 1)
+                    request_composer_render()
+                elif ev.key == "ArrowRight" and (ev.ctrl or ev.alt):
+                    composer_cursor_goal_x = None
+                    composer_cursor = composer_word_forward_end(composer_text, composer_cursor)
+                    request_composer_render()
+                elif ev.key == "ArrowRight":
+                    composer_cursor_goal_x = None
+                    composer_cursor = min(len(composer_text), composer_cursor + 1)
+                    request_composer_render()
+                elif ev.key == "ArrowUp":
+                    composer_cursor, composer_cursor_goal_x = composer_cursor_for_vertical_move(
+                        composer_text,
+                        composer_cursor,
+                        -1,
+                        composer_cursor_goal_x,
+                    )
+                    request_composer_render()
+                elif ev.key == "ArrowDown":
+                    composer_cursor, composer_cursor_goal_x = composer_cursor_for_vertical_move(
+                        composer_text,
+                        composer_cursor,
+                        1,
+                        composer_cursor_goal_x,
+                    )
+                    request_composer_render()
                 elif ev.key == "Enter":
+                    composer_cursor_goal_x = None
+                    pending_key_echoes.clear()
                     await submit_composer()
                 elif ev.key == "Escape":
+                    composer_cursor_goal_x = None
+                    pending_key_echoes.clear()
                     composer_text = ""
-                    await render_composer()
+                    composer_cursor = 0
+                    request_composer_render()
+                elif ev.ctrl or ev.meta:
+                    composer_cursor_goal_x = None
+                    pending_key_echoes.clear()
+                    if ev.key.lower() == "v":
+                        next_paste_request_id += 1
+                        paste_request_id = next_paste_request_id
+                        pending_paste_requests.append({
+                            "id": paste_request_id,
+                            "at": time.monotonic(),
+                        })
+                        asyncio.create_task(fallback_paste_request(paste_request_id))
+                        emit_step_event(transcript, 10, "checkpoint", {
+                            "code": "input:paste-requested",
+                            "title": "Composer paste requested",
+                            "action": "waiting for runtime clipboard character payload; SSH clipboard fallback is armed",
+                            "expected_visual": "clipboard text appears once in composer",
+                        })
+                    elif len(ev.key) == 1:
+                        suppress_shortcut_character(ev.key)
+                    emit_step_event(transcript, 10, "checkpoint", {
+                        "code": "input:shortcut-ignored",
+                        "title": "Composer shortcut ignored",
+                        "action": "runtime delivered a modified key that this exemplar does not implement",
+                        "expected_visual": "shortcut key does not insert literal text",
+                    }, key=ev.key, key_code=ev.key_code, ctrl=ev.ctrl, meta=ev.meta)
+                else:
+                    fallback_text = composer_key_fallback_text(ev.key)
+                    if fallback_text is not None:
+                        composer_cursor_goal_x = None
+                        composer_text = (
+                            composer_text[:composer_cursor]
+                            + fallback_text
+                            + composer_text[composer_cursor:]
+                        )
+                        composer_cursor += len(fallback_text)
+                        pending_key_echoes.append({
+                            "text": fallback_text,
+                            "at": time.monotonic(),
+                        })
+                        emit_step_event(transcript, 10, "checkpoint", {
+                            "code": "input:key-text",
+                            "title": "Composer key text applied",
+                            "action": "printable key-down updated composer in-order",
+                            "expected_visual": "typed character appears once in composer text window",
+                        }, text=fallback_text)
+                        request_composer_render()
 
             elif kind == "scroll_offset_changed":
                 ev = envelope.scroll_offset_changed
@@ -919,6 +1752,7 @@ async def portal_interaction_loop(
                     "action": "runtime focus manager focused the composer hit region",
                     "expected_visual": "subsequent keyboard events route to composer",
                 })
+                set_composer_focus(True)
 
             elif kind == "focus_lost":
                 ev = envelope.focus_lost
@@ -930,6 +1764,9 @@ async def portal_interaction_loop(
                     "action": "runtime focus manager moved focus away from composer",
                     "expected_visual": "composer stops receiving keyboard events",
                 })
+                set_composer_focus(False)
+
+        prune_pending_key_echoes()
 
         if pending_output_scroll_y is not None:
             if last_output_scroll_y is not None and abs(pending_output_scroll_y - last_output_scroll_y) < 0.5:
@@ -1235,6 +2072,8 @@ async def run_scenario(args: argparse.Namespace) -> int:
             client=client,
             lease_id=lease_id,
             portal_x=portal_x,
+            tab_width=scene_width,
+            tab_height=scene_height,
         )
         heartbeat_interval_ms = client.heartbeat_interval_ms or 5_000
         heartbeat_task = asyncio.create_task(
@@ -1252,6 +2091,10 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 tab_width=scene_width,
                 tab_height=scene_height,
                 mutation_lock=mutation_lock,
+                clipboard_host=target_host(args.target),
+                clipboard_user=args.clipboard_user,
+                clipboard_ssh_key=args.clipboard_ssh_key,
+                clipboard_timeout_s=args.clipboard_timeout_s,
             )
         )
 
@@ -1371,6 +2214,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rapid-cycles", type=int, default=12)
     p.add_argument("--rapid-interval-ms", type=int, default=80)
     p.add_argument("--cleanup-timeout-s", type=float, default=5.0)
+    p.add_argument("--clipboard-user", default="tzeus")
+    p.add_argument("--clipboard-ssh-key", default=DEFAULT_SSH_KEY)
+    p.add_argument("--clipboard-timeout-s", type=float, default=0.7)
     p.add_argument(
         "--leave-lease-on-exit",
         action="store_true",

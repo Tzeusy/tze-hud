@@ -1,39 +1,40 @@
 # Text Stream Portal — UX Refinement Handover
 
-Date: 2026-04-25 (update; originally opened 2026-04-18)
-Status: **in progress — not complete.**
+Date: 2026-04-27 (update; originally opened 2026-04-18)
+Status: **live interactive refinement landed; final operator polish still active.**
 
-## Current state (2026-04-25)
+## Current state (2026-04-27)
 
-The previous revision of this doc claimed the HitRegion render fix had
-landed; on inspection it had never been committed. Operator feedback on the
-live HUD confirmed the symptom ("background is still pale blue") — the
-default HitRegion branch in `renderer.rs` was still painting opaque
-`[0.2, 0.3, 0.5, 1.0]` over the pane backgrounds.
+The text stream portal exemplar is no longer a static two-pane render. It now
+exercises the Phase-0 portal as a live, content-layer interaction surface over
+the existing primary `HudSession` stream:
 
-This update keeps the HitRegion render fix, reconciles the exemplar constants
-with the intended pane opacity, and raises the input/output pane backgrounds to
-0.95 per the operator's latest preference.
+- draggable header repositioning for the portal surface,
+- independent transparent capture tiles for composer and transcript panes,
+- local-first transcript scrolling on the OUTPUT pane,
+- click-to-focus composer input with placeholder/caret rendering,
+- bounded text editing, submit/clear behavior, Home/End, arrow movement,
+  visual-line Up/Down, word navigation, word delete, and Ctrl+V paste,
+- cleanup of stale portal tiles when the user-test session exits normally.
 
-**Interactivity status** — `hud-dih4` (pointer capture on content-layer
-tiles, PR #490) and `hud-6bbe` (wheel + PgUp/PgDn wiring, PR #497) are both
-**closed and merged on main**.  If the live HUD still shows no click / drag
-/ scroll, the deployed Windows binary is almost certainly older than those
-PRs — redeploy from a fresh `cargo build --target x86_64-pc-windows-gnu
---release` (or the Butler flow) before re-testing. Composer *text input*
-(typing into the input box) is a separate unplumbed path — the composer is
-placeholder-only today; there is no HitRegion→keyboard→text-buffer pipe in
-v1 for agent-authored tiles. That needs its own bead; see "What's NOT
-complete".
+The refinement is still intentionally Phase 0: no portal-specific proto RPCs,
+no terminal emulator, no PTY semantics, and no runtime-owned external process.
+The exemplar remains a resident raw-tile composition driven by an authenticated
+agent session.
+
+**Open polish at handoff:** live operator feedback is still tuning caret
+geometry at long line ends and validating that Space/focus behavior is stable
+after the latest input-path simplification.
 
 ### What now lives in the repo
 
 One exemplar script under `.claude/skills/user-test/scripts/`:
 
-- **`text_stream_portal_exemplar.py`** — the two-pane UX demo.
+- **`text_stream_portal_exemplar.py`** — the two-pane live UX demo.
   860×680 content-layer portal surface at the right edge. The static frame
-  tile sits at z=220, while transparent input/transcript scroll-capture tiles
-  sit above the two text boxes so mouse wheel input only targets those boxes.
+  tile sits at z=220, while transparent capture tiles sit above the header,
+  composer, and transcript body so drag, keyboard focus, and mouse wheel input
+  route to the intended surface only.
   Header (52px) + footer (30px) chrome strips, INPUT pane on the left with eyebrow
   label, composer text window (black 0.95 backing + 1px border, green caret stub),
   placeholder text, submit-hint strip (`Enter submit · Shift+Enter newline ·
@@ -48,10 +49,18 @@ One exemplar script under `.claude/skills/user-test/scripts/`:
   on the transcript pane tile, four SetScrollOffset steps, five appends
   mid-scroll with offset preserved, then return-to-tail.
 
+  The composer now uses stable runtime node IDs and mutation updates for the
+  text/caret nodes rather than rebuilding the whole input tile for every
+  character. Normal printable input is sourced from runtime character events;
+  the only key-down fallback that inserts text is `Space`, because Windows
+  winit does not send a separate `Key::Character(" ")` event for it in this
+  path. Ctrl+V is handled first by runtime clipboard forwarding and then by an
+  SSH clipboard fallback if the runtime paste event does not arrive.
+
 The script uses `HudClient` from `hud_grpc_client.py` and follows the
 split-batch `set_tile_root` → `add_node` pattern (see Gotchas).
 
-### Engine work that landed this session
+### Engine work that landed across the refinement
 
 1. **HitRegion rendering fix** (`crates/tze_hud_compositor/src/renderer.rs`)
    — actually committed this time.
@@ -78,6 +87,22 @@ split-batch `set_tile_root` → `add_node` pattern (see Gotchas).
    RFCs cross-referenced. Appears to have shipped in the intervening day —
    recent commits (`hud-vwggh`, `hud-qu8k4`, `hud-9pmd`, `hud-rxfc`) all
    touch `color_run_spans`. Verify separately before building on it.
+5. **Windowed runtime input refinements** (`crates/tze_hud_runtime/src/windowed.rs`):
+   keyboard dispatch now uses blocking scene locks rather than opportunistic
+   `try_lock()` for active tab/session lookup; Windows pointer capture/release
+   is used for drag continuity; Ctrl+V reads `CF_UNICODETEXT` from the Windows
+   clipboard and emits a character event; direct character forwarding is
+   suppressed while Ctrl/Meta/Alt are held.
+6. **Session event burst headroom** (`crates/tze_hud_protocol/src/session_server.rs`):
+   `BROADCAST_CHANNEL_CAPACITY` increased from 32 to 1024 because runtime input
+   events share the channel with server-push notices. Short typing/pointer bursts
+   should not evict focus/input events while mutation responses are in flight.
+7. **Literal composer text over proto** (`hud_grpc_client.py` +
+   `crates/tze_hud_protocol/src/convert.rs`): the Python test client can emit
+   `TextMarkdownNode.color_runs`, and a full-span color run matching the base
+   color is interpreted as literal/monospace composer text. This keeps markdown
+   markers visible and gives the caret model stable advances until the proto
+   grows an explicit `font_family` field.
 
 ### Pixel-readback tests updated (2026-04-19 pm)
 
@@ -97,30 +122,22 @@ pixel_readback --features "headless dev-mode" -- test_color_14 test_color_17`
 
 ## What's NOT complete
 
-- **Windows HUD redeploy** — operator still sees "no click / drag / scroll"
-  as of 2026-04-19 pm. `hud-dih4` (PR #490, content-tile pointer capture)
-  and `hud-6bbe` (PR #497, wheel + PgUp/PgDn) are both merged on main.
-  Most likely the `TzeHudOverlay` scheduled task on Windows is still running
-  a binary from before those PRs. Rebuild + redeploy before re-testing any
-  of the interaction items below.
 - **Drag-to-resize the pane divider**: the visual affordance +
   `portal-pane-resize` HitRegion are there. The divider resize logic itself
   is not wired — moving the handle still needs code that consumes the
   captured drag and adjusts `INPUT_PANE_W` at runtime. File a bead when the
   engine redeploy confirms pointer capture is landing.
-- **Drag-to-move portal tile**: not wired today. Pointer capture exists, but
-  the live windowed/content-layer path does not turn a header/title-bar drag
-  into tile bounds mutation and geometry persistence. Tracked as `hud-9yfce`.
-- **Composer typing / submit**: the composer is placeholder-only.  No text
-  input path exists for agent-authored content-layer tiles in v1 — key
-  events currently reach the runtime but there is no plumbing from a
-  focused HitRegion to a mutable text buffer that can be re-rendered via
-  MutationBatch. Tracked as `hud-opkvq`.
-- **Wheel / keyboard scroll live sign-off**: the engine path is in place
-  (PR #497). The portal exemplar now scopes scroll registration to transparent
-  input/transcript pane tiles, not the frame tile. A future pass should still
-  drive actual wheel / PgUp / PgDn input against the live HUD and confirm the
-  frame does not move.
+- **Caret fidelity at line ends**: current live feedback says caret row is
+  mostly corrected after markdown paste, but x-position can lag by roughly one
+  character near the right edge. The script currently uses separate wrap and
+  caret advance constants plus wrap slack to avoid glyphon adding hidden rows.
+  Further tuning should happen against live paste samples.
+- **Space/focus validation**: the latest patch makes printable characters
+  character-event-only and leaves key-down fallback only for Space. Operator
+  should re-test `hello world` and paste/edit sequences before marking input
+  complete.
+- **Drag persistence**: header drag repositions the live portal, but position
+  persistence across sessions is not implemented.
 - **`docs/exemplar-manual-review-checklist.md` row 11** — still needs the
   final UX-tweak sign-off row entered once a human confirms the two-pane
   render on the live HUD.
@@ -264,4 +281,11 @@ python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_str
 - `hud-6bbe` — **CLOSED** (PR #497). Wheel + PgUp/PgDn wired through
   `process_keyboard_scroll`.
 - `hud-opkvq` — click-focus and keyboard input for the portal composer.
-- `hud-9yfce` — drag-to-move support for text stream portal tiles.
+  Implementation has effectively landed in the user-test exemplar path; keep
+  the bead open only if there is remaining acceptance bookkeeping or engine
+  generalization to do.
+- `hud-9yfce` — drag-to-move support for text stream portal tiles. Header
+  drag is implemented in the exemplar via content-tile pointer capture and
+  tile geometry mutation; persistence and final sign-off remain polish items.
+- `hud-0ojis` — remaining caret x-position and Space/focus sign-off after
+  the 2026-04-27 live input-path refinement.

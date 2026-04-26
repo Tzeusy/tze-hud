@@ -21,6 +21,16 @@ This RFC also defines a phased boundary:
 
 **Inline color runs (cross-reference):** `TextMarkdownNode.color_runs` (see RFC 0001 §TextMarkdownNode) enables adapter-side ANSI-to-runs conversion without a terminal-emulator surface. An adapter can strip ANSI escape sequences from `content` and map each color segment to a `TextColorRun` entry, letting the runtime compositor render colored spans natively. This feature is in scope for Phase 0 adapters; terminal emulation (PTY, cursor positioning, scrollback) remains out of scope.
 
+**Implementation note (2026-04-27 refinement):** the live `/user-test` portal
+exemplar exercises Phase 0 as a four-tile resident surface over the existing
+`HudSession`: one frame tile plus transparent capture tiles for header drag,
+composer input, and transcript scrolling. The scroll contract is now treated as
+a subset of the expanded portal's OUTPUT pane behavior. Composer text remains
+adapter-owned state: runtime input/focus/clipboard events are delivered through
+the existing event stream, and the adapter re-publishes `TextMarkdownNode` plus
+a separate caret node through ordinary mutation batches. No portal-specific RPC,
+terminal node, or PTY semantics were added.
+
 ---
 
 ## Motivation

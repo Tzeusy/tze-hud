@@ -519,6 +519,18 @@ def _make_node(data: dict) -> types_pb2.NodeProto:
         bg = t.get("background")
         if bg:
             tm.background.CopyFrom(types_pb2.Rgba(r=bg[0], g=bg[1], b=bg[2], a=bg[3]))
+        for run in t.get("color_runs", []):
+            run_color = run.get("color", color)
+            tm.color_runs.append(types_pb2.TextColorRunProto(
+                start_byte=run["start_byte"],
+                end_byte=run["end_byte"],
+                color=types_pb2.Rgba(
+                    r=run_color[0],
+                    g=run_color[1],
+                    b=run_color[2],
+                    a=run_color[3],
+                ),
+            ))
         node.text_markdown.CopyFrom(tm)
     elif "hit_region" in data:
         h = data["hit_region"]

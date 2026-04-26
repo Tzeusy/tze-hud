@@ -95,6 +95,12 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 .map(proto_rect_to_scene)
                 .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
             let color_runs = proto_color_runs_to_scene(&tm.color_runs);
+            let font_family =
+                if proto_text_markdown_uses_literal_full_span(&tm.content, color, &color_runs) {
+                    FontFamily::SystemMonospace
+                } else {
+                    FontFamily::SystemSansSerif
+                };
             NodeData::TextMarkdown(TextMarkdownNode {
                 content: tm.content.clone(),
                 bounds,
@@ -103,7 +109,7 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 } else {
                     16.0
                 },
-                font_family: FontFamily::SystemSansSerif,
+                font_family,
                 color,
                 background: bg,
                 alignment: TextAlign::Start,
@@ -206,6 +212,12 @@ pub fn proto_update_node_content_data_to_scene(
                 .map(proto_rect_to_scene)
                 .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
             let color_runs = proto_color_runs_to_scene(&tm.color_runs);
+            let font_family =
+                if proto_text_markdown_uses_literal_full_span(&tm.content, color, &color_runs) {
+                    FontFamily::SystemMonospace
+                } else {
+                    FontFamily::SystemSansSerif
+                };
             Some(NodeData::TextMarkdown(TextMarkdownNode {
                 content: tm.content.clone(),
                 bounds,
@@ -214,7 +226,7 @@ pub fn proto_update_node_content_data_to_scene(
                 } else {
                     16.0
                 },
-                font_family: FontFamily::SystemSansSerif,
+                font_family,
                 color,
                 background: bg,
                 alignment: TextAlign::Start,
@@ -284,6 +296,23 @@ pub fn proto_color_runs_to_scene(runs: &[proto::TextColorRunProto]) -> Box<[Text
         })
         .collect::<Vec<_>>()
         .into_boxed_slice()
+}
+
+/// The v1 TextMarkdown proto does not yet expose `font_family` directly.
+///
+/// The text-stream portal composer sends one full-span color run identical to
+/// the base color to request literal raw text rendering (markdown markers must
+/// stay visible).  Treat that narrow wire shape as an editor/composer text
+/// surface and render it in monospace so caret positioning can stay stable.
+fn proto_text_markdown_uses_literal_full_span(
+    content: &str,
+    color: Rgba,
+    runs: &[TextColorRun],
+) -> bool {
+    let [run] = runs else {
+        return false;
+    };
+    run.start_byte == 0 && run.end_byte as usize == content.len() && run.color == color
 }
 
 /// Convert a `Box<[TextColorRun]>` to a `Vec<TextColorRunProto>`.
