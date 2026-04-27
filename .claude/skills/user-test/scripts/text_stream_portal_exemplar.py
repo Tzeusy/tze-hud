@@ -165,6 +165,15 @@ COMPOSER_NODE_IDS = {
 }
 COMPOSER_RUNTIME_NODE_IDS: dict[str, bytes] = {}
 
+
+def fresh_composer_node_ids() -> dict[str, bytes]:
+    return {
+        "root": uuid.uuid4().bytes,
+        "hit": uuid.uuid4().bytes,
+        "text": uuid.uuid4().bytes,
+        "caret": uuid.uuid4().bytes,
+    }
+
 # ─── Scroll contract tokens ──────────────────────────────────────────────────
 
 SCROLL_TOTAL_LINES = 80
@@ -821,7 +830,7 @@ def build_input_scroll_nodes(
     *,
     node_ids: Optional[dict[str, bytes]] = None,
 ) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
-    node_ids = node_ids or COMPOSER_NODE_IDS
+    node_ids = node_ids or fresh_composer_node_ids()
     input_rect, _ = portal_pane_rects()
     composer_rect = input_composer_local_rect()
     text_inset = 12.0
