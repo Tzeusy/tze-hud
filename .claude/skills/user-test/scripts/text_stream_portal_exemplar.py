@@ -977,6 +977,36 @@ async def set_root_with_children(
     return root_id, child_ids
 
 
+async def set_input_root_with_runtime_ids(
+    client: HudClient,
+    lease_id: bytes,
+    tile_id: bytes,
+    composer_text: str,
+    mutation_lock: Optional[asyncio.Lock] = None,
+) -> None:
+    node_ids = fresh_composer_node_ids()
+    input_root, input_children = build_input_scroll_nodes(
+        composer_text,
+        node_ids=node_ids,
+    )
+
+    async def mount() -> None:
+        COMPOSER_RUNTIME_NODE_IDS.clear()
+        _, input_child_ids = await set_root_with_children(
+            client, lease_id, tile_id, input_root, input_children,
+        )
+        if len(input_child_ids) >= 3:
+            COMPOSER_RUNTIME_NODE_IDS["hit"] = input_child_ids[0]
+            COMPOSER_RUNTIME_NODE_IDS["text"] = input_child_ids[1]
+            COMPOSER_RUNTIME_NODE_IDS["caret"] = input_child_ids[2]
+
+    if mutation_lock is not None:
+        async with mutation_lock:
+            await mount()
+    else:
+        await mount()
+
+
 async def publish_portal(
     client: HudClient,
     lease_id: bytes,
@@ -1044,14 +1074,9 @@ async def publish_portal(
         client, lease_id, tiles.frame, frame_root, frame_children, mutation_lock,
     )
 
-    input_root, input_children = build_input_scroll_nodes(composer_text)
-    _, input_child_ids = await set_root_with_children(
-        client, lease_id, tiles.input_scroll, input_root, input_children, mutation_lock,
+    await set_input_root_with_runtime_ids(
+        client, lease_id, tiles.input_scroll, composer_text, mutation_lock,
     )
-    if len(input_child_ids) >= 3:
-        COMPOSER_RUNTIME_NODE_IDS["hit"] = input_child_ids[0]
-        COMPOSER_RUNTIME_NODE_IDS["text"] = input_child_ids[1]
-        COMPOSER_RUNTIME_NODE_IDS["caret"] = input_child_ids[2]
 
     output_root, output_children = build_output_scroll_nodes(body)
     await set_root_with_children(
@@ -1274,8 +1299,11 @@ async def portal_interaction_loop(
             )
 
     async def render_composer_once() -> None:
-        text_node_id = COMPOSER_RUNTIME_NODE_IDS.get("text", COMPOSER_NODE_IDS["text"])
-        caret_node_id = COMPOSER_RUNTIME_NODE_IDS.get("caret", COMPOSER_NODE_IDS["caret"])
+        text_node_id = COMPOSER_RUNTIME_NODE_IDS.get("text")
+        caret_node_id = COMPOSER_RUNTIME_NODE_IDS.get("caret")
+        if text_node_id is None or caret_node_id is None:
+            print("  [grpc] Composer render skipped; input nodes not mounted yet.", flush=True)
+            return
         display_text, placeholder_style = composer_display_text(
             composer_text,
             composer_cursor,
