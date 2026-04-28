@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 /// Default maximum bytes accepted by one `publish_output` request.
@@ -32,6 +33,10 @@ pub const DEFAULT_MAX_POLL_ITEMS: usize = 8;
 pub const DEFAULT_MAX_POLL_RESPONSE_BYTES: usize = 16_384;
 /// Default maximum HUD portal updates per second.
 pub const DEFAULT_MAX_PORTAL_UPDATES_PER_SECOND: u32 = 10;
+/// Default maximum retained publish-output logical-unit IDs per projection.
+pub const DEFAULT_MAX_SEEN_LOGICAL_UNITS: usize = 4_096;
+/// Default maximum retained audit records for the in-memory authority.
+pub const DEFAULT_MAX_AUDIT_RECORDS: usize = 4_096;
 /// Owner tokens are 256-bit random values encoded as lowercase hex.
 pub const OWNER_TOKEN_ENTROPY_BITS: usize = 256;
 /// Default owner-token lifetime in wall-clock microseconds.
@@ -232,6 +237,8 @@ pub struct ProjectionBounds {
     pub max_poll_items: usize,
     pub max_poll_response_bytes: usize,
     pub max_portal_updates_per_second: u32,
+    pub max_seen_logical_units: usize,
+    pub max_audit_records: usize,
     pub owner_token_ttl_wall_us: u64,
 }
 
@@ -248,6 +255,8 @@ impl Default for ProjectionBounds {
             max_poll_items: DEFAULT_MAX_POLL_ITEMS,
             max_poll_response_bytes: DEFAULT_MAX_POLL_RESPONSE_BYTES,
             max_portal_updates_per_second: DEFAULT_MAX_PORTAL_UPDATES_PER_SECOND,
+            max_seen_logical_units: DEFAULT_MAX_SEEN_LOGICAL_UNITS,
+            max_audit_records: DEFAULT_MAX_AUDIT_RECORDS,
             owner_token_ttl_wall_us: DEFAULT_OWNER_TOKEN_TTL_WALL_US,
         }
     }
@@ -265,6 +274,8 @@ impl ProjectionBounds {
             || self.max_poll_items == 0
             || self.max_poll_response_bytes == 0
             || self.max_portal_updates_per_second == 0
+            || self.max_seen_logical_units == 0
+            || self.max_audit_records == 0
             || self.owner_token_ttl_wall_us == 0
         {
             return Err(ProjectionContractError::InvalidArgument(
@@ -293,8 +304,7 @@ impl OperationEnvelope {
     fn validate(&self, expected: ProjectionOperation) -> Result<(), ProjectionContractError> {
         if self.operation != expected {
             return Err(ProjectionContractError::InvalidArgument(format!(
-                "operation must be {:?}",
-                expected
+                "operation must be {expected:?}"
             )));
         }
         validate_non_empty_bounded(
@@ -667,8 +677,21 @@ struct ProjectionSession {
     attach_idempotency_key: Option<String>,
     retained_transcript_bytes: usize,
     seen_logical_units: HashSet<String>,
+    seen_logical_unit_order: VecDeque<String>,
+    completed_input_ack_states: HashMap<String, InputDeliveryState>,
+    completed_input_ack_order: VecDeque<String>,
     pending_input: VecDeque<PendingInputItem>,
     pending_input_bytes: usize,
+}
+
+struct ProjectionAuditEvent<'a> {
+    envelope: &'a OperationEnvelope,
+    caller_identity: &'a str,
+    server_timestamp_wall_us: u64,
+    accepted: bool,
+    error_code: Option<ProjectionErrorCode>,
+    reason: &'a str,
+    category: ProjectionAuditCategory,
 }
 
 /// Minimal in-memory authority that enforces the operation contract. Production
@@ -771,15 +794,15 @@ impl ProjectionAuthority {
                     "projection already attached for matching idempotency key",
                 );
                 response.lifecycle_state = Some(existing.lifecycle_state);
-                self.audit(
-                    &request.envelope,
+                self.audit(ProjectionAuditEvent {
+                    envelope: &request.envelope,
                     caller_identity,
                     server_timestamp_wall_us,
-                    true,
-                    None,
-                    "idempotent attach replay",
-                    ProjectionAuditCategory::Attach,
-                );
+                    accepted: true,
+                    error_code: None,
+                    reason: "idempotent attach replay",
+                    category: ProjectionAuditCategory::Attach,
+                });
                 return response;
             }
             let response = ProjectionResponse::denied(
@@ -789,15 +812,15 @@ impl ProjectionAuthority {
                 ProjectionErrorCode::ProjectionAlreadyAttached,
                 "projection_id is already attached",
             );
-            self.audit(
-                &request.envelope,
+            self.audit(ProjectionAuditEvent {
+                envelope: &request.envelope,
                 caller_identity,
                 server_timestamp_wall_us,
-                false,
-                Some(ProjectionErrorCode::ProjectionAlreadyAttached),
-                "attach conflict",
-                ProjectionAuditCategory::ConflictDenied,
-            );
+                accepted: false,
+                error_code: Some(ProjectionErrorCode::ProjectionAlreadyAttached),
+                reason: "attach conflict",
+                category: ProjectionAuditCategory::ConflictDenied,
+            });
             return response;
         }
 
@@ -827,6 +850,9 @@ impl ProjectionAuthority {
                 attach_idempotency_key: request.idempotency_key,
                 retained_transcript_bytes: 0,
                 seen_logical_units: HashSet::new(),
+                seen_logical_unit_order: VecDeque::new(),
+                completed_input_ack_states: HashMap::new(),
+                completed_input_ack_order: VecDeque::new(),
                 pending_input: VecDeque::new(),
                 pending_input_bytes: 0,
             },
@@ -840,15 +866,15 @@ impl ProjectionAuthority {
         );
         response.owner_token = Some(owner_token);
         response.lifecycle_state = Some(ProjectionLifecycleState::Attached);
-        self.audit(
-            &request.envelope,
+        self.audit(ProjectionAuditEvent {
+            envelope: &request.envelope,
             caller_identity,
             server_timestamp_wall_us,
-            true,
-            None,
-            "attach accepted",
-            ProjectionAuditCategory::Attach,
-        );
+            accepted: true,
+            error_code: None,
+            reason: "attach accepted",
+            category: ProjectionAuditCategory::Attach,
+        });
         response
     }
 
@@ -868,6 +894,7 @@ impl ProjectionAuthority {
             );
         }
         let max_retained_transcript_bytes = self.bounds.max_retained_transcript_bytes;
+        let max_seen_logical_units = self.bounds.max_seen_logical_units;
         let response = match self.authorize_owner(
             &request.envelope,
             &request.owner_token,
@@ -876,7 +903,7 @@ impl ProjectionAuthority {
         ) {
             Ok(session) => {
                 if let Some(logical_unit_id) = &request.logical_unit_id {
-                    if !session.seen_logical_units.insert(logical_unit_id.clone()) {
+                    if remember_logical_unit(session, logical_unit_id, max_seen_logical_units) {
                         ProjectionResponse::accepted(
                             &request.envelope.request_id,
                             &request.envelope.projection_id,
@@ -999,6 +1026,7 @@ impl ProjectionAuthority {
             .sessions
             .get_mut(projection_id)
             .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
+        prune_terminal_pending_input(session, self.bounds.max_pending_input_items);
         if submission_text.len() > self.bounds.max_pending_input_bytes_per_item {
             return Err(ProjectionErrorCode::ProjectionInputTooLarge);
         }
@@ -1368,38 +1396,36 @@ impl ProjectionAuthority {
         response: &ProjectionResponse,
         category: ProjectionAuditCategory,
     ) {
-        self.audit(
+        self.audit(ProjectionAuditEvent {
             envelope,
             caller_identity,
             server_timestamp_wall_us,
-            response.accepted,
-            response.error_code,
-            &response.status_summary,
-            category,
-        );
-    }
-
-    fn audit(
-        &mut self,
-        envelope: &OperationEnvelope,
-        caller_identity: &str,
-        server_timestamp_wall_us: u64,
-        accepted: bool,
-        error_code: Option<ProjectionErrorCode>,
-        reason: &str,
-        category: ProjectionAuditCategory,
-    ) {
-        self.audit_log.push(ProjectionAuditRecord {
-            timestamp_wall_us: server_timestamp_wall_us,
-            operation: envelope.operation,
-            projection_id: envelope.projection_id.clone(),
-            caller_identity: bounded_copy(caller_identity.to_string(), MAX_CALLER_IDENTITY_BYTES),
-            request_id: envelope.request_id.clone(),
-            accepted,
-            error_code,
-            reason: bounded_copy(reason.to_string(), MAX_REASON_BYTES),
+            accepted: response.accepted,
+            error_code: response.error_code,
+            reason: &response.status_summary,
             category,
         });
+    }
+
+    fn audit(&mut self, event: ProjectionAuditEvent<'_>) {
+        self.audit_log.push(ProjectionAuditRecord {
+            timestamp_wall_us: event.server_timestamp_wall_us,
+            operation: event.envelope.operation,
+            projection_id: event.envelope.projection_id.clone(),
+            caller_identity: bounded_copy(
+                event.caller_identity.to_string(),
+                MAX_CALLER_IDENTITY_BYTES,
+            ),
+            request_id: event.envelope.request_id.clone(),
+            accepted: event.accepted,
+            error_code: event.error_code,
+            reason: bounded_copy(event.reason.to_string(), MAX_REASON_BYTES),
+            category: event.category,
+        });
+        if self.audit_log.len() > self.bounds.max_audit_records {
+            let overflow = self.audit_log.len() - self.bounds.max_audit_records;
+            self.audit_log.drain(0..overflow);
+        }
     }
 }
 
@@ -1419,6 +1445,103 @@ fn append_transcript_bytes(
     session.lifecycle_state = ProjectionLifecycleState::Active;
 }
 
+fn remember_logical_unit(
+    session: &mut ProjectionSession,
+    logical_unit_id: &str,
+    max_seen_logical_units: usize,
+) -> bool {
+    if session.seen_logical_units.contains(logical_unit_id) {
+        return true;
+    }
+    session
+        .seen_logical_units
+        .insert(logical_unit_id.to_string());
+    session
+        .seen_logical_unit_order
+        .push_back(logical_unit_id.to_string());
+    while session.seen_logical_unit_order.len() > max_seen_logical_units {
+        if let Some(evicted) = session.seen_logical_unit_order.pop_front() {
+            session.seen_logical_units.remove(&evicted);
+        }
+    }
+    false
+}
+
+fn requested_delivery_state(ack_state: InputAckState) -> InputDeliveryState {
+    match ack_state {
+        InputAckState::Handled => InputDeliveryState::Handled,
+        InputAckState::Rejected => InputDeliveryState::Rejected,
+        InputAckState::Deferred => InputDeliveryState::Deferred,
+    }
+}
+
+fn terminal_ack_replay_response(
+    terminal_state: InputDeliveryState,
+    request: &AcknowledgeInputRequest,
+    server_timestamp_wall_us: u64,
+) -> ProjectionResponse {
+    if terminal_state == requested_delivery_state(request.ack_state) {
+        return ProjectionResponse::accepted(
+            &request.envelope.request_id,
+            &request.envelope.projection_id,
+            server_timestamp_wall_us,
+            "terminal acknowledgement replay accepted idempotently",
+        );
+    }
+    ProjectionResponse::denied(
+        &request.envelope.request_id,
+        &request.envelope.projection_id,
+        server_timestamp_wall_us,
+        ProjectionErrorCode::ProjectionStateConflict,
+        "conflicting acknowledgement for terminal input",
+    )
+}
+
+fn remember_terminal_input(
+    session: &mut ProjectionSession,
+    input_id: &str,
+    delivery_state: InputDeliveryState,
+    max_completed_input_tombstones: usize,
+) {
+    if !delivery_state.is_terminal() {
+        return;
+    }
+    if session
+        .completed_input_ack_states
+        .insert(input_id.to_string(), delivery_state)
+        .is_none()
+    {
+        session
+            .completed_input_ack_order
+            .push_back(input_id.to_string());
+    }
+    while session.completed_input_ack_order.len() > max_completed_input_tombstones {
+        if let Some(evicted) = session.completed_input_ack_order.pop_front() {
+            session.completed_input_ack_states.remove(&evicted);
+        }
+    }
+}
+
+fn prune_terminal_pending_input(
+    session: &mut ProjectionSession,
+    max_completed_input_tombstones: usize,
+) {
+    let mut retained = VecDeque::with_capacity(session.pending_input.len());
+    while let Some(item) = session.pending_input.pop_front() {
+        if item.delivery_state.is_terminal() {
+            remember_terminal_input(
+                session,
+                &item.input_id,
+                item.delivery_state,
+                max_completed_input_tombstones,
+            );
+        } else {
+            retained.push_back(item);
+        }
+    }
+    session.pending_input = retained;
+}
+
 fn acknowledge_input(
     session: &mut ProjectionSession,
     request: &AcknowledgeInputRequest,
@@ -1430,6 +1553,13 @@ fn acknowledge_input(
         .iter_mut()
         .find(|item| item.input_id == request.input_id)
     else {
+        if let Some(terminal_state) = session.completed_input_ack_states.get(&request.input_id) {
+            return terminal_ack_replay_response(
+                *terminal_state,
+                request,
+                server_timestamp_wall_us,
+            );
+        }
         return ProjectionResponse::denied(
             &request.envelope.request_id,
             &request.envelope.projection_id,
@@ -1438,6 +1568,16 @@ fn acknowledge_input(
             "input_id not found",
         );
     };
+
+    if request.ack_state != InputAckState::Deferred && request.not_before_wall_us.is_some() {
+        return ProjectionResponse::denied(
+            &request.envelope.request_id,
+            &request.envelope.projection_id,
+            server_timestamp_wall_us,
+            ProjectionErrorCode::ProjectionInvalidArgument,
+            "not_before_wall_us is only valid for deferred acknowledgements",
+        );
+    }
 
     if let Some(not_before_wall_us) = request.not_before_wall_us {
         if not_before_wall_us >= item.expires_at_wall_us {
@@ -1452,25 +1592,10 @@ fn acknowledge_input(
     }
 
     if item.delivery_state.is_terminal() {
-        let requested_terminal = match request.ack_state {
-            InputAckState::Handled => InputDeliveryState::Handled,
-            InputAckState::Rejected => InputDeliveryState::Rejected,
-            InputAckState::Deferred => InputDeliveryState::Deferred,
-        };
-        if item.delivery_state == requested_terminal {
-            return ProjectionResponse::accepted(
-                &request.envelope.request_id,
-                &request.envelope.projection_id,
-                server_timestamp_wall_us,
-                "terminal acknowledgement replay accepted idempotently",
-            );
-        }
-        return ProjectionResponse::denied(
-            &request.envelope.request_id,
-            &request.envelope.projection_id,
+        return terminal_ack_replay_response(
+            item.delivery_state,
+            request,
             server_timestamp_wall_us,
-            ProjectionErrorCode::ProjectionStateConflict,
-            "conflicting acknowledgement for terminal input",
         );
     }
 
@@ -1566,14 +1691,7 @@ fn verifier_for_secret(secret: &str) -> String {
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in left.as_bytes().iter().zip(right.as_bytes()) {
-        diff |= a ^ b;
-    }
-    diff == 0
+    left.as_bytes().ct_eq(right.as_bytes()).into()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -1590,7 +1708,11 @@ fn bounded_copy(mut value: String, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value;
     }
-    value.truncate(max_bytes);
+    let mut boundary = max_bytes;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
     value
 }
 
@@ -1820,6 +1942,61 @@ mod tests {
     }
 
     #[test]
+    fn logical_unit_id_cache_is_bounded() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_seen_logical_units: 1,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let owner_token = attach(&mut authority, "projection-a");
+
+        let first = authority.handle_publish_output(
+            output_request("projection-a", &owner_token, "req-output-1"),
+            "caller-a",
+            20,
+        );
+        let mut second_request = output_request("projection-a", &owner_token, "req-output-2");
+        second_request.logical_unit_id = Some("unit-2".to_string());
+        let second = authority.handle_publish_output(second_request, "caller-a", 21);
+        let first_again = authority.handle_publish_output(
+            output_request("projection-a", &owner_token, "req-output-3"),
+            "caller-a",
+            22,
+        );
+
+        assert!(first.accepted);
+        assert!(second.accepted);
+        assert!(first_again.accepted);
+        assert!(!first_again.status_summary.contains("idempotently"));
+    }
+
+    #[test]
+    fn audit_log_is_bounded_without_payload_text() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_audit_records: 2,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let owner_token = attach(&mut authority, "projection-a");
+
+        for index in 0..3 {
+            let mut request =
+                output_request("projection-a", &owner_token, &format!("req-output-{index}"));
+            request.output_text = format!("private transcript {index}");
+            let response = authority.handle_publish_output(request, "caller-a", 20 + index);
+            assert!(response.accepted);
+        }
+
+        assert_eq!(authority.audit_log().len(), 2);
+        assert!(
+            authority
+                .audit_log()
+                .iter()
+                .all(|audit| !audit.reason.contains("private transcript"))
+        );
+    }
+
+    #[test]
     fn pending_input_bounds_and_acknowledgement_state_conflicts_are_enforced() {
         let mut authority = ProjectionAuthority::new(ProjectionBounds {
             max_pending_input_items: 1,
@@ -1926,6 +2103,136 @@ mod tests {
             conflict.error_code,
             Some(ProjectionErrorCode::ProjectionStateConflict)
         );
+    }
+
+    #[test]
+    fn terminal_pending_input_is_pruned_without_losing_ack_replay() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_pending_input_items: 1,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let owner_token = attach(&mut authority, "projection-a");
+        authority
+            .enqueue_input(
+                "projection-a",
+                "input-1",
+                "first".to_string(),
+                20,
+                1_000,
+                None,
+            )
+            .unwrap();
+
+        let poll = authority.handle_get_pending_input(
+            GetPendingInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::GetPendingInput,
+                    "projection-a",
+                    "req-poll",
+                ),
+                owner_token: owner_token.clone(),
+                max_items: Some(8),
+                max_bytes: None,
+            },
+            "caller-a",
+            30,
+        );
+        assert!(poll.accepted);
+
+        let handled = authority.handle_acknowledge_input(
+            AcknowledgeInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::AcknowledgeInput,
+                    "projection-a",
+                    "req-ack-1",
+                ),
+                owner_token: owner_token.clone(),
+                input_id: "input-1".to_string(),
+                ack_state: InputAckState::Handled,
+                ack_message: None,
+                not_before_wall_us: None,
+            },
+            "caller-a",
+            31,
+        );
+        assert!(handled.accepted);
+
+        authority
+            .enqueue_input(
+                "projection-a",
+                "input-2",
+                "second".to_string(),
+                32,
+                1_000,
+                None,
+            )
+            .unwrap();
+
+        let replay = authority.handle_acknowledge_input(
+            AcknowledgeInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::AcknowledgeInput,
+                    "projection-a",
+                    "req-ack-2",
+                ),
+                owner_token,
+                input_id: "input-1".to_string(),
+                ack_state: InputAckState::Handled,
+                ack_message: None,
+                not_before_wall_us: None,
+            },
+            "caller-a",
+            33,
+        );
+        assert!(replay.accepted);
+        assert!(replay.status_summary.contains("idempotently"));
+    }
+
+    #[test]
+    fn not_before_is_rejected_for_terminal_acknowledgements() {
+        let mut authority = ProjectionAuthority::default();
+        let owner_token = attach(&mut authority, "projection-a");
+        authority
+            .enqueue_input(
+                "projection-a",
+                "input-1",
+                "first".to_string(),
+                20,
+                1_000,
+                None,
+            )
+            .unwrap();
+
+        let response = authority.handle_acknowledge_input(
+            AcknowledgeInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::AcknowledgeInput,
+                    "projection-a",
+                    "req-ack",
+                ),
+                owner_token,
+                input_id: "input-1".to_string(),
+                ack_state: InputAckState::Handled,
+                ack_message: None,
+                not_before_wall_us: Some(50),
+            },
+            "caller-a",
+            30,
+        );
+
+        assert!(!response.accepted);
+        assert_eq!(
+            response.error_code,
+            Some(ProjectionErrorCode::ProjectionInvalidArgument)
+        );
+    }
+
+    #[test]
+    fn bounded_copy_preserves_utf8_boundaries() {
+        assert_eq!(bounded_copy("hello".to_string(), 10), "hello");
+        assert_eq!(bounded_copy("éclair".to_string(), 1), "");
+        assert_eq!(bounded_copy("aéclair".to_string(), 2), "a");
     }
 
     #[test]
