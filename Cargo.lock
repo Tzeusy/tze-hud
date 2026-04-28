@@ -4057,6 +4057,8 @@ dependencies = [
  "serde_json",
  "subtle",
  "thiserror 2.0.18",
+ "tze_hud_protocol",
+ "uuid",
 ]
 
 [[package]]

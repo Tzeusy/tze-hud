@@ -16,6 +16,12 @@ thiserror = { workspace = true }
 blake3 = { workspace = true }
 getrandom = { workspace = true }
 subtle = { workspace = true }
+tze_hud_protocol = { path = "../tze_hud_protocol", optional = true }
+uuid = { workspace = true, optional = true }
+
+[features]
+default = []
+resident-grpc = ["dep:tze_hud_protocol", "dep:uuid"]
 
 [dev-dependencies]
 proptest = { workspace = true }
