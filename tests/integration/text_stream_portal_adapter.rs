@@ -759,6 +759,79 @@ fn cooperative_projection_adapter_satisfies_text_portal_contract_without_process
     }
 }
 
+#[test]
+fn cooperative_projection_runtime_surface_is_provider_neutral_and_process_agnostic() {
+    for (index, provider_kind) in [
+        ProviderKind::Codex,
+        ProviderKind::Claude,
+        ProviderKind::Opencode,
+        ProviderKind::Other,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let projection_id = format!("projection-provider-{index}");
+        let mut authority = ProjectionAuthority::default();
+        let attach = authority.handle_attach(
+            AttachRequest {
+                envelope: OperationEnvelope {
+                    operation: ProjectionOperation::Attach,
+                    projection_id: projection_id.clone(),
+                    request_id: "attach-provider-neutral".to_string(),
+                    client_timestamp_wall_us: 1,
+                },
+                provider_kind,
+                display_name: format!("Provider-neutral session {index}"),
+                workspace_hint: Some("mayor/rig".to_string()),
+                repository_hint: Some("tze_hud".to_string()),
+                icon_profile_hint: None,
+                content_classification: ContentClassification::Private,
+                hud_target: Some("resident-grpc".to_string()),
+                idempotency_key: Some("provider-neutral-attach".to_string()),
+            },
+            "projection-daemon",
+            10,
+        );
+        assert!(attach.accepted);
+
+        let state = authority
+            .projected_portal_state(&projection_id, &ProjectedPortalPolicy::permit_all())
+            .expect("provider-neutral projection materializes portal state");
+        assert_eq!(
+            state.adapter_family,
+            ProjectedPortalAdapterFamily::CooperativeProjection
+        );
+        assert_eq!(
+            state.runtime_authority,
+            ProjectedPortalRuntimeAuthority::ResidentSessionLease
+        );
+        assert_eq!(state.layer, ProjectedPortalLayer::Content);
+        assert!(state.interaction_enabled);
+
+        let wire = serde_json::to_string(&state)
+            .expect("provider-neutral portal state serializes")
+            .to_ascii_lowercase();
+        for forbidden in [
+            "pty",
+            "tmux",
+            "terminal",
+            "stdin",
+            "stdout",
+            "process_lifecycle",
+            "spawn",
+            "kill",
+            "codex_rpc",
+            "claude_rpc",
+            "opencode_rpc",
+        ] {
+            assert!(
+                !wire.contains(forbidden),
+                "runtime-facing cooperative projection state must not expose {forbidden}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn tmux_pilot_drives_portal_over_existing_primary_session_stream()
 -> Result<(), Box<dyn std::error::Error>> {

@@ -717,6 +717,8 @@ pub struct ReconnectBookkeeping {
     pub last_disconnect_wall_us: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reconnect_wall_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_wall_us: Option<u64>,
 }
 
 /// One retained transcript logical unit. Text is memory-only v1 private state
@@ -1210,6 +1212,33 @@ impl ProjectionAuthority {
         session.advisory_lease = None;
         session.reconnect.last_disconnect_wall_us = Some(disconnected_at_wall_us);
         session.lifecycle_state = ProjectionLifecycleState::HudUnavailable;
+        Ok(())
+    }
+
+    pub fn record_heartbeat(
+        &mut self,
+        projection_id: &str,
+        heartbeat_wall_us: u64,
+    ) -> Result<(), ProjectionErrorCode> {
+        if heartbeat_wall_us == 0 {
+            return Err(ProjectionErrorCode::ProjectionInvalidArgument);
+        }
+        let session = self
+            .sessions
+            .get_mut(projection_id)
+            .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
+        if session.hud_connection.is_none() {
+            return Err(ProjectionErrorCode::ProjectionHudUnavailable);
+        }
+        if session
+            .reconnect
+            .last_heartbeat_wall_us
+            .is_some_and(|last| heartbeat_wall_us < last)
+        {
+            return Err(ProjectionErrorCode::ProjectionStateConflict);
+        }
+        session.reconnect.last_heartbeat_wall_us = Some(heartbeat_wall_us);
+        promote_to_active_if_recovering(session);
         Ok(())
     }
 
@@ -3444,6 +3473,137 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_requires_live_connection_and_is_monotonic() {
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "projection-a");
+
+        assert_eq!(
+            authority.record_heartbeat("projection-a", 25),
+            Err(ProjectionErrorCode::ProjectionHudUnavailable)
+        );
+
+        authority
+            .record_hud_connection("projection-a", connection_metadata(&["create_tiles"]))
+            .unwrap();
+        authority.record_heartbeat("projection-a", 30).unwrap();
+        assert_eq!(
+            authority
+                .state_summary("projection-a")
+                .unwrap()
+                .reconnect
+                .last_heartbeat_wall_us,
+            Some(30)
+        );
+        assert_eq!(
+            authority.record_heartbeat("projection-a", 29),
+            Err(ProjectionErrorCode::ProjectionStateConflict)
+        );
+
+        authority.mark_hud_disconnected("projection-a", 40).unwrap();
+        assert_eq!(
+            authority.record_heartbeat("projection-a", 41),
+            Err(ProjectionErrorCode::ProjectionHudUnavailable)
+        );
+    }
+
+    #[test]
+    fn reconnect_preserves_transcript_inbox_ack_state_and_requires_new_lease() {
+        let mut authority = ProjectionAuthority::default();
+        let owner_token = attach(&mut authority, "projection-a");
+        let mut output = output_request("projection-a", &owner_token, "req-output");
+        output.output_text = "retained across HUD reconnect".to_string();
+        assert!(
+            authority
+                .handle_publish_output(output, "caller-a", 20)
+                .accepted
+        );
+        authority
+            .enqueue_input(
+                "projection-a",
+                "input-1",
+                "operator input survives reconnect".to_string(),
+                21,
+                1_000,
+                None,
+            )
+            .unwrap();
+        let delivered = authority.handle_get_pending_input(
+            GetPendingInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::GetPendingInput,
+                    "projection-a",
+                    "req-poll",
+                ),
+                owner_token: owner_token.clone(),
+                max_items: Some(1),
+                max_bytes: None,
+            },
+            "caller-a",
+            22,
+        );
+        assert!(delivered.accepted);
+        authority
+            .record_hud_connection("projection-a", connection_metadata(&["create_tiles"]))
+            .unwrap();
+        authority
+            .record_advisory_lease("projection-a", advisory_lease(&["create_tiles"], 100), 23)
+            .unwrap();
+
+        authority.mark_hud_disconnected("projection-a", 30).unwrap();
+        let mut reconnected = connection_metadata(&["create_tiles"]);
+        reconnected.connection_id = "connection-after-drop".to_string();
+        reconnected.authenticated_session_id = "runtime-session-after-drop".to_string();
+        reconnected.connected_at_wall_us = 40;
+        reconnected.last_reconnect_wall_us = 40;
+        authority
+            .record_hud_connection("projection-a", reconnected)
+            .unwrap();
+
+        let summary = authority.state_summary("projection-a").unwrap();
+        assert_eq!(summary.retained_transcript_units, 1);
+        assert_eq!(summary.pending_input_count, 1);
+        assert!(!summary.has_advisory_lease);
+        assert_eq!(
+            authority.visible_transcript_window("projection-a").unwrap()[0].output_text,
+            "retained across HUD reconnect"
+        );
+        assert_eq!(
+            authority.authorize_portal_republish(
+                "projection-a",
+                "lease-1",
+                &[String::from("create_tiles")],
+                41
+            ),
+            Err(ProjectionErrorCode::ProjectionUnauthorized)
+        );
+
+        let handled_after_reconnect = authority.handle_acknowledge_input(
+            AcknowledgeInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::AcknowledgeInput,
+                    "projection-a",
+                    "req-ack-after-reconnect",
+                ),
+                owner_token,
+                input_id: "input-1".to_string(),
+                ack_state: InputAckState::Handled,
+                ack_message: None,
+                not_before_wall_us: None,
+            },
+            "caller-a",
+            42,
+        );
+        assert!(handled_after_reconnect.accepted);
+        assert_eq!(
+            authority
+                .state_summary("projection-a")
+                .unwrap()
+                .pending_input_count,
+            0
+        );
+    }
+
+    #[test]
     fn owner_degraded_lifecycle_is_not_overwritten_by_connection_or_output() {
         let mut authority = ProjectionAuthority::default();
         let owner_token = attach(&mut authority, "projection-a");
@@ -3581,6 +3741,73 @@ mod tests {
                 !wire.contains(forbidden),
                 "projected portal state must not expose {forbidden} authority"
             );
+        }
+    }
+
+    #[test]
+    fn provider_kind_does_not_change_projection_semantics() {
+        for (index, provider_kind) in [
+            ProviderKind::Codex,
+            ProviderKind::Claude,
+            ProviderKind::Opencode,
+            ProviderKind::Other,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let projection_id = format!("projection-provider-{index}");
+            let mut authority = ProjectionAuthority::default();
+            let attach = authority.handle_attach(
+                AttachRequest {
+                    provider_kind,
+                    display_name: format!("Provider {index}"),
+                    ..attach_request(&projection_id, "req-attach")
+                },
+                "caller-a",
+                10,
+            );
+            assert!(attach.accepted);
+            let owner_token = attach.owner_token.expect("attach returns owner token");
+
+            assert!(
+                authority
+                    .handle_publish_output(
+                        output_request(&projection_id, &owner_token, "req-output"),
+                        "caller-a",
+                        20,
+                    )
+                    .accepted
+            );
+            let feedback =
+                authority.submit_portal_input(&projection_id, portal_submission("input-1", "ok"));
+            assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
+            let poll = authority.handle_get_pending_input(
+                GetPendingInputRequest {
+                    envelope: envelope(
+                        ProjectionOperation::GetPendingInput,
+                        &projection_id,
+                        "req-poll",
+                    ),
+                    owner_token: owner_token.clone(),
+                    max_items: None,
+                    max_bytes: None,
+                },
+                "caller-a",
+                30,
+            );
+            assert!(poll.accepted);
+            assert_eq!(poll.pending_input.len(), 1);
+            let detached = authority.handle_detach(
+                DetachRequest {
+                    envelope: envelope(ProjectionOperation::Detach, &projection_id, "req-detach"),
+                    owner_token,
+                    reason: "done".to_string(),
+                },
+                "caller-a",
+                40,
+            );
+            assert!(detached.accepted);
+            assert!(!authority.has_projection(&projection_id));
         }
     }
 
@@ -4241,6 +4468,111 @@ mod tests {
                 poll.pending_remaining_count + poll.pending_input.len(),
                 item_count
             );
+        }
+
+        #[test]
+        fn lifecycle_state_machine_never_reuses_stale_connection_or_lease(
+            actions in prop::collection::vec(0u8..6, 1..32),
+        ) {
+            let mut authority = ProjectionAuthority::default();
+            let owner_token = attach(&mut authority, "projection-a");
+            let mut projection_exists = true;
+            let mut has_connection = false;
+            let mut lease_expires_at = None;
+            let mut now = 20u64;
+
+            for action in actions {
+                now += 10;
+                match action {
+                    0 => {
+                        let mut metadata = connection_metadata(&["create_tiles"]);
+                        metadata.connection_id = format!("connection-{now}");
+                        metadata.authenticated_session_id = format!("runtime-session-{now}");
+                        metadata.connected_at_wall_us = now;
+                        metadata.last_reconnect_wall_us = now;
+                        prop_assert_eq!(
+                            authority.record_hud_connection("projection-a", metadata),
+                            Ok(())
+                        );
+                        has_connection = true;
+                        lease_expires_at = None;
+                    }
+                    1 => {
+                        let result = authority.record_heartbeat("projection-a", now);
+                        if has_connection {
+                            prop_assert_eq!(result, Ok(()));
+                        } else {
+                            prop_assert_eq!(result, Err(ProjectionErrorCode::ProjectionHudUnavailable));
+                        }
+                    }
+                    2 => {
+                        let result = authority.record_advisory_lease(
+                            "projection-a",
+                            advisory_lease(&["create_tiles"], now + 100),
+                            now,
+                        );
+                        if has_connection {
+                            prop_assert_eq!(result, Ok(()));
+                            lease_expires_at = Some(now + 100);
+                        } else {
+                            prop_assert_eq!(result, Err(ProjectionErrorCode::ProjectionHudUnavailable));
+                        }
+                    }
+                    3 => {
+                        prop_assert_eq!(
+                            authority.mark_hud_disconnected("projection-a", now),
+                            Ok(())
+                        );
+                        has_connection = false;
+                        lease_expires_at = None;
+                    }
+                    4 => {
+                        let result = authority.authorize_portal_republish(
+                            "projection-a",
+                            "lease-1",
+                            &[String::from("create_tiles")],
+                            now,
+                        );
+                        if has_connection && lease_expires_at.is_some_and(|expires_at| now < expires_at) {
+                            prop_assert_eq!(result, Ok(()));
+                        } else {
+                            prop_assert!(result.is_err());
+                            if has_connection && lease_expires_at.is_some_and(|expires_at| now >= expires_at) {
+                                prop_assert_eq!(result, Err(ProjectionErrorCode::ProjectionTokenExpired));
+                                lease_expires_at = None;
+                            }
+                        }
+                    }
+                    _ => {
+                        let response = authority.handle_detach(
+                            DetachRequest {
+                                envelope: envelope(
+                                    ProjectionOperation::Detach,
+                                    "projection-a",
+                                    "req-detach",
+                                ),
+                                owner_token: owner_token.clone(),
+                                reason: "property lifecycle detach".to_string(),
+                            },
+                            "caller-a",
+                            now,
+                        );
+                        prop_assert!(response.accepted);
+                        projection_exists = false;
+                    }
+                }
+
+                if !projection_exists {
+                    prop_assert!(authority.state_summary("projection-a").is_none());
+                    break;
+                }
+
+                let summary = authority.state_summary("projection-a").unwrap();
+                prop_assert_eq!(summary.has_hud_connection, has_connection);
+                if !has_connection {
+                    prop_assert!(!summary.has_advisory_lease);
+                }
+            }
         }
     }
 }
