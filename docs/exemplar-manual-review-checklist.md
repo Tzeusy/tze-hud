@@ -17,7 +17,7 @@ Reviewed: 2026-04-09
 | 8 | [Gauge Widget](#8-gauge-widget) | **done** | Automation batch + manual visual sign-off completed on 2026-04-09 (ultra-minimal track, hover-only readout/label, tuned spacing/colors) |
 | 9 | [Progress Bar](#9-progress-bar) | **automation-pass** | Step + color-sweep batches passed on 2026-04-09; manual visual sign-off pending |
 | 10 | [Status Indicator](#10-status-indicator) | **automation-pass** | Enum/theme/label/validation batches passed on 2026-04-09; manual visual sign-off pending |
-| 11 | [Text Stream Portals](#11-text-stream-portals) | **live-refinement** | Phase-0 pilot shipped via epic `hud-t98e`; live `/user-test` now covers two-pane portal, scroll subset, header drag, focus, composer editing, paste, deterministic caret smoke, resize/minimize prototypes, and cleanup. Heavy UX improvement passes remain open; do not mark complete yet. |
+| 11 | [Text Stream Portals](#11-text-stream-portals) | **live-refinement** | Phase-0 pilot shipped via epic `hud-t98e`; live `/user-test` now covers two-pane portal, scroll subset, header drag, focus, composer editing, paste, deterministic caret smoke, resize/minimize prototypes, and cleanup. `hud-0ojis` signed off focused caret/Space behavior on 2026-04-29; heavier UX improvement passes remain open. |
 
 ---
 

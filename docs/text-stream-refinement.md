@@ -1,9 +1,9 @@
 # Text Stream Portal — UX Refinement Handover
 
-Date: 2026-04-27 (update; originally opened 2026-04-18)
-Status: **live interactive refinement landed; final operator polish still active.**
+Date: 2026-04-29 (update; originally opened 2026-04-18)
+Status: **live interactive refinement landed; caret/Space polish signed off; broader operator polish still active.**
 
-## Current state (2026-04-27)
+## Current state (2026-04-29)
 
 The text stream portal exemplar is no longer a static two-pane render. It now
 exercises the Phase-0 portal as a live, content-layer interaction surface over
@@ -22,9 +22,10 @@ no terminal emulator, no PTY semantics, and no runtime-owned external process.
 The exemplar remains a resident raw-tile composition driven by an authenticated
 agent session.
 
-**Open polish at handoff:** live operator feedback is still tuning caret
-geometry at long line ends and validating that Space/focus behavior is stable
-after the latest input-path simplification.
+**Latest sign-off:** `hud-0ojis` closed the focused composer caret and Space
+input polish with deterministic tests plus the portal `--self-test` path. The
+sign-off report is
+`docs/reports/hud-0ojis-text-stream-portal-caret-space-signoff-20260429.md`.
 
 ### What now lives in the repo
 
@@ -127,20 +128,15 @@ pixel_readback --features "headless dev-mode" -- test_color_14 test_color_17`
   is not wired — moving the handle still needs code that consumes the
   captured drag and adjusts `INPUT_PANE_W` at runtime. File a bead when the
   engine redeploy confirms pointer capture is landing.
-- **Caret fidelity at line ends**: current live feedback says caret row is
-  mostly corrected after markdown paste, but x-position can lag by roughly one
-  character near the right edge. The script currently uses separate wrap and
-  caret advance constants plus wrap slack to avoid glyphon adding hidden rows.
-  Further tuning should happen against live paste samples.
-- **Space/focus validation**: the latest patch makes printable characters
-  character-event-only and leaves key-down fallback only for Space. Operator
-  should re-test `hello world` and paste/edit sequences before marking input
-  complete.
+- **Full operator input pass**: `hud-0ojis` signed off deterministic caret
+  advance and Space fallback behavior. A future operator pass can still use the
+  `composer-smoke` phase to visually confirm the latest render on the Windows
+  HUD alongside the remaining drag/resize/minimize polish.
 - **Drag persistence**: header drag repositions the live portal, but position
   persistence across sessions is not implemented.
-- **`docs/exemplar-manual-review-checklist.md` row 11** — still needs the
-  final UX-tweak sign-off row entered once a human confirms the two-pane
-  render on the live HUD.
+- **`docs/exemplar-manual-review-checklist.md` row 11** — records the focused
+  caret/Space sign-off, but still tracks the broader Text Stream Portal visual
+  review as `live-refinement`.
 - **`.claude/skills/user-test/SKILL.md`** — now documents the unified
   `text_stream_portal_exemplar.py` CLI and phase table. Keep it in sync as
   the portal phases evolve.
