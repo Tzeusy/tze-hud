@@ -28,7 +28,7 @@ Primary implementation landed in `crates/tze_hud_projection`, with packaging in 
 | [#618](https://github.com/Tzeusy/tze-hud/pull/618) | [`c80def5`](https://github.com/Tzeusy/tze-hud/commit/c80def50c1af76ec582715d0f5eb0a23951de4f8) | Merged | Packaged `/hud-projection` skill instructions, examples, MCP facade notes, and mirrored tool skill surfaces. |
 | [#619](https://github.com/Tzeusy/tze-hud/pull/619) | [`e0dc3e7`](https://github.com/Tzeusy/tze-hud/commit/e0dc3e79355c0dadecfa17b120b64eb31d856e00) | Merged | Built projection authority daemon semantics: retained state, inbox, lifecycle, audit, reconnect, cleanup, bounds, and authorization behavior. |
 | [#620](https://github.com/Tzeusy/tze-hud/pull/620) | [`40a2e27`](https://github.com/Tzeusy/tze-hud/commit/40a2e273c1fcd2e7883fc27f939d163d12fb546c) | Merged | Wired projected sessions to text-stream portal state and added provider-neutral adapter integration coverage. |
-| [#621](https://github.com/Tzeusy/tze-hud/pull/621) | [`92926d2`](https://github.com/Tzeusy/tze-hud/commit/92926d217981b15acf2043c6bc5b44c5c2068432) | Merged | Supplied in the PR range, but not part of this epic; it is an Android GStreamer public-SDK audit. |
+| [#621](https://github.com/Tzeusy/tze-hud/pull/621) | [`92926d2`](https://github.com/Tzeusy/tze-hud/commit/92926d217981b15acf2043c6bc5b44c5c2068432) | Merged | Supplied in the PR range, but not part of this epic; it is an Android GStreamer NDK media public SDK audit. |
 | [#622](https://github.com/Tzeusy/tze-hud/pull/622) | [`4794b32`](https://github.com/Tzeusy/tze-hud/commit/4794b324fb704dc6a250cf45489ce115a564853a) | Merged | Added local/unit and headless integration validation plus the validation evidence document. |
 
 ## Cooperative HUD Projection Matrix
@@ -77,7 +77,7 @@ The final recorded results were `cargo fmt --check` passing, `cargo test -p tze_
 | External daemon packaging versus runtime MCP | Watch | Projection MCP operations must remain served by the external projection authority, not runtime v1 MCP. |
 | Memory-only v1 state | Accepted v1 constraint | Future durable projection state needs a separate encrypted-store contract before implementation. |
 | Task checkbox drift | Administrative | `tasks.md` has unchecked implementation and validation items even where merged PRs and validation evidence show completion. Use this report plus evidence as the closure signal, then normalize tasks only if the coordinator wants the ledger edited before archive. |
-| PR #621 in supplied range | Not epic evidence | It is unrelated Android documentation work and should not be used to support `hud-ggntn` requirement coverage. |
+| PR #621 in supplied range | Not epic evidence | It is an unrelated Android GStreamer NDK media public SDK audit and should not be used to support `hud-ggntn` requirement coverage. |
 
 ## OpenSpec Sync And Archive Readiness
 
