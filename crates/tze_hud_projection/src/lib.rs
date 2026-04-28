@@ -52,6 +52,8 @@ const MAX_HINT_BYTES: usize = 256;
 const MAX_STATUS_SUMMARY_BYTES: usize = 512;
 const MAX_REASON_BYTES: usize = 512;
 const MAX_ACK_MESSAGE_BYTES: usize = 512;
+const MAX_PORTAL_ID_BYTES: usize = 192;
+const DEFAULT_PORTAL_INPUT_TTL_WALL_US: u64 = 10 * 60 * 1_000_000;
 
 /// Stable append-only projection error codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -206,6 +208,51 @@ impl InputDeliveryState {
 pub enum CleanupAuthority {
     Owner,
     Operator,
+}
+
+/// Cooperative projected-session adapter family. The v1 projection path is a
+/// text-stream portal adapter, not a PTY or terminal-capture adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectedPortalAdapterFamily {
+    CooperativeProjection,
+}
+
+/// Runtime authority used to publish projected portal mutations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectedPortalRuntimeAuthority {
+    ResidentSessionLease,
+}
+
+/// Projected portals render as content-layer territory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectedPortalLayer {
+    Content,
+}
+
+/// Expanded or collapsed projected-portal presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectedPortalPresentation {
+    Expanded,
+    Collapsed,
+}
+
+/// Ambient attention state exposed by projected portals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectedPortalAttention {
+    Ambient,
+}
+
+/// Local-first HUD composer feedback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortalInputFeedbackState {
+    Accepted,
+    Rejected,
 }
 
 /// Audit category. Owner cleanup and operator cleanup are intentionally
@@ -555,6 +602,46 @@ pub struct PendingInputItem {
     pub content_classification: ContentClassification,
 }
 
+/// HUD-originated text submitted from an expanded projected portal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortalInputSubmission {
+    pub input_id: String,
+    pub submission_text: String,
+    pub submitted_at_wall_us: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_wall_us: Option<u64>,
+    #[serde(default)]
+    pub content_classification: ContentClassification,
+}
+
+impl PortalInputSubmission {
+    fn effective_expires_at_wall_us(&self) -> Result<u64, ProjectionErrorCode> {
+        if self.submitted_at_wall_us == 0 {
+            return Err(ProjectionErrorCode::ProjectionInvalidArgument);
+        }
+        let expires_at_wall_us = self
+            .expires_at_wall_us
+            .unwrap_or(self.submitted_at_wall_us + DEFAULT_PORTAL_INPUT_TTL_WALL_US);
+        if expires_at_wall_us <= self.submitted_at_wall_us {
+            return Err(ProjectionErrorCode::ProjectionInvalidArgument);
+        }
+        Ok(expires_at_wall_us)
+    }
+}
+
+/// Bounded local feedback returned after a HUD composer submission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortalInputFeedback {
+    pub projection_id: String,
+    pub input_id: String,
+    pub feedback_state: PortalInputFeedbackState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<ProjectionErrorCode>,
+    pub pending_input_count: usize,
+    pub pending_input_bytes: usize,
+    pub status_summary: String,
+}
+
 /// Runtime session metadata retained by the projection authority while a HUD
 /// connection is live. Lease use is authorized against these grants, not
 /// against cached lease identity alone.
@@ -785,6 +872,101 @@ pub struct ProjectionIdentitySummary {
     pub lifecycle_state: ProjectionLifecycleState,
 }
 
+/// Viewer and runtime policy applied while materializing projected portal
+/// state. Defaults fail closed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectedPortalPolicy {
+    pub viewer_clearance: ContentClassification,
+    pub reveal_identity: bool,
+    pub reveal_lifecycle: bool,
+    pub reveal_transcript: bool,
+    pub reveal_unread: bool,
+    pub reveal_pending_input: bool,
+    pub allow_input: bool,
+    pub safe_mode_active: bool,
+    pub frozen: bool,
+    pub dismissed: bool,
+}
+
+impl ProjectedPortalPolicy {
+    /// Policy fixture that permits all private projected-session fields.
+    pub fn permit_all() -> Self {
+        Self {
+            viewer_clearance: ContentClassification::Sensitive,
+            reveal_identity: true,
+            reveal_lifecycle: true,
+            reveal_transcript: true,
+            reveal_unread: true,
+            reveal_pending_input: true,
+            allow_input: true,
+            safe_mode_active: false,
+            frozen: false,
+            dismissed: false,
+        }
+    }
+
+    fn permits(&self, classification: ContentClassification) -> bool {
+        classification <= self.viewer_clearance
+    }
+}
+
+impl Default for ProjectedPortalPolicy {
+    fn default() -> Self {
+        Self {
+            viewer_clearance: ContentClassification::Public,
+            reveal_identity: false,
+            reveal_lifecycle: false,
+            reveal_transcript: false,
+            reveal_unread: false,
+            reveal_pending_input: false,
+            allow_input: false,
+            safe_mode_active: false,
+            frozen: false,
+            dismissed: false,
+        }
+    }
+}
+
+/// Bounded state for resident-session text-stream portal materialization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectedPortalState {
+    pub projection_id: String,
+    pub portal_id: String,
+    pub adapter_family: ProjectedPortalAdapterFamily,
+    pub runtime_authority: ProjectedPortalRuntimeAuthority,
+    pub layer: ProjectedPortalLayer,
+    pub presentation: ProjectedPortalPresentation,
+    pub preserve_geometry: bool,
+    pub redacted: bool,
+    pub interaction_enabled: bool,
+    pub attention: ProjectedPortalAttention,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<ProviderKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_profile_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<ProjectionLifecycleState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<String>,
+    #[serde(default)]
+    pub visible_transcript: Vec<TranscriptUnit>,
+    pub visible_transcript_bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_output_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_input_feedback: Option<PortalInputFeedback>,
+}
+
 /// Errors raised by schema validation or token generation.
 #[derive(Debug, Error)]
 pub enum ProjectionContractError {
@@ -808,11 +990,18 @@ impl ProjectionContractError {
 
 #[derive(Clone, Debug)]
 struct ProjectionSession {
+    projection_id: String,
     provider_kind: ProviderKind,
     display_name: String,
+    workspace_hint: Option<String>,
+    repository_hint: Option<String>,
+    icon_profile_hint: Option<String>,
+    portal_id: String,
+    portal_presentation: ProjectedPortalPresentation,
     owner_token_verifier: String,
     owner_token_expires_at_wall_us: u64,
     lifecycle_state: ProjectionLifecycleState,
+    latest_status_text: Option<String>,
     content_classification: ContentClassification,
     attach_idempotency_key: Option<String>,
     hud_connection: Option<HudConnectionMetadata>,
@@ -832,6 +1021,7 @@ struct ProjectionSession {
     completed_input_ack_order: VecDeque<String>,
     pending_input: VecDeque<PendingInputItem>,
     pending_input_bytes: usize,
+    last_input_feedback: Option<PortalInputFeedback>,
     portal_update_pending: bool,
 }
 
@@ -931,6 +1121,45 @@ impl ProjectionAuthority {
         self.sessions.get(projection_id).map(|session| {
             visible_transcript_window(session, self.bounds.max_visible_transcript_bytes)
         })
+    }
+
+    /// Materialize the bounded text-stream portal state for a projected
+    /// session. This returns data for an external daemon/resident-session
+    /// adapter; it does not expose runtime scene state or process authority.
+    pub fn projected_portal_state(
+        &self,
+        projection_id: &str,
+        policy: &ProjectedPortalPolicy,
+    ) -> Option<ProjectedPortalState> {
+        self.sessions.get(projection_id).map(|session| {
+            projected_portal_state(session, policy, self.bounds.max_visible_transcript_bytes)
+        })
+    }
+
+    /// Collapse a projected portal into its compact content-layer surface.
+    pub fn collapse_projected_portal(
+        &mut self,
+        projection_id: &str,
+    ) -> Result<(), ProjectionErrorCode> {
+        let session = self
+            .sessions
+            .get_mut(projection_id)
+            .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
+        session.portal_presentation = ProjectedPortalPresentation::Collapsed;
+        Ok(())
+    }
+
+    /// Expand a projected portal back to its transcript/composer surface.
+    pub fn expand_projected_portal(
+        &mut self,
+        projection_id: &str,
+    ) -> Result<(), ProjectionErrorCode> {
+        let session = self
+            .sessions
+            .get_mut(projection_id)
+            .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
+        session.portal_presentation = ProjectedPortalPresentation::Expanded;
+        Ok(())
     }
 
     pub fn record_hud_connection(
@@ -1190,12 +1419,19 @@ impl ProjectionAuthority {
         self.sessions.insert(
             request.envelope.projection_id.clone(),
             ProjectionSession {
+                projection_id: request.envelope.projection_id.clone(),
                 provider_kind: request.provider_kind,
                 display_name: request.display_name,
+                workspace_hint: request.workspace_hint,
+                repository_hint: request.repository_hint,
+                icon_profile_hint: request.icon_profile_hint,
+                portal_id: portal_id_for_projection(&request.envelope.projection_id),
+                portal_presentation: ProjectedPortalPresentation::Expanded,
                 owner_token_verifier,
                 owner_token_expires_at_wall_us: server_timestamp_wall_us
                     + self.bounds.owner_token_ttl_wall_us,
                 lifecycle_state: ProjectionLifecycleState::Attached,
+                latest_status_text: None,
                 content_classification: request.content_classification,
                 attach_idempotency_key: request.idempotency_key,
                 hud_connection: None,
@@ -1215,6 +1451,7 @@ impl ProjectionAuthority {
                 completed_input_ack_order: VecDeque::new(),
                 pending_input: VecDeque::new(),
                 pending_input_bytes: 0,
+                last_input_feedback: None,
                 portal_update_pending: false,
             },
         );
@@ -1365,6 +1602,7 @@ impl ProjectionAuthority {
         ) {
             Ok(session) => {
                 session.lifecycle_state = request.lifecycle_state;
+                session.latest_status_text = request.status_text;
                 let mut response = ProjectionResponse::accepted(
                     &request.envelope.request_id,
                     &request.envelope.projection_id,
@@ -1405,24 +1643,7 @@ impl ProjectionAuthority {
         expires_at_wall_us: u64,
         content_classification: Option<ContentClassification>,
     ) -> Result<(), ProjectionErrorCode> {
-        let session = self
-            .sessions
-            .get_mut(projection_id)
-            .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
-        prune_terminal_pending_input(session, self.bounds.max_pending_input_items);
-        if submission_text.len() > self.bounds.max_pending_input_bytes_per_item {
-            return Err(ProjectionErrorCode::ProjectionInputTooLarge);
-        }
-        if session.pending_input.len() >= self.bounds.max_pending_input_items {
-            return Err(ProjectionErrorCode::ProjectionInputQueueFull);
-        }
-        if session.pending_input_bytes + submission_text.len()
-            > self.bounds.max_pending_input_total_bytes
-        {
-            return Err(ProjectionErrorCode::ProjectionInputQueueFull);
-        }
-        session.pending_input_bytes += submission_text.len();
-        session.pending_input.push_back(PendingInputItem {
+        let item = PendingInputItem {
             input_id: input_id.to_string(),
             projection_id: projection_id.to_string(),
             submission_text,
@@ -1432,7 +1653,100 @@ impl ProjectionAuthority {
             delivered_at_wall_us: None,
             not_before_wall_us: None,
             content_classification: content_classification.unwrap_or_default(),
-        });
+        };
+        self.enqueue_input_item(projection_id, item)
+    }
+
+    /// Submit HUD composer text into the cooperative pending-input inbox and
+    /// return bounded local-first feedback for the portal surface.
+    pub fn submit_portal_input(
+        &mut self,
+        projection_id: &str,
+        submission: PortalInputSubmission,
+    ) -> PortalInputFeedback {
+        let input_id = submission.input_id.clone();
+        let result = match submission.effective_expires_at_wall_us() {
+            Ok(expires_at_wall_us) => self.enqueue_input_item(
+                projection_id,
+                PendingInputItem {
+                    input_id: submission.input_id,
+                    projection_id: projection_id.to_string(),
+                    submission_text: submission.submission_text,
+                    submitted_at_wall_us: submission.submitted_at_wall_us,
+                    expires_at_wall_us,
+                    delivery_state: InputDeliveryState::Pending,
+                    delivered_at_wall_us: None,
+                    not_before_wall_us: None,
+                    content_classification: submission.content_classification,
+                },
+            ),
+            Err(code) => Err(code),
+        };
+
+        let (pending_input_count, pending_input_bytes) = self
+            .state_summary(projection_id)
+            .map(|summary| (summary.pending_input_count, summary.pending_input_bytes))
+            .unwrap_or_default();
+        let feedback = match result {
+            Ok(()) => PortalInputFeedback {
+                projection_id: projection_id.to_string(),
+                input_id,
+                feedback_state: PortalInputFeedbackState::Accepted,
+                error_code: None,
+                pending_input_count,
+                pending_input_bytes,
+                status_summary: "portal input accepted".to_string(),
+            },
+            Err(code) => PortalInputFeedback {
+                projection_id: projection_id.to_string(),
+                input_id,
+                feedback_state: PortalInputFeedbackState::Rejected,
+                error_code: Some(code),
+                pending_input_count,
+                pending_input_bytes,
+                status_summary: format!("{code}: portal input rejected"),
+            },
+        };
+        if let Some(session) = self.sessions.get_mut(projection_id) {
+            session.last_input_feedback = Some(feedback.clone());
+        }
+        feedback
+    }
+
+    fn enqueue_input_item(
+        &mut self,
+        projection_id: &str,
+        item: PendingInputItem,
+    ) -> Result<(), ProjectionErrorCode> {
+        let session = self
+            .sessions
+            .get_mut(projection_id)
+            .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
+        validate_pending_input_item(&item, &self.bounds)?;
+        prune_terminal_pending_input(session, self.bounds.max_pending_input_items);
+        if session
+            .pending_input
+            .iter()
+            .any(|pending| pending.input_id == item.input_id)
+            || session
+                .completed_input_ack_states
+                .contains_key(&item.input_id)
+        {
+            return Err(ProjectionErrorCode::ProjectionStateConflict);
+        }
+        if item.submission_text.len() > self.bounds.max_pending_input_bytes_per_item {
+            return Err(ProjectionErrorCode::ProjectionInputTooLarge);
+        }
+        if session.pending_input.len() >= self.bounds.max_pending_input_items {
+            return Err(ProjectionErrorCode::ProjectionInputQueueFull);
+        }
+        if session.pending_input_bytes + item.submission_text.len()
+            > self.bounds.max_pending_input_total_bytes
+        {
+            return Err(ProjectionErrorCode::ProjectionInputQueueFull);
+        }
+        session.pending_input_bytes += item.submission_text.len();
+        session.pending_input.push_back(item);
         Ok(())
     }
 
@@ -1823,6 +2137,126 @@ impl Default for ProjectionAuthority {
     fn default() -> Self {
         Self::new(ProjectionBounds::default()).expect("default projection bounds are valid")
     }
+}
+
+fn projected_portal_state(
+    session: &ProjectionSession,
+    policy: &ProjectedPortalPolicy,
+    max_visible_transcript_bytes: usize,
+) -> ProjectedPortalState {
+    let projection_visible = policy.permits(session.content_classification);
+    let expanded = session.portal_presentation == ProjectedPortalPresentation::Expanded;
+    let identity_visible = projection_visible && policy.reveal_identity;
+    let lifecycle_visible = projection_visible && policy.reveal_lifecycle;
+    let transcript_visible = expanded && projection_visible && policy.reveal_transcript;
+    let unread_visible = projection_visible && policy.reveal_unread;
+    let pending_visible = projection_visible && policy.reveal_pending_input;
+    let redacted = !identity_visible || !lifecycle_visible || (expanded && !transcript_visible);
+    let interaction_enabled = session.portal_presentation == ProjectedPortalPresentation::Expanded
+        && projection_visible
+        && policy.allow_input
+        && !redacted
+        && !policy.safe_mode_active
+        && !policy.frozen
+        && !policy.dismissed;
+    let visible_transcript: Vec<TranscriptUnit> = if transcript_visible {
+        visible_transcript_window(session, max_visible_transcript_bytes)
+            .into_iter()
+            .filter(|unit| policy.permits(unit.content_classification))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let visible_transcript_bytes = visible_transcript
+        .iter()
+        .map(TranscriptUnit::byte_len)
+        .sum();
+    let pending_input_count = session
+        .pending_input
+        .iter()
+        .filter(|item| !item.delivery_state.is_terminal())
+        .count();
+
+    ProjectedPortalState {
+        projection_id: session.projection_id.clone(),
+        portal_id: session.portal_id.clone(),
+        adapter_family: ProjectedPortalAdapterFamily::CooperativeProjection,
+        runtime_authority: ProjectedPortalRuntimeAuthority::ResidentSessionLease,
+        layer: ProjectedPortalLayer::Content,
+        presentation: session.portal_presentation,
+        preserve_geometry: true,
+        redacted,
+        interaction_enabled,
+        attention: ProjectedPortalAttention::Ambient,
+        provider_kind: identity_visible.then(|| session.provider_kind.clone()),
+        display_name: identity_visible.then(|| session.display_name.clone()),
+        workspace_hint: identity_visible
+            .then(|| session.workspace_hint.clone())
+            .flatten(),
+        repository_hint: identity_visible
+            .then(|| session.repository_hint.clone())
+            .flatten(),
+        icon_profile_hint: identity_visible
+            .then(|| session.icon_profile_hint.clone())
+            .flatten(),
+        lifecycle_state: lifecycle_visible.then_some(session.lifecycle_state),
+        status_text: lifecycle_visible
+            .then(|| session.latest_status_text.clone())
+            .flatten(),
+        visible_transcript,
+        visible_transcript_bytes,
+        unread_output_count: unread_visible.then_some(session.unread_output_count),
+        pending_input_count: pending_visible.then_some(pending_input_count),
+        pending_input_bytes: pending_visible.then_some(session.pending_input_bytes),
+        last_input_feedback: session
+            .last_input_feedback
+            .as_ref()
+            .and_then(|feedback| pending_visible.then(|| redacted_feedback(feedback))),
+    }
+}
+
+fn redacted_feedback(feedback: &PortalInputFeedback) -> PortalInputFeedback {
+    PortalInputFeedback {
+        projection_id: feedback.projection_id.clone(),
+        input_id: String::new(),
+        feedback_state: feedback.feedback_state,
+        error_code: feedback.error_code,
+        pending_input_count: feedback.pending_input_count,
+        pending_input_bytes: feedback.pending_input_bytes,
+        status_summary: feedback.status_summary.clone(),
+    }
+}
+
+fn portal_id_for_projection(projection_id: &str) -> String {
+    let prefix = "text-stream://projection/";
+    let mut portal_id = String::with_capacity(prefix.len() + projection_id.len());
+    portal_id.push_str(prefix);
+    portal_id.push_str(projection_id);
+    bounded_copy(portal_id, MAX_PORTAL_ID_BYTES)
+}
+
+fn validate_pending_input_item(
+    item: &PendingInputItem,
+    bounds: &ProjectionBounds,
+) -> Result<(), ProjectionErrorCode> {
+    validate_non_empty_bounded("input_id", &item.input_id, MAX_REQUEST_ID_BYTES)
+        .map_err(|error| error.code())?;
+    validate_non_empty_bounded(
+        "projection_id",
+        &item.projection_id,
+        MAX_PROJECTION_ID_BYTES,
+    )
+    .map_err(|error| error.code())?;
+    if item.submitted_at_wall_us == 0
+        || item.expires_at_wall_us == 0
+        || item.submitted_at_wall_us >= item.expires_at_wall_us
+    {
+        return Err(ProjectionErrorCode::ProjectionInvalidArgument);
+    }
+    if item.submission_text.len() > bounds.max_pending_input_bytes_per_item {
+        return Err(ProjectionErrorCode::ProjectionInputTooLarge);
+    }
+    Ok(())
 }
 
 fn append_transcript_unit(
@@ -2333,6 +2767,16 @@ mod tests {
         }
     }
 
+    fn portal_submission(input_id: &str, text: &str) -> PortalInputSubmission {
+        PortalInputSubmission {
+            input_id: input_id.to_string(),
+            submission_text: text.to_string(),
+            submitted_at_wall_us: 30,
+            expires_at_wall_us: Some(1_000),
+            content_classification: ContentClassification::Private,
+        }
+    }
+
     #[test]
     fn schema_uses_required_wall_clock_and_owner_token_fields() {
         let attach_json = serde_json::to_value(attach_request("projection-a", "req-a")).unwrap();
@@ -2373,6 +2817,55 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ProjectionErrorCode::ProjectionUnauthorized).unwrap(),
             "\"PROJECTION_UNAUTHORIZED\""
+        );
+    }
+
+    #[test]
+    fn attach_materializes_content_layer_projected_portal_and_reuses_idempotently() {
+        let mut authority = ProjectionAuthority::default();
+        let first =
+            authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+        assert!(first.accepted);
+
+        let state = authority
+            .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+            .expect("attach creates portal state");
+        assert_eq!(
+            state.adapter_family,
+            ProjectedPortalAdapterFamily::CooperativeProjection
+        );
+        assert_eq!(
+            state.runtime_authority,
+            ProjectedPortalRuntimeAuthority::ResidentSessionLease
+        );
+        assert_eq!(state.layer, ProjectedPortalLayer::Content);
+        assert_eq!(state.presentation, ProjectedPortalPresentation::Expanded);
+        assert_eq!(state.display_name.as_deref(), Some("Codex Session"));
+        assert_eq!(state.workspace_hint.as_deref(), Some("mayor/rig"));
+        assert!(state.interaction_enabled);
+
+        authority.collapse_projected_portal("projection-a").unwrap();
+        let collapsed = authority
+            .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+            .expect("collapsed portal state remains materializable");
+        assert_eq!(collapsed.portal_id, state.portal_id);
+        assert_eq!(
+            collapsed.presentation,
+            ProjectedPortalPresentation::Collapsed
+        );
+        assert!(collapsed.visible_transcript.is_empty());
+        assert!(!collapsed.interaction_enabled);
+
+        let replay =
+            authority.handle_attach(attach_request("projection-a", "req-b"), "caller-a", 11);
+        assert!(replay.accepted);
+        assert!(replay.owner_token.is_none());
+        assert_eq!(
+            authority
+                .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+                .unwrap()
+                .portal_id,
+            state.portal_id
         );
     }
 
@@ -2556,6 +3049,72 @@ mod tests {
     }
 
     #[test]
+    fn portal_composer_submission_is_transactional_bounded_inbox_feedback() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_pending_input_items: 1,
+            max_pending_input_bytes_per_item: 4,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let owner_token = attach(&mut authority, "projection-a");
+
+        let oversized = authority.submit_portal_input(
+            "projection-a",
+            portal_submission("input-too-large", "12345"),
+        );
+        assert_eq!(oversized.feedback_state, PortalInputFeedbackState::Rejected);
+        assert_eq!(
+            oversized.error_code,
+            Some(ProjectionErrorCode::ProjectionInputTooLarge)
+        );
+        assert_eq!(oversized.pending_input_count, 0);
+
+        let accepted =
+            authority.submit_portal_input("projection-a", portal_submission("input-1", "ok"));
+        assert_eq!(accepted.feedback_state, PortalInputFeedbackState::Accepted);
+        assert_eq!(accepted.pending_input_count, 1);
+        assert_eq!(accepted.pending_input_bytes, 2);
+
+        let full =
+            authority.submit_portal_input("projection-a", portal_submission("input-2", "yo"));
+        assert_eq!(full.feedback_state, PortalInputFeedbackState::Rejected);
+        assert_eq!(
+            full.error_code,
+            Some(ProjectionErrorCode::ProjectionInputQueueFull)
+        );
+        assert_eq!(full.pending_input_count, 1);
+
+        let state = authority
+            .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+            .expect("portal state includes pending feedback");
+        assert_eq!(state.pending_input_count, Some(1));
+        assert_eq!(state.pending_input_bytes, Some(2));
+        assert_eq!(
+            state.last_input_feedback.as_ref().map(|f| f.feedback_state),
+            Some(PortalInputFeedbackState::Rejected)
+        );
+
+        let poll = authority.handle_get_pending_input(
+            GetPendingInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::GetPendingInput,
+                    "projection-a",
+                    "req-poll",
+                ),
+                owner_token,
+                max_items: None,
+                max_bytes: None,
+            },
+            "caller-a",
+            40,
+        );
+        assert!(poll.accepted);
+        assert_eq!(poll.pending_input.len(), 1);
+        assert_eq!(poll.pending_input[0].input_id, "input-1");
+        assert_eq!(poll.pending_input[0].submission_text, "ok");
+    }
+
+    #[test]
     fn default_bounds_match_projection_spec_values() {
         let bounds = ProjectionBounds::default();
         assert_eq!(
@@ -2591,6 +3150,44 @@ mod tests {
         assert_eq!(
             bounds.max_portal_updates_per_second,
             DEFAULT_MAX_PORTAL_UPDATES_PER_SECOND
+        );
+    }
+
+    #[test]
+    fn collapsed_redacted_projection_preserves_geometry_and_suppresses_private_affordances() {
+        let mut authority = ProjectionAuthority::default();
+        let owner_token = attach(&mut authority, "projection-a");
+        let mut output = output_request("projection-a", &owner_token, "req-output");
+        output.output_text = "private projected transcript".to_string();
+        assert!(
+            authority
+                .handle_publish_output(output, "caller-a", 20)
+                .accepted
+        );
+        let feedback =
+            authority.submit_portal_input("projection-a", portal_submission("input-1", "help"));
+        assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
+        authority.collapse_projected_portal("projection-a").unwrap();
+
+        let state = authority
+            .projected_portal_state("projection-a", &ProjectedPortalPolicy::default())
+            .expect("redacted portal still materializes");
+        assert_eq!(state.presentation, ProjectedPortalPresentation::Collapsed);
+        assert!(state.preserve_geometry);
+        assert!(state.redacted);
+        assert!(!state.interaction_enabled);
+        assert_eq!(state.layer, ProjectedPortalLayer::Content);
+        assert!(state.provider_kind.is_none());
+        assert!(state.display_name.is_none());
+        assert!(state.workspace_hint.is_none());
+        assert!(state.lifecycle_state.is_none());
+        assert!(state.visible_transcript.is_empty());
+        assert_eq!(state.unread_output_count, None);
+        assert_eq!(state.pending_input_count, None);
+        assert!(
+            !serde_json::to_string(&state)
+                .unwrap()
+                .contains("private projected transcript")
         );
     }
 
@@ -2852,6 +3449,101 @@ mod tests {
                 .lifecycle_state,
             ProjectionLifecycleState::Degraded
         );
+    }
+
+    #[test]
+    fn acknowledgement_and_detach_cleanup_update_projected_portal_state() {
+        let mut authority = ProjectionAuthority::default();
+        let owner_token = attach(&mut authority, "projection-a");
+        let accepted =
+            authority.submit_portal_input("projection-a", portal_submission("input-1", "ok"));
+        assert_eq!(accepted.feedback_state, PortalInputFeedbackState::Accepted);
+        assert_eq!(
+            authority
+                .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+                .unwrap()
+                .pending_input_count,
+            Some(1)
+        );
+
+        let poll = authority.handle_get_pending_input(
+            GetPendingInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::GetPendingInput,
+                    "projection-a",
+                    "req-poll",
+                ),
+                owner_token: owner_token.clone(),
+                max_items: None,
+                max_bytes: None,
+            },
+            "caller-a",
+            40,
+        );
+        assert!(poll.accepted);
+        let handled = authority.handle_acknowledge_input(
+            AcknowledgeInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::AcknowledgeInput,
+                    "projection-a",
+                    "req-ack",
+                ),
+                owner_token: owner_token.clone(),
+                input_id: "input-1".to_string(),
+                ack_state: InputAckState::Handled,
+                ack_message: None,
+                not_before_wall_us: None,
+            },
+            "caller-a",
+            41,
+        );
+        assert!(handled.accepted);
+        let state = authority
+            .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+            .unwrap();
+        assert_eq!(state.pending_input_count, Some(0));
+        assert_eq!(state.pending_input_bytes, Some(0));
+
+        let detached = authority.handle_detach(
+            DetachRequest {
+                envelope: envelope(ProjectionOperation::Detach, "projection-a", "req-detach"),
+                owner_token,
+                reason: "session complete".to_string(),
+            },
+            "caller-a",
+            42,
+        );
+        assert!(detached.accepted);
+        assert!(
+            authority
+                .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn projected_portal_contract_has_no_terminal_or_process_authority() {
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "projection-a");
+        let state = authority
+            .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+            .expect("portal state exists");
+
+        assert_eq!(
+            state.adapter_family,
+            ProjectedPortalAdapterFamily::CooperativeProjection
+        );
+        assert_eq!(
+            state.runtime_authority,
+            ProjectedPortalRuntimeAuthority::ResidentSessionLease
+        );
+        let wire = serde_json::to_string(&state).unwrap();
+        for forbidden in ["pty", "tmux", "terminal", "stdin", "process"] {
+            assert!(
+                !wire.contains(forbidden),
+                "projected portal state must not expose {forbidden} authority"
+            );
+        }
     }
 
     #[test]

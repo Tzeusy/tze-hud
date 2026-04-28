@@ -1504,6 +1504,7 @@ dependencies = [
  "tonic",
  "tze_hud_compositor",
  "tze_hud_input",
+ "tze_hud_projection",
  "tze_hud_protocol",
  "tze_hud_resource",
  "tze_hud_runtime",
