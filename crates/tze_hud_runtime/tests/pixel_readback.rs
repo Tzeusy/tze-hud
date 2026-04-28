@@ -291,19 +291,19 @@ async fn test_color_03_three_tiles_no_overlap() {
 // ─── 4. overlapping_tiles_zorder ─────────────────────────────────────────────
 
 /// overlapping_tiles_zorder: three overlapping tiles.
-///   z=1 (red):  (100, 100, 600, 400)  — red (0.8, 0.2, 0.2) → sRGB ≈ (228, 124, 124)
-///   z=2 (green):(200, 150, 600, 400)  — green (0.2, 0.8, 0.2) → sRGB ≈ (124, 228, 124)
-///   z=3 (blue): (300, 200, 600, 400)  — blue (0.2, 0.2, 0.8) → sRGB ≈ (124, 124, 228)
+///   z=1 (red):  (10%, 16%, 50%, 67%) — red (0.8, 0.2, 0.2) → sRGB ≈ (228, 124, 124)
+///   z=2 (green):(20%, 25%, 50%, 67%) — green (0.2, 0.8, 0.2) → sRGB ≈ (124, 228, 124)
+///   z=3 (blue): (30%, 33%, 50%, 67%) — blue (0.2, 0.2, 0.8) → sRGB ≈ (124, 124, 228)
 ///
 /// Key sample points:
-/// - (150, 150): inside z=1 only → red dominant (sRGB ≈ [228, 124, 124]).
-/// - (250, 175): inside z=1 and z=2 → green dominant (z=2 wins).
-/// - (400, 250): inside all three → blue dominant (z=3 wins).
+/// - (15%, 20%): inside z=1 only → red dominant (sRGB ≈ [228, 124, 124]).
+/// - (25%, 29%): inside z=1 and z=2 → green dominant (z=2 wins).
+/// - (45%, 45%): inside all three → blue dominant (z=3 wins).
 ///
 /// WHEN overlapping_tiles_zorder rendered
-/// THEN (150,150): red channel > blue channel + 50.
-/// THEN (250,175): green channel > red channel + 50 and > blue channel + 50.
-/// THEN (400,250): blue channel > red channel + 50 and > green channel + 50.
+/// THEN red-only sample: red channel > blue channel + 50.
+/// THEN red+green overlap sample: green channel > red channel + 50 and > blue channel + 50.
+/// THEN all-tile overlap sample: blue channel > red channel + 50 and > green channel + 50.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_04_overlapping_tiles_zorder() {
     let mut runtime = make_scene_runtime().await;
@@ -314,25 +314,31 @@ async fn test_color_04_overlapping_tiles_zorder() {
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
 
-    // (150, 150): inside z=1 (red) only. Red dominant.
-    let red_only = HeadlessSurface::pixel_at(&pixels, SCENE_W, 150, 150);
+    // Inside z=1 (red) only. Red dominant.
+    let red_only_x = (SCENE_W as f32 * 0.15).round() as u32;
+    let red_only_y = (SCENE_H as f32 * 0.20).round() as u32;
+    let red_only = HeadlessSurface::pixel_at(&pixels, SCENE_W, red_only_x, red_only_y);
     assert!(
         red_only[0] > red_only[2] + 50,
-        "overlapping_tiles_zorder: (150,150) red must dominate: pixel={red_only:?}"
+        "overlapping_tiles_zorder: red-only sample at ({red_only_x},{red_only_y}) must dominate: pixel={red_only:?}"
     );
 
-    // (250, 175): inside z=1 and z=2. z=2 (green) wins.
-    let green_wins = HeadlessSurface::pixel_at(&pixels, SCENE_W, 250, 175);
+    // Inside z=1 and z=2. z=2 (green) wins.
+    let green_wins_x = (SCENE_W as f32 * 0.25).round() as u32;
+    let green_wins_y = (SCENE_H as f32 * 0.29).round() as u32;
+    let green_wins = HeadlessSurface::pixel_at(&pixels, SCENE_W, green_wins_x, green_wins_y);
     assert!(
         green_wins[1] > green_wins[0] + 50 && green_wins[1] > green_wins[2] + 50,
-        "overlapping_tiles_zorder: (250,175) green must dominate: pixel={green_wins:?}"
+        "overlapping_tiles_zorder: red+green overlap sample at ({green_wins_x},{green_wins_y}) must be green-dominant: pixel={green_wins:?}"
     );
 
-    // (400, 250): inside all three. z=3 (blue) wins.
-    let blue_wins = HeadlessSurface::pixel_at(&pixels, SCENE_W, 400, 250);
+    // Inside all three. z=3 (blue) wins.
+    let blue_wins_x = (SCENE_W as f32 * 0.45).round() as u32;
+    let blue_wins_y = (SCENE_H as f32 * 0.45).round() as u32;
+    let blue_wins = HeadlessSurface::pixel_at(&pixels, SCENE_W, blue_wins_x, blue_wins_y);
     assert!(
         blue_wins[2] > blue_wins[0] + 50 && blue_wins[2] > blue_wins[1] + 50,
-        "overlapping_tiles_zorder: (400,250) blue must dominate: pixel={blue_wins:?}"
+        "overlapping_tiles_zorder: all-tile overlap sample at ({blue_wins_x},{blue_wins_y}) must be blue-dominant: pixel={blue_wins:?}"
     );
 }
 
@@ -648,15 +654,15 @@ async fn test_color_12_max_tiles_stress_has_content() {
 
 /// three_agents_contention: 3 agents at overlapping positions.
 ///
-/// agent.high_prio (z=10): red (0.8, 0.2, 0.2) at (100, 100, 700, 500)
-/// agent.normal_prio (z=5): green (0.2, 0.8, 0.2) at (300, 200, 700, 500)
-/// agent.low_prio (z=1):  blue (0.2, 0.2, 0.8) at (500, 300, 700, 500)
+/// agent.high_prio (z=10): red (0.8, 0.2, 0.2) at (10%, 16%, 55%, 55%)
+/// agent.normal_prio (z=5): green (0.2, 0.8, 0.2) at (20%, 25%, 55%, 55%)
+/// agent.low_prio (z=1):  blue (0.2, 0.2, 0.8) at (30%, 33%, 55%, 55%)
 ///
-/// At (150, 150): inside high_prio tile only → red dominant.
+/// At (45%, 45%): inside all three tiles → high_prio z=10 tile wins.
 /// sRGB: red (0.8, 0.2, 0.2) ≈ (228, 124, 124).
 ///
 /// WHEN three_agents_contention rendered
-/// THEN (150,150): red channel > blue channel + 50.
+/// THEN all-agent overlap sample: red channel > blue channel + 50.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_13_three_agents_contention_high_prio_tile() {
     let mut runtime = make_scene_runtime().await;
@@ -667,10 +673,12 @@ async fn test_color_13_three_agents_contention_high_prio_tile() {
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
 
-    let px = HeadlessSurface::pixel_at(&pixels, SCENE_W, 150, 150);
+    let x = (SCENE_W as f32 * 0.45).round() as u32;
+    let y = (SCENE_H as f32 * 0.45).round() as u32;
+    let px = HeadlessSurface::pixel_at(&pixels, SCENE_W, x, y);
     assert!(
         px[0] > px[2] + 50,
-        "three_agents_contention: (150,150) must be red-dominant (high_prio z=10): pixel={px:?}"
+        "three_agents_contention: all-agent overlap sample at ({x},{y}) must be red-dominant (high_prio z=10): pixel={px:?}"
     );
 }
 
