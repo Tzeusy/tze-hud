@@ -106,7 +106,9 @@ jobs:
         if: steps.cache-libvpx-lib.outputs.cache-hit != 'true'
         run: |
           mkdir -p /tmp/libvpx-build
+          cd /tmp/libvpx-build
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          export SDKROOT="${SDK_PATH}"
           /tmp/libvpx-src/configure \
             --target=arm64-darwin-gcc \
             --prefix=/tmp/libvpx-install \
@@ -120,9 +122,8 @@ jobs:
             --disable-runtime-cpu-detect \
             --enable-neon \
             --disable-libyuv \
-            --sdk-path="${SDK_PATH}"
+            --extra-cflags="-isysroot ${SDK_PATH}"
           echo "GATE 3 PASS: libvpx configured for arm64-darwin-gcc"
-        working-directory: /tmp/libvpx-build
 
       # Gate 4 — Build libvpx and verify libvpx.a is produced.
       - name: Gate 4 — Build libvpx

@@ -1,8 +1,8 @@
 ## 1. Projection Contract and Packaging
 
-- [ ] 1.1 Define the provider-neutral projection operation schema for attach, publish_output, publish_status, get_pending_input, acknowledge_input, detach, and cleanup.
-- [ ] 1.2 Define bounded request/response shapes, size limits, idempotency fields, stable error codes, audit fields, and lifecycle states for projection operations.
-- [ ] 1.3 Define projection operation authentication, owner binding, cross-projection denial behavior, and local IPC or credential requirements.
+- [x] 1.1 Define the provider-neutral projection operation schema for attach, publish_output, publish_status, get_pending_input, acknowledge_input, detach, and cleanup.
+- [x] 1.2 Define bounded request/response shapes, size limits, idempotency fields, stable error codes, audit fields, and lifecycle states for projection operations.
+- [x] 1.3 Define projection operation authentication, owner binding, cross-projection denial behavior, and local IPC or credential requirements.
 - [ ] 1.4 Create the first `/hud-projection` skill package and mirrored tool-facing instructions for cooperative attachment from an already-running LLM session.
 - [ ] 1.5 Add example flows for Codex, Claude, and opencode using the same projection contract.
 
@@ -24,7 +24,7 @@
 
 ## 4. Validation
 
-- [ ] 4.1 Add unit tests for projection operation schema validation, bounds, idempotency, authorization, audit fields, stable error codes, and error handling.
+- [x] 4.1 Add unit tests for projection operation schema validation, bounds, idempotency, authorization, audit fields, stable error codes, and error handling.
 - [ ] 4.2 Add daemon tests for transcript retention, pending input acknowledgement, reconnect, stale lease handling, heartbeat, detach, and cleanup.
 - [ ] 4.3 Add integration tests proving cooperative projection does not require PTY, tmux, terminal capture, provider-specific RPCs, or runtime process lifecycle authority.
 - [ ] 4.4 Add live `/user-test` coverage for attach -> publish output -> submit HUD input -> poll/acknowledge -> collapse/restore -> detach cleanup on the Windows HUD.
