@@ -61,7 +61,7 @@ opencode:
 }
 ```
 
-Successful attach responses include `owner_token`, `request_id`, `projection_id`, `accepted`, `error_code`, `server_timestamp_wall_us`, bounded `status_summary`, and initial lifecycle state.
+Successful attach responses include `owner_token`, `request_id`, `projection_id`, `accepted`, `error_code`, `server_timestamp_wall_us`, bounded `status_summary`, and initial lifecycle state. The `owner_token` is returned only by successful `attach`; later operation responses must not return it.
 
 ## Publish Output
 
@@ -139,11 +139,11 @@ Deferred:
   "input_id": "input-0008",
   "ack_state": "deferred",
   "ack_message": "Will revisit after tests finish.",
-  "not_before_wall_us": 1777400600000000
+  "not_before_wall_us": 1777400010000000
 }
 ```
 
-Use `not_before_wall_us` only when `ack_state` is `deferred`; it must be before the input item's expiry.
+Use `not_before_wall_us` only when `ack_state` is `deferred`; it must be before the input item's expiry. Deferral only delays redelivery. The projection authority still expires the item at or after the item's `expires_at_wall_us`.
 
 ## Detach
 
