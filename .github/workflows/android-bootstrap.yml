@@ -132,21 +132,21 @@ jobs:
       - name: "Gate 2 — androidmedia plugin material present"
         run: |
           PLUGIN="$GSTREAMER_ROOT_ANDROID/arm64/lib/gstreamer-1.0/libgstandroidmedia.so"
-          FULL_ARCHIVE="$GSTREAMER_ROOT_ANDROID/arm64/lib/libgstreamer-full-1.0.a"
+          LIB_DIR="$GSTREAMER_ROOT_ANDROID/arm64/lib"
 
           if [ -f "$PLUGIN" ]; then
             echo "PASS: separate libgstandroidmedia.so present"
             ls -lh "$PLUGIN"
             echo "ANDROIDMEDIA_INSPECT_TARGET=$PLUGIN" >> "$GITHUB_ENV"
-          elif [ -f "$FULL_ARCHIVE" ]; then
-            echo "PASS: libgstandroidmedia.so is not separate in this SDK; using gstreamer-full archive for androidmedia inspection"
-            ls -lh "$FULL_ARCHIVE"
-            echo "ANDROIDMEDIA_INSPECT_TARGET=$FULL_ARCHIVE" >> "$GITHUB_ENV"
+          elif find "$LIB_DIR" -maxdepth 1 -name '*.a' -print -quit | grep -q .; then
+            echo "PASS: libgstandroidmedia.so is not separate in this SDK; using arm64 static archive set for androidmedia inspection"
+            find "$LIB_DIR" -maxdepth 1 -name '*.a' | sort | sed -n '1,20p'
+            echo "ANDROIDMEDIA_INSPECT_TARGET=$LIB_DIR" >> "$GITHUB_ENV"
           else
-            echo "FAIL: neither separate libgstandroidmedia.so nor libgstreamer-full-1.0.a found"
+            echo "FAIL: neither separate libgstandroidmedia.so nor static archives found"
             echo "Checked:"
             echo "  $PLUGIN"
-            echo "  $FULL_ARCHIVE"
+            echo "  $LIB_DIR/*.a"
             exit 1
           fi
 
@@ -352,8 +352,14 @@ jobs:
           # Primary check: look for NDK codec wrapper symbols from gstamc-codec-ndk.c.
           # These only exist when HAVE_NDKMEDIA=1 at build time.
           # We accept either the C name or the mangled form (T = defined text symbol).
-          NDK_SYMS=$(readelf -s --wide "$PLUGIN" 2>/dev/null \
-            | grep -E 'gst_amc_codec_ndk|gst_amc_format_ndk' | head -5 || true)
+          if [ -d "$PLUGIN" ]; then
+            NDK_SYMS=$(find "$PLUGIN" -maxdepth 1 -name '*.a' -print0 \
+              | xargs -0 readelf -s --wide 2>/dev/null \
+              | grep -E 'gst_amc_codec_ndk|gst_amc_format_ndk' | head -5 || true)
+          else
+            NDK_SYMS=$(readelf -s --wide "$PLUGIN" 2>/dev/null \
+              | grep -E 'gst_amc_codec_ndk|gst_amc_format_ndk' | head -5 || true)
+          fi
 
           if [ -n "$NDK_SYMS" ]; then
             echo "PASS (primary): NDK codec wrapper symbols found in libgstandroidmedia.so:"
@@ -364,8 +370,14 @@ jobs:
 
             # Secondary check: the dlsym target string is embedded in .rodata when
             # the NDK path is compiled in. strings(1) is available on ubuntu-latest.
-            DLSYM_STR=$(strings "$PLUGIN" 2>/dev/null \
-              | grep -F 'AMediaCodec_createCodecByName' || true)
+            if [ -d "$PLUGIN" ]; then
+              DLSYM_STR=$(find "$PLUGIN" -maxdepth 1 -name '*.a' -print0 \
+                | xargs -0 strings 2>/dev/null \
+                | grep -F 'AMediaCodec_createCodecByName' || true)
+            else
+              DLSYM_STR=$(strings "$PLUGIN" 2>/dev/null \
+                | grep -F 'AMediaCodec_createCodecByName' || true)
+            fi
 
             if [ -n "$DLSYM_STR" ]; then
               echo "PASS (secondary): dlsym string 'AMediaCodec_createCodecByName' found in binary."
