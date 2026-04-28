@@ -46,7 +46,7 @@ Result: passed.
 cargo test -p tze_hud_projection --features resident-grpc --lib
 ```
 
-Result: passed. Final run: 34 passed, 0 failed.
+Result: passed. Final run: 36 passed, 0 failed.
 
 ```bash
 cargo test -p integration --test text_stream_portal_adapter --features headless

@@ -357,30 +357,36 @@ impl ResidentGrpcPortalAdapter {
 }
 
 fn portal_markdown(state: &ProjectedPortalState) -> String {
-    let mut lines = Vec::new();
+    let mut result = String::new();
     let title = state.display_name.as_deref().unwrap_or("Projected session");
-    lines.push(format!("**{title}**"));
-    lines.push(format!(
-        "`{}` · {:?} · {:?}",
-        state.portal_id, state.presentation, state.attention
-    ));
+    push_line(&mut result, &format!("**{title}**"));
+    push_line(
+        &mut result,
+        &format!(
+            "`{}` · {:?} · {:?}",
+            state.portal_id, state.presentation, state.attention
+        ),
+    );
     if let Some(lifecycle) = state.lifecycle_state {
-        lines.push(format!("status: {lifecycle:?}"));
+        push_line(&mut result, &format!("status: {lifecycle:?}"));
     }
     if let Some(status_text) = state.status_text.as_deref() {
-        lines.push(format!("note: {status_text}"));
+        push_line(&mut result, &format!("note: {status_text}"));
     }
 
     match state.presentation {
         ProjectedPortalPresentation::Expanded => {
-            lines.push(String::new());
-            lines.push(visible_transcript_markdown(&state.visible_transcript));
+            push_line(&mut result, "");
+            push_line(
+                &mut result,
+                &visible_transcript_markdown(&state.visible_transcript),
+            );
             if state.interaction_enabled {
-                lines.push(String::new());
-                lines.push("composer: ready".to_string());
+                push_line(&mut result, "");
+                push_line(&mut result, "composer: ready");
             } else {
-                lines.push(String::new());
-                lines.push("composer: unavailable".to_string());
+                push_line(&mut result, "");
+                push_line(&mut result, "composer: unavailable");
             }
         }
         ProjectedPortalPresentation::Collapsed => {
@@ -389,38 +395,41 @@ fn portal_markdown(state: &ProjectedPortalState) -> String {
                 .last()
                 .map(|unit| unit.output_text.as_str())
                 .unwrap_or("compact projection affordance");
-            lines.push(clamp_one_line(preview, 160));
+            push_line(&mut result, &clamp_one_line(preview, 160));
         }
     }
 
     if let Some(pending) = state.pending_input_count {
-        lines.push(format!("pending HUD input: {pending}"));
+        push_line(&mut result, &format!("pending HUD input: {pending}"));
     }
     if let Some(feedback) = &state.last_input_feedback {
-        lines.push(format!("last composer: {:?}", feedback.feedback_state));
+        push_line(
+            &mut result,
+            &format!("last composer: {:?}", feedback.feedback_state),
+        );
     }
-    clamp_utf8(lines.join("\n"), MAX_PORTAL_MARKDOWN_BYTES)
+    truncate_utf8(result, MAX_PORTAL_MARKDOWN_BYTES)
 }
 
 fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {
     if units.is_empty() {
         return "<empty projection stream>".to_string();
     }
-    units
-        .iter()
-        .map(|unit| clamp_utf8(unit.output_text.clone(), 4_096))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut result = String::new();
+    for (index, unit) in units.iter().enumerate() {
+        if index > 0 {
+            result.push('\n');
+        }
+        result.push_str(clamp_utf8(&unit.output_text, 4_096));
+    }
+    result
 }
 
 fn clamp_one_line(text: &str, max_bytes: usize) -> String {
-    clamp_utf8(
-        text.lines().next().unwrap_or_default().to_string(),
-        max_bytes,
-    )
+    clamp_utf8(text.lines().next().unwrap_or_default(), max_bytes).to_string()
 }
 
-fn clamp_utf8(mut text: String, max_bytes: usize) -> String {
+fn clamp_utf8(text: &str, max_bytes: usize) -> &str {
     if text.len() <= max_bytes {
         return text;
     }
@@ -428,8 +437,20 @@ fn clamp_utf8(mut text: String, max_bytes: usize) -> String {
     while cut > 0 && !text.is_char_boundary(cut) {
         cut -= 1;
     }
+    &text[..cut]
+}
+
+fn truncate_utf8(mut text: String, max_bytes: usize) -> String {
+    let cut = clamp_utf8(&text, max_bytes).len();
     text.truncate(cut);
     text
+}
+
+fn push_line(result: &mut String, line: &str) {
+    if !result.is_empty() {
+        result.push('\n');
+    }
+    result.push_str(line);
 }
 
 fn sample_budget(started: Instant, budget_us: u64) -> ResidentGrpcBudgetSample {
@@ -441,4 +462,48 @@ fn sample_budget(started: Instant, budget_us: u64) -> ResidentGrpcBudgetSample {
 
 fn new_scene_id_bytes() -> Vec<u8> {
     uuid::Uuid::now_v7().as_bytes().to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::OutputKind;
+
+    #[test]
+    fn clamp_utf8_borrows_at_valid_character_boundary() {
+        let text = "alpha éé omega";
+
+        assert_eq!(clamp_utf8(text, text.len()), text);
+        assert_eq!(clamp_utf8(text, 7), "alpha ");
+    }
+
+    #[test]
+    fn visible_transcript_markdown_clamps_each_unit_without_collecting_lines() {
+        let units = vec![
+            TranscriptUnit {
+                sequence: 1,
+                output_text: "first".to_string(),
+                output_kind: OutputKind::Assistant,
+                content_classification: ContentClassification::Private,
+                logical_unit_id: None,
+                coalesce_key: None,
+                appended_at_wall_us: 1,
+            },
+            TranscriptUnit {
+                sequence: 2,
+                output_text: "é".repeat(3_000),
+                output_kind: OutputKind::Assistant,
+                content_classification: ContentClassification::Private,
+                logical_unit_id: None,
+                coalesce_key: None,
+                appended_at_wall_us: 2,
+            },
+        ];
+
+        let markdown = visible_transcript_markdown(&units);
+
+        assert!(markdown.starts_with("first\n"));
+        assert!(markdown.is_char_boundary(markdown.len()));
+        assert!(markdown.len() <= "first\n".len() + 4_096);
+    }
 }
