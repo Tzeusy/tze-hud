@@ -70,7 +70,7 @@ PR #621 / `92926d2` was explicitly excluded from evidence because it is unrelate
 | Submitted HUD input becomes pending item | Covered for authority semantics | `submit_portal_input` enqueues pending inbox items: `crates/tze_hud_projection/src/lib.rs:1691`. |
 | Submitted HUD input gets local pending feedback | Covered for authority semantics | `PortalInputFeedback` returns accepted/rejected state immediately: `crates/tze_hud_projection/src/lib.rs:636`, `:1691`. |
 | Acknowledgement updates visible state | Covered for authority semantics | Handled/rejected acknowledgement updates state and pending counts: `crates/tze_hud_projection/src/lib.rs:2551`. |
-| Deferred input is redelivered after not-before time | Covered | Deferred transition validates `not_before_wall_us` and polling hides until due: `crates/tze_hud_projection/src/lib.rs:2578`. |
+| Deferred input is redelivered at or after not-before time | Covered | Deferred transition validates `not_before_wall_us` and polling hides until due: `crates/tze_hud_projection/src/lib.rs:1829`, `:2578`. |
 | Conflicting terminal acknowledgement is rejected | Covered | Terminal replay accepts matching state and rejects conflicting state: `crates/tze_hud_projection/src/lib.rs:2484`. |
 | Input is not terminal keystroke passthrough | Covered | Headless adapter state has no PTY/terminal/stdin authority: `tests/integration/text_stream_portal_adapter.rs:753`. |
 | Attach creates projected portal | Partial (GAP-2) | Headless `projected_portal_state` exists, but no resident gRPC/live visible portal creation evidence exists. |
@@ -100,6 +100,7 @@ The Rust crate defines the operation contract and an in-memory authority, and th
 **GAP-2: Resident gRPC and visible text-stream portal lifecycle are not implemented or validated for cooperative projection.**
 
 `projected_portal_state` provides a headless materialization boundary, but no concrete adapter drives the existing `HudSession` raw-tile path for cooperative projection. The spec scenarios for attach-created portal, collapse/restore affordance, HUD composer input, drag/reposition, lease release, and visible detach cleanup are therefore only partially covered.
+Resident-path bounded portal-update and local input-feedback/input-to-scene budget evidence from task 4.6 is also not proven by the current local/headless tests.
 
 **GAP-3: Live privacy/governance validation is absent.**
 
@@ -110,7 +111,7 @@ Local policy shaping covers redaction, safe mode, freeze, dismiss, and ambient a
 1. The operation schema, in-memory authority semantics, authorization model, inbox state machine, provider-neutral identity, and bounded backpressure behavior are covered by landed code and local/headless tests.
 2. The implementation does not yet satisfy the full cooperative workflow as a usable already-running LLM projection path because the repo lacks an executable projection daemon surface and a concrete resident gRPC adapter that creates a visible portal.
 3. The OpenSpec change is not ready for sync/archive. Sync should wait until GAP-1 through GAP-3 are closed or explicitly waived in a follow-up reconciliation.
-4. A gen-2 reconciliation bead is appropriate after the gap beads land. No gen-4 reconciliation is proposed.
+4. A gen-2 reconciliation bead is appropriate after the gap beads land. No gen-3 reconciliation is proposed.
 
 ## Coordinator Follow-On Proposals
 
@@ -126,16 +127,16 @@ The worker did not mutate Beads lifecycle state. Materialize the following as ne
    `type`: `task`
    `priority`: `1`
    `depends_on`: `discovered-from:hud-ggntn.7`
-   `description`: `Close GAP-2 by adding the concrete resident gRPC adapter that turns cooperative projection attach/output/status/input state into an existing text-stream portal raw-tile surface. Evidence must cover attach creating or reusing a content-layer portal, HUD composer submission into the semantic inbox, collapse/restore, drag/reposition or movable compact affordance, detach/cleanup lease release, and no PTY/tmux/process lifecycle authority.`
+   `description`: `Close GAP-2 by adding the concrete resident gRPC adapter that turns cooperative projection attach/output/status/input state into an existing text-stream portal raw-tile surface. Evidence must cover attach creating or reusing a content-layer portal, HUD composer submission into the semantic inbox, collapse/restore, drag/reposition or movable compact affordance, detach/cleanup lease release, resident-path bounded portal-update/local input-feedback budget behavior, and no PTY/tmux/process lifecycle authority.`
 
 3. `title`: `Run live Windows governance validation for cooperative HUD projection`
    `type`: `task`
    `priority`: `1`
    `depends_on`: `discovered-from:hud-ggntn.7`
-   `description`: `Close GAP-3 by recording visible Windows HUD evidence for attach -> publish output -> submit HUD input -> poll/acknowledge -> collapse/restore -> detach cleanup, plus redaction, safe mode, freeze, dismiss, orphan cleanup, and backlog non-escalation behavior. Store the artifact under docs/evidence/cooperative-hud-projection/.`
+   `description`: `Close GAP-3 by recording visible Windows HUD evidence for attach -> publish output -> submit HUD input -> poll/acknowledge -> collapse/restore -> detach cleanup, plus redaction, safe mode, freeze, dismiss, orphan cleanup, backlog non-escalation, and live local-ack/input-to-scene budget behavior. Store the artifact under docs/evidence/cooperative-hud-projection/.`
 
 4. `title`: `Reconcile spec-to-code (gen-2) for cooperative HUD projection`
    `type`: `task`
    `priority`: `1`
    `depends_on`: `the three GAP beads proposed by hud-ggntn.7`
-   `description`: `Run the gen-2 reconciliation after GAP-1 through GAP-3 are implemented or explicitly waived. Verify every cooperative-hud-projection and text-stream-portals delta requirement and scenario against code, tests, live evidence, and reports; then decide whether OpenSpec sync/archive is ready.`
+   `description`: `Run the gen-2 reconciliation after GAP-1 through GAP-3 are implemented or explicitly waived. Verify every cooperative-hud-projection and text-stream-portals delta requirement and scenario against code, tests, live evidence, reports, and the OpenSpec task ledger; then decide whether OpenSpec sync/archive is ready or emit explicit sync/archive follow-up work.`
