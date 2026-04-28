@@ -1,0 +1,15 @@
+[package]
+name = "tze_hud_projection"
+description = "Provider-neutral cooperative HUD projection operation contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+getrandom = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
