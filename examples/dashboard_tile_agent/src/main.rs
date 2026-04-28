@@ -523,6 +523,8 @@ pub async fn do_content_update(
                 interaction_id: "refresh-button".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                auto_capture: true,
+                release_on_up: true,
             },
         )),
     };
@@ -540,6 +542,8 @@ pub async fn do_content_update(
                 interaction_id: "dismiss-button".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                auto_capture: true,
+                release_on_up: true,
             },
         )),
     };
@@ -1578,6 +1582,8 @@ pub async fn create_tile_batch(
                 interaction_id: "refresh-button".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                auto_capture: true,
+                release_on_up: true,
             },
         )),
     };
@@ -1595,6 +1601,8 @@ pub async fn create_tile_batch(
                 interaction_id: "dismiss-button".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                auto_capture: true,
+                release_on_up: true,
             },
         )),
     };

@@ -128,6 +128,8 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 interaction_id: hr.interaction_id.clone(),
                 accepts_focus: hr.accepts_focus,
                 accepts_pointer: hr.accepts_pointer,
+                auto_capture: hr.auto_capture,
+                release_on_up: hr.release_on_up,
                 ..Default::default()
             })
         }
@@ -677,6 +679,8 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
                 interaction_id: hr.interaction_id.clone(),
                 accepts_focus: hr.accepts_focus,
                 accepts_pointer: hr.accepts_pointer,
+                auto_capture: hr.auto_capture,
+                release_on_up: hr.release_on_up,
             },
         )),
         NodeData::StaticImage(si) => {

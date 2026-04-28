@@ -880,6 +880,9 @@ message InputFocusResponse {
 message InputCaptureRequest {
   bytes  tile_id     = 1;  // Tile requesting capture (16-byte UUIDv7)
   string device_kind = 2;  // "pointer" | "keyboard" | "touch"
+  bytes  node_id     = 3;  // Optional HitRegionNode to capture (16-byte UUIDv7)
+  string device_id   = 4;  // Optional pointer device id; empty = primary pointer
+  bool   release_on_up = 5; // Release pointer capture on PointerUp
 }
 
 // Server response to InputCaptureRequest.
@@ -895,6 +898,7 @@ message InputCaptureResponse {
 message InputCaptureRelease {
   bytes  tile_id     = 1;  // Tile releasing capture (16-byte UUIDv7)
   string device_kind = 2;  // "pointer" | "keyboard" | "touch"
+  string device_id   = 3;  // Optional pointer device id; empty = primary pointer
 }
 
 // Client repositions the IME (Input Method Editor) candidate window.
