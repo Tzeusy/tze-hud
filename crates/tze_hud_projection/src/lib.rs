@@ -832,6 +832,7 @@ struct ProjectionSession {
     completed_input_ack_order: VecDeque<String>,
     pending_input: VecDeque<PendingInputItem>,
     pending_input_bytes: usize,
+    portal_update_pending: bool,
 }
 
 struct ProjectionAuditEvent<'a> {
@@ -942,12 +943,23 @@ impl ProjectionAuthority {
             .sessions
             .get_mut(projection_id)
             .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
-        if session.hud_connection.is_some() {
+        let is_reconnect = session
+            .reconnect
+            .last_reconnect_wall_us
+            .is_some_and(|last| last < metadata.last_reconnect_wall_us);
+        let connection_changed = session.hud_connection.as_ref().is_some_and(|connection| {
+            connection.connection_id != metadata.connection_id
+                || connection.authenticated_session_id != metadata.authenticated_session_id
+        });
+        if is_reconnect {
             session.reconnect.reconnect_count += 1;
-            session.reconnect.last_reconnect_wall_us = Some(metadata.last_reconnect_wall_us);
+        }
+        session.reconnect.last_reconnect_wall_us = Some(metadata.last_reconnect_wall_us);
+        if is_reconnect || connection_changed {
+            session.advisory_lease = None;
         }
         session.hud_connection = Some(metadata);
-        session.lifecycle_state = ProjectionLifecycleState::Active;
+        promote_to_active_if_recovering(session);
         Ok(())
     }
 
@@ -1046,8 +1058,14 @@ impl ProjectionAuthority {
             .sessions
             .get_mut(projection_id)
             .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
-        if !portal_update_allowed(session, server_timestamp_wall_us, max_updates) {
+        if session.unread_output_count == 0 {
             return Ok(None);
+        }
+        if !session.portal_update_pending {
+            if !portal_update_allowed(session, server_timestamp_wall_us, max_updates) {
+                return Ok(None);
+            }
+            session.portal_update_pending = true;
         }
         let visible_transcript = visible_transcript_window(session, max_visible);
         let visible_transcript_bytes = visible_transcript
@@ -1058,6 +1076,8 @@ impl ProjectionAuthority {
         let unread_output_count = session.unread_output_count;
         session.coalesced_portal_update_count = 0;
         session.unread_output_count = 0;
+        session.portal_update_pending = false;
+        session.last_publish_portal_update_ready = false;
         Ok(Some(PortalTranscriptUpdate {
             projection_id: projection_id.to_string(),
             visible_transcript,
@@ -1195,6 +1215,7 @@ impl ProjectionAuthority {
                 completed_input_ack_order: VecDeque::new(),
                 pending_input: VecDeque::new(),
                 pending_input_bytes: 0,
+                portal_update_pending: false,
             },
         );
 
@@ -1818,6 +1839,9 @@ fn append_transcript_unit(
         max_portal_updates_per_second,
     );
     session.last_publish_portal_update_ready = portal_update_ready;
+    if portal_update_ready {
+        session.portal_update_pending = true;
+    }
 
     if !portal_update_ready {
         session.coalesced_portal_update_count += 1;
@@ -1842,7 +1866,7 @@ fn append_transcript_unit(
                     max_retained_transcript_bytes,
                     max_visible_transcript_bytes,
                 );
-                session.lifecycle_state = ProjectionLifecycleState::Active;
+                promote_to_active_if_recovering(session);
                 session.unread_output_count += 1;
                 return;
             }
@@ -1866,8 +1890,17 @@ fn append_transcript_unit(
         max_retained_transcript_bytes,
         max_visible_transcript_bytes,
     );
-    session.lifecycle_state = ProjectionLifecycleState::Active;
+    promote_to_active_if_recovering(session);
     session.unread_output_count += 1;
+}
+
+fn promote_to_active_if_recovering(session: &mut ProjectionSession) {
+    if matches!(
+        session.lifecycle_state,
+        ProjectionLifecycleState::Attached | ProjectionLifecycleState::HudUnavailable
+    ) {
+        session.lifecycle_state = ProjectionLifecycleState::Active;
+    }
 }
 
 fn portal_update_allowed(
@@ -1895,17 +1928,24 @@ fn prune_retained_transcript(
     max_retained_transcript_bytes: usize,
     max_visible_transcript_bytes: usize,
 ) {
-    let visible_sequences: HashSet<u64> =
-        visible_transcript_window(session, max_visible_transcript_bytes)
-            .into_iter()
-            .map(|unit| unit.sequence)
-            .collect();
+    let mut visible_bytes = 0usize;
+    let mut oldest_visible_sequence = None;
+    for unit in session.retained_transcript.iter().rev() {
+        let next_visible_bytes = visible_bytes.saturating_add(unit.byte_len());
+        if next_visible_bytes > max_visible_transcript_bytes {
+            break;
+        }
+        visible_bytes = next_visible_bytes;
+        oldest_visible_sequence = Some(unit.sequence);
+    }
     while session.retained_transcript_bytes > max_retained_transcript_bytes {
         let Some(front) = session.retained_transcript.front() else {
             session.retained_transcript_bytes = 0;
             break;
         };
-        if visible_sequences.contains(&front.sequence) && session.retained_transcript.len() == 1 {
+        if oldest_visible_sequence.is_some_and(|sequence| front.sequence >= sequence)
+            && session.retained_transcript.len() == 1
+        {
             break;
         }
         let Some(pruned) = session.retained_transcript.pop_front() else {
@@ -2709,6 +2749,166 @@ mod tests {
                 131
             ),
             Err(ProjectionErrorCode::ProjectionHudUnavailable)
+        );
+    }
+
+    #[test]
+    fn reconnect_updates_bookkeeping_and_requires_fresh_lease() {
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "projection-a");
+        authority
+            .record_hud_connection(
+                "projection-a",
+                connection_metadata(&["create_tiles", "modify_own_tiles"]),
+            )
+            .unwrap();
+        authority
+            .record_advisory_lease("projection-a", advisory_lease(&["create_tiles"], 100), 22)
+            .unwrap();
+
+        let mut reconnected = connection_metadata(&["create_tiles", "modify_own_tiles"]);
+        reconnected.connection_id = "connection-2".to_string();
+        reconnected.authenticated_session_id = "runtime-session-2".to_string();
+        reconnected.connected_at_wall_us = 40;
+        reconnected.last_reconnect_wall_us = 40;
+        authority
+            .record_hud_connection("projection-a", reconnected)
+            .unwrap();
+
+        let summary = authority.state_summary("projection-a").unwrap();
+        assert_eq!(summary.reconnect.reconnect_count, 1);
+        assert_eq!(summary.reconnect.last_reconnect_wall_us, Some(40));
+        assert!(!summary.has_advisory_lease);
+        assert_eq!(
+            authority.authorize_portal_republish(
+                "projection-a",
+                "lease-1",
+                &[String::from("create_tiles")],
+                41
+            ),
+            Err(ProjectionErrorCode::ProjectionUnauthorized)
+        );
+
+        authority
+            .record_advisory_lease("projection-a", advisory_lease(&["create_tiles"], 100), 42)
+            .unwrap();
+        authority.mark_hud_disconnected("projection-a", 50).unwrap();
+        let mut after_disconnect = connection_metadata(&["create_tiles"]);
+        after_disconnect.connection_id = "connection-3".to_string();
+        after_disconnect.authenticated_session_id = "runtime-session-3".to_string();
+        after_disconnect.connected_at_wall_us = 60;
+        after_disconnect.last_reconnect_wall_us = 60;
+        authority
+            .record_hud_connection("projection-a", after_disconnect)
+            .unwrap();
+
+        let summary = authority.state_summary("projection-a").unwrap();
+        assert_eq!(summary.reconnect.reconnect_count, 2);
+        assert_eq!(summary.reconnect.last_disconnect_wall_us, Some(50));
+        assert!(!summary.has_advisory_lease);
+    }
+
+    #[test]
+    fn owner_degraded_lifecycle_is_not_overwritten_by_connection_or_output() {
+        let mut authority = ProjectionAuthority::default();
+        let owner_token = attach(&mut authority, "projection-a");
+        let degraded = authority.handle_publish_status(
+            PublishStatusRequest {
+                envelope: envelope(
+                    ProjectionOperation::PublishStatus,
+                    "projection-a",
+                    "req-status",
+                ),
+                owner_token: owner_token.clone(),
+                lifecycle_state: ProjectionLifecycleState::Degraded,
+                status_text: Some("HUD projection is degraded".to_string()),
+            },
+            "caller-a",
+            20,
+        );
+        assert!(degraded.accepted);
+
+        authority
+            .record_hud_connection("projection-a", connection_metadata(&["create_tiles"]))
+            .unwrap();
+        assert_eq!(
+            authority
+                .state_summary("projection-a")
+                .unwrap()
+                .lifecycle_state,
+            ProjectionLifecycleState::Degraded
+        );
+
+        let published = authority.handle_publish_output(
+            output_request("projection-a", &owner_token, "req-output"),
+            "caller-a",
+            21,
+        );
+        assert!(published.accepted);
+        assert_eq!(
+            authority
+                .state_summary("projection-a")
+                .unwrap()
+                .lifecycle_state,
+            ProjectionLifecycleState::Degraded
+        );
+    }
+
+    #[test]
+    fn ready_portal_update_can_be_taken_without_spending_another_rate_slot() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 1,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let owner_token = attach(&mut authority, "projection-a");
+
+        let mut first = output_request("projection-a", &owner_token, "req-output-1");
+        first.output_text = "first".to_string();
+        first.logical_unit_id = Some("unit-first".to_string());
+        let first_response = authority.handle_publish_output(first, "caller-a", 20);
+        assert!(first_response.accepted);
+        assert!(first_response.portal_update_ready);
+
+        let immediate = authority
+            .take_due_portal_update("projection-a", 20)
+            .unwrap()
+            .expect("ready publish should be immediately materializable");
+        assert_eq!(immediate.unread_output_count, 1);
+        assert_eq!(immediate.coalesced_output_count, 0);
+        assert!(
+            authority
+                .take_due_portal_update("projection-a", 20)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut second = output_request("projection-a", &owner_token, "req-output-2");
+        second.output_text = "second".to_string();
+        second.logical_unit_id = Some("unit-second".to_string());
+        let second_response = authority.handle_publish_output(second, "caller-a", 20);
+        assert!(second_response.accepted);
+        assert!(!second_response.portal_update_ready);
+        assert!(
+            authority
+                .take_due_portal_update("projection-a", 20)
+                .unwrap()
+                .is_none()
+        );
+
+        let coalesced = authority
+            .take_due_portal_update("projection-a", PORTAL_UPDATE_RATE_WINDOW_WALL_US + 20)
+            .unwrap()
+            .expect("coalesced publish should become due in the next rate window");
+        assert_eq!(coalesced.unread_output_count, 1);
+        assert_eq!(coalesced.coalesced_output_count, 1);
+        assert_eq!(
+            coalesced
+                .visible_transcript
+                .last()
+                .expect("visible transcript includes second publish")
+                .output_text,
+            "second"
         );
     }
 
