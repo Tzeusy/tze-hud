@@ -34,9 +34,9 @@ This document covers:
 
 ### 1.1 Version Selection
 
-**Recommended: GStreamer 1.24.x (current stable)**
+**Recommended CI pin: GStreamer 1.24.13**
 
-GStreamer 1.24 is the correct anchor because:
+GStreamer 1.24 remains the bootstrap anchor because:
 - OMX was removed in 1.24; the only hardware-decode path is `androidmedia` (MediaCodec).
   Any version prior to 1.24 would require handling OMX removal as a migration concern.
 - GStreamer 1.24 aligns with NDK r25c minimum and r27 recommended (tested by the
@@ -52,30 +52,36 @@ JVM bootstrap requirement — codec enumeration and surface-to-ANativeWindow
 conversion still use JNI. All `JNI_OnLoad` ordering constraints in Sections 5.3
 and 6 remain in force for GStreamer 1.24.x.
 
-At phase 3 kickoff, verify `HAVE_NDKMEDIA` activates in the 1.24 prebuilt
-environment (it should — MR #4115 is merged). If upgrading to GStreamer 1.26,
-plan for the Android.mk → CMake build system migration (Android.mk deprecated
-upstream in 1.26). Evaluate upgrading if CI bootstrap reveals 1.24 tarball
-availability issues or significant security fixes in 1.26.
+At phase 3 kickoff, verify whether `HAVE_NDKMEDIA` activates in the selected
+prebuilt or source-built SDK. MR #4115 is merged in GStreamer 1.24, but PR #617
+showed that the public 1.24.13 prebuilt material did not expose confirmable
+`gst_amc_*_ndk` symbols or `AMediaCodec_createCodecByName` strings through the
+current archive inspection gate. Treat this as unresolved until a source-built
+Cerbero log or device/runtime probe confirms the NDK path.
+
+If upgrading past GStreamer 1.24, plan for the Android.mk → CMake build system
+migration (Android.mk deprecated upstream in 1.26 and removed in 1.28). Evaluate
+upgrading only for a security, linker, or runtime fix that outweighs that migration.
 
 ### 1.2 Tarball URLs
 
 **Base URL**: `https://gstreamer.freedesktop.org/data/pkg/android/<version>/`
 
-Replace `<version>` with the pinned release (e.g., `1.24.12`).
+Replace `<version>` with the pinned release (currently `1.24.13`).
 
-| Tarball | ABI | Approx size | CI use |
+| Tarball | ABI | Current availability | CI use |
 |---|---|---|---|
-| `gstreamer-1.0-android-universal-<version>.tar.xz` | All ABIs | ~300 MB compressed | Integration validation only |
-| `gstreamer-1.0-android-arm64-<version>.tar.xz` | `aarch64-linux-android` | ~75 MB compressed | Physical device CI (preferred) |
-| `gstreamer-1.0-android-x86_64-<version>.tar.xz` | `x86_64-linux-android` | ~75 MB compressed | Emulator CI (preferred) |
+| `gstreamer-1.0-android-universal-<version>.tar.xz` | All ABIs | Published for `1.24.13` | Bootstrap CI |
+| `gstreamer-1.0-android-arm64-<version>.tar.xz` | `aarch64-linux-android` | Not published in the public `1.24.13` directory | Do not assume |
+| `gstreamer-1.0-android-x86_64-<version>.tar.xz` | `x86_64-linux-android` | Not published in the public `1.24.13` directory | Do not assume |
 
-**Recommendation for CI**: Download per-ABI tarballs (`arm64` + `x86_64`) rather than
-the universal tarball. This reduces CI step time from ~5 min to ~90 sec for download
-+ extraction. The universal tarball is only useful for local developer environments
-that need all four ABIs without multiple downloads.
+**Current public SDK observation (2026-04-29)**: the GStreamer public Android
+listing for `1.24.13` publishes only `gstreamer-1.0-android-universal-1.24.13.tar.xz`,
+its signature, and its `.sha256sum`; the per-ABI `arm64` and `x86_64` archives
+assumed by the original sketch are absent. The live workflow correctly downloads
+the universal archive and caches it under a `universal` cache key.
 
-**Version pinning**: Pin the exact version in CI (e.g., `1.24.12`) via an environment
+**Version pinning**: Pin the exact version in CI (e.g., `1.24.13`) via an environment
 variable or workflow input. Do not use `latest` — GStreamer does not publish a
 stable-latest alias. Check for new patch releases at phase 3 kickoff and update the
 pin if security or linker fixes are present.
@@ -84,10 +90,10 @@ pin if security or linker fixes are present.
 tarball at the same base URL. Always verify:
 
 ```bash
-# Example for arm64
-wget https://gstreamer.freedesktop.org/data/pkg/android/1.24.12/gstreamer-1.0-android-arm64-1.24.12.tar.xz
-wget https://gstreamer.freedesktop.org/data/pkg/android/1.24.12/gstreamer-1.0-android-arm64-1.24.12.tar.xz.sha256sum
-sha256sum -c gstreamer-1.0-android-arm64-1.24.12.tar.xz.sha256sum
+# Example for the current 1.24.13 public archive
+wget https://gstreamer.freedesktop.org/data/pkg/android/1.24.13/gstreamer-1.0-android-universal-1.24.13.tar.xz
+wget https://gstreamer.freedesktop.org/data/pkg/android/1.24.13/gstreamer-1.0-android-universal-1.24.13.tar.xz.sha256sum
+sha256sum -c gstreamer-1.0-android-universal-1.24.13.tar.xz.sha256sum
 ```
 
 ### 1.3 Extraction Layout
@@ -100,21 +106,21 @@ $GSTREAMER_ROOT_ANDROID/
     lib/
       pkgconfig/                  ← .pc files for cross-pkg-config
       libgstreamer-full-1.0.a     ← main static archive (all plugins bundled)
-      gstreamer-1.0/
-        libgstandroidmedia.so     ← androidmedia plugin (separate .so; JVM-dependent)
+      gstreamer-1.0/              ← may be absent in current public 1.24.13
     include/gstreamer-1.0/
   x86_64/                         ← x86_64-linux-android (emulator)
     lib/
       pkgconfig/
       libgstreamer-full-1.0.a
-      gstreamer-1.0/
-        libgstandroidmedia.so
+      gstreamer-1.0/              ← may be absent in current public 1.24.13
     include/gstreamer-1.0/
 ```
 
-The per-ABI tarballs extract to a single-ABI layout (`arm64/` only). When both
-tarballs are downloaded, extract each into the same `$GSTREAMER_ROOT_ANDROID`
-root to produce the multi-ABI layout above.
+PR #617 observed the current public `1.24.13` universal archive extracting with
+`arm64/lib/` static archives and `arm64/lib/pkgconfig/`, but without a separate
+`arm64/lib/gstreamer-1.0/libgstandroidmedia.so`. The live workflow therefore
+accepts the arm64 static archive set as the material to inspect for `androidmedia`
+symbols when the separate plugin `.so` is absent.
 
 ---
 
@@ -126,8 +132,8 @@ root to produce the multi-ABI layout above.
 |---|---|---|---|
 | r21 | Not recommended | Clang 9 | LTS but outdated; GStreamer 1.24 Cerbero targets r25+. |
 | r25c | Minimum viable | Clang 14 | Stable libc++; no GCC remnants; acceptable for initial bootstrap. |
-| r27 | **Recommended (pinned)** | Clang 18 | Current stable NDK (2024). Improved LLD linker; fixes static init ordering bugs in complex C++ (GLib/GObject). `ANDROID_NDK_HOME` should point here. |
-| r28 | Monitor | — | Not yet released as of April 2026. Do not pin until GStreamer Cerbero validates. |
+| r27 | **Recommended (pinned)** | Clang 18 | Pinned baseline for this workflow. Improved LLD linker; fixes static init ordering bugs in complex C++ (GLib/GObject). `ANDROID_NDK_HOME` should point here. |
+| r28 | Monitor | Clang 19 | Released after the original spike; do not pin until GStreamer Cerbero validates this workflow against it. |
 
 **Pin NDK r27 for phase 3.** NDK r27 is the version used by GStreamer's own CI and
 cross-file examples (`android_arm64_api28.txt` in gst-build). Using a different NDK
@@ -326,15 +332,22 @@ Fix: use `PKG_CONFIG=/usr/bin/pkg-config` explicitly or install `cross-pkg-confi
 
 ## 4. GitHub Actions Workflow Sketch
 
-The following YAML sketch is a **proposed** CI job for validating the Android
-GStreamer bootstrap. It is not yet added to `.github/workflows/ci.yml`. Phase 3
-kickoff is the correct time to integrate it (or add as a separate
-`.github/workflows/android-bootstrap.yml`).
+The following YAML sketch is a reference CI job for validating the Android
+GStreamer bootstrap. The live `.github/workflows/android-bootstrap.yml` file is
+already present and remains authoritative; keep this sketch aligned when the
+workflow contract changes.
 
 **Note**: As of PR #541 (hud-dr5yf) + PR #542 (hud-04b00), the workflow file
 `.github/workflows/android-bootstrap.yml` exists and includes Gates 1–6 (see
-Section 6 for Gate 6 HAVE_NDKMEDIA details). The sketch below reflects the original
-5-gate design from hud-685ha. The live file is the authoritative source.
+Section 6 for Gate 6 HAVE_NDKMEDIA details). The sketch below is intentionally
+abbreviated, but should not contradict the live artifact layout, version pin, or
+Gate 6 advisory policy.
+
+**Update from PR #617 / hud-5dlpd**: the live workflow should keep Gate 6 as a
+warning-level audit. The public `1.24.13` archive allowed pkg-config and cargo-ndk
+link probes to pass for both Android targets, but `HAVE_NDKMEDIA` could not be
+confirmed from the archive symbols/strings. Hard-gating on `HAVE_NDKMEDIA` should
+wait for source-built Cerbero evidence or a runtime/device probe.
 
 ```yaml
 # .github/workflows/android-bootstrap.yml
@@ -358,9 +371,9 @@ on:
   workflow_dispatch:
     inputs:
       gst_version:
-        description: "GStreamer version (e.g. 1.24.12)"
+        description: "GStreamer version (e.g. 1.24.13)"
         required: true
-        default: "1.24.12"
+        default: "1.24.13"
   pull_request:
     paths:
       - "docs/ci/android-gstreamer-bootstrap.md"
@@ -369,7 +382,7 @@ on:
 
 env:
   # Pin these at phase 3 kickoff; update via PR when bumping
-  GST_VERSION: ${{ github.event.inputs.gst_version || '1.24.12' }}
+  GST_VERSION: ${{ github.event.inputs.gst_version || '1.24.13' }}
   NDK_VERSION: "27.2.12479018"
   ANDROID_API_LEVEL: "28"
   CARGO_TERM_COLOR: always
@@ -416,28 +429,26 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /opt/gstreamer-android
-          key: gstreamer-android-${{ env.GST_VERSION }}-arm64-x86_64
+          key: gstreamer-android-${{ env.GST_VERSION }}-universal
 
-      - name: Download GStreamer Android SDK (arm64 + x86_64)
+      - name: Download GStreamer Android SDK (universal)
         if: steps.cache-gst.outputs.cache-hit != 'true'
         run: |
           mkdir -p /opt/gstreamer-android-dl /opt/gstreamer-android
 
           GST_BASE="https://gstreamer.freedesktop.org/data/pkg/android/${{ env.GST_VERSION }}"
+          TARBALL="gstreamer-1.0-android-universal-${{ env.GST_VERSION }}.tar.xz"
 
-          for ABI in arm64 x86_64; do
-            TARBALL="gstreamer-1.0-android-${ABI}-${{ env.GST_VERSION }}.tar.xz"
-            echo "Downloading ${TARBALL}..."
-            wget -q -P /opt/gstreamer-android-dl "${GST_BASE}/${TARBALL}"
-            wget -q -P /opt/gstreamer-android-dl "${GST_BASE}/${TARBALL}.sha256sum"
+          echo "Downloading ${TARBALL}..."
+          wget -q -P /opt/gstreamer-android-dl "${GST_BASE}/${TARBALL}"
+          wget -q -P /opt/gstreamer-android-dl "${GST_BASE}/${TARBALL}.sha256sum"
 
-            echo "Verifying checksum..."
-            cd /opt/gstreamer-android-dl
-            sha256sum -c "${TARBALL}.sha256sum"
+          echo "Verifying checksum..."
+          cd /opt/gstreamer-android-dl
+          sha256sum -c "${TARBALL}.sha256sum"
 
-            echo "Extracting ${TARBALL}..."
-            tar xf "${TARBALL}" -C /opt/gstreamer-android
-          done
+          echo "Extracting ${TARBALL}..."
+          tar xf "${TARBALL}" -C /opt/gstreamer-android
 
           ls /opt/gstreamer-android/
 
@@ -455,16 +466,23 @@ jobs:
           fi
           echo "PASS: GStreamer arm64 SDK has $COUNT static archives"
 
-      # ── Gate 2: androidmedia .so present ─────────────────────────────────
-      - name: Gate 2 — androidmedia plugin .so present
+      # ── Gate 2: androidmedia material present ────────────────────────────
+      - name: Gate 2 — androidmedia plugin material present
         run: |
           PLUGIN="$GSTREAMER_ROOT_ANDROID/arm64/lib/gstreamer-1.0/libgstandroidmedia.so"
-          if [ ! -f "$PLUGIN" ]; then
-            echo "FAIL: libgstandroidmedia.so not found at $PLUGIN"
+          LIB_DIR="$GSTREAMER_ROOT_ANDROID/arm64/lib"
+
+          if [ -f "$PLUGIN" ]; then
+            echo "PASS: separate libgstandroidmedia.so present"
+            ls -lh "$PLUGIN"
+            echo "ANDROIDMEDIA_INSPECT_TARGET=$PLUGIN" >> "$GITHUB_ENV"
+          elif find "$LIB_DIR" -maxdepth 1 -name '*.a' -print -quit | grep -q .; then
+            echo "PASS: libgstandroidmedia.so is not separate in this SDK; using arm64 static archive set for androidmedia inspection"
+            echo "ANDROIDMEDIA_INSPECT_TARGET=$LIB_DIR" >> "$GITHUB_ENV"
+          else
+            echo "FAIL: neither separate libgstandroidmedia.so nor static archives found"
             exit 1
           fi
-          echo "PASS: libgstandroidmedia.so present"
-          ls -lh "$PLUGIN"
 
       # ── Gate 3: cross-pkg-config resolves gstreamer-1.0 ──────────────────
       - name: Gate 3 — cross-pkg-config probe
@@ -622,6 +640,18 @@ jobs:
           fi
           echo "PASS: cargo-ndk linked gstreamer-full for x86_64-linux-android"
 
+      # ── Gate 6: HAVE_NDKMEDIA advisory audit ─────────────────────────────
+      - name: Gate 6 — HAVE_NDKMEDIA audit for androidmedia material
+        run: |
+          PLUGIN="${ANDROIDMEDIA_INSPECT_TARGET:-$GSTREAMER_ROOT_ANDROID/arm64/lib/gstreamer-1.0/libgstandroidmedia.so}"
+          HAVE_NDKMEDIA_STATUS="not-confirmed"
+
+          echo "Inspecting $PLUGIN for HAVE_NDKMEDIA symbols..."
+          # Inspect gst_amc_*_ndk symbols and the AMediaCodec_createCodecByName
+          # dlsym string. Absence is warning-level for public SDK inspection.
+          echo "::warning::HAVE_NDKMEDIA was not confirmed from the downloaded SDK material; track this as Android phase-3 verification work rather than failing the bootstrap link gate."
+          echo "HAVE_NDKMEDIA_STATUS=$HAVE_NDKMEDIA_STATUS" >> "$GITHUB_ENV"
+
       # ── Summary ───────────────────────────────────────────────────────────
       - name: Bootstrap gate summary
         run: |
@@ -629,8 +659,9 @@ jobs:
           echo "GStreamer version : ${{ env.GST_VERSION }}"
           echo "NDK version       : ${{ env.NDK_VERSION }}"
           echo "API level         : ${{ env.ANDROID_API_LEVEL }}"
-          echo "All 5 gates passed — Android GStreamer CI bootstrap validated."
-          echo "Pre-phase-3 gate is GREEN. Phase 3 Android bead may open."
+          echo "Bootstrap link gates passed — Android GStreamer CI bootstrap validated."
+          echo "HAVE_NDKMEDIA audit: ${HAVE_NDKMEDIA_STATUS:-not-confirmed}"
+          echo "Pre-phase-3 source-build/runtime confirmation remains tracked separately when the audit cannot confirm NDK MediaCodec symbols."
 ```
 
 ---
@@ -658,8 +689,8 @@ may be corrupted or an incorrect ABI tarball was downloaded. Verify by checking
 
 ### 5.3 JVM bootstrap ordering (androidmedia)
 
-`libgstandroidmedia.so` requires JVM initialization before GStreamer can register
-the `androidmedia` plugin. The ordering must be:
+The `androidmedia` plugin requires JVM initialization before GStreamer can
+register its Android callbacks. The ordering must be:
 
 ```
 JNI_OnLoad  →  gst_android_init(env, context)  →  [event loop starts]  →  gst_init()
@@ -671,18 +702,19 @@ back to software without any error. The only symptom is `amcvideodec` not
 appearing in `gst-inspect-1.0` on the device.
 
 **CI impact**: This ordering constraint cannot be validated in CI without a JVM
-(and therefore a real Android device or emulator). Gates 1–5 in the CI workflow
-above validate the build chain only. Ordering validation happens in Phase 3
-on-device tests.
+(and therefore a real Android device or emulator). The link gates validate the
+build chain, and Gate 6 only reports whether the inspected public material
+confirms `HAVE_NDKMEDIA`. Ordering validation happens in Phase 3 on-device tests.
 
 ### 5.4 GStreamer SDK tarball naming variation
 
 GStreamer occasionally changes the tarball filename format between releases:
 - GStreamer ≤1.22: `gstreamer-1.0-android-universal-<version>.tar.bz2`
-- GStreamer 1.24+: `gstreamer-1.0-android-<abi>-<version>.tar.xz` (per-ABI)
+- Observed public GStreamer 1.24.13: `gstreamer-1.0-android-universal-<version>.tar.xz`
 
 The universal tarball moved to `.tar.xz` format (from `.tar.bz2`) in 1.24.
-Pin the file extension in CI scripts and update if the format changes in 1.26.
+Pin the file extension and archive flavor in CI scripts. Re-check the public
+directory before changing version pins; do not assume per-ABI tarballs exist.
 
 ### 5.5 pkg-config sysroot double-prepending
 
@@ -751,42 +783,56 @@ if cc.check_header('media/NdkMediaCodec.h')
 endif
 ```
 
-The prebuilt GStreamer Android SDK tarballs from freedesktop.org should activate
-HAVE_NDKMEDIA automatically for NDK API level ≥21 (which exposes NdkMediaCodec.h).
-But this needs explicit verification: if it is absent, all MediaCodec operations go
-through JNI with no observable error, and phase 3 would miss the per-frame NDK
-optimization without knowing it.
+The prebuilt GStreamer Android SDK tarballs from freedesktop.org may activate
+HAVE_NDKMEDIA when built with an NDK/API combination that exposes
+`NdkMediaCodec.h`. The public archive layout does not currently prove that on
+its own, so phase 3 needs source-build or runtime evidence before depending on
+the per-frame NDK optimization.
 
 ### Verification strategy
 
 Since `libmediandk.so` is accessed via `dlopen`/`dlsym` at runtime (not direct
 dynamic linkage), a `readelf -d` check for DT_NEEDED entries will not show it.
-Instead, the CI gate inspects the compiled symbol content of `libgstandroidmedia.so`:
+Instead, the CI gate inspects the available androidmedia material: a separate
+`libgstandroidmedia.so` when present, otherwise the arm64 static archive set.
 
-**Primary check**: `readelf -s --wide libgstandroidmedia.so | grep gst_amc_codec_ndk`
+**Primary check**: `readelf -s --wide <androidmedia-material> | grep gst_amc_codec_ndk`
 
 The functions defined in `ndk/gstamc-codec-ndk.c` (e.g., `gst_amc_codec_ndk_new`,
-`gst_amc_codec_ndk_start`) are compiled into the `.so` as defined symbols when
-`HAVE_NDKMEDIA=1`. They are absent if `HAVE_NDKMEDIA` was not set.
+`gst_amc_codec_ndk_start`) are expected evidence that `HAVE_NDKMEDIA=1` was set
+when the inspected material includes the androidmedia internals.
 
-**Secondary check (fallback)**: `strings libgstandroidmedia.so | grep AMediaCodec_createCodecByName`
+**Secondary check (fallback)**: `strings <androidmedia-material> | grep AMediaCodec_createCodecByName`
 
 Because the NDK path uses `dlsym("AMediaCodec_createCodecByName")`, this string
 literal is embedded in the binary's `.rodata` section when the NDK path is
-compiled in. Its absence means the NDK path is not present.
+compiled in and visible to archive inspection. Its absence from the current
+public archive inspection means the NDK path is not confirmed, not that the
+public SDK definitively lacks it.
 
-### What to do if Gate 6 fails
+### What to do if Gate 6 cannot confirm HAVE_NDKMEDIA
 
 If neither check passes:
 
 1. Verify the GStreamer SDK version is ≥1.24. Older versions predate MR #4115.
-2. Verify the SDK tarball ABI. The per-ABI tarballs (`arm64`, `x86_64`) should
-   expose NdkMediaCodec.h for API level ≥21; the universal tarball occasionally
-   has different include path layouts.
+2. Verify the SDK tarball layout. The current public `1.24.13` listing publishes
+   only the universal archive, so do not assume per-ABI tarballs or a separate
+   `libgstandroidmedia.so` are available.
 3. Check if the prebuilt was built with an NDK that includes `<media/NdkMediaCodec.h>`.
    NDK r21+ provides this header for API 21+. NDK r16 and earlier do not.
 4. As a workaround, rebuild the SDK from source with Cerbero using NDK r27, which
    is guaranteed to expose NdkMediaCodec.h for API 28.
+
+PR #617 is the current observed baseline: `pkg-config` resolved `gstreamer-1.0`
+to `1.24.13`, cargo-ndk linked for `aarch64-linux-android` and
+`x86_64-linux-android`, and Gate 6 completed with `HAVE_NDKMEDIA_STATUS=not-confirmed`.
+That result should not fail the bootstrap link gate. It should remain a visible
+warning until phase 3 produces one of:
+
+- Cerbero build logs showing `-DHAVE_NDKMEDIA` while building `androidmedia`.
+- Runtime/device evidence that the NDK-backed codec path is active.
+- Upstream release notes or package metadata that explicitly identify the public
+  prebuilt as built with `HAVE_NDKMEDIA`.
 
 ### Important: JNI bootstrap constraint unchanged
 
@@ -809,24 +855,28 @@ phase 3 implementation and on-device runtime validation exist.
 |---|---|---|---|---|
 | 1 | GStreamer 1.24.x tarball downloaded and SHA-256 verified | CI Gate: download step exits 0 | Yes | Pending |
 | 2 | GStreamer arm64 SDK has >50 static archives in `arm64/lib/` | CI Gate 1 | Yes | Pending |
-| 3 | `libgstandroidmedia.so` present at `arm64/lib/gstreamer-1.0/libgstandroidmedia.so` | CI Gate 2 | Yes | Pending |
+| 3 | `androidmedia` material present (`libgstandroidmedia.so` when separate, otherwise arm64 static archive set) | CI Gate 2 | Yes | Pending |
 | 4 | cross-pkg-config resolves `gstreamer-1.0` to version 1.24.x | CI Gate 3 | Yes | Pending |
 | 5 | NDK r27 installed; `ANDROID_NDK_HOME` set correctly | CI: NDK install step | Yes | Pending |
 | 6 | `cargo-ndk --version` reports 3.5+ | CI: cargo-ndk install step | Yes | Pending |
 | 7 | Rust targets `aarch64-linux-android` and `x86_64-linux-android` installed | CI: rust-toolchain step | Yes | Pending |
 | 8 | `cargo ndk -t aarch64-linux-android -p 28 build` links gstreamer-full without errors | CI Gate 4 | Yes | Pending |
 | 9 | `cargo ndk -t x86_64-linux-android -p 28 build` links gstreamer-full without errors | CI Gate 5 | Yes | Pending |
-| 10 | `HAVE_NDKMEDIA` active in `libgstandroidmedia.so` (NDK codec wrapper symbols present) | CI Gate 6 | Yes | Pending |
+| 10 | `HAVE_NDKMEDIA` audit executed and status recorded; confirmation requires source-build or runtime evidence | CI Gate 6 warning | Yes | Pending |
 | 11 | `build.rs` ABI-to-directory mapping handles both `arm64-v8a` and `x86_64` | Review of build.rs | Manual | Pending |
 | 12 | `gst_android_init()` call site exists in Android JNI entry point before `gst_init()` | Code review of JNI_OnLoad | Manual | Blocked (see `docs/reports/android-phase3-gate-validation-2026-04-21.md`) |
 | 13 | On-device: `amcvideodec` element registered (`gst_element_factory_find("amcvideodec")` not null) | On-device logcat check | Device-only | Blocked (see `docs/reports/android-phase3-gate-validation-2026-04-21.md`) |
 
-Items 1–10 are validated by the GitHub Actions workflow in Section 4.
+Items 1–9 are validated by the GitHub Actions workflow in Section 4. Item 10 is
+observed and reported by CI, but is not a hard pre-phase-3 bootstrap gate while
+the public prebuilt remains symbol-inconclusive.
 Items 11–13 require phase 3 implementation work or on-device verification.
 
-**Gate is GREEN when**: items 1–10 pass in CI (including Gate 6 HAVE_NDKMEDIA check),
-item 11 passes manual review, and the android-bootstrap workflow exits 0 on a PR that
-adds the actual build.rs and Android shim crate.
+**Gate is GREEN when**: items 1–9 pass in CI, Gate 6 records either `confirmed` or
+`not-confirmed` without hiding the status, item 11 passes manual review, and the
+android-bootstrap workflow exits 0 on a PR that adds the actual build.rs and
+Android shim crate. Do not make `HAVE_NDKMEDIA` a hard gate without source-built
+Cerbero logs or runtime/device evidence.
 
 ---
 
@@ -906,6 +956,9 @@ handle discovery directly without CMake. This is a phase 3 runtime concern only.
 - `docs/reports/gstreamer-1.26-ndk-mediacodec-audit.md` — NDK MediaCodec audit
   (hud-fts60, PR #540). Confirms MR #4115 shipped in GStreamer 1.24; explains
   what HAVE_NDKMEDIA does and does not eliminate; basis for Gate 6 in this CI workflow.
+- `docs/reports/android-gstreamer-ndkmedia-public-sdk-audit-20260429.md` —
+  hud-5dlpd verification against the current public SDK listing and PR #617 CI
+  behavior; records why Gate 6 remains an advisory assertion.
 - `docs/audits/gstreamer-media-pipeline-audit.md` — GStreamer desktop pipeline
   audit. Desktop pattern reference for GStreamer pipeline model, AppSink bridge,
   GLib main loop threading.
