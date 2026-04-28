@@ -1,0 +1,4 @@
+interface:
+  display_name: "HUD Projection"
+  short_description: "Cooperatively project an active LLM session into a tze_hud text-stream portal"
+  default_prompt: "Attach this already-running LLM session to the HUD through the external projection daemon, publish bounded output/status, poll pending HUD input, acknowledge input items, and detach or clean up without terminal capture or PTY attachment."
