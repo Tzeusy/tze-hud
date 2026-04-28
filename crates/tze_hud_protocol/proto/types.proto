@@ -81,6 +81,13 @@ message HitRegionNodeProto {
   string interaction_id = 2;
   bool accepts_focus = 3;
   bool accepts_pointer = 4;
+  // When true, PointerDown on this region acquires runtime pointer capture so
+  // subsequent move/up events continue routing to the same node even after the
+  // pointer leaves the original bounds.
+  bool auto_capture = 5;
+  // When true, runtime pointer capture acquired by this region is released on
+  // the matching PointerUp.
+  bool release_on_up = 6;
 }
 
 // How image content is fitted within the node bounds.

@@ -713,6 +713,11 @@ struct WindowedRuntimeState {
     window_surface: Option<Arc<WindowSurface>>,
     /// Input processor for local feedback.
     input_processor: InputProcessor,
+    /// Session-plane pointer capture commands delivered from the gRPC server.
+    input_capture_rx:
+        tokio::sync::mpsc::UnboundedReceiver<tze_hud_protocol::session::InputCaptureCommand>,
+    pending_input_capture_commands:
+        std::collections::VecDeque<tze_hud_protocol::session::InputCaptureCommand>,
     /// Focus manager — tracks which node / tile has keyboard focus per tab.
     ///
     /// Updated on every pointer-down via `InputProcessor::process_with_focus`.
@@ -826,6 +831,7 @@ impl ApplicationHandler for WinitApp {
             self.resumed(event_loop);
         }
         self.refresh_cursor_position_from_os();
+        self.drain_input_capture_commands();
         self.synthesize_left_release_if_physically_up();
         self.refresh_widget_hover_tracking();
         self.update_overlay_cursor_hittest();
@@ -1543,6 +1549,7 @@ impl ApplicationHandler for WinitApp {
             // ── Redraw ────────────────────────────────────────────────────
             WindowEvent::RedrawRequested => {
                 self.refresh_cursor_position_from_os();
+                self.drain_input_capture_commands();
                 self.refresh_widget_hover_tracking();
                 self.tick_widget_hover_tracking();
                 self.update_overlay_cursor_hittest();
@@ -1563,6 +1570,71 @@ impl ApplicationHandler for WinitApp {
 }
 
 impl WinitApp {
+    fn drain_input_capture_commands(&mut self) {
+        while let Ok(command) = self.state.input_capture_rx.try_recv() {
+            self.state.pending_input_capture_commands.push_back(command);
+        }
+
+        while let Some(command) = self.state.pending_input_capture_commands.pop_front() {
+            let Ok(state) = self.state.shared_state.try_lock() else {
+                tracing::warn!("input capture command deferred: shared_state lock busy");
+                self.state
+                    .pending_input_capture_commands
+                    .push_front(command);
+                break;
+            };
+            let Ok(scene) = state.scene.try_lock() else {
+                tracing::warn!("input capture command deferred: scene lock busy");
+                self.state
+                    .pending_input_capture_commands
+                    .push_front(command);
+                break;
+            };
+
+            match command {
+                tze_hud_protocol::session::InputCaptureCommand::Request {
+                    tile_id,
+                    node_id,
+                    device_id,
+                    release_on_up,
+                } => {
+                    let req = tze_hud_input::CaptureRequest {
+                        tile_id,
+                        node_id,
+                        device_id,
+                    };
+                    if let Some(dispatch) =
+                        self.state
+                            .input_processor
+                            .request_capture(&req, &scene, release_on_up)
+                    {
+                        tracing::debug!(
+                            tile_id = ?tile_id,
+                            node_id = ?node_id,
+                            device_id,
+                            kind = ?dispatch.kind,
+                            "session input capture request applied"
+                        );
+                    } else {
+                        tracing::warn!(
+                            tile_id = ?tile_id,
+                            node_id = ?node_id,
+                            device_id,
+                            "session input capture request ignored: target not found"
+                        );
+                    }
+                }
+                tze_hud_protocol::session::InputCaptureCommand::Release { device_id } => {
+                    let req = tze_hud_input::CaptureReleaseRequest { device_id };
+                    if let Some(dispatch) = self.state.input_processor.release_capture(&req, &scene)
+                    {
+                        dispatch_capture_released_event(&self.state.input_event_tx, dispatch);
+                    }
+                }
+            }
+        }
+    }
+
     fn synthesize_left_release_if_physically_up(&mut self) -> bool {
         if self.state.left_button_down
             && matches!(left_mouse_button_is_physically_down(), Some(false))
@@ -2705,6 +2777,7 @@ impl WindowedRuntime {
             )
         };
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&cfg.psk);
+        let (input_capture_tx, input_capture_rx) = tokio::sync::mpsc::unbounded_channel();
         let shared_state = Arc::new(Mutex::new(SharedState {
             scene: Arc::clone(&shared_scene),
             sessions,
@@ -2719,6 +2792,7 @@ impl WindowedRuntime {
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
+            input_capture_tx: Some(input_capture_tx),
         }));
 
         let (frame_ready_tx, frame_ready_rx) = frame_ready_channel();
@@ -2831,6 +2905,8 @@ impl WindowedRuntime {
             compositor: None,
             window_surface: None,
             input_processor: InputProcessor::new(),
+            input_capture_rx,
+            pending_input_capture_commands: std::collections::VecDeque::new(),
             focus_manager: FocusManager::new(),
             keyboard_processor: KeyboardProcessor::new(),
             telemetry: TelemetryCollector::new(),
@@ -4328,6 +4404,7 @@ mod tests {
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: RuntimeDegradationLevel::Normal,
+            input_capture_tx: None,
         }))
     }
 
