@@ -18,6 +18,7 @@ use tze_hud_projection::{
 
 const DEFAULT_CALLER_IDENTITY: &str = "projection-authority-stdio";
 const MAX_CLI_STATUS_SUMMARY_BYTES: usize = 512;
+const MAX_STDIN_LINE_BYTES: usize = 65_536;
 
 #[derive(Debug)]
 struct CliConfig {
@@ -66,9 +67,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliConfig, Strin
                     .ok_or("--caller-identity requires a value".to_string())?;
             }
             "--operator-authority" => {
-                operator_authority = Some(
-                    iter.next()
-                        .ok_or("--operator-authority requires a value".to_string())?,
+                return Err(
+                    "--operator-authority is not supported; use --operator-authority-env VAR"
+                        .to_string(),
                 );
             }
             "--operator-authority-env" => {
@@ -95,7 +96,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliConfig, Strin
 
 fn print_help() {
     println!(
-        "Usage: tze_hud_projection_authority [--stdio] [--caller-identity ID] [--operator-authority SECRET | --operator-authority-env VAR]\n\
+        "Usage: tze_hud_projection_authority [--stdio] [--caller-identity ID] [--operator-authority-env VAR]\n\
          \n\
          Reads one cooperative HUD projection operation JSON object per stdin line and writes one JSON result per stdout line.\n\
          The process retains projection state in memory only and emits bounded operation responses plus newly written audit records."
@@ -104,25 +105,119 @@ fn print_help() {
 
 fn serve_stdio(authority: &mut ProjectionAuthority, config: &CliConfig) -> Result<(), String> {
     let stdin = io::stdin();
+    let mut stdin = stdin.lock();
     let mut stdout = io::stdout().lock();
 
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|error| format!("failed to read stdin: {error}"))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let result = dispatch_line(authority, config, &line);
-        serde_json::to_writer(&mut stdout, &result)
-            .map_err(|error| format!("failed to encode response: {error}"))?;
-        stdout
-            .write_all(b"\n")
-            .map_err(|error| format!("failed to write response: {error}"))?;
-        stdout
-            .flush()
-            .map_err(|error| format!("failed to flush response: {error}"))?;
+    loop {
+        let result = match read_bounded_line(&mut stdin, MAX_STDIN_LINE_BYTES)
+            .map_err(|error| format!("failed to read stdin: {error}"))?
+        {
+            StdinLine::Line(line) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                dispatch_line(authority, config, &line)
+            }
+            StdinLine::TooLong => malformed_response(
+                "unknown",
+                "unknown",
+                now_wall_us(),
+                format!("stdin request line exceeds {MAX_STDIN_LINE_BYTES} bytes"),
+            ),
+            StdinLine::InvalidUtf8 => malformed_response(
+                "unknown",
+                "unknown",
+                now_wall_us(),
+                "stdin request line is not valid UTF-8",
+            ),
+            StdinLine::Eof => break,
+        };
+        write_result(&mut stdout, &result)?;
     }
 
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StdinLine {
+    Line(String),
+    TooLong,
+    InvalidUtf8,
+    Eof,
+}
+
+fn read_bounded_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<StdinLine> {
+    let mut bytes = Vec::new();
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(StdinLine::Eof);
+            }
+            break;
+        }
+
+        if let Some(newline_index) = available.iter().position(|byte| *byte == b'\n') {
+            let take = newline_index + 1;
+            if bytes.len() + take > max_bytes {
+                reader.consume(take);
+                return Ok(StdinLine::TooLong);
+            }
+            bytes.extend_from_slice(&available[..take]);
+            reader.consume(take);
+            break;
+        }
+
+        if bytes.len() + available.len() > max_bytes {
+            let consumed = available.len();
+            reader.consume(consumed);
+            drain_until_newline(reader)?;
+            return Ok(StdinLine::TooLong);
+        }
+
+        bytes.extend_from_slice(available);
+        let consumed = available.len();
+        reader.consume(consumed);
+    }
+
+    if bytes.ends_with(b"\n") {
+        bytes.pop();
+        if bytes.ends_with(b"\r") {
+            bytes.pop();
+        }
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(line) => Ok(StdinLine::Line(line)),
+        Err(_) => Ok(StdinLine::InvalidUtf8),
+    }
+}
+
+fn drain_until_newline<R: BufRead>(reader: &mut R) -> io::Result<()> {
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        if let Some(newline_index) = available.iter().position(|byte| *byte == b'\n') {
+            reader.consume(newline_index + 1);
+            return Ok(());
+        }
+        let consumed = available.len();
+        reader.consume(consumed);
+    }
+}
+
+fn write_result(mut stdout: impl Write, result: &CliOperationResult) -> Result<(), String> {
+    serde_json::to_writer(&mut stdout, result)
+        .map_err(|error| format!("failed to encode response: {error}"))?;
+    stdout
+        .write_all(b"\n")
+        .map_err(|error| format!("failed to write response: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush response: {error}"))
 }
 
 fn dispatch_line(
@@ -142,7 +237,7 @@ fn dispatch_line(
             );
         }
     };
-    let caller_identity = config.caller_identity.clone();
+    let caller_identity = config.caller_identity.as_str();
     let Some(operation_value) = value.get("operation") else {
         return malformed_response(
             request_id(&value),
@@ -166,23 +261,23 @@ fn dispatch_line(
     let audit_start = authority.audit_log().len();
     let response = match operation {
         ProjectionOperation::Attach => deserialize_then(value, |request: AttachRequest| {
-            authority.handle_attach(request, &caller_identity, server_timestamp_wall_us)
+            authority.handle_attach(request, caller_identity, server_timestamp_wall_us)
         }),
         ProjectionOperation::PublishOutput => {
             deserialize_then(value, |request: PublishOutputRequest| {
-                authority.handle_publish_output(request, &caller_identity, server_timestamp_wall_us)
+                authority.handle_publish_output(request, caller_identity, server_timestamp_wall_us)
             })
         }
         ProjectionOperation::PublishStatus => {
             deserialize_then(value, |request: PublishStatusRequest| {
-                authority.handle_publish_status(request, &caller_identity, server_timestamp_wall_us)
+                authority.handle_publish_status(request, caller_identity, server_timestamp_wall_us)
             })
         }
         ProjectionOperation::GetPendingInput => {
             deserialize_then(value, |request: GetPendingInputRequest| {
                 authority.handle_get_pending_input(
                     request,
-                    &caller_identity,
+                    caller_identity,
                     server_timestamp_wall_us,
                 )
             })
@@ -191,24 +286,46 @@ fn dispatch_line(
             deserialize_then(value, |request: AcknowledgeInputRequest| {
                 authority.handle_acknowledge_input(
                     request,
-                    &caller_identity,
+                    caller_identity,
                     server_timestamp_wall_us,
                 )
             })
         }
         ProjectionOperation::Detach => deserialize_then(value, |request: DetachRequest| {
-            authority.handle_detach(request, &caller_identity, server_timestamp_wall_us)
+            authority.handle_detach(request, caller_identity, server_timestamp_wall_us)
         }),
         ProjectionOperation::Cleanup => deserialize_then(value, |request: CleanupRequest| {
-            authority.handle_cleanup(request, &caller_identity, server_timestamp_wall_us)
+            authority.handle_cleanup(request, caller_identity, server_timestamp_wall_us)
         }),
     };
 
-    let audit_records = authority.audit_log()[audit_start..].to_vec();
+    let audit_records = new_audit_records(authority, audit_start, &response);
     CliOperationResult {
         response,
         audit_records,
     }
+}
+
+fn new_audit_records(
+    authority: &ProjectionAuthority,
+    audit_start: usize,
+    response: &ProjectionResponse,
+) -> Vec<ProjectionAuditRecord> {
+    let audit_log = authority.audit_log();
+    if audit_log.len() > audit_start {
+        return audit_log[audit_start..].to_vec();
+    }
+
+    audit_log
+        .last()
+        .filter(|record| {
+            record.request_id == response.request_id
+                && record.projection_id == response.projection_id
+                && record.timestamp_wall_us == response.server_timestamp_wall_us
+        })
+        .cloned()
+        .into_iter()
+        .collect()
 }
 
 fn deserialize_then<T>(
