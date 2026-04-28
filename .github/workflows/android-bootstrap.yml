@@ -5,7 +5,7 @@
 # Android implementation bead (D19 — Pixel aarch64) can open:
 #
 #   Gate 1 — GStreamer SDK static archives present (arm64)
-#   Gate 2 — androidmedia plugin .so present
+#   Gate 2 — androidmedia plugin material present
 #   Gate 3 — cross-pkg-config resolves gstreamer-1.0
 #   Gate 4 — cargo-ndk link probe (aarch64-linux-android)
 #   Gate 5 — cargo-ndk link probe (x86_64-linux-android)
@@ -128,16 +128,27 @@ jobs:
           fi
           echo "PASS: GStreamer arm64 SDK has $COUNT static archives"
 
-      # ── Gate 2: androidmedia .so present ─────────────────────────────────────
-      - name: "Gate 2 — androidmedia plugin .so present"
+      # ── Gate 2: androidmedia plugin material present ─────────────────────────
+      - name: "Gate 2 — androidmedia plugin material present"
         run: |
           PLUGIN="$GSTREAMER_ROOT_ANDROID/arm64/lib/gstreamer-1.0/libgstandroidmedia.so"
-          if [ ! -f "$PLUGIN" ]; then
-            echo "FAIL: libgstandroidmedia.so not found at $PLUGIN"
+          FULL_ARCHIVE="$GSTREAMER_ROOT_ANDROID/arm64/lib/libgstreamer-full-1.0.a"
+
+          if [ -f "$PLUGIN" ]; then
+            echo "PASS: separate libgstandroidmedia.so present"
+            ls -lh "$PLUGIN"
+            echo "ANDROIDMEDIA_INSPECT_TARGET=$PLUGIN" >> "$GITHUB_ENV"
+          elif [ -f "$FULL_ARCHIVE" ]; then
+            echo "PASS: libgstandroidmedia.so is not separate in this SDK; using gstreamer-full archive for androidmedia inspection"
+            ls -lh "$FULL_ARCHIVE"
+            echo "ANDROIDMEDIA_INSPECT_TARGET=$FULL_ARCHIVE" >> "$GITHUB_ENV"
+          else
+            echo "FAIL: neither separate libgstandroidmedia.so nor libgstreamer-full-1.0.a found"
+            echo "Checked:"
+            echo "  $PLUGIN"
+            echo "  $FULL_ARCHIVE"
             exit 1
           fi
-          echo "PASS: libgstandroidmedia.so present"
-          ls -lh "$PLUGIN"
 
       # ── Gate 3: cross-pkg-config resolves gstreamer-1.0 ──────────────────────
       - name: "Gate 3 — cross-pkg-config probe"
@@ -308,10 +319,12 @@ jobs:
 
           echo "PASS: cargo-ndk linked gstreamer-full for x86_64-linux-android"
 
-      # ── Gate 6: HAVE_NDKMEDIA active in libgstandroidmedia.so ────────────────
+      # ── Gate 6: HAVE_NDKMEDIA active in androidmedia material ────────────────
       #
-      # Strategy: inspect libgstandroidmedia.so for symbols that are compiled in
-      # only when HAVE_NDKMEDIA=1 is defined at build time (from meson.build):
+      # Strategy: inspect the separate androidmedia plugin .so when present,
+      # otherwise inspect the gstreamer-full archive used by current SDK
+      # packaging, for symbols that are compiled in only when HAVE_NDKMEDIA=1
+      # is defined at build time (from meson.build):
       #
       #   if cc.check_header('media/NdkMediaCodec.h')
       #     androidmedia_sources += ndk_sources
@@ -330,9 +343,9 @@ jobs:
       # References:
       #   gstamc-codec-ndk.c: subprojects/gst-plugins-bad/sys/androidmedia/ndk/
       #   hud-fts60 audit: docs/reports/gstreamer-1.26-ndk-mediacodec-audit.md
-      - name: "Gate 6 — HAVE_NDKMEDIA active in libgstandroidmedia.so"
+      - name: "Gate 6 — HAVE_NDKMEDIA active in androidmedia material"
         run: |
-          PLUGIN="$GSTREAMER_ROOT_ANDROID/arm64/lib/gstreamer-1.0/libgstandroidmedia.so"
+          PLUGIN="${ANDROIDMEDIA_INSPECT_TARGET:-$GSTREAMER_ROOT_ANDROID/arm64/lib/gstreamer-1.0/libgstandroidmedia.so}"
 
           echo "Inspecting $PLUGIN for HAVE_NDKMEDIA symbols..."
 
@@ -360,7 +373,7 @@ jobs:
             else
               echo ""
               echo "FAIL: Neither NDK codec wrapper symbols nor the AMediaCodec_createCodecByName"
-              echo "dlsym string were found in libgstandroidmedia.so."
+              echo "dlsym string were found in androidmedia material."
               echo ""
               echo "This means HAVE_NDKMEDIA was NOT defined at build time:"
               echo "  - The prebuilt SDK may have been built without NdkMediaCodec.h in the NDK headers."
