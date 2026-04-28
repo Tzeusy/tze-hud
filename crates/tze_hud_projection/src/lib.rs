@@ -767,8 +767,6 @@ pub struct ProjectionStateSummary {
     pub pending_input_count: usize,
     pub pending_input_bytes: usize,
     pub unread_output_count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_heartbeat_wall_us: Option<u64>,
     pub reconnect: ReconnectBookkeeping,
 }
 
@@ -1118,7 +1116,6 @@ impl ProjectionAuthority {
                     .count(),
                 pending_input_bytes: session.pending_input_bytes,
                 unread_output_count: session.unread_output_count,
-                last_heartbeat_wall_us: session.reconnect.last_heartbeat_wall_us,
                 reconnect: session.reconnect,
             }
         })
@@ -3493,6 +3490,7 @@ mod tests {
             authority
                 .state_summary("projection-a")
                 .unwrap()
+                .reconnect
                 .last_heartbeat_wall_us,
             Some(30)
         );
@@ -4480,7 +4478,7 @@ mod tests {
             let owner_token = attach(&mut authority, "projection-a");
             let mut projection_exists = true;
             let mut has_connection = false;
-            let mut has_fresh_lease = false;
+            let mut lease_expires_at = None;
             let mut now = 20u64;
 
             for action in actions {
@@ -4497,7 +4495,7 @@ mod tests {
                             Ok(())
                         );
                         has_connection = true;
-                        has_fresh_lease = false;
+                        lease_expires_at = None;
                     }
                     1 => {
                         let result = authority.record_heartbeat("projection-a", now);
@@ -4515,7 +4513,7 @@ mod tests {
                         );
                         if has_connection {
                             prop_assert_eq!(result, Ok(()));
-                            has_fresh_lease = true;
+                            lease_expires_at = Some(now + 100);
                         } else {
                             prop_assert_eq!(result, Err(ProjectionErrorCode::ProjectionHudUnavailable));
                         }
@@ -4526,7 +4524,7 @@ mod tests {
                             Ok(())
                         );
                         has_connection = false;
-                        has_fresh_lease = false;
+                        lease_expires_at = None;
                     }
                     4 => {
                         let result = authority.authorize_portal_republish(
@@ -4535,10 +4533,14 @@ mod tests {
                             &[String::from("create_tiles")],
                             now,
                         );
-                        if has_connection && has_fresh_lease {
+                        if has_connection && lease_expires_at.is_some_and(|expires_at| now < expires_at) {
                             prop_assert_eq!(result, Ok(()));
                         } else {
                             prop_assert!(result.is_err());
+                            if has_connection && lease_expires_at.is_some_and(|expires_at| now >= expires_at) {
+                                prop_assert_eq!(result, Err(ProjectionErrorCode::ProjectionTokenExpired));
+                                lease_expires_at = None;
+                            }
                         }
                     }
                     _ => {
