@@ -244,24 +244,17 @@ jobs:
 
           echo "Running cargo ndk link probe (aarch64)..."
           cd "$PROBE_DIR"
-          cargo ndk \
+          set -o pipefail
+          if ! cargo ndk \
             --target aarch64-linux-android \
             --platform "${{ env.ANDROID_API_LEVEL }}" \
-            build --release 2>&1 | tee /tmp/cargo-ndk-probe-arm64.log
-
-          if grep -q "^error" /tmp/cargo-ndk-probe-arm64.log; then
-            echo "FAIL: cargo-ndk arm64 link probe produced errors"
-            cat /tmp/cargo-ndk-probe-arm64.log
-            exit 1
-          fi
-
-          if ! grep -q "Finished release" /tmp/cargo-ndk-probe-arm64.log; then
+            build --release 2>&1 | tee /tmp/cargo-ndk-probe-arm64.log; then
             echo "FAIL: cargo-ndk arm64 link probe did not finish successfully"
             cat /tmp/cargo-ndk-probe-arm64.log
             exit 1
           fi
 
-          echo "PASS: cargo-ndk linked gstreamer-full successfully for aarch64-linux-android"
+          echo "PASS: cargo-ndk linked GStreamer via pkg-config for aarch64-linux-android"
 
       # ── Gate 5: cargo-ndk link probe (x86_64-linux-android) ──────────────────
       - name: "Gate 5 — cargo-ndk link probe (x86_64-linux-android)"
@@ -336,24 +329,17 @@ jobs:
 
           echo "Running cargo ndk link probe (x86_64)..."
           cd "$PROBE_DIR"
-          cargo ndk \
+          set -o pipefail
+          if ! cargo ndk \
             --target x86_64-linux-android \
             --platform "${{ env.ANDROID_API_LEVEL }}" \
-            build --release 2>&1 | tee /tmp/cargo-ndk-probe-x86.log
-
-          if grep -q "^error" /tmp/cargo-ndk-probe-x86.log; then
-            echo "FAIL: x86_64 link probe produced errors"
-            cat /tmp/cargo-ndk-probe-x86.log
-            exit 1
-          fi
-
-          if ! grep -q "Finished release" /tmp/cargo-ndk-probe-x86.log; then
+            build --release 2>&1 | tee /tmp/cargo-ndk-probe-x86.log; then
             echo "FAIL: x86_64 link probe did not finish successfully"
             cat /tmp/cargo-ndk-probe-x86.log
             exit 1
           fi
 
-          echo "PASS: cargo-ndk linked gstreamer-full for x86_64-linux-android"
+          echo "PASS: cargo-ndk linked GStreamer via pkg-config for x86_64-linux-android"
 
       # ── Gate 6: HAVE_NDKMEDIA active in androidmedia material ────────────────
       #
