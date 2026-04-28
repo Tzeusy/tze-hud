@@ -3476,7 +3476,7 @@ fn dispatch_pointer_event(
 
     // Monotonic microseconds since process start — same clock source used by
     // the keyboard and scene-graph event paths (see `nanoseconds_since_start`).
-    let timestamp_mono_us = nanoseconds_since_start() / 1_000;
+    let timestamp_mono_us = (nanoseconds_since_start() / 1_000).max(1);
 
     let event = match dispatch.kind {
         AgentDispatchKind::PointerDown => {
