@@ -11,10 +11,16 @@ use std::collections::VecDeque;
 
 use tokio_stream::StreamExt;
 use tze_hud_projection::{
-    AttachRequest, ContentClassification, GetPendingInputRequest, OperationEnvelope, OutputKind,
-    PortalInputFeedbackState, PortalInputSubmission, ProjectedPortalAdapterFamily,
-    ProjectedPortalLayer, ProjectedPortalPolicy, ProjectedPortalRuntimeAuthority,
-    ProjectionAuthority, ProjectionOperation, ProviderKind, PublishOutputRequest,
+    AdvisoryLeaseIdentity, AttachRequest, ContentClassification, GetPendingInputRequest,
+    HudConnectionMetadata, OperationEnvelope, OutputKind, PortalInputFeedbackState,
+    PortalInputSubmission, ProjectedPortalAdapterFamily, ProjectedPortalLayer,
+    ProjectedPortalPolicy, ProjectedPortalRuntimeAuthority, ProjectionAuthority,
+    ProjectionLifecycleState, ProjectionOperation, ProviderKind, PublishOutputRequest,
+    PublishStatusRequest,
+    resident_grpc::{
+        RESIDENT_PORTAL_INPUT_FEEDBACK_BUDGET_US, ResidentGrpcPortalAdapter,
+        ResidentGrpcPortalCommand, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
+    },
 };
 use tze_hud_protocol::auth::{RUNTIME_MAX_VERSION, RUNTIME_MIN_VERSION};
 use tze_hud_protocol::proto;
@@ -308,7 +314,9 @@ impl PortalAdapter for RelayChatAdapter {
 }
 
 struct AgentSession {
+    session_id: Vec<u8>,
     namespace: String,
+    granted_capabilities: Vec<String>,
     lease_id: Vec<u8>,
     tx: tokio::sync::mpsc::Sender<session_proto::ClientMessage>,
     rx: tonic::codec::Streaming<session_proto::ServerMessage>,
@@ -345,6 +353,14 @@ struct SessionSceneVerification {
     session_count: usize,
 }
 
+#[derive(Debug)]
+struct TileVerification {
+    tile_count: usize,
+    root_text: String,
+    bounds: tze_hud_scene::types::Rect,
+    input_mode: tze_hud_scene::types::InputMode,
+}
+
 async fn verify_scene_for_namespace(
     runtime: &HeadlessRuntime,
     namespace: &str,
@@ -376,6 +392,34 @@ async fn verify_scene_for_namespace(
         contains_identity: has_identity,
         session_count: state.sessions.session_count(),
     }
+}
+
+async fn verify_single_tile(
+    runtime: &HeadlessRuntime,
+    tile_id: &[u8],
+) -> Result<TileVerification, Box<dyn std::error::Error>> {
+    let uuid = uuid::Uuid::from_slice(tile_id)?;
+    let scene_id = tze_hud_scene::SceneId::from_uuid(uuid);
+    let state = runtime.shared_state().lock().await;
+    let scene = state.scene.lock().await;
+    let tile = scene
+        .tiles
+        .get(&scene_id)
+        .ok_or("expected resident portal tile to exist")?;
+    let root_text = tile
+        .root_node
+        .and_then(|root_id| scene.nodes.get(&root_id))
+        .and_then(|node| match &node.data {
+            NodeData::TextMarkdown(text) => Some(text.content.clone()),
+            _ => None,
+        })
+        .ok_or("expected resident portal root TextMarkdown node")?;
+    Ok(TileVerification {
+        tile_count: scene.tiles.len(),
+        root_text,
+        bounds: tile.bounds,
+        input_mode: tile.input_mode,
+    })
 }
 
 async fn connect_agent(
@@ -413,8 +457,10 @@ async fn connect_agent(
     let mut rx = client.session(stream).await?.into_inner();
 
     let established = rx.next().await.ok_or("missing SessionEstablished")??;
-    let namespace = match established.payload {
-        Some(session_proto::server_message::Payload::SessionEstablished(est)) => est.namespace,
+    let (session_id, namespace, granted_capabilities) = match established.payload {
+        Some(session_proto::server_message::Payload::SessionEstablished(est)) => {
+            (est.session_id, est.namespace, est.granted_capabilities)
+        }
         other => {
             return Err(format!("expected SessionEstablished, got: {other:?}").into());
         }
@@ -436,7 +482,9 @@ async fn connect_agent(
     .await?;
 
     let mut session = AgentSession {
+        session_id,
         namespace,
+        granted_capabilities,
         lease_id: Vec::new(),
         tx,
         rx,
@@ -451,6 +499,94 @@ async fn connect_agent(
         }
         other => Err(format!("expected granted LeaseResponse, got: {other:?}").into()),
     }
+}
+
+async fn send_resident_command(
+    session: &mut AgentSession,
+    command: ResidentGrpcPortalCommand,
+) -> Result<session_proto::ServerMessage, Box<dyn std::error::Error>> {
+    assert!(
+        command.budget.within_budget(),
+        "resident adapter {:?} build exceeded budget: {:?}",
+        command.kind,
+        command.budget
+    );
+    session.tx.send(command.message).await?;
+    session.next_non_state_change().await
+}
+
+fn expect_created_tile(
+    command_kind: ResidentGrpcPortalCommandKind,
+    msg: session_proto::ServerMessage,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    assert_eq!(
+        command_kind,
+        ResidentGrpcPortalCommandKind::CreatePortalTile
+    );
+    match msg.payload {
+        Some(session_proto::server_message::Payload::MutationResult(result)) if result.accepted => {
+            Ok(result
+                .created_ids
+                .first()
+                .cloned()
+                .ok_or("accepted CreateTile returned no created ID")?)
+        }
+        Some(session_proto::server_message::Payload::MutationResult(result)) => Err(format!(
+            "resident CreateTile rejected: {} {}",
+            result.error_code, result.error_message
+        )
+        .into()),
+        other => Err(format!("expected MutationResult, got: {other:?}").into()),
+    }
+}
+
+fn expect_accepted_mutation(
+    msg: session_proto::ServerMessage,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match msg.payload {
+        Some(session_proto::server_message::Payload::MutationResult(result)) if result.accepted => {
+            Ok(())
+        }
+        Some(session_proto::server_message::Payload::MutationResult(result)) => Err(format!(
+            "resident mutation rejected: {} {}",
+            result.error_code, result.error_message
+        )
+        .into()),
+        other => Err(format!("expected MutationResult, got: {other:?}").into()),
+    }
+}
+
+fn expect_released_lease(
+    msg: session_proto::ServerMessage,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match msg.payload {
+        Some(session_proto::server_message::Payload::LeaseResponse(response))
+            if response.granted =>
+        {
+            Ok(())
+        }
+        Some(session_proto::server_message::Payload::LeaseResponse(response)) => Err(format!(
+            "resident lease release denied: {} {}",
+            response.deny_code, response.deny_reason
+        )
+        .into()),
+        other => Err(format!("expected LeaseResponse, got: {other:?}").into()),
+    }
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    out
+}
+
+fn projection_result<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    result.map_err(|error| error.to_string().into())
 }
 
 async fn create_tile(
@@ -830,6 +966,317 @@ fn cooperative_projection_runtime_surface_is_provider_neutral_and_process_agnost
             );
         }
     }
+}
+
+#[tokio::test]
+async fn cooperative_projection_resident_grpc_adapter_drives_projected_portal_lifecycle()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("[::1]:0")?;
+    let grpc_port = listener.local_addr()?.port();
+    drop(listener);
+
+    let config = HeadlessConfig {
+        width: DISPLAY_W as u32,
+        height: DISPLAY_H as u32,
+        grpc_port,
+        psk: TEST_PSK.to_string(),
+        config_toml: None,
+    };
+    let runtime = HeadlessRuntime::new(config).await?;
+
+    {
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab_id = scene.create_tab("Cooperative-Projection-Resident-gRPC", 0)?;
+        scene.active_tab = Some(tab_id);
+        scene.zone_registry = ZoneRegistry::with_defaults();
+    }
+
+    let _server = runtime.start_grpc_server().await?;
+    let mut session = connect_agent("projection-resident-adapter", grpc_port).await?;
+
+    let mut authority = ProjectionAuthority::default();
+    let attach = authority.handle_attach(
+        AttachRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::Attach,
+                projection_id: "projection-resident".to_string(),
+                request_id: "attach-resident".to_string(),
+                client_timestamp_wall_us: 1,
+            },
+            provider_kind: ProviderKind::Codex,
+            display_name: "Codex resident projection".to_string(),
+            workspace_hint: Some("mayor/rig".to_string()),
+            repository_hint: Some("tze_hud".to_string()),
+            icon_profile_hint: None,
+            content_classification: ContentClassification::Private,
+            hud_target: Some("resident-grpc".to_string()),
+            idempotency_key: Some("resident-projection-once".to_string()),
+        },
+        "projection-daemon",
+        10,
+    );
+    assert!(attach.accepted);
+    let owner_token = attach.owner_token.expect("attach returns owner token");
+
+    projection_result(authority.record_hud_connection(
+        "projection-resident",
+        HudConnectionMetadata {
+            connection_id: "resident-grpc-headless".to_string(),
+            authenticated_session_id: bytes_hex(&session.session_id),
+            granted_capabilities: session.granted_capabilities.clone(),
+            connected_at_wall_us: 12,
+            last_reconnect_wall_us: 12,
+        },
+    ))?;
+    projection_result(authority.record_advisory_lease(
+        "projection-resident",
+        AdvisoryLeaseIdentity {
+            lease_id: bytes_hex(&session.lease_id),
+            capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+            acquired_at_wall_us: 13,
+            expires_at_wall_us: 120_000_013,
+        },
+        14,
+    ))?;
+    projection_result(authority.authorize_portal_republish(
+        "projection-resident",
+        &bytes_hex(&session.lease_id),
+        &["create_tiles".to_string(), "modify_own_tiles".to_string()],
+        15,
+    ))?;
+
+    let mut adapter =
+        ResidentGrpcPortalAdapter::new(ResidentGrpcPortalConfig::new(session.lease_id.clone()));
+
+    let initial_state = authority
+        .projected_portal_state("projection-resident", &ProjectedPortalPolicy::permit_all())
+        .expect("attach materializes projected portal state");
+    let create_cmd =
+        adapter.ensure_portal_tile_message(&initial_state, session.next_seq(), now_wall_us())?;
+    assert_eq!(
+        create_cmd.kind,
+        ResidentGrpcPortalCommandKind::CreatePortalTile,
+        "attach should create a content-layer portal tile when none exists"
+    );
+    let created_msg = send_resident_command(&mut session, create_cmd).await?;
+    let tile_id =
+        expect_created_tile(ResidentGrpcPortalCommandKind::CreatePortalTile, created_msg)?;
+    adapter.record_created_tile(tile_id.clone());
+
+    let reuse_cmd =
+        adapter.ensure_portal_tile_message(&initial_state, session.next_seq(), now_wall_us())?;
+    assert_eq!(
+        reuse_cmd.kind,
+        ResidentGrpcPortalCommandKind::ReusePortalTile,
+        "reattach/idempotent render should reuse the existing portal tile"
+    );
+    let reuse_msg = send_resident_command(&mut session, reuse_cmd).await?;
+    expect_accepted_mutation(reuse_msg)?;
+
+    let published = authority.handle_publish_output(
+        PublishOutputRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::PublishOutput,
+                projection_id: "projection-resident".to_string(),
+                request_id: "publish-resident".to_string(),
+                client_timestamp_wall_us: 20,
+            },
+            owner_token: owner_token.clone(),
+            output_text: "assistant: resident projected output landed".to_string(),
+            output_kind: OutputKind::Assistant,
+            content_classification: ContentClassification::Private,
+            logical_unit_id: Some("resident-output-1".to_string()),
+            coalesce_key: None,
+        },
+        "codex-session",
+        21,
+    );
+    assert!(published.accepted);
+    let active = authority.handle_publish_status(
+        PublishStatusRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::PublishStatus,
+                projection_id: "projection-resident".to_string(),
+                request_id: "status-active".to_string(),
+                client_timestamp_wall_us: 22,
+            },
+            owner_token: owner_token.clone(),
+            lifecycle_state: ProjectionLifecycleState::Active,
+            status_text: Some("working set synchronized".to_string()),
+        },
+        "codex-session",
+        23,
+    );
+    assert!(active.accepted);
+
+    let expanded_state = authority
+        .projected_portal_state("projection-resident", &ProjectedPortalPolicy::permit_all())
+        .expect("published output materializes projected portal state");
+    let render_cmd =
+        adapter.render_portal_message(&expanded_state, session.next_seq(), now_wall_us())?;
+    let render_msg = send_resident_command(&mut session, render_cmd).await?;
+    expect_accepted_mutation(render_msg)?;
+
+    let rendered = verify_single_tile(&runtime, &tile_id).await?;
+    assert_eq!(rendered.tile_count, 1, "resident adapter owns one tile");
+    assert!(
+        rendered
+            .root_text
+            .contains("resident projected output landed"),
+        "expanded portal renders cooperative output"
+    );
+    assert!(
+        rendered.root_text.contains("composer: ready"),
+        "expanded portal exposes composer affordance"
+    );
+    assert_eq!(
+        rendered.input_mode,
+        tze_hud_scene::types::InputMode::Capture,
+        "expanded portal captures local input for composer behavior"
+    );
+
+    let input = adapter.submit_composer_text(
+        &mut authority,
+        "projection-resident",
+        "please summarize the resident adapter proof".to_string(),
+        30,
+        Some(10_030),
+        ContentClassification::Private,
+    );
+    assert_eq!(
+        input.feedback.feedback_state,
+        PortalInputFeedbackState::Accepted
+    );
+    assert!(
+        input.budget.elapsed_us <= RESIDENT_PORTAL_INPUT_FEEDBACK_BUDGET_US,
+        "local composer feedback must stay within budget: {:?}",
+        input.budget
+    );
+    let feedback_state = authority
+        .projected_portal_state("projection-resident", &ProjectedPortalPolicy::permit_all())
+        .expect("input feedback materializes projected portal state");
+    let feedback_cmd =
+        adapter.render_portal_message(&feedback_state, session.next_seq(), now_wall_us())?;
+    let feedback_msg = send_resident_command(&mut session, feedback_cmd).await?;
+    expect_accepted_mutation(feedback_msg)?;
+
+    let poll = authority.handle_get_pending_input(
+        GetPendingInputRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::GetPendingInput,
+                projection_id: "projection-resident".to_string(),
+                request_id: "poll-resident-input".to_string(),
+                client_timestamp_wall_us: 31,
+            },
+            owner_token: owner_token.clone(),
+            max_items: Some(1),
+            max_bytes: Some(4_096),
+        },
+        "codex-session",
+        32,
+    );
+    assert!(poll.accepted);
+    assert_eq!(
+        poll.pending_input[0].submission_text, "please summarize the resident adapter proof",
+        "HUD composer submission must arrive through the semantic inbox"
+    );
+
+    projection_result(authority.collapse_projected_portal("projection-resident"))?;
+    let collapsed_state = authority
+        .projected_portal_state("projection-resident", &ProjectedPortalPolicy::permit_all())
+        .expect("collapsed state materializes projected portal state");
+    assert!(!collapsed_state.interaction_enabled);
+    let collapse_cmd =
+        adapter.render_portal_message(&collapsed_state, session.next_seq(), now_wall_us())?;
+    let collapse_msg = send_resident_command(&mut session, collapse_cmd).await?;
+    expect_accepted_mutation(collapse_msg)?;
+    let collapsed = verify_single_tile(&runtime, &tile_id).await?;
+    assert!(
+        collapsed
+            .root_text
+            .contains("compact projection affordance"),
+        "collapsed portal preserves a compact session affordance"
+    );
+    assert_eq!(
+        collapsed.bounds.width, 420.0,
+        "collapsed portal uses compact geometry"
+    );
+
+    adapter.move_compact_to(280.0, 320.0);
+    let moved_cmd =
+        adapter.render_portal_message(&collapsed_state, session.next_seq(), now_wall_us())?;
+    let moved_msg = send_resident_command(&mut session, moved_cmd).await?;
+    expect_accepted_mutation(moved_msg)?;
+    let moved = verify_single_tile(&runtime, &tile_id).await?;
+    assert_eq!(moved.bounds.x, 280.0);
+    assert_eq!(moved.bounds.y, 320.0);
+
+    projection_result(authority.expand_projected_portal("projection-resident"))?;
+    let restored_state = authority
+        .projected_portal_state("projection-resident", &ProjectedPortalPolicy::permit_all())
+        .expect("restored state materializes projected portal state");
+    let restore_cmd =
+        adapter.render_portal_message(&restored_state, session.next_seq(), now_wall_us())?;
+    let restore_msg = send_resident_command(&mut session, restore_cmd).await?;
+    expect_accepted_mutation(restore_msg)?;
+    let restored = verify_single_tile(&runtime, &tile_id).await?;
+    assert_eq!(
+        restored.bounds.width, 720.0,
+        "restore uses expanded geometry"
+    );
+    assert!(
+        restored.root_text.contains("composer: ready"),
+        "restore brings back expanded composer affordance"
+    );
+
+    let release_cmd = adapter.release_lease_message(session.next_seq(), now_wall_us());
+    assert_eq!(
+        release_cmd.kind,
+        ResidentGrpcPortalCommandKind::ReleaseLease
+    );
+    let release_msg = send_resident_command(&mut session, release_cmd).await?;
+    expect_released_lease(release_msg)?;
+
+    {
+        let state = runtime.shared_state().lock().await;
+        let scene = state.scene.lock().await;
+        assert_eq!(
+            scene.tiles.len(),
+            0,
+            "lease release must clean up stale projected-session tiles"
+        );
+    }
+
+    let wire = serde_json::to_string(&restored_state)?;
+    for forbidden in [
+        "pty",
+        "tmux",
+        "terminal",
+        "stdin",
+        "stdout",
+        "process_lifecycle",
+        "spawn",
+        "kill",
+    ] {
+        assert!(
+            !wire.contains(forbidden),
+            "resident projection state must not expose {forbidden} authority"
+        );
+    }
+    {
+        let state = runtime.shared_state().lock().await;
+        assert_eq!(
+            state.sessions.session_count(),
+            1,
+            "projection adapter must use the single existing resident HudSession stream"
+        );
+    }
+    assert_eq!(
+        session.sequence, 10,
+        "resident portal lifecycle should complete without opening an auxiliary stream"
+    );
+    Ok(())
 }
 
 #[tokio::test]

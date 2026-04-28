@@ -145,7 +145,7 @@ tze_hud_input = { path = "../../crates/tze_hud_input" }
 tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["headless", "dev-mode"] }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
-tze_hud_projection = { path = "../../crates/tze_hud_projection" }
+tze_hud_projection = { path = "../../crates/tze_hud_projection", features = ["resident-grpc"] }
 tze_hud_resource = { path = "../../crates/tze_hud_resource" }
 tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
 tze_hud_validation = { path = "../../crates/tze_hud_validation" }

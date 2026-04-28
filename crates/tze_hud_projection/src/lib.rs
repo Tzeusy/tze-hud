@@ -7,6 +7,9 @@
 //! the projection daemon and talks outward to the HUD over the resident control
 //! plane.
 
+#[cfg(feature = "resident-grpc")]
+pub mod resident_grpc;
+
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
