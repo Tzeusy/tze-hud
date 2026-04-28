@@ -26,9 +26,9 @@ on:
   workflow_dispatch:
     inputs:
       gst_version:
-        description: "GStreamer version (e.g. 1.24.12)"
+        description: "GStreamer version (e.g. 1.24.13)"
         required: true
-        default: "1.24.12"
+        default: "1.24.13"
   pull_request:
     paths:
       - "docs/ci/android-gstreamer-bootstrap.md"
@@ -38,7 +38,7 @@ on:
 env:
   # Pin at phase 3 kickoff; update via PR when bumping.
   # gst_version input overrides GST_VERSION on manual dispatch.
-  GST_VERSION: ${{ github.event.inputs.gst_version || '1.24.12' }}
+  GST_VERSION: ${{ github.event.inputs.gst_version || '1.24.13' }}
   # NDK r27 — recommended by GStreamer Cerbero CI (see spike doc §2.1).
   NDK_VERSION: "27.2.12479018"
   ANDROID_API_LEVEL: "28"
@@ -91,7 +91,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /opt/gstreamer-android
-          key: gstreamer-android-${{ env.GST_VERSION }}-arm64-x86_64
+          key: gstreamer-android-${{ env.GST_VERSION }}-universal
 
       - name: Download GStreamer Android SDK (arm64 + x86_64)
         if: steps.cache-gst.outputs.cache-hit != 'true'
@@ -99,20 +99,18 @@ jobs:
           mkdir -p /opt/gstreamer-android-dl /opt/gstreamer-android
 
           GST_BASE="https://gstreamer.freedesktop.org/data/pkg/android/${{ env.GST_VERSION }}"
+          TARBALL="gstreamer-1.0-android-universal-${{ env.GST_VERSION }}.tar.xz"
 
-          for ABI in arm64 x86_64; do
-            TARBALL="gstreamer-1.0-android-${ABI}-${{ env.GST_VERSION }}.tar.xz"
-            echo "Downloading ${TARBALL}..."
-            wget -q -P /opt/gstreamer-android-dl "${GST_BASE}/${TARBALL}"
-            wget -q -P /opt/gstreamer-android-dl "${GST_BASE}/${TARBALL}.sha256sum"
+          echo "Downloading ${TARBALL}..."
+          wget -q -P /opt/gstreamer-android-dl "${GST_BASE}/${TARBALL}"
+          wget -q -P /opt/gstreamer-android-dl "${GST_BASE}/${TARBALL}.sha256sum"
 
-            echo "Verifying checksum for ${TARBALL}..."
-            cd /opt/gstreamer-android-dl
-            sha256sum -c "${TARBALL}.sha256sum"
+          echo "Verifying checksum for ${TARBALL}..."
+          cd /opt/gstreamer-android-dl
+          sha256sum -c "${TARBALL}.sha256sum"
 
-            echo "Extracting ${TARBALL}..."
-            tar xf "${TARBALL}" -C /opt/gstreamer-android
-          done
+          echo "Extracting ${TARBALL}..."
+          tar xf "${TARBALL}" -C /opt/gstreamer-android
 
           ls /opt/gstreamer-android/
 
