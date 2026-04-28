@@ -4,7 +4,7 @@ The existing text-stream portal capability defines a governed content-layer surf
 
 The proposed workflow is different from PTY or tmux attachment. A user may already be in a Codex, Claude, opencode, or similar session and then ask that session to project itself to the HUD. Because the runtime must not become a terminal host and because arbitrary already-running processes cannot be reliably hijacked without prior PTY ownership, the attachment model must be cooperative: the active LLM session opts in, uses a skill or MCP server, and exchanges compact projection operations with a long-lived local daemon.
 
-The projection daemon is the durable owner of transport and state. It keeps the HUD connection, portal lease, transcript retention, pending input inbox, lifecycle metadata, and reconnect behavior outside the LLM token context. The LLM session remains the semantic owner: it decides what to publish, when to consume HUD input, and when to detach.
+The projection daemon is the intended first implementation of the external projection authority. It keeps the HUD connection, advisory portal lease identity, transcript retention, pending input inbox, lifecycle metadata, and reconnect behavior outside the LLM token context and outside runtime core. The LLM session remains the semantic owner: it decides what to publish, when to consume HUD input, and when to detach.
 
 ## Goals / Non-Goals
 
@@ -43,6 +43,22 @@ The projection daemon is the durable owner of transport and state. It keeps the 
 **Rationale:** The projection must survive long-lived sessions without turning the LLM context into a state store. The daemon can reconnect, coalesce, redact, and replay bounded visible windows without requiring the model to keep history in tokens.
 
 **Alternative considered:** Let each LLM carry the portal transcript in prompt state. Rejected because it creates persistent token drain and makes reconnection/history behavior model-dependent.
+
+### 2a. Authorization: every projection operation is owner-bound
+
+**Decision:** Every LLM-facing operation is authenticated and scoped to the owning projection session. Cross-projection reads and mutations fail closed with stable error codes and audit records.
+
+**Rationale:** Projection state contains transcript content and operator-submitted input. Treating the local skill/MCP surface as trusted by location would violate the security doctrine's authentication and agent isolation model.
+
+**Alternative considered:** Rely on projection ID secrecy alone. Rejected because projection IDs are user-facing handles and may appear on screen or in conversation.
+
+### 2b. Persistence: memory-only v1, durable only within daemon lifetime
+
+**Decision:** The first implementation retains projection state in daemon memory only. State survives HUD stream reconnects while the daemon remains alive, but it does not persist transcript or pending input across host or daemon restart.
+
+**Rationale:** Projection state contains private transcripts and operator input. Memory-only retention gives the desired token-context relief and reconnect behavior without introducing at-rest secret storage, encryption, purge policy, or migration complexity in the first tranche.
+
+**Alternative considered:** Persist projection state to local disk. Deferred until there is a concrete recovery need and an explicit encrypted-store contract.
 
 ### 3. Transport split: skill/MCP control inward, resident gRPC outward
 
@@ -94,11 +110,10 @@ No runtime migration is required for the spec phase. Implementation should proce
 4. Add live user-test coverage on the Windows HUD for attach → output → HUD input → acknowledgement → collapse/restore → detach cleanup.
 5. Broaden to multiple simultaneous sessions and provider-specific icon/profile hints after the single-session flow is stable.
 
-Rollback is operational: stop the daemon, release leases, and remove the skill/MCP server configuration. No persistent runtime schema migration is expected in v1.
+Rollback is operational: stop the daemon, release leases, clear in-memory projection state, and remove the skill/MCP server configuration. No persistent runtime schema migration is expected in v1.
 
 ## Open Questions
 
 1. Should pending HUD input be pushed to the LLM through a notification/prompt mechanism where available, or should the first contract require explicit polling?
-2. Should projection daemon state persist across host restarts, or only across transient HUD/session reconnects?
-3. What is the minimum provider metadata needed for useful icons without leaking private project/session details?
-4. Should the first skill package live beside `th-hud-publish`, or should projection be a separate installable skill to keep the simple publish path small?
+2. What is the minimum provider metadata needed for useful icons without leaking private project/session details?
+3. Should the first skill package live beside `th-hud-publish`, or should projection be a separate installable skill to keep the simple publish path small?
