@@ -186,7 +186,7 @@ jobs:
 
           cat > "$PROBE_DIR/src/lib.rs" << 'RUST'
           // Minimal GStreamer link probe.
-          // If this compiles for aarch64-linux-android, gstreamer-full is correctly linked.
+          // If this compiles for aarch64-linux-android, pkg-config GStreamer linking is correct.
           extern "C" {
               fn gst_version(major: *mut u32, minor: *mut u32, micro: *mut u32, nano: *mut u32);
           }
@@ -214,8 +214,26 @@ jobs:
                   other         => panic!("Unsupported ABI: {other}"),
               };
               let lib_dir = format!("{}/{}/lib", gst_root, gst_abi);
+              let pkgconfig_dir = format!("{}/pkgconfig", lib_dir);
               println!("cargo:rustc-link-search=native={}", lib_dir);
-              println!("cargo:rustc-link-lib=static=gstreamer-full-1.0");
+              let output = std::process::Command::new("pkg-config")
+                  .args(["--libs", "gstreamer-1.0"])
+                  .env("PKG_CONFIG_ALLOW_CROSS", "1")
+                  .env("PKG_CONFIG_PATH", &pkgconfig_dir)
+                  .output()
+                  .expect("pkg-config must be available");
+              if !output.status.success() {
+                  panic!("pkg-config failed: {}", String::from_utf8_lossy(&output.stderr));
+              }
+              for token in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+                  if let Some(path) = token.strip_prefix("-L") {
+                      println!("cargo:rustc-link-search=native={path}");
+                  } else if let Some(lib) = token.strip_prefix("-l") {
+                      println!("cargo:rustc-link-lib={lib}");
+                  } else if token.starts_with("-Wl,") {
+                      println!("cargo:rustc-link-arg={token}");
+                  }
+              }
               println!("cargo:rustc-link-lib=dylib=android");
               println!("cargo:rustc-link-lib=dylib=log");
               println!("cargo:rustc-link-lib=dylib=z");
@@ -288,8 +306,26 @@ jobs:
                   other         => panic!("Unsupported ABI: {other}"),
               };
               let lib_dir = format!("{}/{}/lib", gst_root, gst_abi);
+              let pkgconfig_dir = format!("{}/pkgconfig", lib_dir);
               println!("cargo:rustc-link-search=native={}", lib_dir);
-              println!("cargo:rustc-link-lib=static=gstreamer-full-1.0");
+              let output = std::process::Command::new("pkg-config")
+                  .args(["--libs", "gstreamer-1.0"])
+                  .env("PKG_CONFIG_ALLOW_CROSS", "1")
+                  .env("PKG_CONFIG_PATH", &pkgconfig_dir)
+                  .output()
+                  .expect("pkg-config must be available");
+              if !output.status.success() {
+                  panic!("pkg-config failed: {}", String::from_utf8_lossy(&output.stderr));
+              }
+              for token in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+                  if let Some(path) = token.strip_prefix("-L") {
+                      println!("cargo:rustc-link-search=native={path}");
+                  } else if let Some(lib) = token.strip_prefix("-l") {
+                      println!("cargo:rustc-link-lib={lib}");
+                  } else if token.starts_with("-Wl,") {
+                      println!("cargo:rustc-link-arg={token}");
+                  }
+              }
               println!("cargo:rustc-link-lib=dylib=android");
               println!("cargo:rustc-link-lib=dylib=log");
               println!("cargo:rustc-link-lib=dylib=z");
