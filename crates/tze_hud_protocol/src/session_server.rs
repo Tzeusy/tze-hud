@@ -640,21 +640,41 @@ fn parse_input_device_id(device_id: &str) -> Result<u32, String> {
 
 fn scene_node_contains(
     scene: &tze_hud_scene::SceneGraph,
-    current: tze_hud_scene::SceneId,
+    root: tze_hud_scene::SceneId,
     target: tze_hud_scene::SceneId,
 ) -> bool {
-    if current == target {
-        return true;
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current == target {
+            return true;
+        }
+        if let Some(node) = scene.nodes.get(&current) {
+            stack.extend(node.children.iter().copied());
+        }
     }
-    scene
-        .nodes
-        .get(&current)
-        .map(|node| {
-            node.children
-                .iter()
-                .any(|child| scene_node_contains(scene, *child, target))
-        })
-        .unwrap_or(false)
+    false
+}
+
+async fn send_input_capture_invalid_argument(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    message: String,
+    context: &'static str,
+) {
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                error_code: "INVALID_ARGUMENT".to_string(),
+                message,
+                context: context.to_string(),
+                hint: r#"{"check_field":"device_id"}"#.to_string(),
+                error_code_enum: ErrorCode::InvalidArgument as i32,
+            })),
+        }))
+        .await;
 }
 
 /// Map proto `batch_id` bytes to a `SceneId` for rejection-correlation semantics.
@@ -6620,10 +6640,20 @@ async fn handle_input_capture_release(
     };
 
     if let Some(input_capture_tx) = input_capture_tx {
-        if let Ok(device_id) = parse_input_device_id(&rel.device_id) {
-            let _ =
-                input_capture_tx.send(crate::session::InputCaptureCommand::Release { device_id });
-        }
+        let device_id = match parse_input_device_id(&rel.device_id) {
+            Ok(device_id) => device_id,
+            Err(e) => {
+                send_input_capture_invalid_argument(
+                    session,
+                    tx,
+                    e,
+                    "input_capture_release.device_id",
+                )
+                .await;
+                return;
+            }
+        };
+        let _ = input_capture_tx.send(crate::session::InputCaptureCommand::Release { device_id });
         return;
     }
 
@@ -6968,6 +6998,57 @@ mod tests {
         let client = connect_test_client_with_retry(addr.port()).await;
 
         (client, handle, capture_rx, tile_id, node_id)
+    }
+
+    #[test]
+    fn test_scene_node_contains_handles_deep_hierarchy_iteratively() {
+        let mut scene = SceneGraph::new(800.0, 600.0);
+        let root_id = tze_hud_scene::SceneId::new();
+        scene.nodes.insert(
+            root_id,
+            tze_hud_scene::Node {
+                id: root_id,
+                data: tze_hud_scene::NodeData::SolidColor(tze_hud_scene::SolidColorNode {
+                    bounds: tze_hud_scene::Rect::new(0.0, 0.0, 1.0, 1.0),
+                    color: tze_hud_scene::Rgba::WHITE,
+                    radius: None,
+                }),
+                children: Vec::new(),
+            },
+        );
+
+        let mut parent_id = root_id;
+        for _ in 0..2_048 {
+            let child_id = tze_hud_scene::SceneId::new();
+            scene.nodes.insert(
+                child_id,
+                tze_hud_scene::Node {
+                    id: child_id,
+                    data: tze_hud_scene::NodeData::SolidColor(tze_hud_scene::SolidColorNode {
+                        bounds: tze_hud_scene::Rect::new(0.0, 0.0, 1.0, 1.0),
+                        color: tze_hud_scene::Rgba::WHITE,
+                        radius: None,
+                    }),
+                    children: Vec::new(),
+                },
+            );
+            scene
+                .nodes
+                .get_mut(&parent_id)
+                .unwrap()
+                .children
+                .push(child_id);
+            parent_id = child_id;
+        }
+
+        assert!(
+            scene_node_contains(&scene, root_id, parent_id),
+            "deep descendant should be found without recursive traversal"
+        );
+        assert!(
+            !scene_node_contains(&scene, root_id, tze_hud_scene::SceneId::new()),
+            "unrelated node should not be reported as contained"
+        );
     }
 
     async fn connect_test_client_with_retry(
@@ -11812,6 +11893,46 @@ mod tests {
                 device_id: 7,
                 release_on_up: true,
             }
+        );
+    }
+
+    /// Scenario: malformed capture-release device ids are reported to the caller.
+    #[tokio::test]
+    async fn test_input_capture_release_rejects_invalid_device_id() {
+        let (mut client, _server, mut capture_rx, tile_id, _node_id) =
+            setup_test_with_input_capture_channel().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "capture-agent", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::InputCaptureRelease(InputCaptureRelease {
+                tile_id: scene_id_to_bytes(tile_id),
+                device_kind: "pointer".to_string(),
+                device_id: "not-a-u32".to_string(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(err.error_code, "INVALID_ARGUMENT");
+                assert_eq!(err.error_code_enum, ErrorCode::InvalidArgument as i32);
+                assert_eq!(err.context, "input_capture_release.device_id");
+                assert!(
+                    err.message.contains("invalid pointer device_id"),
+                    "error should name the malformed device id, got: {}",
+                    err.message
+                );
+            }
+            other => panic!("Expected RuntimeError, got: {other:?}"),
+        }
+        assert!(
+            capture_rx.try_recv().is_err(),
+            "invalid release must not enqueue a runtime capture command"
         );
     }
 
