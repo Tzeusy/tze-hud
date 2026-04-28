@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "hud-projection-daemon": {
+      "type": "url",
+      "url": "http://<PROJECTION_DAEMON_HOST>:<PORT>/mcp",
+      "headers": {
+        "Authorization": "Bearer ${HUD_PROJECTION_DAEMON_TOKEN}"
+      }
+    }
+  }
+}
