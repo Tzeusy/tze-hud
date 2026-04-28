@@ -130,3 +130,32 @@ Fresh-process live hit-region input is partially validated:
 python3 -m py_compile .claude/skills/user-test/scripts/text_stream_portal_exemplar.py
 ```
 
+## Resume Attempt - 2026-04-29
+
+The worker resumed `agent/hud-eq1m4` in the assigned worktree and verified the
+branch still contains the existing portal composer fixes:
+
+- `d94beaf fix: refresh portal composer ids on remount [hud-eq1m4]`
+- `7a67974 fix: guard portal composer runtime ids [hud-ooyps]`
+
+Local script verification still passes:
+
+```bash
+python3 -m py_compile \
+  .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
+  .claude/skills/user-test/scripts/hud_grpc_client.py \
+  .claude/skills/user-test/scripts/test_hud_grpc_client.py
+```
+
+Live Windows validation could not proceed in this resume attempt because the
+Windows host was unreachable from the worker environment:
+
+- `ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 -o ConnectionAttempts=1 -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"` timed out on port 22.
+- `ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 -o ConnectionAttempts=1 -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"` timed out on port 22.
+- TCP probes to `tzehouse-windows.parrot-hen.ts.net:50051` and `:9090` failed.
+- `curl --max-time 8 http://tzehouse-windows.parrot-hen.ts.net:9090/mcp` timed out.
+- `tailscale ping --c 1 tzehouse-windows.parrot-hen.ts.net` timed out with no reply.
+
+Current handoff: the local harness is compile-clean, but fresh live sign-off
+remains blocked until `tzehouse-windows.parrot-hen.ts.net` is reachable again
+over Tailscale/SSH and the HUD gRPC/MCP ports are listening.
