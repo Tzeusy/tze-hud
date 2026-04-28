@@ -7,8 +7,8 @@
 //!   1. Reads `GSTREAMER_ROOT_ANDROID` — path to the extracted GStreamer SDK.
 //!   2. Maps `CARGO_NDK_ANDROID_TARGET` (Android ABI name) → GStreamer SDK
 //!      subdirectory name (e.g. "arm64-v8a" → "arm64").
-//!   3. Emits `cargo:rustc-link-*` directives for gstreamer-full and the
-//!      required Android system libraries.
+//!   3. Uses the SDK's pkg-config metadata to emit `cargo:rustc-link-*`
+//!      directives plus required Android system libraries.
 //!
 //! Reference: docs/ci/android-gstreamer-bootstrap.md §3.3 (hud-685ha, PR #539)
 //!
@@ -25,6 +25,7 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() {
     // Gate on target OS — this script is a no-op on non-Android hosts.
@@ -58,9 +59,7 @@ fn main() {
     // Emit link search path for GStreamer static archives.
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
 
-    // Link gstreamer-full — monolithic static archive (all plugins bundled).
-    // GStreamer 1.24 always ships libgstreamer-full-1.0.a; see spike doc §5.2.
-    println!("cargo:rustc-link-lib=static=gstreamer-full-1.0");
+    emit_pkg_config_links(&pkgconfig_dir);
 
     // Required Android system libraries (always dynamic).
     println!("cargo:rustc-link-lib=dylib=android");
@@ -71,9 +70,46 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GSTREAMER_ROOT_ANDROID");
     println!("cargo:rerun-if-env-changed=CARGO_NDK_ANDROID_TARGET");
     println!("cargo:rerun-if-env-changed=CARGO_NDK_ANDROID_PLATFORM");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR");
+}
 
-    // pkgconfig_dir is reserved for future per-plugin pkg-config queries
-    // (e.g. libssl, libcrypto for encrypted streams).  Not used in the
-    // minimal bootstrap; suppress the unused-variable warning until needed.
-    let _ = pkgconfig_dir;
+fn emit_pkg_config_links(pkgconfig_dir: &PathBuf) {
+    let mut command = Command::new("pkg-config");
+    command
+        .args(["--libs", "gstreamer-1.0"])
+        .env("PKG_CONFIG_ALLOW_CROSS", "1")
+        .env("PKG_CONFIG_PATH", pkgconfig_dir);
+
+    if let Ok(ndk_home) = env::var("ANDROID_NDK_HOME") {
+        let linux_sysroot = PathBuf::from(ndk_home)
+            .join("toolchains")
+            .join("llvm")
+            .join("prebuilt")
+            .join("linux-x86_64")
+            .join("sysroot");
+        if linux_sysroot.exists() {
+            command.env("PKG_CONFIG_SYSROOT_DIR", linux_sysroot);
+        }
+    }
+
+    let output = command
+        .output()
+        .expect("pkg-config must be available for Android GStreamer builds");
+    if !output.status.success() {
+        panic!(
+            "pkg-config gstreamer-1.0 failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for token in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+        if let Some(path) = token.strip_prefix("-L") {
+            println!("cargo:rustc-link-search=native={path}");
+        } else if let Some(lib) = token.strip_prefix("-l") {
+            println!("cargo:rustc-link-lib={lib}");
+        } else if token.starts_with("-Wl,") {
+            println!("cargo:rustc-link-arg={token}");
+        }
+    }
 }

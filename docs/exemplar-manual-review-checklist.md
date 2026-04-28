@@ -17,7 +17,7 @@ Reviewed: 2026-04-09
 | 8 | [Gauge Widget](#8-gauge-widget) | **done** | Automation batch + manual visual sign-off completed on 2026-04-09 (ultra-minimal track, hover-only readout/label, tuned spacing/colors) |
 | 9 | [Progress Bar](#9-progress-bar) | **automation-pass** | Step + color-sweep batches passed on 2026-04-09; manual visual sign-off pending |
 | 10 | [Status Indicator](#10-status-indicator) | **automation-pass** | Enum/theme/label/validation batches passed on 2026-04-09; manual visual sign-off pending |
-| 11 | [Text Stream Portals](#11-text-stream-portals) | **live-refinement** | Phase-0 pilot shipped via epic `hud-t98e`; live `/user-test` now covers two-pane portal, scroll subset, header drag, focus, composer editing, paste, and cleanup. Final polish remains around caret geometry and input feel. |
+| 11 | [Text Stream Portals](#11-text-stream-portals) | **live-refinement** | Phase-0 pilot shipped via epic `hud-t98e`; live `/user-test` now covers two-pane portal, scroll subset, header drag, focus, composer editing, paste, deterministic caret smoke, resize/minimize prototypes, and cleanup. Heavy UX improvement passes remain open; do not mark complete yet. |
 
 ---
 
@@ -335,7 +335,7 @@ _(to be filled during review)_
 **Archived change:** `openspec/changes/archive/2026-04-17-text-stream-portals/` (spec/RFC planning only; implementation tracked under `hud-t98e`)
 **RFC:** 0013 (see `about/legends-and-lore/`)
 
-**Status:** live-refinement. Phase-0 raw-tile pilot shipped across `hud-t98e.1` / `.2` / `.3` / `.4` (PRs #427, #429, #432, #435), with follow-up closures `hud-r11x` (PR #437) and `hud-r9u0` (PR #438). Gen-2 reconciliation `hud-fomr` (PR #441) confirmed full 13/13 spec requirement coverage. The live `/user-test` exemplar at `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py` now includes the scroll contract as the OUTPUT transcript pane plus header drag, focus, composer editing, paste, and cleanup. Final manual sign-off remains open for caret geometry and input feel.
+**Status:** live-refinement / heavy user-iteration mode. Phase-0 raw-tile pilot shipped across `hud-t98e.1` / `.2` / `.3` / `.4` (PRs #427, #429, #432, #435), with follow-up closures `hud-r11x` (PR #437) and `hud-r9u0` (PR #438). Gen-2 reconciliation `hud-fomr` (PR #441) confirmed full 13/13 spec requirement coverage. The live `/user-test` exemplar at `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py` now includes the scroll contract as the OUTPUT transcript pane plus header drag, focus, composer editing, paste, cleanup, deterministic composer caret smoke coverage, center-pane resize, bottom-right portal resize, and minimize-to-icon prototypes. The current caret/Space pass has fresh live transcript evidence, but the portal is explicitly not complete: smooth drag/resize/minimized-icon UX still needs runtime pointer-capture work and more operator-led passes.
 
 ### Capability summary
 
@@ -386,7 +386,11 @@ Integration tests prove structure; these axes still need operator-visible proof 
 | Safe mode | Governance / Privacy / Override | Portal updates suspend under safe mode like other content surfaces |
 | Orphan path | Governance / Privacy / Override | PASS for ordinary `/user-test` cleanup; explicit orphan/grace behavior still needs a dedicated run |
 | Ambient attention | Ambient Portal Attention Defaults | Unread backlog does not auto-escalate interruption class |
-| Composer input | Reply Submission | ACTIVE POLISH — click focus, normal typing, paste, Home/End, arrows, and word operations are implemented; Space/focus feel is still being validated |
+| Composer input | Reply Submission | 2026-04-28 evidence pass, still open for UX refinement — click focus, runtime Character events for `hello world`, Space key-down fallback, Enter submit, and deterministic long-paste caret smoke all produced clean transcript evidence |
+| Caret geometry | Reply Submission | 2026-04-28 evidence pass, still open for UX refinement — composer-smoke long markdown-like paste rendered as 5 visual lines with no trailing-whitespace wrap lines and caret on the final wrapped row |
+| Pane / portal resizing | Transcript Interaction Contract | 2026-04-28 live refinement in progress — center divider and bottom-right handle were added, black pane backgrounds resize consistently during drag, and scroll tile z-order conflicts were fixed; manual sign-off remains open because cursor-follow still stutters without runtime pointer capture for gRPC hit regions |
+| Minimized icon | Transcript Interaction Contract | 2026-04-28 live refinement in progress — top-left minimize works, the icon is now split into immediate restore body + separate drag grip, and restore no longer depends on `pointer_up`; manual sign-off remains open because icon dragging still depends on incomplete runtime pointer capture and the final live split-target pass was interrupted by a Windows rig/HUD connection reset |
+| Runtime stability | User-Test Scenario | 2026-04-28 blocker — latest split-target run reached baseline render, then gRPC reset with `StatusCode.UNAVAILABLE` / `recvmsg:Connection reset by peer`; subsequent ping, SSH, and port probes to `tzehouse-windows.parrot-hen.ts.net` timed out, so live verification could not be completed |
 
 ### Out of scope
 
@@ -400,8 +404,11 @@ Integration tests prove structure; these axes still need operator-visible proof 
 
 1. Run `text_stream_portal_exemplar.py --phases baseline,scroll` against the live Windows HUD.
 2. Record PASS/FAIL per live validation axis above, including the OUTPUT-pane scroll phase.
-3. Re-test long markdown paste caret placement and ordinary `hello world` typing.
-4. Move this row to `done` only after evidence-backed manual sign-off is recorded.
+3. Re-test long markdown paste caret placement and ordinary `hello world` typing. Completed on 2026-04-28 with `test_results/text-stream-portal-hud-0ojis-baseline-scroll-20260428.json` and `test_results/text-stream-portal-hud-0ojis-composer-smoke-20260428.json`.
+4. Re-run the minimized-icon split-target pass once the Windows rig is reachable; specifically verify click-to-restore on the icon body and drag-only behavior from the bottom-right grip.
+5. Implement/verify runtime pointer capture for gRPC-created hit regions (`hud-rvmil`) so header drag, pane resize, portal resize, and icon grip follow the cursor continuously instead of relying on idle/watchdog behavior.
+6. Continue UX improvement passes while this section remains `live-refinement`.
+7. Move this row to `done` only after a human visual sign-off is recorded.
 
 ### UX Tweaks
 
@@ -415,6 +422,30 @@ Integration tests prove structure; these axes still need operator-visible proof 
   lighter.
 - Added cleanup for ordinary `/user-test` exits so stale portal/progress/status
   artifacts do not linger on the HUD.
+- Fixed composer pre-wrap so word-boundary wraps do not leave trailing spaces
+  that can make caret placement look one character behind near right-edge line
+  ends. Added `--self-test` and `--phases composer-smoke` to validate Space
+  fallback, `hello world`, and long-paste caret geometry.
+- Kept the input composer mounted during output-only portal updates so scroll,
+  streaming, and append phases do not reset composer focus/caret state.
+- Added center-divider pane ratio resizing and a bottom-right portal resize
+  handle. Follow-up pass reduced flicker by avoiding full node-tree remounts
+  during pointer movement, widened drag hold timeouts for human resize gestures,
+  and stopped discarding coalesced pointer moves inside a single event batch.
+- Added a top-left minimize affordance and compact text-stream icon. Live pass
+  confirmed minimize/restore and icon repositioning, but the icon/resize drag
+  still stutters because gRPC-created hit regions do not receive continuous
+  pointer capture after the cursor leaves the hit rect. Runtime follow-up is
+  tracked in `hud-rvmil`.
+- Refined minimized-icon behavior after live feedback: the icon body now
+  restores immediately on pointer-down, while a small bottom-right grip is the
+  only drag target. This avoids depending on `pointer_up`, which the current
+  gRPC hit-region path can drop for icon gestures.
+- Latest live pass was cut short by a rig/HUD connection reset and subsequent
+  host reachability timeout. Future direction is to keep iterating the portal
+  UX in `/user-test`, but prioritize runtime pointer capture and test-rig
+  stability before trying to polish drag smoothness further in the Python
+  exemplar alone.
 
 ---
 

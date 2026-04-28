@@ -629,6 +629,54 @@ fn bytes_to_scene_id(bytes: &[u8]) -> Result<tze_hud_scene::SceneId, Status> {
     Ok(tze_hud_scene::SceneId::from_uuid(uuid))
 }
 
+fn parse_input_device_id(device_id: &str) -> Result<u32, String> {
+    if device_id.trim().is_empty() {
+        return Ok(0);
+    }
+    device_id
+        .parse::<u32>()
+        .map_err(|_| format!("invalid pointer device_id '{device_id}'"))
+}
+
+fn scene_node_contains(
+    scene: &tze_hud_scene::SceneGraph,
+    root: tze_hud_scene::SceneId,
+    target: tze_hud_scene::SceneId,
+) -> bool {
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current == target {
+            return true;
+        }
+        if let Some(node) = scene.nodes.get(&current) {
+            stack.extend(node.children.iter().copied());
+        }
+    }
+    false
+}
+
+async fn send_input_capture_invalid_argument(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    message: String,
+    context: &'static str,
+) {
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                error_code: "INVALID_ARGUMENT".to_string(),
+                message,
+                context: context.to_string(),
+                hint: r#"{"check_field":"device_id"}"#.to_string(),
+                error_code_enum: ErrorCode::InvalidArgument as i32,
+            })),
+        }))
+        .await;
+}
+
 /// Map proto `batch_id` bytes to a `SceneId` for rejection-correlation semantics.
 ///
 /// If the client supplied a valid 16-byte UUID, use it directly so that any
@@ -1544,6 +1592,7 @@ impl HudSessionImpl {
                 token_store: TokenStore::new(),
                 freeze_active: false,
                 degradation_level: crate::session::RuntimeDegradationLevel::Normal,
+                input_capture_tx: None,
             })),
             psk: psk.to_string(),
             agent_capabilities: Arc::new(HashMap::new()),
@@ -2830,13 +2879,12 @@ async fn handle_client_message(
         }
         ClientPayload::InputCaptureRequest(req) => {
             // Synchronous capture request (RFC 0005 §3.8).
-            // v1 grants capture unconditionally (arbitration deferred to post-v1).
-            handle_input_capture_request(session, tx, req).await;
+            handle_input_capture_request(state, session, tx, req).await;
         }
         ClientPayload::InputCaptureRelease(rel) => {
             // Asynchronous capture release (RFC 0005 §3.8).
             // Confirmed by CaptureReleasedEvent in EventBatch (field 34).
-            handle_input_capture_release(session, tx, rel).await;
+            handle_input_capture_release(state, session, tx, rel).await;
         }
         ClientPayload::SetImePosition(_pos) => {
             // IME position hint (RFC 0005 §3.8): fire-and-forget, no response sent.
@@ -6480,12 +6528,81 @@ async fn handle_input_focus_request(
 /// Handle an InputCaptureRequest from the client (RFC 0005 §3.8, RFC 0004 §8.3.1).
 ///
 /// Synchronous: runtime responds with InputCaptureResponse correlated by sequence.
-/// v1 grants capture unconditionally (arbitration deferred to post-v1).
+/// Windowed runtime queues pointer capture into the local input processor; test
+/// and headless services without a capture bridge retain legacy no-op grants.
 async fn handle_input_capture_request(
+    state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     req: InputCaptureRequest,
 ) {
+    let mut granted = true;
+    let mut reason = String::new();
+
+    let (input_capture_tx, scene) = {
+        let st = state.lock().await;
+        (st.input_capture_tx.clone(), st.scene.clone())
+    };
+
+    if let Some(input_capture_tx) = input_capture_tx {
+        if req.device_kind != "pointer" && req.device_kind != "touch" {
+            granted = false;
+            reason = format!("unsupported capture device_kind '{}'", req.device_kind);
+        } else if req.node_id.is_empty() {
+            granted = false;
+            reason = "node_id is required for runtime pointer capture".to_string();
+        } else {
+            let tile_id = bytes_to_scene_id(&req.tile_id);
+            let node_id = bytes_to_scene_id(&req.node_id);
+            let device_id = parse_input_device_id(&req.device_id);
+            match (tile_id, node_id, device_id) {
+                (Ok(tile_id), Ok(node_id), Ok(device_id)) => {
+                    let scene_guard = scene.lock().await;
+                    let target_valid = scene_guard
+                        .tiles
+                        .get(&tile_id)
+                        .map(|tile| {
+                            tile.namespace == session.namespace
+                                && tile
+                                    .root_node
+                                    .map(|root| scene_node_contains(&scene_guard, root, node_id))
+                                    .unwrap_or(false)
+                        })
+                        .unwrap_or(false)
+                        && matches!(
+                            scene_guard.nodes.get(&node_id).map(|n| &n.data),
+                            Some(tze_hud_scene::NodeData::HitRegion(_))
+                        );
+                    drop(scene_guard);
+
+                    if !target_valid {
+                        granted = false;
+                        reason = "capture target tile/node was not found".to_string();
+                    } else if input_capture_tx
+                        .send(crate::session::InputCaptureCommand::Request {
+                            tile_id,
+                            node_id,
+                            device_id,
+                            release_on_up: req.release_on_up,
+                        })
+                        .is_err()
+                    {
+                        granted = false;
+                        reason = "runtime input capture bridge is unavailable".to_string();
+                    }
+                }
+                (Err(e), _, _) | (_, Err(e), _) => {
+                    granted = false;
+                    reason = e.message().to_string();
+                }
+                (_, _, Err(e)) => {
+                    granted = false;
+                    reason = e;
+                }
+            }
+        }
+    }
+
     let seq = session.next_server_seq();
     let _ = tx
         .send(Ok(ServerMessage {
@@ -6493,9 +6610,9 @@ async fn handle_input_capture_request(
             timestamp_wall_us: now_wall_us(),
             payload: Some(ServerPayload::InputCaptureResponse(InputCaptureResponse {
                 tile_id: req.tile_id.clone(),
-                granted: true,
+                granted,
                 device_kind: req.device_kind.clone(),
-                reason: String::new(),
+                reason,
             })),
         }))
         .await;
@@ -6505,8 +6622,10 @@ async fn handle_input_capture_request(
 ///
 /// Asynchronous: confirmed by CaptureReleasedEvent in the next EventBatch (field 34).
 /// No synchronous response is sent. The event is delivered with reason=AGENT_RELEASED.
-/// v1: immediately delivers a CaptureReleasedEvent in a synthetic EventBatch.
+/// Windowed runtime releases capture through the local input processor; services
+/// without a capture bridge retain the legacy synthetic confirmation.
 async fn handle_input_capture_release(
+    state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     rel: InputCaptureRelease,
@@ -6514,6 +6633,29 @@ async fn handle_input_capture_release(
     use crate::proto::CaptureReleasedReason;
     use crate::proto::input_envelope::Event as InputEvent;
     use crate::proto::{CaptureReleasedEvent, EventBatch, InputEnvelope};
+
+    let input_capture_tx = {
+        let st = state.lock().await;
+        st.input_capture_tx.clone()
+    };
+
+    if let Some(input_capture_tx) = input_capture_tx {
+        let device_id = match parse_input_device_id(&rel.device_id) {
+            Ok(device_id) => device_id,
+            Err(e) => {
+                send_input_capture_invalid_argument(
+                    session,
+                    tx,
+                    e,
+                    "input_capture_release.device_id",
+                )
+                .await;
+                return;
+            }
+        };
+        let _ = input_capture_tx.send(crate::session::InputCaptureCommand::Release { device_id });
+        return;
+    }
 
     // Only deliver the CaptureReleasedEvent if the agent is subscribed to FOCUS_EVENTS.
     // CaptureReleasedEvent is a focus variant (RFC 0005 §7.1).
@@ -6788,6 +6930,125 @@ mod tests {
         let client = connect_test_client_with_retry(addr.port()).await;
 
         (client, handle)
+    }
+
+    async fn setup_test_with_input_capture_channel() -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::session::InputCaptureCommand>,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+    ) {
+        let mut scene = SceneGraph::new(800.0, 600.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "capture-agent",
+            60_000,
+            vec![
+                tze_hud_scene::Capability::CreateTile,
+                tze_hud_scene::Capability::CreateNode,
+            ],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "capture-agent",
+                lease_id,
+                tze_hud_scene::Rect::new(10.0, 10.0, 100.0, 50.0),
+                1,
+            )
+            .unwrap();
+        let node_id = tze_hud_scene::SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                tze_hud_scene::Node {
+                    id: node_id,
+                    data: tze_hud_scene::NodeData::HitRegion(tze_hud_scene::HitRegionNode {
+                        bounds: tze_hud_scene::Rect::new(0.0, 0.0, 100.0, 50.0),
+                        interaction_id: "capture-target".to_string(),
+                        accepts_pointer: true,
+                        auto_capture: true,
+                        release_on_up: true,
+                        ..Default::default()
+                    }),
+                    children: Vec::new(),
+                },
+            )
+            .unwrap();
+        let service = HudSessionImpl::new(scene, "test-key");
+        let (capture_tx, capture_rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut st = service.state.lock().await;
+            st.input_capture_tx = Some(capture_tx);
+        }
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        let client = connect_test_client_with_retry(addr.port()).await;
+
+        (client, handle, capture_rx, tile_id, node_id)
+    }
+
+    #[test]
+    fn test_scene_node_contains_handles_deep_hierarchy_iteratively() {
+        let mut scene = SceneGraph::new(800.0, 600.0);
+        let root_id = tze_hud_scene::SceneId::new();
+        scene.nodes.insert(
+            root_id,
+            tze_hud_scene::Node {
+                id: root_id,
+                data: tze_hud_scene::NodeData::SolidColor(tze_hud_scene::SolidColorNode {
+                    bounds: tze_hud_scene::Rect::new(0.0, 0.0, 1.0, 1.0),
+                    color: tze_hud_scene::Rgba::WHITE,
+                    radius: None,
+                }),
+                children: Vec::new(),
+            },
+        );
+
+        let mut parent_id = root_id;
+        for _ in 0..2_048 {
+            let child_id = tze_hud_scene::SceneId::new();
+            scene.nodes.insert(
+                child_id,
+                tze_hud_scene::Node {
+                    id: child_id,
+                    data: tze_hud_scene::NodeData::SolidColor(tze_hud_scene::SolidColorNode {
+                        bounds: tze_hud_scene::Rect::new(0.0, 0.0, 1.0, 1.0),
+                        color: tze_hud_scene::Rgba::WHITE,
+                        radius: None,
+                    }),
+                    children: Vec::new(),
+                },
+            );
+            scene
+                .nodes
+                .get_mut(&parent_id)
+                .unwrap()
+                .children
+                .push(child_id);
+            parent_id = child_id;
+        }
+
+        assert!(
+            scene_node_contains(&scene, root_id, parent_id),
+            "deep descendant should be found without recursive traversal"
+        );
+        assert!(
+            !scene_node_contains(&scene, root_id, tze_hud_scene::SceneId::new()),
+            "unrelated node should not be reported as contained"
+        );
     }
 
     async fn connect_test_client_with_retry(
@@ -11567,6 +11828,9 @@ mod tests {
             payload: Some(ClientPayload::InputCaptureRequest(InputCaptureRequest {
                 tile_id: tile_id_bytes.clone(),
                 device_kind: "pointer".to_string(),
+                node_id: Vec::new(),
+                device_id: String::new(),
+                release_on_up: false,
             })),
         })
         .await
@@ -11581,6 +11845,95 @@ mod tests {
             }
             other => panic!("Expected InputCaptureResponse, got: {other:?}"),
         }
+    }
+
+    /// Scenario: InputCaptureRequest wires through to the runtime input processor bridge.
+    #[tokio::test]
+    async fn test_input_capture_request_sends_runtime_command() {
+        let (mut client, _server, mut capture_rx, tile_id, node_id) =
+            setup_test_with_input_capture_channel().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "capture-agent", "test-key").await;
+
+        let tile_id_bytes = scene_id_to_bytes(tile_id);
+        let node_id_bytes = scene_id_to_bytes(node_id);
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::InputCaptureRequest(InputCaptureRequest {
+                tile_id: tile_id_bytes.clone(),
+                device_kind: "pointer".to_string(),
+                node_id: node_id_bytes,
+                device_id: "7".to_string(),
+                release_on_up: true,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::InputCaptureResponse(resp)) => {
+                assert_eq!(resp.tile_id, tile_id_bytes, "tile_id must match request");
+                assert!(resp.granted, "capture bridge should accept valid request");
+            }
+            other => panic!("Expected InputCaptureResponse, got: {other:?}"),
+        }
+
+        let command = capture_rx
+            .recv()
+            .await
+            .expect("capture command must be sent");
+        assert_eq!(
+            command,
+            crate::session::InputCaptureCommand::Request {
+                tile_id,
+                node_id,
+                device_id: 7,
+                release_on_up: true,
+            }
+        );
+    }
+
+    /// Scenario: malformed capture-release device ids are reported to the caller.
+    #[tokio::test]
+    async fn test_input_capture_release_rejects_invalid_device_id() {
+        let (mut client, _server, mut capture_rx, tile_id, _node_id) =
+            setup_test_with_input_capture_channel().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "capture-agent", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::InputCaptureRelease(InputCaptureRelease {
+                tile_id: scene_id_to_bytes(tile_id),
+                device_kind: "pointer".to_string(),
+                device_id: "not-a-u32".to_string(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(err.error_code, "INVALID_ARGUMENT");
+                assert_eq!(err.error_code_enum, ErrorCode::InvalidArgument as i32);
+                assert_eq!(err.context, "input_capture_release.device_id");
+                assert!(
+                    err.message.contains("invalid pointer device_id"),
+                    "error should name the malformed device id, got: {}",
+                    err.message
+                );
+            }
+            other => panic!("Expected RuntimeError, got: {other:?}"),
+        }
+        assert!(
+            capture_rx.try_recv().is_err(),
+            "invalid release must not enqueue a runtime capture command"
+        );
     }
 
     /// Scenario: InputCaptureRelease → CaptureReleasedEvent in EventBatch (asynchronous).
@@ -11627,6 +11980,7 @@ mod tests {
             payload: Some(ClientPayload::InputCaptureRelease(InputCaptureRelease {
                 tile_id: tile_id_bytes.clone(),
                 device_kind: "pointer".to_string(),
+                device_id: String::new(),
             })),
         })
         .await

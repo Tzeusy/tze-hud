@@ -10,6 +10,12 @@
 use std::collections::VecDeque;
 
 use tokio_stream::StreamExt;
+use tze_hud_projection::{
+    AttachRequest, ContentClassification, GetPendingInputRequest, OperationEnvelope, OutputKind,
+    PortalInputFeedbackState, PortalInputSubmission, ProjectedPortalAdapterFamily,
+    ProjectedPortalLayer, ProjectedPortalPolicy, ProjectedPortalRuntimeAuthority,
+    ProjectionAuthority, ProjectionOperation, ProviderKind, PublishOutputRequest,
+};
 use tze_hud_protocol::auth::{RUNTIME_MAX_VERSION, RUNTIME_MIN_VERSION};
 use tze_hud_protocol::proto;
 use tze_hud_protocol::proto::session as session_proto;
@@ -640,6 +646,190 @@ fn non_tmux_adapter_satisfies_transport_agnostic_bridge_contract() {
         "portal://pilot/non-tmux-1",
         "bridge identity must stay transport-agnostic"
     );
+}
+
+#[test]
+fn cooperative_projection_adapter_satisfies_text_portal_contract_without_process_authority() {
+    let mut authority = ProjectionAuthority::default();
+    let attach = authority.handle_attach(
+        AttachRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::Attach,
+                projection_id: "projection-integration".to_string(),
+                request_id: "attach-projection".to_string(),
+                client_timestamp_wall_us: 1,
+            },
+            provider_kind: ProviderKind::Codex,
+            display_name: "Codex projected session".to_string(),
+            workspace_hint: Some("mayor/rig".to_string()),
+            repository_hint: None,
+            icon_profile_hint: None,
+            content_classification: ContentClassification::Private,
+            hud_target: Some("resident-grpc".to_string()),
+            idempotency_key: Some("projection-once".to_string()),
+        },
+        "projection-daemon",
+        10,
+    );
+    assert!(attach.accepted);
+    let owner_token = attach.owner_token.expect("attach returns owner token");
+
+    let published = authority.handle_publish_output(
+        PublishOutputRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::PublishOutput,
+                projection_id: "projection-integration".to_string(),
+                request_id: "publish-output".to_string(),
+                client_timestamp_wall_us: 2,
+            },
+            owner_token: owner_token.clone(),
+            output_text: "assistant: ready over cooperative projection".to_string(),
+            output_kind: OutputKind::Assistant,
+            content_classification: ContentClassification::Private,
+            logical_unit_id: Some("unit-ready".to_string()),
+            coalesce_key: None,
+        },
+        "projection-daemon",
+        20,
+    );
+    assert!(published.accepted);
+
+    let feedback = authority.submit_portal_input(
+        "projection-integration",
+        PortalInputSubmission {
+            input_id: "hud-input-1".to_string(),
+            submission_text: "please summarize the current diff".to_string(),
+            submitted_at_wall_us: 30,
+            expires_at_wall_us: Some(1_000),
+            content_classification: ContentClassification::Private,
+        },
+    );
+    assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
+    assert_eq!(feedback.pending_input_count, 1);
+
+    let state = authority
+        .projected_portal_state(
+            "projection-integration",
+            &ProjectedPortalPolicy::permit_all(),
+        )
+        .expect("cooperative projection materializes portal state");
+    assert_eq!(
+        state.adapter_family,
+        ProjectedPortalAdapterFamily::CooperativeProjection
+    );
+    assert_eq!(
+        state.runtime_authority,
+        ProjectedPortalRuntimeAuthority::ResidentSessionLease
+    );
+    assert_eq!(state.layer, ProjectedPortalLayer::Content);
+    assert_eq!(state.pending_input_count, Some(1));
+    assert!(state.visible_transcript.iter().any(|unit| {
+        unit.output_text
+            .contains("ready over cooperative projection")
+    }));
+
+    let poll = authority.handle_get_pending_input(
+        GetPendingInputRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::GetPendingInput,
+                projection_id: "projection-integration".to_string(),
+                request_id: "poll-input".to_string(),
+                client_timestamp_wall_us: 3,
+            },
+            owner_token,
+            max_items: None,
+            max_bytes: None,
+        },
+        "codex-session",
+        40,
+    );
+    assert!(poll.accepted);
+    assert_eq!(poll.pending_input.len(), 1);
+    assert_eq!(
+        poll.pending_input[0].submission_text,
+        "please summarize the current diff"
+    );
+
+    let wire = serde_json::to_string(&state).expect("portal state serializes");
+    for forbidden in ["pty", "tmux", "terminal", "stdin", "process"] {
+        assert!(
+            !wire.contains(forbidden),
+            "cooperative projection must not expose {forbidden} authority"
+        );
+    }
+}
+
+#[test]
+fn cooperative_projection_runtime_surface_is_provider_neutral_and_process_agnostic() {
+    for (index, provider_kind) in [
+        ProviderKind::Codex,
+        ProviderKind::Claude,
+        ProviderKind::Opencode,
+        ProviderKind::Other,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let projection_id = format!("projection-provider-{index}");
+        let mut authority = ProjectionAuthority::default();
+        let attach = authority.handle_attach(
+            AttachRequest {
+                envelope: OperationEnvelope {
+                    operation: ProjectionOperation::Attach,
+                    projection_id: projection_id.clone(),
+                    request_id: "attach-provider-neutral".to_string(),
+                    client_timestamp_wall_us: 1,
+                },
+                provider_kind,
+                display_name: format!("Provider-neutral session {index}"),
+                workspace_hint: Some("mayor/rig".to_string()),
+                repository_hint: Some("tze_hud".to_string()),
+                icon_profile_hint: None,
+                content_classification: ContentClassification::Private,
+                hud_target: Some("resident-grpc".to_string()),
+                idempotency_key: Some("provider-neutral-attach".to_string()),
+            },
+            "projection-daemon",
+            10,
+        );
+        assert!(attach.accepted);
+
+        let state = authority
+            .projected_portal_state(&projection_id, &ProjectedPortalPolicy::permit_all())
+            .expect("provider-neutral projection materializes portal state");
+        assert_eq!(
+            state.adapter_family,
+            ProjectedPortalAdapterFamily::CooperativeProjection
+        );
+        assert_eq!(
+            state.runtime_authority,
+            ProjectedPortalRuntimeAuthority::ResidentSessionLease
+        );
+        assert_eq!(state.layer, ProjectedPortalLayer::Content);
+        assert!(state.interaction_enabled);
+
+        let wire = serde_json::to_string(&state)
+            .expect("provider-neutral portal state serializes")
+            .to_ascii_lowercase();
+        for forbidden in [
+            "pty",
+            "tmux",
+            "terminal",
+            "stdin",
+            "stdout",
+            "process_lifecycle",
+            "spawn",
+            "kill",
+            "codex_rpc",
+            "claude_rpc",
+            "opencode_rpc",
+        ] {
+            assert!(
+                !wire.contains(forbidden),
+                "runtime-facing cooperative projection state must not expose {forbidden}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

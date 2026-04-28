@@ -19,6 +19,21 @@ use crate::proto::SceneEvent;
 use crate::proto::session::ServerMessage;
 use crate::token::TokenStore;
 
+/// Runtime input-capture command sent from the gRPC session plane to the local
+/// input processor owned by the compositor/window thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputCaptureCommand {
+    Request {
+        tile_id: SceneId,
+        node_id: SceneId,
+        device_id: u32,
+        release_on_up: bool,
+    },
+    Release {
+        device_id: u32,
+    },
+}
+
 /// Current degradation level of the runtime (RFC 0005 §3.4).
 ///
 /// Mirrors `DegradationLevel` from `session.proto` as a plain Rust enum so that
@@ -128,6 +143,10 @@ pub struct SharedState {
     /// Current degradation level (RFC 0005 §3.4).
     /// Default: Normal (no degradation).
     pub degradation_level: RuntimeDegradationLevel,
+    /// Optional bridge for session-plane pointer capture requests. Windowed
+    /// runtime installs this so gRPC InputCaptureRequest/InputCaptureRelease
+    /// mutates the same InputProcessor used for OS pointer routing.
+    pub input_capture_tx: Option<mpsc::UnboundedSender<InputCaptureCommand>>,
 }
 
 /// Bounded per-session event channel capacity (events).

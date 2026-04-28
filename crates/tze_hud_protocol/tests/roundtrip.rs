@@ -393,6 +393,8 @@ fn roundtrip_node_proto_hit_region() {
             interaction_id: "btn-primary".to_string(),
             accepts_focus: true,
             accepts_pointer: true,
+            auto_capture: true,
+            release_on_up: true,
         })),
     };
     let decoded = round_trip(&orig);
@@ -401,6 +403,8 @@ fn roundtrip_node_proto_hit_region() {
             assert_eq!(hr.interaction_id, "btn-primary");
             assert!(hr.accepts_focus);
             assert!(hr.accepts_pointer);
+            assert!(hr.auto_capture);
+            assert!(hr.release_on_up);
         }
         _ => panic!("wrong data variant"),
     }

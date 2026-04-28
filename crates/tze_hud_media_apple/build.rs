@@ -51,11 +51,11 @@
 //!                                              # pointless and breaks static link
 //!   --enable-neon                          \   # NEON SIMD for Apple Silicon / A-series
 //!   --disable-libyuv                       \   # internal libyuv conflicts with system
-//!   --sdk-path="$(xcrun --sdk iphoneos --show-sdk-path)"
+//!   --extra-cflags="-isysroot $(xcrun --sdk iphoneos --show-sdk-path)"
 //! ```
 //!
 //! For the iOS Simulator target (`aarch64-apple-ios-sim`) substitute
-//! `--sdk-path="$(xcrun --sdk iphonesimulator --show-sdk-path)"`.
+//! `--extra-cflags="-isysroot $(xcrun --sdk iphonesimulator --show-sdk-path)"`.
 //!
 //! # Fat static library (multi-arch / xcframework) strategy
 //!
@@ -199,29 +199,29 @@ fn main() {
         configure_path.display()
     );
 
-    run_command(
-        std::process::Command::new(&configure_path)
-            .current_dir(&build_dir)
-            .arg(format!("--target={libvpx_target}"))
-            .arg(format!("--prefix={}", install_dir.display()))
-            .arg("--enable-vp9")
-            .arg("--disable-vp8")
-            // Decoder-only: halves compile time and binary size.
-            // VP9 encode is not required for tze_hud's receive-only media plane.
-            .arg("--disable-vp9-encoder")
-            .arg("--enable-pic")
-            .arg("--disable-examples")
-            .arg("--disable-unit-tests")
-            .arg("--disable-docs")
-            // Fixed NEON SIMD on Apple A-series / M-series; runtime CPU detection
-            // is pointless and breaks static link on iOS (no dynamic CPUID).
-            .arg("--disable-runtime-cpu-detect")
-            .arg("--enable-neon")
-            // Internal libyuv conflicts with system frameworks on iOS.
-            .arg("--disable-libyuv")
-            .arg(format!("--sdk-path={sdk_path}")),
-        "libvpx configure",
-    );
+    let mut configure_command = std::process::Command::new(&configure_path);
+    configure_command
+        .current_dir(&build_dir)
+        .env("SDKROOT", &sdk_path)
+        .arg(format!("--target={libvpx_target}"))
+        .arg(format!("--prefix={}", install_dir.display()))
+        .arg("--enable-vp9")
+        .arg("--disable-vp8")
+        // Decoder-only: halves compile time and binary size.
+        // VP9 encode is not required for tze_hud's receive-only media plane.
+        .arg("--disable-vp9-encoder")
+        .arg("--enable-pic")
+        .arg("--disable-examples")
+        .arg("--disable-unit-tests")
+        .arg("--disable-docs")
+        // Fixed NEON SIMD on Apple A-series / M-series; runtime CPU detection
+        // is pointless and breaks static link on iOS (no dynamic CPUID).
+        .arg("--disable-runtime-cpu-detect")
+        .arg("--enable-neon")
+        // Internal libyuv conflicts with system frameworks on iOS.
+        .arg("--disable-libyuv")
+        .arg(format!("--extra-cflags=-isysroot {sdk_path}"));
+    run_command(&mut configure_command, "libvpx configure");
 
     // Run make (parallel build for speed).
     let parallelism = std::thread::available_parallelism()

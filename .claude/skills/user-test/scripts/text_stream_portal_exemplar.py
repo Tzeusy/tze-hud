@@ -54,6 +54,10 @@ from proto_gen import events_pb2, types_pb2  # noqa: E402
 
 PORTAL_W = 860.0
 PORTAL_H = 680.0
+PORTAL_MIN_W = 640.0
+PORTAL_MIN_H = 480.0
+PORTAL_MAX_W = 1280.0
+PORTAL_MAX_H = 960.0
 PORTAL_RADIUS = 14.0
 PORTAL_X_FROM_RIGHT = 28.0
 PORTAL_Y = 120.0
@@ -99,17 +103,30 @@ ACTIVITY_DOT_SIZE = 8.0
 # Equal 50/50 split with a fat divider between panes. Runtime pointer capture
 # exists, but resize-on-drag still needs portal-side geometry mutation logic.
 PANE_DIVIDER_W = 6.0
+MIN_PANE_W = 240.0
 INPUT_PANE_W = (PORTAL_W - PANE_DIVIDER_W) / 2.0
 PANE_DIVIDER_RGBA = (1.0, 1.0, 1.0, 0.14)
 PANE_DIVIDER_GRIP_RGBA = (1.0, 1.0, 1.0, 0.40)
 PANE_DIVIDER_GRIP_H = 44.0
 PANE_DIVIDER_GRIP_W = 2.0
+PORTAL_RESIZE_HANDLE = 22.0
+MINIMIZED_ICON_SIZE = 58.0
+MINIMIZED_ICON_RADIUS = 17.0
+MINIMIZE_BUTTON_SIZE = 22.0
+MINIMIZE_BUTTON_X = 10.0
+MINIMIZE_BUTTON_Y = 14.0
+MINIMIZE_HIT_W = 44.0
+MINIMIZE_HIT_H = HEADER_H
 
 SCROLL_INTERACTION_ID = "portal-scroll"
 SUBMIT_INTERACTION_ID = "portal-submit"
 COMPOSER_INTERACTION_ID = "portal-composer-focus"
 PANE_RESIZE_INTERACTION_ID = "portal-pane-resize"
 PORTAL_DRAG_INTERACTION_ID = "portal-drag-header"
+PORTAL_RESIZE_INTERACTION_ID = "portal-resize-bottom-right"
+PORTAL_MINIMIZE_INTERACTION_ID = "portal-minimize"
+PORTAL_RESTORE_INTERACTION_ID = "portal-restore"
+PORTAL_ICON_DRAG_INTERACTION_ID = "portal-icon-drag"
 
 
 @dataclass(frozen=True)
@@ -126,6 +143,8 @@ class PortalTiles:
     frame: bytes
     input_scroll: bytes
     output_scroll: bytes
+    drag_shield: bytes
+    minimized_icon: bytes
     tab_width: float
     tab_height: float
 
@@ -144,8 +163,11 @@ DEFAULT_DOC = "docs/exemplar-manual-review-checklist.md"
 DEFAULT_TRANSCRIPT_PATH = "test_results/text-stream-portal-latest.json"
 DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/ecdsa_home")
 MAX_MARKDOWN_BYTES = 65535
-DRAG_MAX_SECONDS = 1.25
-DRAG_IDLE_RELEASE_SECONDS = 0.35
+DRAG_MAX_SECONDS = 12.0
+DRAG_IDLE_RELEASE_SECONDS = 1.0
+DRAG_APPLY_MIN_INTERVAL_SECONDS = 0.025
+ICON_DRAG_APPLY_MIN_INTERVAL_SECONDS = 0.008
+ICON_DRAG_START_THRESHOLD_PX = 20.0
 KEY_ECHO_TIMEOUT_SECONDS = 1.0
 COMPOSER_RENDER_DEBOUNCE_SECONDS = 0.02
 COMPOSER_CARET_BLINK_SECONDS = 0.45
@@ -164,6 +186,37 @@ COMPOSER_NODE_IDS = {
     "caret": uuid.uuid4().bytes,
 }
 COMPOSER_RUNTIME_NODE_IDS: dict[str, bytes] = {}
+FRAME_RUNTIME_NODE_IDS: dict[str, bytes] = {}
+PORTAL_STATUS_STATE: dict[str, bool] = {
+    "minimized": False,
+    "attention": False,
+    "pulse": False,
+}
+FRAME_CHILD_KEYS = [
+    # header
+    "header_bg", "header_divider", "minimize_bg", "minimize_glyph",
+    "minimize_hit", "activity_dot", "title", "subtitle",
+    "header_grip", "portal_drag_hit",
+    # input pane
+    "input_pane_bg", "input_eyebrow",
+    "composer_bg", "border_t", "border_b", "border_l", "border_r",
+    "submit_hint", "submit_hit",
+    # divider
+    "pane_divider", "pane_divider_grip", "pane_resize_hit",
+    # output pane
+    "output_pane_bg", "output_eyebrow", "output_text_window_bg",
+    # footer
+    "footer_divider", "footer_bg", "footer_node", "resize_handle", "resize_hit",
+]
+
+
+def fresh_composer_node_ids() -> dict[str, bytes]:
+    return {
+        "root": uuid.uuid4().bytes,
+        "hit": uuid.uuid4().bytes,
+        "text": uuid.uuid4().bytes,
+        "caret": uuid.uuid4().bytes,
+    }
 
 # ─── Scroll contract tokens ──────────────────────────────────────────────────
 
@@ -230,13 +283,22 @@ def composer_visual_lines(
     def finish_line() -> None:
         lines.append(ComposerVisualLine("".join(line_chars), tuple(positions)))
 
-    def start_line(index: int) -> None:
+    def start_line(index: int, zero_positions: tuple[int, ...] = ()) -> None:
         nonlocal line_chars, positions, wrap_line_width, caret_line_width
         finish_line()
         line_chars = []
         wrap_line_width = 0.0
         caret_line_width = 0.0
         positions = [(index, 0.0)]
+        for position in zero_positions:
+            add_position(position)
+
+    def append_char(index: int, ch: str) -> None:
+        nonlocal wrap_line_width, caret_line_width
+        line_chars.append(ch)
+        wrap_line_width += composer_wrap_char_width_px(ch)
+        caret_line_width += composer_caret_char_width_px(ch)
+        add_position(index + 1)
 
     i = 0
     while i < len(text):
@@ -248,16 +310,34 @@ def composer_visual_lines(
             continue
 
         if ch.isspace():
-            wrap_ch_width = composer_wrap_char_width_px(ch)
-            if wrap_line_width > 0.0 and wrap_line_width + wrap_ch_width > max_width_px:
-                start_line(i + 1)
-                i += 1
+            run_end = i + 1
+            while run_end < len(text) and text[run_end].isspace() and text[run_end] != "\n":
+                run_end += 1
+            next_word_end = run_end
+            while next_word_end < len(text) and not text[next_word_end].isspace():
+                next_word_end += 1
+
+            whitespace_width = composer_wrap_text_width_px(text[i:run_end])
+            next_word_width = composer_wrap_text_width_px(text[run_end:next_word_end])
+            if (
+                wrap_line_width > 0.0
+                and run_end < len(text)
+                and wrap_line_width + whitespace_width + next_word_width > max_width_px
+            ):
+                add_position(i)
+                start_line(i + 1, tuple(range(i + 2, run_end + 1)))
+                i = run_end
                 continue
-            add_position(i)
-            line_chars.append(ch)
-            wrap_line_width += wrap_ch_width
-            caret_line_width += composer_caret_char_width_px(ch)
-            i += 1
+
+            while i < run_end:
+                ch = text[i]
+                wrap_ch_width = composer_wrap_char_width_px(ch)
+                if wrap_line_width > 0.0 and wrap_line_width + wrap_ch_width > max_width_px:
+                    start_line(i + 1)
+                    i += 1
+                    continue
+                append_char(i, ch)
+                i += 1
             continue
 
         word_end = i + 1
@@ -273,10 +353,7 @@ def composer_visual_lines(
             wrap_ch_width = composer_wrap_char_width_px(ch)
             if wrap_line_width > 0.0 and wrap_line_width + wrap_ch_width > max_width_px:
                 start_line(i)
-            add_position(i)
-            line_chars.append(ch)
-            wrap_line_width += wrap_ch_width
-            caret_line_width += composer_caret_char_width_px(ch)
+            append_char(i, ch)
             i += 1
 
     add_position(len(text))
@@ -402,6 +479,33 @@ def composer_word_forward_end(text: str, cursor: int) -> int:
     while i < len(text) and (text[i].isalnum() or text[i] == "_"):
         i += 1
     return i
+
+
+def clamp_portal_size(w: float, h: float, tab_width: float, tab_height: float) -> tuple[float, float]:
+    return (
+        max(PORTAL_MIN_W, min(w, min(PORTAL_MAX_W, tab_width))),
+        max(PORTAL_MIN_H, min(h, min(PORTAL_MAX_H, tab_height))),
+    )
+
+
+def clamp_input_pane_width(width: float) -> float:
+    max_input_w = max(MIN_PANE_W, PORTAL_W - PANE_DIVIDER_W - MIN_PANE_W)
+    return max(MIN_PANE_W, min(width, max_input_w))
+
+
+def set_input_pane_width(width: float) -> None:
+    global INPUT_PANE_W
+    INPUT_PANE_W = clamp_input_pane_width(width)
+
+
+def set_portal_size(w: float, h: float, tab_width: float, tab_height: float) -> None:
+    global PORTAL_W, PORTAL_H
+    old_w = PORTAL_W
+    PORTAL_W, PORTAL_H = clamp_portal_size(w, h, tab_width, tab_height)
+    if old_w > 0:
+        set_input_pane_width(INPUT_PANE_W * (PORTAL_W / old_w))
+    else:
+        set_input_pane_width((PORTAL_W - PANE_DIVIDER_W) / 2.0)
 
 
 def target_host(target: str) -> str:
@@ -644,6 +748,30 @@ def build_portal_nodes(
     header_divider = make_solid_color_node(
         *DIVIDER_RGBA, 0.0, HEADER_H, PORTAL_W, DIVIDER_H,
     )
+    minimize_bg = make_solid_color_node(
+        0.10, 0.14, 0.20, 0.88,
+        MINIMIZE_BUTTON_X,
+        MINIMIZE_BUTTON_Y,
+        MINIMIZE_BUTTON_SIZE,
+        MINIMIZE_BUTTON_SIZE,
+        radius=7.0,
+    )
+    minimize_glyph = make_solid_color_node(
+        0.76, 0.82, 0.90, 0.96,
+        MINIMIZE_BUTTON_X + 6.0,
+        MINIMIZE_BUTTON_Y + 10.0,
+        MINIMIZE_BUTTON_SIZE - 12.0,
+        2.0,
+        radius=1.0,
+    )
+    minimize_hit = make_hit_region(
+        PORTAL_MINIMIZE_INTERACTION_ID,
+        0.0,
+        0.0,
+        MINIMIZE_HIT_W,
+        MINIMIZE_HIT_H,
+        accepts_focus=False,
+    )
     activity_dot = make_solid_color_node(
         *ACTIVITY_DOT_RGBA,
         PORTAL_W - PADDING_X - ACTIVITY_DOT_SIZE,
@@ -651,16 +779,17 @@ def build_portal_nodes(
         ACTIVITY_DOT_SIZE, ACTIVITY_DOT_SIZE,
         radius=ACTIVITY_DOT_SIZE / 2.0,
     )
+    title_x = PADDING_X + MINIMIZE_BUTTON_SIZE + 18.0
     title_node = make_text_node(
         title,
-        PADDING_X, 10.0,
-        PORTAL_W - PADDING_X * 2.0 - ACTIVITY_DOT_SIZE - 12.0,
+        title_x, 10.0,
+        PORTAL_W - title_x - PADDING_X - ACTIVITY_DOT_SIZE - 12.0,
         22.0, TITLE_FONT, TITLE_RGBA,
     )
     subtitle_node = make_text_node(
         subtitle,
-        PADDING_X, 31.0,
-        PORTAL_W - PADDING_X * 2.0,
+        title_x, 31.0,
+        PORTAL_W - title_x - PADDING_X,
         16.0, SUBTITLE_FONT, SUBTITLE_RGBA,
     )
     grip_w = 92.0
@@ -675,8 +804,8 @@ def build_portal_nodes(
     )
     portal_drag_hit = make_hit_region(
         PORTAL_DRAG_INTERACTION_ID,
-        0.0, 0.0,
-        PORTAL_W, HEADER_H,
+        MINIMIZE_HIT_W, 0.0,
+        PORTAL_W - MINIMIZE_HIT_W, HEADER_H,
         accepts_focus=False,
         auto_capture=True,
         release_on_up=True,
@@ -760,6 +889,9 @@ def build_portal_nodes(
     pane_resize_hit = make_hit_region(
         PANE_RESIZE_INTERACTION_ID,
         divider_x - 4.0, pane_y, PANE_DIVIDER_W + 8.0, pane_h,
+        accepts_focus=False,
+        auto_capture=True,
+        release_on_up=True,
     )
 
     # ── Output pane (right) ───────────────────────────────────────────────
@@ -796,11 +928,29 @@ def build_portal_nodes(
         PORTAL_W - PADDING_X * 2.0, 16.0,
         META_FONT, META_RGBA,
     )
+    resize_handle = make_solid_color_node(
+        *PANE_DIVIDER_GRIP_RGBA,
+        PORTAL_W - PORTAL_RESIZE_HANDLE,
+        PORTAL_H - PORTAL_RESIZE_HANDLE,
+        PORTAL_RESIZE_HANDLE,
+        PORTAL_RESIZE_HANDLE,
+        radius=6.0,
+    )
+    resize_hit = make_hit_region(
+        PORTAL_RESIZE_INTERACTION_ID,
+        PORTAL_W - PORTAL_RESIZE_HANDLE - 8.0,
+        PORTAL_H - PORTAL_RESIZE_HANDLE - 8.0,
+        PORTAL_RESIZE_HANDLE + 12.0,
+        PORTAL_RESIZE_HANDLE + 12.0,
+        accepts_focus=False,
+        auto_capture=True,
+        release_on_up=True,
+    )
 
     children = [
         # header
-        header_bg, header_divider, activity_dot, title_node, subtitle_node,
-        header_grip, portal_drag_hit,
+        header_bg, header_divider, minimize_bg, minimize_glyph, minimize_hit,
+        activity_dot, title_node, subtitle_node, header_grip, portal_drag_hit,
         # input pane
         input_pane_bg, input_eyebrow,
         composer_bg, border_t, border_b, border_l, border_r,
@@ -810,7 +960,7 @@ def build_portal_nodes(
         # output pane
         output_pane_bg, output_eyebrow, output_text_window_bg,
         # footer
-        footer_divider, footer_bg, footer_node,
+        footer_divider, footer_bg, footer_node, resize_handle, resize_hit,
     ]
     return root_node, children
 
@@ -821,7 +971,7 @@ def build_input_scroll_nodes(
     *,
     node_ids: Optional[dict[str, bytes]] = None,
 ) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
-    node_ids = node_ids or COMPOSER_NODE_IDS
+    node_ids = node_ids or fresh_composer_node_ids()
     input_rect, _ = portal_pane_rects()
     composer_rect = input_composer_local_rect()
     text_inset = 12.0
@@ -968,6 +1118,196 @@ async def set_root_with_children(
     return root_id, child_ids
 
 
+def update_node_content_mutation(
+    tile_id: bytes,
+    node_id: bytes,
+    node: types_pb2.NodeProto,
+) -> types_pb2.MutationProto:
+    mutation = types_pb2.UpdateNodeContentMutation(tile_id=tile_id, node_id=node_id)
+    if node.HasField("solid_color"):
+        mutation.solid_color.CopyFrom(node.solid_color)
+    elif node.HasField("text_markdown"):
+        mutation.text_markdown.CopyFrom(node.text_markdown)
+    elif node.HasField("hit_region"):
+        mutation.hit_region.CopyFrom(node.hit_region)
+    elif node.HasField("static_image"):
+        mutation.static_image.CopyFrom(node.static_image)
+    else:
+        raise ValueError("node has no updateable content")
+    return types_pb2.MutationProto(update_node_content=mutation)
+
+
+async def set_frame_root_with_runtime_ids(
+    client: HudClient,
+    lease_id: bytes,
+    tile_id: bytes,
+    title: str,
+    subtitle: str,
+    body: str,
+    footer_meta: str,
+    mutation_lock: Optional[asyncio.Lock] = None,
+) -> None:
+    frame_root, frame_children = build_portal_nodes(title, subtitle, body, footer_meta)
+
+    async def mount() -> None:
+        FRAME_RUNTIME_NODE_IDS.clear()
+        frame_root_id, frame_child_ids = await set_root_with_children(
+            client, lease_id, tile_id, frame_root, frame_children,
+        )
+        FRAME_RUNTIME_NODE_IDS["root"] = frame_root_id
+        for key, node_id in zip(FRAME_CHILD_KEYS, frame_child_ids):
+            FRAME_RUNTIME_NODE_IDS[key] = node_id
+
+    if mutation_lock is not None:
+        async with mutation_lock:
+            await mount()
+    else:
+        await mount()
+
+
+async def update_frame_chrome_live(
+    client: HudClient,
+    lease_id: bytes,
+    tile_id: bytes,
+    title: str,
+    subtitle: str,
+    body: str,
+    footer_meta: str,
+    *,
+    live_only: bool = True,
+) -> None:
+    if not FRAME_RUNTIME_NODE_IDS:
+        return
+    frame_root, frame_children = build_portal_nodes(title, subtitle, body, footer_meta)
+    keyed_nodes = {"root": frame_root}
+    keyed_nodes.update(zip(FRAME_CHILD_KEYS, frame_children))
+    live_keys = {
+        "root",
+        "header_bg",
+        "header_divider",
+        "input_pane_bg",
+        "composer_bg",
+        "border_t",
+        "border_b",
+        "border_l",
+        "border_r",
+        "pane_divider",
+        "pane_divider_grip",
+        "pane_resize_hit",
+        "output_pane_bg",
+        "output_text_window_bg",
+        "footer_divider",
+        "footer_bg",
+        "resize_handle",
+        "resize_hit",
+    }
+    allowed_keys = live_keys if live_only else set(keyed_nodes.keys())
+    mutations = [
+        update_node_content_mutation(tile_id, node_id, keyed_nodes[key])
+        for key, node_id in FRAME_RUNTIME_NODE_IDS.items()
+        if key in keyed_nodes and key in allowed_keys
+    ]
+    if mutations:
+        await client.submit_mutation_batch(lease_id, mutations, timeout=2.0)
+
+
+async def set_input_root_with_runtime_ids(
+    client: HudClient,
+    lease_id: bytes,
+    tile_id: bytes,
+    composer_text: str,
+    mutation_lock: Optional[asyncio.Lock] = None,
+) -> None:
+    node_ids = fresh_composer_node_ids()
+    input_root, input_children = build_input_scroll_nodes(
+        composer_text,
+        node_ids=node_ids,
+    )
+
+    async def mount() -> None:
+        COMPOSER_RUNTIME_NODE_IDS.clear()
+        _, input_child_ids = await set_root_with_children(
+            client, lease_id, tile_id, input_root, input_children,
+        )
+        if len(input_child_ids) >= 3:
+            COMPOSER_RUNTIME_NODE_IDS["hit"] = input_child_ids[0]
+            COMPOSER_RUNTIME_NODE_IDS["text"] = input_child_ids[1]
+            COMPOSER_RUNTIME_NODE_IDS["caret"] = input_child_ids[2]
+
+    if mutation_lock is not None:
+        async with mutation_lock:
+            await mount()
+    else:
+        await mount()
+
+
+async def render_composer_static(
+    client: HudClient,
+    lease_id: bytes,
+    tile_id: bytes,
+    composer_text: str,
+    cursor: int,
+    *,
+    focused: bool,
+    caret_visible: bool,
+    mutation_lock: Optional[asyncio.Lock] = None,
+) -> tuple[str, float, int]:
+    text_node_id = COMPOSER_RUNTIME_NODE_IDS.get("text")
+    caret_node_id = COMPOSER_RUNTIME_NODE_IDS.get("caret")
+    if text_node_id is None or caret_node_id is None:
+        raise RuntimeError("composer nodes are not mounted")
+
+    display_text, placeholder_style = composer_display_text(
+        composer_text,
+        cursor,
+        focused=focused,
+    )
+    cursor_x, cursor_row = composer_caret_layout(composer_text, cursor)
+    text_node = build_composer_text_node(
+        display_text,
+        placeholder_style=placeholder_style,
+        node_id=text_node_id,
+    )
+    caret_node = build_composer_caret_node(
+        composer_text,
+        cursor,
+        focused=focused,
+        caret_visible=caret_visible,
+        node_id=caret_node_id,
+    )
+
+    async def update() -> None:
+        await client.update_node_content(lease_id, tile_id, text_node_id, text_node)
+        await client.update_node_content(lease_id, tile_id, caret_node_id, caret_node)
+
+    if mutation_lock is not None:
+        async with mutation_lock:
+            await update()
+    else:
+        await update()
+
+    return display_text, cursor_x, cursor_row
+
+
+async def update_input_scroll_geometry_live(
+    client: HudClient,
+    lease_id: bytes,
+    tile_id: bytes,
+    composer_text: str,
+) -> None:
+    if not COMPOSER_RUNTIME_NODE_IDS:
+        return
+    _, input_children = build_input_scroll_nodes(composer_text)
+    child_keys = ["hit", "text", "caret"]
+    mutations = [
+        update_node_content_mutation(tile_id, node_id, node)
+        for key, node in zip(child_keys, input_children)
+        if (node_id := COMPOSER_RUNTIME_NODE_IDS.get(key)) is not None
+    ]
+    if mutations:
+        await client.submit_mutation_batch(lease_id, mutations, timeout=2.0)
+
+
 async def publish_portal(
     client: HudClient,
     lease_id: bytes,
@@ -989,16 +1329,23 @@ async def publish_portal(
     under atomic-batch semantics.
     """
     if include_tile_setup:
-        for tile_id in (
-            tiles.capture_backstop,
-            tiles.frame,
-            tiles.input_scroll,
-            tiles.output_scroll,
-        ):
+        await client.update_tile_opacity(lease_id, tiles.capture_backstop, 0.0)
+        await client.update_tile_input_mode(
+            lease_id, tiles.capture_backstop, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+        )
+        for tile_id in (tiles.frame, tiles.input_scroll, tiles.output_scroll):
             await client.update_tile_opacity(lease_id, tile_id, 1.0)
             await client.update_tile_input_mode(
                 lease_id, tile_id, types_pb2.TILE_INPUT_MODE_CAPTURE,
             )
+        await client.update_tile_input_mode(
+            lease_id, tiles.drag_shield, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+        )
+        await client.update_tile_opacity(lease_id, tiles.drag_shield, 0.0)
+        await client.update_tile_opacity(lease_id, tiles.minimized_icon, 0.0)
+        await client.update_tile_input_mode(
+            lease_id, tiles.minimized_icon, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+        )
         input_rect, output_rect = portal_pane_rects()
         output_scroll_body = output_scroll_content if output_scroll_content is not None else body
         await client.submit_mutation_batch(
@@ -1030,30 +1377,56 @@ async def publish_portal(
         mutation_lock,
     )
 
-    frame_root, frame_children = build_portal_nodes(title, subtitle, body, footer_meta)
-    await set_root_with_children(
-        client, lease_id, tiles.frame, frame_root, frame_children, mutation_lock,
+    await set_frame_root_with_runtime_ids(
+        client, lease_id, tiles.frame, title, subtitle, body, footer_meta,
+        mutation_lock,
     )
 
-    input_root, input_children = build_input_scroll_nodes(composer_text)
-    _, input_child_ids = await set_root_with_children(
-        client, lease_id, tiles.input_scroll, input_root, input_children, mutation_lock,
+    should_mount_input = (
+        include_tile_setup
+        or bool(composer_text)
+        or not COMPOSER_RUNTIME_NODE_IDS
     )
-    if len(input_child_ids) >= 3:
-        COMPOSER_RUNTIME_NODE_IDS["hit"] = input_child_ids[0]
-        COMPOSER_RUNTIME_NODE_IDS["text"] = input_child_ids[1]
-        COMPOSER_RUNTIME_NODE_IDS["caret"] = input_child_ids[2]
+    if should_mount_input:
+        await set_input_root_with_runtime_ids(
+            client, lease_id, tiles.input_scroll, composer_text, mutation_lock,
+        )
 
     output_root, output_children = build_output_scroll_nodes(body)
     await set_root_with_children(
         client, lease_id, tiles.output_scroll, output_root, output_children, mutation_lock,
     )
 
+    if include_tile_setup:
+        shield_root, shield_children = build_drag_shield_nodes(
+            PORTAL_W,
+            PORTAL_H,
+            None,
+        )
+        await set_root_with_children(
+            client, lease_id, tiles.drag_shield, shield_root, shield_children, mutation_lock,
+        )
+        icon_root, icon_children = build_minimized_icon_nodes(attention=False, pulse=False)
+        await set_root_with_children(
+            client, lease_id, tiles.minimized_icon, icon_root, icon_children, mutation_lock,
+        )
+    elif PORTAL_STATUS_STATE.get("minimized"):
+        PORTAL_STATUS_STATE["attention"] = True
+        PORTAL_STATUS_STATE["pulse"] = not PORTAL_STATUS_STATE.get("pulse", False)
+        icon_root, icon_children = build_minimized_icon_nodes(
+            attention=True,
+            pulse=PORTAL_STATUS_STATE["pulse"],
+        )
+        await set_root_with_children(
+            client, lease_id, tiles.minimized_icon, icon_root, icon_children, mutation_lock,
+        )
+
 
 async def create_portal_tiles(
     client: HudClient,
     lease_id: bytes,
     portal_x: float,
+    portal_y: float,
     tab_width: float,
     tab_height: float,
 ) -> PortalTiles:
@@ -1061,7 +1434,7 @@ async def create_portal_tiles(
     capture_backstop = await client.create_tile(
         lease_id,
         x=portal_x,
-        y=PORTAL_Y,
+        y=portal_y,
         w=PORTAL_W,
         h=PORTAL_H,
         z_order=PORTAL_Z - 100,
@@ -1069,7 +1442,7 @@ async def create_portal_tiles(
     frame = await client.create_tile(
         lease_id,
         x=portal_x,
-        y=PORTAL_Y,
+        y=portal_y,
         w=PORTAL_W,
         h=PORTAL_H,
         z_order=PORTAL_Z,
@@ -1077,24 +1450,42 @@ async def create_portal_tiles(
     input_scroll = await client.create_tile(
         lease_id,
         x=portal_x + input_rect.x,
-        y=PORTAL_Y + input_rect.y,
+        y=portal_y + input_rect.y,
         w=input_rect.w,
         h=input_rect.h,
-        z_order=PORTAL_Z + 1,
+        z_order=PORTAL_Z + 2,
     )
     output_scroll = await client.create_tile(
         lease_id,
         x=portal_x + output_rect.x,
-        y=PORTAL_Y + output_rect.y,
+        y=portal_y + output_rect.y,
         w=output_rect.w,
         h=output_rect.h,
-        z_order=PORTAL_Z + 1,
+        z_order=PORTAL_Z + 3,
+    )
+    drag_shield = await client.create_tile(
+        lease_id,
+        x=max(0.0, tab_width - 1.0),
+        y=max(0.0, tab_height - 1.0),
+        w=1.0,
+        h=1.0,
+        z_order=PORTAL_Z + 20,
+    )
+    minimized_icon = await client.create_tile(
+        lease_id,
+        x=portal_x,
+        y=portal_y,
+        w=MINIMIZED_ICON_SIZE,
+        h=MINIMIZED_ICON_SIZE,
+        z_order=PORTAL_Z + 10,
     )
     return PortalTiles(
         capture_backstop=capture_backstop,
         frame=frame,
         input_scroll=input_scroll,
         output_scroll=output_scroll,
+        drag_shield=drag_shield,
+        minimized_icon=minimized_icon,
         tab_width=tab_width,
         tab_height=tab_height,
     )
@@ -1169,6 +1560,32 @@ def portal_bounds_mutations(tiles: PortalTiles, portal_x: float, portal_y: float
             output_rect.w,
             output_rect.h,
         ),
+        publish_to_tile_bounds_mutation(
+            tiles.minimized_icon,
+            portal_x,
+            portal_y,
+            MINIMIZED_ICON_SIZE,
+            MINIMIZED_ICON_SIZE,
+        ),
+    ]
+
+
+def portal_hidden_bounds_mutations(tiles: PortalTiles, portal_x: float, portal_y: float) -> list[types_pb2.MutationProto]:
+    hidden_x = max(0.0, tiles.tab_width - 1.0)
+    hidden_y = max(0.0, tiles.tab_height - 1.0)
+    return [
+        publish_to_tile_bounds_mutation(tiles.capture_backstop, hidden_x, hidden_y, 1.0, 1.0),
+        publish_to_tile_bounds_mutation(tiles.frame, hidden_x, hidden_y, 1.0, 1.0),
+        publish_to_tile_bounds_mutation(tiles.input_scroll, hidden_x, hidden_y, 1.0, 1.0),
+        publish_to_tile_bounds_mutation(tiles.output_scroll, hidden_x, hidden_y, 1.0, 1.0),
+        publish_to_tile_bounds_mutation(tiles.drag_shield, hidden_x, hidden_y, 1.0, 1.0),
+        publish_to_tile_bounds_mutation(
+            tiles.minimized_icon,
+            portal_x,
+            portal_y,
+            MINIMIZED_ICON_SIZE,
+            MINIMIZED_ICON_SIZE,
+        ),
     ]
 
 
@@ -1182,6 +1599,108 @@ def build_capture_backstop_nodes(tab_width: float, tab_height: float) -> tuple[t
         accepts_focus=False,
     )
     return root, [hit]
+
+
+def build_drag_shield_nodes(
+    tab_width: float,
+    tab_height: float,
+    interaction_id: Optional[str],
+) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
+    root = make_solid_color_node(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, tab_width, tab_height)
+    if not interaction_id:
+        return root, []
+    hit = make_hit_region(
+        interaction_id,
+        0.0, 0.0,
+        tab_width,
+        tab_height,
+        accepts_focus=False,
+    )
+    return root, [hit]
+
+
+def build_minimized_icon_nodes(
+    *,
+    attention: bool,
+    pulse: bool,
+) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
+    accent = (1.0, 0.82, 0.22, 0.98) if attention else (0.48, 0.86, 0.56, 0.94)
+    halo_alpha = 0.28 if pulse else 0.12
+    root = make_solid_color_node(
+        0.02, 0.03, 0.05, 0.72,
+        0.0, 0.0,
+        MINIMIZED_ICON_SIZE,
+        MINIMIZED_ICON_SIZE,
+        radius=MINIMIZED_ICON_RADIUS,
+    )
+    halo = make_solid_color_node(
+        accent[0], accent[1], accent[2], halo_alpha,
+        4.0, 4.0,
+        MINIMIZED_ICON_SIZE - 8.0,
+        MINIMIZED_ICON_SIZE - 8.0,
+        radius=MINIMIZED_ICON_RADIUS - 3.0,
+    )
+    core = make_solid_color_node(
+        0.06, 0.08, 0.12, 0.94,
+        10.0, 10.0,
+        MINIMIZED_ICON_SIZE - 20.0,
+        MINIMIZED_ICON_SIZE - 20.0,
+        radius=12.0,
+    )
+    signal = make_solid_color_node(
+        accent[0], accent[1], accent[2], accent[3],
+        36.0, 13.0,
+        8.0, 8.0,
+        radius=4.0,
+    )
+    line_a = make_solid_color_node(
+        0.82, 0.88, 0.96, 0.95,
+        18.0, 23.0, 17.0, 2.0,
+        radius=1.0,
+    )
+    line_b = make_solid_color_node(
+        0.82, 0.88, 0.96, 0.70,
+        18.0, 30.0, 22.0, 2.0,
+        radius=1.0,
+    )
+    line_c = make_solid_color_node(
+        accent[0], accent[1], accent[2], 0.90,
+        18.0, 37.0, 13.0, 2.0,
+        radius=1.0,
+    )
+    grip_a = make_solid_color_node(
+        0.70, 0.78, 0.90, 0.66,
+        43.0, 43.0, 7.0, 2.0,
+        radius=1.0,
+    )
+    grip_b = make_solid_color_node(
+        0.70, 0.78, 0.90, 0.66,
+        43.0, 49.0, 7.0, 2.0,
+        radius=1.0,
+    )
+    restore_hit_top = make_hit_region(
+        PORTAL_RESTORE_INTERACTION_ID,
+        0.0, 0.0,
+        MINIMIZED_ICON_SIZE, 36.0,
+        accepts_focus=False,
+    )
+    restore_hit_left = make_hit_region(
+        PORTAL_RESTORE_INTERACTION_ID,
+        0.0, 36.0,
+        36.0, MINIMIZED_ICON_SIZE - 36.0,
+        accepts_focus=False,
+    )
+    drag_hit = make_hit_region(
+        PORTAL_ICON_DRAG_INTERACTION_ID,
+        36.0, 36.0,
+        MINIMIZED_ICON_SIZE - 36.0,
+        MINIMIZED_ICON_SIZE - 36.0,
+        accepts_focus=False,
+    )
+    return root, [
+        halo, core, signal, line_a, line_b, line_c, grip_a, grip_b,
+        restore_hit_top, restore_hit_left, drag_hit,
+    ]
 
 
 def emit_step_event(
@@ -1241,7 +1760,6 @@ async def portal_interaction_loop(
     _, output_rect = portal_pane_rects()
     output_view_start = 0
     drag: Optional[dict[str, float | str]] = None
-    last_drag_send = 0.0
     last_output_scroll_y: Optional[float] = None
     pending_key_echoes: list[dict[str, float | str]] = []
     suppressed_shortcut_chars: list[dict[str, float | str]] = []
@@ -1252,21 +1770,305 @@ async def portal_interaction_loop(
     composer_last_dirty_at = 0.0
     composer_caret_visible = True
     composer_blink_task: Optional[asyncio.Task[None]] = None
+    portal_minimized = False
+    minimized_attention = False
+    minimized_pulse = False
+    last_drag_apply_at = 0.0
 
-    async def move_portal(new_x: float, new_y: float) -> None:
-        nonlocal portal_x, portal_y
-        portal_x = max(0.0, min(new_x, max(0.0, tab_width - PORTAL_W)))
-        portal_y = max(0.0, min(new_y, max(0.0, tab_height - PORTAL_H)))
+    async def render_minimized_icon() -> None:
+        root, children = build_minimized_icon_nodes(
+            attention=minimized_attention,
+            pulse=minimized_pulse,
+        )
+        await set_root_with_children(
+            client, lease_id, tiles.minimized_icon, root, children, mutation_lock,
+        )
+
+    async def set_portal_minimized(minimized: bool) -> None:
+        nonlocal minimized_attention, minimized_pulse, portal_minimized, portal_x, portal_y
+        if portal_minimized == minimized:
+            return
+        portal_minimized = minimized
+        if minimized:
+            minimized_pulse = minimized_attention
+            set_composer_focus(False)
+        else:
+            minimized_attention = False
+            minimized_pulse = False
+            portal_x = max(0.0, min(portal_x, max(0.0, tab_width - PORTAL_W)))
+            portal_y = max(0.0, min(portal_y, max(0.0, tab_height - PORTAL_H)))
+        PORTAL_STATUS_STATE["minimized"] = minimized
+        PORTAL_STATUS_STATE["attention"] = minimized_attention
+        PORTAL_STATUS_STATE["pulse"] = minimized_pulse
+        portal_opacity = 0.0 if minimized else 1.0
+        portal_input_mode = (
+            types_pb2.TILE_INPUT_MODE_PASSTHROUGH
+            if minimized
+            else types_pb2.TILE_INPUT_MODE_CAPTURE
+        )
+        icon_opacity = 1.0 if minimized else 0.0
+        icon_input_mode = (
+            types_pb2.TILE_INPUT_MODE_CAPTURE
+            if minimized
+            else types_pb2.TILE_INPUT_MODE_PASSTHROUGH
+        )
+        if minimized:
+            async with mutation_lock:
+                hidden_x = max(0.0, tiles.tab_width - 1.0)
+                hidden_y = max(0.0, tiles.tab_height - 1.0)
+                await client.submit_mutation_batch(
+                    lease_id,
+                    [
+                        publish_to_tile_bounds_mutation(tiles.capture_backstop, hidden_x, hidden_y, 1.0, 1.0),
+                        publish_to_tile_bounds_mutation(tiles.input_scroll, hidden_x, hidden_y, 1.0, 1.0),
+                        publish_to_tile_bounds_mutation(tiles.output_scroll, hidden_x, hidden_y, 1.0, 1.0),
+                        publish_to_tile_bounds_mutation(tiles.drag_shield, hidden_x, hidden_y, 1.0, 1.0),
+                        publish_to_tile_bounds_mutation(tiles.minimized_icon, hidden_x, hidden_y, 1.0, 1.0),
+                        publish_to_tile_bounds_mutation(
+                            tiles.frame,
+                            portal_x,
+                            portal_y,
+                            MINIMIZED_ICON_SIZE,
+                            MINIMIZED_ICON_SIZE,
+                        ),
+                    ],
+                    timeout=2.0,
+                )
+                await client.update_tile_opacity(lease_id, tiles.capture_backstop, 0.0)
+                await client.update_tile_input_mode(
+                    lease_id, tiles.capture_backstop, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+                )
+                await client.update_tile_opacity(lease_id, tiles.input_scroll, 0.0)
+                await client.update_tile_input_mode(
+                    lease_id, tiles.input_scroll, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+                )
+                await client.update_tile_opacity(lease_id, tiles.output_scroll, 0.0)
+                await client.update_tile_input_mode(
+                    lease_id, tiles.output_scroll, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+                )
+                await client.update_tile_opacity(lease_id, tiles.frame, 1.0)
+                await client.update_tile_input_mode(
+                    lease_id, tiles.frame, types_pb2.TILE_INPUT_MODE_CAPTURE,
+                )
+                await client.update_tile_opacity(lease_id, tiles.minimized_icon, 0.0)
+                await client.update_tile_input_mode(
+                    lease_id, tiles.minimized_icon, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+                )
+                icon_root, icon_children = build_minimized_icon_nodes(
+                    attention=minimized_attention,
+                    pulse=minimized_pulse,
+                )
+                await set_root_with_children(
+                    client, lease_id, tiles.frame, icon_root, icon_children,
+                )
+            return
+
+        visible_body, _ = visible_output_text(body_full, 0.0, output_rect.h)
         async with mutation_lock:
             await client.submit_mutation_batch(
                 lease_id,
                 portal_bounds_mutations(tiles, portal_x, portal_y),
                 timeout=2.0,
             )
+            await client.update_tile_opacity(lease_id, tiles.capture_backstop, 0.0)
+            await client.update_tile_input_mode(
+                lease_id, tiles.capture_backstop, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+            )
+            for tile_id in (tiles.frame, tiles.input_scroll, tiles.output_scroll):
+                await client.update_tile_opacity(lease_id, tile_id, portal_opacity)
+                await client.update_tile_input_mode(lease_id, tile_id, portal_input_mode)
+            await client.update_tile_opacity(lease_id, tiles.minimized_icon, icon_opacity)
+            await client.update_tile_input_mode(lease_id, tiles.minimized_icon, icon_input_mode)
+            await set_frame_root_with_runtime_ids(
+                client,
+                lease_id,
+                tiles.frame,
+                "Exemplar Review Portal",
+                "docs/exemplar-manual-review-checklist.md",
+                visible_body,
+                f"restored  •  input {INPUT_PANE_W:.0f}px / output {output_rect.w:.0f}px",
+            )
+
+    async def move_minimized_icon(new_x: float, new_y: float) -> None:
+        nonlocal portal_x, portal_y
+        portal_x = max(0.0, min(new_x, max(0.0, tab_width - MINIMIZED_ICON_SIZE)))
+        portal_y = max(0.0, min(new_y, max(0.0, tab_height - MINIMIZED_ICON_SIZE)))
+        async with mutation_lock:
+            await client.submit_mutation_batch(
+                lease_id,
+                [
+                    publish_to_tile_bounds_mutation(
+                        tiles.frame,
+                        portal_x,
+                        portal_y,
+                        MINIMIZED_ICON_SIZE,
+                        MINIMIZED_ICON_SIZE,
+                    )
+                ],
+                timeout=0.5,
+            )
+
+    async def move_portal(new_x: float, new_y: float) -> None:
+        nonlocal portal_x, portal_y
+        portal_x = max(0.0, min(new_x, max(0.0, tab_width - PORTAL_W)))
+        portal_y = max(0.0, min(new_y, max(0.0, tab_height - PORTAL_H)))
+        mutations = portal_bounds_mutations(tiles, portal_x, portal_y)
+        if drag is not None:
+            mutations.append(
+                publish_to_tile_bounds_mutation(
+                    tiles.drag_shield, portal_x, portal_y, PORTAL_W, PORTAL_H,
+                )
+            )
+        async with mutation_lock:
+            await client.submit_mutation_batch(
+                lease_id,
+                mutations,
+                timeout=2.0,
+            )
+
+    async def set_drag_shield(interaction_id: Optional[str]) -> None:
+        await client.update_tile_opacity(lease_id, tiles.drag_shield, 0.0)
+        await client.submit_mutation_batch(
+            lease_id,
+            [
+                publish_to_tile_bounds_mutation(
+                    tiles.drag_shield,
+                    portal_x if interaction_id else max(0.0, tab_width - 1.0),
+                    portal_y if interaction_id else max(0.0, tab_height - 1.0),
+                    PORTAL_W if interaction_id else 1.0,
+                    PORTAL_H if interaction_id else 1.0,
+                )
+            ],
+            timeout=2.0,
+        )
+        await client.update_tile_input_mode(
+            lease_id,
+            tiles.drag_shield,
+            types_pb2.TILE_INPUT_MODE_CAPTURE if interaction_id else types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+        )
+        root, children = build_drag_shield_nodes(PORTAL_W, PORTAL_H, interaction_id)
+        await set_root_with_children(
+            client, lease_id, tiles.drag_shield, root, children, mutation_lock,
+        )
+
+    async def clear_drag_shield() -> None:
+        await set_drag_shield(None)
+
+    async def apply_current_bounds() -> None:
+        nonlocal portal_x, portal_y, output_rect
+        portal_x = max(0.0, min(portal_x, max(0.0, tab_width - PORTAL_W)))
+        portal_y = max(0.0, min(portal_y, max(0.0, tab_height - PORTAL_H)))
+        _, output_rect = portal_pane_rects()
+        mutations = portal_bounds_mutations(tiles, portal_x, portal_y)
+        if drag is not None:
+            mutations.append(
+                publish_to_tile_bounds_mutation(
+                    tiles.drag_shield, portal_x, portal_y, PORTAL_W, PORTAL_H,
+                )
+            )
+        async with mutation_lock:
+            await client.submit_mutation_batch(
+                lease_id,
+                mutations,
+                timeout=2.0,
+            )
+
+    async def apply_drag_delta(dx: float, dy: float, *, rebuild: bool) -> None:
+        nonlocal last_drag_apply_at, portal_x, portal_y
+        if drag is None:
+            return
+        now = time.monotonic()
+        drag_kind = str(drag.get("kind", "portal"))
+        min_interval = (
+            ICON_DRAG_APPLY_MIN_INTERVAL_SECONDS
+            if drag_kind == "icon"
+            else DRAG_APPLY_MIN_INTERVAL_SECONDS
+        )
+        if not rebuild and now - last_drag_apply_at < min_interval:
+            drag["pending_dx"] = dx
+            drag["pending_dy"] = dy
+            return
+        last_drag_apply_at = now
+        drag.pop("pending_dx", None)
+        drag.pop("pending_dy", None)
+        if drag_kind == "portal":
+            await move_portal(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
+            return
+        if drag_kind == "icon":
+            raw_moved = max(abs(dx), abs(dy))
+            if not bool(drag.get("icon_dragging", False)):
+                if raw_moved < ICON_DRAG_START_THRESHOLD_PX:
+                    return
+                drag["icon_dragging"] = True
+            await move_minimized_icon(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
+            return
+        if drag_kind == "pane":
+            set_input_pane_width(float(drag["input_pane_w"]) + dx)
+        elif drag_kind == "resize":
+            set_portal_size(
+                float(drag["portal_w"]) + dx,
+                float(drag["portal_h"]) + dy,
+                tab_width,
+                tab_height,
+            )
+        if rebuild:
+            await rebuild_resized_portal()
+        else:
+            await apply_current_bounds()
+
+    async def rebuild_resized_portal() -> None:
+        nonlocal output_rect, portal_x, portal_y
+        portal_x = max(0.0, min(portal_x, max(0.0, tab_width - PORTAL_W)))
+        portal_y = max(0.0, min(portal_y, max(0.0, tab_height - PORTAL_H)))
+        _, output_rect = portal_pane_rects()
+        visible_body, _ = visible_output_text(body_full, 0.0, output_rect.h)
+        async with mutation_lock:
+            await client.submit_mutation_batch(
+                lease_id,
+                [
+                    *portal_bounds_mutations(tiles, portal_x, portal_y),
+                    register_tile_scroll_mutation(
+                        tiles.input_scroll,
+                        scrollable_y=True,
+                        content_height=scroll_max_y_for_text(
+                            composer_text,
+                            input_composer_local_rect().h,
+                            SCROLL_LINE_PX,
+                        ),
+                    ),
+                    register_tile_scroll_mutation(
+                        tiles.output_scroll,
+                        scrollable_y=True,
+                        content_height=scroll_max_y_for_text(
+                            body_full,
+                            output_rect.h,
+                            SCROLL_LINE_PX,
+                        ),
+                    ),
+                ],
+                timeout=2.0,
+            )
+            await update_frame_chrome_live(
+                client,
+                lease_id,
+                tiles.frame,
+                "Exemplar Review Portal",
+                "docs/exemplar-manual-review-checklist.md",
+                visible_body,
+                f"resized  •  input {INPUT_PANE_W:.0f}px / output {output_rect.w:.0f}px",
+                live_only=False,
+            )
+            await update_input_scroll_geometry_live(
+                client, lease_id, tiles.input_scroll, composer_text,
+            )
+        request_composer_render()
 
     async def render_composer_once() -> None:
-        text_node_id = COMPOSER_RUNTIME_NODE_IDS.get("text", COMPOSER_NODE_IDS["text"])
-        caret_node_id = COMPOSER_RUNTIME_NODE_IDS.get("caret", COMPOSER_NODE_IDS["caret"])
+        text_node_id = COMPOSER_RUNTIME_NODE_IDS.get("text")
+        caret_node_id = COMPOSER_RUNTIME_NODE_IDS.get("caret")
+        if text_node_id is None or caret_node_id is None:
+            print("  [grpc] Composer render skipped; input nodes not mounted yet.", flush=True)
+            return
         display_text, placeholder_style = composer_display_text(
             composer_text,
             composer_cursor,
@@ -1284,21 +2086,27 @@ async def portal_interaction_loop(
             caret_visible=composer_caret_visible,
             node_id=caret_node_id,
         )
-        if mutation_lock is not None:
-            async with mutation_lock:
+        try:
+            if mutation_lock is not None:
+                async with mutation_lock:
+                    await client.update_node_content(
+                        lease_id, tiles.input_scroll, text_node_id, text_node,
+                    )
+                    await client.update_node_content(
+                        lease_id, tiles.input_scroll, caret_node_id, caret_node,
+                    )
+            else:
                 await client.update_node_content(
                     lease_id, tiles.input_scroll, text_node_id, text_node,
                 )
                 await client.update_node_content(
                     lease_id, tiles.input_scroll, caret_node_id, caret_node,
                 )
-        else:
-            await client.update_node_content(
-                lease_id, tiles.input_scroll, text_node_id, text_node,
-            )
-            await client.update_node_content(
-                lease_id, tiles.input_scroll, caret_node_id, caret_node,
-            )
+        except RuntimeError as exc:
+            if "node not found" in str(exc).lower():
+                print("  [grpc] Composer render skipped; stale input nodes during resize.", flush=True)
+                return
+            raise
         print(
             "  [grpc] Composer text/caret updated: "
             f"{text_node_id.hex()[:16]}.../{caret_node_id.hex()[:16]}...",
@@ -1364,17 +2172,67 @@ async def portal_interaction_loop(
         nonlocal drag
         if drag is None:
             return
+        drag_kind = str(drag.get("kind", "portal"))
+        if display_x is None or display_y is None:
+            pending_dx = drag.get("pending_dx")
+            pending_dy = drag.get("pending_dy")
+            if pending_dx is not None and pending_dy is not None:
+                await apply_drag_delta(float(pending_dx), float(pending_dy), rebuild=False)
         if display_x is not None and display_y is not None:
             dx = display_x - float(drag["start_x"])
             dy = display_y - float(drag["start_y"])
-            await move_portal(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
+            await apply_drag_delta(dx, dy, rebuild=False)
+        if drag_kind == "icon":
+            icon_dragging = bool(drag.get("icon_dragging", False))
+            moved = max(
+                abs(portal_x - float(drag["portal_x"])),
+                abs(portal_y - float(drag["portal_y"])),
+            )
+            if display_x is not None and display_y is not None:
+                moved = max(moved,
+                    abs(display_x - float(drag["start_x"])),
+                    abs(display_y - float(drag["start_y"])),
+                )
+            drag = None
+            if not icon_dragging and moved < ICON_DRAG_START_THRESHOLD_PX:
+                emit_step_event(transcript, 9, "checkpoint", {
+                    "code": "portal-icon:drag-cancel",
+                    "title": "Minimized icon drag cancelled",
+                    "action": "icon drag grip was pressed without crossing the drag threshold",
+                    "expected_visual": "icon remains minimized; main icon body still restores immediately",
+                }, portal_x=portal_x, portal_y=portal_y,
+                   portal_w=PORTAL_W, portal_h=PORTAL_H)
+            else:
+                emit_step_event(transcript, 9, "checkpoint", {
+                    "code": "portal-icon:drag-end",
+                    "title": "Minimized icon drag ended",
+                    "action": "floating text-stream icon stayed minimized at its new anchor",
+                    "expected_visual": "icon remains clickable at the dragged position",
+                }, portal_x=portal_x, portal_y=portal_y, reason=reason)
+            return
         drag = None
+        await clear_drag_shield()
+        if drag_kind in {"pane", "resize"}:
+            await rebuild_resized_portal()
+        code = {
+            "portal": "drag:end",
+            "pane": "pane-resize:end",
+            "resize": "portal-resize:end",
+        }.get(drag_kind, "drag:end")
+        title = {
+            "portal": "Portal drag ended",
+            "pane": "Pane resize ended",
+            "resize": "Portal resize ended",
+        }.get(drag_kind, "Portal drag ended")
         emit_step_event(transcript, 9, "checkpoint", {
-            "code": "drag:end",
-            "title": "Portal drag ended",
+            "code": code,
+            "title": title,
             "action": "all portal tiles committed to grouped position",
             "expected_visual": "input/output panes remain aligned with portal frame",
-        }, portal_x=portal_x, portal_y=portal_y, reason=reason)
+        }, portal_x=portal_x, portal_y=portal_y,
+           portal_w=PORTAL_W, portal_h=PORTAL_H,
+           input_pane_w=INPUT_PANE_W, output_pane_w=portal_pane_rects()[1].w,
+           reason=reason)
 
     async def submit_composer() -> None:
         nonlocal composer_cursor, composer_cursor_goal_x, composer_text
@@ -1505,10 +2363,71 @@ async def portal_interaction_loop(
 
             if kind == "pointer_down":
                 ev = envelope.pointer_down
-                if ev.interaction_id == PORTAL_DRAG_INTERACTION_ID:
+                if ev.interaction_id == PORTAL_MINIMIZE_INTERACTION_ID:
+                    if drag is not None:
+                        await finish_drag("superseded:minimize")
+                    await set_portal_minimized(True)
+                    emit_step_event(transcript, 9, "checkpoint", {
+                        "code": "portal:minimize",
+                        "title": "Portal minimized",
+                        "action": "top-left minimize control collapsed the portal to a floating status icon",
+                        "expected_visual": "full portal hides; compact text-stream icon remains clickable",
+                    }, portal_x=portal_x, portal_y=portal_y)
+                elif ev.interaction_id == PORTAL_RESTORE_INTERACTION_ID:
+                    if not portal_minimized:
+                        emit_step_event(transcript, 9, "checkpoint", {
+                            "code": "portal:restore-ignored",
+                            "title": "Restore ignored while portal is expanded",
+                            "action": "stale minimized-icon event arrived after restore",
+                            "expected_visual": "expanded portal remains visible",
+                        }, portal_x=portal_x, portal_y=portal_y)
+                        continue
+                    if drag is not None and str(drag.get("kind", "")) == "icon":
+                        await finish_drag("superseded:restore-click")
+                    await set_portal_minimized(False)
+                    emit_step_event(transcript, 9, "checkpoint", {
+                        "code": "portal:restore",
+                        "title": "Portal restored",
+                        "action": "floating text-stream icon body restored the full portal immediately",
+                        "expected_visual": "portal reappears at the icon anchor",
+                    }, portal_x=portal_x, portal_y=portal_y,
+                       portal_w=PORTAL_W, portal_h=PORTAL_H)
+                elif ev.interaction_id == PORTAL_ICON_DRAG_INTERACTION_ID:
+                    if not portal_minimized:
+                        continue
+                    if drag is not None:
+                        if str(drag.get("kind", "")) == "icon":
+                            emit_step_event(transcript, 9, "checkpoint", {
+                                "code": "portal-icon:pointer-down-ignored",
+                                "title": "Duplicate icon drag pointer down ignored",
+                                "action": "minimized icon drag grip already has an armed gesture",
+                                "expected_visual": "icon remains ready to move while dragging",
+                            }, portal_x=portal_x, portal_y=portal_y)
+                            continue
+                        await finish_drag("superseded:restore")
+                    drag = {
+                        "kind": "icon",
+                        "device_id": ev.device_id,
+                        "start_x": ev.display_x,
+                        "start_y": ev.display_y,
+                        "portal_x": portal_x,
+                        "portal_y": portal_y,
+                        "icon_dragging": False,
+                        "started_at": time.monotonic(),
+                        "last_activity_at": time.monotonic(),
+                    }
+                    emit_step_event(transcript, 9, "checkpoint", {
+                        "code": "portal-icon:pointer-down",
+                        "title": "Minimized icon drag grip pointer down",
+                        "action": "floating text-stream icon drag grip is ready to move the icon",
+                        "expected_visual": "icon moves only after a deliberate drag from the grip",
+                    }, portal_x=portal_x, portal_y=portal_y,
+                       portal_w=PORTAL_W, portal_h=PORTAL_H)
+                elif ev.interaction_id == PORTAL_DRAG_INTERACTION_ID:
                     if drag is not None:
                         await finish_drag("superseded:pointer_down")
                     drag = {
+                        "kind": "portal",
                         "device_id": ev.device_id,
                         "start_x": ev.display_x,
                         "start_y": ev.display_y,
@@ -1517,12 +2436,54 @@ async def portal_interaction_loop(
                         "started_at": time.monotonic(),
                         "last_activity_at": time.monotonic(),
                     }
+                    await set_drag_shield(PORTAL_DRAG_INTERACTION_ID)
                     emit_step_event(transcript, 9, "checkpoint", {
                         "code": "drag:start",
                         "title": "Portal drag started",
                         "action": "header drag surface received pointer down",
                         "expected_visual": "portal follows pointer while dragging",
                     }, display_x=ev.display_x, display_y=ev.display_y)
+                elif ev.interaction_id == PANE_RESIZE_INTERACTION_ID:
+                    if drag is not None:
+                        await finish_drag("superseded:pane_resize")
+                    drag = {
+                        "kind": "pane",
+                        "device_id": ev.device_id,
+                        "start_x": ev.display_x,
+                        "start_y": ev.display_y,
+                        "input_pane_w": INPUT_PANE_W,
+                        "started_at": time.monotonic(),
+                        "last_activity_at": time.monotonic(),
+                    }
+                    await set_drag_shield(PANE_RESIZE_INTERACTION_ID)
+                    emit_step_event(transcript, 9, "checkpoint", {
+                        "code": "pane-resize:start",
+                        "title": "Pane resize started",
+                        "action": "middle divider received pointer down",
+                        "expected_visual": "dragging changes input/output width ratio",
+                    }, display_x=ev.display_x, display_y=ev.display_y,
+                       input_pane_w=INPUT_PANE_W)
+                elif ev.interaction_id == PORTAL_RESIZE_INTERACTION_ID:
+                    if drag is not None:
+                        await finish_drag("superseded:portal_resize")
+                    drag = {
+                        "kind": "resize",
+                        "device_id": ev.device_id,
+                        "start_x": ev.display_x,
+                        "start_y": ev.display_y,
+                        "portal_w": PORTAL_W,
+                        "portal_h": PORTAL_H,
+                        "started_at": time.monotonic(),
+                        "last_activity_at": time.monotonic(),
+                    }
+                    await set_drag_shield(PORTAL_RESIZE_INTERACTION_ID)
+                    emit_step_event(transcript, 9, "checkpoint", {
+                        "code": "portal-resize:start",
+                        "title": "Portal resize started",
+                        "action": "bottom-right resize handle received pointer down",
+                        "expected_visual": "dragging resizes the whole portal surface",
+                    }, display_x=ev.display_x, display_y=ev.display_y,
+                       portal_w=PORTAL_W, portal_h=PORTAL_H)
                 elif ev.interaction_id == COMPOSER_INTERACTION_ID:
                     if drag is not None:
                         await finish_drag("superseded:composer_focus")
@@ -1532,6 +2493,14 @@ async def portal_interaction_loop(
                         "action": "input composer received pointer down",
                         "expected_visual": "keyboard focus should move to composer",
                     }, display_x=ev.display_x, display_y=ev.display_y)
+                else:
+                    emit_step_event(transcript, 9, "checkpoint", {
+                        "code": "input:pointer-down-unhandled",
+                        "title": "Unhandled portal pointer down",
+                        "action": "runtime delivered pointer down for an interaction id without exemplar handling",
+                        "expected_visual": "operator click may appear to do nothing",
+                    }, interaction_id=ev.interaction_id,
+                       display_x=ev.display_x, display_y=ev.display_y)
 
             elif kind == "pointer_move" and drag is not None:
                 ev = envelope.pointer_move
@@ -1541,13 +2510,10 @@ async def portal_interaction_loop(
                 if now - float(drag["started_at"]) > DRAG_MAX_SECONDS:
                     await finish_drag("watchdog")
                     continue
-                if now - last_drag_send < 1.0 / 30.0:
-                    continue
-                last_drag_send = now
                 drag["last_activity_at"] = now
                 dx = ev.display_x - float(drag["start_x"])
                 dy = ev.display_y - float(drag["start_y"])
-                await move_portal(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
+                await apply_drag_delta(dx, dy, rebuild=False)
 
             elif kind == "pointer_up" and drag is not None:
                 ev = envelope.pointer_up
@@ -2021,6 +2987,78 @@ async def run_rapid(
     })
 
 
+async def run_composer_smoke(
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
+    transcript: list[dict[str, Any]],
+    mutation_lock: asyncio.Lock,
+    hold_s: float,
+) -> None:
+    """Render deterministic composer states for live caret/input review."""
+    emit_step_event(transcript, 5, "started", {
+        "code": "composer-smoke",
+        "title": "Composer caret smoke",
+        "action": "render hello-world and long-paste composer states with visible caret",
+        "expected_visual": "caret aligns with text after Space and wrapped markdown paste",
+    })
+    await publish_portal(
+        client, lease_id, tiles,
+        title="Exemplar Review Portal",
+        subtitle="Composer caret and Space smoke",
+        body="INPUT pane is under review. OUTPUT pane remains bounded.",
+        footer_meta="composer-smoke  •  deterministic live render",
+        include_tile_setup=True,
+        mutation_lock=mutation_lock,
+    )
+
+    hello = "hello world"
+    display_text, cursor_x, cursor_row = await render_composer_static(
+        client,
+        lease_id,
+        tiles.input_scroll,
+        hello,
+        len(hello),
+        focused=True,
+        caret_visible=True,
+        mutation_lock=mutation_lock,
+    )
+    emit_step_event(transcript, 5, "checkpoint", {
+        "code": "composer:hello-world",
+        "title": "Composer hello world rendered",
+        "action": "rendered normal typing target with Space between words",
+        "expected_visual": "hello world appears once, caret after the final d",
+    }, cursor_x=cursor_x, cursor_row=cursor_row, visual_lines=len(display_text.splitlines()))
+    await asyncio.sleep(min(hold_s, 3.0))
+
+    paste = (
+        "**Long markdown paste** near the right edge of the composer line with "
+        "words, punctuation, and enough text to wrap several visual rows without "
+        "leaving a blank-looking trailing-space caret offset."
+    )
+    display_text, cursor_x, cursor_row = await render_composer_static(
+        client,
+        lease_id,
+        tiles.input_scroll,
+        paste,
+        len(paste),
+        focused=True,
+        caret_visible=True,
+        mutation_lock=mutation_lock,
+    )
+    visual_lines = display_text.splitlines()
+    trailing_ws_lines = [
+        index for index, line in enumerate(visual_lines[:-1])
+        if line.endswith((" ", "\t"))
+    ]
+    emit_step_event(transcript, 5, "completed", {
+        "code": "composer:long-paste",
+        "title": "Composer long paste rendered",
+        "action": "rendered wrapped markdown-like paste with caret at end",
+        "expected_visual": "caret remains on the final wrapped row without a one-character lag at line ends",
+    }, cursor_x=cursor_x, cursor_row=cursor_row,
+       visual_lines=len(visual_lines), trailing_ws_lines=trailing_ws_lines)
+    await asyncio.sleep(hold_s)
+
+
 async def run_scenario(args: argparse.Namespace) -> int:
     psk = os.getenv(args.psk_env, "")
     if not psk:
@@ -2063,15 +3101,19 @@ async def run_scenario(args: argparse.Namespace) -> int:
         }, scene_width=scene_width, scene_height=scene_height)
         lease_ttl_ms = max(600_000, int(args.baseline_hold_s * 1000) + 120_000)
         lease_id = await client.request_lease(ttl_ms=lease_ttl_ms)
+        set_portal_size(PORTAL_W, PORTAL_H, scene_width, scene_height)
         portal_x = (
             args.portal_x
             if args.portal_x is not None
             else scene_width - PORTAL_W - PORTAL_X_FROM_RIGHT
         )
+        portal_x = max(0.0, min(portal_x, max(0.0, scene_width - PORTAL_W)))
+        portal_y = max(0.0, min(PORTAL_Y, max(0.0, scene_height - PORTAL_H)))
         tiles = await create_portal_tiles(
             client=client,
             lease_id=lease_id,
             portal_x=portal_x,
+            portal_y=portal_y,
             tab_width=scene_width,
             tab_height=scene_height,
         )
@@ -2087,7 +3129,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 transcript=transcript,
                 body_full=body,
                 initial_portal_x=portal_x,
-                initial_portal_y=PORTAL_Y,
+                initial_portal_y=portal_y,
                 tab_width=scene_width,
                 tab_height=scene_height,
                 mutation_lock=mutation_lock,
@@ -2116,6 +3158,11 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 await run_rapid(
                     client, lease_id, tiles, body, transcript,
                     args.rapid_cycles, args.rapid_interval_ms, mutation_lock,
+                )
+            elif phase == "composer-smoke":
+                await run_composer_smoke(
+                    client, lease_id, tiles, transcript, mutation_lock,
+                    args.composer_smoke_hold_s,
                 )
             else:
                 emit_step_event(transcript, -1, "skipped", {
@@ -2194,9 +3241,85 @@ async def run_scenario(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_composer_self_test() -> int:
+    width = composer_wrap_area_width_px()
+    failures: list[str] = []
+
+    fallback = composer_key_fallback_text("Space")
+    if fallback != " ":
+        failures.append(f"Space fallback returned {fallback!r}")
+    if composer_key_fallback_text("A") is not None:
+        failures.append("non-Space printable key-down produced fallback text")
+
+    hello_display, hello_x, hello_row = composer_wrapped_layout(
+        "hello world",
+        len("hello world"),
+        width,
+    )
+    if hello_display != "hello world" or hello_row != 0:
+        failures.append(
+            f"hello world wrapped unexpectedly: row={hello_row}, text={hello_display!r}"
+        )
+    expected_hello_x = len("hello world") * COMPOSER_CARET_CHAR_W
+    if abs(hello_x - expected_hello_x) > 0.01:
+        failures.append(f"hello world caret x={hello_x:.2f}, expected {expected_hello_x:.2f}")
+
+    paste = (
+        "**Long markdown paste** near the right edge of the composer line with "
+        "words, punctuation, and enough text to wrap several visual rows without "
+        "leaving a blank-looking trailing-space caret offset."
+    )
+    display, cursor_x, cursor_row = composer_wrapped_layout(paste, len(paste), width)
+    lines = display.splitlines()
+    for row, line in enumerate(lines[:-1]):
+        if line.endswith((" ", "\t")):
+            failures.append(f"wrapped line {row} ends with whitespace: {line!r}")
+    if not (0 <= cursor_row < len(lines)):
+        failures.append(f"caret row {cursor_row} outside {len(lines)} visual lines")
+    if cursor_x > width + 0.01:
+        failures.append(f"caret x={cursor_x:.2f} exceeds wrap width {width:.2f}")
+
+    long_word = "x" * int(width // COMPOSER_WRAP_CHAR_W + 8)
+    _, long_x, long_row = composer_wrapped_layout(long_word, len(long_word), width)
+    if long_row == 0:
+        failures.append("long unbroken word did not wrap")
+    if long_x > width + 0.01:
+        failures.append(f"long-word caret x={long_x:.2f} exceeds wrap width {width:.2f}")
+
+    result = {
+        "status": "failed" if failures else "passed",
+        "wrap_width_px": width,
+        "char_width_px": COMPOSER_WRAP_CHAR_W,
+        "failures": failures,
+        "cases": {
+            "hello_world": {
+                "display": hello_display,
+                "cursor_x": hello_x,
+                "cursor_row": hello_row,
+            },
+            "long_markdown_paste": {
+                "visual_lines": len(lines),
+                "cursor_x": cursor_x,
+                "cursor_row": cursor_row,
+            },
+            "long_word": {
+                "cursor_x": long_x,
+                "cursor_row": long_row,
+            },
+        },
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 1 if failures else 0
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Run the Text Stream Portal live resident gRPC scenario."
+    )
+    p.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run local composer wrap/caret/input smoke checks without opening gRPC",
     )
     p.add_argument("--target", default=DEFAULT_TARGET)
     p.add_argument("--psk-env", default=DEFAULT_PSK_ENV)
@@ -2207,8 +3330,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tab-height", type=float, default=1080.0)
     p.add_argument("--portal-x", type=float, default=None)
     p.add_argument("--phases", default="baseline,scroll",
-                   help="Comma list: baseline,scroll,streaming,rapid")
+                   help="Comma list: baseline,scroll,streaming,rapid,composer-smoke")
     p.add_argument("--baseline-hold-s", type=float, default=20.0)
+    p.add_argument("--composer-smoke-hold-s", type=float, default=8.0)
     p.add_argument("--stream-chunks", type=int, default=6)
     p.add_argument("--stream-interval-s", type=float, default=1.5)
     p.add_argument("--rapid-cycles", type=int, default=12)
@@ -2227,8 +3351,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    args = parse_args()
+    if args.self_test:
+        return run_composer_self_test()
     try:
-        return asyncio.run(run_scenario(parse_args()))
+        return asyncio.run(run_scenario(args))
     except KeyboardInterrupt:
         print(json.dumps({"error": "interrupted"}), file=sys.stderr)
         return 130
