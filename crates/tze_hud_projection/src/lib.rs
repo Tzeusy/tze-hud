@@ -619,9 +619,11 @@ impl PortalInputSubmission {
         if self.submitted_at_wall_us == 0 {
             return Err(ProjectionErrorCode::ProjectionInvalidArgument);
         }
-        let expires_at_wall_us = self
-            .expires_at_wall_us
-            .unwrap_or(self.submitted_at_wall_us + DEFAULT_PORTAL_INPUT_TTL_WALL_US);
+        let expires_at_wall_us = self.expires_at_wall_us.map(Ok).unwrap_or_else(|| {
+            self.submitted_at_wall_us
+                .checked_add(DEFAULT_PORTAL_INPUT_TTL_WALL_US)
+                .ok_or(ProjectionErrorCode::ProjectionInvalidArgument)
+        })?;
         if expires_at_wall_us <= self.submitted_at_wall_us {
             return Err(ProjectionErrorCode::ProjectionInvalidArgument);
         }
@@ -2208,10 +2210,15 @@ fn projected_portal_state(
         unread_output_count: unread_visible.then_some(session.unread_output_count),
         pending_input_count: pending_visible.then_some(pending_input_count),
         pending_input_bytes: pending_visible.then_some(session.pending_input_bytes),
-        last_input_feedback: session
-            .last_input_feedback
-            .as_ref()
-            .and_then(|feedback| pending_visible.then(|| redacted_feedback(feedback))),
+        last_input_feedback: session.last_input_feedback.as_ref().and_then(|feedback| {
+            pending_visible.then(|| {
+                if redacted {
+                    redacted_feedback(feedback)
+                } else {
+                    feedback.clone()
+                }
+            })
+        }),
     }
 }
 
@@ -3093,6 +3100,13 @@ mod tests {
             state.last_input_feedback.as_ref().map(|f| f.feedback_state),
             Some(PortalInputFeedbackState::Rejected)
         );
+        assert_eq!(
+            state
+                .last_input_feedback
+                .as_ref()
+                .map(|f| f.input_id.as_str()),
+            Some("input-2")
+        );
 
         let poll = authority.handle_get_pending_input(
             GetPendingInputRequest {
@@ -3189,6 +3203,30 @@ mod tests {
                 .unwrap()
                 .contains("private projected transcript")
         );
+    }
+
+    #[test]
+    fn portal_submission_default_ttl_overflow_is_rejected_not_panicked() {
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "projection-a");
+
+        let feedback = authority.submit_portal_input(
+            "projection-a",
+            PortalInputSubmission {
+                input_id: "input-overflow".to_string(),
+                submission_text: "help".to_string(),
+                submitted_at_wall_us: u64::MAX,
+                expires_at_wall_us: None,
+                content_classification: ContentClassification::Private,
+            },
+        );
+
+        assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Rejected);
+        assert_eq!(
+            feedback.error_code,
+            Some(ProjectionErrorCode::ProjectionInvalidArgument)
+        );
+        assert_eq!(feedback.pending_input_count, 0);
     }
 
     #[test]
