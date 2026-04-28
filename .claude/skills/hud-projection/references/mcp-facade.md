@@ -1,6 +1,6 @@
-# External Projection-Daemon MCP Facade
+# External Projection-Daemon Control Facades
 
-The MCP facade belongs to the projection daemon. It is not the runtime v1 MCP bridge and should not expose raw scene state, zone publishing shortcuts, PTY attachment, terminal capture, or process lifecycle controls.
+Projection control facades belong to the projection daemon. They are not the runtime v1 MCP bridge and should not expose raw scene state, zone publishing shortcuts, PTY attachment, terminal capture, or process lifecycle controls.
 
 ## Required Boundary
 
@@ -9,6 +9,22 @@ The MCP facade belongs to the projection daemon. It is not the runtime v1 MCP br
 - Bind owner-scoped non-attach operations to `projection_id` plus `owner_token`; bind operator cleanup to separate explicit operator authority.
 - Return bounded operation responses only: no unbounded transcript, unbounded inbox history, `owner_token` outside a successful `attach` response, owner-token verifier, or raw runtime scene graph.
 - Emit audit records without transcript text, HUD input text, or owner tokens.
+
+## In-Repo Stdio Daemon CLI
+
+The repo ships a daemon-local stdio control surface in `crates/tze_hud_projection`:
+
+```bash
+cargo run -p tze_hud_projection --bin tze_hud_projection_authority -- --stdio --caller-identity codex-local
+```
+
+Send one operation JSON object per stdin line. The process writes one JSON result per stdout line:
+
+```json
+{"response":{"request_id":"req-attach","projection_id":"codex-rig","accepted":true,"server_timestamp_wall_us":1777400000000000,"status_summary":"projection attached","owner_token":"<attach-only>","lifecycle_state":"attached","pending_remaining_count":0,"pending_remaining_bytes":0,"portal_update_ready":false,"coalesced_output_count":0},"audit_records":[{"timestamp_wall_us":1777400000000000,"operation":"attach","projection_id":"codex-rig","caller_identity":"codex-local","request_id":"req-attach","accepted":true,"reason":"attach accepted","category":"attach"}]}
+```
+
+The CLI keeps projection state in memory only for the lifetime of that process. Restarting it purges transcript text, pending input text, owner tokens, and cached lease identity, so sessions must attach again after restart. Operator cleanup can be enabled with `--operator-authority-env HUD_PROJECTION_OPERATOR_AUTHORITY`; owner operations still require the owner token issued by `attach`.
 
 ## Tool Shape
 

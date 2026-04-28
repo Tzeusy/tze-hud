@@ -5,8 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "tze_hud_projection_authority"
+path = "src/bin/projection_authority.rs"
+
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
 getrandom = { workspace = true }
@@ -14,4 +19,3 @@ subtle = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-serde_json = { workspace = true }
