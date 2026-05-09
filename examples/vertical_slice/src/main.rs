@@ -160,6 +160,7 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
         config_file_path: None, // No config file path needed when config_toml is None.
         debug_zones: false,     // Render zone boundaries — disabled for the demo.
         monitor_index: None,    // Use primary monitor.
+        benchmark: None,        // Demo mode is unbounded until the window closes.
     };
 
     let runtime = WindowedRuntime::new(config);
