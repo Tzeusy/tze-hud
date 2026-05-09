@@ -84,21 +84,37 @@ def load_json(path: Path) -> dict[str, Any]:
             payload = json.load(handle)
     except json.JSONDecodeError as exc:
         raise SystemExit(f"{path}: invalid JSON: {exc}") from exc
+    except OSError as exc:
+        raise SystemExit(f"{path}: unable to read: {exc}") from exc
     if not isinstance(payload, dict):
         raise SystemExit(f"{path}: expected object root")
     return payload
 
 
+def valid_factor(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
 def hardware_factors(artifact: dict[str, Any]) -> dict[str, float]:
-    factors = artifact.get("calibration", {}).get("factors", {})
+    calibration = artifact.get("calibration")
+    if not isinstance(calibration, dict):
+        raise SystemExit("benchmark artifact field 'calibration' must be an object")
+    factors = calibration.get("factors")
+    if not isinstance(factors, dict):
+        raise SystemExit("benchmark artifact field 'calibration.factors' must be an object")
     missing = [
         key
         for key in ("cpu", "gpu", "upload")
-        if not isinstance(factors.get(key), (int, float))
+        if not valid_factor(factors.get(key))
     ]
     if missing:
         raise SystemExit(
-            "benchmark artifact is missing required calibration factors: "
+            "benchmark artifact is missing valid positive calibration factors: "
             + ", ".join(missing)
         )
     return {key: float(factors[key]) for key in ("cpu", "gpu", "upload")}
@@ -120,7 +136,10 @@ def session_by_name(artifact: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def samples(summary: dict[str, Any], bucket: str) -> list[int]:
-    raw_samples = summary.get(bucket, {}).get("samples", [])
+    bucket_value = summary.get(bucket)
+    if not isinstance(bucket_value, dict):
+        raise ValueError(f"{bucket}: expected object")
+    raw_samples = bucket_value.get("samples", [])
     if not isinstance(raw_samples, list) or not raw_samples:
         raise ValueError(f"{bucket}: no samples")
     out = []
