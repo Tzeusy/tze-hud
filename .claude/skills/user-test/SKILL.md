@@ -915,6 +915,10 @@ Optional `--phases` values:
 | `rapid` | Coalescing coherence smoke | Rapid publish pressure does not collapse the retained window to one latest line |
 | `diagnostic-input` | Live compositor/input path | Uses Windows OS input injection over SSH to click-focus the composer, drag the portal header, and wheel-scroll the OUTPUT pane |
 
+For `diagnostic-input`, `--diagnostic-input-connect-timeout-s` controls the
+SSH connect timeout separately from the overall injector timeout so unreachable
+Windows hosts fail fast.
+
 ### Live Validation Axes
 
 `text_stream_portal_exemplar.py` drives the resident raw-tile pilot against a

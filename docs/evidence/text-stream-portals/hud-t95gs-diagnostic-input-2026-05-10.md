@@ -27,6 +27,11 @@ This means focus, drag, and scroll still pass through the windowed runtime's
 winit event handling, hit testing, focus manager, capture handling, scroll
 processor, and agent input-event dispatch.
 
+The injector clamps the planned drag against the live scene dimensions before
+choosing the subsequent wheel target, checks `SetCursorPos`/`SendInput` return
+values in the generated PowerShell, and applies an explicit SSH
+`ConnectTimeout` so unreachable Windows hosts fail quickly.
+
 ## Expected Live Evidence
 
 Run shape:
@@ -38,6 +43,7 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --agent-id agent-alpha \
   --doc docs/exemplar-manual-review-checklist.md \
   --phases diagnostic-input \
+  --diagnostic-input-connect-timeout-s 5 \
   --transcript-out test_results/text-stream-portal-diagnostic-input.json
 ```
 
@@ -63,7 +69,7 @@ Local result: all commands passed.
 ## Residual Live Blocker
 
 This change exposes the diagnostic hook and validates its generated OS-input
-script shape locally. Final sign-off for `hud-eq1m4` still requires a reachable
+script shape locally. Final sign-off for `hud-t95gs` still requires a reachable
 Windows HUD target with `TZE_HUD_PSK` set and the overlay running with gRPC
 enabled so the `test_results/text-stream-portal-diagnostic-input.json`
 transcript can be captured.

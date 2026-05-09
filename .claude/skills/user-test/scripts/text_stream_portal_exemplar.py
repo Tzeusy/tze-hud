@@ -593,17 +593,29 @@ def ps_single_quoted(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def build_diagnostic_input_plan(portal_x: float, portal_y: float) -> list[dict[str, Any]]:
+def build_diagnostic_input_plan(
+    portal_x: float,
+    portal_y: float,
+    *,
+    tab_width: Optional[float] = None,
+    tab_height: Optional[float] = None,
+) -> list[dict[str, Any]]:
     """Build an OS-input plan covering composer focus, drag, and output scroll."""
     input_rect, output_rect = portal_pane_rects()
     composer_x = portal_x + input_rect.x + input_rect.w / 2.0
     composer_y = portal_y + input_rect.y + min(input_rect.h - 10.0, 72.0)
     header_x = portal_x + PORTAL_W / 2.0
     header_y = portal_y + HEADER_H / 2.0
-    drag_dx = -120.0
-    drag_dy = 72.0
-    output_x = portal_x + drag_dx + output_rect.x + output_rect.w / 2.0
-    output_y = portal_y + drag_dy + output_rect.y + min(output_rect.h - 10.0, 96.0)
+    target_portal_x = portal_x - 120.0
+    target_portal_y = portal_y + 72.0
+    if tab_width is not None:
+        target_portal_x = max(0.0, min(target_portal_x, max(0.0, tab_width - PORTAL_W)))
+    if tab_height is not None:
+        target_portal_y = max(0.0, min(target_portal_y, max(0.0, tab_height - PORTAL_H)))
+    drag_dx = target_portal_x - portal_x
+    drag_dy = target_portal_y - portal_y
+    output_x = target_portal_x + output_rect.x + output_rect.w / 2.0
+    output_y = target_portal_y + output_rect.y + min(output_rect.h - 10.0, 96.0)
     return [
         {
             "kind": "click",
@@ -660,7 +672,7 @@ def windows_diagnostic_input_script(actions: list[dict[str, Any]]) -> str:
         "$KEYEVENTF_KEYUP = 0x0002",
         "$InputSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][HudDiagnosticInput+INPUT])",
         "function Move-To([double]$x, [double]$y) {",
-        "  [HudDiagnosticInput]::SetCursorPos([int][Math]::Round($x), [int][Math]::Round($y)) | Out-Null",
+        "  if (-not [HudDiagnosticInput]::SetCursorPos([int][Math]::Round($x), [int][Math]::Round($y))) { throw 'SetCursorPos failed' }",
         "  Start-Sleep -Milliseconds 80",
         "}",
         "function Left-Down() { [HudDiagnosticInput]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 80 }",
@@ -673,8 +685,8 @@ def windows_diagnostic_input_script(actions: list[dict[str, Any]]) -> str:
         "  }",
         "}",
         "function Send-Text([string]$text) {",
+        "  $inputs = [HudDiagnosticInput+INPUT[]]::new(2)",
         "  foreach ($ch in $text.ToCharArray()) {",
-        "    $inputs = [HudDiagnosticInput+INPUT[]]::new(2)",
         "    $scan = [uint16][char]$ch",
         "    $inputs[0].type = $INPUT_KEYBOARD",
         "    $inputs[0].U.ki.wVk = 0",
@@ -684,7 +696,7 @@ def windows_diagnostic_input_script(actions: list[dict[str, Any]]) -> str:
         "    $inputs[1].U.ki.wVk = 0",
         "    $inputs[1].U.ki.wScan = $scan",
         "    $inputs[1].U.ki.dwFlags = $KEYEVENTF_UNICODE -bor $KEYEVENTF_KEYUP",
-        "    [HudDiagnosticInput]::SendInput(2, $inputs, $InputSize) | Out-Null",
+        "    if ([HudDiagnosticInput]::SendInput(2, $inputs, $InputSize) -eq 0) { throw 'SendInput failed' }",
         "    Start-Sleep -Milliseconds 25",
         "  }",
         "}",
@@ -739,13 +751,16 @@ async def run_windows_diagnostic_input(
     ssh_key: str,
     actions: list[dict[str, Any]],
     timeout_s: float,
+    connect_timeout_s: float = 5.0,
 ) -> dict[str, Any]:
     script = windows_diagnostic_input_script(actions)
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    connect_timeout = max(1, int(round(connect_timeout_s)))
     cmd = [
         "ssh",
         "-i", ssh_key,
         "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={connect_timeout}",
         "-o", "IdentitiesOnly=yes",
         "-o", "StrictHostKeyChecking=no",
         f"{user}@{host}",
@@ -756,7 +771,7 @@ async def run_windows_diagnostic_input(
         "-EncodedCommand",
         encoded,
     ]
-    started = time.time()
+    started = time.monotonic()
     proc: Optional[asyncio.subprocess.Process] = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -769,25 +784,27 @@ async def run_windows_diagnostic_input(
         if proc is not None:
             with contextlib.suppress(Exception):
                 proc.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
         return {
             "ok": False,
             "returncode": None,
             "error": "timeout",
-            "duration_s": round(time.time() - started, 3),
+            "duration_s": round(time.monotonic() - started, 3),
         }
     except (OSError, subprocess.SubprocessError) as exc:
         return {
             "ok": False,
             "returncode": None,
             "error": f"{type(exc).__name__}: {exc}",
-            "duration_s": round(time.time() - started, 3),
+            "duration_s": round(time.monotonic() - started, 3),
         }
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
         "stdout": stdout.decode("utf-8", errors="replace").strip(),
         "stderr": stderr.decode("utf-8", errors="replace").strip(),
-        "duration_s": round(time.time() - started, 3),
+        "duration_s": round(time.monotonic() - started, 3),
     }
 
 
@@ -3271,10 +3288,18 @@ async def run_diagnostic_input_phase(
     ssh_key: str,
     portal_x: float,
     portal_y: float,
+    tab_width: float,
+    tab_height: float,
     timeout_s: float,
+    connect_timeout_s: float,
 ) -> None:
     """Drive focus, drag, and scroll through Windows OS input injection."""
-    actions = build_diagnostic_input_plan(portal_x, portal_y)
+    actions = build_diagnostic_input_plan(
+        portal_x,
+        portal_y,
+        tab_width=tab_width,
+        tab_height=tab_height,
+    )
     emit_step_event(transcript, 6, "started", {
         "code": "diagnostic-input",
         "title": "Compositor-path diagnostic input",
@@ -3287,6 +3312,7 @@ async def run_diagnostic_input_phase(
         ssh_key=ssh_key,
         actions=actions,
         timeout_s=timeout_s,
+        connect_timeout_s=connect_timeout_s,
     )
     status = "completed" if result.get("ok") else "failed"
     emit_step_event(transcript, 6, status, {
@@ -3419,7 +3445,10 @@ async def run_scenario(args: argparse.Namespace) -> int:
                     ssh_key=args.diagnostic_input_ssh_key,
                     portal_x=portal_x,
                     portal_y=portal_y,
+                    tab_width=scene_width,
+                    tab_height=scene_height,
                     timeout_s=args.diagnostic_input_timeout_s,
+                    connect_timeout_s=args.diagnostic_input_connect_timeout_s,
                 )
             else:
                 emit_step_event(transcript, -1, "skipped", {
@@ -3601,6 +3630,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--diagnostic-input-user", default="tzeus")
     p.add_argument("--diagnostic-input-ssh-key", default=DEFAULT_SSH_KEY)
     p.add_argument("--diagnostic-input-timeout-s", type=float, default=12.0)
+    p.add_argument("--diagnostic-input-connect-timeout-s", type=float, default=5.0)
     p.add_argument(
         "--leave-lease-on-exit",
         action="store_true",

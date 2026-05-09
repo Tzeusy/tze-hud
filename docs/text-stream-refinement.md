@@ -249,6 +249,7 @@ python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_str
   --doc /home/tze/gt/tze_hud/mayor/rig/docs/exemplar-manual-review-checklist.md \
   --tab-width 1920 \
   --phases diagnostic-input \
+  --diagnostic-input-connect-timeout-s 5 \
   --transcript-out test_results/text-stream-portal-diagnostic-input.json
 ```
 

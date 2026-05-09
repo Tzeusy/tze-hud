@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import sys
 import unittest
@@ -56,6 +57,24 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertNotEqual(plan[2]["end_x"], plan[2]["start_x"])
         self.assertGreater(plan[2]["end_y"], plan[2]["start_y"])
 
+    def test_diagnostic_input_plan_uses_clamped_drag_for_wheel_target(self) -> None:
+        plan = portal.build_diagnostic_input_plan(
+            0.0,
+            0.0,
+            tab_width=portal.PORTAL_W + 20.0,
+            tab_height=portal.PORTAL_H + 20.0,
+        )
+        _, output_rect = portal.portal_pane_rects()
+
+        drag = plan[2]
+        wheel = plan[3]
+        self.assertEqual(drag["end_x"], drag["start_x"])
+        self.assertEqual(wheel["x"], output_rect.x + output_rect.w / 2.0)
+        self.assertEqual(
+            wheel["y"],
+            20.0 + output_rect.y + min(output_rect.h - 10.0, 96.0),
+        )
+
     def test_windows_diagnostic_input_script_uses_os_input_not_event_transcript(self) -> None:
         script = portal.windows_diagnostic_input_script(
             [
@@ -84,8 +103,100 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertIn("SetCursorPos", script)
         self.assertIn("mouse_event", script)
         self.assertIn("SendInput", script)
+        self.assertIn("if (-not [HudDiagnosticInput]::SetCursorPos", script)
+        self.assertIn("if ([HudDiagnosticInput]::SendInput", script)
+        self.assertLess(
+            script.index("$inputs = [HudDiagnosticInput+INPUT[]]::new(2)"),
+            script.index("foreach ($ch in $text.ToCharArray())"),
+        )
+        self.assertEqual(script.count("$inputs = [HudDiagnosticInput+INPUT[]]::new(2)"), 1)
         self.assertNotIn("EventBatch", script)
         self.assertNotIn("input_event_tx", script)
+
+    def test_windows_diagnostic_input_uses_ssh_connect_timeout(self) -> None:
+        captured: dict[str, tuple[str, ...]] = {}
+        original = portal.asyncio.create_subprocess_exec
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"ok", b""
+
+        async def fake_create_subprocess_exec(
+            *cmd: str,
+            stdout: object,
+            stderr: object,
+        ) -> FakeProcess:
+            captured["cmd"] = cmd
+            return FakeProcess()
+
+        async def run() -> None:
+            portal.asyncio.create_subprocess_exec = fake_create_subprocess_exec
+            try:
+                result = await portal.run_windows_diagnostic_input(
+                    "example.invalid",
+                    user="tester",
+                    ssh_key="/tmp/key",
+                    actions=[],
+                    timeout_s=1.0,
+                    connect_timeout_s=2.0,
+                )
+            finally:
+                portal.asyncio.create_subprocess_exec = original
+            self.assertTrue(result["ok"])
+
+        asyncio.run(run())
+        self.assertIn("ConnectTimeout=2", captured["cmd"])
+
+    def test_windows_diagnostic_input_reaps_timed_out_process(self) -> None:
+        original = portal.asyncio.create_subprocess_exec
+
+        class SlowProcess:
+            returncode = None
+
+            def __init__(self) -> None:
+                self.killed = False
+                self.waited = False
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                await asyncio.sleep(1.0)
+                return b"", b""
+
+            def kill(self) -> None:
+                self.killed = True
+
+            async def wait(self) -> int:
+                self.waited = True
+                return -9
+
+        proc = SlowProcess()
+
+        async def fake_create_subprocess_exec(
+            *cmd: str,
+            stdout: object,
+            stderr: object,
+        ) -> SlowProcess:
+            return proc
+
+        async def run() -> None:
+            portal.asyncio.create_subprocess_exec = fake_create_subprocess_exec
+            try:
+                result = await portal.run_windows_diagnostic_input(
+                    "example.invalid",
+                    user="tester",
+                    ssh_key="/tmp/key",
+                    actions=[],
+                    timeout_s=0.01,
+                )
+            finally:
+                portal.asyncio.create_subprocess_exec = original
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "timeout")
+
+        asyncio.run(run())
+        self.assertTrue(proc.killed)
+        self.assertTrue(proc.waited)
 
 
 if __name__ == "__main__":
