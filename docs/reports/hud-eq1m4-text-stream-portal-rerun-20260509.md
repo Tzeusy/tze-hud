@@ -79,7 +79,6 @@ Local transcript artifacts:
 |---|---:|---:|---:|---:|
 | `test_results/text-stream-portal-rerun-hitregion-20260509.json` | `3840x2160` | none | `scroll:offset=4`, `scroll:append=5` | pass, `cleanup_errors=[]` |
 | `test_results/text-stream-portal-rerun-hitregion-input-20260509.json` | `3840x2160` | none | `scroll:offset=4`, `scroll:append=5` | pass, `cleanup_errors=[]` |
-| `test_results/text-stream-portal-rerun-live-input-20260509.json` | `3840x2160` | none | not requested | pass, `cleanup_errors=[]` |
 | `test_results/text-stream-portal-rerun-live-input-final-20260509.json` | `3840x2160` | none | not requested | pass, `cleanup_errors=[]` |
 
 The transcript counters stayed at zero for:
