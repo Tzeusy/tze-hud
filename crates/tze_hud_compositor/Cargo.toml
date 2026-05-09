@@ -19,6 +19,7 @@ winit = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+blake3 = { workspace = true }
 glyphon = { workspace = true }
 resvg = { workspace = true }
 tiny-skia = { workspace = true }
