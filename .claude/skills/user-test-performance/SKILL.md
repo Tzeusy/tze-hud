@@ -192,6 +192,11 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 schtasks /Run /TN TzeHudBenchmarkOverlay
 ```
 
+The installer stores the PSK as a DPAPI-protected file for the task user and the
+runner passes it to `tze_hud.exe` through `TZE_HUD_PSK`. It only stops an
+existing benchmark-config `tze_hud.exe` process before relaunching; it does not
+kill the production `TzeHudOverlay` process by executable name.
+
 ### 7) Three-agent 60-minute widget soak
 
 ```bash

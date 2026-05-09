@@ -30,8 +30,12 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -Psk $env:TZE_HUD_PSK
 ```
 
-The installer refuses missing PSKs and the default development PSK. It registers
-`TzeHudBenchmarkOverlay`, leaving the production `TzeHudOverlay` task unchanged.
+The installer refuses missing PSKs and the default development PSK. It writes a
+DPAPI-protected `benchmark_hud.psk.dpapi` for the current task user and the
+generated runner passes the key to `tze_hud.exe` through `TZE_HUD_PSK`, not a
+command-line argument. The runner stops only existing `tze_hud.exe` processes
+whose command line already references the benchmark config and benchmark ports,
+so the production `TzeHudOverlay` task is left unchanged.
 
 Launch:
 

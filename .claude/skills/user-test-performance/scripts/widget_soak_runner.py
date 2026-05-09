@@ -8,7 +8,6 @@ import datetime as dt
 import json
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ DEFAULT_WIDGET = "main-progress"
 DEFAULT_INSTANCE = "main-progress"
 DEFAULT_DURATION_S = 3600.0
 DEFAULT_RATE_RPS = 1.0
+MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 
 
 def utc_now_iso() -> str:
@@ -170,8 +170,18 @@ def harness_command(
 def load_agent_artifact(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"artifact_path": str(path), "artifact_missing": True}
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        artifact_size = path.stat().st_size
+        if artifact_size > MAX_ARTIFACT_BYTES:
+            return {
+                "artifact_path": str(path),
+                "artifact_error": f"artifact exceeds {MAX_ARTIFACT_BYTES} byte limit",
+                "artifact_size_bytes": artifact_size,
+            }
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"artifact_path": str(path), "artifact_error": str(exc)}
     data["artifact_path"] = str(path)
     return data
 
@@ -213,6 +223,8 @@ def summarize(
             "rtt_jitter_us": rtt_jitter_us,
             "verdict": artifact.get("verdict"),
             "artifact_path": artifact.get("artifact_path"),
+            "artifact_error": artifact.get("artifact_error"),
+            "artifact_missing": artifact.get("artifact_missing"),
             "returncode": artifact.get("returncode"),
         }
 
@@ -360,33 +372,62 @@ def main() -> int:
 
     resource_samples = [sample_windows_resources(args, "before")]
     processes: dict[str, subprocess.Popen[Any]] = {}
+    log_handles: list[Any] = []
+    interrupted = False
+    launch_error = None
     try:
         for agent_id, cmd in commands.items():
             stdout = (log_dir / f"{agent_id}.stdout.log").open("w", encoding="utf-8")
             stderr = (log_dir / f"{agent_id}.stderr.log").open("w", encoding="utf-8")
+            log_handles.extend([stdout, stderr])
             processes[agent_id] = subprocess.Popen(cmd, cwd=root, stdout=stdout, stderr=stderr)
+            stdout.close()
+            stderr.close()
+            log_handles.remove(stdout)
+            log_handles.remove(stderr)
 
         while any(proc.poll() is None for proc in processes.values()):
             time.sleep(2.0)
     except KeyboardInterrupt:
+        interrupted = True
         for proc in processes.values():
             if proc.poll() is None:
                 proc.terminate()
-        raise
-    finally:
+    except Exception as exc:  # noqa: BLE001
+        launch_error = str(exc)
         for proc in processes.values():
             if proc.poll() is None:
-                proc.wait(timeout=10)
+                proc.terminate()
+    finally:
+        for handle in log_handles:
+            handle.close()
+        for proc in processes.values():
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=10)
 
     resource_samples.append(sample_windows_resources(args, "after"))
     agent_results: dict[str, dict[str, Any]] = {}
     exit_code = 0
-    for agent_id, proc in processes.items():
+    for agent_id in agents:
+        proc = processes.get(agent_id)
         artifact = load_agent_artifact(agent_dir / f"{agent_id}.json")
-        artifact["returncode"] = proc.returncode
+        artifact["returncode"] = proc.returncode if proc is not None else None
         agent_results[agent_id] = artifact
-        if proc.returncode != 0:
+        if proc is None:
+            exit_code = exit_code or 1
+        elif proc.returncode != 0:
             exit_code = proc.returncode or 1
+        if artifact.get("artifact_error") or artifact.get("artifact_missing"):
+            exit_code = exit_code or 1
+
+    if launch_error is not None:
+        exit_code = exit_code or 1
+    if interrupted:
+        exit_code = exit_code or 130
 
     summary = summarize(
         args=args,
@@ -398,6 +439,10 @@ def main() -> int:
         resource_samples=resource_samples,
         dry_run=False,
     )
+    if launch_error is not None:
+        summary["launch_error"] = launch_error
+    if interrupted:
+        summary["interrupted"] = True
     path = write_summary(output_root, summary)
     print(f"soak summary: {path}")
     return exit_code
