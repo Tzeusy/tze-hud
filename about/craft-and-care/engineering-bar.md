@@ -40,6 +40,46 @@ Consolidated from RFCs. All times are p99 unless noted. Hardware-normalized per 
 
 A change that moves a metric closer to its budget ceiling (even while still passing) is a regression. Track trends, not just pass/fail.
 
+### Windows-First Locked Budgets (May 2026)
+
+These budgets apply only to the Windows-first runtime lane. They are calibrated against the May 2026 baseline in `docs/reports/windows_perf_baseline_2026-05.md`.
+
+Reference hardware tag: `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`), Intel Core i5-13600KF, NVIDIA GeForce RTX 3080 driver `32.0.15.9636`, 16 GiB RAM, 4096x2160 at 60 Hz, Windows 11 Pro `10.0.26200` build `26200`, `C:\tze_hud\tze_hud.exe` in overlay mode. Baseline calibration factors from the 600-frame run: CPU `0.854`, GPU `0.338`, texture upload `0.215`.
+
+Any future Windows performance number quoted in docs, PRs, or release notes must carry this reference tag, a newer approved reference tag, or an explicit statement that the number is not comparable.
+
+#### CI-Enforced Headless Windows Gate
+
+The PR gate runs the existing `examples/benchmark` headless harness on `windows-latest`, emits the normal benchmark JSON artifact, and validates it with `scripts/ci/check_windows_perf_budgets.py`. The checker scales these TzeHouse raw budgets by `current_factor / TzeHouse_factor`; missing calibration is a gate failure. This avoids a live TzeHouse dependency in PR CI while still failing regressions in the benchmark/artifact path.
+
+| Metric | Locked TzeHouse budget | Normalization | Scope |
+|--------|------------------------|---------------|-------|
+| `steady_state_render.frame_time` p99 | ≤ 8.3 ms | GPU factor | Headless Windows benchmark |
+| `steady_state_render.frame_time` p99.9 | ≤ 16.6 ms | GPU factor | Headless Windows benchmark |
+| `steady_state_render.input_to_local_ack` p99 | ≤ 2 ms | CPU factor | Headless Windows benchmark |
+| `steady_state_render.input_to_scene_commit` p99 | ≤ 25 ms | CPU factor | Headless Windows benchmark |
+| `steady_state_render.input_to_next_present` p99 | ≤ 16.6 ms | GPU factor | Headless Windows benchmark |
+| `high_mutation.frame_time` p99 | ≤ 8.3 ms | GPU factor | Headless Windows benchmark |
+| `high_mutation.frame_time` p99.9 | ≤ 16.6 ms | GPU factor | Headless Windows benchmark |
+| `high_mutation.input_to_local_ack` p99 | ≤ 2 ms | CPU factor | Headless Windows benchmark |
+| `high_mutation.input_to_scene_commit` p99 | ≤ 25 ms | CPU factor | Headless Windows benchmark |
+| `high_mutation.input_to_next_present` p99 | ≤ 16.6 ms | GPU factor | Headless Windows benchmark |
+| Lease violations / budget overruns / sync-drift violations | `0` | none | Both benchmark scenarios |
+
+#### Manual Or Reference-Host Gates
+
+These budgets require TzeHouse or another explicitly approved reference host. They are not required on ordinary PRs because they need a live desktop session, exclusive GPU access, or long-duration soak conditions.
+
+| Metric | Locked budget | Gate |
+|--------|---------------|------|
+| Widget SVG re-rasterization, gauge 512x512 | ≤ 7.0 ms p99/max regression ceiling; aspirational target remains ≤ 1.0 ms after profiling | Reference-host Criterion artifact |
+| Transparent-overlay composite cost vs fullscreen | ≤ +0.5 ms p99 added | Manual `windowed-overlay-perf` workflow with `fail_on_budget=true` |
+| Idle CPU, overlay mode, no agents | ≤ 1% of one core | Reference-host resource sample |
+| Idle GPU, overlay mode, no agents | ≤ 4.0% Windows GPU engine sum regression ceiling; aspirational target remains ≤ 0.5% after cleaner sampling | Reference-host resource sample |
+| Memory growth, three-agent 60-minute soak | ≤ 5 MiB total drift | Reference-host soak report |
+
+Reference-host claim path: coordinate through the current Windows benchmark owner before running live perf work, acquire the GPU lock for the whole measurement window, launch the benchmark HUD with `app/tze_hud_app/config/benchmark.toml` and a non-default PSK, write artifacts under `C:\tze_hud\perf\<bead-id>\`, then copy the report inputs into `docs/reports/` or attach them to the PR. A run that cannot prove the reference tag and command shape is informational only.
+
 ### D18 Media Budgets (v2 real-decode lane)
 
 The following thresholds apply to the dedicated self-hosted GPU runner nightly real-decode CI lane. Reference codecs are H.264 + VP9; reference streams are the fixed library checked into LFS. Source: signoff-packet D18.

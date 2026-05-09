@@ -613,9 +613,7 @@ mod headless_impl {
 
             // input_to_local_ack: Stage 1 + Stage 2 (input drain + local feedback)
             let local_ack = telemetry.stage1_input_drain_us + telemetry.stage2_local_feedback_us;
-            if local_ack > 0 {
-                summary.input_to_local_ack.record(local_ack);
-            }
+            summary.input_to_local_ack.record(local_ack);
             // input_to_scene_commit: Stage 3 + Stage 4 (mutation intake + commit)
             let scene_commit =
                 telemetry.stage3_mutation_intake_us + telemetry.stage4_scene_commit_us;
@@ -731,9 +729,7 @@ mod headless_impl {
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
 
             let local_ack = telemetry.stage1_input_drain_us + telemetry.stage2_local_feedback_us;
-            if local_ack > 0 {
-                summary.input_to_local_ack.record(local_ack);
-            }
+            summary.input_to_local_ack.record(local_ack);
             let scene_commit =
                 telemetry.stage3_mutation_intake_us + telemetry.stage4_scene_commit_us;
             if scene_commit > 0 {
