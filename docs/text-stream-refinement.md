@@ -58,6 +58,14 @@ One exemplar script under `.claude/skills/user-test/scripts/`:
   path. Ctrl+V is handled first by runtime clipboard forwarding and then by an
   SSH clipboard fallback if the runtime paste event does not arrive.
 
+  The exemplar also has a `diagnostic-input` phase for live compositor-path
+  validation when manual console input is unavailable. It mounts the normal
+  portal surface and then uses Windows OS input over SSH (`SetCursorPos`,
+  mouse down/move/up, wheel, and `SendInput` Unicode text) against the overlay.
+  Expected transcript evidence includes `input:focus-gained`,
+  `drag:start`/`drag:end`, and `scroll:output`; this is intentionally not a
+  direct `EventBatch` or transcript-only shortcut.
+
 The script uses `HudClient` from `hud_grpc_client.py` and follows the
 split-batch `set_tile_root` → `add_node` pattern (see Gotchas).
 
@@ -232,6 +240,17 @@ python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_str
   --phases baseline,scroll \
   --baseline-hold-s 30 \
   --max-lines 80
+
+# Automated compositor-path input pass
+python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
+  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --psk-env TZE_HUD_PSK \
+  --agent-id agent-alpha \
+  --doc /home/tze/gt/tze_hud/mayor/rig/docs/exemplar-manual-review-checklist.md \
+  --tab-width 1920 \
+  --phases diagnostic-input \
+  --diagnostic-input-connect-timeout-s 5 \
+  --transcript-out test_results/text-stream-portal-diagnostic-input.json
 ```
 
 ## Gotchas discovered the hard way
