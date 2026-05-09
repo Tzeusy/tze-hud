@@ -20,7 +20,7 @@ This change records the refocus, sets the new active scope boundary, and superse
 
 ### New Capabilities
 
-- None *yet*. This change is a strategic refocus + performance-bar reset. Capability-level deltas (e.g., a `windows-runtime-performance-budget` capability or amendments to `runtime-kernel` and `validation-framework`) will be drafted as concrete work proceeds and recorded in this change's `specs/` folder before archive.
+- `windows-runtime-scope` records the active Windows-first scope boundary, the deferral authority for media/mobile/v2 surfaces, and the reference-hardware calibration gate for locking performance budgets.
 
 ### Modified Capabilities
 

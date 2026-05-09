@@ -84,7 +84,7 @@ decision is recorded in
   avoidable overhead before embodied/bidirectional AV is admitted.
 
 For the deferred embodied/bidirectional media scope (v2 Phase 4 per
-`openspec/changes/v2-embodied-media-presence/design.md`), a separate
+`openspec/changes/_deferred/v2-embodied-media-presence/design.md`), a separate
 `rpc MediaSignaling(...)` on `SessionService` remains an open option; that
 decision is out of scope here.
 
@@ -198,7 +198,7 @@ for media are defined in **RFC 0014 (Media Plane)**. RFC 0014 is the
 authoritative cross-pillar reference for:
 
 - the v2 Phase 1–4 media program structure
-  (`openspec/changes/v2-embodied-media-presence/design.md`),
+  (`openspec/changes/_deferred/v2-embodied-media-presence/design.md`),
 - the governance model that media MUST obey (capability, lease, privacy,
   operator-policy, and budget gates),
 - the `MediaIngressOpen` transport descriptor wire format and field semantics.

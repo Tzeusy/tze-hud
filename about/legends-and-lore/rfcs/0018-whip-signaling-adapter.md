@@ -14,7 +14,7 @@
 - `docs/audits/webrtc-sfu-fallback-audit.md` (hud-1ee3a) — str0m as fallback transport; WHIP integration pattern for LiveKit/Cloudflare
 - `docs/reports/webrtc-rs-v0.20-simulcast-readiness.md` (hud-g89zs) — NO-GO verdict for v0.20 alpha; fallback context
 - `docs/reports/sfu-vendor-adapter-seam.md` (hud-s2j0l) — dual-adapter design; LiveKit (WHIP) vs Cloudflare Realtime (proprietary JSON REST) seam specification
-- `openspec/changes/v2-embodied-media-presence/signoff-packet.md` — C15 vendor decision, F29 gate, E25 ladder
+- `openspec/changes/_deferred/v2-embodied-media-presence/signoff-packet.md` — C15 vendor decision, F29 gate, E25 ladder
 **Parent program:** v2-embodied-media-presence (phase 4b)
 **Forward references:**
 - RFC 0019 (Audit Log Schema and Retention) — cloud-relay activation events; local-append audit for relay sessions
@@ -1220,9 +1220,9 @@ Sign-off criteria for reviewers:
 - `docs/reports/sfu-vendor-adapter-seam.md` (hud-s2j0l) — full dual-adapter design spec;
   `SfuVendorAdapter` trait, `WhipAdapter` (LiveKit), `CloudflareRealtimeAdapter` (proprietary
   JSON REST), error taxonomy, harness selection mechanism, test matrix
-- `openspec/changes/v2-embodied-media-presence/signoff-packet.md` — C15 vendor decision,
+- `openspec/changes/_deferred/v2-embodied-media-presence/signoff-packet.md` — C15 vendor decision,
   F29 gate (≥1 reviewer for RFC 0018), E25 ladder order, D18 budgets
-- `openspec/changes/v2-embodied-media-presence/procurement.md` — GPU runner, SFU vendor
+- `openspec/changes/_deferred/v2-embodied-media-presence/procurement.md` — GPU runner, SFU vendor
   cost estimates; LiveKit Cloud free dev tier
 - RFC 0015 (forthcoming) — Embodied Presence Contract; cloud-relay may carry embodied media
 - RFC 0017 (forthcoming) — Recording and Audit; E25 step 4 "Suspend recording" precedes
