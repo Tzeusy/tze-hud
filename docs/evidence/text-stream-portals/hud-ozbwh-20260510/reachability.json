@@ -1,0 +1,55 @@
+{
+  "issue_id": "hud-ozbwh",
+  "timestamp_local": "2026-05-10T00:13:34+08:00",
+  "timestamp_utc": "2026-05-09T16:13:34Z",
+  "worker_branch": "agent/hud-ozbwh",
+  "target_host": "tzehouse-windows.parrot-hen.ts.net",
+  "resolved_ip": "100.87.181.125",
+  "tailnet_source": "100.99.218.4",
+  "result": "blocked",
+  "blocker": "Windows target was unreachable over Tailscale/SSH during this validation window.",
+  "commands": [
+    {
+      "command": "ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${TMPDIR:-/tmp}/tze_hud_known_hosts -o ConnectTimeout=8 -o ConnectionAttempts=1 -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net \"whoami\"",
+      "exit_code": 255,
+      "output": "ssh: connect to host tzehouse-windows.parrot-hen.ts.net port 22: Connection timed out"
+    },
+    {
+      "command": "ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${TMPDIR:-/tmp}/tze_hud_known_hosts -o ConnectTimeout=8 -o ConnectionAttempts=1 -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net \"whoami\"",
+      "exit_code": 255,
+      "output": "ssh: connect to host tzehouse-windows.parrot-hen.ts.net port 22: Connection timed out"
+    },
+    {
+      "command": "timeout 10 bash -lc 'nc -vz tzehouse-windows.parrot-hen.ts.net 22; nc -vz tzehouse-windows.parrot-hen.ts.net 50051; nc -vz tzehouse-windows.parrot-hen.ts.net 9090'",
+      "exit_code": 124,
+      "output": ""
+    },
+    {
+      "command": "timeout 10 bash -lc 'getent hosts tzehouse-windows.parrot-hen.ts.net; tailscale status --peers=false 2>/dev/null || true; tailscale ping --timeout=5s tzehouse-windows.parrot-hen.ts.net 2>/dev/null || true'",
+      "exit_code": 124,
+      "output": "100.87.181.125  tzehouse-windows.parrot-hen.ts.net\n100.99.218.4  tzeusy  userid:<redacted>  linux  -\n\n# Health check:\n#     - systemd-resolved and NetworkManager are wired together incorrectly; MagicDNS will probably not work. For more info, see https://tailscale.com/s/resolved-nm\nping \"100.87.181.125\" timed out",
+      "redactions": ["tailscale_userid"]
+    },
+    {
+      "command": "for i in 1 2 3; do echo retry=$i; timeout 8 tailscale ping --timeout=5s tzehouse-windows.parrot-hen.ts.net || true; timeout 8 ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${TMPDIR:-/tmp}/tze_hud_known_hosts -o ConnectTimeout=5 -o ConnectionAttempts=1 -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net \"whoami\" || true; sleep 10; done",
+      "exit_code": 0,
+      "exit_code_semantics": "loop_completion_only; final sleep masked individual probe failures",
+      "probe_failures_observed": true,
+      "effective_reachability_exit_code": 1,
+      "output": "retry=1\nping \"100.87.181.125\" timed out\nssh: connect to host tzehouse-windows.parrot-hen.ts.net port 22: Connection timed out\nretry=2\nping \"100.87.181.125\" timed out\nssh: connect to host tzehouse-windows.parrot-hen.ts.net port 22: Connection timed out\nretry=3\nping \"100.87.181.125\" timed out\nssh: connect to host tzehouse-windows.parrot-hen.ts.net port 22: Connection timed out"
+    }
+  ],
+  "acceptance_status": {
+    "live_focus_event": "not_run_target_unreachable",
+    "live_drag_event": "not_run_target_unreachable",
+    "live_scroll_event": "not_run_target_unreachable",
+    "visible_hud_screenshot": "not_captured_target_unreachable",
+    "cleanup": "no_portal_created"
+  },
+  "follow_up_bead_draft": {
+    "title": "Add compositor-path diagnostic input injector for text-stream portal live validation",
+    "type": "task",
+    "priority": 1,
+    "description": "Provide a runtime-supported diagnostic input injection path that enters the same windowed compositor/input pipeline as true OS pointer, wheel, focus, and keyboard events, then use it to record text-stream portal focus, drag, and scroll transcript evidence. Existing scheduled-task SendInput can move the console cursor but did not produce input:focus-*, drag:*, or scroll:output transcript events in hud-eq1m4 rerun evidence."
+  }
+}
