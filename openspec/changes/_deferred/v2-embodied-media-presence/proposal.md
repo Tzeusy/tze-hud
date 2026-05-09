@@ -1,3 +1,9 @@
+> **DEFERRED INDEFINITELY (2026-05-09).** This change is parked. The project has refocused on a performant single-device Rust HUD runtime for Windows before any multi-device, mobile, glasses, embodied-presence, or media-plane work. All 44 v2 beads (`hud-ora8.*`) were closed; the doctrine files this change relies on (`about/heart-and-soul/v2.md`, `mobile.md`, `media-doctrine.md`) are marked deferred. Active work tracked under epic `hud-9wljr` and openspec change `windows-first-performant-runtime`. **Do not pick up tasks from this change.** Multi-device scope returns only after the single-Windows runtime is done.
+>
+> Original proposal follows.
+
+---
+
 ## Why
 
 V1 intentionally proves governed on-screen presence with bounded surface area. It explicitly defers live media, WebRTC, embodied presence, exercised mobile/glasses profiles, and broader orchestration. That boundary is correct for v1, but it leaves the core thesis only partially realized: the doctrine says tze_hud is a presence engine that can eventually hold space, stream media, synchronize cues, and react across real devices.

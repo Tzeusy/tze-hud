@@ -1,5 +1,11 @@
 # Mobile and Smart Glasses
 
+> **DEFERRED INDEFINITELY (2026-05-09).** Mobile and smart-glasses deployment profiles are parked. The project has refocused on a performant single-device Rust HUD runtime for Windows. Mobile capability negotiation hooks remain in the schema as documented in `v1.md`'s deferral list, but **no mobile- or glasses-specific implementation, doctrine evolution, or beads** are admitted until the single-Windows runtime is done. The "first-class from the start" framing below is superseded; treat it as historical context, not as an active requirement. See `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`.
+>
+> Original mobile doctrine follows.
+
+---
+
 The system must support a mobile deployment profile from the start. Not as an afterthought. Not as a separate product. As a first-class requirement.
 
 Mobile presence is not "desktop presence on a smaller screen." It is a degraded but compatible operating profile within the same architecture.

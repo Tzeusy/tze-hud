@@ -1,5 +1,11 @@
 # Media Doctrine
 
+> **DEFERRED INDEFINITELY (2026-05-09).** The media plane (WebRTC + GStreamer, bounded ingress, bidirectional AV, recording, cloud-relay) is parked. The project has refocused on a performant single-device Rust HUD runtime for Windows. **No media-plane implementation, RFC drafting, or bead spawning** is admitted until the single-Windows runtime is done. The companion v2 program is in `openspec/changes/_deferred/`; the active scope source is `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`. Treat the doctrine below as historical posture, not active policy.
+>
+> Original media doctrine follows.
+
+---
+
 The media plane exists to let models be present as living, temporal entities — not
 as static pages or text streams, but as entities that speak, hear, and show. A
 runtime without media keeps agents behind a one-way glass. Media is the glass coming

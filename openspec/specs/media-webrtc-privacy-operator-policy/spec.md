@@ -1,5 +1,9 @@
 # Specification: Media/WebRTC Privacy, Operator Controls, and Enablement Policy
 
+> **DEFERRED INDEFINITELY (2026-05-09).** Pairs with `media-webrtc-bounded-ingress` and is deferred for the same reason: the project has refocused on a performant single-device Rust HUD runtime for Windows. Active source of truth: `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`.
+>
+> Original spec follows.
+
 ## Purpose
 
 Define the viewer/privacy constraints, human/operator overrides, observability

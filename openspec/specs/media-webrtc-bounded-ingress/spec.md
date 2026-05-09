@@ -1,5 +1,9 @@
 # Specification: Media/WebRTC Post-v1 Bounded Ingress
 
+> **DEFERRED INDEFINITELY (2026-05-09).** This contract is parked. The project has refocused on a performant single-device Rust HUD runtime for Windows; all media-plane work is deferred. Do not implement against this spec or gate v1 work on it. Active source of truth: `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`.
+>
+> Original spec follows.
+
 ## Purpose
 
 Define the smallest admissible media/WebRTC capability slice after v1: one-way inbound visual media ingress into runtime-owned surfaces, with deterministic timing, explicit governance, and default-off safety.

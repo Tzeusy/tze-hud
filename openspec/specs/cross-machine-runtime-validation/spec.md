@@ -1,5 +1,9 @@
 # cross-machine-runtime-validation Specification
 
+> **DEFERRED (2026-05-09) — single-Windows refocus.** This spec governs a Linux-build → Windows-deploy → live-MCP-publish cross-machine validation flow. Under the single-device refocus, the active deployment target is **Windows only**, and the canonical validation flow is local-on-Windows or single-host. The cross-machine flow described here is parked. The existing automation (Butler SSH/SCP harness, MCP reachability gate, etc.) is preserved as-is for now because it is what we currently use to bench Windows builds from a Linux dev box, but no new requirements are added here and the spec does not gate single-Windows-runtime work. Active source of truth: `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`.
+>
+> Original spec follows.
+
 ## Purpose
 TBD - created by archiving change ship-runtime-app-binary. Update Purpose after archive.
 ## Requirements
