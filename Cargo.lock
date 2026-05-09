@@ -2855,7 +2855,9 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tokio",
  "tze_hud_compositor",
+ "tze_hud_runtime",
  "tze_hud_scene",
  "tze_hud_telemetry",
  "tze_hud_validation",
