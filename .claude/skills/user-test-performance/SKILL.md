@@ -83,6 +83,13 @@ then add more (for example, a remote MacBook target) under new `target_id` keys.
   - Benchmarks `WidgetPublish` on one gRPC bidi stream.
   - Supports pacing, target registry, byte accounting, traceability tags, thresholds, and CSV recording.
   - Uses local `scripts/proto_gen/` stubs (self-contained inside this skill).
+- `scripts/widget_soak_runner.py`
+  - Runs the Rust gRPC widget harness concurrently for `agent-alpha`, `agent-beta`, and
+    `agent-gamma` by default.
+  - Defaults to a 60-minute paced soak (`--duration-s 3600`) and writes per-agent
+    artifacts plus `soak_summary.json` under `benchmarks/soak/<timestamp>/`.
+  - Use with the benchmark Windows config (`app/tze_hud_app/config/benchmark.toml`)
+    and benchmark scheduled task (`scripts/windows/install_benchmark_hud_task.ps1`).
 - `scripts/compare_results.py`
   - Compares candidate vs baseline runs from `reference/results.csv`.
   - Reports metric deltas and threshold pass/fail for regression gates.
@@ -170,6 +177,30 @@ python3 .claude/skills/user-test-performance/scripts/compare_results.py \
   --target-id user-test-windows-tailnet \
   --transport mcp_http \
   --mode widget
+```
+
+### 6) Install the benchmark Windows launch task
+
+Copy `app/tze_hud_app/config/benchmark.toml` to `C:\tze_hud\benchmark.toml`, then
+register the benchmark task from Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File C:\tze_hud\install_benchmark_hud_task.ps1 `
+  -BaseDir C:\tze_hud `
+  -Psk $env:TZE_HUD_PSK
+schtasks /Run /TN TzeHudBenchmarkOverlay
+```
+
+### 7) Three-agent 60-minute widget soak
+
+```bash
+python3 .claude/skills/user-test-performance/scripts/widget_soak_runner.py \
+  --target-id user-test-windows-tailnet \
+  --duration-s 3600 \
+  --rate-rps 1 \
+  --sample-windows-resources \
+  --ssh-identity ~/.ssh/ecdsa_home
 ```
 
 ## Traceability and Threshold Flags

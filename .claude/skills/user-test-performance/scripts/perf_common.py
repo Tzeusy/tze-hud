@@ -20,7 +20,7 @@ DEFAULT_TARGETS = {
     "targets": {
         "user-test-windows-tailnet": {
             "description": "Windows HUD host used by /user-test",
-            "mcp_url": "http://tzehouse-windows.parrot-hen.ts.net:9090",
+            "mcp_url": "http://tzehouse-windows.parrot-hen.ts.net:9090/mcp",
             "grpc_target": "tzehouse-windows.parrot-hen.ts.net:50051",
             "network_scope": "tailnet",
         }
