@@ -22,11 +22,19 @@ cargo run -p render_artifacts --features headless \
 ```
 
 That command renders the cooperative projection scene through
-`HeadlessRuntime`, calls `read_pixels()`, and writes:
+`HeadlessRuntime`, calls `read_pixels()`, and writes the PPM source frame plus
+JSON metadata:
 
 - `readback/cooperative-projection-readback.ppm`: raw RGB frame from runtime readback.
-- `readback/cooperative-projection-readback.png`: PNG packaging of the same PPM for review.
 - `readback/cooperative-projection-readback.json`: metadata, telemetry, and sampled pixels.
+
+The reviewable PNG derivative was packaged from the PPM with ImageMagick:
+
+```bash
+convert \
+  docs/evidence/cooperative-hud-projection/hud-ggntn.12-2026-05-09/readback/cooperative-projection-readback.ppm \
+  docs/evidence/cooperative-hud-projection/hud-ggntn.12-2026-05-09/readback/cooperative-projection-readback.png
+```
 
 ## Live Windows Context
 

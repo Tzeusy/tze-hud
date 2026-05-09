@@ -15,7 +15,7 @@ required-features = ["headless"]
 
 [features]
 # Enable headless GPU rendering so Layer 1/2 images can be sourced live.
-headless = ["dep:tze_hud_compositor", "dep:tze_hud_runtime", "tze_hud_runtime/headless", "tze_hud_runtime/dev-mode"]
+headless = ["dep:tze_hud_compositor", "dep:tze_hud_runtime", "tze_hud_runtime/headless"]
 
 [dependencies]
 tze_hud_validation = { path = "../../crates/tze_hud_validation" }

@@ -11,10 +11,10 @@
   "frame_telemetry": {
     "active_leases": 1,
     "frame_number": 1,
-    "frame_time_us": 74031,
+    "frame_time_us": 272273,
     "node_count": 1,
-    "stage6_render_encode_us": 72736,
-    "stage7_gpu_submit_us": 882,
+    "stage6_render_encode_us": 269580,
+    "stage7_gpu_submit_us": 2182,
     "tile_count": 1
   },
   "height": 720,
