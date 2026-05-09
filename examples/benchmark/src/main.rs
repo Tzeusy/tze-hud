@@ -190,11 +190,14 @@ mod tests {
 mod headless_impl {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Instant;
+    use tokio::sync::Mutex;
     use tracing::{info, warn};
 
     use tze_hud_runtime::headless::{HeadlessConfig, HeadlessRuntime};
     use tze_hud_scene::calibration::calibrate as calibrate_cpu;
+    use tze_hud_scene::graph::SceneGraph;
     use tze_hud_scene::mutation::{MutationBatch, SceneMutation};
     use tze_hud_scene::types::{Capability, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode};
 
@@ -218,6 +221,21 @@ mod headless_impl {
 
     /// Tiles per upload cycle.
     const UPLOAD_TILES_PER_CYCLE: usize = 10;
+
+    async fn scene_handle(runtime: &HeadlessRuntime) -> Arc<Mutex<SceneGraph>> {
+        let state = runtime.state.lock().await;
+        state.scene.clone()
+    }
+
+    fn benchmark_config(psk: &str) -> HeadlessConfig {
+        HeadlessConfig {
+            width: 1920,
+            height: 1080,
+            grpc_port: 0,
+            psk: psk.to_string(),
+            config_toml: Some(String::new()),
+        }
+    }
 
     // ── CLI args ─────────────────────────────────────────────────────────────
 
@@ -293,12 +311,7 @@ mod headless_impl {
     pub async fn calibrate_gpu() -> GpuCalibrationResult {
         let start = Instant::now();
 
-        let config = HeadlessConfig {
-            width: 1920,
-            height: 1080,
-            grpc_port: 0,
-            psk: "calibration".to_string(),
-        };
+        let config = benchmark_config("calibration");
 
         let mut runtime = match HeadlessRuntime::new(config).await {
             Ok(r) => r,
@@ -314,8 +327,8 @@ mod headless_impl {
 
         // Set up a multi-tile scene with overlapping alpha-blended tiles
         {
-            let mut state = runtime.state.lock().await;
-            let scene = &mut state.scene;
+            let scene_arc = scene_handle(&runtime).await;
+            let mut scene = scene_arc.lock().await;
             let tab_id = match scene.create_tab("gpu_calibration", 0) {
                 Ok(id) => id,
                 Err(e) => {
@@ -362,6 +375,7 @@ mod headless_impl {
                                 alpha,
                             ),
                             bounds: Rect::new(0.0, 0.0, 380.0, 270.0),
+                            radius: None,
                         }),
                     };
                     let _ = scene.set_tile_root(tile_id, node);
@@ -401,12 +415,7 @@ mod headless_impl {
     pub async fn calibrate_upload() -> UploadCalibrationResult {
         let start = Instant::now();
 
-        let config = HeadlessConfig {
-            width: 1920,
-            height: 1080,
-            grpc_port: 0,
-            psk: "calibration".to_string(),
-        };
+        let config = benchmark_config("calibration");
 
         let mut runtime = match HeadlessRuntime::new(config).await {
             Ok(r) => r,
@@ -423,8 +432,8 @@ mod headless_impl {
         let tab_id;
         let lease_id;
         {
-            let mut state = runtime.state.lock().await;
-            let scene = &mut state.scene;
+            let scene_arc = scene_handle(&runtime).await;
+            let mut scene = scene_arc.lock().await;
             tab_id = match scene.create_tab("upload_calibration", 0) {
                 Ok(id) => id,
                 Err(e) => {
@@ -459,8 +468,8 @@ mod headless_impl {
 
             // Create UPLOAD_TILES_PER_CYCLE tiles
             {
-                let mut state = runtime.state.lock().await;
-                let scene = &mut state.scene;
+                let scene_arc = scene_handle(&runtime).await;
+                let mut scene = scene_arc.lock().await;
                 for i in 0..UPLOAD_TILES_PER_CYCLE {
                     let bounds = Rect::new(
                         (i as f32 % 10.0) * 190.0,
@@ -486,6 +495,7 @@ mod headless_impl {
                                     1.0,
                                 ),
                                 bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
+                                radius: None,
                             }),
                         };
                         // Count create unconditionally (it succeeded); count
@@ -505,8 +515,8 @@ mod headless_impl {
 
             // Delete all tiles (models a full tile lifecycle per cycle)
             {
-                let mut state = runtime.state.lock().await;
-                let scene = &mut state.scene;
+                let scene_arc = scene_handle(&runtime).await;
+                let mut scene = scene_arc.lock().await;
                 for tile_id in &tile_ids {
                     let batch = MutationBatch {
                         batch_id: SceneId::new(),
@@ -543,12 +553,7 @@ mod headless_impl {
             frame_count
         );
 
-        let config = HeadlessConfig {
-            width: 1920,
-            height: 1080,
-            grpc_port: 0,
-            psk: "benchmark".to_string(),
-        };
+        let config = benchmark_config("benchmark");
 
         let mut runtime = HeadlessRuntime::new(config)
             .await
@@ -556,8 +561,8 @@ mod headless_impl {
 
         // Set up the benchmark scene: 10 tiles with solid colors
         {
-            let mut state = runtime.state.lock().await;
-            let scene = &mut state.scene;
+            let scene_arc = scene_handle(&runtime).await;
+            let mut scene = scene_arc.lock().await;
             let tab_id = scene.create_tab("bench", 0).expect("create_tab");
             let lease_id = scene.grant_lease(
                 "bench",
@@ -585,6 +590,7 @@ mod headless_impl {
                         data: NodeData::SolidColor(SolidColorNode {
                             color: Rgba::new(i as f32 / 10.0, 0.5, 1.0 - i as f32 / 10.0, 1.0),
                             bounds: Rect::new(0.0, 0.0, 380.0, 536.0),
+                            radius: None,
                         }),
                     };
                     let _ = scene.set_tile_root(tile_id, node);
@@ -635,12 +641,7 @@ mod headless_impl {
     pub async fn run_high_mutation(frame_count: u64) -> ScenarioResult {
         info!("Running high-mutation scenario ({} frames)", frame_count);
 
-        let config = HeadlessConfig {
-            width: 1920,
-            height: 1080,
-            grpc_port: 0,
-            psk: "benchmark".to_string(),
-        };
+        let config = benchmark_config("benchmark");
 
         let mut runtime = HeadlessRuntime::new(config)
             .await
@@ -651,8 +652,8 @@ mod headless_impl {
         let mut tile_ids = Vec::new();
 
         {
-            let mut state = runtime.state.lock().await;
-            let scene = &mut state.scene;
+            let scene_arc = scene_handle(&runtime).await;
+            let mut scene = scene_arc.lock().await;
             tab_id = scene.create_tab("mutation_bench", 0).expect("create_tab");
             lease_id = scene.grant_lease(
                 "mutation_bench",
@@ -698,8 +699,8 @@ mod headless_impl {
         for frame_idx in 0..frame_count {
             // Apply bounds mutation to 3 tiles per frame
             {
-                let mut state = runtime.state.lock().await;
-                let scene = &mut state.scene;
+                let scene_arc = scene_handle(&runtime).await;
+                let mut scene = scene_arc.lock().await;
                 let mut mutations = Vec::new();
                 for offset in 0..3usize {
                     let idx = ((frame_idx as usize) + offset) % tile_ids.len();
