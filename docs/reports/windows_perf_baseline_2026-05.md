@@ -1,144 +1,156 @@
-# Windows Performance Baseline — May 2026
+# Windows Performance Baseline - May 2026
 
 Issue: `hud-1753c`
-Change source: `openspec/changes/windows-first-performant-runtime/tasks.md` §2
-Run date: 2026-05-09
+OpenSpec source: `openspec/changes/windows-first-performant-runtime/tasks.md` section 2
+Run date: 2026-05-09 UTC
+Reference host: `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`)
 
 ## Reference Hardware
 
-Canonical Windows target: `tzehouse-windows.parrot-hen.ts.net`
-
-| Field | Value |
+| Surface | Value |
 |---|---|
-| OS | Microsoft Windows 11 Pro, version 10.0.26200, build 26200, 64-bit |
 | CPU | 13th Gen Intel(R) Core(TM) i5-13600KF, 14 cores / 20 logical processors |
-| GPU | NVIDIA GeForce RTX 3080, driver 32.0.15.9636 |
-| RAM | 16 GiB |
-| Display mode observed | 4096 x 2160 via `Win32_VideoController`; runtime overlay log observed 3840 x 2160 surface at 1.5 scale |
-| Runtime launch mode | Scheduled task `TzeHudOverlay`, overlay mode, Vulkan backend, premultiplied alpha |
+| GPU | NVIDIA GeForce RTX 3080, driver `32.0.15.9636` |
+| RAM | 16 GiB physical memory |
+| Display | 4096x2160 at 60 Hz |
+| OS | Microsoft Windows 11 Pro, version `10.0.26200`, build `26200` |
+| Runtime | `C:\tze_hud\tze_hud.exe`, overlay mode, gRPC `50051`, MCP `9090` |
 
-## Artifacts
+This host is the reference machine for the first Windows-first baseline. Any future quoted Windows budget should carry this hardware tag or explicitly say why it is not comparable.
 
-Raw artifacts are under `docs/reports/artifacts/windows_perf_baseline_2026-05/`:
+## Commands And Artifacts
 
-| Artifact | Purpose |
-|---|---|
-| `windows_benchmark_300frames.json` | Windows headless Layer-3 benchmark output, 300 frames per scenario |
-| `windows_benchmark_stdout.txt` | Remote benchmark transcript |
-| `widget_rasterize_criterion.txt` | Windows Criterion output for widget SVG rasterization |
-| `widget_publish_load_harness_1000_burst.json` | gRPC widget publish-load attempt against deployed HUD |
-| `mcp_results.csv` | MCP publish attempts against deployed HUD |
-| `idle_resource_sample.json` | 10-second overlay-mode process/GPU resource sample |
+Artifacts were written on the Windows host under `C:\tze_hud\perf\hud-1753c\`. Earlier raw copies from the 300-frame pass remain checked in under `docs/reports/artifacts/windows_perf_baseline_2026-05/` for traceability; the table below reflects the newer 600-frame reference pass.
 
-## Headless Frame And Mutation Baseline
+| Artifact | Command shape | Result |
+|---|---|---|
+| `layer3_benchmark_600.json` | `benchmark.exe --emit ... --frames 600` | Pass; headless GPU/composition + scene mutation summaries emitted |
+| `widget_rasterize_bench.txt` + Criterion output | `widget_rasterize.exe --bench --sample-size 20 --warm-up-time 1 --measurement-time 5` | Pass as executable benchmark; above proposed Windows target |
+| `widget_publish_burst_1000.json` | `widget_publish_load_harness.exe --target-id local-dev --mode burst --publish-count 1000` | Connected/authenticated; 0/1000 accepted due to missing widget publish capability |
 
-Command shape: cross-compiled `benchmark.exe`, run on the Windows target with `--emit C:/tze_hud/windows_perf_benchmark_hud1753c.json --frames 300`. The live HUD was stopped during this headless run and restarted afterwards.
+The benchmark source repairs needed to build `examples/benchmark --features headless` are already on current `main`; this report update records the newer Windows evidence and follow-up gaps.
 
-Calibration factors:
+## Baseline Results
 
-| Factor | Value |
+### Frame Time And Input Latency
+
+Source: `layer3_benchmark_600.json`, 600 frames per scenario, 1920x1080 headless render path on the Windows host.
+
+| Scenario | Metric | p50 | p99 | p99.9 | Max |
+|---|---:|---:|---:|---:|---:|
+| steady_state_render | frame time | 0.492 ms | 2.533 ms | 3.093 ms | 3.093 ms |
+| steady_state_render | input_to_local_ack | 0.001 ms | 0.001 ms | 0.001 ms | 0.001 ms |
+| steady_state_render | input_to_scene_commit | 0.001 ms | 0.007 ms | 0.297 ms | 0.297 ms |
+| steady_state_render | input_to_next_present | 0.492 ms | 2.533 ms | 3.093 ms | 3.093 ms |
+| high_mutation | frame time | 0.468 ms | 2.437 ms | 3.116 ms | 3.116 ms |
+| high_mutation | input_to_local_ack | 0.001 ms | 0.001 ms | 0.001 ms | 0.001 ms |
+| high_mutation | input_to_scene_commit | 0.001 ms | 0.001 ms | 0.001 ms | 0.001 ms |
+| high_mutation | input_to_next_present | 0.468 ms | 2.437 ms | 3.116 ms | 3.116 ms |
+
+Calibration summary:
+
+| Calibration | Value |
 |---|---:|
-| CPU | 0.7576 |
-| GPU fill/composition | 0.3247 |
-| Upload | 0.2680 |
-| Scene ops/sec | 704,688 |
-| Upload tile ops/sec | 18,658 |
-| GPU calibration FPS | 1,539.8 |
+| CPU scene ops/sec | 611,733 |
+| CPU speed factor | 0.854 |
+| Hash throughput | 1,188.5 MB/s |
+| GPU fill/composition | 1,479.5 fps |
+| GPU factor | 0.338 |
+| Texture upload tile ops/sec | 23,225 |
+| Upload factor | 0.215 |
 
-Frame results:
+Interpretation: the synthetic headless path clears the proposed frame-time and input-latency targets with large margin. This is not yet a transparent-overlay result because it does not include DWM overlay composition or OS input routing.
 
-| Scenario | FPS | frame p50 | frame p99 | frame p99.9 | peak | input_to_scene_commit p99 | input_to_next_present p99 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| steady_state_render | 1617.9 | 0.494 ms | 1.979 ms | 2.679 ms | 2.741 ms | 0.002 ms | 1.979 ms |
-| high_mutation | 1516.1 | 0.509 ms | 2.139 ms | 2.962 ms | 3.182 ms | 0.001 ms | 2.139 ms |
+### Widget Raster Cost
 
-Validation verdict was `partial`: 6 pass, 0 fail, 1 uncalibrated. `input_to_local_ack` had no samples because this benchmark path does not inject input events.
+Source: Criterion sample JSON generated by `widget_rasterize.exe --bench`. Values are per-iteration times from 20 samples.
 
-## Widget Raster Cost
+| Benchmark | p50 | p99 / max | Proposed target |
+|---|---:|---:|---:|
+| gauge 512x512 cold | 2.398 ms | 4.526 ms | <= 1.0 ms p99 |
+| gauge 512x512 warm | 5.114 ms | 6.869 ms | <= 1.0 ms p99 |
+| gauge 128x128 warm | 2.222 ms | 2.540 ms | n/a |
 
-Command shape: cross-compiled `widget_rasterize` Criterion bench, run on the Windows target with sample size 20, 1s warmup, 3s measurement.
+Interpretation: widget re-rasterization is the clearest measured miss. The current benchmark also shows the "warm" path slower than "cold", which suggests the existing benchmark fixture or cache assumptions need profiling before treating this as a renderer-only result.
 
-| Benchmark | Mean | 95% range |
-|---|---:|---:|
-| gauge_512x512/cold | 3.679 ms | 2.840-4.282 ms |
-| gauge_512x512/warm | 4.775 ms | 4.622-4.902 ms |
-| gauge_128x128/warm | 2.326 ms | 2.200-2.437 ms |
+### Widget Publish Load
 
-This misses the proposed Windows target of <= 1 ms p99 for 512x512 re-rasterization and also exceeds the older v1 2 ms target.
+The Rust `widget_publish_load_harness` was built and run on the Windows host against `local-dev` (`127.0.0.1:50051`) to avoid tailnet RTT. It authenticated successfully and produced correlated RTT/error accounting, but the deployed runtime config grants `agent-alpha`, `agent-beta`, and `agent-gamma` only:
 
-## Live HUD Transport Attempts
+`create_tiles`, `modify_own_tiles`, `access_input_events`
 
-The deployed HUD was reachable on ports 50051 and 9090 after starting the `TzeHudOverlay` scheduled task.
-
-`widget_publish_load_harness` reached the gRPC session service but all 1000 publishes were rejected:
+The harness requested `publish_widget:gauge`, while the runtime rejected each durable publish with `WIDGET_CAPABILITY_MISSING` for the target widget instance. Result:
 
 | Metric | Value |
 |---|---:|
-| Requests | 1000 |
-| Success | 0 |
-| Errors | 1000 |
-| p50 RTT | 45.151 ms |
-| p95 RTT | 49.657 ms |
-| p99 RTT | 49.674 ms |
-| Rejection | `WIDGET_CAPABILITY_MISSING: publish_widget:main-progress` |
+| Requests | 1,000 |
+| Accepted | 0 |
+| Rejected | 1,000 |
+| Rejection code | `WIDGET_CAPABILITY_MISSING` |
+| RTT p50 / p95 / p99 / max | 2.602 / 3.959 / 4.144 / 4.165 ms |
 
-A temporary attempt to add a benchmark-agent capability to `C:/tze_hud/tze_hud.toml` caused the scheduled task not to rebind HUD ports, so the original config was restored. This means the transport harness is present, but the deployed reference config is not benchmark-ready for gRPC widget publishing.
+The RTT values are still useful for rejection-path transport accounting, but they are not an accepted-publish throughput baseline.
 
-MCP zone publish attempts were also not accepted:
+### Idle Overlay Resources
 
-| Target | Result |
-|---|---|
-| `status-bar`, 100 publishes | 100/100 rejected with zone media type mismatch |
-| `subtitle`, 100 publishes | 100/100 failed with remote close/no response |
-
-These MCP results are diagnostic only and are not treated as successful throughput baselines.
-
-## Idle Resource Sample
-
-Overlay-mode sample, 10 seconds, no benchmark workload:
+Source: 10-second sample of the live overlay process (`tze_hud`, PID 31380) with no benchmark client running.
 
 | Metric | Value |
 |---|---:|
-| `tze_hud.exe` CPU over sample | 0.0% of total logical CPU |
-| Working set | 270,348,288 bytes |
-| NVIDIA GPU utilization | 38% device |
-| NVIDIA memory used | 5,319 MiB / 10,240 MiB |
+| CPU | 0.000% of total processor capacity over the sample |
+| GPU engine utilization sum | 3.791% |
+| Working set | 200.2 MiB |
+| Private memory | 289.5 MiB |
 
-GPU utilization is global device utilization from `nvidia-smi`, not per-process attribution, so it is not a clean HUD-only idle metric. It is still far above the proposed <= 0.5% device-utilization target and needs isolated measurement.
+Interpretation: CPU is within the proposed idle target. GPU idle is above the proposed <= 0.5% target, though this single sample uses Windows GPU Engine counters and should be repeated after eliminating unrelated desktop GPU activity.
 
-## Overlay Composite Cost
+### Overlay Composite Cost
 
-No existing harness currently emits a fullscreen-vs-overlay frame-time delta for the windowed compositor. The headless benchmark gives GPU composition cost, and runtime logs confirm overlay mode uses Vulkan with premultiplied alpha, but the proposed `<= +0.5 ms p99` transparent-overlay composite budget is not directly measurable yet from the available tooling.
+The transparent-overlay p99 delta versus fullscreen is not yet established. The available measured proxy is:
 
-## Multi-Agent Soak
+| Path | Observed |
+|---|---:|
+| Headless GPU fill/composition calibration | 1,479.5 fps |
+| Live overlay idle GPU engine utilization | 3.791% |
+| Fullscreen A/B p99 frame-time delta | not instrumented |
 
-A 60-minute, three-agent Windows soak was not run in this baseline pass. The current blocking issues are:
+This is a measurement gap, not a pass. The next profiling bead should add a controlled fullscreen-vs-overlay run that records frame-time histograms under the same scene.
 
-1. The reference config grants `agent-alpha`, `agent-beta`, and `agent-gamma` tile/input capabilities only, not widget publish capabilities.
-2. The gRPC widget publish-load path cannot establish a successful live widget workload under the deployed config.
-3. There is no single Windows soak runner that emits leak/jitter/resource drift metrics in the report shape required by this bead.
+### Multi-Agent Soak
 
-## Gap Analysis Against `design.md` §1
+A valid multi-agent soak was not established in this run. The deployed reference config currently lacks widget/zone publish capabilities for the three named agents, so the first resident publish-load attempt fails at admission rather than exercising the compositor under load.
 
-| Property | Proposed target | Baseline status |
-|---|---:|---|
-| Frame time p99 | <= 8.3 ms | PASS in headless steady/high-mutation paths: 1.979 ms / 2.139 ms |
-| Frame time p99.9 | <= 16.6 ms | PASS in headless steady/high-mutation paths: 2.679 ms / 2.962 ms |
-| input_to_local_ack p99 | <= 2 ms | NOT MEASURED; no input samples in benchmark |
-| input_to_scene_commit p99 | <= 25 ms | PASS in headless paths: <= 0.002 ms |
-| input_to_next_present p99 | <= 16.6 ms | PASS in headless paths: <= 2.139 ms |
-| Widget SVG re-rasterization | <= 1 ms p99 | FAIL; Criterion means 3.679-4.775 ms for 512x512 |
-| Transparent-overlay composite delta | <= +0.5 ms p99 | NOT MEASURED; no fullscreen/overlay delta harness |
-| Idle CPU | <= 1% single core | PASS in 10s overlay sample: 0.0% total CPU |
-| Idle GPU | <= 0.5% device | UNKNOWN/LIKELY FAIL; global `nvidia-smi` reported 38% |
-| Memory growth over 60-min soak | <= 5 MB drift | NOT MEASURED; soak not run |
+Observed behavior under the attempted load: the runtime stayed up, authenticated the resident client, and returned structured `WIDGET_CAPABILITY_MISSING` responses for all 1,000 durable publish attempts. That proves the rejection path is stable, but it does not satisfy the intended three-agent scene/widget/zone soak.
+
+## Comparison To `design.md` section 1 Targets
+
+| Property | Proposed target | Current baseline | Status |
+|---|---:|---:|---|
+| Frame time p99 | <= 8.3 ms | 2.533 ms headless steady-state; 2.437 ms headless high-mutation | Pass for headless only |
+| Frame time p99.9 | <= 16.6 ms | 3.093 ms / 3.116 ms headless | Pass for headless only |
+| input_to_local_ack p99 | <= 2 ms | 0.001 ms synthetic headless | Pass for synthetic path |
+| input_to_scene_commit p99 | <= 25 ms | 0.007 ms steady-state; 0.001 ms high-mutation | Pass for synthetic path |
+| input_to_next_present p99 | <= 16.6 ms | 2.533 ms / 2.437 ms headless | Pass for headless only |
+| Widget SVG re-rasterization 512x512 | <= 1 ms p99 | 4.526 ms cold; 6.869 ms warm | Fail |
+| Transparent-overlay composite cost | <= +0.5 ms p99 vs fullscreen | Not instrumented | Unknown / gap |
+| Idle CPU | <= 1% on one core | 0.000% total processor sample | Pass in sample |
+| Idle GPU | <= 0.5% device utilization | 3.791% GPU engine sum sample | Fail / needs cleaner sample |
+| Memory growth, 60-min soak | <= 5 MB drift | Not run | Unknown / gap |
 
 ## Top Three Gaps
 
-1. **Widget rasterization is over budget.** The 512x512 path is roughly 3.7-4.8 ms mean on reference hardware, missing both the new 1 ms target and the older 2 ms target. Suspected causes: repeated SVG parse/rasterize cost in `resvg`/`tiny-skia`, text binding work, and missing warm-path parse/cache separation.
-2. **Windowed overlay performance is not benchmarkable yet.** There is no current harness that compares fullscreen vs transparent overlay p99 frame cost. Suspected cause: windowed telemetry is collected internally but not exported as a bounded benchmark artifact.
-3. **Reference live-workload config is not benchmark-ready.** gRPC widget publishing is blocked by missing `publish_widget:main-progress` capability, MCP zone publishes failed, and no three-agent soak runner emits the required metrics. Suspected cause: user-test deployment config is optimized for manual demos, not performance harness identity/capability setup.
+1. Widget rasterization is over the proposed Windows budget. The 512x512 gauge path measured 4.5-6.9 ms p99/max against a 1.0 ms proposed p99 target. Suspected causes: SVG parse/raster dominates each update, the "warm" Criterion path does not reflect a real cache hit, and the renderer lacks a measured parameter-binding fast path.
 
-## Notes
+2. Transparent-overlay composite cost is not measurable with the current harness set. Headless frame histograms are strong, but the acceptance target is overlay-vs-fullscreen p99 delta on Windows/DWM. Suspected causes: no runtime telemetry export for live windowed frame histograms and no scripted fullscreen/overlay A/B mode.
 
-`examples/benchmark` had drifted from the current `HeadlessRuntime` API and did not compile with `--features headless` at the start of this work. The harness was updated so the Windows benchmark binary can be built and run again.
+3. The reference runtime config is not soak-ready for the intended resident publish workload. The named agents can create/modify owned tiles but cannot publish widgets or zones, so the canonical Rust widget publish-load harness produces only admission rejections. Suspected cause: production config stayed aligned with earlier raw-tile/user-test flows and was not updated for the Windows-first publish-load baseline.
+
+## Follow-Up Inputs For New Beads
+
+Use these as inputs for follow-up bead creation by the coordinator:
+
+| Gap | Suggested bead shape |
+|---|---|
+| Widget raster p99 over budget | Profile and optimize 512x512 SVG re-rasterization; separate parse, binding, raster, compositing, and texture-upload cost |
+| Overlay composite cost unknown | Add live windowed frame histogram export plus scripted fullscreen-vs-overlay A/B run on TzeHouse |
+| Soak blocked by capabilities | Add a reference Windows perf config/profile that grants only the capabilities needed for three resident perf agents, then rerun widget/zone/tile soak |
