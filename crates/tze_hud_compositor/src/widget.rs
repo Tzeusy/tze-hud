@@ -78,6 +78,8 @@ impl WidgetRenderPlan {
 struct PrimitiveSvgLayerPlan {
     view_box: SvgViewBox,
     items: Vec<PrimitiveItem>,
+    has_text_items: bool,
+    text_target_ids: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -274,7 +276,23 @@ impl PrimitiveSvgLayerPlan {
             pos = tag_end + 1;
         }
 
-        Some(Self { view_box, items })
+        let has_text_items = items
+            .iter()
+            .any(|item| matches!(item, PrimitiveItem::Text(_)));
+        let text_target_ids = items
+            .iter()
+            .filter_map(|item| match item {
+                PrimitiveItem::Text(text) => text.id.clone(),
+                _ => None,
+            })
+            .collect();
+
+        Some(Self {
+            view_box,
+            items,
+            has_text_items,
+            text_target_ids,
+        })
     }
 
     fn rasterize(
@@ -285,7 +303,7 @@ impl PrimitiveSvgLayerPlan {
         pixel_height: u32,
     ) -> Option<tiny_skia::Pixmap> {
         let mut pixmap = tiny_skia::Pixmap::new(pixel_width, pixel_height)?;
-        if self.has_text_items() {
+        if self.has_text_items {
             self.draw_onto_with_text_split(
                 &mut pixmap,
                 source_digest,
@@ -297,22 +315,6 @@ impl PrimitiveSvgLayerPlan {
             self.draw_onto(&mut pixmap, resolved_bindings, pixel_width, pixel_height);
         }
         Some(pixmap)
-    }
-
-    fn has_text_items(&self) -> bool {
-        self.items
-            .iter()
-            .any(|item| matches!(item, PrimitiveItem::Text(_)))
-    }
-
-    fn text_target_ids(&self) -> BTreeSet<String> {
-        self.items
-            .iter()
-            .filter_map(|item| match item {
-                PrimitiveItem::Text(text) => text.id.clone(),
-                _ => None,
-            })
-            .collect()
     }
 
     fn layer_transform(&self, pixel_width: u32, pixel_height: u32) -> tiny_skia::Transform {
@@ -361,8 +363,7 @@ impl PrimitiveSvgLayerPlan {
         pixel_width: u32,
         pixel_height: u32,
     ) {
-        let text_target_ids = self.text_target_ids();
-        let non_text_digest = resolved_bindings.digest_excluding_targets(&text_target_ids);
+        let non_text_digest = resolved_bindings.digest_excluding_targets(&self.text_target_ids);
         let transform = self.layer_transform(pixel_width, pixel_height);
         let mut segment_start: Option<usize> = None;
         let mut segment_index = 0u32;
@@ -423,6 +424,11 @@ impl PrimitiveSvgLayerPlan {
         pixel_width: u32,
         pixel_height: u32,
     ) {
+        if self.non_text_range_has_active_bindings(start, end, resolved_bindings) {
+            self.draw_non_text_range(pixmap, start, end, resolved_bindings, transform);
+            return;
+        }
+
         let key = primitive_non_text_segment_cache_key(
             source_digest,
             segment_index,
@@ -492,6 +498,19 @@ impl PrimitiveSvgLayerPlan {
             }
         }
     }
+
+    fn non_text_range_has_active_bindings(
+        &self,
+        start: usize,
+        end: usize,
+        resolved_bindings: &ResolvedLayerBindings,
+    ) -> bool {
+        self.items[start..end].iter().any(|item| match item {
+            PrimitiveItem::Rect(rect) => rect.has_active_binding(resolved_bindings),
+            PrimitiveItem::Circle(circle) => circle.has_active_binding(resolved_bindings),
+            PrimitiveItem::Text(_) => false,
+        })
+    }
 }
 
 impl PrimitiveRect {
@@ -558,6 +577,10 @@ impl PrimitiveRect {
 
     fn effective_opacity(&self, bindings: &ResolvedLayerBindings) -> f32 {
         self.opacity * bound_ancestor_opacity(&self.ancestor_ids, bindings)
+    }
+
+    fn has_active_binding(&self, bindings: &ResolvedLayerBindings) -> bool {
+        target_or_ancestor_has_binding(self.id.as_deref(), &self.ancestor_ids, bindings)
     }
 
     fn fill_paint(&self, bindings: &ResolvedLayerBindings) -> Option<tiny_skia::Paint<'static>> {
@@ -659,6 +682,10 @@ impl PrimitiveCircle {
         self.opacity * bound_ancestor_opacity(&self.ancestor_ids, bindings)
     }
 
+    fn has_active_binding(&self, bindings: &ResolvedLayerBindings) -> bool {
+        target_or_ancestor_has_binding(self.id.as_deref(), &self.ancestor_ids, bindings)
+    }
+
     fn fill_paint(&self, bindings: &ResolvedLayerBindings) -> Option<tiny_skia::Paint<'static>> {
         let color = self
             .bound_attr(bindings, "fill")
@@ -729,10 +756,11 @@ impl PrimitiveText {
         if content.is_empty() {
             return;
         }
-        let color = self
-            .bound_attr(bindings, "fill")
-            .or(self.fill.as_deref())
-            .and_then(parse_svg_color);
+        let fill = self.bound_attr(bindings, "fill").or(self.fill.as_deref());
+        if fill.is_some_and(is_svg_paint_none) {
+            return;
+        }
+        let color = fill.and_then(parse_svg_color).unwrap_or((0, 0, 0, 1.0));
         let opacity = self.opacity * bound_ancestor_opacity(&self.ancestor_ids, bindings);
         if opacity <= 0.0 {
             return;
@@ -741,12 +769,7 @@ impl PrimitiveText {
         let Some(layer) = rasterize_cached_text_svg(&text_svg, pixel_width, pixel_height) else {
             return;
         };
-        draw_tinted_text_mask(
-            pixmap,
-            layer.as_ref().as_ref(),
-            color.unwrap_or((0, 0, 0, 1.0)),
-            opacity,
-        );
+        draw_tinted_text_mask(pixmap, layer.as_ref().as_ref(), color, opacity);
     }
 
     fn bound_attr<'a>(
@@ -810,6 +833,21 @@ fn bound_ancestor_opacity(ancestor_ids: &[String], bindings: &ResolvedLayerBindi
             .unwrap_or(1.0);
         acc * bound
     })
+}
+
+fn target_or_ancestor_has_binding(
+    id: Option<&str>,
+    ancestor_ids: &[String],
+    bindings: &ResolvedLayerBindings,
+) -> bool {
+    id.is_some_and(|id| bindings.by_target_attr.contains_key(id))
+        || ancestor_ids
+            .iter()
+            .any(|ancestor_id| bindings.by_target_attr.contains_key(ancestor_id))
+}
+
+fn is_svg_paint_none(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("none")
 }
 
 fn contains_unsupported_primitive_svg(svg_text: &str) -> bool {
@@ -984,35 +1022,40 @@ fn draw_tinted_text_mask(
     color: (u8, u8, u8, f32),
     opacity: f32,
 ) {
-    let Some(mut tinted) = tiny_skia::Pixmap::new(mask.width(), mask.height()) else {
-        return;
-    };
     let color_alpha = (color.3 * opacity).clamp(0.0, 1.0);
     if color_alpha <= 0.0 {
         return;
     }
+    let color_alpha_u8 = (color_alpha * 255.0).round() as u32;
 
-    for (dst, src) in tinted.pixels_mut().iter_mut().zip(mask.pixels()) {
-        let alpha = ((src.alpha() as f32) * color_alpha).round() as u8;
-        if alpha == 0 {
+    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(mask.pixels()) {
+        let mask_alpha = src.alpha() as u32;
+        if mask_alpha == 0 {
             continue;
         }
-        let scale = alpha as f32 / 255.0;
-        let r = (color.0 as f32 * scale).round().min(alpha as f32) as u8;
-        let g = (color.1 as f32 * scale).round().min(alpha as f32) as u8;
-        let b = (color.2 as f32 * scale).round().min(alpha as f32) as u8;
-        *dst = tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, alpha)
-            .unwrap_or(tiny_skia::PremultipliedColorU8::TRANSPARENT);
-    }
 
-    pixmap.as_mut().draw_pixmap(
-        0,
-        0,
-        tinted.as_ref(),
-        &tiny_skia::PixmapPaint::default(),
-        tiny_skia::Transform::identity(),
-        None,
-    );
+        let src_alpha = (mask_alpha * color_alpha_u8 + 127) / 255;
+        if src_alpha == 0 {
+            continue;
+        }
+
+        let src_r = (color.0 as u32 * src_alpha + 127) / 255;
+        let src_g = (color.1 as u32 * src_alpha + 127) / 255;
+        let src_b = (color.2 as u32 * src_alpha + 127) / 255;
+        let inv_alpha = 255 - src_alpha;
+        let out_alpha = src_alpha + (dst.alpha() as u32 * inv_alpha + 127) / 255;
+        let out_r = src_r + (dst.red() as u32 * inv_alpha + 127) / 255;
+        let out_g = src_g + (dst.green() as u32 * inv_alpha + 127) / 255;
+        let out_b = src_b + (dst.blue() as u32 * inv_alpha + 127) / 255;
+
+        *dst = tiny_skia::PremultipliedColorU8::from_rgba(
+            out_r.min(out_alpha) as u8,
+            out_g.min(out_alpha) as u8,
+            out_b.min(out_alpha) as u8,
+            out_alpha as u8,
+        )
+        .unwrap_or(tiny_skia::PremultipliedColorU8::TRANSPARENT);
+    }
 }
 
 fn escape_attr(value: &str) -> String {
@@ -2629,15 +2672,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
 
     fn sans_serif_font_available() -> bool {
-        let mut db = resvg::usvg::fontdb::Database::new();
-        db.load_system_fonts();
+        let db = shared_widget_fontdb();
         let query = resvg::usvg::fontdb::Query {
             families: &[resvg::usvg::fontdb::Family::SansSerif],
             ..Default::default()
         };
         db.query(&query).is_some()
+    }
+
+    fn widget_cache_test_guard() -> MutexGuard<'static, ()> {
+        static CACHE_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        CACHE_TEST_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("widget cache test mutex poisoned")
     }
 
     // ── SVG attribute manipulation tests ──────────────────────────────────────
@@ -2712,6 +2763,7 @@ mod tests {
 
     #[test]
     fn retained_plan_static_cache_is_invalidated_by_svg_content() {
+        let _cache_guard = widget_cache_test_guard();
         clear_widget_raster_caches();
         let red_svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
             <rect id="box" x="0" y="0" width="16" height="16" fill="#ff0000"/>
@@ -2753,6 +2805,7 @@ mod tests {
 
     #[test]
     fn retained_plan_bound_cache_is_invalidated_by_resolved_binding_values() {
+        let _cache_guard = widget_cache_test_guard();
         clear_widget_raster_caches();
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
             <rect id="bar" x="0" y="0" width="0" height="16" fill="#00ff00"/>
@@ -2814,6 +2867,7 @@ mod tests {
 
     #[test]
     fn retained_plan_bound_cache_includes_primitive_layers_after_static_layers() {
+        let _cache_guard = widget_cache_test_guard();
         clear_widget_raster_caches();
         let background = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
             <rect id="bg" x="0" y="0" width="16" height="16" fill="#000000"/>
@@ -2914,6 +2968,7 @@ mod tests {
 
     #[test]
     fn text_svg_cache_is_stable_across_opacity_only_changes() {
+        let _cache_guard = widget_cache_test_guard();
         clear_widget_raster_caches();
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
             <g id="fade"><text id="label" x="4" y="20" font-size="12" fill="#ffffff">CPU</text></g>
@@ -2957,6 +3012,7 @@ mod tests {
 
     #[test]
     fn text_svg_cache_is_stable_across_text_fill_color_changes() {
+        let _cache_guard = widget_cache_test_guard();
         clear_widget_raster_caches();
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
             <text id="label" x="4" y="20" font-size="12" fill="#ffffff">CPU</text>
@@ -3010,7 +3066,41 @@ mod tests {
     }
 
     #[test]
+    fn primitive_text_fill_none_is_not_tinted_black() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
+            <rect id="bg" x="0" y="0" width="64" height="32" fill="#00ff00"/>
+            <text id="label" x="4" y="20" font-size="12" fill="none">CPU</text>
+        </svg>"##;
+        let plan = WidgetRenderPlan::compile(&[(svg, &[])]);
+        let constraints = HashMap::new();
+        let params = HashMap::new();
+
+        let rendered = rasterize_widget_render_plan(&plan, &constraints, &params, 64, 32)
+            .expect("text with fill none should still rasterize the non-text layer");
+        let expected = rasterize_widget_render_plan(
+            &WidgetRenderPlan::compile(&[(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
+                    <rect id="bg" x="0" y="0" width="64" height="32" fill="#00ff00"/>
+                </svg>"##,
+                &[],
+            )]),
+            &constraints,
+            &params,
+            64,
+            32,
+        )
+        .expect("background-only control should rasterize");
+
+        assert_eq!(
+            rendered.data(),
+            expected.data(),
+            "fill=\"none\" text must not fall back to black tinting"
+        );
+    }
+
+    #[test]
     fn text_content_changes_reuse_primitive_non_text_segments() {
+        let _cache_guard = widget_cache_test_guard();
         clear_widget_raster_caches();
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
             <rect id="bar" x="0" y="0" width="32" height="32" fill="#00ff00"/>
@@ -3041,9 +3131,8 @@ mod tests {
             .expect("label B should rasterize");
         let primitive_plan =
             PrimitiveSvgLayerPlan::parse(svg).expect("primitive layer should parse");
-        let text_ids = primitive_plan.text_target_ids();
         let non_text_digest = resolve_layer_bindings(&bindings, &params_a, &constraints)
-            .digest_excluding_targets(&text_ids);
+            .digest_excluding_targets(&primitive_plan.text_target_ids);
         let first_segment_key = primitive_non_text_segment_cache_key(
             plan.layers[0].source_digest,
             0,

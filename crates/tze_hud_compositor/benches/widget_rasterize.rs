@@ -247,11 +247,20 @@ fn bench_gauge_512x512_warm_text_changing(c: &mut Criterion) {
         BenchmarkId::new("gauge_512x512", "warm_text_changing"),
         |b| {
             let mut params = gauge_params();
+            let labels: Vec<String> = (0..997).map(|idx| format!("load-{idx:03}")).collect();
+            *params.get_mut("label").expect("label param exists") =
+                WidgetParameterValue::String(String::with_capacity(8));
             let mut i = 0u32;
             b.iter(|| {
                 i = i.wrapping_add(1);
-                *params.get_mut("label").expect("label param exists") =
-                    WidgetParameterValue::String(format!("load-{:03}", i % 997));
+                let label = labels[(i as usize) % labels.len()].as_str();
+                match params.get_mut("label").expect("label param exists") {
+                    WidgetParameterValue::String(current) => {
+                        current.clear();
+                        current.push_str(label);
+                    }
+                    _ => unreachable!("label param is initialized as a string"),
+                }
                 black_box(rasterize_widget_render_plan(
                     black_box(&plan),
                     black_box(&constraints),
