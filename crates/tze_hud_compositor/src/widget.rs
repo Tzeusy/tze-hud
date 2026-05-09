@@ -28,7 +28,7 @@
 //! using z_order >= WIDGET_TILE_Z_MIN (0x9000_0000), which places widget tiles
 //! above zone tiles.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -37,6 +37,780 @@ use tze_hud_scene::types::{
     GeometryPolicy, Rgba, WIDGET_TILE_Z_MIN, WidgetBinding, WidgetBindingMapping, WidgetDefinition,
     WidgetParameterValue, WidgetRegistry,
 };
+
+// ─── SVG render plans ────────────────────────────────────────────────────────
+
+/// Retained CPU render plan for widget SVG layers.
+///
+/// The plan owns SVG text and cloned bindings so the compositor can compile it
+/// once per widget definition and reuse it across parameter changes. Layers
+/// that match the compositor's small primitive subset bypass repeated XML parse
+/// and render directly through `tiny-skia`; unsupported layers keep the existing
+/// `resvg` fallback.
+pub struct WidgetRenderPlan {
+    layers: Vec<WidgetRenderPlanLayer>,
+}
+
+struct WidgetRenderPlanLayer {
+    svg_text: String,
+    bindings: Vec<WidgetBinding>,
+    source_digest: [u8; 32],
+    primitive_plan: Option<PrimitiveSvgLayerPlan>,
+}
+
+impl WidgetRenderPlan {
+    /// Compile a retained render plan from SVG text and per-layer bindings.
+    pub fn compile(svg_layers: &[(&str, &[WidgetBinding])]) -> Self {
+        let layers = svg_layers
+            .iter()
+            .map(|(svg_text, bindings)| WidgetRenderPlanLayer {
+                svg_text: (*svg_text).to_string(),
+                bindings: (*bindings).to_vec(),
+                source_digest: *blake3::hash(svg_text.as_bytes()).as_bytes(),
+                primitive_plan: PrimitiveSvgLayerPlan::parse(svg_text),
+            })
+            .collect();
+        Self { layers }
+    }
+}
+
+#[derive(Clone)]
+struct PrimitiveSvgLayerPlan {
+    view_box: SvgViewBox,
+    items: Vec<PrimitiveItem>,
+}
+
+#[derive(Clone, Copy)]
+struct SvgViewBox {
+    min_x: f32,
+    min_y: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Clone)]
+enum PrimitiveItem {
+    Rect(PrimitiveRect),
+    Circle(PrimitiveCircle),
+    Text(PrimitiveText),
+}
+
+#[derive(Clone)]
+struct PrimitiveRect {
+    id: Option<String>,
+    ancestor_ids: Vec<String>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    fill: Option<String>,
+    fill_opacity: f32,
+    stroke: Option<String>,
+    stroke_opacity: f32,
+    stroke_width: f32,
+    opacity: f32,
+}
+
+#[derive(Clone)]
+struct PrimitiveCircle {
+    id: Option<String>,
+    ancestor_ids: Vec<String>,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    fill: Option<String>,
+    fill_opacity: f32,
+    stroke: Option<String>,
+    stroke_opacity: f32,
+    stroke_width: f32,
+    opacity: f32,
+}
+
+#[derive(Clone)]
+struct PrimitiveText {
+    id: Option<String>,
+    ancestor_ids: Vec<String>,
+    view_box: SvgViewBox,
+    x: f32,
+    y: f32,
+    text_anchor: Option<String>,
+    dominant_baseline: Option<String>,
+    font_family: Option<String>,
+    font_size: f32,
+    fill: Option<String>,
+    opacity: f32,
+    content: String,
+}
+
+#[derive(Clone)]
+struct PrimitiveGroup {
+    id: Option<String>,
+    opacity: f32,
+}
+
+struct ResolvedLayerBindings {
+    by_target_attr: BTreeMap<(String, String), String>,
+    digest: [u8; 32],
+}
+
+impl PrimitiveSvgLayerPlan {
+    fn parse(svg_text: &str) -> Option<Self> {
+        if contains_unsupported_primitive_svg(svg_text) {
+            return None;
+        }
+
+        let svg_tag = find_start_tag(svg_text, "svg")?;
+        let svg_attrs = parse_tag_attrs(svg_tag);
+        let view_box = parse_view_box(&svg_attrs).or_else(|| {
+            let width = parse_f32_attr(&svg_attrs, "width")?;
+            let height = parse_f32_attr(&svg_attrs, "height")?;
+            Some(SvgViewBox {
+                min_x: 0.0,
+                min_y: 0.0,
+                width,
+                height,
+            })
+        })?;
+        if view_box.width <= 0.0 || view_box.height <= 0.0 {
+            return None;
+        }
+
+        let mut items = Vec::new();
+        let mut groups: Vec<PrimitiveGroup> = Vec::new();
+        let mut skip_depth = 0usize;
+        let mut pos = 0usize;
+
+        while let Some(tag_start_rel) = svg_text[pos..].find('<') {
+            let tag_start = pos + tag_start_rel;
+            let tag_end_rel = find_tag_end(&svg_text[tag_start..])?;
+            let tag_end = tag_start + tag_end_rel;
+            let raw_tag = &svg_text[tag_start..=tag_end];
+            let tag_name = match tag_name(raw_tag) {
+                Some(name) => name,
+                None => {
+                    pos = tag_end + 1;
+                    continue;
+                }
+            };
+
+            if raw_tag.starts_with("</") {
+                if tag_name == "g" {
+                    let _ = groups.pop();
+                } else if (tag_name == "defs" || tag_name == "clipPath") && skip_depth > 0 {
+                    skip_depth -= 1;
+                }
+                pos = tag_end + 1;
+                continue;
+            }
+
+            let self_closing = raw_tag.ends_with("/>");
+            if tag_name == "defs" || tag_name == "clipPath" {
+                if !self_closing {
+                    skip_depth += 1;
+                }
+                pos = tag_end + 1;
+                continue;
+            }
+            if skip_depth > 0 {
+                pos = tag_end + 1;
+                continue;
+            }
+
+            let attrs = parse_tag_attrs(raw_tag);
+            match tag_name {
+                "g" => {
+                    groups.push(PrimitiveGroup {
+                        id: attrs.get("id").cloned(),
+                        opacity: parse_f32_attr(&attrs, "opacity").unwrap_or(1.0),
+                    });
+                }
+                "rect" => {
+                    if let Some(rect) = PrimitiveRect::from_attrs(&attrs, &groups) {
+                        items.push(PrimitiveItem::Rect(rect));
+                    }
+                }
+                "circle" => {
+                    if let Some(circle) = PrimitiveCircle::from_attrs(&attrs, &groups) {
+                        items.push(PrimitiveItem::Circle(circle));
+                    }
+                }
+                "text" => {
+                    let close = svg_text[tag_end + 1..].find("</text>")?;
+                    let content = &svg_text[tag_end + 1..tag_end + 1 + close];
+                    if let Some(text) =
+                        PrimitiveText::from_attrs(&attrs, &groups, view_box, content)
+                    {
+                        items.push(PrimitiveItem::Text(text));
+                    }
+                    pos = tag_end + 1 + close + "</text>".len();
+                    continue;
+                }
+                "svg" | "?xml" | "!--" => {}
+                _ => return None,
+            }
+
+            pos = tag_end + 1;
+        }
+
+        Some(Self { view_box, items })
+    }
+
+    fn rasterize(
+        &self,
+        resolved_bindings: &ResolvedLayerBindings,
+        pixel_width: u32,
+        pixel_height: u32,
+    ) -> Option<tiny_skia::Pixmap> {
+        let mut pixmap = tiny_skia::Pixmap::new(pixel_width, pixel_height)?;
+        self.draw_onto(&mut pixmap, resolved_bindings, pixel_width, pixel_height);
+        Some(pixmap)
+    }
+
+    fn draw_onto(
+        &self,
+        pixmap: &mut tiny_skia::Pixmap,
+        resolved_bindings: &ResolvedLayerBindings,
+        pixel_width: u32,
+        pixel_height: u32,
+    ) {
+        let sx = pixel_width as f32 / self.view_box.width;
+        let sy = pixel_height as f32 / self.view_box.height;
+        let uniform_scale = sx.min(sy);
+        let rendered_w = self.view_box.width * uniform_scale;
+        let rendered_h = self.view_box.height * uniform_scale;
+        let offset_x =
+            (pixel_width as f32 - rendered_w) * 0.5 - self.view_box.min_x * uniform_scale;
+        let offset_y =
+            (pixel_height as f32 - rendered_h) * 0.5 - self.view_box.min_y * uniform_scale;
+        let transform = tiny_skia::Transform::from_translate(offset_x, offset_y)
+            .post_scale(uniform_scale, uniform_scale);
+
+        for item in &self.items {
+            match item {
+                PrimitiveItem::Rect(rect) => {
+                    rect.draw(pixmap, resolved_bindings, transform);
+                }
+                PrimitiveItem::Circle(circle) => {
+                    circle.draw(pixmap, resolved_bindings, transform);
+                }
+                PrimitiveItem::Text(text) => {
+                    text.draw(pixmap, resolved_bindings, pixel_width, pixel_height);
+                }
+            }
+        }
+    }
+}
+
+impl PrimitiveRect {
+    fn from_attrs(attrs: &BTreeMap<String, String>, groups: &[PrimitiveGroup]) -> Option<Self> {
+        Some(Self {
+            id: attrs.get("id").cloned(),
+            ancestor_ids: group_ids(groups),
+            x: parse_f32_attr(attrs, "x").unwrap_or(0.0),
+            y: parse_f32_attr(attrs, "y").unwrap_or(0.0),
+            width: parse_f32_attr(attrs, "width")?,
+            height: parse_f32_attr(attrs, "height")?,
+            fill: attrs.get("fill").cloned(),
+            fill_opacity: parse_f32_attr(attrs, "fill-opacity").unwrap_or(1.0),
+            stroke: attrs.get("stroke").cloned(),
+            stroke_opacity: parse_f32_attr(attrs, "stroke-opacity").unwrap_or(1.0),
+            stroke_width: parse_f32_attr(attrs, "stroke-width").unwrap_or(1.0),
+            opacity: parse_f32_attr(attrs, "opacity").unwrap_or(1.0) * group_opacity(groups),
+        })
+    }
+
+    fn draw(
+        &self,
+        pixmap: &mut tiny_skia::Pixmap,
+        bindings: &ResolvedLayerBindings,
+        transform: tiny_skia::Transform,
+    ) {
+        let x = self.bound_f32(bindings, "x", self.x);
+        let y = self.bound_f32(bindings, "y", self.y);
+        let width = self.bound_f32(bindings, "width", self.width);
+        let height = self.bound_f32(bindings, "height", self.height);
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let Some(rect) = tiny_skia::Rect::from_xywh(x, y, width, height) else {
+            return;
+        };
+        let path = tiny_skia::PathBuilder::from_rect(rect);
+        if let Some(paint) = self.fill_paint(bindings) {
+            pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, transform, None);
+        }
+        if let Some((paint, stroke)) = self.stroke_paint(bindings) {
+            pixmap.stroke_path(&path, &paint, &stroke, transform, None);
+        }
+    }
+
+    fn bound_attr<'a>(
+        &'a self,
+        bindings: &'a ResolvedLayerBindings,
+        attr: &str,
+    ) -> Option<&'a str> {
+        let id = self.id.as_ref()?;
+        bindings
+            .by_target_attr
+            .get(&(id.clone(), attr.to_string()))
+            .map(String::as_str)
+    }
+
+    fn bound_f32(&self, bindings: &ResolvedLayerBindings, attr: &str, default: f32) -> f32 {
+        self.bound_attr(bindings, attr)
+            .and_then(parse_svg_number)
+            .unwrap_or(default)
+    }
+
+    fn effective_opacity(&self, bindings: &ResolvedLayerBindings) -> f32 {
+        self.opacity * bound_ancestor_opacity(&self.ancestor_ids, bindings)
+    }
+
+    fn fill_paint(&self, bindings: &ResolvedLayerBindings) -> Option<tiny_skia::Paint<'static>> {
+        let color = self
+            .bound_attr(bindings, "fill")
+            .or(self.fill.as_deref())
+            .and_then(parse_svg_color)?;
+        let alpha =
+            (color.3 * self.fill_opacity * self.effective_opacity(bindings)).clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return None;
+        }
+        Some(paint_rgba(color.0, color.1, color.2, alpha))
+    }
+
+    fn stroke_paint(
+        &self,
+        bindings: &ResolvedLayerBindings,
+    ) -> Option<(tiny_skia::Paint<'static>, tiny_skia::Stroke)> {
+        let color = self
+            .bound_attr(bindings, "stroke")
+            .or(self.stroke.as_deref())
+            .and_then(parse_svg_color)?;
+        let alpha =
+            (color.3 * self.stroke_opacity * self.effective_opacity(bindings)).clamp(0.0, 1.0);
+        if alpha <= 0.0 || self.stroke_width <= 0.0 {
+            return None;
+        }
+        let stroke = tiny_skia::Stroke {
+            width: self.stroke_width,
+            ..Default::default()
+        };
+        Some((paint_rgba(color.0, color.1, color.2, alpha), stroke))
+    }
+}
+
+impl PrimitiveCircle {
+    fn from_attrs(attrs: &BTreeMap<String, String>, groups: &[PrimitiveGroup]) -> Option<Self> {
+        Some(Self {
+            id: attrs.get("id").cloned(),
+            ancestor_ids: group_ids(groups),
+            cx: parse_f32_attr(attrs, "cx")?,
+            cy: parse_f32_attr(attrs, "cy")?,
+            r: parse_f32_attr(attrs, "r")?,
+            fill: attrs.get("fill").cloned(),
+            fill_opacity: parse_f32_attr(attrs, "fill-opacity").unwrap_or(1.0),
+            stroke: attrs.get("stroke").cloned(),
+            stroke_opacity: parse_f32_attr(attrs, "stroke-opacity").unwrap_or(1.0),
+            stroke_width: parse_f32_attr(attrs, "stroke-width").unwrap_or(1.0),
+            opacity: parse_f32_attr(attrs, "opacity").unwrap_or(1.0) * group_opacity(groups),
+        })
+    }
+
+    fn draw(
+        &self,
+        pixmap: &mut tiny_skia::Pixmap,
+        bindings: &ResolvedLayerBindings,
+        transform: tiny_skia::Transform,
+    ) {
+        let r = self.bound_f32(bindings, "r", self.r);
+        if r <= 0.0 {
+            return;
+        }
+        let Some(path) = tiny_skia::PathBuilder::from_circle(
+            self.bound_f32(bindings, "cx", self.cx),
+            self.bound_f32(bindings, "cy", self.cy),
+            r,
+        ) else {
+            return;
+        };
+        if let Some(paint) = self.fill_paint(bindings) {
+            pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, transform, None);
+        }
+        if let Some((paint, stroke)) = self.stroke_paint(bindings) {
+            pixmap.stroke_path(&path, &paint, &stroke, transform, None);
+        }
+    }
+
+    fn bound_attr<'a>(
+        &'a self,
+        bindings: &'a ResolvedLayerBindings,
+        attr: &str,
+    ) -> Option<&'a str> {
+        let id = self.id.as_ref()?;
+        bindings
+            .by_target_attr
+            .get(&(id.clone(), attr.to_string()))
+            .map(String::as_str)
+    }
+
+    fn bound_f32(&self, bindings: &ResolvedLayerBindings, attr: &str, default: f32) -> f32 {
+        self.bound_attr(bindings, attr)
+            .and_then(parse_svg_number)
+            .unwrap_or(default)
+    }
+
+    fn effective_opacity(&self, bindings: &ResolvedLayerBindings) -> f32 {
+        self.opacity * bound_ancestor_opacity(&self.ancestor_ids, bindings)
+    }
+
+    fn fill_paint(&self, bindings: &ResolvedLayerBindings) -> Option<tiny_skia::Paint<'static>> {
+        let color = self
+            .bound_attr(bindings, "fill")
+            .or(self.fill.as_deref())
+            .and_then(parse_svg_color)?;
+        let alpha =
+            (color.3 * self.fill_opacity * self.effective_opacity(bindings)).clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return None;
+        }
+        Some(paint_rgba(color.0, color.1, color.2, alpha))
+    }
+
+    fn stroke_paint(
+        &self,
+        bindings: &ResolvedLayerBindings,
+    ) -> Option<(tiny_skia::Paint<'static>, tiny_skia::Stroke)> {
+        let color = self
+            .bound_attr(bindings, "stroke")
+            .or(self.stroke.as_deref())
+            .and_then(parse_svg_color)?;
+        let alpha =
+            (color.3 * self.stroke_opacity * self.effective_opacity(bindings)).clamp(0.0, 1.0);
+        if alpha <= 0.0 || self.stroke_width <= 0.0 {
+            return None;
+        }
+        let stroke = tiny_skia::Stroke {
+            width: self.stroke_width,
+            ..Default::default()
+        };
+        Some((paint_rgba(color.0, color.1, color.2, alpha), stroke))
+    }
+}
+
+impl PrimitiveText {
+    fn from_attrs(
+        attrs: &BTreeMap<String, String>,
+        groups: &[PrimitiveGroup],
+        view_box: SvgViewBox,
+        content: &str,
+    ) -> Option<Self> {
+        Some(Self {
+            id: attrs.get("id").cloned(),
+            ancestor_ids: group_ids(groups),
+            view_box,
+            x: parse_f32_attr(attrs, "x").unwrap_or(0.0),
+            y: parse_f32_attr(attrs, "y").unwrap_or(0.0),
+            text_anchor: attrs.get("text-anchor").cloned(),
+            dominant_baseline: attrs.get("dominant-baseline").cloned(),
+            font_family: attrs.get("font-family").cloned(),
+            font_size: parse_f32_attr(attrs, "font-size").unwrap_or(12.0),
+            fill: attrs.get("fill").cloned(),
+            opacity: parse_f32_attr(attrs, "opacity").unwrap_or(1.0) * group_opacity(groups),
+            content: html_unescape_text(content),
+        })
+    }
+
+    fn draw(
+        &self,
+        pixmap: &mut tiny_skia::Pixmap,
+        bindings: &ResolvedLayerBindings,
+        pixel_width: u32,
+        pixel_height: u32,
+    ) {
+        let content = self
+            .bound_attr(bindings, "text-content")
+            .unwrap_or(self.content.as_str());
+        if content.is_empty() {
+            return;
+        }
+        let color = self
+            .bound_attr(bindings, "fill")
+            .or(self.fill.as_deref())
+            .and_then(parse_svg_color);
+        let opacity = self.opacity * bound_ancestor_opacity(&self.ancestor_ids, bindings);
+        if opacity <= 0.0 {
+            return;
+        }
+        let text_svg = self.render_svg(content, color, opacity);
+        let Some(layer) = rasterize_cached_text_svg(&text_svg, pixel_width, pixel_height) else {
+            return;
+        };
+        pixmap.as_mut().draw_pixmap(
+            0,
+            0,
+            layer.as_ref().as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
+
+    fn bound_attr<'a>(
+        &'a self,
+        bindings: &'a ResolvedLayerBindings,
+        attr: &str,
+    ) -> Option<&'a str> {
+        let id = self.id.as_ref()?;
+        bindings
+            .by_target_attr
+            .get(&(id.clone(), attr.to_string()))
+            .map(String::as_str)
+    }
+
+    fn render_svg(&self, content: &str, color: Option<(u8, u8, u8, f32)>, opacity: f32) -> String {
+        let fill = color
+            .map(|(r, g, b, a)| {
+                if a >= 0.996 {
+                    format!("#{r:02x}{g:02x}{b:02x}")
+                } else {
+                    format!("rgba({r},{g},{b},{a:.3})")
+                }
+            })
+            .or_else(|| self.fill.clone())
+            .unwrap_or_else(|| "#000000".to_string());
+        let mut attrs = format!(
+            "x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\" opacity=\"{}\"",
+            self.x,
+            self.y,
+            self.font_size,
+            fill,
+            opacity.clamp(0.0, 1.0)
+        );
+        if let Some(value) = &self.text_anchor {
+            attrs.push_str(&format!(" text-anchor=\"{}\"", escape_attr(value)));
+        }
+        if let Some(value) = &self.dominant_baseline {
+            attrs.push_str(&format!(" dominant-baseline=\"{}\"", escape_attr(value)));
+        }
+        if let Some(value) = &self.font_family {
+            attrs.push_str(&format!(" font-family=\"{}\"", escape_attr(value)));
+        }
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\" width=\"{}\" height=\"{}\"><text {attrs}>{}</text></svg>",
+            self.view_box.min_x,
+            self.view_box.min_y,
+            self.view_box.width,
+            self.view_box.height,
+            self.view_box.width,
+            self.view_box.height,
+            escape_text(content)
+        )
+    }
+}
+
+fn group_ids(groups: &[PrimitiveGroup]) -> Vec<String> {
+    groups.iter().filter_map(|group| group.id.clone()).collect()
+}
+
+fn group_opacity(groups: &[PrimitiveGroup]) -> f32 {
+    groups
+        .iter()
+        .map(|group| group.opacity)
+        .fold(1.0, |acc, opacity| acc * opacity)
+}
+
+fn bound_ancestor_opacity(ancestor_ids: &[String], bindings: &ResolvedLayerBindings) -> f32 {
+    ancestor_ids.iter().fold(1.0, |acc, id| {
+        let bound = bindings
+            .by_target_attr
+            .get(&(id.clone(), "opacity".to_string()))
+            .and_then(|value| parse_svg_number(value))
+            .unwrap_or(1.0);
+        acc * bound
+    })
+}
+
+fn contains_unsupported_primitive_svg(svg_text: &str) -> bool {
+    [
+        "<path",
+        "<line",
+        "<polyline",
+        "<polygon",
+        "<ellipse",
+        "<image",
+        "<use",
+        "<linearGradient",
+        "<radialGradient",
+        "<pattern",
+        " transform=",
+    ]
+    .iter()
+    .any(|needle| svg_text.contains(needle))
+}
+
+fn find_start_tag<'a>(svg_text: &'a str, name: &str) -> Option<&'a str> {
+    let start = svg_text.find(&format!("<{name}"))?;
+    let end = start + find_tag_end(&svg_text[start..])?;
+    Some(&svg_text[start..=end])
+}
+
+fn tag_name(raw_tag: &str) -> Option<&str> {
+    let trimmed = raw_tag.trim_start_matches('<').trim_start_matches('/');
+    let end = trimmed
+        .char_indices()
+        .find_map(|(idx, ch)| (ch.is_whitespace() || ch == '>' || ch == '/').then_some(idx))
+        .unwrap_or(trimmed.len());
+    let name = &trimmed[..end];
+    (!name.is_empty()).then_some(name)
+}
+
+fn parse_tag_attrs(raw_tag: &str) -> BTreeMap<String, String> {
+    let mut attrs = BTreeMap::new();
+    let mut i = match raw_tag.find(char::is_whitespace) {
+        Some(pos) => pos + 1,
+        None => return attrs,
+    };
+    let bytes = raw_tag.as_bytes();
+
+    while i < raw_tag.len() {
+        while i < raw_tag.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= raw_tag.len() || bytes[i] == b'>' || bytes[i] == b'/' {
+            break;
+        }
+
+        let key_start = i;
+        while i < raw_tag.len()
+            && !bytes[i].is_ascii_whitespace()
+            && bytes[i] != b'='
+            && bytes[i] != b'>'
+            && bytes[i] != b'/'
+        {
+            i += 1;
+        }
+        let key = raw_tag[key_start..i].to_string();
+        while i < raw_tag.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= raw_tag.len() || bytes[i] != b'=' {
+            continue;
+        }
+        i += 1;
+        while i < raw_tag.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= raw_tag.len() {
+            break;
+        }
+        let quote = bytes[i];
+        if quote != b'"' && quote != b'\'' {
+            continue;
+        }
+        i += 1;
+        let value_start = i;
+        while i < raw_tag.len() && bytes[i] != quote {
+            i += 1;
+        }
+        if i <= raw_tag.len() {
+            attrs.insert(key, raw_tag[value_start..i].to_string());
+        }
+        i += 1;
+    }
+
+    attrs
+}
+
+fn parse_view_box(attrs: &BTreeMap<String, String>) -> Option<SvgViewBox> {
+    let raw = attrs.get("viewBox")?;
+    let nums: Vec<f32> = raw
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',')
+        .filter(|part| !part.is_empty())
+        .filter_map(parse_svg_number)
+        .collect();
+    (nums.len() == 4).then_some(SvgViewBox {
+        min_x: nums[0],
+        min_y: nums[1],
+        width: nums[2],
+        height: nums[3],
+    })
+}
+
+fn parse_f32_attr(attrs: &BTreeMap<String, String>, key: &str) -> Option<f32> {
+    attrs.get(key).and_then(|value| parse_svg_number(value))
+}
+
+fn parse_svg_number(value: &str) -> Option<f32> {
+    let trimmed = value.trim();
+    let end = trimmed
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            (!(ch.is_ascii_digit() || matches!(ch, '.' | '-' | '+' | 'e' | 'E'))).then_some(idx)
+        })
+        .unwrap_or(trimmed.len());
+    trimmed[..end].parse::<f32>().ok()
+}
+
+fn parse_svg_color(value: &str) -> Option<(u8, u8, u8, f32)> {
+    let v = value.trim();
+    if v == "none" {
+        return None;
+    }
+    if let Some(hex) = v.strip_prefix('#') {
+        return match hex.len() {
+            3 => {
+                let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
+                let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
+                let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
+                Some((r, g, b, 1.0))
+            }
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                Some((r, g, b, 1.0))
+            }
+            _ => None,
+        };
+    }
+    if let Some(raw) = v.strip_prefix("rgba(").and_then(|s| s.strip_suffix(')')) {
+        let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
+        if parts.len() == 4 {
+            let r = parts[0].parse::<u8>().ok()?;
+            let g = parts[1].parse::<u8>().ok()?;
+            let b = parts[2].parse::<u8>().ok()?;
+            let a = parts[3].parse::<f32>().ok()?;
+            return Some((r, g, b, a));
+        }
+    }
+    None
+}
+
+fn paint_rgba(r: u8, g: u8, b: u8, a: f32) -> tiny_skia::Paint<'static> {
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8);
+    paint.anti_alias = true;
+    paint
+}
+
+fn escape_attr(value: &str) -> String {
+    escape_text(value)
+}
+
+fn escape_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn html_unescape_text(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
 
 // ─── SVG attribute manipulation ───────────────────────────────────────────────
 
@@ -485,6 +1259,152 @@ fn static_svg_layer_cache_key(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RasterizedLayerCacheKey {
+    source_digest: [u8; 32],
+    binding_digest: [u8; 32],
+    pixel_width: u32,
+    pixel_height: u32,
+}
+
+const BOUND_SVG_LAYER_CACHE_MAX_ENTRIES: usize = 128;
+const BOUND_SVG_LAYER_CACHE_MAX_BYTES: usize = 48 * 1024 * 1024;
+const TEXT_SVG_LAYER_CACHE_MAX_ENTRIES: usize = 128;
+const TEXT_SVG_LAYER_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const COMPOSED_WIDGET_CACHE_MAX_ENTRIES: usize = 64;
+const COMPOSED_WIDGET_CACHE_MAX_BYTES: usize = 48 * 1024 * 1024;
+
+type RasterizedLayerCache = StaticSvgLayerCache;
+
+fn bound_svg_layer_cache() -> &'static Mutex<RasterizedLayerCache> {
+    static CACHE: OnceLock<Mutex<RasterizedLayerCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RasterizedLayerCache::default()))
+}
+
+fn text_svg_layer_cache() -> &'static Mutex<RasterizedLayerCache> {
+    static CACHE: OnceLock<Mutex<RasterizedLayerCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RasterizedLayerCache::default()))
+}
+
+fn composed_widget_cache() -> &'static Mutex<RasterizedLayerCache> {
+    static CACHE: OnceLock<Mutex<RasterizedLayerCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RasterizedLayerCache::default()))
+}
+
+fn cache_key_from_raster_key(key: &RasterizedLayerCacheKey) -> StaticSvgLayerCacheKey {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&key.source_digest);
+    hasher.update(&key.binding_digest);
+    StaticSvgLayerCacheKey {
+        svg_digest: *hasher.finalize().as_bytes(),
+        pixel_width: key.pixel_width,
+        pixel_height: key.pixel_height,
+    }
+}
+
+fn resolve_layer_bindings(
+    bindings: &[WidgetBinding],
+    params: &HashMap<String, WidgetParameterValue>,
+    param_constraints: &HashMap<String, (f32, f32)>,
+) -> ResolvedLayerBindings {
+    let mut by_target_attr = BTreeMap::new();
+    let mut hasher = blake3::Hasher::new();
+
+    for binding in bindings {
+        if let Some(attr_val) = resolve_binding_value(binding, params, param_constraints) {
+            hasher.update(binding.target_element.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(binding.target_attribute.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(attr_val.as_bytes());
+            hasher.update(&[0]);
+            by_target_attr.insert(
+                (
+                    binding.target_element.clone(),
+                    binding.target_attribute.clone(),
+                ),
+                attr_val,
+            );
+        }
+    }
+
+    ResolvedLayerBindings {
+        by_target_attr,
+        digest: *hasher.finalize().as_bytes(),
+    }
+}
+
+fn cached_bound_layer(key: RasterizedLayerCacheKey) -> Option<Arc<tiny_skia::Pixmap>> {
+    bound_svg_layer_cache()
+        .lock()
+        .expect("bound SVG layer cache poisoned")
+        .get(&cache_key_from_raster_key(&key))
+}
+
+fn insert_bound_layer(
+    key: RasterizedLayerCacheKey,
+    pixmap: tiny_skia::Pixmap,
+) -> Option<Arc<tiny_skia::Pixmap>> {
+    let cache_key = cache_key_from_raster_key(&key);
+    let mut cache = bound_svg_layer_cache()
+        .lock()
+        .expect("bound SVG layer cache poisoned");
+    cache.insert_with_limits(
+        cache_key,
+        pixmap,
+        BOUND_SVG_LAYER_CACHE_MAX_ENTRIES,
+        BOUND_SVG_LAYER_CACHE_MAX_BYTES,
+        STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
+    );
+    cache.get(&cache_key)
+}
+
+fn rasterize_cached_text_svg(
+    svg_text: &str,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Option<Arc<tiny_skia::Pixmap>> {
+    let key = static_svg_layer_cache_key(svg_text, pixel_width, pixel_height);
+    if let Some(cached) = text_svg_layer_cache()
+        .lock()
+        .expect("text SVG layer cache poisoned")
+        .get(&key)
+    {
+        return Some(cached);
+    }
+
+    let pixmap = rasterize_single_svg_layer(svg_text, pixel_width, pixel_height)?;
+    let mut cache = text_svg_layer_cache()
+        .lock()
+        .expect("text SVG layer cache poisoned");
+    cache.insert_with_limits(
+        key,
+        pixmap,
+        TEXT_SVG_LAYER_CACHE_MAX_ENTRIES,
+        TEXT_SVG_LAYER_CACHE_MAX_BYTES,
+        STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
+    );
+    cache.get(&key)
+}
+
+fn composed_widget_cache_key(
+    plan: &WidgetRenderPlan,
+    resolved_layers: &[ResolvedLayerBindings],
+    pixel_width: u32,
+    pixel_height: u32,
+) -> StaticSvgLayerCacheKey {
+    let mut hasher = blake3::Hasher::new();
+    for (layer, resolved) in plan.layers.iter().zip(resolved_layers) {
+        hasher.update(&layer.source_digest);
+        hasher.update(&resolved.digest);
+    }
+    StaticSvgLayerCacheKey {
+        svg_digest: *hasher.finalize().as_bytes(),
+        pixel_width,
+        pixel_height,
+    }
+}
+
 fn rasterize_single_svg_layer(
     svg_text: &str,
     pixel_width: u32,
@@ -573,6 +1493,26 @@ pub fn clear_static_svg_layer_cache() {
         .clear();
 }
 
+/// Clear all process-local widget raster caches.
+///
+/// Benchmarks use this to separate cold parse/raster cost from retained-plan
+/// and warm parameter cache behavior.
+pub fn clear_widget_raster_caches() {
+    clear_static_svg_layer_cache();
+    bound_svg_layer_cache()
+        .lock()
+        .expect("bound SVG layer cache poisoned")
+        .clear();
+    text_svg_layer_cache()
+        .lock()
+        .expect("text SVG layer cache poisoned")
+        .clear();
+    composed_widget_cache()
+        .lock()
+        .expect("composed widget cache poisoned")
+        .clear();
+}
+
 fn composite_layer(base: &mut Option<tiny_skia::Pixmap>, layer: RasterizedSvgLayer) {
     // Composite this layer onto the accumulation pixmap (source-over).
     // Uses tiny_skia::PixmapMut::draw_pixmap which is SIMD-optimised and
@@ -625,20 +1565,78 @@ pub fn rasterize_svg_layers(
     pixel_width: u32,
     pixel_height: u32,
 ) -> Option<tiny_skia::Pixmap> {
+    let plan = WidgetRenderPlan::compile(svg_layers);
+    rasterize_widget_render_plan(&plan, param_constraints, params, pixel_width, pixel_height)
+}
+
+/// Rasterize a retained widget render plan.
+///
+/// Static layers use the static layer cache, bound layers use a digest of the
+/// source SVG plus resolved binding values, and primitive-compatible layers
+/// avoid reparsing XML on warm parameter changes.
+pub fn rasterize_widget_render_plan(
+    plan: &WidgetRenderPlan,
+    param_constraints: &HashMap<String, (f32, f32)>,
+    params: &HashMap<String, WidgetParameterValue>,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Option<tiny_skia::Pixmap> {
+    let resolved_layers: Vec<ResolvedLayerBindings> = plan
+        .layers
+        .iter()
+        .map(|layer| resolve_layer_bindings(&layer.bindings, params, param_constraints))
+        .collect();
+    let composed_key = composed_widget_cache_key(plan, &resolved_layers, pixel_width, pixel_height);
+    if let Some(cached) = composed_widget_cache()
+        .lock()
+        .expect("composed widget cache poisoned")
+        .get(&composed_key)
+    {
+        return Some((*cached).clone());
+    }
+
     let mut composed: Option<tiny_skia::Pixmap> = None;
 
-    for (svg_text, bindings) in svg_layers {
-        if bindings.is_empty() {
-            if let Some(pixmap) = rasterize_static_svg_layer(svg_text, pixel_width, pixel_height) {
+    for (layer, resolved_bindings) in plan.layers.iter().zip(&resolved_layers) {
+        if layer.bindings.is_empty() {
+            if let Some(pixmap) =
+                rasterize_static_svg_layer(&layer.svg_text, pixel_width, pixel_height)
+            {
                 composite_layer(&mut composed, pixmap);
             }
             continue;
         }
 
-        // Apply parameter bindings to the SVG source. Static layers are cached
-        // above; bound layers intentionally remain parameter-sensitive.
-        let mut modified_svg = (*svg_text).to_string();
-        for binding in *bindings {
+        let cache_key = RasterizedLayerCacheKey {
+            source_digest: layer.source_digest,
+            binding_digest: resolved_bindings.digest,
+            pixel_width,
+            pixel_height,
+        };
+
+        if let Some(cached) = cached_bound_layer(cache_key) {
+            composite_layer(&mut composed, RasterizedSvgLayer::Shared(cached));
+            continue;
+        }
+
+        if let Some(primitive_plan) = &layer.primitive_plan {
+            if let Some(base) = composed.as_mut() {
+                primitive_plan.draw_onto(base, resolved_bindings, pixel_width, pixel_height);
+                continue;
+            }
+            if let Some(pixmap) =
+                primitive_plan.rasterize(resolved_bindings, pixel_width, pixel_height)
+            {
+                if let Some(cached) = insert_bound_layer(cache_key, pixmap) {
+                    composite_layer(&mut composed, RasterizedSvgLayer::Shared(cached));
+                }
+            }
+            continue;
+        }
+
+        // Apply parameter bindings to the SVG source for unsupported layers.
+        let mut modified_svg = layer.svg_text.clone();
+        for binding in &layer.bindings {
             if let Some(attr_val) = resolve_binding_value(binding, params, param_constraints) {
                 modified_svg = apply_svg_attribute(
                     &modified_svg,
@@ -650,11 +1648,27 @@ pub fn rasterize_svg_layers(
         }
 
         if let Some(pixmap) = rasterize_single_svg_layer(&modified_svg, pixel_width, pixel_height) {
-            composite_layer(&mut composed, RasterizedSvgLayer::Owned(pixmap));
+            if let Some(cached) = insert_bound_layer(cache_key, pixmap) {
+                composite_layer(&mut composed, RasterizedSvgLayer::Shared(cached));
+            }
         }
     }
 
-    composed
+    if let Some(pixmap) = composed {
+        let mut cache = composed_widget_cache()
+            .lock()
+            .expect("composed widget cache poisoned");
+        cache.insert_with_limits(
+            composed_key,
+            pixmap,
+            COMPOSED_WIDGET_CACHE_MAX_ENTRIES,
+            COMPOSED_WIDGET_CACHE_MAX_BYTES,
+            STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
+        );
+        return cache.get(&composed_key).map(|cached| (*cached).clone());
+    }
+
+    None
 }
 
 // ─── WidgetRenderer (GPU state) ───────────────────────────────────────────────
@@ -669,6 +1683,9 @@ pub struct WidgetRenderer {
 
     /// Per-instance texture cache keyed by instance_name.
     textures: HashMap<String, WidgetTextureEntry>,
+
+    /// Retained CPU render plans keyed by widget type id.
+    render_plans: HashMap<String, WidgetRenderPlan>,
 
     /// Bind group layout for the texture pipeline.
     texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -711,6 +1728,7 @@ impl WidgetRenderer {
         Self {
             svgs: HashMap::new(),
             textures: HashMap::new(),
+            render_plans: HashMap::new(),
             texture_bind_group_layout,
             texture_pipeline,
         }
@@ -772,6 +1790,7 @@ impl WidgetRenderer {
             (widget_type_id.to_string(), svg_filename.to_string()),
             svg_bytes,
         );
+        self.render_plans.remove(widget_type_id);
         tracing::debug!(
             widget_type = widget_type_id,
             svg_file = svg_filename,
@@ -886,42 +1905,49 @@ impl WidgetRenderer {
             })
             .collect();
 
-        // Resolve SVG text for each layer (bytes → str) without copying the
-        // registered SVG payloads on the hot path.
-        let mut svg_layers: Vec<(&str, &[WidgetBinding])> =
-            Vec::with_capacity(widget_def.layers.len());
+        if !self.render_plans.contains_key(&widget_def.id) {
+            let mut svg_layers: Vec<(&str, &[WidgetBinding])> =
+                Vec::with_capacity(widget_def.layers.len());
 
-        for layer in &widget_def.layers {
-            let key = (widget_def.id.clone(), layer.svg_file.clone());
-            let svg_bytes = match self.svgs.get(&key) {
-                Some(b) => b,
-                None => {
-                    tracing::warn!(
-                        widget = widget_def.id,
-                        svg_file = layer.svg_file,
-                        "SVG bytes not registered for widget layer"
-                    );
-                    continue;
-                }
-            };
-            match std::str::from_utf8(svg_bytes) {
-                Ok(s) => {
-                    svg_layers.push((s, &layer.bindings));
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "widget SVG not valid UTF-8");
+            for layer in &widget_def.layers {
+                let key = (widget_def.id.clone(), layer.svg_file.clone());
+                let svg_bytes = match self.svgs.get(&key) {
+                    Some(b) => b,
+                    None => {
+                        tracing::warn!(
+                            widget = widget_def.id,
+                            svg_file = layer.svg_file,
+                            "SVG bytes not registered for widget layer"
+                        );
+                        continue;
+                    }
+                };
+                match std::str::from_utf8(svg_bytes) {
+                    Ok(s) => {
+                        svg_layers.push((s, &layer.bindings));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "widget SVG not valid UTF-8");
+                    }
                 }
             }
+
+            self.render_plans.insert(
+                widget_def.id.clone(),
+                WidgetRenderPlan::compile(&svg_layers),
+            );
         }
 
         // Delegate to the CPU-only rasterization path (shared with benchmarks/tests).
-        let composed = rasterize_svg_layers(
-            &svg_layers,
-            &param_constraints,
-            params,
-            pixel_width,
-            pixel_height,
-        );
+        let composed = self.render_plans.get(&widget_def.id).and_then(|plan| {
+            rasterize_widget_render_plan(
+                plan,
+                &param_constraints,
+                params,
+                pixel_width,
+                pixel_height,
+            )
+        });
 
         let raster_us = start.elapsed().as_micros() as u64;
 
@@ -1426,6 +2452,90 @@ mod tests {
     }
 
     #[test]
+    fn retained_plan_static_cache_is_invalidated_by_svg_content() {
+        clear_widget_raster_caches();
+        let red_svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect id="box" x="0" y="0" width="16" height="16" fill="#ff0000"/>
+        </svg>"##;
+        let blue_svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect id="box" x="0" y="0" width="16" height="16" fill="#0000ff"/>
+        </svg>"##;
+        let params = HashMap::new();
+        let constraints = HashMap::new();
+
+        let red_plan = WidgetRenderPlan::compile(&[(red_svg, &[])]);
+        let blue_plan = WidgetRenderPlan::compile(&[(blue_svg, &[])]);
+        let red = rasterize_widget_render_plan(&red_plan, &constraints, &params, 16, 16)
+            .expect("red SVG must rasterize");
+        let blue = rasterize_widget_render_plan(&blue_plan, &constraints, &params, 16, 16)
+            .expect("blue SVG must rasterize");
+
+        assert_ne!(
+            red.data(),
+            blue.data(),
+            "same-size static layers with different SVG bytes must not share cached pixels"
+        );
+        assert_eq!(
+            static_svg_layer_cache()
+                .lock()
+                .expect("static cache")
+                .entries
+                .len(),
+            2,
+            "static cache should keep separate entries for separate SVG content digests"
+        );
+    }
+
+    #[test]
+    fn retained_plan_bound_cache_is_invalidated_by_resolved_binding_values() {
+        clear_widget_raster_caches();
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect id="bar" x="0" y="0" width="0" height="16" fill="#00ff00"/>
+        </svg>"##;
+        let binding = WidgetBinding {
+            param: "level".to_string(),
+            target_element: "bar".to_string(),
+            target_attribute: "width".to_string(),
+            mapping: WidgetBindingMapping::Linear {
+                attr_min: 0.0,
+                attr_max: 16.0,
+            },
+        };
+        let bindings = vec![binding];
+        let plan = WidgetRenderPlan::compile(&[(svg, bindings.as_slice())]);
+        let constraints = HashMap::from([("level".to_string(), (0.0f32, 1.0f32))]);
+        let params_half = HashMap::from([("level".to_string(), WidgetParameterValue::F32(0.5))]);
+        let params_full = HashMap::from([("level".to_string(), WidgetParameterValue::F32(1.0))]);
+
+        let half = rasterize_widget_render_plan(&plan, &constraints, &params_half, 16, 16)
+            .expect("half-width bound layer must rasterize");
+        let half_again = rasterize_widget_render_plan(&plan, &constraints, &params_half, 16, 16)
+            .expect("same bound values must rasterize from cache");
+        let full = rasterize_widget_render_plan(&plan, &constraints, &params_full, 16, 16)
+            .expect("full-width bound layer must rasterize");
+
+        assert_eq!(
+            half.data(),
+            half_again.data(),
+            "identical bound values must return identical cached pixels"
+        );
+        assert_ne!(
+            half.data(),
+            full.data(),
+            "changed bound values must invalidate the bound-layer cache key"
+        );
+        assert_eq!(
+            bound_svg_layer_cache()
+                .lock()
+                .expect("bound cache")
+                .entries
+                .len(),
+            2,
+            "bound cache should contain separate entries for half and full resolved bindings"
+        );
+    }
+
+    #[test]
     fn test_apply_svg_attribute_replaces_existing() {
         let svg = r#"<svg><rect id="bar" width="50" fill="blue"/></svg>"#;
         let result = apply_svg_attribute(svg, "bar", "width", "80");
@@ -1792,8 +2902,7 @@ mod tests {
         let elapsed_us = start.elapsed().as_micros();
         if elapsed_us > 2000 {
             eprintln!(
-                "WARNING: 512x512 rasterization took {}µs (budget: 2000µs) — may fail on slow CI",
-                elapsed_us
+                "WARNING: 512x512 rasterization took {elapsed_us}µs (budget: 2000µs) — may fail on slow CI"
             );
         }
         // Verify non-trivial output
@@ -2012,8 +3121,7 @@ mod tests {
         // The reference hardware target is 3GHz single-core; llvmpipe in CI may be slower.
         if elapsed_us > 2000 {
             eprintln!(
-                "WARNING: reference gauge 512×512 rasterization took {}µs (budget: 2000µs) — may fail on slow CI",
-                elapsed_us
+                "WARNING: reference gauge 512×512 rasterization took {elapsed_us}µs (budget: 2000µs) — may fail on slow CI"
             );
         }
 

@@ -8,9 +8,8 @@
 //! Per widget-system/spec.md §Requirement: Widget Compositor Rendering (task 12.11):
 //! > Re-rasterization MUST complete in < 2ms for a 512×512 widget on reference hardware.
 //!
-//! This benchmark measures `rasterize_svg_layers` — the pure CPU path (SVG string
-//! manipulation, `usvg` parsing, `resvg`/`tiny-skia` rendering, layer compositing)
-//! without the GPU texture upload step.
+//! This benchmark measures the retained `WidgetRenderPlan` CPU path without the
+//! GPU texture upload step.
 //!
 //! ## Thresholds
 //!
@@ -24,18 +23,21 @@
 //!
 //! ## Benchmark groups
 //!
-//! - `widget_rasterize/gauge_512x512_cold` — full two-layer gauge at 512×512,
-//!   including static-layer cache miss, SVG string manipulation, and usvg parse
-//!   on each iteration (first-render path).
-//! - `widget_rasterize/gauge_512x512_warm` — two-layer gauge at 512×512, SVG
-//!   strings pre-built and static no-binding layers cached; bound layer
-//!   `usvg` parse + rasterize remains measured (hot path after cache separation).
+//! - `widget_rasterize/gauge_512x512_cold_parse` — full two-layer gauge at
+//!   512×512, including retained-plan compilation and cold raster caches.
+//! - `widget_rasterize/gauge_512x512_warm_identical_params` — retained plan,
+//!   identical params, static + bound layer caches warm.
+//! - `widget_rasterize/gauge_512x512_warm_parameter_changing` — retained plan,
+//!   static/text caches warm, bound numeric/color params changing each iteration.
 //! - `widget_rasterize/gauge_128x128` — same widget at 128×128 for comparison.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use tze_hud_compositor::widget::{clear_static_svg_layer_cache, rasterize_svg_layers};
+use tze_hud_compositor::widget::{
+    WidgetRenderPlan, clear_widget_raster_caches, rasterize_widget_render_plan,
+};
 use tze_hud_scene::types::{WidgetBinding, WidgetBindingMapping, WidgetParameterValue};
 
 // ─── Reference gauge SVG fixtures ────────────────────────────────────────────
@@ -119,6 +121,15 @@ fn gauge_params() -> HashMap<String, WidgetParameterValue> {
     .collect()
 }
 
+fn gauge_params_no_label() -> HashMap<String, WidgetParameterValue> {
+    let mut params = gauge_params();
+    params.insert(
+        "label".to_string(),
+        WidgetParameterValue::String(String::new()),
+    );
+    params
+}
+
 fn gauge_param_constraints() -> HashMap<String, (f32, f32)> {
     [("level".to_string(), (0.0f32, 1.0f32))]
         .into_iter()
@@ -133,14 +144,15 @@ fn bench_gauge_512x512_cold(c: &mut Criterion) {
     let constraints = gauge_param_constraints();
     let mut group = c.benchmark_group("widget_rasterize");
 
-    group.bench_function(BenchmarkId::new("gauge_512x512", "cold"), |b| {
+    group.bench_function(BenchmarkId::new("gauge_512x512", "cold_parse"), |b| {
         b.iter(|| {
-            clear_static_svg_layer_cache();
+            clear_widget_raster_caches();
             let bindings = gauge_fill_bindings();
             let layers: Vec<(&str, &[WidgetBinding])> =
                 vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
-            black_box(rasterize_svg_layers(
-                &layers,
+            let plan = WidgetRenderPlan::compile(&layers);
+            black_box(rasterize_widget_render_plan(
+                &plan,
                 black_box(&constraints),
                 black_box(&params),
                 black_box(512),
@@ -152,53 +164,110 @@ fn bench_gauge_512x512_cold(c: &mut Criterion) {
     group.finish();
 }
 
-/// Two-layer gauge at 512×512 — warm path (bindings pre-built, only SVG parse + rasterize).
-fn bench_gauge_512x512_warm(c: &mut Criterion) {
+/// Two-layer gauge at 512×512 — warm path with identical params.
+fn bench_gauge_512x512_warm_identical_params(c: &mut Criterion) {
+    clear_widget_raster_caches();
     let params = gauge_params();
     let constraints = gauge_param_constraints();
     let bindings = gauge_fill_bindings();
     let layers: Vec<(&str, &[WidgetBinding])> =
         vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
-    let _ = rasterize_svg_layers(&layers, &constraints, &params, 512, 512);
+    let plan = WidgetRenderPlan::compile(&layers);
+    let _ = rasterize_widget_render_plan(&plan, &constraints, &params, 512, 512);
 
     let mut group = c.benchmark_group("widget_rasterize");
 
-    group.bench_function(BenchmarkId::new("gauge_512x512", "warm"), |b| {
-        b.iter(|| {
-            black_box(rasterize_svg_layers(
-                black_box(&layers),
-                black_box(&constraints),
-                black_box(&params),
-                black_box(512),
-                black_box(512),
-            ))
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("gauge_512x512", "warm_identical_params"),
+        |b| {
+            b.iter(|| {
+                black_box(rasterize_widget_render_plan(
+                    black_box(&plan),
+                    black_box(&constraints),
+                    black_box(&params),
+                    black_box(512),
+                    black_box(512),
+                ))
+            })
+        },
+    );
+
+    group.finish();
+}
+
+/// Two-layer gauge at 512×512 — retained plan with changing numeric/color params.
+fn bench_gauge_512x512_warm_parameter_changing(c: &mut Criterion) {
+    clear_widget_raster_caches();
+    let constraints = gauge_param_constraints();
+    let bindings = gauge_fill_bindings();
+    let layers: Vec<(&str, &[WidgetBinding])> =
+        vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
+    let plan = WidgetRenderPlan::compile(&layers);
+    let warm_params = gauge_params_no_label();
+    let _ = rasterize_widget_render_plan(&plan, &constraints, &warm_params, 512, 512);
+    let counter = Cell::new(0u32);
+
+    let mut group = c.benchmark_group("widget_rasterize");
+
+    group.bench_function(
+        BenchmarkId::new("gauge_512x512", "warm_parameter_changing"),
+        |b| {
+            b.iter(|| {
+                let i = counter.get().wrapping_add(1);
+                counter.set(i);
+                let level = ((i % 997) as f32) / 996.0;
+                let mut params = gauge_params_no_label();
+                params.insert("level".to_string(), WidgetParameterValue::F32(level));
+                params.insert(
+                    "fill_color".to_string(),
+                    WidgetParameterValue::Color(tze_hud_scene::types::Rgba::new(
+                        level,
+                        0.706,
+                        1.0 - level * 0.5,
+                        1.0,
+                    )),
+                );
+                black_box(rasterize_widget_render_plan(
+                    black_box(&plan),
+                    black_box(&constraints),
+                    black_box(&params),
+                    black_box(512),
+                    black_box(512),
+                ))
+            })
+        },
+    );
 
     group.finish();
 }
 
 /// Two-layer gauge at 128×128 for scale comparison.
 fn bench_gauge_128x128(c: &mut Criterion) {
+    clear_widget_raster_caches();
     let params = gauge_params();
     let constraints = gauge_param_constraints();
     let bindings = gauge_fill_bindings();
     let layers: Vec<(&str, &[WidgetBinding])> =
         vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
+    let plan = WidgetRenderPlan::compile(&layers);
+    let _ = rasterize_widget_render_plan(&plan, &constraints, &params, 128, 128);
 
     let mut group = c.benchmark_group("widget_rasterize");
 
-    group.bench_function(BenchmarkId::new("gauge_128x128", "warm"), |b| {
-        b.iter(|| {
-            black_box(rasterize_svg_layers(
-                black_box(&layers),
-                black_box(&constraints),
-                black_box(&params),
-                black_box(128),
-                black_box(128),
-            ))
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("gauge_128x128", "warm_identical_params"),
+        |b| {
+            b.iter(|| {
+                black_box(rasterize_widget_render_plan(
+                    black_box(&plan),
+                    black_box(&constraints),
+                    black_box(&params),
+                    black_box(128),
+                    black_box(128),
+                ))
+            })
+        },
+    );
 
     group.finish();
 }
@@ -206,7 +275,8 @@ fn bench_gauge_128x128(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_gauge_512x512_cold,
-    bench_gauge_512x512_warm,
+    bench_gauge_512x512_warm_identical_params,
+    bench_gauge_512x512_warm_parameter_changing,
     bench_gauge_128x128,
 );
 criterion_main!(benches);
