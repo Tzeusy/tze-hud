@@ -48,7 +48,7 @@ Scope ordering from doctrine to mechanism:
    lifecycle contract, envelope slots, capability dialog, role authority.
 3. **This RFC (0014)** — wire shape, state machine diagrams, SDP handling,
    degradation mechanism, worker-pool protocol API, audio stack.
-4. **Capability specs** (`openspec/changes/v2-embodied-media-presence/specs/`)
+4. **Capability specs** (`openspec/changes/_deferred/v2-embodied-media-presence/specs/`)
    — operator-visible contracts authored against this RFC.
 
 **Field number allocation:** This RFC allocates session envelope fields **60–79**
@@ -1590,11 +1590,11 @@ Sign-off criteria for reviewers:
   session-envelope extension decision
 - `docs/reconciliations/webrtc_media_v1_protocol_schema_snapshot_deltas.md` —
   original delta document (superseded by this RFC for field numbering)
-- `openspec/changes/v2-embodied-media-presence/signoff-packet.md` — F29 gate,
+- `openspec/changes/_deferred/v2-embodied-media-presence/signoff-packet.md` — F29 gate,
   E22, E24, E25, E26, D18, C13, C17
-- `openspec/changes/v2-embodied-media-presence/procurement.md` — GPU runner
+- `openspec/changes/_deferred/v2-embodied-media-presence/procurement.md` — GPU runner
   and reference streams (D18)
-- `openspec/changes/v2-embodied-media-presence/specs/media-plane/` — capability
+- `openspec/changes/_deferred/v2-embodied-media-presence/specs/media-plane/` — capability
   spec (authored against this RFC)
 - RFC 0015 (forthcoming) — Embodied Presence Contract
 - RFC 0016 (forthcoming) — Device Profile Execution

@@ -848,7 +848,7 @@ message PolicyTelemetry {
 
 **Source:** v2 embodied-media-presence signoff packet, decision C12 (F29 mandated: RFC 0009 amendment required before implementation beads on this topic).
 **Bead:** hud-ora8.1.12
-**Cross-reference:** `openspec/changes/v2-embodied-media-presence/specs/identity-and-roles/` (capability spec hud-ora8.2.5, to be authored) owns role definitions, user-directory schema, and role-to-capability binding. This amendment establishes only the policy-arbitration impact of those roles.
+**Cross-reference:** `openspec/changes/_deferred/v2-embodied-media-presence/specs/identity-and-roles/` (capability spec hud-ora8.2.5) owns role definitions, user-directory schema, and role-to-capability binding in the deferred v2 program. This amendment establishes only the policy-arbitration impact of those roles.
 
 ---
 
@@ -985,7 +985,7 @@ This amendment extends the cross-RFC interaction table (Section 15):
 |-----|-------------|
 | RFC 0005 (Session Protocol) | Session handshake establishes capability grants; authorizing-principal role is validated at that point. `SessionInit` does not carry a role field — roles are a runtime identity store concern, not a per-session wire field. |
 | RFC 0008 (Lease Governance) | Lease priority grants above Standard require operator role authority per A1.3. The `lease:priority:<N>` capability (Section 8.1) is the existing mechanism; this amendment specifies which roles may authorize its grant. |
-| `openspec/changes/v2-embodied-media-presence/specs/identity-and-roles/` | The `identity-and-roles` capability spec (hud-ora8.2.5) is the authoritative source for role definitions, user-directory schema, role-to-capability binding tables, and the principal identity wire format. This amendment is the policy-arbitration surface of that spec; the full role model lives there. |
+| `openspec/changes/_deferred/v2-embodied-media-presence/specs/identity-and-roles/` | The `identity-and-roles` capability spec (hud-ora8.2.5) is the authoritative source for role definitions, user-directory schema, role-to-capability binding tables, and the principal identity wire format in the deferred v2 program. This amendment is the policy-arbitration surface of that spec; the full role model lives there. |
 
 **v2 non-enforcement note:** Federation-aware `PrincipalOrigin::Federated` fields are defined but the runtime rejects federated principals at load time. Any federation policy enforcement (cross-operator role merge, federated capability delegation) is deferred to a post-v2 phase and requires a separate RFC amendment at that time.
 

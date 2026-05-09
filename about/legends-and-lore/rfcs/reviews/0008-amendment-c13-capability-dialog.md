@@ -7,7 +7,7 @@
 **Depends on:** RFC 0009 Amendment A1 (C12 role-based operators, hud-ora8.1.12)
 **Parent task:** hud-ora8.1 (v2 embodied media presence program preparation)
 **Source decision:** v2-embodied-media-presence signoff packet, C13 (F29 mandated: RFC 0008 amendment required before implementation beads on this topic)
-**Cross-reference:** `openspec/changes/v2-embodied-media-presence/specs/identity-and-roles/` (capability spec hud-ora8.2.5, to be authored) owns the authoritative identity-and-roles schema; this amendment establishes the per-capability grant dialog and remember behavior within lease governance.
+**Cross-reference:** `openspec/changes/_deferred/v2-embodied-media-presence/specs/identity-and-roles/` (capability spec hud-ora8.2.5) owns the authoritative identity-and-roles schema in the deferred v2 program; this amendment establishes the per-capability grant dialog and remember behavior within lease governance.
 
 ---
 
@@ -386,7 +386,7 @@ The capability dialog requires an operator action. Not all operator roles have a
 
 ### A8. Cross-Reference to Identity-and-Roles Capability Spec (hud-ora8.2.5)
 
-The `identity-and-roles` capability spec (to be authored as `openspec/changes/v2-embodied-media-presence/specs/identity-and-roles/spec.md`, issue hud-ora8.2.5) is the **authoritative source** for:
+The `identity-and-roles` capability spec (`openspec/changes/_deferred/v2-embodied-media-presence/specs/identity-and-roles/`, issue hud-ora8.2.5) is the **authoritative source** for the deferred v2 program:
 
 - The complete role definitions and user-directory schema (extended from RFC 0009 A1.1).
 - The role-to-capability binding tables (which capabilities each role may grant, revoke, or be prompted for).
@@ -416,7 +416,7 @@ The following row is addended to the §18 related RFCs table in RFC 0008:
 | RFC / Spec | Relationship |
 |-----------|-------------|
 | RFC 0009 Amendment A1 (C12 role-based operators) | The per-session capability dialog (§A2) requires operator role authority to grant C13 capabilities. `owner` and `admin` roles may grant; `member` and `guest` may not (§A7). Role definitions and user-directory schema are authoritative in RFC 0009 A1 and hud-ora8.2.5. |
-| `openspec/changes/v2-embodied-media-presence/specs/identity-and-roles/` (hud-ora8.2.5) | Authoritative source for role definitions, principal identity store, and role-to-capability binding. This amendment is the lease-governance surface of that spec. |
+| `openspec/changes/_deferred/v2-embodied-media-presence/specs/identity-and-roles/` (hud-ora8.2.5) | Authoritative source for role definitions, principal identity store, and role-to-capability binding in the deferred v2 program. This amendment is the lease-governance surface of that spec. |
 | RFC 0007 (System Shell) | The capability dialog is presented through the system shell chrome layer (RFC 0007 SS6). The dialog MUST be rendered at chrome-layer priority (priority 0) so it cannot be occluded by agent tiles. |
 | RFC 0009 (Policy Arbitration) | Capability grant audit events from §A5 use the audit log infrastructure defined in RFC 0009 SS13.3. |
 

@@ -513,7 +513,7 @@ standalone document is the post-v1 normative specification.
   (C12 role-based operators) — role authority for capability grants
 - `about/heart-and-soul/failure.md` — E25 degradation ladder and axes
   (authoritative doctrine; RFC 0014 media-specific axes to be inserted)
-- `openspec/changes/v2-embodied-media-presence/signoff-packet.md` §E (E24,
+- `openspec/changes/_deferred/v2-embodied-media-presence/signoff-packet.md` §E (E24,
   E25), §"Open items" item 3
 - RFC 0014 (forthcoming) — mechanism layer for media plane; must implement
   this amendment's lifecycle contract
