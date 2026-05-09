@@ -1,4 +1,5 @@
 {
+  "capture_artifact_note": "All screenshot captures in this transcript resolved to the same Windows lock-screen capture blocker; per-step duplicate files were intentionally consolidated into screenshots/lock-screen-capture-blocker.png.",
   "steps": [
     {
       "code": "bootstrap",
@@ -24,7 +25,7 @@
     },
     {
       "code": "attach_publish_output",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/06-attach-publish-output.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325945602573
     },
@@ -47,7 +48,7 @@
     },
     {
       "code": "local_ack_input_pending",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/07-local-ack-input-pending.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325950366733
     },
@@ -65,7 +66,7 @@
     },
     {
       "code": "poll_acknowledge",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/08-poll-acknowledge-handled.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325955115033
     },
@@ -81,7 +82,7 @@
     },
     {
       "code": "collapse",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/09-collapse-compact-card.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325959860200
     },
@@ -98,7 +99,7 @@
     },
     {
       "code": "restore",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/10-restore-expanded.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325964622480
     },
@@ -116,7 +117,7 @@
     },
     {
       "code": "redaction",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/11-redaction.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325969370067
     },
@@ -133,7 +134,7 @@
     },
     {
       "code": "backlog_non_escalation",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/12-backlog-non-escalation.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325974111056
     },
@@ -151,7 +152,7 @@
     },
     {
       "code": "safe_freeze_dismiss",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/13-safe-freeze-dismiss.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325978868986
     },
@@ -168,7 +169,7 @@
     },
     {
       "code": "orphan_cleanup",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/14-orphan-cleanup-before-release.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325983626254
     },
@@ -179,7 +180,7 @@
     },
     {
       "code": "detach_cleanup",
-      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/15-detach-cleanup-removed.png",
+      "screenshot": "docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/screenshots/lock-screen-capture-blocker.png",
       "bytes": 8016309,
       "captured_at_wall_us": 1778325988743907
     }
