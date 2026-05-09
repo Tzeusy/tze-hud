@@ -28,7 +28,10 @@
 //! - `widget_rasterize/gauge_512x512_warm_identical_params` — retained plan,
 //!   identical params, static + bound layer caches warm.
 //! - `widget_rasterize/gauge_512x512_warm_parameter_changing` — retained plan,
-//!   static/text caches warm, bound numeric/color params changing each iteration.
+//!   static/text caches warm, bound numeric/color params changing each iteration
+//!   while text content stays stable.
+//! - `widget_rasterize/gauge_512x512_warm_text_changing` — retained plan with
+//!   non-text primitive segments warm and `text-content` changing each iteration.
 //! - `widget_rasterize/gauge_128x128` — same widget at 128×128 for comparison.
 
 use std::collections::HashMap;
@@ -120,15 +123,6 @@ fn gauge_params() -> HashMap<String, WidgetParameterValue> {
     .collect()
 }
 
-fn gauge_params_no_label() -> HashMap<String, WidgetParameterValue> {
-    let mut params = gauge_params();
-    params.insert(
-        "label".to_string(),
-        WidgetParameterValue::String(String::new()),
-    );
-    params
-}
-
 fn gauge_param_constraints() -> HashMap<String, (f32, f32)> {
     [("level".to_string(), (0.0f32, 1.0f32))]
         .into_iter()
@@ -202,7 +196,7 @@ fn bench_gauge_512x512_warm_parameter_changing(c: &mut Criterion) {
     let layers: Vec<(&str, &[WidgetBinding])> =
         vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
     let plan = WidgetRenderPlan::compile(&layers);
-    let warm_params = gauge_params_no_label();
+    let warm_params = gauge_params();
     let _ = rasterize_widget_render_plan(&plan, &constraints, &warm_params, 512, 512);
 
     let mut group = c.benchmark_group("widget_rasterize");
@@ -210,7 +204,7 @@ fn bench_gauge_512x512_warm_parameter_changing(c: &mut Criterion) {
     group.bench_function(
         BenchmarkId::new("gauge_512x512", "warm_parameter_changing"),
         |b| {
-            let mut params = gauge_params_no_label();
+            let mut params = gauge_params();
             let mut i = 0u32;
             b.iter(|| {
                 i = i.wrapping_add(1);
@@ -222,6 +216,42 @@ fn bench_gauge_512x512_warm_parameter_changing(c: &mut Criterion) {
                     .expect("fill_color param exists") = WidgetParameterValue::Color(
                     tze_hud_scene::types::Rgba::new(level, 0.706, 1.0 - level * 0.5, 1.0),
                 );
+                black_box(rasterize_widget_render_plan(
+                    black_box(&plan),
+                    black_box(&constraints),
+                    black_box(&params),
+                    black_box(512),
+                    black_box(512),
+                ))
+            })
+        },
+    );
+
+    group.finish();
+}
+
+/// Two-layer gauge at 512×512 — retained plan with changing text-content params.
+fn bench_gauge_512x512_warm_text_changing(c: &mut Criterion) {
+    clear_widget_raster_caches();
+    let constraints = gauge_param_constraints();
+    let bindings = gauge_fill_bindings();
+    let layers: Vec<(&str, &[WidgetBinding])> =
+        vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
+    let plan = WidgetRenderPlan::compile(&layers);
+    let warm_params = gauge_params();
+    let _ = rasterize_widget_render_plan(&plan, &constraints, &warm_params, 512, 512);
+
+    let mut group = c.benchmark_group("widget_rasterize");
+
+    group.bench_function(
+        BenchmarkId::new("gauge_512x512", "warm_text_changing"),
+        |b| {
+            let mut params = gauge_params();
+            let mut i = 0u32;
+            b.iter(|| {
+                i = i.wrapping_add(1);
+                *params.get_mut("label").expect("label param exists") =
+                    WidgetParameterValue::String(format!("load-{:03}", i % 997));
                 black_box(rasterize_widget_render_plan(
                     black_box(&plan),
                     black_box(&constraints),
@@ -272,6 +302,7 @@ criterion_group!(
     bench_gauge_512x512_cold,
     bench_gauge_512x512_warm_identical_params,
     bench_gauge_512x512_warm_parameter_changing,
+    bench_gauge_512x512_warm_text_changing,
     bench_gauge_128x128,
 );
 criterion_main!(benches);
