@@ -28,8 +28,8 @@
 //! using z_order >= WIDGET_TILE_Z_MIN (0x9000_0000), which places widget tiles
 //! above zone tiles.
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use tze_hud_scene::DegradationLevel;
@@ -351,6 +351,249 @@ fn shared_widget_fontdb() -> Arc<resvg::usvg::fontdb::Database> {
         .clone()
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct StaticSvgLayerCacheKey {
+    svg_digest: [u8; 32],
+    pixel_width: u32,
+    pixel_height: u32,
+}
+
+const STATIC_SVG_LAYER_CACHE_MAX_ENTRIES: usize = 64;
+const STATIC_SVG_LAYER_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+
+struct StaticSvgLayerCacheEntry {
+    pixmap: Arc<tiny_skia::Pixmap>,
+    byte_len: usize,
+}
+
+#[derive(Default)]
+struct StaticSvgLayerCache {
+    entries: HashMap<StaticSvgLayerCacheKey, StaticSvgLayerCacheEntry>,
+    lru: VecDeque<StaticSvgLayerCacheKey>,
+    total_bytes: usize,
+}
+
+impl StaticSvgLayerCache {
+    fn get(&mut self, key: &StaticSvgLayerCacheKey) -> Option<Arc<tiny_skia::Pixmap>> {
+        let pixmap = self.entries.get(key)?.pixmap.clone();
+        self.promote(key);
+        Some(pixmap)
+    }
+
+    fn insert(&mut self, key: StaticSvgLayerCacheKey, pixmap: tiny_skia::Pixmap) {
+        self.insert_with_limits(
+            key,
+            pixmap,
+            STATIC_SVG_LAYER_CACHE_MAX_ENTRIES,
+            STATIC_SVG_LAYER_CACHE_MAX_BYTES,
+            STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
+        );
+    }
+
+    fn insert_with_limits(
+        &mut self,
+        key: StaticSvgLayerCacheKey,
+        pixmap: tiny_skia::Pixmap,
+        max_entries: usize,
+        max_bytes: usize,
+        max_entry_bytes: usize,
+    ) {
+        let byte_len = pixmap.data().len();
+        if byte_len > max_entry_bytes || byte_len > max_bytes || max_entries == 0 {
+            return;
+        }
+
+        if let Some(old) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.byte_len);
+            self.remove_from_lru(&key);
+        }
+
+        self.total_bytes = self.total_bytes.saturating_add(byte_len);
+        self.entries.insert(
+            key,
+            StaticSvgLayerCacheEntry {
+                pixmap: Arc::new(pixmap),
+                byte_len,
+            },
+        );
+        self.lru.push_back(key);
+
+        while self.entries.len() > max_entries || self.total_bytes > max_bytes {
+            if !self.evict_lru_one() {
+                break;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+        self.total_bytes = 0;
+    }
+
+    fn promote(&mut self, key: &StaticSvgLayerCacheKey) {
+        self.remove_from_lru(key);
+        self.lru.push_back(*key);
+    }
+
+    fn remove_from_lru(&mut self, key: &StaticSvgLayerCacheKey) {
+        if let Some(pos) = self.lru.iter().position(|candidate| candidate == key) {
+            self.lru.remove(pos);
+        }
+    }
+
+    fn evict_lru_one(&mut self) -> bool {
+        while let Some(key) = self.lru.pop_front() {
+            if let Some(entry) = self.entries.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.byte_len);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+enum RasterizedSvgLayer {
+    Owned(tiny_skia::Pixmap),
+    Shared(Arc<tiny_skia::Pixmap>),
+}
+
+impl RasterizedSvgLayer {
+    fn as_ref(&self) -> tiny_skia::PixmapRef<'_> {
+        match self {
+            Self::Owned(pixmap) => pixmap.as_ref(),
+            Self::Shared(pixmap) => pixmap.as_ref().as_ref(),
+        }
+    }
+}
+
+fn static_svg_layer_cache() -> &'static Mutex<StaticSvgLayerCache> {
+    static CACHE: OnceLock<Mutex<StaticSvgLayerCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(StaticSvgLayerCache::default()))
+}
+
+fn static_svg_layer_cache_key(
+    svg_text: &str,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> StaticSvgLayerCacheKey {
+    StaticSvgLayerCacheKey {
+        svg_digest: *blake3::hash(svg_text.as_bytes()).as_bytes(),
+        pixel_width,
+        pixel_height,
+    }
+}
+
+fn rasterize_single_svg_layer(
+    svg_text: &str,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Option<tiny_skia::Pixmap> {
+    // Parse modified SVG into usvg::Tree.
+    let opts = widget_usvg_options();
+    let tree = match resvg::usvg::Tree::from_str(svg_text, &opts) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "rasterize_single_svg_layer: failed to parse SVG");
+            return None;
+        }
+    };
+
+    // Rasterize into a pixmap at the target size.
+    let mut pixmap = match tiny_skia::Pixmap::new(pixel_width, pixel_height) {
+        Some(p) => p,
+        None => {
+            tracing::warn!(
+                width = pixel_width,
+                height = pixel_height,
+                "rasterize_single_svg_layer: failed to allocate pixmap"
+            );
+            return None;
+        }
+    };
+
+    // Scale the SVG uniformly (preserving aspect ratio) and center it
+    // within the target pixel rectangle.  This prevents circles from
+    // becoming ovals on non-square screen geometries.
+    let svg_size = tree.size();
+    let sx = pixel_width as f32 / svg_size.width();
+    let sy = pixel_height as f32 / svg_size.height();
+    let uniform_scale = sx.min(sy);
+    let rendered_w = svg_size.width() * uniform_scale;
+    let rendered_h = svg_size.height() * uniform_scale;
+    let offset_x = (pixel_width as f32 - rendered_w) * 0.5;
+    let offset_y = (pixel_height as f32 - rendered_h) * 0.5;
+    let transform = tiny_skia::Transform::from_translate(offset_x, offset_y)
+        .post_scale(uniform_scale, uniform_scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    Some(pixmap)
+}
+
+fn rasterize_static_svg_layer(
+    svg_text: &str,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Option<RasterizedSvgLayer> {
+    let key = static_svg_layer_cache_key(svg_text, pixel_width, pixel_height);
+
+    if let Some(cached) = static_svg_layer_cache()
+        .lock()
+        .expect("static SVG layer cache poisoned")
+        .get(&key)
+    {
+        return Some(RasterizedSvgLayer::Shared(cached));
+    }
+
+    let pixmap = rasterize_single_svg_layer(svg_text, pixel_width, pixel_height)?;
+    let byte_len = pixmap.data().len();
+
+    if byte_len > STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES
+        || byte_len > STATIC_SVG_LAYER_CACHE_MAX_BYTES
+    {
+        return Some(RasterizedSvgLayer::Owned(pixmap));
+    }
+
+    let mut cache = static_svg_layer_cache()
+        .lock()
+        .expect("static SVG layer cache poisoned");
+    cache.insert(key, pixmap);
+    cache.get(&key).map(RasterizedSvgLayer::Shared)
+}
+
+/// Clear the process-local static SVG layer raster cache.
+///
+/// This is primarily used by benchmarks to distinguish first-render cost from
+/// hot-path cost after static widget chrome has been cached.
+pub fn clear_static_svg_layer_cache() {
+    static_svg_layer_cache()
+        .lock()
+        .expect("static SVG layer cache poisoned")
+        .clear();
+}
+
+fn composite_layer(base: &mut Option<tiny_skia::Pixmap>, layer: RasterizedSvgLayer) {
+    // Composite this layer onto the accumulation pixmap (source-over).
+    // Uses tiny_skia::PixmapMut::draw_pixmap which is SIMD-optimised and
+    // handles premultiplied alpha correctly — avoiding a manual pixel loop.
+    if let Some(base) = base.as_mut() {
+        base.as_mut().draw_pixmap(
+            0,
+            0,
+            layer.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    } else {
+        *base = Some(match layer {
+            RasterizedSvgLayer::Owned(pixmap) => pixmap,
+            RasterizedSvgLayer::Shared(pixmap) => (*pixmap).clone(),
+        });
+    }
+}
+
 /// Rasterize all SVG layers for a widget definition with parameter bindings applied.
 ///
 /// This is the **CPU-only** portion of the widget rendering pipeline — SVG string
@@ -385,8 +628,16 @@ pub fn rasterize_svg_layers(
     let mut composed: Option<tiny_skia::Pixmap> = None;
 
     for (svg_text, bindings) in svg_layers {
-        // Apply parameter bindings to the SVG source.
-        let mut modified_svg = svg_text.to_string();
+        if bindings.is_empty() {
+            if let Some(pixmap) = rasterize_static_svg_layer(svg_text, pixel_width, pixel_height) {
+                composite_layer(&mut composed, pixmap);
+            }
+            continue;
+        }
+
+        // Apply parameter bindings to the SVG source. Static layers are cached
+        // above; bound layers intentionally remain parameter-sensitive.
+        let mut modified_svg = (*svg_text).to_string();
         for binding in *bindings {
             if let Some(attr_val) = resolve_binding_value(binding, params, param_constraints) {
                 modified_svg = apply_svg_attribute(
@@ -398,58 +649,8 @@ pub fn rasterize_svg_layers(
             }
         }
 
-        // Parse modified SVG into usvg::Tree.
-        let opts = widget_usvg_options();
-        let tree = match resvg::usvg::Tree::from_str(&modified_svg, &opts) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(error = %e, "rasterize_svg_layers: failed to parse SVG");
-                continue;
-            }
-        };
-
-        // Rasterize into a pixmap at the target size.
-        let mut pixmap = match tiny_skia::Pixmap::new(pixel_width, pixel_height) {
-            Some(p) => p,
-            None => {
-                tracing::warn!(
-                    width = pixel_width,
-                    height = pixel_height,
-                    "rasterize_svg_layers: failed to allocate pixmap"
-                );
-                continue;
-            }
-        };
-
-        // Scale the SVG uniformly (preserving aspect ratio) and center it
-        // within the target pixel rectangle.  This prevents circles from
-        // becoming ovals on non-square screen geometries.
-        let svg_size = tree.size();
-        let sx = pixel_width as f32 / svg_size.width();
-        let sy = pixel_height as f32 / svg_size.height();
-        let uniform_scale = sx.min(sy);
-        let rendered_w = svg_size.width() * uniform_scale;
-        let rendered_h = svg_size.height() * uniform_scale;
-        let offset_x = (pixel_width as f32 - rendered_w) * 0.5;
-        let offset_y = (pixel_height as f32 - rendered_h) * 0.5;
-        let transform = tiny_skia::Transform::from_translate(offset_x, offset_y)
-            .post_scale(uniform_scale, uniform_scale);
-        resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-        // Composite this layer onto the accumulation pixmap (source-over).
-        // Uses tiny_skia::PixmapMut::draw_pixmap which is SIMD-optimised and
-        // handles premultiplied alpha correctly — avoiding a manual pixel loop.
-        if let Some(ref mut base) = composed {
-            base.as_mut().draw_pixmap(
-                0,
-                0,
-                pixmap.as_ref(),
-                &tiny_skia::PixmapPaint::default(),
-                tiny_skia::Transform::identity(),
-                None,
-            );
-        } else {
-            composed = Some(pixmap);
+        if let Some(pixmap) = rasterize_single_svg_layer(&modified_svg, pixel_width, pixel_height) {
+            composite_layer(&mut composed, RasterizedSvgLayer::Owned(pixmap));
         }
     }
 
@@ -685,15 +886,15 @@ impl WidgetRenderer {
             })
             .collect();
 
-        // Resolve SVG text for each layer (bytes → str).
-        let mut layer_texts: Vec<String> = Vec::with_capacity(widget_def.layers.len());
-        let mut layer_data: Vec<(usize, &[WidgetBinding])> =
+        // Resolve SVG text for each layer (bytes → str) without copying the
+        // registered SVG payloads on the hot path.
+        let mut svg_layers: Vec<(&str, &[WidgetBinding])> =
             Vec::with_capacity(widget_def.layers.len());
 
-        for (idx, layer) in widget_def.layers.iter().enumerate() {
+        for layer in &widget_def.layers {
             let key = (widget_def.id.clone(), layer.svg_file.clone());
             let svg_bytes = match self.svgs.get(&key) {
-                Some(b) => b.clone(),
+                Some(b) => b,
                 None => {
                     tracing::warn!(
                         widget = widget_def.id,
@@ -703,23 +904,15 @@ impl WidgetRenderer {
                     continue;
                 }
             };
-            match std::str::from_utf8(&svg_bytes) {
+            match std::str::from_utf8(svg_bytes) {
                 Ok(s) => {
-                    layer_texts.push(s.to_string());
-                    layer_data.push((idx, &layer.bindings));
+                    svg_layers.push((s, &layer.bindings));
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "widget SVG not valid UTF-8");
                 }
             }
         }
-
-        // Build the slice expected by rasterize_svg_layers.
-        let svg_layers: Vec<(&str, &[WidgetBinding])> = layer_data
-            .iter()
-            .zip(layer_texts.iter())
-            .map(|((_, bindings), text)| (text.as_str(), *bindings))
-            .collect();
 
         // Delegate to the CPU-only rasterization path (shared with benchmarks/tests).
         let composed = rasterize_svg_layers(
@@ -1163,6 +1356,74 @@ mod tests {
     use super::*;
 
     // ── SVG attribute manipulation tests ──────────────────────────────────────
+
+    fn test_cache_key(label: &str) -> StaticSvgLayerCacheKey {
+        static_svg_layer_cache_key(label, 16, 16)
+    }
+
+    fn test_pixmap(width: u32, height: u32) -> tiny_skia::Pixmap {
+        tiny_skia::Pixmap::new(width, height).expect("test pixmap allocation must succeed")
+    }
+
+    #[test]
+    fn static_svg_layer_cache_key_uses_full_content_digest() {
+        let key_a = static_svg_layer_cache_key("<svg><rect id=\"a\"/></svg>", 16, 16);
+        let key_b = static_svg_layer_cache_key("<svg><rect id=\"b\"/></svg>", 16, 16);
+
+        assert_ne!(
+            key_a.svg_digest, key_b.svg_digest,
+            "same-size SVG strings with different bytes must not share a cache identity"
+        );
+        assert_eq!(key_a.pixel_width, key_b.pixel_width);
+        assert_eq!(key_a.pixel_height, key_b.pixel_height);
+    }
+
+    #[test]
+    fn static_svg_layer_cache_skips_entries_above_per_entry_limit() {
+        let mut cache = StaticSvgLayerCache::default();
+        let key = test_cache_key("oversize");
+
+        cache.insert_with_limits(key, test_pixmap(2, 2), 64, 64, 15);
+
+        assert!(
+            cache.entries.is_empty(),
+            "16-byte pixmap must not be cached when the per-entry limit is 15 bytes"
+        );
+        assert_eq!(cache.total_bytes, 0);
+        assert!(cache.lru.is_empty());
+    }
+
+    #[test]
+    fn static_svg_layer_cache_evicts_lru_incrementally_to_byte_bound() {
+        let mut cache = StaticSvgLayerCache::default();
+        let key_a = test_cache_key("a");
+        let key_b = test_cache_key("b");
+        let key_c = test_cache_key("c");
+        let key_d = test_cache_key("d");
+
+        cache.insert_with_limits(key_a, test_pixmap(16, 16), 64, 2048, 2048);
+        cache.insert_with_limits(key_b, test_pixmap(16, 16), 64, 2048, 2048);
+        cache.insert_with_limits(key_c, test_pixmap(16, 16), 64, 2048, 2048);
+
+        assert!(
+            !cache.entries.contains_key(&key_a),
+            "inserting the third 1024-byte pixmap into a 2048-byte cache evicts only the LRU entry"
+        );
+        assert!(cache.entries.contains_key(&key_b));
+        assert!(cache.entries.contains_key(&key_c));
+        assert_eq!(cache.total_bytes, 2048);
+
+        let _ = cache.get(&key_b);
+        cache.insert_with_limits(key_d, test_pixmap(16, 16), 64, 2048, 2048);
+
+        assert!(
+            !cache.entries.contains_key(&key_c),
+            "cache hit must promote key_b so key_c becomes the next LRU eviction"
+        );
+        assert!(cache.entries.contains_key(&key_b));
+        assert!(cache.entries.contains_key(&key_d));
+        assert_eq!(cache.total_bytes, 2048);
+    }
 
     #[test]
     fn test_apply_svg_attribute_replaces_existing() {

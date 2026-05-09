@@ -25,15 +25,17 @@
 //! ## Benchmark groups
 //!
 //! - `widget_rasterize/gauge_512x512_cold` — full two-layer gauge at 512×512,
-//!   including SVG string manipulation and usvg parse on each iteration (cold path).
+//!   including static-layer cache miss, SVG string manipulation, and usvg parse
+//!   on each iteration (first-render path).
 //! - `widget_rasterize/gauge_512x512_warm` — two-layer gauge at 512×512, SVG
-//!   strings pre-built but `usvg` parse + rasterize measured (hot path).
+//!   strings pre-built and static no-binding layers cached; bound layer
+//!   `usvg` parse + rasterize remains measured (hot path after cache separation).
 //! - `widget_rasterize/gauge_128x128` — same widget at 128×128 for comparison.
 
 use std::collections::HashMap;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use tze_hud_compositor::widget::rasterize_svg_layers;
+use tze_hud_compositor::widget::{clear_static_svg_layer_cache, rasterize_svg_layers};
 use tze_hud_scene::types::{WidgetBinding, WidgetBindingMapping, WidgetParameterValue};
 
 // ─── Reference gauge SVG fixtures ────────────────────────────────────────────
@@ -133,6 +135,7 @@ fn bench_gauge_512x512_cold(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("gauge_512x512", "cold"), |b| {
         b.iter(|| {
+            clear_static_svg_layer_cache();
             let bindings = gauge_fill_bindings();
             let layers: Vec<(&str, &[WidgetBinding])> =
                 vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
@@ -156,6 +159,7 @@ fn bench_gauge_512x512_warm(c: &mut Criterion) {
     let bindings = gauge_fill_bindings();
     let layers: Vec<(&str, &[WidgetBinding])> =
         vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
+    let _ = rasterize_svg_layers(&layers, &constraints, &params, 512, 512);
 
     let mut group = c.benchmark_group("widget_rasterize");
 
