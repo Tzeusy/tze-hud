@@ -149,7 +149,7 @@ struct PrimitiveGroup {
 }
 
 struct ResolvedLayerBindings {
-    by_target_attr: BTreeMap<(String, String), String>,
+    by_target_attr: BTreeMap<String, BTreeMap<String, String>>,
     digest: [u8; 32],
 }
 
@@ -194,10 +194,12 @@ impl PrimitiveSvgLayerPlan {
             };
 
             if raw_tag.starts_with("</") {
-                if tag_name == "g" {
+                if skip_depth > 0 {
+                    if tag_name == "defs" || tag_name == "clipPath" {
+                        skip_depth -= 1;
+                    }
+                } else if tag_name == "g" {
                     let _ = groups.pop();
-                } else if (tag_name == "defs" || tag_name == "clipPath") && skip_depth > 0 {
-                    skip_depth -= 1;
                 }
                 pos = tag_end + 1;
                 continue;
@@ -352,7 +354,8 @@ impl PrimitiveRect {
         let id = self.id.as_ref()?;
         bindings
             .by_target_attr
-            .get(&(id.clone(), attr.to_string()))
+            .get(id)
+            .and_then(|attrs| attrs.get(attr))
             .map(String::as_str)
     }
 
@@ -450,7 +453,8 @@ impl PrimitiveCircle {
         let id = self.id.as_ref()?;
         bindings
             .by_target_attr
-            .get(&(id.clone(), attr.to_string()))
+            .get(id)
+            .and_then(|attrs| attrs.get(attr))
             .map(String::as_str)
     }
 
@@ -542,15 +546,19 @@ impl PrimitiveText {
         if opacity <= 0.0 {
             return;
         }
-        let text_svg = self.render_svg(content, color, opacity);
+        let text_svg = self.render_svg(content, color);
         let Some(layer) = rasterize_cached_text_svg(&text_svg, pixel_width, pixel_height) else {
             return;
+        };
+        let paint = tiny_skia::PixmapPaint {
+            opacity: opacity.clamp(0.0, 1.0),
+            ..Default::default()
         };
         pixmap.as_mut().draw_pixmap(
             0,
             0,
             layer.as_ref().as_ref(),
-            &tiny_skia::PixmapPaint::default(),
+            &paint,
             tiny_skia::Transform::identity(),
             None,
         );
@@ -564,11 +572,12 @@ impl PrimitiveText {
         let id = self.id.as_ref()?;
         bindings
             .by_target_attr
-            .get(&(id.clone(), attr.to_string()))
+            .get(id)
+            .and_then(|attrs| attrs.get(attr))
             .map(String::as_str)
     }
 
-    fn render_svg(&self, content: &str, color: Option<(u8, u8, u8, f32)>, opacity: f32) -> String {
+    fn render_svg(&self, content: &str, color: Option<(u8, u8, u8, f32)>) -> String {
         let fill = color
             .map(|(r, g, b, a)| {
                 if a >= 0.996 {
@@ -580,12 +589,8 @@ impl PrimitiveText {
             .or_else(|| self.fill.clone())
             .unwrap_or_else(|| "#000000".to_string());
         let mut attrs = format!(
-            "x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\" opacity=\"{}\"",
-            self.x,
-            self.y,
-            self.font_size,
-            fill,
-            opacity.clamp(0.0, 1.0)
+            "x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\"",
+            self.x, self.y, self.font_size, fill
         );
         if let Some(value) = &self.text_anchor {
             attrs.push_str(&format!(" text-anchor=\"{}\"", escape_attr(value)));
@@ -624,7 +629,8 @@ fn bound_ancestor_opacity(ancestor_ids: &[String], bindings: &ResolvedLayerBindi
     ancestor_ids.iter().fold(1.0, |acc, id| {
         let bound = bindings
             .by_target_attr
-            .get(&(id.clone(), "opacity".to_string()))
+            .get(id)
+            .and_then(|attrs| attrs.get("opacity"))
             .and_then(|value| parse_svg_number(value))
             .unwrap_or(1.0);
         acc * bound
@@ -643,6 +649,9 @@ fn contains_unsupported_primitive_svg(svg_text: &str) -> bool {
         "<linearGradient",
         "<radialGradient",
         "<pattern",
+        " style=",
+        " rx=",
+        " ry=",
         " transform=",
     ]
     .iter()
@@ -796,6 +805,8 @@ fn paint_rgba(r: u8, g: u8, b: u8, a: f32) -> tiny_skia::Paint<'static> {
 
 fn escape_attr(value: &str) -> String {
     escape_text(value)
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn escape_text(value: &str) -> String {
@@ -1318,13 +1329,10 @@ fn resolve_layer_bindings(
             hasher.update(&[0]);
             hasher.update(attr_val.as_bytes());
             hasher.update(&[0]);
-            by_target_attr.insert(
-                (
-                    binding.target_element.clone(),
-                    binding.target_attribute.clone(),
-                ),
-                attr_val,
-            );
+            by_target_attr
+                .entry(binding.target_element.clone())
+                .or_insert_with(BTreeMap::new)
+                .insert(binding.target_attribute.clone(), attr_val);
         }
     }
 
@@ -1620,10 +1628,6 @@ pub fn rasterize_widget_render_plan(
         }
 
         if let Some(primitive_plan) = &layer.primitive_plan {
-            if let Some(base) = composed.as_mut() {
-                primitive_plan.draw_onto(base, resolved_bindings, pixel_width, pixel_height);
-                continue;
-            }
             if let Some(pixmap) =
                 primitive_plan.rasterize(resolved_bindings, pixel_width, pixel_height)
             {
@@ -2475,14 +2479,20 @@ mod tests {
             blue.data(),
             "same-size static layers with different SVG bytes must not share cached pixels"
         );
+        let red_key = static_svg_layer_cache_key(red_svg, 16, 16);
+        let blue_key = static_svg_layer_cache_key(blue_svg, 16, 16);
+        let cache = static_svg_layer_cache().lock().expect("static cache");
+        assert!(
+            cache.entries.contains_key(&red_key),
+            "static cache should include the red SVG content digest"
+        );
+        assert!(
+            cache.entries.contains_key(&blue_key),
+            "static cache should include the blue SVG content digest"
+        );
         assert_eq!(
-            static_svg_layer_cache()
-                .lock()
-                .expect("static cache")
-                .entries
-                .len(),
-            2,
-            "static cache should keep separate entries for separate SVG content digests"
+            red_key.pixel_width, blue_key.pixel_width,
+            "same-size SVGs should differ by content digest, not dimensions"
         );
     }
 
@@ -2513,6 +2523,18 @@ mod tests {
             .expect("same bound values must rasterize from cache");
         let full = rasterize_widget_render_plan(&plan, &constraints, &params_full, 16, 16)
             .expect("full-width bound layer must rasterize");
+        let half_key = cache_key_from_raster_key(&RasterizedLayerCacheKey {
+            source_digest: plan.layers[0].source_digest,
+            binding_digest: resolve_layer_bindings(&bindings, &params_half, &constraints).digest,
+            pixel_width: 16,
+            pixel_height: 16,
+        });
+        let full_key = cache_key_from_raster_key(&RasterizedLayerCacheKey {
+            source_digest: plan.layers[0].source_digest,
+            binding_digest: resolve_layer_bindings(&bindings, &params_full, &constraints).digest,
+            pixel_width: 16,
+            pixel_height: 16,
+        });
 
         assert_eq!(
             half.data(),
@@ -2524,14 +2546,157 @@ mod tests {
             full.data(),
             "changed bound values must invalidate the bound-layer cache key"
         );
+        let cache = bound_svg_layer_cache().lock().expect("bound cache");
+        assert!(
+            cache.entries.contains_key(&half_key),
+            "bound cache should contain the half-width resolved binding"
+        );
+        assert!(
+            cache.entries.contains_key(&full_key),
+            "bound cache should contain the full-width resolved binding"
+        );
+    }
+
+    #[test]
+    fn retained_plan_bound_cache_includes_primitive_layers_after_static_layers() {
+        clear_widget_raster_caches();
+        let background = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect id="bg" x="0" y="0" width="16" height="16" fill="#000000"/>
+        </svg>"##;
+        let fill = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect id="bar" x="0" y="0" width="0" height="16" fill="#00ff00"/>
+        </svg>"##;
+        let bindings = vec![WidgetBinding {
+            param: "level".to_string(),
+            target_element: "bar".to_string(),
+            target_attribute: "width".to_string(),
+            mapping: WidgetBindingMapping::Linear {
+                attr_min: 0.0,
+                attr_max: 16.0,
+            },
+        }];
+        let layers = vec![(background, &[][..]), (fill, bindings.as_slice())];
+        let plan = WidgetRenderPlan::compile(&layers);
+        let constraints = HashMap::from([("level".to_string(), (0.0f32, 1.0f32))]);
+        let params_half = HashMap::from([("level".to_string(), WidgetParameterValue::F32(0.5))]);
+        let params_full = HashMap::from([("level".to_string(), WidgetParameterValue::F32(1.0))]);
+
+        let _ = rasterize_widget_render_plan(&plan, &constraints, &params_half, 16, 16)
+            .expect("half-width primitive layer must rasterize");
+        let _ = rasterize_widget_render_plan(&plan, &constraints, &params_full, 16, 16)
+            .expect("full-width primitive layer must rasterize");
+        let half_key = cache_key_from_raster_key(&RasterizedLayerCacheKey {
+            source_digest: plan.layers[1].source_digest,
+            binding_digest: resolve_layer_bindings(&bindings, &params_half, &constraints).digest,
+            pixel_width: 16,
+            pixel_height: 16,
+        });
+        let full_key = cache_key_from_raster_key(&RasterizedLayerCacheKey {
+            source_digest: plan.layers[1].source_digest,
+            binding_digest: resolve_layer_bindings(&bindings, &params_full, &constraints).digest,
+            pixel_width: 16,
+            pixel_height: 16,
+        });
+
+        let cache = bound_svg_layer_cache().lock().expect("bound cache");
+        assert!(
+            cache.entries.contains_key(&half_key),
+            "bound primitive layer after static layers should cache the half-width binding"
+        );
+        assert!(
+            cache.entries.contains_key(&full_key),
+            "bound primitive layer after static layers should cache the full-width binding"
+        );
+    }
+
+    #[test]
+    fn primitive_plan_does_not_pop_groups_inside_skipped_defs() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <g id="outer" opacity="0.5">
+              <defs><g id="ignored"><rect id="ignored-box" x="0" y="0" width="1" height="1"/></g></defs>
+              <rect id="box" x="0" y="0" width="16" height="16" fill="#00ff00"/>
+            </g>
+        </svg>"##;
+
+        let plan = PrimitiveSvgLayerPlan::parse(svg).expect("primitive SVG should parse");
+        let PrimitiveItem::Rect(rect) = &plan.items[0] else {
+            panic!("expected the visible rect to be parsed");
+        };
+
+        assert_eq!(rect.ancestor_ids, vec!["outer".to_string()]);
+        assert!(
+            (rect.opacity - 0.5).abs() < f32::EPSILON,
+            "visible rect should retain outer group opacity after skipped defs"
+        );
+    }
+
+    #[test]
+    fn primitive_plan_falls_back_for_style_and_rounded_rect_attributes() {
+        let styled = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect id="box" x="0" y="0" width="16" height="16" style="fill:#00ff00"/>
+        </svg>"##;
+        let rounded = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect id="box" x="0" y="0" width="16" height="16" rx="2" ry="2" fill="#00ff00"/>
+        </svg>"##;
+
+        assert!(
+            PrimitiveSvgLayerPlan::parse(styled).is_none(),
+            "style attributes are outside the primitive fast path and must use resvg fallback"
+        );
+        assert!(
+            PrimitiveSvgLayerPlan::parse(rounded).is_none(),
+            "rounded rects are outside the primitive fast path until rx/ry are rendered equivalently"
+        );
+    }
+
+    #[test]
+    fn escape_attr_escapes_quotes_for_generated_text_svg() {
         assert_eq!(
-            bound_svg_layer_cache()
+            escape_attr("Font \"Display\" & 'Mono'"),
+            "Font &quot;Display&quot; &amp; &apos;Mono&apos;"
+        );
+    }
+
+    #[test]
+    fn text_svg_cache_is_stable_across_opacity_only_changes() {
+        clear_widget_raster_caches();
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
+            <g id="fade"><text id="label" x="4" y="20" font-size="12" fill="#ffffff">CPU</text></g>
+        </svg>"##;
+        let bindings = vec![WidgetBinding {
+            param: "opacity".to_string(),
+            target_element: "fade".to_string(),
+            target_attribute: "opacity".to_string(),
+            mapping: WidgetBindingMapping::Linear {
+                attr_min: 0.25,
+                attr_max: 0.75,
+            },
+        }];
+        let layers = vec![(svg, bindings.as_slice())];
+        let plan = WidgetRenderPlan::compile(&layers);
+        let constraints = HashMap::from([("opacity".to_string(), (0.0f32, 1.0f32))]);
+        let params_low = HashMap::from([("opacity".to_string(), WidgetParameterValue::F32(0.0))]);
+        let params_high = HashMap::from([("opacity".to_string(), WidgetParameterValue::F32(1.0))]);
+
+        let _ = rasterize_widget_render_plan(&plan, &constraints, &params_low, 64, 32)
+            .expect("low-opacity text should rasterize");
+        let _ = rasterize_widget_render_plan(&plan, &constraints, &params_high, 64, 32)
+            .expect("high-opacity text should rasterize");
+        let primitive_plan =
+            PrimitiveSvgLayerPlan::parse(svg).expect("primitive text should parse");
+        let PrimitiveItem::Text(text) = &primitive_plan.items[0] else {
+            panic!("expected text primitive");
+        };
+        let expected_text_svg = text.render_svg("CPU", Some((255, 255, 255, 1.0)));
+        let expected_key = static_svg_layer_cache_key(&expected_text_svg, 64, 32);
+
+        assert!(
+            text_svg_layer_cache()
                 .lock()
-                .expect("bound cache")
+                .expect("text cache")
                 .entries
-                .len(),
-            2,
-            "bound cache should contain separate entries for half and full resolved bindings"
+                .contains_key(&expected_key),
+            "opacity-only changes should cache text glyphs without baking opacity into the SVG key"
         );
     }
 

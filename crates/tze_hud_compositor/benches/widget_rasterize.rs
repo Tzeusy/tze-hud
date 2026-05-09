@@ -31,7 +31,6 @@
 //!   static/text caches warm, bound numeric/color params changing each iteration.
 //! - `widget_rasterize/gauge_128x128` — same widget at 128×128 for comparison.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
@@ -205,27 +204,23 @@ fn bench_gauge_512x512_warm_parameter_changing(c: &mut Criterion) {
     let plan = WidgetRenderPlan::compile(&layers);
     let warm_params = gauge_params_no_label();
     let _ = rasterize_widget_render_plan(&plan, &constraints, &warm_params, 512, 512);
-    let counter = Cell::new(0u32);
 
     let mut group = c.benchmark_group("widget_rasterize");
 
     group.bench_function(
         BenchmarkId::new("gauge_512x512", "warm_parameter_changing"),
         |b| {
+            let mut params = gauge_params_no_label();
+            let mut i = 0u32;
             b.iter(|| {
-                let i = counter.get().wrapping_add(1);
-                counter.set(i);
+                i = i.wrapping_add(1);
                 let level = ((i % 997) as f32) / 996.0;
-                let mut params = gauge_params_no_label();
-                params.insert("level".to_string(), WidgetParameterValue::F32(level));
-                params.insert(
-                    "fill_color".to_string(),
-                    WidgetParameterValue::Color(tze_hud_scene::types::Rgba::new(
-                        level,
-                        0.706,
-                        1.0 - level * 0.5,
-                        1.0,
-                    )),
+                *params.get_mut("level").expect("level param exists") =
+                    WidgetParameterValue::F32(level);
+                *params
+                    .get_mut("fill_color")
+                    .expect("fill_color param exists") = WidgetParameterValue::Color(
+                    tze_hud_scene::types::Rgba::new(level, 0.706, 1.0 - level * 0.5, 1.0),
                 );
                 black_box(rasterize_widget_render_plan(
                     black_box(&plan),
