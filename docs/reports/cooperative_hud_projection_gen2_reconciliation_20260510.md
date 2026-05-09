@@ -8,7 +8,7 @@ OpenSpec change: `openspec/changes/cooperative-hud-projection`
 
 `cooperative-hud-projection` is implementation-complete for the active delta requirements and scenarios. GAP-1 and GAP-2 are closed by landed code and tests. GAP-3 is closed for archive purposes only if the project accepts the documented evidence substitution: SSH-triggered Windows desktop capture could not observe the HUD overlay, so the proof set uses live resident gRPC transcripts and scene snapshots from Windows plus a runtime-native compositor readback artifact.
 
-OpenSpec sync is ready. Archive is ready after sync, with the evidence-substitution note preserved in the archive trail.
+OpenSpec sync is ready. Archive is ready after sync if the runtime-native readback substitution is accepted and preserved in the archive trail.
 
 ## Inputs Audited
 
@@ -73,7 +73,7 @@ All delta scenarios have code or evidence coverage. The only non-literal coverag
 - Runtime-native readback metadata and PNG: `docs/evidence/cooperative-hud-projection/hud-ggntn.12-2026-05-09/readback/cooperative-projection-readback.json`, `docs/evidence/cooperative-hud-projection/hud-ggntn.12-2026-05-09/readback/cooperative-projection-readback.png`
 - Governance storyboard states: `docs/evidence/cooperative-hud-projection/live-governance-2026-05-09/logs/live-governance-storyboard-transcript.json`
 
-The readback metadata records `tile_count=1`, `node_count=1`, `active_leases=1`, background samples `[63,63,89,255]`, and projection-tile samples `[56,69,89,255]`. The Windows final cleanup snapshot records zero remaining tiles and no proof text or `agent-alpha` references.
+The readback metadata records `tile_count=1`, `node_count=1`, `active_leases=1`, background samples `[63,63,89,255]`, and projection-tile samples `[56,69,89,255]`. Those tile samples come from the runtime-native readback fixture's linear `Rgba::new(0.04, 0.06, 0.10, 0.94)` background encoded to sRGB, not from the resident adapter's separate portal color constant. The Windows final cleanup snapshot records zero remaining tiles and no proof text or `agent-alpha` references.
 
 ## Task Ledger
 
