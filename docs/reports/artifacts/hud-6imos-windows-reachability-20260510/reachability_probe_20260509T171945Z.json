@@ -2,6 +2,8 @@
   "schema_version": 1,
   "issue": "hud-6imos",
   "recorded_at_utc": "2026-05-09T17:19:45Z",
+  "recorded_at_local": "2026-05-10T01:19:45+08:00",
+  "local_timezone": "Asia/Singapore",
   "reference_host": "tzehouse-windows.parrot-hen.ts.net",
   "resolved_tailnet_ip": "100.87.181.125",
   "purpose": "Restore or precisely characterize Windows reference host reachability for validation and soak runs.",

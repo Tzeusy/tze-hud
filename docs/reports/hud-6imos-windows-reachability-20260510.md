@@ -2,6 +2,7 @@
 
 Issue: `hud-6imos`
 Attempted at: 2026-05-09T17:19:45Z
+Local report date: 2026-05-10 Asia/Singapore (UTC+08:00)
 Reference host: `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`, tailnet `100.87.181.125`)
 
 ## Verdict
@@ -20,8 +21,9 @@ Raw evidence:
 
 ## Safety Context
 
-PR #641 and PR #642 were both open with `mergeStateStatus=BLOCKED` during this
-attempt. To avoid disrupting their review workers or live validation state, the
+PR #641 and PR #642 were both open with merge state status `BLOCKED` during this
+attempt, matching the artifact's `merge_state_status` field. To avoid disrupting
+their review workers or live validation state, the
 probe stayed read-only: no HUD process was killed, launched, restarted, or
 published to.
 
