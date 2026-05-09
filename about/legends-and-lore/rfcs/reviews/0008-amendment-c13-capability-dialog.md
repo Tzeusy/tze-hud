@@ -386,7 +386,7 @@ The capability dialog requires an operator action. Not all operator roles have a
 
 ### A8. Cross-Reference to Identity-and-Roles Capability Spec (hud-ora8.2.5)
 
-The `identity-and-roles` capability spec (`openspec/changes/_deferred/v2-embodied-media-presence/specs/identity-and-roles/spec.md`, issue hud-ora8.2.5) is the **authoritative source** for the deferred v2 program:
+The `identity-and-roles` capability spec (`openspec/changes/_deferred/v2-embodied-media-presence/specs/identity-and-roles/`, issue hud-ora8.2.5) is the **authoritative source** for the deferred v2 program:
 
 - The complete role definitions and user-directory schema (extended from RFC 0009 A1.1).
 - The role-to-capability binding tables (which capabilities each role may grant, revoke, or be prompted for).
