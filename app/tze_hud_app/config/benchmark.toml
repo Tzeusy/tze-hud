@@ -1,0 +1,110 @@
+# tze_hud Windows Benchmark Configuration
+#
+# This config is intentionally separate from production.toml. Use it for live
+# Windows performance and soak runs where resident benchmark agents need
+# explicit widget/zone publish grants. Deploy as C:\tze_hud\benchmark.toml and
+# launch with scripts/windows/install_benchmark_hud_task.ps1.
+#
+# Production safety:
+# - does not change the default production config
+# - registers only named benchmark/demo agents
+# - grants widget publish only for the committed widget instances below
+# - keeps unregistered agents on guest policy
+
+[runtime]
+profile = "full-display"
+
+[widget_bundles]
+paths = ["widget_bundles"]
+
+[component_profile_bundles]
+paths = ["profiles"]
+
+[component_profiles]
+notification = "notification-stack-exemplar"
+
+[[tabs]]
+name = "Main"
+default_tab = true
+
+[[tabs.widgets]]
+widget_type = "gauge"
+instance_id = "main-gauge"
+
+[tabs.widgets.geometry]
+x = 40
+y = 420
+width = 100
+height = 240
+
+[[tabs.widgets]]
+widget_type = "progress-bar"
+instance_id = "main-progress"
+
+[tabs.widgets.geometry]
+x_pct = 0.421875
+y_pct = 0.9074074
+width_pct = 0.15625
+height_pct = 0.0185185
+
+[[tabs.widgets]]
+widget_type = "status-indicator"
+instance_id = "main-status"
+
+[tabs.widgets.geometry]
+x = 1660
+y = 40
+width = 252
+height = 96
+
+# Canonical Rust publish-load harness identity.
+[agents.registered.widget-publish-load-harness]
+capabilities = [
+    "publish_widget:main-progress",
+    "read_telemetry",
+]
+
+# Three-agent live soak identities. These retain the manual raw-tile/demo grants
+# used by existing Windows user-tests and add only the publish scopes needed by
+# widget and MCP zone performance runs.
+[agents.registered.agent-alpha]
+capabilities = [
+    "create_tiles",
+    "modify_own_tiles",
+    "access_input_events",
+    "publish_widget:main-progress",
+    "publish_widget:main-gauge",
+    "publish_widget:main-status",
+    "publish_zone:subtitle",
+    "publish_zone:notification-area",
+    "publish_zone:status-bar",
+    "read_telemetry",
+]
+
+[agents.registered.agent-beta]
+capabilities = [
+    "create_tiles",
+    "modify_own_tiles",
+    "access_input_events",
+    "publish_widget:main-progress",
+    "publish_widget:main-gauge",
+    "publish_widget:main-status",
+    "publish_zone:subtitle",
+    "publish_zone:notification-area",
+    "publish_zone:status-bar",
+    "read_telemetry",
+]
+
+[agents.registered.agent-gamma]
+capabilities = [
+    "create_tiles",
+    "modify_own_tiles",
+    "access_input_events",
+    "publish_widget:main-progress",
+    "publish_widget:main-gauge",
+    "publish_widget:main-status",
+    "publish_zone:subtitle",
+    "publish_zone:notification-area",
+    "publish_zone:status-bar",
+    "read_telemetry",
+]
