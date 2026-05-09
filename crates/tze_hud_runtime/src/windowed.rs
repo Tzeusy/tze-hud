@@ -589,18 +589,21 @@ fn seed_windowed_benchmark_scene(scene: &mut SceneGraph, width: u32, height: u32
     let height = height.max(1) as f32;
     scene.display_area = Rect::new(0.0, 0.0, width, height);
 
-    let Ok(tab_id) = scene.create_tab("windowed_perf", 0) else {
+    let display_order = scene
+        .tabs
+        .values()
+        .map(|tab| tab.display_order)
+        .max()
+        .map_or(0, |order| order.saturating_add(1));
+    let Ok(tab_id) = scene.create_tab("windowed_perf", display_order) else {
         tracing::warn!("windowed benchmark: failed to create benchmark tab");
         return;
     };
+    scene.active_tab = Some(tab_id);
     let lease_id = scene.grant_lease(
         WINDOWED_BENCHMARK_AGENT,
         300_000,
-        vec![
-            Capability::CreateTile,
-            Capability::CreateNode,
-            Capability::UpdateTile,
-        ],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     if let Some(lease) = scene.leases.get_mut(&lease_id) {
         lease.resource_budget.max_tiles = 32;
@@ -705,7 +708,7 @@ impl WindowedBenchmarkRunState {
             .record_frame(telemetry.frame_time_us, telemetry.tile_count);
         self.summary
             .input_to_next_present
-            .record(telemetry.frame_time_us);
+            .record(telemetry.input_to_next_present_us);
         self.measured_seen += 1;
         self.measured_seen >= self.config.frames
     }
@@ -933,6 +936,8 @@ struct WindowedRuntimeState {
     pipeline: FramePipeline,
     /// Shutdown token.
     shutdown: ShutdownToken,
+    /// Set when benchmark output failed after the event loop was already running.
+    benchmark_failed: Arc<std::sync::atomic::AtomicBool>,
     /// Current cursor position (updated by CursorMoved events).
     cursor_x: f32,
     cursor_y: f32,
@@ -1313,6 +1318,7 @@ impl ApplicationHandler for WinitApp {
             .take()
             .expect("frame_ready_tx already taken");
         let shutdown = self.state.shutdown.clone();
+        let benchmark_failed = self.state.benchmark_failed.clone();
         let telemetry_collector = TelemetryCollector::new();
         let surface_for_compositor = window_surface.clone();
         let mut benchmark_state = cfg.benchmark.clone().map(|benchmark| {
@@ -1455,8 +1461,8 @@ impl ApplicationHandler for WinitApp {
                             compositor_telemetry.frame_number,
                         );
                         telem.frame_time_us = frame_start.elapsed().as_micros() as u64;
-                        telem.render_encode_us = compositor_telemetry.render_encode_us;
-                        telem.gpu_submit_us = compositor_telemetry.gpu_submit_us;
+                        telem.stage6_render_encode_us = compositor_telemetry.render_encode_us;
+                        telem.stage7_gpu_submit_us = compositor_telemetry.gpu_submit_us;
                         telem.tile_count = compositor_telemetry.tile_count;
                         telem.sync_legacy_aliases();
                         telemetry.record(telem);
@@ -1484,6 +1490,8 @@ impl ApplicationHandler for WinitApp {
                                                 path = %emit_path.display(),
                                                 "failed to write windowed benchmark artifact"
                                             );
+                                            benchmark_failed
+                                                .store(true, std::sync::atomic::Ordering::Release);
                                             shutdown_tok
                                                 .trigger(crate::threads::ShutdownReason::Clean);
                                             break;
@@ -3160,6 +3168,7 @@ impl WindowedRuntime {
             telemetry: TelemetryCollector::new(),
             pipeline: FramePipeline::new(),
             shutdown,
+            benchmark_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cursor_x: 0.0,
             cursor_y: 0.0,
             left_button_down: false,
@@ -3232,6 +3241,14 @@ impl WindowedRuntime {
                 .rt
                 .shutdown_timeout(std::time::Duration::from_millis(500));
             tracing::info!("network runtime shutdown complete");
+        }
+
+        if app
+            .state
+            .benchmark_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("windowed benchmark artifact write failed".into());
         }
 
         Ok(())
@@ -4108,12 +4125,33 @@ mod tests {
         assert_eq!(scene.display_area.height, 1080.0);
         assert_eq!(scene.tiles.len(), 20);
         assert!(
+            scene.active_tab.is_some(),
+            "benchmark scene must select the benchmark tab as active"
+        );
+        assert!(
             scene
                 .leases
                 .values()
                 .any(|lease| lease.namespace == WINDOWED_BENCHMARK_AGENT),
             "benchmark scene must be owned by the benchmark agent namespace"
         );
+    }
+
+    #[test]
+    fn seed_windowed_benchmark_scene_uses_unique_tab_order() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let existing = scene.create_tab("configured", 0).unwrap();
+        assert_eq!(scene.active_tab, Some(existing));
+
+        seed_windowed_benchmark_scene(&mut scene, 1920, 1080);
+
+        assert_eq!(scene.tabs.len(), 2);
+        assert_ne!(
+            scene.active_tab,
+            Some(existing),
+            "benchmark mode must activate its own deterministic tab"
+        );
+        assert_eq!(scene.tiles.len(), 20);
     }
 
     // ── overlay_auto_size field (hud-48ml) ────────────────────────────────────

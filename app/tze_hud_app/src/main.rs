@@ -244,6 +244,14 @@ fn validate_config_toml_for_startup(toml_src: &str) -> Result<(), String> {
     })
 }
 
+fn parse_benchmark_emit_path(value: String, source: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err(format!("{source} requires a non-empty path"))
+    } else {
+        Ok(value)
+    }
+}
+
 /// Parse startup options from CLI arguments and environment variables.
 ///
 /// CLI flags take priority over environment variables.
@@ -285,7 +293,7 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
             .map_err(|_| format!("TZE_HUD_FPS: invalid integer: {v:?}"))?;
     }
     if let Ok(v) = std::env::var("TZE_HUD_BENCHMARK_EMIT") {
-        opts.benchmark_emit = Some(v);
+        opts.benchmark_emit = Some(parse_benchmark_emit_path(v, "TZE_HUD_BENCHMARK_EMIT")?);
     }
     if let Ok(v) = std::env::var("TZE_HUD_BENCHMARK_FRAMES") {
         opts.benchmark_frames = v
@@ -394,11 +402,11 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
             }
             "--benchmark-emit" => {
                 i += 1;
-                opts.benchmark_emit = Some(
-                    args.get(i)
-                        .cloned()
-                        .ok_or_else(|| "--benchmark-emit requires a path argument".to_string())?,
-                );
+                let path = args
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| "--benchmark-emit requires a path argument".to_string())?;
+                opts.benchmark_emit = Some(parse_benchmark_emit_path(path, "--benchmark-emit")?);
             }
             "--benchmark-frames" => {
                 i += 1;
@@ -860,6 +868,21 @@ mod tests {
         );
         assert_eq!(opts.benchmark_frames, 720);
         assert_eq!(opts.benchmark_warmup_frames, 180);
+    }
+
+    #[test]
+    fn parse_options_rejects_empty_benchmark_emit_path() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::remove_var("TZE_HUD_BENCHMARK_EMIT");
+        }
+        let args: Vec<String> = vec!["--benchmark-emit".to_string(), "".to_string()];
+        let err = parse_options(&args).unwrap_err();
+        assert!(
+            err.contains("--benchmark-emit") && err.contains("non-empty path"),
+            "error should identify the empty benchmark emit path, got: {err}"
+        );
     }
 
     #[test]
