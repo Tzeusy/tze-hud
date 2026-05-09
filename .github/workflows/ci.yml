@@ -8,6 +8,7 @@
 #   test-trace     — cargo test -p integration --test trace_regression
 #   test-v1-thesis — cargo test -p integration --test v1_thesis
 #   production-boot — cargo test -p vertical_slice --test production_boot
+#   windows-performance-budget — headless Windows benchmark + locked budget gate
 #   vocabulary-lint — scripts/check_canonical_vocabulary.sh
 #   dev-mode-guard  — verifies dev-mode feature is NOT compiled into release binary
 #
@@ -159,6 +160,49 @@ jobs:
             --workspace \
             --all-targets \
             --exclude integration
+
+  windows-performance-budget:
+    name: Windows performance budget
+    runs-on: windows-latest
+    needs: [check]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
+      - name: Ensure protobuf compiler is available
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not (Get-Command protoc -ErrorAction SilentlyContinue)) {
+            choco install protoc -y --no-progress
+          }
+          protoc --version
+      - name: Run headless benchmark artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path test_results/windows-performance-budget | Out-Null
+          cargo run -p benchmark --features headless -- `
+            --emit test_results/windows-performance-budget/benchmark.json `
+            --frames 180
+      - name: Enforce locked Windows budgets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python scripts/ci/check_windows_perf_budgets.py `
+            --benchmark-json test_results/windows-performance-budget/benchmark.json `
+            --output-json test_results/windows-performance-budget/budget-gate.json
+      - name: Upload Windows performance artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-performance-budget
+          path: test_results/windows-performance-budget/
+          if-no-files-found: error
 
   # ── Integration: trace regression ──────────────────────────────────────────
   #

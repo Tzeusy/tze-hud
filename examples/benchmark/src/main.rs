@@ -195,11 +195,14 @@ mod headless_impl {
     use tokio::sync::Mutex;
     use tracing::{info, warn};
 
+    use tze_hud_input::{PointerEvent, PointerEventKind};
     use tze_hud_runtime::headless::{HeadlessConfig, HeadlessRuntime};
     use tze_hud_scene::calibration::calibrate as calibrate_cpu;
     use tze_hud_scene::graph::SceneGraph;
     use tze_hud_scene::mutation::{MutationBatch, SceneMutation};
-    use tze_hud_scene::types::{Capability, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode};
+    use tze_hud_scene::types::{
+        Capability, HitRegionNode, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
+    };
 
     // ── Budget constants ─────────────────────────────────────────────────────
 
@@ -221,6 +224,8 @@ mod headless_impl {
 
     /// Tiles per upload cycle.
     const UPLOAD_TILES_PER_CYCLE: usize = 10;
+    const SYNTHETIC_INPUT_X: f32 = 16.0;
+    const SYNTHETIC_INPUT_Y: f32 = 16.0;
 
     async fn scene_handle(runtime: &HeadlessRuntime) -> Arc<Mutex<SceneGraph>> {
         let state = runtime.state.lock().await;
@@ -299,6 +304,47 @@ mod headless_impl {
             emit,
             frames,
             cpu_only,
+        }
+    }
+
+    fn benchmark_hit_region() -> Node {
+        Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(8.0, 8.0, 96.0, 96.0),
+                interaction_id: "benchmark-input-target".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        }
+    }
+
+    async fn record_synthetic_input_ack(
+        runtime: &mut HeadlessRuntime,
+        summary: &mut SessionSummary,
+        frame_idx: u64,
+    ) {
+        let scene_arc = scene_handle(runtime).await;
+        let mut scene = scene_arc.lock().await;
+        let kind = if frame_idx % 2 == 0 {
+            PointerEventKind::Down
+        } else {
+            PointerEventKind::Up
+        };
+        let result = runtime.input_processor.process(
+            &PointerEvent {
+                x: SYNTHETIC_INPUT_X,
+                y: SYNTHETIC_INPUT_Y,
+                kind,
+                device_id: 0,
+                timestamp: None,
+            },
+            &mut scene,
+        );
+        if result.hit.is_node_hit() {
+            summary.input_to_local_ack.record(result.local_ack_us);
         }
     }
 
@@ -584,8 +630,9 @@ mod headless_impl {
                 if let Ok(tile_id) =
                     scene.create_tile(tab_id, "bench", lease_id, bounds, (i + 1) as u32)
                 {
+                    let root_id = SceneId::new();
                     let node = Node {
-                        id: SceneId::new(),
+                        id: root_id,
                         children: vec![],
                         data: NodeData::SolidColor(SolidColorNode {
                             color: Rgba::new(i as f32 / 10.0, 0.5, 1.0 - i as f32 / 10.0, 1.0),
@@ -594,6 +641,10 @@ mod headless_impl {
                         }),
                     };
                     let _ = scene.set_tile_root(tile_id, node);
+                    if i == 0 {
+                        let _ =
+                            scene.add_node_to_tile(tile_id, Some(root_id), benchmark_hit_region());
+                    }
                 }
             }
         }
@@ -607,15 +658,11 @@ mod headless_impl {
         let session_start = Instant::now();
         let mut summary = SessionSummary::new();
 
-        for _ in 0..frame_count {
+        for frame_idx in 0..frame_count {
+            record_synthetic_input_ack(&mut runtime, &mut summary, frame_idx).await;
             let telemetry = runtime.render_frame().await;
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
 
-            // input_to_local_ack: Stage 1 + Stage 2 (input drain + local feedback)
-            let local_ack = telemetry.stage1_input_drain_us + telemetry.stage2_local_feedback_us;
-            if local_ack > 0 {
-                summary.input_to_local_ack.record(local_ack);
-            }
             // input_to_scene_commit: Stage 3 + Stage 4 (mutation intake + commit)
             let scene_commit =
                 telemetry.stage3_mutation_intake_us + telemetry.stage4_scene_commit_us;
@@ -676,6 +723,21 @@ mod headless_impl {
                     scene.create_tile(tab_id, "mutation_bench", lease_id, bounds, (i + 1) as u32)
                 {
                     tile_ids.push(tile_id);
+                    if i == 0 {
+                        let root_id = SceneId::new();
+                        let node = Node {
+                            id: root_id,
+                            children: vec![],
+                            data: NodeData::SolidColor(SolidColorNode {
+                                color: Rgba::new(0.25, 0.5, 0.75, 1.0),
+                                bounds: Rect::new(0.0, 0.0, 380.0, 536.0),
+                                radius: None,
+                            }),
+                        };
+                        let _ = scene.set_tile_root(tile_id, node);
+                        let _ =
+                            scene.add_node_to_tile(tile_id, Some(root_id), benchmark_hit_region());
+                    }
                 }
             }
         }
@@ -697,6 +759,8 @@ mod headless_impl {
         let mut summary = SessionSummary::new();
 
         for frame_idx in 0..frame_count {
+            record_synthetic_input_ack(&mut runtime, &mut summary, frame_idx).await;
+
             // Apply bounds mutation to 3 tiles per frame
             {
                 let scene_arc = scene_handle(&runtime).await;
@@ -730,10 +794,6 @@ mod headless_impl {
             let telemetry = runtime.render_frame().await;
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
 
-            let local_ack = telemetry.stage1_input_drain_us + telemetry.stage2_local_feedback_us;
-            if local_ack > 0 {
-                summary.input_to_local_ack.record(local_ack);
-            }
             let scene_commit =
                 telemetry.stage3_mutation_intake_us + telemetry.stage4_scene_commit_us;
             if scene_commit > 0 {
