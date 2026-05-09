@@ -21,6 +21,9 @@
 //! | `--mcp-port <port>` | `TZE_HUD_MCP_PORT`     | `9090`       | MCP HTTP listen port (0 to disable).     |
 //! | `--psk <key>`       | `TZE_HUD_PSK`          | `tze-hud-key`| Pre-shared key for session authentication.|
 //! | `--fps <n>`         | `TZE_HUD_FPS`          | `60`         | Target frames per second.                |
+//! | `--benchmark-emit <path>` | `TZE_HUD_BENCHMARK_EMIT` | — | Emit bounded windowed benchmark JSON and exit. |
+//! | `--benchmark-frames <n>` | `TZE_HUD_BENCHMARK_FRAMES` | `600` | Measured frames for benchmark mode. |
+//! | `--benchmark-warmup-frames <n>` | `TZE_HUD_BENCHMARK_WARMUP_FRAMES` | `120` | Warmup frames skipped before measurement. |
 //! | `--help`            | —                      | —            | Print this help and exit.                |
 //! | `--version`         | —                      | —            | Print version and exit.                  |
 //!
@@ -69,7 +72,7 @@
 use tze_hud_config::{reload_config, resolve_config_path};
 use tze_hud_runtime::gpu_lock::GpuLock;
 use tze_hud_runtime::window::{WindowConfig, WindowMode};
-use tze_hud_runtime::windowed::{WindowedConfig, WindowedRuntime};
+use tze_hud_runtime::windowed::{WindowedBenchmarkConfig, WindowedConfig, WindowedRuntime};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BIN_NAME: &str = "tze_hud";
@@ -101,6 +104,14 @@ OPTIONS:
                            (env: TZE_HUD_PSK)
     --fps <n>              Target frames per second  [default: 60]
                            (env: TZE_HUD_FPS)
+    --benchmark-emit <path>
+                           Emit bounded windowed compositor benchmark JSON and exit
+                           (env: TZE_HUD_BENCHMARK_EMIT)
+    --benchmark-frames <n> Measured frames for benchmark mode  [default: 600]
+                           (env: TZE_HUD_BENCHMARK_FRAMES)
+    --benchmark-warmup-frames <n>
+                           Warmup frames skipped before measurement  [default: 120]
+                           (env: TZE_HUD_BENCHMARK_WARMUP_FRAMES)
     --help                 Print this help and exit
     --version              Print version and exit
 
@@ -153,6 +164,12 @@ struct StartupOptions {
     debug_zones: bool,
     /// Monitor index for overlay placement (0-based). `None` = primary monitor.
     monitor_index: Option<usize>,
+    /// Path for bounded windowed compositor benchmark output.
+    benchmark_emit: Option<String>,
+    /// Number of measured frames in benchmark mode.
+    benchmark_frames: u64,
+    /// Number of warmup frames skipped before benchmark measurement.
+    benchmark_warmup_frames: u64,
 }
 
 impl Default for StartupOptions {
@@ -170,6 +187,9 @@ impl Default for StartupOptions {
             fps: 60,
             debug_zones: false,
             monitor_index: None,
+            benchmark_emit: None,
+            benchmark_frames: 600,
+            benchmark_warmup_frames: 120,
         }
     }
 }
@@ -224,6 +244,14 @@ fn validate_config_toml_for_startup(toml_src: &str) -> Result<(), String> {
     })
 }
 
+fn parse_benchmark_emit_path(value: String, source: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err(format!("{source} requires a non-empty path"))
+    } else {
+        Ok(value)
+    }
+}
+
 /// Parse startup options from CLI arguments and environment variables.
 ///
 /// CLI flags take priority over environment variables.
@@ -263,6 +291,19 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
         opts.fps = v
             .parse::<u32>()
             .map_err(|_| format!("TZE_HUD_FPS: invalid integer: {v:?}"))?;
+    }
+    if let Ok(v) = std::env::var("TZE_HUD_BENCHMARK_EMIT") {
+        opts.benchmark_emit = Some(parse_benchmark_emit_path(v, "TZE_HUD_BENCHMARK_EMIT")?);
+    }
+    if let Ok(v) = std::env::var("TZE_HUD_BENCHMARK_FRAMES") {
+        opts.benchmark_frames = v
+            .parse::<u64>()
+            .map_err(|_| format!("TZE_HUD_BENCHMARK_FRAMES: invalid integer: {v:?}"))?;
+    }
+    if let Ok(v) = std::env::var("TZE_HUD_BENCHMARK_WARMUP_FRAMES") {
+        opts.benchmark_warmup_frames = v
+            .parse::<u64>()
+            .map_err(|_| format!("TZE_HUD_BENCHMARK_WARMUP_FRAMES: invalid integer: {v:?}"))?;
     }
 
     // Parse CLI flags (override env vars).
@@ -358,6 +399,32 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
                     val.parse::<usize>()
                         .map_err(|_| format!("--monitor: invalid index: {val:?}"))?,
                 );
+            }
+            "--benchmark-emit" => {
+                i += 1;
+                let path = args
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| "--benchmark-emit requires a path argument".to_string())?;
+                opts.benchmark_emit = Some(parse_benchmark_emit_path(path, "--benchmark-emit")?);
+            }
+            "--benchmark-frames" => {
+                i += 1;
+                let val = args.get(i).ok_or_else(|| {
+                    "--benchmark-frames requires a frame count argument".to_string()
+                })?;
+                opts.benchmark_frames = val
+                    .parse::<u64>()
+                    .map_err(|_| format!("--benchmark-frames: invalid integer: {val:?}"))?;
+            }
+            "--benchmark-warmup-frames" => {
+                i += 1;
+                let val = args.get(i).ok_or_else(|| {
+                    "--benchmark-warmup-frames requires a frame count argument".to_string()
+                })?;
+                opts.benchmark_warmup_frames = val
+                    .parse::<u64>()
+                    .map_err(|_| format!("--benchmark-warmup-frames: invalid integer: {val:?}"))?;
             }
             flag if flag.starts_with('-') => {
                 return Err(format!(
@@ -550,6 +617,18 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
     // explicitly, auto-detection is disabled so the user's intent is honoured.
     let overlay_auto_size =
         opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
+    if opts.benchmark_emit.is_some() && opts.benchmark_frames == 0 {
+        eprintln!("error: --benchmark-frames must be greater than zero");
+        std::process::exit(1);
+    }
+    let benchmark = opts
+        .benchmark_emit
+        .as_ref()
+        .map(|path| WindowedBenchmarkConfig {
+            warmup_frames: opts.benchmark_warmup_frames,
+            frames: opts.benchmark_frames,
+            emit_path: std::path::PathBuf::from(path),
+        });
 
     tracing::info!(
         version = VERSION,
@@ -560,6 +639,7 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
         grpc_port = opts.grpc_port,
         mcp_port = opts.mcp_port,
         fps = opts.fps,
+        benchmark = benchmark.is_some(),
         "tze_hud runtime starting"
     );
 
@@ -579,6 +659,7 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
         config_file_path,
         debug_zones: opts.debug_zones,
         monitor_index: opts.monitor_index,
+        benchmark,
     };
 
     // Diagnostic: write resolved config to disk so we can verify args were parsed.
@@ -664,6 +745,9 @@ mod tests {
             std::env::remove_var("TZE_HUD_MCP_PORT");
             std::env::remove_var("TZE_HUD_PSK");
             std::env::remove_var("TZE_HUD_FPS");
+            std::env::remove_var("TZE_HUD_BENCHMARK_EMIT");
+            std::env::remove_var("TZE_HUD_BENCHMARK_FRAMES");
+            std::env::remove_var("TZE_HUD_BENCHMARK_WARMUP_FRAMES");
         }
 
         let opts = parse_options(&[]).unwrap();
@@ -674,6 +758,9 @@ mod tests {
         assert_eq!(opts.mcp_port, 9090);
         assert_eq!(opts.fps, 60);
         assert!(opts.config_path.is_none());
+        assert!(opts.benchmark_emit.is_none());
+        assert_eq!(opts.benchmark_frames, 600);
+        assert_eq!(opts.benchmark_warmup_frames, 120);
     }
 
     // ── parse_options: CLI flags ─────────────────────────────────────────────
@@ -755,6 +842,47 @@ mod tests {
         let args: Vec<String> = vec!["--fps".to_string(), "30".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.fps, 30);
+    }
+
+    #[test]
+    fn parse_options_windowed_benchmark_flags() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::remove_var("TZE_HUD_BENCHMARK_EMIT");
+            std::env::remove_var("TZE_HUD_BENCHMARK_FRAMES");
+            std::env::remove_var("TZE_HUD_BENCHMARK_WARMUP_FRAMES");
+        }
+        let args: Vec<String> = vec![
+            "--benchmark-emit".to_string(),
+            "artifacts/fullscreen.json".to_string(),
+            "--benchmark-frames".to_string(),
+            "720".to_string(),
+            "--benchmark-warmup-frames".to_string(),
+            "180".to_string(),
+        ];
+        let opts = parse_options(&args).unwrap();
+        assert_eq!(
+            opts.benchmark_emit.as_deref(),
+            Some("artifacts/fullscreen.json")
+        );
+        assert_eq!(opts.benchmark_frames, 720);
+        assert_eq!(opts.benchmark_warmup_frames, 180);
+    }
+
+    #[test]
+    fn parse_options_rejects_empty_benchmark_emit_path() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::remove_var("TZE_HUD_BENCHMARK_EMIT");
+        }
+        let args: Vec<String> = vec!["--benchmark-emit".to_string(), "".to_string()];
+        let err = parse_options(&args).unwrap_err();
+        assert!(
+            err.contains("--benchmark-emit") && err.contains("non-empty path"),
+            "error should identify the empty benchmark emit path, got: {err}"
+        );
     }
 
     #[test]

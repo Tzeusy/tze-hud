@@ -78,6 +78,7 @@
 //! On `WindowEvent::Resized`, the main thread calls `surface.reconfigure()`.
 //! The compositor thread picks up the new size on the next `surface.size()` call.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -108,7 +109,7 @@ use tze_hud_scene::types::{
     DragHandleContextMenuState, DragHandleElementKind, WidgetParameterValue, ZoneContent,
     ZoneInteractionKind,
 };
-use tze_hud_telemetry::TelemetryCollector;
+use tze_hud_telemetry::{SessionSummary, TelemetryCollector};
 
 use crate::channels::{
     FrameReadyRx, FrameReadyTx, INPUT_EVENT_CAPACITY, InputEvent, InputEventKind,
@@ -577,7 +578,204 @@ fn refresh_zone_hit_regions_after_render(
     compositor.populate_zone_hit_regions(scene, surf_w as f32, surf_h as f32);
 }
 
+const WINDOWED_BENCHMARK_AGENT: &str = "windowed-compositor-benchmark";
+const WINDOWED_BENCHMARK_SCENE: &str = "composite_tiles_v1";
+const OVERLAY_COMPOSITE_DELTA_TARGET_US: i64 = 500;
+
+fn seed_windowed_benchmark_scene(scene: &mut SceneGraph, width: u32, height: u32) {
+    use tze_hud_scene::{Capability, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode};
+
+    let width = width.max(1) as f32;
+    let height = height.max(1) as f32;
+    scene.display_area = Rect::new(0.0, 0.0, width, height);
+
+    let display_order = scene
+        .tabs
+        .values()
+        .map(|tab| tab.display_order)
+        .max()
+        .map_or(0, |order| order.saturating_add(1));
+    let Ok(tab_id) = scene.create_tab("windowed_perf", display_order) else {
+        tracing::warn!("windowed benchmark: failed to create benchmark tab");
+        return;
+    };
+    scene.active_tab = Some(tab_id);
+    let lease_id = scene.grant_lease(
+        WINDOWED_BENCHMARK_AGENT,
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    if let Some(lease) = scene.leases.get_mut(&lease_id) {
+        lease.resource_budget.max_tiles = 32;
+    }
+
+    let cols = 5usize;
+    let rows = 4usize;
+    let tile_w = width / 4.85;
+    let tile_h = height / 3.8;
+    let step_x = width / 5.65;
+    let step_y = height / 5.0;
+
+    for i in 0..(cols * rows) {
+        let col = i % cols;
+        let row = i / cols;
+        let x = col as f32 * step_x + (row % 2) as f32 * step_x * 0.25;
+        let y = row as f32 * step_y;
+        let bounds = Rect::new(x, y, tile_w, tile_h);
+
+        let Ok(tile_id) = scene.create_tile(
+            tab_id,
+            WINDOWED_BENCHMARK_AGENT,
+            lease_id,
+            bounds,
+            (i + 1) as u32,
+        ) else {
+            continue;
+        };
+
+        let alpha = match i % 4 {
+            0 => 0.58,
+            1 => 0.72,
+            2 => 0.86,
+            _ => 1.0,
+        };
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(
+                    (i % cols) as f32 / cols as f32,
+                    0.32 + (row as f32 / rows as f32) * 0.45,
+                    1.0 - (i as f32 / (cols * rows) as f32) * 0.7,
+                    alpha,
+                ),
+                bounds: Rect::new(0.0, 0.0, tile_w, tile_h),
+                radius: Some(10.0),
+            }),
+        };
+        if let Err(err) = scene.set_tile_root(tile_id, node) {
+            tracing::warn!(?err, "windowed benchmark: failed to set tile root");
+        }
+    }
+}
+
+struct WindowedBenchmarkRunState {
+    config: WindowedBenchmarkConfig,
+    requested_mode: WindowMode,
+    effective_mode: WindowMode,
+    width: u32,
+    height: u32,
+    target_fps: u32,
+    warmup_seen: u64,
+    measured_seen: u64,
+    measured_start: Option<Instant>,
+    summary: SessionSummary,
+}
+
+impl WindowedBenchmarkRunState {
+    fn new(
+        config: WindowedBenchmarkConfig,
+        requested_mode: WindowMode,
+        effective_mode: WindowMode,
+        width: u32,
+        height: u32,
+        target_fps: u32,
+    ) -> Self {
+        Self {
+            config,
+            requested_mode,
+            effective_mode,
+            width,
+            height,
+            target_fps,
+            warmup_seen: 0,
+            measured_seen: 0,
+            measured_start: None,
+            summary: SessionSummary::new(),
+        }
+    }
+
+    fn record(&mut self, telemetry: &tze_hud_telemetry::FrameTelemetry) -> bool {
+        if self.warmup_seen < self.config.warmup_frames {
+            self.warmup_seen += 1;
+            return false;
+        }
+
+        if self.measured_start.is_none() {
+            self.measured_start = Some(Instant::now());
+        }
+        self.summary
+            .record_frame(telemetry.frame_time_us, telemetry.tile_count);
+        self.summary
+            .input_to_next_present
+            .record(telemetry.input_to_next_present_us);
+        self.measured_seen += 1;
+        self.measured_seen >= self.config.frames
+    }
+
+    fn finish(mut self) -> std::io::Result<()> {
+        if let Some(start) = self.measured_start {
+            self.summary.elapsed_us = start.elapsed().as_micros() as u64;
+        }
+        self.summary.finalize();
+
+        let frame_time = serde_json::json!({
+            "p50_us": self.summary.frame_time.p50(),
+            "p99_us": self.summary.frame_time.p99(),
+            "p99_9_us": self.summary.frame_time.percentile(99.9),
+            "peak_us": self.summary.peak_frame_time_us,
+        });
+        let report = serde_json::json!({
+            "schema": "tze_hud.windowed_compositor_benchmark.v1",
+            "scene": WINDOWED_BENCHMARK_SCENE,
+            "target": {
+                "overlay_composite_delta_p99_us": OVERLAY_COMPOSITE_DELTA_TARGET_US,
+            },
+            "requested_mode": self.requested_mode.to_string(),
+            "effective_mode": self.effective_mode.to_string(),
+            "window": {
+                "width": self.width,
+                "height": self.height,
+                "target_fps": self.target_fps,
+            },
+            "benchmark": {
+                "warmup_frames": self.config.warmup_frames,
+                "measured_frames": self.config.frames,
+                "recorded_frames": self.summary.total_frames,
+            },
+            "frame_time": frame_time,
+            "summary": self.summary,
+        });
+
+        if let Some(parent) = self.config.emit_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(
+            &self.config.emit_path,
+            serde_json::to_vec_pretty(&report)
+                .expect("windowed benchmark report JSON serialization must succeed"),
+        )
+    }
+}
+
 // ─── WindowedConfig ──────────────────────────────────────────────────────────
+
+/// Bounded benchmark configuration for the real windowed compositor.
+///
+/// When present, the windowed runtime seeds a deterministic scene, records frame
+/// telemetry after `warmup_frames`, writes a JSON artifact at `emit_path`, and
+/// exits after `frames` measured frames.
+#[derive(Debug, Clone)]
+pub struct WindowedBenchmarkConfig {
+    /// Number of warmup frames to render before recording measurements.
+    pub warmup_frames: u64,
+    /// Number of measured frames to include in the emitted artifact.
+    pub frames: u64,
+    /// Path to the per-mode benchmark JSON artifact.
+    pub emit_path: PathBuf,
+}
 
 /// Configuration for the windowed runtime.
 #[derive(Debug, Clone)]
@@ -652,6 +850,8 @@ pub struct WindowedConfig {
     pub debug_zones: bool,
     /// Monitor index for overlay placement (0-based).  `None` = primary monitor.
     pub monitor_index: Option<usize>,
+    /// Optional bounded benchmark run for the windowed compositor.
+    pub benchmark: Option<WindowedBenchmarkConfig>,
 }
 
 impl Default for WindowedConfig {
@@ -667,6 +867,7 @@ impl Default for WindowedConfig {
             config_file_path: None,
             debug_zones: false,
             monitor_index: None,
+            benchmark: None,
         }
     }
 }
@@ -735,6 +936,8 @@ struct WindowedRuntimeState {
     pipeline: FramePipeline,
     /// Shutdown token.
     shutdown: ShutdownToken,
+    /// Set when benchmark output failed after the event loop was already running.
+    benchmark_failed: Arc<std::sync::atomic::AtomicBool>,
     /// Current cursor position (updated by CursorMoved events).
     cursor_x: f32,
     cursor_y: f32,
@@ -824,6 +1027,10 @@ impl ApplicationHandler for WinitApp {
     /// Pending mode switches must therefore be handled here in `about_to_wait`
     /// rather than in `resumed()`.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.shutdown.is_triggered() {
+            event_loop.exit();
+            return;
+        }
         if self.state.pending_mode_switch.is_some() {
             self.apply_pending_mode_switch();
             // Re-create the window with the new mode by forwarding to the
@@ -1014,6 +1221,9 @@ impl ApplicationHandler for WinitApp {
             if let Ok(state) = self.state.shared_state.try_lock() {
                 if let Ok(mut scene) = state.scene.try_lock() {
                     sync_scene_display_area(&mut scene, surface_width, surface_height);
+                    if self.state.config.benchmark.is_some() {
+                        seed_windowed_benchmark_scene(&mut scene, surface_width, surface_height);
+                    }
                 }
             }
         }
@@ -1108,8 +1318,19 @@ impl ApplicationHandler for WinitApp {
             .take()
             .expect("frame_ready_tx already taken");
         let shutdown = self.state.shutdown.clone();
+        let benchmark_failed = self.state.benchmark_failed.clone();
         let telemetry_collector = TelemetryCollector::new();
         let surface_for_compositor = window_surface.clone();
+        let mut benchmark_state = cfg.benchmark.clone().map(|benchmark| {
+            WindowedBenchmarkRunState::new(
+                benchmark,
+                cfg.window.mode,
+                self.state.effective_mode,
+                surface_width,
+                surface_height,
+                cfg.target_fps,
+            )
+        });
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
@@ -1240,10 +1461,45 @@ impl ApplicationHandler for WinitApp {
                             compositor_telemetry.frame_number,
                         );
                         telem.frame_time_us = frame_start.elapsed().as_micros() as u64;
-                        telem.render_encode_us = compositor_telemetry.render_encode_us;
-                        telem.gpu_submit_us = compositor_telemetry.gpu_submit_us;
+                        telem.stage6_render_encode_us = compositor_telemetry.render_encode_us;
+                        telem.stage7_gpu_submit_us = compositor_telemetry.gpu_submit_us;
                         telem.tile_count = compositor_telemetry.tile_count;
+                        telem.sync_legacy_aliases();
                         telemetry.record(telem);
+
+                        if let Some(state) = benchmark_state.as_mut() {
+                            if let Some(last) = telemetry.records().last() {
+                                if state.record(last) {
+                                    let finished = benchmark_state.take().expect(
+                                        "benchmark_state must still exist when record completes",
+                                    );
+                                    let emit_path = finished.config.emit_path.clone();
+                                    match finished.finish() {
+                                        Ok(()) => {
+                                            tracing::info!(
+                                                path = %emit_path.display(),
+                                                "windowed benchmark artifact written; shutting down"
+                                            );
+                                            shutdown_tok
+                                                .trigger(crate::threads::ShutdownReason::Clean);
+                                            break;
+                                        }
+                                        Err(err) => {
+                                            tracing::error!(
+                                                error = %err,
+                                                path = %emit_path.display(),
+                                                "failed to write windowed benchmark artifact"
+                                            );
+                                            benchmark_failed
+                                                .store(true, std::sync::atomic::Ordering::Release);
+                                            shutdown_tok
+                                                .trigger(crate::threads::ShutdownReason::Clean);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Frame rate control.
@@ -2912,6 +3168,7 @@ impl WindowedRuntime {
             telemetry: TelemetryCollector::new(),
             pipeline: FramePipeline::new(),
             shutdown,
+            benchmark_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cursor_x: 0.0,
             cursor_y: 0.0,
             left_button_down: false,
@@ -2984,6 +3241,14 @@ impl WindowedRuntime {
                 .rt
                 .shutdown_timeout(std::time::Duration::from_millis(500));
             tracing::info!("network runtime shutdown complete");
+        }
+
+        if app
+            .state
+            .benchmark_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("windowed benchmark artifact write failed".into());
         }
 
         Ok(())
@@ -3848,6 +4113,45 @@ mod tests {
         assert_eq!(cfg.grpc_port, 50051);
         assert_eq!(cfg.mcp_port, 9090);
         assert!(!cfg.psk.is_empty());
+        assert!(cfg.benchmark.is_none());
+    }
+
+    #[test]
+    fn seed_windowed_benchmark_scene_creates_deterministic_tile_stack() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        seed_windowed_benchmark_scene(&mut scene, 1920, 1080);
+
+        assert_eq!(scene.display_area.width, 1920.0);
+        assert_eq!(scene.display_area.height, 1080.0);
+        assert_eq!(scene.tiles.len(), 20);
+        assert!(
+            scene.active_tab.is_some(),
+            "benchmark scene must select the benchmark tab as active"
+        );
+        assert!(
+            scene
+                .leases
+                .values()
+                .any(|lease| lease.namespace == WINDOWED_BENCHMARK_AGENT),
+            "benchmark scene must be owned by the benchmark agent namespace"
+        );
+    }
+
+    #[test]
+    fn seed_windowed_benchmark_scene_uses_unique_tab_order() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let existing = scene.create_tab("configured", 0).unwrap();
+        assert_eq!(scene.active_tab, Some(existing));
+
+        seed_windowed_benchmark_scene(&mut scene, 1920, 1080);
+
+        assert_eq!(scene.tabs.len(), 2);
+        assert_ne!(
+            scene.active_tab,
+            Some(existing),
+            "benchmark mode must activate its own deterministic tab"
+        );
+        assert_eq!(scene.tiles.len(), 20);
     }
 
     // ── overlay_auto_size field (hud-48ml) ────────────────────────────────────
