@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import contextlib
 import json
 import os
 import subprocess
@@ -585,6 +587,208 @@ async def read_windows_left_button_down(
     if value == "up":
         return False
     return None
+
+
+def ps_single_quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def build_diagnostic_input_plan(portal_x: float, portal_y: float) -> list[dict[str, Any]]:
+    """Build an OS-input plan covering composer focus, drag, and output scroll."""
+    input_rect, output_rect = portal_pane_rects()
+    composer_x = portal_x + input_rect.x + input_rect.w / 2.0
+    composer_y = portal_y + input_rect.y + min(input_rect.h - 10.0, 72.0)
+    header_x = portal_x + PORTAL_W / 2.0
+    header_y = portal_y + HEADER_H / 2.0
+    drag_dx = -120.0
+    drag_dy = 72.0
+    output_x = portal_x + drag_dx + output_rect.x + output_rect.w / 2.0
+    output_y = portal_y + drag_dy + output_rect.y + min(output_rect.h - 10.0, 96.0)
+    return [
+        {
+            "kind": "click",
+            "label": "focus-composer",
+            "x": composer_x,
+            "y": composer_y,
+        },
+        {
+            "kind": "text",
+            "label": "type-composer-text",
+            "text": "diagnostic input",
+        },
+        {
+            "kind": "drag",
+            "label": "drag-portal-header",
+            "start_x": header_x,
+            "start_y": header_y,
+            "end_x": header_x + drag_dx,
+            "end_y": header_y + drag_dy,
+            "steps": 8,
+        },
+        {
+            "kind": "wheel",
+            "label": "scroll-output-pane",
+            "x": output_x,
+            "y": output_y,
+            "delta": -360,
+            "count": 3,
+        },
+    ]
+
+
+def windows_diagnostic_input_script(actions: list[dict[str, Any]]) -> str:
+    """Return a PowerShell script that injects real Windows OS input events."""
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        "Add-Type -TypeDefinition @\"",
+        "using System;",
+        "using System.Runtime.InteropServices;",
+        "public static class HudDiagnosticInput {",
+        "  [DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int X, int Y);",
+        "  [DllImport(\"user32.dll\")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);",
+        "  [DllImport(\"user32.dll\", SetLastError=true)] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);",
+        "  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION U; }",
+        "  [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public KEYBDINPUT ki; }",
+        "  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public UIntPtr dwExtraInfo; }",
+        "}",
+        "\"@",
+        "$MOUSEEVENTF_LEFTDOWN = 0x0002",
+        "$MOUSEEVENTF_LEFTUP = 0x0004",
+        "$MOUSEEVENTF_WHEEL = 0x0800",
+        "$INPUT_KEYBOARD = 1",
+        "$KEYEVENTF_UNICODE = 0x0004",
+        "$KEYEVENTF_KEYUP = 0x0002",
+        "$InputSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][HudDiagnosticInput+INPUT])",
+        "function Move-To([double]$x, [double]$y) {",
+        "  [HudDiagnosticInput]::SetCursorPos([int][Math]::Round($x), [int][Math]::Round($y)) | Out-Null",
+        "  Start-Sleep -Milliseconds 80",
+        "}",
+        "function Left-Down() { [HudDiagnosticInput]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 80 }",
+        "function Left-Up() { [HudDiagnosticInput]::mouse_event($MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 120 }",
+        "function Wheel-At([double]$x, [double]$y, [int]$delta, [int]$count) {",
+        "  Move-To $x $y",
+        "  for ($i = 0; $i -lt $count; $i++) {",
+        "    [HudDiagnosticInput]::mouse_event($MOUSEEVENTF_WHEEL, 0, 0, $delta, [UIntPtr]::Zero)",
+        "    Start-Sleep -Milliseconds 140",
+        "  }",
+        "}",
+        "function Send-Text([string]$text) {",
+        "  foreach ($ch in $text.ToCharArray()) {",
+        "    $inputs = [HudDiagnosticInput+INPUT[]]::new(2)",
+        "    $scan = [uint16][char]$ch",
+        "    $inputs[0].type = $INPUT_KEYBOARD",
+        "    $inputs[0].U.ki.wVk = 0",
+        "    $inputs[0].U.ki.wScan = $scan",
+        "    $inputs[0].U.ki.dwFlags = $KEYEVENTF_UNICODE",
+        "    $inputs[1].type = $INPUT_KEYBOARD",
+        "    $inputs[1].U.ki.wVk = 0",
+        "    $inputs[1].U.ki.wScan = $scan",
+        "    $inputs[1].U.ki.dwFlags = $KEYEVENTF_UNICODE -bor $KEYEVENTF_KEYUP",
+        "    [HudDiagnosticInput]::SendInput(2, $inputs, $InputSize) | Out-Null",
+        "    Start-Sleep -Milliseconds 25",
+        "  }",
+        "}",
+    ]
+    for action in actions:
+        kind = str(action.get("kind", ""))
+        if kind == "click":
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'click')))}",
+                f"Move-To {float(action['x']):.1f} {float(action['y']):.1f}",
+                "Left-Down",
+                "Left-Up",
+            ])
+        elif kind == "drag":
+            steps = max(1, int(action.get("steps", 8)))
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'drag')))}",
+                f"$sx = {float(action['start_x']):.1f}; $sy = {float(action['start_y']):.1f}",
+                f"$ex = {float(action['end_x']):.1f}; $ey = {float(action['end_y']):.1f}",
+                f"$steps = {steps}",
+                "Move-To $sx $sy",
+                "Left-Down",
+                "for ($i = 1; $i -le $steps; $i++) {",
+                "  $t = [double]$i / [double]$steps",
+                "  Move-To ($sx + (($ex - $sx) * $t)) ($sy + (($ey - $sy) * $t))",
+                "}",
+                "Left-Up",
+            ])
+        elif kind == "wheel":
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'wheel')))}",
+                (
+                    f"Wheel-At {float(action['x']):.1f} {float(action['y']):.1f} "
+                    f"{int(action.get('delta', -120))} {max(1, int(action.get('count', 1)))}"
+                ),
+            ])
+        elif kind == "text":
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'text')))}",
+                f"Send-Text {ps_single_quoted(str(action.get('text', '')))}",
+                "Start-Sleep -Milliseconds 120",
+            ])
+        else:
+            raise ValueError(f"unsupported diagnostic action kind: {kind!r}")
+    return "\n".join(lines) + "\n"
+
+
+async def run_windows_diagnostic_input(
+    host: str,
+    *,
+    user: str,
+    ssh_key: str,
+    actions: list[dict[str, Any]],
+    timeout_s: float,
+) -> dict[str, Any]:
+    script = windows_diagnostic_input_script(actions)
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    cmd = [
+        "ssh",
+        "-i", ssh_key,
+        "-o", "BatchMode=yes",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "StrictHostKeyChecking=no",
+        f"{user}@{host}",
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        encoded,
+    ]
+    started = time.time()
+    proc: Optional[asyncio.subprocess.Process] = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.kill()
+        return {
+            "ok": False,
+            "returncode": None,
+            "error": "timeout",
+            "duration_s": round(time.time() - started, 3),
+        }
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "ok": False,
+            "returncode": None,
+            "error": f"{type(exc).__name__}: {exc}",
+            "duration_s": round(time.time() - started, 3),
+        }
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": stdout.decode("utf-8", errors="replace").strip(),
+        "stderr": stderr.decode("utf-8", errors="replace").strip(),
+        "duration_s": round(time.time() - started, 3),
+    }
 
 
 def bounded_transcript(lines: list[str], start: int, max_lines: int) -> str:
@@ -3059,6 +3263,40 @@ async def run_composer_smoke(
     await asyncio.sleep(hold_s)
 
 
+async def run_diagnostic_input_phase(
+    transcript: list[dict[str, Any]],
+    *,
+    host: str,
+    user: str,
+    ssh_key: str,
+    portal_x: float,
+    portal_y: float,
+    timeout_s: float,
+) -> None:
+    """Drive focus, drag, and scroll through Windows OS input injection."""
+    actions = build_diagnostic_input_plan(portal_x, portal_y)
+    emit_step_event(transcript, 6, "started", {
+        "code": "diagnostic-input",
+        "title": "Compositor-path diagnostic input",
+        "action": "inject OS pointer, wheel, and Unicode input into the live overlay",
+        "expected_visual": "composer focuses, portal drags, and OUTPUT pane scrolls via the normal runtime input path",
+    }, host=host, user=user, action_labels=[a["label"] for a in actions])
+    result = await run_windows_diagnostic_input(
+        host,
+        user=user,
+        ssh_key=ssh_key,
+        actions=actions,
+        timeout_s=timeout_s,
+    )
+    status = "completed" if result.get("ok") else "failed"
+    emit_step_event(transcript, 6, status, {
+        "code": "diagnostic-input",
+        "title": "Compositor-path diagnostic input",
+        "action": "Windows OS input injector finished",
+        "expected_visual": "transcript should include input:focus-gained, drag:start/drag:end, and scroll:output checkpoints",
+    }, **result)
+
+
 async def run_scenario(args: argparse.Namespace) -> int:
     psk = os.getenv(args.psk_env, "")
     if not psk:
@@ -3163,6 +3401,25 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 await run_composer_smoke(
                     client, lease_id, tiles, transcript, mutation_lock,
                     args.composer_smoke_hold_s,
+                )
+            elif phase == "diagnostic-input":
+                await publish_portal(
+                    client, lease_id, tiles,
+                    title="Exemplar Review Portal",
+                    subtitle="Compositor-path diagnostic input",
+                    body=body,
+                    footer_meta="diagnostic-input  •  OS input injector armed",
+                    include_tile_setup=True,
+                    mutation_lock=mutation_lock,
+                )
+                await run_diagnostic_input_phase(
+                    transcript,
+                    host=target_host(args.target),
+                    user=args.diagnostic_input_user,
+                    ssh_key=args.diagnostic_input_ssh_key,
+                    portal_x=portal_x,
+                    portal_y=portal_y,
+                    timeout_s=args.diagnostic_input_timeout_s,
                 )
             else:
                 emit_step_event(transcript, -1, "skipped", {
@@ -3330,7 +3587,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tab-height", type=float, default=1080.0)
     p.add_argument("--portal-x", type=float, default=None)
     p.add_argument("--phases", default="baseline,scroll",
-                   help="Comma list: baseline,scroll,streaming,rapid,composer-smoke")
+                   help="Comma list: baseline,scroll,streaming,rapid,composer-smoke,diagnostic-input")
     p.add_argument("--baseline-hold-s", type=float, default=20.0)
     p.add_argument("--composer-smoke-hold-s", type=float, default=8.0)
     p.add_argument("--stream-chunks", type=int, default=6)
@@ -3341,6 +3598,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clipboard-user", default="tzeus")
     p.add_argument("--clipboard-ssh-key", default=DEFAULT_SSH_KEY)
     p.add_argument("--clipboard-timeout-s", type=float, default=0.7)
+    p.add_argument("--diagnostic-input-user", default="tzeus")
+    p.add_argument("--diagnostic-input-ssh-key", default=DEFAULT_SSH_KEY)
+    p.add_argument("--diagnostic-input-timeout-s", type=float, default=12.0)
     p.add_argument(
         "--leave-lease-on-exit",
         action="store_true",

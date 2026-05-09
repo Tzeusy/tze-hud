@@ -913,6 +913,7 @@ Optional `--phases` values:
 | `scroll` | Transcript Interaction Contract | OUTPUT pane registers scroll, steps through transcript data, preserves mid-scroll window while tail lines append, then returns to latest output |
 | `streaming` | Low-latency text interaction | OUTPUT body grows in ordered chunks |
 | `rapid` | Coalescing coherence smoke | Rapid publish pressure does not collapse the retained window to one latest line |
+| `diagnostic-input` | Live compositor/input path | Uses Windows OS input injection over SSH to click-focus the composer, drag the portal header, and wheel-scroll the OUTPUT pane |
 
 ### Live Validation Axes
 
@@ -949,6 +950,11 @@ cannot validate alone:
 - During `streaming`, output arrives incrementally rather than as a single
   snapshot replace.
 - During `rapid`, the pane remains coherent under fast updates.
+- During `diagnostic-input`, the JSON transcript includes `input:focus-gained`,
+  `drag:start`/`drag:end`, and `scroll:output` checkpoints. The injector uses
+  `SetCursorPos`, mouse events, wheel events, and `SendInput` Unicode text
+  against the live overlay, so failures are runtime/input-path evidence rather
+  than synthetic transcript success.
 - Manual review notes and any UX tweaks are recorded in
   `docs/exemplar-manual-review-checklist.md` row 11.
 
