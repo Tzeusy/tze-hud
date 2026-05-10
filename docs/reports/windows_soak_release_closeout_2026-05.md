@@ -19,6 +19,24 @@ Raw probe evidence:
 
 - `docs/reports/artifacts/windows_soak_release_closeout_2026-05/reachability_probe_20260509T171102Z.json`
 
+## Recovery Update - 2026-05-10
+
+Issue `hud-6imos` was rechecked after the operator reported that the Windows
+host was back online. The host is reachable over Tailscale, non-interactive SSH
+succeeds for both `hudbot` and `tzeus`, and the `TzeHudOverlay` scheduled task
+was started successfully. The running `tze_hud.exe` process listens on gRPC
+port `50051` and MCP port `9090`.
+
+MCP validation used `http://tzehouse-windows.parrot-hen.ts.net:9090/mcp` and
+passed for all six configured zones. Widget discovery returned the
+`main-progress` and `main-status` instances; publish and cleanup passed for
+both. The older `main-gauge` fixture was not a valid deployed-instance target
+for this runtime config.
+
+Recovery evidence:
+
+- `docs/reports/artifacts/windows_soak_release_closeout_2026-05/reachability_recovery_20260510T022109Z.json`
+
 ## Safety Gate
 
 The live-run safety constraint was checked before attempting any soak workload.
