@@ -1,0 +1,116 @@
+# TzeHouse Windows Recovery Runbook
+
+Reference host: `tzehouse-windows.parrot-hen.ts.net` / `100.87.181.125`
+
+This runbook is for restoring the Windows HUD reference host before `/user-test`
+validation, strict smoke, or the 60-minute Windows soak. It contains no secrets.
+
+## Current Recovery Boundary
+
+The repository does not currently define a safe Wake-on-LAN, router, BIOS, or
+Synology-mediated command that can power on or wake the Windows machine remotely.
+When the Windows node is offline in Tailscale and SSH port `22` times out, the
+supported recovery route is manual/operator action on the Windows host.
+
+The adjacent `tzehouse-synology.parrot-hen.ts.net` node may be online while
+Windows is offline, but that is not by itself a supported recovery path unless an
+operator supplies and documents a no-secret Wake-on-LAN or equivalent procedure.
+
+## Manual Operator Action
+
+1. Confirm `TzeHouse` is powered on.
+2. Confirm Windows is connected to the network.
+3. Confirm Tailscale is running and the Windows node is online in the tailnet.
+4. Confirm Windows OpenSSH is running.
+5. Confirm the existing `~/.ssh/ecdsa_home` public key is accepted for the
+   required users, especially `tzeus` and `hudbot`.
+6. Confirm the intended HUD scheduled task exists:
+   - `TzeHudOverlay` for production validation.
+   - `TzeHudBenchmarkOverlay` for benchmark/soak validation.
+
+## Verification From This Workspace
+
+Run these from `/home/tze/gt/tze_hud/mayor/rig`.
+
+```bash
+tailscale status --json | jq '.Peer[] | select(.DNSName=="tzehouse-windows.parrot-hen.ts.net.") | {HostName,DNSName,Online,LastSeen,TailscaleIPs}'
+timeout 12 tailscale ping -c 1 tzehouse-windows.parrot-hen.ts.net
+```
+
+```bash
+timeout 12 ssh -i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 \
+  tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"
+
+timeout 12 ssh -i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 \
+  hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+```
+
+```bash
+for port in 22 50051 9090; do
+  timeout 6 bash -lc "cat < /dev/null > /dev/tcp/tzehouse-windows.parrot-hen.ts.net/$port" \
+    >/dev/null 2>&1 && echo "$port open" || echo "$port closed_or_timeout"
+done
+```
+
+## HUD Task Bring-Up
+
+If SSH succeeds but `50051` or `9090` is not listening, start the appropriate
+scheduled task from the interactive Windows account. Use the task that matches
+the validation mode.
+
+Production validation:
+
+```bash
+ssh -i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes \
+  tzeus@tzehouse-windows.parrot-hen.ts.net \
+  'schtasks /Run /TN TzeHudOverlay'
+```
+
+Benchmark/soak validation:
+
+```bash
+ssh -i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes \
+  tzeus@tzehouse-windows.parrot-hen.ts.net \
+  'schtasks /Run /TN TzeHudBenchmarkOverlay'
+```
+
+The HUD runtime must use a non-default PSK. Do not write PSKs into this file or
+into Beads notes.
+
+## Smoke Before Soak
+
+After the task starts, repeat the TCP probes above and use the MCP `/mcp`
+endpoint, not the bare port URL.
+
+MCP widget discovery:
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url http://tzehouse-windows.parrot-hen.ts.net:9090/mcp \
+  --list-widgets
+```
+
+MCP zone discovery:
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
+  --url http://tzehouse-windows.parrot-hen.ts.net:9090/mcp \
+  --list-zones
+```
+
+gRPC session smoke:
+
+```bash
+python3 .claude/skills/user-test/scripts/hud_grpc_client.py \
+  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --psk "$TZE_HUD_PSK"
+```
+
+Only proceed to strict smoke or `hud-nfl7n` after:
+
+- Tailscale ping succeeds.
+- SSH works non-interactively.
+- TCP `22`, `50051`, and `9090` are open.
+- The relevant scheduled task is known.
+- Widget/zone discovery succeeds against MCP `/mcp`.
+- The gRPC client smoke succeeds against port `50051`.
