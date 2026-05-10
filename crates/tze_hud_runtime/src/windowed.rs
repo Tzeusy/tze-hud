@@ -78,8 +78,9 @@
 //! On `WindowEvent::Resized`, the main thread calls `surface.reconfigure()`.
 //! The compositor thread picks up the new size on the next `surface.size()` call.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use tokio::sync::Mutex;
@@ -581,8 +582,67 @@ fn refresh_zone_hit_regions_after_render(
 const WINDOWED_BENCHMARK_AGENT: &str = "windowed-compositor-benchmark";
 const WINDOWED_BENCHMARK_SCENE: &str = "composite_tiles_v1";
 const OVERLAY_COMPOSITE_DELTA_TARGET_US: i64 = 500;
+const WINDOWED_BENCHMARK_INPUT_X: f32 = 16.0;
+const WINDOWED_BENCHMARK_INPUT_Y: f32 = 16.0;
+
+#[derive(Clone, Copy, Debug)]
+struct PendingInputLatencySample {
+    input_started_at: Instant,
+    local_ack_us: u64,
+}
+
+type PendingInputLatencySamples = Arc<StdMutex<VecDeque<PendingInputLatencySample>>>;
+
+fn record_pending_input_latency(
+    pending: &PendingInputLatencySamples,
+    input_started_at: Instant,
+    local_ack_us: u64,
+) {
+    let local_ack_us = local_ack_us.max(1);
+    if let Ok(mut samples) = pending.lock() {
+        samples.push_back(PendingInputLatencySample {
+            input_started_at,
+            local_ack_us,
+        });
+    }
+}
+
+fn drain_pending_input_latency(
+    pending: &PendingInputLatencySamples,
+    scene_commit_at: Instant,
+    frame_present_at: Instant,
+) -> Option<(u64, u64, u64)> {
+    let mut samples = pending.lock().ok()?;
+    if samples.is_empty() {
+        return None;
+    }
+
+    let mut local_ack_us = 0;
+    let mut input_to_scene_commit_us = 0;
+    let mut input_to_next_present_us = 0;
+    while let Some(sample) = samples.pop_front() {
+        local_ack_us = local_ack_us.max(sample.local_ack_us);
+        input_to_scene_commit_us = input_to_scene_commit_us.max(
+            scene_commit_at
+                .saturating_duration_since(sample.input_started_at)
+                .as_micros() as u64,
+        );
+        input_to_next_present_us = input_to_next_present_us.max(
+            frame_present_at
+                .saturating_duration_since(sample.input_started_at)
+                .as_micros() as u64,
+        );
+    }
+
+    Some((
+        local_ack_us,
+        input_to_scene_commit_us,
+        input_to_next_present_us,
+    ))
+}
 
 fn seed_windowed_benchmark_scene(scene: &mut SceneGraph, width: u32, height: u32) {
+    use tze_hud_scene::types::HitRegionNode;
     use tze_hud_scene::{Capability, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode};
 
     let width = width.max(1) as f32;
@@ -639,8 +699,9 @@ fn seed_windowed_benchmark_scene(scene: &mut SceneGraph, width: u32, height: u32
             2 => 0.86,
             _ => 1.0,
         };
+        let root_id = SceneId::new();
         let node = Node {
-            id: SceneId::new(),
+            id: root_id,
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(
@@ -655,6 +716,20 @@ fn seed_windowed_benchmark_scene(scene: &mut SceneGraph, width: u32, height: u32
         };
         if let Err(err) = scene.set_tile_root(tile_id, node) {
             tracing::warn!(?err, "windowed benchmark: failed to set tile root");
+            continue;
+        }
+        let hit_region = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, 0.0, tile_w, tile_h),
+                interaction_id: format!("windowed-benchmark-input-{i}"),
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        };
+        if let Err(err) = scene.add_node_to_tile(tile_id, Some(root_id), hit_region) {
+            tracing::warn!(?err, "windowed benchmark: failed to add input hit region");
         }
     }
 }
@@ -915,6 +990,8 @@ struct WindowedRuntimeState {
     shared_state: Arc<Mutex<SharedState>>,
     /// Input channel (ring buffer) — main thread writes, compositor thread reads.
     input_ring: Arc<std::sync::Mutex<std::collections::VecDeque<InputEvent>>>,
+    /// Pending Stage 1/2 input latency samples for the next compositor frame.
+    pending_input_latency: PendingInputLatencySamples,
     /// Frame-ready signal: compositor → main thread.
     frame_ready_rx: FrameReadyRx,
     /// Frame-ready sender (compositor thread will own this; stored here until
@@ -1324,6 +1401,7 @@ impl ApplicationHandler for WinitApp {
         };
         // Share the ArcSwap handle (not the FramePipeline itself) with the compositor thread.
         let hit_test_snapshot = self.state.pipeline.hit_test_snapshot.clone();
+        let pending_input_latency = Arc::clone(&self.state.pending_input_latency);
         let frame_ready_tx = self
             .state
             .frame_ready_tx
@@ -1452,6 +1530,7 @@ impl ApplicationHandler for WinitApp {
                         hit_test_snapshot.store(Arc::new(new_snap));
 
                         // ── Stage 5–7: Render Encode + GPU Submit ─────────
+                        let scene_commit_at = Instant::now();
                         let compositor_telemetry =
                             compositor.render_frame(&scene, surface_for_compositor.as_ref());
                         refresh_zone_hit_regions_after_render(
@@ -1476,6 +1555,17 @@ impl ApplicationHandler for WinitApp {
                         telem.stage6_render_encode_us = compositor_telemetry.render_encode_us;
                         telem.stage7_gpu_submit_us = compositor_telemetry.gpu_submit_us;
                         telem.tile_count = compositor_telemetry.tile_count;
+                        if let Some((local_ack_us, scene_commit_us, next_present_us)) =
+                            drain_pending_input_latency(
+                                &pending_input_latency,
+                                scene_commit_at,
+                                Instant::now(),
+                            )
+                        {
+                            telem.input_to_local_ack_us = local_ack_us;
+                            telem.input_to_scene_commit_us = scene_commit_us;
+                            telem.input_to_next_present_us = next_present_us;
+                        }
                         telem.sync_legacy_aliases();
                         telemetry.record(telem);
 
@@ -1818,6 +1908,7 @@ impl ApplicationHandler for WinitApp {
             WindowEvent::RedrawRequested => {
                 self.refresh_cursor_position_from_os();
                 self.drain_input_capture_commands();
+                self.inject_windowed_benchmark_input_probe();
                 self.refresh_widget_hover_tracking();
                 self.tick_widget_hover_tracking();
                 self.update_overlay_cursor_hittest();
@@ -1916,6 +2007,15 @@ impl WinitApp {
         false
     }
 
+    fn inject_windowed_benchmark_input_probe(&mut self) {
+        if self.state.config.benchmark.is_none() {
+            return;
+        }
+        self.state.cursor_x = WINDOWED_BENCHMARK_INPUT_X;
+        self.state.cursor_y = WINDOWED_BENCHMARK_INPUT_Y;
+        self.enqueue_pointer_event(PointerEventKind::Move);
+    }
+
     /// Enqueue a pointer event into the input ring buffer.
     ///
     /// Maps a `PointerEventKind` to the corresponding `InputEventKind` variant
@@ -1954,12 +2054,13 @@ impl WinitApp {
 
         // Also feed the InputProcessor for local feedback (Stage 2).
         // This happens synchronously on the main thread per spec §Stage 2.
+        let input_started_at = Instant::now();
         let pointer_event = PointerEvent {
             x,
             y,
             kind,
             device_id: 0,
-            timestamp: Some(Instant::now()),
+            timestamp: Some(input_started_at),
         };
         // Acquire the scene lock directly (without going through SharedState) so that
         // the main-thread input path does not contend with session handlers that hold
@@ -2098,6 +2199,11 @@ impl WinitApp {
                 // compositor via a local-patch channel in the full pipeline. For the
                 // initial windowed runtime, the compositor reads the scene state
                 // directly on the next frame.
+                record_pending_input_latency(
+                    &self.state.pending_input_latency,
+                    input_started_at,
+                    result.local_ack_us,
+                );
                 let _ = result.local_patch;
 
                 // ── Pointer event dispatch to subscribed portal agents ────────
@@ -3067,6 +3173,7 @@ impl WindowedRuntime {
         let input_ring = Arc::new(std::sync::Mutex::new(
             std::collections::VecDeque::with_capacity(INPUT_EVENT_CAPACITY),
         ));
+        let pending_input_latency = Arc::new(StdMutex::new(VecDeque::new()));
         let shutdown = ShutdownToken::new();
 
         // ── RuntimeContext ─────────────────────────────────────────────────────
@@ -3168,6 +3275,7 @@ impl WindowedRuntime {
             fallback_unrestricted,
             shared_state,
             input_ring,
+            pending_input_latency,
             frame_ready_rx,
             frame_ready_tx: Some(frame_ready_tx),
             compositor: None,
@@ -4117,6 +4225,7 @@ fn detect_monitor_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tze_hud_scene::NodeData;
 
     #[test]
     fn windowed_config_default_values() {
@@ -4147,6 +4256,19 @@ mod tests {
                 .any(|lease| lease.namespace == WINDOWED_BENCHMARK_AGENT),
             "benchmark scene must be owned by the benchmark agent namespace"
         );
+        assert!(
+            scene.nodes.values().any(|node| {
+                matches!(
+                    &node.data,
+                    NodeData::HitRegion(hit_region)
+                        if hit_region
+                            .interaction_id
+                            .starts_with("windowed-benchmark-input-")
+                            && hit_region.accepts_pointer
+                )
+            }),
+            "benchmark scene must include pointer hit regions for input-latency probes"
+        );
     }
 
     #[test]
@@ -4164,6 +4286,40 @@ mod tests {
             "benchmark mode must activate its own deterministic tab"
         );
         assert_eq!(scene.tiles.len(), 20);
+    }
+
+    #[test]
+    fn pending_input_latency_drains_into_split_latency_fields() {
+        let pending = Arc::new(StdMutex::new(VecDeque::new()));
+        let started = Instant::now() - std::time::Duration::from_millis(3);
+        let scene_commit_at = Instant::now() - std::time::Duration::from_millis(1);
+        record_pending_input_latency(&pending, started, 125);
+
+        let (local_ack, scene_commit, next_present) =
+            drain_pending_input_latency(&pending, scene_commit_at, Instant::now())
+                .expect("sample drains");
+
+        assert_eq!(local_ack, 125);
+        assert!(scene_commit >= 2_000);
+        assert!(next_present >= 3_000);
+        assert!(scene_commit < next_present);
+        assert!(
+            drain_pending_input_latency(&pending, scene_commit_at, Instant::now()).is_none(),
+            "sample should be consumed exactly once"
+        );
+    }
+
+    #[test]
+    fn pending_input_latency_clamps_sub_microsecond_local_ack_to_nonzero_sample() {
+        let pending = Arc::new(StdMutex::new(VecDeque::new()));
+        let started = Instant::now() - std::time::Duration::from_millis(1);
+        record_pending_input_latency(&pending, started, 0);
+
+        let (local_ack, _, _) =
+            drain_pending_input_latency(&pending, Instant::now(), Instant::now())
+                .expect("sample drains");
+
+        assert_eq!(local_ack, 1);
     }
 
     #[test]
