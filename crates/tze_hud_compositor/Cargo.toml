@@ -23,6 +23,7 @@ blake3 = { workspace = true }
 glyphon = { workspace = true }
 resvg = { workspace = true }
 tiny-skia = { workspace = true }
+ab_glyph = { workspace = true }
 statig = { workspace = true }
 
 [dev-dependencies]

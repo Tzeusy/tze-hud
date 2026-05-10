@@ -75,6 +75,8 @@ quick-xml = "0.37"
 # bindings (e.g., status-indicator labels) actually render.
 resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 tiny-skia = "0.12"
+# Direct CPU glyph masks for retained widget SVG text fast paths.
+ab_glyph = "0.2"
 
 # Misc
 subtle = "2.5"
