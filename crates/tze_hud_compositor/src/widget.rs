@@ -477,23 +477,21 @@ impl PrimitiveSvgLayerPlan {
         let mut cache = primitive_non_text_layer_cache()
             .lock()
             .expect("primitive non-text SVG layer cache poisoned");
-        cache.insert_with_limits(
+        let cached = cache.insert_with_limits(
             key,
             segment,
             PRIMITIVE_NON_TEXT_LAYER_CACHE_MAX_ENTRIES,
             PRIMITIVE_NON_TEXT_LAYER_CACHE_MAX_BYTES,
             STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
         );
-        if let Some(cached) = cache.get(&key) {
-            pixmap.as_mut().draw_pixmap(
-                0,
-                0,
-                cached.as_ref().as_ref(),
-                &tiny_skia::PixmapPaint::default(),
-                tiny_skia::Transform::identity(),
-                None,
-            );
-        }
+        pixmap.as_mut().draw_pixmap(
+            0,
+            0,
+            cached.as_ref().as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
     }
 
     fn draw_non_text_range(
@@ -932,7 +930,7 @@ impl PrimitiveText {
         }
 
         let scaled_font = font.as_scaled(font_size_px);
-        let cache_key = self.direct_text_mask_cache_key(content, &crop, pixel_width);
+        let cache_key = self.direct_text_mask_cache_key(content, &crop, pixel_width, pixel_height);
         if let Some(cached) = text_svg_layer_cache()
             .lock()
             .expect("text SVG layer cache poisoned")
@@ -1015,14 +1013,14 @@ impl PrimitiveText {
         let mut cache = text_svg_layer_cache()
             .lock()
             .expect("text SVG layer cache poisoned");
-        cache.insert_with_limits(
+        let pixmap = cache.insert_with_limits(
             cache_key,
             pixmap,
             TEXT_SVG_LAYER_CACHE_MAX_ENTRIES,
             TEXT_SVG_LAYER_CACHE_MAX_BYTES,
             STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
         );
-        cache.get(&cache_key).map(|pixmap| DirectTextMask {
+        Some(DirectTextMask {
             pixmap,
             pixel_y: crop.pixel_y,
         })
@@ -1040,10 +1038,12 @@ impl PrimitiveText {
         content: &str,
         crop: &TextMaskCrop,
         pixel_width: u32,
+        pixel_height: u32,
     ) -> StaticSvgLayerCacheKey {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"direct-text-mask-v1");
         hasher.update(content.as_bytes());
+        hasher.update(&pixel_height.to_le_bytes());
         hasher.update(&self.x.to_le_bytes());
         hasher.update(&self.y.to_le_bytes());
         hasher.update(&self.font_size.to_le_bytes());
@@ -1796,14 +1796,18 @@ impl StaticSvgLayerCache {
         Some(pixmap)
     }
 
-    fn insert(&mut self, key: StaticSvgLayerCacheKey, pixmap: tiny_skia::Pixmap) {
+    fn insert(
+        &mut self,
+        key: StaticSvgLayerCacheKey,
+        pixmap: tiny_skia::Pixmap,
+    ) -> Arc<tiny_skia::Pixmap> {
         self.insert_with_limits(
             key,
             pixmap,
             STATIC_SVG_LAYER_CACHE_MAX_ENTRIES,
             STATIC_SVG_LAYER_CACHE_MAX_BYTES,
             STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
-        );
+        )
     }
 
     fn insert_with_limits(
@@ -1813,10 +1817,11 @@ impl StaticSvgLayerCache {
         max_entries: usize,
         max_bytes: usize,
         max_entry_bytes: usize,
-    ) {
+    ) -> Arc<tiny_skia::Pixmap> {
         let byte_len = pixmap.data().len();
+        let pixmap = Arc::new(pixmap);
         if byte_len > max_entry_bytes || byte_len > max_bytes || max_entries == 0 {
-            return;
+            return pixmap;
         }
 
         if let Some(old) = self.entries.remove(&key) {
@@ -1828,7 +1833,7 @@ impl StaticSvgLayerCache {
         self.entries.insert(
             key,
             StaticSvgLayerCacheEntry {
-                pixmap: Arc::new(pixmap),
+                pixmap: Arc::clone(&pixmap),
                 byte_len,
             },
         );
@@ -1839,6 +1844,10 @@ impl StaticSvgLayerCache {
                 break;
             }
         }
+        self.entries
+            .get(&key)
+            .map(|entry| Arc::clone(&entry.pixmap))
+            .unwrap_or(pixmap)
     }
 
     fn clear(&mut self) {
@@ -2061,10 +2070,10 @@ fn cached_bound_layer(key: RasterizedLayerCacheKey) -> Option<Arc<tiny_skia::Pix
 fn insert_bound_layer(
     key: RasterizedLayerCacheKey,
     pixmap: tiny_skia::Pixmap,
-) -> Option<Arc<tiny_skia::Pixmap>> {
+) -> Arc<tiny_skia::Pixmap> {
     let cache_key = cache_key_from_raster_key(&key);
     if !admit_bound_layer_cache_key(cache_key) {
-        return Some(Arc::new(pixmap));
+        return Arc::new(pixmap);
     }
     insert_admitted_bound_layer(cache_key, pixmap)
 }
@@ -2079,7 +2088,7 @@ fn admit_bound_layer_cache_key(cache_key: StaticSvgLayerCacheKey) -> bool {
 fn insert_admitted_bound_layer(
     cache_key: StaticSvgLayerCacheKey,
     pixmap: tiny_skia::Pixmap,
-) -> Option<Arc<tiny_skia::Pixmap>> {
+) -> Arc<tiny_skia::Pixmap> {
     let mut cache = bound_svg_layer_cache()
         .lock()
         .expect("bound SVG layer cache poisoned");
@@ -2089,8 +2098,7 @@ fn insert_admitted_bound_layer(
         BOUND_SVG_LAYER_CACHE_MAX_ENTRIES,
         BOUND_SVG_LAYER_CACHE_MAX_BYTES,
         STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
-    );
-    cache.get(&cache_key)
+    )
 }
 
 fn rasterize_cached_text_svg(
@@ -2119,14 +2127,14 @@ fn rasterize_cached_text_svg(
     let mut cache = text_svg_layer_cache()
         .lock()
         .expect("text SVG layer cache poisoned");
-    cache.insert_with_limits(
+    let pixmap = cache.insert_with_limits(
         key,
         pixmap,
         TEXT_SVG_LAYER_CACHE_MAX_ENTRIES,
         TEXT_SVG_LAYER_CACHE_MAX_BYTES,
         STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
     );
-    cache.get(&key)
+    Some(pixmap)
 }
 
 fn composed_widget_cache_key(
@@ -2220,8 +2228,7 @@ fn rasterize_static_svg_layer(
     let mut cache = static_svg_layer_cache()
         .lock()
         .expect("static SVG layer cache poisoned");
-    cache.insert(key, pixmap);
-    cache.get(&key).map(RasterizedSvgLayer::Shared)
+    Some(RasterizedSvgLayer::Shared(cache.insert(key, pixmap)))
 }
 
 /// Clear the process-local static SVG layer raster cache.
@@ -2403,9 +2410,8 @@ pub fn rasterize_widget_render_plan(
                 pixel_width,
                 pixel_height,
             ) {
-                if let Some(cached) = insert_admitted_bound_layer(admitted_cache_key, pixmap) {
-                    composite_layer(&mut composed, RasterizedSvgLayer::Shared(cached));
-                }
+                let cached = insert_admitted_bound_layer(admitted_cache_key, pixmap);
+                composite_layer(&mut composed, RasterizedSvgLayer::Shared(cached));
             }
             continue;
         }
@@ -2424,9 +2430,8 @@ pub fn rasterize_widget_render_plan(
         }
 
         if let Some(pixmap) = rasterize_single_svg_layer(&modified_svg, pixel_width, pixel_height) {
-            if let Some(cached) = insert_bound_layer(cache_key, pixmap) {
-                composite_layer(&mut composed, RasterizedSvgLayer::Shared(cached));
-            }
+            let cached = insert_bound_layer(cache_key, pixmap);
+            composite_layer(&mut composed, RasterizedSvgLayer::Shared(cached));
         }
     }
 
@@ -2442,14 +2447,14 @@ pub fn rasterize_widget_render_plan(
         let mut cache = composed_widget_cache()
             .lock()
             .expect("composed widget cache poisoned");
-        cache.insert_with_limits(
+        let cached = cache.insert_with_limits(
             composed_key,
             pixmap,
             COMPOSED_WIDGET_CACHE_MAX_ENTRIES,
             COMPOSED_WIDGET_CACHE_MAX_BYTES,
             STATIC_SVG_LAYER_CACHE_MAX_ENTRY_BYTES,
         );
-        return cache.get(&composed_key).map(|cached| (*cached).clone());
+        return Some((*cached).clone());
     }
 
     None
@@ -3183,6 +3188,26 @@ mod tests {
             .expect("widget cache test mutex poisoned")
     }
 
+    fn expected_text_mask_cache_key(
+        text: &PrimitiveText,
+        content: &str,
+        pixel_width: u32,
+        pixel_height: u32,
+    ) -> StaticSvgLayerCacheKey {
+        let crop = text
+            .mask_crop(pixel_width, pixel_height)
+            .expect("text crop");
+        if shared_widget_ab_glyph_font().is_some()
+            && text.uses_fast_path_font_family()
+            && text.dominant_baseline.is_none()
+        {
+            text.direct_text_mask_cache_key(content, &crop, pixel_width, pixel_height)
+        } else {
+            let text_svg = text.render_mask_svg(content, crop.view_box);
+            static_svg_layer_cache_key(&text_svg, pixel_width, crop.pixel_height)
+        }
+    }
+
     // ── SVG attribute manipulation tests ──────────────────────────────────────
 
     fn test_cache_key(label: &str) -> StaticSvgLayerCacheKey {
@@ -3211,7 +3236,7 @@ mod tests {
         let mut cache = StaticSvgLayerCache::default();
         let key = test_cache_key("oversize");
 
-        cache.insert_with_limits(key, test_pixmap(2, 2), 64, 64, 15);
+        let uncached = cache.insert_with_limits(key, test_pixmap(2, 2), 64, 64, 15);
 
         assert!(
             cache.entries.is_empty(),
@@ -3219,6 +3244,11 @@ mod tests {
         );
         assert_eq!(cache.total_bytes, 0);
         assert!(cache.lru.is_empty());
+        assert_eq!(
+            uncached.data().len(),
+            16,
+            "oversize cache entries must still be returned to the caller"
+        );
     }
 
     #[test]
@@ -3292,6 +3322,33 @@ mod tests {
         assert_eq!(
             red_key.pixel_width, blue_key.pixel_width,
             "same-size SVGs should differ by content digest, not dimensions"
+        );
+    }
+
+    #[test]
+    fn retained_plan_returns_oversize_composed_output_without_caching() {
+        let _cache_guard = widget_cache_test_guard();
+        clear_static_svg_layer_cache();
+        clear_widget_raster_caches();
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="2049" height="1025">
+            <rect x="0" y="0" width="2049" height="1025" fill="#00ff00"/>
+        </svg>"##;
+        let plan = WidgetRenderPlan::compile(&[(svg, &[])]);
+        let constraints = HashMap::new();
+        let params = HashMap::new();
+
+        let first = rasterize_widget_render_plan(&plan, &constraints, &params, 2049, 1025)
+            .expect("first oversize composed render should bypass cache admission");
+        let second = rasterize_widget_render_plan(&plan, &constraints, &params, 2049, 1025)
+            .expect("admitted oversize composed render should still return uncached pixels");
+        let cache = composed_widget_cache()
+            .lock()
+            .expect("composed widget cache");
+
+        assert_eq!(first.data(), second.data());
+        assert!(
+            cache.entries.is_empty(),
+            "oversize composed output should exceed the per-entry cache limit"
         );
     }
 
@@ -3557,8 +3614,7 @@ mod tests {
         let PrimitiveItem::Text(text) = &primitive_plan.items[0] else {
             panic!("expected text primitive");
         };
-        let expected_crop = text.mask_crop(64, 32).expect("text crop");
-        let expected_key = text.direct_text_mask_cache_key("CPU", &expected_crop, 64);
+        let expected_key = expected_text_mask_cache_key(text, "CPU", 64, 32);
 
         assert!(
             text_svg_layer_cache()
@@ -3604,8 +3660,7 @@ mod tests {
         let PrimitiveItem::Text(text) = &primitive_plan.items[0] else {
             panic!("expected text primitive");
         };
-        let expected_crop = text.mask_crop(64, 32).expect("text crop");
-        let expected_key = text.direct_text_mask_cache_key("CPU", &expected_crop, 64);
+        let expected_key = expected_text_mask_cache_key(text, "CPU", 64, 32);
         let cache = text_svg_layer_cache().lock().expect("text cache");
 
         if red.data() == blue.data() && !sans_serif_font_available() {
