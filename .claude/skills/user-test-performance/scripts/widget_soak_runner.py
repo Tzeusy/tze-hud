@@ -186,9 +186,20 @@ def load_agent_artifact(path: Path) -> dict[str, Any]:
     return data
 
 
+def repo_relative_path(path: str | Path, root: Path) -> str:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return str(path)
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def summarize(
     *,
     args: argparse.Namespace,
+    root: Path,
     started_at: str,
     ended_at: str,
     output_root: Path,
@@ -222,7 +233,9 @@ def summarize(
             "rtt_p99_us": metrics.get("rtt_p99_us"),
             "rtt_jitter_us": rtt_jitter_us,
             "verdict": artifact.get("verdict"),
-            "artifact_path": artifact.get("artifact_path"),
+            "artifact_path": repo_relative_path(artifact.get("artifact_path"), root)
+            if artifact.get("artifact_path")
+            else None,
             "artifact_error": artifact.get("artifact_error"),
             "artifact_missing": artifact.get("artifact_missing"),
             "returncode": artifact.get("returncode"),
@@ -264,8 +277,11 @@ def summarize(
         "metrics_by_agent": metrics_by_agent,
         "resource_samples": resource_samples,
         "resource_drift": drift,
-        "commands": commands,
-        "output_root": str(output_root),
+        "commands": {
+            agent_id: [repo_relative_path(part, root) for part in command]
+            for agent_id, command in commands.items()
+        },
+        "output_root": repo_relative_path(output_root, root),
     }
 
 
@@ -298,6 +314,7 @@ def main() -> int:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--sample-windows-resources", action="store_true")
+    parser.add_argument("--resource-sample-interval-s", type=float, default=300.0)
     parser.add_argument("--win-user", default="hudbot")
     parser.add_argument("--win-host", default="tzehouse-windows.parrot-hen.ts.net")
     parser.add_argument("--ssh-identity", default="")
@@ -307,6 +324,8 @@ def main() -> int:
         raise SystemExit("--duration-s must be > 0")
     if args.rate_rps <= 0:
         raise SystemExit("--rate-rps must be > 0")
+    if args.resource_sample_interval_s < 0:
+        raise SystemExit("--resource-sample-interval-s must be >= 0")
 
     agents = parse_agents(args.agent_ids)
     root = repo_root()
@@ -345,6 +364,7 @@ def main() -> int:
         }
         summary = summarize(
             args=args,
+            root=root,
             started_at=started_at,
             ended_at=utc_now_iso(),
             output_root=output_root,
@@ -386,8 +406,20 @@ def main() -> int:
             log_handles.remove(stdout)
             log_handles.remove(stderr)
 
+        next_resource_sample = (
+            time.monotonic() + args.resource_sample_interval_s
+            if args.sample_windows_resources and args.resource_sample_interval_s > 0
+            else None
+        )
+        resource_sample_index = 1
         while any(proc.poll() is None for proc in processes.values()):
             time.sleep(2.0)
+            if next_resource_sample is not None and time.monotonic() >= next_resource_sample:
+                resource_samples.append(
+                    sample_windows_resources(args, f"during-{resource_sample_index}")
+                )
+                resource_sample_index += 1
+                next_resource_sample += args.resource_sample_interval_s
     except KeyboardInterrupt:
         interrupted = True
         for proc in processes.values():
@@ -431,6 +463,7 @@ def main() -> int:
 
     summary = summarize(
         args=args,
+        root=root,
         started_at=started_at,
         ended_at=utc_now_iso(),
         output_root=output_root,
