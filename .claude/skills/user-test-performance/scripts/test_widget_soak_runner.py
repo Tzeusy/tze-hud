@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("widget_soak_runner.py")
@@ -182,6 +184,60 @@ class LiveMetricsArtifactTests(unittest.TestCase):
             self.assertEqual(result["artifact_path"], str(copied))
             self.assertTrue(copied.exists())
             self.assertTrue((output_root / widget_soak_runner.LIVE_METRICS_SUMMARY_NAME).exists())
+
+    def test_windows_resource_sampler_matches_isolated_benchmark_process_names(self) -> None:
+        script = widget_soak_runner.windows_resource_sample_script(
+            label="during-1",
+            process_name="tze_hud*",
+            command_match=r"C:\tze_hud\benchmark.toml",
+        )
+
+        self.assertIn("Get-CimInstance Win32_Process", script)
+        self.assertIn("$_.Name -like $processName", script)
+        self.assertIn("[string]$_.CommandLine", script)
+        self.assertIn(r"$processName = 'tze_hud*'", script)
+        self.assertIn(r"$commandMatch = 'C:\tze_hud\benchmark.toml'", script)
+        self.assertIn("command_match_applied", script)
+        self.assertNotIn("command_match = $commandMatch", script)
+        self.assertIn("process_ids", script)
+        self.assertIn("process_names", script)
+        self.assertNotIn("Get-Process -Name 'tze_hud'", script)
+
+    def test_windows_resource_sampler_uses_encoded_powershell(self) -> None:
+        script = widget_soak_runner.windows_resource_sample_script(
+            label="before",
+            process_name="tze_hud_pr650*",
+            command_match="",
+        )
+
+        encoded = widget_soak_runner.encode_powershell_command(script)
+        decoded = base64.b64decode(encoded).decode("utf-16le")
+
+        self.assertEqual(decoded, script)
+        self.assertIn("$processName = 'tze_hud_pr650*'", decoded)
+
+    def test_windows_resource_sampler_uses_noninteractive_powershell(self) -> None:
+        args = Namespace(
+            sample_windows_resources=True,
+            win_user="hudbot",
+            win_host="tzehouse-windows.parrot-hen.ts.net",
+            ssh_identity="",
+            windows_process_name="tze_hud*",
+            windows_process_command_match="",
+        )
+
+        with mock.patch.object(widget_soak_runner.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = json.dumps({"process_count": 0})
+            run.return_value.stderr = ""
+
+            result = widget_soak_runner.sample_windows_resources(args, "before")
+
+        self.assertTrue(result["ok"], result)
+        command = run.call_args.args[0]
+        powershell_command = command[-1]
+        self.assertIn("-NonInteractive", powershell_command)
+        self.assertIn("-EncodedCommand", powershell_command)
 
 
 if __name__ == "__main__":
