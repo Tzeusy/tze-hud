@@ -104,8 +104,13 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertIn("mouse_event", script)
         self.assertIn("SendInput", script)
         self.assertIn("if (-not [HudDiagnosticInput]::SetCursorPos", script)
-        self.assertIn("if ([HudDiagnosticInput]::SendInput", script)
-        self.assertIn("diagnostic-warning:SendInput failed", script)
+        self.assertIn("$sent = [HudDiagnosticInput]::SendInput", script)
+        self.assertIn("public MOUSEINPUT mi", script)
+        self.assertIn("public KEYBDINPUT ki", script)
+        self.assertIn("public HARDWAREINPUT hi", script)
+        self.assertIn("Marshal]::GetLastWin32Error()", script)
+        self.assertIn("diagnostic-warning:SendInput failed sent=", script)
+        self.assertIn("' input_size=' + $InputSize", script)
         self.assertNotIn("throw 'SendInput failed'", script)
         self.assertLess(
             script.index("$inputs = [HudDiagnosticInput+INPUT[]]::new(2)"),
