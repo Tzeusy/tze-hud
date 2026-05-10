@@ -84,6 +84,25 @@ Follow-up on branch `agent/hud-9wljr.1`: the widget raster benchmark now separat
 
 Interpretation: the retained-plan work removes repeated XML parse from the warm shape-binding path and gets numeric/color gauge updates under the proposed <=1 ms target locally. The remaining unproven gap is the reference Windows path and text-changing labels/readouts: text still routes through cached minimal SVG text rasterization and should be measured separately from shape-only parameter changes.
 
+Reference-host rerun for `hud-eeejt` on 2026-05-10 measured the retained
+Criterion benchmark directly on TzeHouse, including the dedicated text-changing
+case. Source:
+`docs/reports/retained_widget_raster_windows_hud_eeejt_20260510.md`.
+
+| Benchmark | TzeHouse point estimate | TzeHouse upper estimate | Proposed target |
+|---|---:|---:|---:|
+| gauge 512x512 cold parse | 5.062 ms | 5.338 ms | n/a |
+| gauge 512x512 warm identical params | 0.323 ms | 0.332 ms | <= 1.0 ms |
+| gauge 512x512 warm numeric/color parameter-changing | 4.021 ms | 4.309 ms | <= 1.0 ms |
+| gauge 512x512 warm text-changing | 5.726 ms | 6.261 ms | <= 1.0 ms |
+| gauge 128x128 warm identical params | 0.0048 ms | 0.0049 ms | n/a |
+
+Interpretation: the retained composed-widget cache path is fast for unchanged
+parameters, but real 512x512 re-rasterization is still above the proposed
+Windows-first target on the reference host. Text-changing labels/readouts are
+slower than numeric/color changes and must stay as a separately tracked
+benchmark case.
+
 ### Widget Publish Load
 
 The Rust `widget_publish_load_harness` was built and run on the Windows host against `local-dev` (`127.0.0.1:50051`) to avoid tailnet RTT. It authenticated successfully and produced correlated RTT/error accounting, but the deployed runtime config grants `agent-alpha`, `agent-beta`, and `agent-gamma` only:
@@ -142,7 +161,7 @@ Observed behavior under the attempted load: the runtime stayed up, authenticated
 | input_to_local_ack p99 | <= 2 ms | 0.001 ms synthetic headless | Pass for synthetic path |
 | input_to_scene_commit p99 | <= 25 ms | 0.007 ms steady-state; 0.001 ms high-mutation | Pass for synthetic path |
 | input_to_next_present p99 | <= 16.6 ms | 2.533 ms / 2.437 ms headless | Pass for headless only |
-| Widget SVG re-rasterization 512x512 | <= 1 ms p99 | Baseline: 4.526 ms cold; 6.869 ms warm. Follow-up local retained path: 2.495 ms cold parse upper estimate; 0.0248 ms warm identical upper estimate; 0.291 ms warm numeric/color parameter-changing upper estimate | Pass locally for retained warm shape path; Windows reference rerun still required |
+| Widget SVG re-rasterization 512x512 | <= 1 ms p99 | Baseline: 4.526 ms cold; 6.869 ms warm. Follow-up local retained path: 2.495 ms cold parse upper estimate; 0.0248 ms warm identical upper estimate; 0.291 ms warm numeric/color parameter-changing upper estimate. TzeHouse retained rerun: 0.332 ms warm identical upper estimate; 4.309 ms warm numeric/color parameter-changing upper estimate; 6.261 ms warm text-changing upper estimate | Fail overall; only the TzeHouse unchanged-params cache-reuse case passes. Retained numeric/color and text-changing re-raster paths miss target |
 | Transparent-overlay composite cost | <= +0.5 ms p99 vs fullscreen | Not instrumented | Unknown / gap |
 | Idle CPU | <= 1% on one core | 0.000% total processor sample | Pass in sample |
 | Idle GPU | <= 0.5% device utilization | 3.791% GPU engine sum sample | Fail / needs cleaner sample |
@@ -150,7 +169,7 @@ Observed behavior under the attempted load: the runtime stayed up, authenticated
 
 ## Top Three Gaps
 
-1. Widget rasterization baseline was over the proposed Windows budget. The original 512x512 gauge path measured 4.5-6.9 ms p99/max against a 1.0 ms proposed p99 target. The retained-plan follow-up decomposes cold parse, warm identical, and warm numeric/color parameter-changing paths; local retained warm shape updates are under 1 ms, but reference Windows rerun and text-changing decomposition remain open.
+1. Widget rasterization baseline was over the proposed Windows budget. The original 512x512 gauge path measured 4.5-6.9 ms p99/max against a 1.0 ms proposed p99 target. The retained-plan follow-up decomposes cold parse, warm identical, warm numeric/color parameter-changing, and warm text-changing paths. The TzeHouse rerun passes only the unchanged-params cache-reuse path; numeric/color re-raster and text-changing re-raster remain above target.
 
 2. Transparent-overlay composite cost is not measurable with the current harness set. Headless frame histograms are strong, but the acceptance target is overlay-vs-fullscreen p99 delta on Windows/DWM. Suspected causes: no runtime telemetry export for live windowed frame histograms and no scripted fullscreen/overlay A/B mode.
 
@@ -162,6 +181,6 @@ Use these as inputs for follow-up bead creation by the coordinator:
 
 | Gap | Suggested bead shape |
 |---|---|
-| Widget raster p99 over budget | Rerun the retained-plan benchmark on the reference Windows path; add a dedicated text-changing label/readout case if text update cost remains above the shape-only path |
+| Widget raster p99 over budget | Optimize retained 512x512 re-raster on TzeHouse, with separate tracking for numeric/color primitive updates and text-changing label/readout updates |
 | Overlay composite cost unknown | Add live windowed frame histogram export plus scripted fullscreen-vs-overlay A/B run on TzeHouse |
 | Soak blocked by capabilities | Add a reference Windows perf config/profile that grants only the capabilities needed for three resident perf agents, then rerun widget/zone/tile soak |
