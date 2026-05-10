@@ -114,3 +114,21 @@ Only proceed to strict smoke or `hud-nfl7n` after:
 - The relevant scheduled task is known.
 - Widget/zone discovery succeeds against MCP `/mcp`.
 - The gRPC client smoke succeeds against port `50051`.
+
+## Strict Smoke and Soak Handoff
+
+After the recovery checks pass, use the benchmark launch and soak procedure in
+`docs/reports/windows_benchmark_config_launch_2026-05.md`. The release-gating
+soak must run the three-agent `widget_soak_runner.py` path with:
+
+- `--target-id user-test-windows-tailnet`
+- `--duration-s 3600`
+- `--rate-rps 1`
+- `--windows-live-metrics-path 'C:\tze_hud\perf\hud-nfl7n\windowed_live_metrics.json'`
+- `--sample-windows-resources`
+- `--ssh-identity ~/.ssh/ecdsa_home`
+
+Do not use `--allow-missing-live-metrics` for release evidence. The strict smoke
+or soak artifact must show `live_metrics.ok=true`, nonzero frame/input metrics,
+`process_count >= 1` resource samples, and the cleanup evidence required by
+`hud-nfl7n`.
