@@ -78,6 +78,18 @@ following are true:
 4. `hud-iygbd` closes with a final requirement-to-evidence reconciliation and a
    release/archive decision.
 
+## Prompt-to-Artifact Checklist
+
+| Objective requirement | Required artifact or gate | Current evidence | Status |
+|---|---|---|---|
+| Run the serious soak cycle | 60-minute `hud-nfl7n` three-agent soak artifact under `docs/reports/` or `docs/evidence/` | `hud-nfl7n` acceptance criteria and dry-run notes prove the command shape, including `user-test-windows-tailnet`, 3600s, 1 rps, `main-progress`, required live metrics, resource sampling, and `--windows-process-command-match 'C:\tze_hud\benchmark.toml'` | Blocked by `hud-9m47l` |
+| Prove host readiness before soak | Tailscale, non-interactive SSH, gRPC `:50051`, MCP `:9090`, widget/zone discovery, and gRPC smoke | `docs/operations/tzehouse-windows-recovery.md`; latest `hud-9m47l` notes record Tailscale ping, SSH, and TCP probe timeouts | Incomplete |
+| Prove strict smoke metrics | Short smoke with `live_metrics.ok=true`, nonzero input-latency buckets, and `process_count >= 1` resource samples | Implementations landed via PR #650/#651/#652; local unit/config/dry-run validation is recorded on `hud-nfl7n` | Awaiting live host |
+| Prove release-quality soak metrics | Accepted publish counts, frame-time p50/p99/p99.9, input latency, resource samples, idle GPU, private-memory drift, transparent-overlay composite delta, jitter/failure observations, and cleanup evidence | `hud-nfl7n` acceptance criteria and benchmark launch docs enumerate the required evidence | Awaiting live host |
+| Reconcile requirements to implementation | Final `hud-iygbd` closeout mapping every windows-first task/design budget to evidence or tracked gap | This preflight report maps current evidence and blockers; final closeout depends on `hud-nfl7n` | Incomplete |
+| Use `/project-direction` for gaps | Focused Beads for any uncovered or failed requirement | Known gaps are scheduled as `hud-9m47l`, `hud-nfl7n`, and `hud-iygbd`; if strict smoke or soak fails after recovery, create child beads under `hud-9wljr` with the failing artifact | Satisfied for known gaps |
+| Keep handoff durable | Pushed docs plus Beads notes/export state | Recovery, benchmark, and AGENTS handoff docs are pushed; `bd export --no-memories` includes the current `hud-9m47l`/`hud-nfl7n` notes. `.beads/backup/` is local-only unless a destination is configured | Satisfied locally and in git docs |
+
 ## Direction
 
 No new implementation or planning gap remains unscheduled. Cooperative HUD
