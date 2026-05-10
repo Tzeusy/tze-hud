@@ -1,7 +1,8 @@
 # exemplar-ambient-background Specification
 
 ## Purpose
-TBD - created by archiving change exemplar-ambient-background. Update Purpose after archive.
+Defines the ambient-background exemplar zone contract for full-display background-layer content, latest-wins publication behavior, and transparent/clear fallback rendering.
+
 ## Requirements
 ### Requirement: Ambient Background Zone Visual Contract
 
@@ -166,4 +167,3 @@ Scope: v1-mandatory
 - **WHEN** an agent publishes 10 different solid colors to `ambient-background` in rapid succession via MCP
 - **THEN** only the last-published color MUST be visible after rendering
 - **AND** the zone occupancy MUST show exactly 1 active publication
-

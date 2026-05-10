@@ -1,7 +1,8 @@
 # runtime-app-binary Specification
 
 ## Purpose
-TBD - created by archiving change ship-runtime-app-binary. Update Purpose after archive.
+Defines the canonical operator-facing runtime application binary, its configuration-driven startup behavior, and stable Windows artifact identity for automation.
+
 ## Requirements
 ### Requirement: Canonical Runtime Application Executable
 The project SHALL provide a canonical, non-demo runtime application executable target distinct from example/demo binaries. The canonical executable SHALL be documented as the primary operator-facing runtime artifact.

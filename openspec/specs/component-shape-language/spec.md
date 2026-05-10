@@ -1,7 +1,8 @@
 # component-shape-language Specification
 
 ## Purpose
-TBD - created by archiving change component-shape-language. Update Purpose after archive.
+Defines the v1 component shape language for token-driven visual identity, rendering-policy resolution, component profile loading, readability validation, and SVG token substitution used by zones and widgets.
+
 ## Requirements
 ### Requirement: Design Token System
 The runtime MUST support a design token system — a flat key-value map of named visual primitives loaded from the `[design_tokens]` configuration section. Each token MUST have a dotted namespace key (e.g., `color.text.primary`) and a string value representing a concrete visual primitive. Token keys MUST match the pattern `[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)*` (lowercase ASCII, dot-separated segments, underscores permitted after the first character of each segment). Token values are stored as raw strings; typed interpretation is deferred to consumption time (see Token Value Parsing requirement). Tokens MUST be resolved at startup into concrete values. Token values MUST NOT reference other tokens (no aliases or computed values in v1). The token map MUST be immutable after startup. An empty or absent `[design_tokens]` section MUST be valid — the runtime SHALL use hardcoded fallback values for all canonical tokens.
@@ -449,6 +450,10 @@ Scope: v1-mandatory
 
 ### Requirement: Zone Rendering Override Schema
 Zone rendering overrides in a profile's `zones/{zone_type}.toml` file MUST use the following TOML schema. Each field is optional; omitted fields retain the zone type's default value (which may itself be token-derived from the Default Zone Rendering with Tokens requirement). Each field value MAY be a literal value OR a `{{token.key}}` reference that is resolved against the profile's scoped token map at load time.
+
+#### Scenario: Zone override file may contain literal and token values
+- **WHEN** a profile provides `zones/subtitle.toml` with both literal values and `{{token.key}}` references
+- **THEN** the runtime MUST parse literal values directly and resolve token references against the profile's scoped token map before merging the overrides onto the effective `RenderingPolicy`
 
 **TOML schema:**
 ```toml

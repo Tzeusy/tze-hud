@@ -1,7 +1,8 @@
 # text-stream-portals Specification
 
 ## Purpose
-TBD - created by archiving change text-stream-portals. Update Purpose after archive.
+Defines transport-agnostic text stream portal behavior for resident raw-tile pilots, including output rendering, bounded input, session metadata, and cooperative projection integration points.
+
 ## Requirements
 ### Requirement: Transport-Agnostic Stream Boundary
 

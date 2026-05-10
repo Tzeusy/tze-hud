@@ -5,7 +5,8 @@
 > Original spec follows.
 
 ## Purpose
-TBD - created by archiving change ship-runtime-app-binary. Update Purpose after archive.
+Historical contract for Linux-to-Windows deployment validation and MCP publish smoke checks. Under the Windows-first refocus this remains preserved automation context, not an active expansion of the deployment surface.
+
 ## Requirements
 ### Requirement: Cross-Machine Runtime Validation Flow
 The project SHALL provide a reproducible validation flow for Linux cross-build, Windows deployment, runtime launch, and live MCP publish verification using the canonical app artifact.

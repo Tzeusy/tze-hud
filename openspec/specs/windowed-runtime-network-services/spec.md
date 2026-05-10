@@ -1,7 +1,8 @@
 # windowed-runtime-network-services Specification
 
 ## Purpose
-TBD - created by archiving change ship-runtime-app-binary. Update Purpose after archive.
+Defines network service initialization, MCP listener lifecycle, and authentication enforcement inside the canonical windowed runtime process.
+
 ## Requirements
 ### Requirement: Windowed Runtime Network Service Initialization
 Windowed runtime startup SHALL initialize network service infrastructure when network endpoints are configured, rather than running as compositor-only mode.

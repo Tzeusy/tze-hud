@@ -1,7 +1,8 @@
 # exemplar-presence-card Specification
 
 ## Purpose
-TBD - created by archiving change exemplar-presence-card. Update Purpose after archive.
+Defines the Presence Card exemplar for a compact resident raw-tile surface with avatar imagery, status metadata, input capture, and lease-governed cleanup behavior.
+
 ## Requirements
 ### Requirement: Presence Card Tile Geometry
 Each agent presence card SHALL be a tile with fixed dimensions 320x112 logical pixels. The tile SHALL be anchored to the bottom-left corner of the active tab with a 24px margin from the left edge and 24px margin from the bottom edge. The tile opacity SHALL be 1.0. The tile input_mode SHALL be Capture so the card can host a small human-dismiss affordance in the top-right corner.

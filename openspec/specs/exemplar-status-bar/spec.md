@@ -1,7 +1,8 @@
 # exemplar-status-bar Specification
 
 ## Purpose
-TBD - created by archiving change exemplar-status-bar. Update Purpose after archive.
+Defines the status-bar exemplar zone contract for chrome-layer key/value status rendering and merge-by-key coexistence across agents.
+
 ## Requirements
 ### Requirement: Status Bar Visual Specification
 The status-bar zone exemplar SHALL render as a vertical stack positioned at the right edge of the display, attached to the chrome layer (above all content tiles). The visual treatment SHALL be defined by a component profile with the following effective rendering policy:
@@ -29,6 +30,10 @@ The status-bar zone exemplar SHALL render as a vertical stack positioned at the 
 
 ### Requirement: Status Bar Component Profile
 The exemplar SHALL ship as a component profile directory conforming to the component-shape-language specification. The profile directory structure SHALL be:
+
+#### Scenario: Profile directory follows component-shape-language layout
+- **WHEN** the exemplar status-bar profile is packaged
+- **THEN** it SHALL include `profile.toml` and `zones/status-bar.toml` under `profiles/exemplar-status-bar/`
 
 ```
 profiles/exemplar-status-bar/
@@ -173,4 +178,3 @@ The exemplar SHALL include a user-test scenario that visually verifies multi-age
 #### Scenario: Full user-test sequence completes
 - **WHEN** the user-test script executes steps 1-10 against a live tze_hud instance
 - **THEN** each visual check SHALL confirm the expected key-value display state AND no unexpected keys SHALL appear or disappear
-

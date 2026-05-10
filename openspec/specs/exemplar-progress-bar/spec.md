@@ -1,7 +1,8 @@
 # exemplar-progress-bar Specification
 
 ## Purpose
-TBD - created by archiving change exemplar-progress-bar. Update Purpose after archive.
+Defines the progress-bar widget exemplar bundle and publishing contract for token-driven horizontal progress visualization.
+
 ## Requirements
 ### Requirement: Progress Bar Asset Bundle Structure
 The progress bar exemplar MUST be delivered as a widget asset bundle directory named `progress-bar` containing exactly three files: `widget.toml` (manifest), `track.svg` (background track layer), and `fill.svg` (dynamic fill bar and label layer). The bundle MUST conform to the Widget Asset Bundle Format requirement from widget-system. The `widget.toml` MUST declare: `name = "progress-bar"`, `version = "1.0.0"`, `description = "Horizontal progress bar with configurable fill and label"`, a `parameter_schema` with three parameters, and a `layers` array referencing both SVG files with bindings. Note: The bundle manifest has no `default_geometry` field; the loader always assigns 100% relative geometry. Per-instance geometry is configured via the `geometry_override` field in `[[tabs.widgets]]` config entries.
@@ -224,4 +225,3 @@ Scope: v1-mandatory
 #### Scenario: User-test publishes progress sequence
 - **WHEN** the user-test scenario publishes progress values 0.0, 0.25, 0.5, 0.75, 1.0 in sequence
 - **THEN** each publish MUST succeed and the tester MUST see the fill bar animate to the corresponding width with the label updating at each step
-

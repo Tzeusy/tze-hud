@@ -1,7 +1,8 @@
 # widget-system Specification
 
 ## Purpose
-TBD - created by archiving change component-shape-language. Update Purpose after archive.
+Defines the v1 widget system for startup asset bundles, runtime SVG registration, parameter schemas, publication/occupancy semantics, MCP/gRPC publishing, and compositor rasterization.
+
 ## Requirements
 ### Requirement: Widget Asset Bundle Format
 Widget type definitions MUST be loaded from asset bundles — directories containing a `widget.toml` manifest and one or more SVG files. The manifest MUST declare: `name` (kebab-case, unique across all loaded bundles), `version` (semver string), `description` (human-readable string), `parameter_schema` (array of parameter declarations, each with name, type, default, and optional constraints), `layers` (ordered array of SVG layer references with parameter bindings), and optional `default_geometry` (Rect), `default_rendering_policy`, `default_contention_policy`. The runtime MUST scan all configured bundle directories at startup. The runtime MUST reject bundles with the following error codes: missing `widget.toml` manifest (WIDGET_BUNDLE_NO_MANIFEST), invalid TOML syntax or missing required fields (WIDGET_BUNDLE_INVALID_MANIFEST), duplicate widget type name across loaded bundles (WIDGET_BUNDLE_DUPLICATE_TYPE), SVG file referenced in layers but not present in the bundle directory (WIDGET_BUNDLE_MISSING_SVG), SVG file that fails to parse (WIDGET_BUNDLE_SVG_PARSE_ERROR). A rejected bundle MUST NOT prevent other valid bundles from loading; the runtime SHALL log the error and continue.

@@ -1,7 +1,8 @@
 # exemplar-alert-banner Specification
 
 ## Purpose
-TBD - created by archiving change exemplar-alert-banner. Update Purpose after archive.
+Defines the alert-banner exemplar component profile and visual contract for severity-colored, chrome-layer alert rendering using the component shape language.
+
 ## Requirements
 ### Requirement: Alert-Banner Exemplar Component Profile
 The exemplar-alert-banner component profile MUST be a valid component profile directory containing a `profile.toml` manifest and a `zones/alert-banner.toml` rendering override. The profile MUST declare `component_type = "alert-banner"` and MUST pass OpaqueBackdrop readability validation at startup.
@@ -180,4 +181,3 @@ Scope: v1-mandatory
 #### Scenario: All three banners visible simultaneously
 - **WHEN** all three alerts from the sequential publication are within their auto-dismiss windows
 - **THEN** the display MUST show three stacked banners: critical (red) at top, warning (amber) in middle, info (blue) at bottom, each with white heading text
-

@@ -1,7 +1,8 @@
 # hud-publish-skill Specification
 
 ## Purpose
-TBD - created by archiving change hud-publish-skill. Update Purpose after archive.
+Defines the HUD publish skill packaging and behavior for LLM-facing MCP zone publishing, discovery, configuration templates, and no-dependency publish tooling.
+
 ## Requirements
 ### Requirement: Skill artifact directory structure
 

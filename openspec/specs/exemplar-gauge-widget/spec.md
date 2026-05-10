@@ -1,7 +1,8 @@
 # exemplar-gauge-widget Specification
 
 ## Purpose
-TBD - created by archiving change exemplar-gauge-widget. Update Purpose after archive.
+Defines the gauge widget exemplar bundle, parameter schema, SVG layer bindings, and token-driven vertical fill rendering used by the widget publishing path.
+
 ## Requirements
 ### Requirement: Gauge Widget Visual Contract
 The exemplar gauge widget MUST be a vertical fill gauge consisting of exactly two SVG layers: a static background layer (`background.svg`) providing the frame and track, and a dynamic fill layer (`fill.svg`) containing the fill bar, label text, and severity indicator. The gauge MUST use a 100x240 viewBox for both layers. The background layer MUST contain a rounded outer frame rectangle and an inner track rectangle. The fill layer MUST contain a fill bar rectangle (bound to `level`), a text label element (bound to `label`), and a severity indicator circle (bound to `severity`). The fill bar MUST fill upward from the bottom of the track: the bar is positioned at the track bottom with `height` driven by the `level` parameter via linear binding, and a `clipPath` constraining the fill to the track area. All visible colors in both SVG layers MUST use `{{token.key}}` design token placeholders — no hardcoded hex color values in the SVG markup.
@@ -230,4 +231,3 @@ Scope: v1-mandatory
 #### Scenario: ClipPath constrains fill bar to track
 - **WHEN** `level=1.0` is published
 - **THEN** the fill bar MUST fill exactly the track area and MUST NOT overflow beyond the track boundaries
-

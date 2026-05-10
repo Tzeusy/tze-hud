@@ -1,7 +1,8 @@
 # exemplar-subtitle Specification
 
 ## Purpose
-TBD - created by archiving change exemplar-subtitle. Update Purpose after archive.
+Defines the subtitle exemplar zone contract for readable bottom-of-screen text, dual-layer readability, backdrop/outline policy, and transition behavior.
+
 ## Requirements
 ### Requirement: Subtitle Visual Contract
 The subtitle zone exemplar MUST render with the following visual properties when using default canonical design tokens (no component profile active). These properties constitute the reference rendering target for all subtitle implementations.
@@ -174,4 +175,3 @@ Scope: v1-mandatory
 #### Scenario: User-test subtitle messages use exemplar namespace
 - **WHEN** the subtitle user-test scenario executes
 - **THEN** all published messages MUST use `namespace: "exemplar-test"` to distinguish from other zone test traffic
-
