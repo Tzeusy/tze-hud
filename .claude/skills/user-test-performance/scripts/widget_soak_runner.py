@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import json
 import os
@@ -28,6 +29,7 @@ REQUIRED_INPUT_BUCKETS = (
     "input_to_scene_commit",
     "input_to_next_present",
 )
+DEFAULT_WINDOWS_PROCESS_NAME = "tze_hud*"
 
 
 def utc_now_iso() -> str:
@@ -50,11 +52,64 @@ def binary_path(root: Path) -> Path:
     return root / "target" / "release" / f"widget_publish_load_harness{suffix}"
 
 
+def powershell_single_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def encode_powershell_command(script: str) -> str:
+    return base64.b64encode(script.encode("utf-16le")).decode("ascii")
+
+
+def windows_resource_sample_script(
+    *,
+    label: str,
+    process_name: str,
+    command_match: str,
+) -> str:
+    label_literal = powershell_single_quote(label)
+    process_name_literal = powershell_single_quote(process_name)
+    command_match_literal = powershell_single_quote(command_match)
+    return f"""
+$processName = {process_name_literal}
+$commandMatch = {command_match_literal}
+$candidates = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {{
+    $_.Name -like $processName -and (
+        [string]::IsNullOrWhiteSpace($commandMatch) -or
+        ([string]$_.CommandLine).IndexOf($commandMatch, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    )
+}})
+$ids = @($candidates | ForEach-Object {{ [int]$_.ProcessId }})
+$p = @($ids | ForEach-Object {{ Get-Process -Id $_ -ErrorAction SilentlyContinue }})
+$gpu = $null
+try {{
+    $gpu = (nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
+}} catch {{}}
+[pscustomobject]@{{
+    label = {label_literal}
+    timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+    process_name_filter = $processName
+    command_match_applied = -not [string]::IsNullOrWhiteSpace($commandMatch)
+    process_count = ($p | Measure-Object).Count
+    process_ids = @($p | ForEach-Object {{ $_.Id }})
+    process_names = @($p | ForEach-Object {{ $_.ProcessName }})
+    cpu_seconds_total = ($p | Measure-Object CPU -Sum).Sum
+    working_set_bytes_total = ($p | Measure-Object WorkingSet64 -Sum).Sum
+    private_memory_bytes_total = ($p | Measure-Object PrivateMemorySize64 -Sum).Sum
+    gpu_csv = $gpu
+}} | ConvertTo-Json -Compress
+""".strip()
+
+
 def sample_windows_resources(args: argparse.Namespace, label: str) -> dict[str, Any]:
     if not args.sample_windows_resources:
         return {"enabled": False, "label": label}
 
     ssh_target = f"{args.win_user}@{args.win_host}"
+    script = windows_resource_sample_script(
+        label=label,
+        process_name=getattr(args, "windows_process_name", DEFAULT_WINDOWS_PROCESS_NAME),
+        command_match=getattr(args, "windows_process_command_match", ""),
+    )
     cmd = [
         "ssh",
         "-o",
@@ -65,22 +120,8 @@ def sample_windows_resources(args: argparse.Namespace, label: str) -> dict[str, 
     cmd.extend(
         [
             ssh_target,
-            (
-                "powershell -NoProfile -ExecutionPolicy Bypass -Command "
-                "\"$p=Get-Process -Name 'tze_hud' -ErrorAction SilentlyContinue; "
-                "$gpu=$null; "
-                "try { $gpu=(nvidia-smi --query-gpu=utilization.gpu,memory.used "
-                "--format=csv,noheader,nounits 2>$null | Select-Object -First 1) } catch {}; "
-                "[pscustomobject]@{"
-                f"label='{label}'; "
-                "timestamp_utc=(Get-Date).ToUniversalTime().ToString('o'); "
-                "process_count=($p | Measure-Object).Count; "
-                "cpu_seconds_total=($p | Measure-Object CPU -Sum).Sum; "
-                "working_set_bytes_total=($p | Measure-Object WorkingSet64 -Sum).Sum; "
-                "private_memory_bytes_total=($p | Measure-Object PrivateMemorySize64 -Sum).Sum; "
-                "gpu_csv=$gpu"
-                "} | ConvertTo-Json -Compress\""
-            ),
+            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+            f"-EncodedCommand {encode_powershell_command(script)}",
         ]
     )
     try:
@@ -605,6 +646,22 @@ def main() -> int:
         help="Do not fail a real soak when live frame/input metrics cannot be collected.",
     )
     parser.add_argument("--sample-windows-resources", action="store_true")
+    parser.add_argument(
+        "--windows-process-name",
+        default=DEFAULT_WINDOWS_PROCESS_NAME,
+        help=(
+            "PowerShell wildcard used to select HUD processes for resource sampling. "
+            "Defaults to tze_hud* so production and isolated benchmark executables match."
+        ),
+    )
+    parser.add_argument(
+        "--windows-process-command-match",
+        default="",
+        help=(
+            "Optional case-insensitive command-line substring required for Windows resource "
+            "sampling, for example C:\\tze_hud\\benchmark.toml."
+        ),
+    )
     parser.add_argument("--resource-sample-interval-s", type=float, default=300.0)
     parser.add_argument("--win-user", default="hudbot")
     parser.add_argument("--win-host", default="tzehouse-windows.parrot-hen.ts.net")
