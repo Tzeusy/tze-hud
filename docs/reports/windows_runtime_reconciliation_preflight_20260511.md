@@ -48,9 +48,12 @@ blocker set.
 
 ## Current Blockers
 
-`hud-9m47l` tracks the renewed TzeHouse outage. Fresh probes timed out for
-Tailscale ping, non-interactive SSH as `tzeus`, and TCP ports `22`, `50051`, and
-`9090`. This blocks the live strict smoke and full soak.
+`hud-9m47l` tracks the renewed TzeHouse outage. The latest refresh at
+`2026-05-10T19:43:19Z` found `tzehouse-windows.parrot-hen.ts.net` still
+`Online=false` in Tailscale, with `LastSeen=2026-05-10T17:06:32.1Z` and IP
+`100.87.181.125`. Fresh probes timed out for Tailscale ping, non-interactive
+SSH as `tzeus`, and TCP ports `22`, `50051`, and `9090`. This blocks the live
+strict smoke and full soak.
 
 The out-of-band recovery planning gap is closed by `hud-9wljr.6` and
 `docs/operations/tzehouse-windows-recovery.md`. The repository still does not
@@ -83,7 +86,7 @@ following are true:
 | Objective requirement | Required artifact or gate | Current evidence | Status |
 |---|---|---|---|
 | Run the serious soak cycle | 60-minute `hud-nfl7n` three-agent soak artifact under `docs/reports/` or `docs/evidence/` | `hud-nfl7n` acceptance criteria and dry-run notes prove the command shape, including `user-test-windows-tailnet`, 3600s, 1 rps, `main-progress`, required live metrics, resource sampling, and `--windows-process-command-match 'C:\tze_hud\benchmark.toml'` | Blocked by `hud-9m47l` |
-| Prove host readiness before soak | Tailscale, non-interactive SSH, gRPC `:50051`, MCP `:9090`, widget/zone discovery, and gRPC smoke | `docs/operations/tzehouse-windows-recovery.md`; latest `hud-9m47l` notes record Tailscale ping, SSH, and TCP probe timeouts | Incomplete |
+| Prove host readiness before soak | Tailscale, non-interactive SSH, gRPC `:50051`, MCP `:9090`, widget/zone discovery, and gRPC smoke | `docs/operations/tzehouse-windows-recovery.md`; latest `hud-9m47l` notes record the `2026-05-10T19:43:19Z` Tailscale offline state plus Tailscale ping, SSH, and TCP probe timeouts | Incomplete |
 | Prove strict smoke metrics | Short smoke with `live_metrics.ok=true`, nonzero input-latency buckets, and `process_count >= 1` resource samples | Implementations landed via PR #650/#651/#652; local unit/config/dry-run validation is recorded on `hud-nfl7n` | Awaiting live host |
 | Prove release-quality soak metrics | Accepted publish counts, frame-time p50/p99/p99.9, input latency, resource samples, idle GPU, private-memory drift, transparent-overlay composite delta, jitter/failure observations, and cleanup evidence | `hud-nfl7n` acceptance criteria and benchmark launch docs enumerate the required evidence | Awaiting live host |
 | Reconcile requirements to implementation | Final `hud-iygbd` closeout mapping every windows-first task/design budget to evidence or tracked gap | This preflight report maps current evidence and blockers; final closeout depends on `hud-nfl7n` | Incomplete |
