@@ -46,6 +46,21 @@ blocker set.
 | Release tag / artifact with perf report | `openspec/changes/windows-first-performant-runtime/tasks.md` section 5.3 | Not ready; depends on successful `hud-nfl7n` |
 | Archive `windows-first-performant-runtime` | `openspec/changes/windows-first-performant-runtime/tasks.md` section 5.4 | Not ready; depends on reconciliation and release decision |
 
+## Profile-And-Fix Coverage
+
+OpenSpec task section 4 still has unchecked profile rows because final
+reference-host release evidence is not available while TzeHouse is offline. The
+rows are nevertheless represented by existing Beads or explicit `hud-nfl7n`
+release gates:
+
+| OpenSpec task | Current coverage | Remaining gate |
+|---|---|---|
+| 4.1 Frame-pacing fixes | Headless frame-time budgets pass in `docs/reports/windows_perf_baseline_2026-05.md`; live frame metric artifact handling landed in `hud-wydpo` / PR #650 | `hud-nfl7n` must prove live frame p50/p99/p99.9 under 60-minute load |
+| 4.2 Transparent-overlay composite cost | Overlay A/B harness landed in `hud-3atp0` / PR #633; preflight records final overlay delta as release evidence | `hud-nfl7n` acceptance requires transparent-overlay composite p99 delta `<= +0.5 ms` or a blocking follow-up bead |
+| 4.4 Scene-graph mutation throughput | Baseline high-mutation/headless path passes; long-run drain and live artifact fixes landed in `hud-qivb5`, `hud-wydpo`, `hud-9wljr.3`, and `hud-9wljr.4` | `hud-nfl7n` must prove accepted publish counts and no unexplained missing acks under live resident load |
+| 4.5 Hot-path allocations | Memory growth remains a release gate rather than a closed optimization claim | `hud-nfl7n` acceptance requires private-memory drift `<= 5 MiB`, or a blocking follow-up bead with artifact evidence |
+| 4.6 Idle cost | Baseline idle CPU passes; idle GPU remains weak evidence in `docs/reports/windows_perf_baseline_2026-05.md` | `hud-nfl7n` acceptance requires idle and loaded resource samples, including idle GPU budget evidence or a blocking follow-up bead |
+
 ## Current Blockers
 
 `hud-9m47l` tracks the renewed TzeHouse outage. The latest refresh at
