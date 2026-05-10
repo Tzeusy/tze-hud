@@ -32,7 +32,7 @@ For each gap identified in §2.4, one bead per bottleneck:
 
 - [ ] 4.1 Frame-pacing fixes (swapchain, present interval, DWM composition behavior)
 - [ ] 4.2 Transparent-overlay composite cost (Vulkan path, premultiplied alpha verification, redundant blits)
-- [ ] 4.3 Widget rasterization cost (resvg fast path, texture cache hit rate, parameter-bind allocations)
+- [x] 4.3 Widget rasterization cost (resvg fast path, texture cache hit rate, parameter-bind allocations)
 - [ ] 4.4 Scene-graph mutation throughput (gRPC bidi pipelining, batch commit cost, MCP→gRPC conversion)
 - [ ] 4.5 Hot-path allocations (allocator profile, ring-buffer audit, SmallVec/ArrayVec usage)
 - [ ] 4.6 Idle cost (overlay mode at zero agents — every milliwatt counts)
