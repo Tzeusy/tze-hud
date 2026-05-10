@@ -121,6 +121,20 @@ After the recovery checks pass, use the benchmark launch and soak procedure in
 `docs/reports/windows_benchmark_config_launch_2026-05.md`. First generate the
 bounded windowed live-metrics artifact described there with
 `--benchmark-emit C:\tze_hud\perf\hud-nfl7n\windowed_live_metrics.json`.
+From an interactive Windows shell with `TZE_HUD_PSK` already set to the
+non-default HUD PSK:
+
+```powershell
+New-Item -ItemType Directory -Force C:\tze_hud\perf\hud-nfl7n | Out-Null
+& C:\tze_hud\tze_hud.exe `
+  --config C:\tze_hud\benchmark.toml `
+  --window-mode overlay `
+  --grpc-port 0 `
+  --mcp-port 0 `
+  --benchmark-emit C:\tze_hud\perf\hud-nfl7n\windowed_live_metrics.json `
+  --benchmark-frames 600 `
+  --benchmark-warmup-frames 120
+```
 
 Then run a short strict three-agent smoke with the same command shape as the
 release soak, but a shorter duration and a dedicated output root:
