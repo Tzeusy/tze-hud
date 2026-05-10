@@ -23,6 +23,9 @@ the current requirement-to-evidence map before the final live strict smoke and
 The active direction remains Windows-first. The delta spec narrows current work
 to the native Windows HUD runtime, defers media/mobile/embodied scope, and
 requires reference-hardware budget calibration before budgets are enforced.
+The parallel cooperative HUD projection lane in section 6 of the task list is
+already closed and archived; it is not part of the remaining Windows soak
+blocker set.
 
 ## Requirement Map
 
@@ -40,6 +43,7 @@ requires reference-hardware budget calibration before budgets are enforced.
 | Nonzero input-latency strict smoke | `hud-9wljr.3` / PR #652 | Blocked on eligible approval and TzeHouse reachability |
 | Benchmark HUD process resource sampling | `hud-9wljr.4` / PR #651 | Blocked on eligible approval and TzeHouse reachability |
 | Full 60-minute three-agent Windows soak | `hud-nfl7n` | Blocked on `hud-9m47l`, `hud-egd2j`, `hud-wydpo`, `hud-9wljr.3`, and `hud-9wljr.4` |
+| Cooperative HUD projection completion | `docs/reports/cooperative_hud_projection_gen2_reconciliation_20260510.md`, `openspec/changes/archive/2026-05-10-cooperative-hud-projection/`, `hud-ggntn.7`, `hud-ggntn.10`, `hud-ggntn.11`, `hud-ggntn.12` | Landed and archived |
 | Release tag / artifact with perf report | `openspec/changes/windows-first-performant-runtime/tasks.md` section 5.3 | Not ready; depends on successful `hud-nfl7n` |
 | Archive `windows-first-performant-runtime` | `openspec/changes/windows-first-performant-runtime/tasks.md` section 5.4 | Not ready; depends on reconciliation and release decision |
 
@@ -73,6 +77,8 @@ following are true:
 ## Direction
 
 No new implementation gap was discovered in this preflight beyond the blockers
-already scheduled by `hud-9m47l` and `hud-egd2j`. If either live strict smoke or
-the full soak fails after those blockers clear, create focused child beads under
-`hud-9wljr` using the failing artifact as evidence, then rerun `hud-iygbd`.
+already scheduled by `hud-9m47l` and `hud-egd2j`. Cooperative HUD projection
+section 6 has separate closeout evidence and does not need new direction work.
+If either live strict smoke or the full soak fails after those blockers clear,
+create focused child beads under `hud-9wljr` using the failing artifact as
+evidence, then rerun `hud-iygbd`.
