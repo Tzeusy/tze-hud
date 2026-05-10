@@ -820,11 +820,7 @@ $result | ConvertTo-Json -Compress -Depth 4 | Set-Content -Encoding UTF8 -Path '
         for i in range(0, len(wrapper_base64), 240)
     ]
     wrapper_expr = " + ".join(wrapper_chunks)
-    statements = [
-        "$ErrorActionPreference = 'Stop'",
-        f"$taskName = {ps_single_quoted(task_name)}",
-        f"$scriptPath = {ps_single_quoted(script_path)}",
-        f"$resultPath = {ps_single_quoted(result_path)}",
+    task_body = [
         "Remove-Item -Force $resultPath -ErrorAction SilentlyContinue",
         f"$wrapperBase64 = {wrapper_expr}",
         (
@@ -849,21 +845,38 @@ $result | ConvertTo-Json -Compress -Depth 4 | Set-Content -Encoding UTF8 -Path '
             "-Principal $principal -Settings $settings -Force | Out-Null"
         ),
         "Start-ScheduledTask -TaskName $taskName",
+        "$completed = $false",
         f"$deadline = (Get-Date).AddSeconds({timeout})",
         (
             "while ((Get-Date) -lt $deadline) { "
             "if (Test-Path $resultPath) { "
             "$payload = Get-Content -Raw -Path $resultPath; "
-            "Unregister-ScheduledTask -TaskName $taskName -Confirm:$false "
-            "-ErrorAction SilentlyContinue; "
-            "Write-Output $payload; exit 0 }; "
+            "$completed = $true; Write-Output $payload; break }; "
             "Start-Sleep -Milliseconds 200 }"
+        ),
+        (
+            "if (-not $completed) { throw "
+            "('scheduled diagnostic task timed out waiting for ' + $resultPath) }"
+        ),
+    ]
+    cleanup_body = [
+        (
+            "Stop-ScheduledTask -TaskName $taskName "
+            "-ErrorAction SilentlyContinue"
         ),
         (
             "Unregister-ScheduledTask -TaskName $taskName -Confirm:$false "
             "-ErrorAction SilentlyContinue"
         ),
-        "throw ('scheduled diagnostic task timed out waiting for ' + $resultPath)",
+        "Remove-Item -Force $scriptPath,$resultPath -ErrorAction SilentlyContinue",
+    ]
+    statements = [
+        "$ErrorActionPreference = 'Stop'",
+        f"$taskName = {ps_single_quoted(task_name)}",
+        f"$scriptPath = {ps_single_quoted(script_path)}",
+        f"$resultPath = {ps_single_quoted(result_path)}",
+        "try { " + "; ".join(task_body) + " } finally { "
+        + "; ".join(cleanup_body) + " }",
     ]
     return "; ".join(statements) + "\n"
 

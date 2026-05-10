@@ -221,6 +221,21 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertIn("TzeHudDiagnosticInput", remote_script)
         self.assertIn("text_stream_portal_diagnostic_input_result_", remote_script)
 
+    def test_windows_diagnostic_task_script_always_cleans_up_task_and_files(self) -> None:
+        script = portal.windows_diagnostic_task_script(
+            "Write-Output 'ok'",
+            user="tester",
+            timeout_s=1.0,
+            run_id="abc123",
+        )
+
+        self.assertIn("try {", script)
+        self.assertIn("finally {", script)
+        self.assertIn("Stop-ScheduledTask -TaskName $taskName", script)
+        self.assertIn("Unregister-ScheduledTask -TaskName $taskName", script)
+        self.assertIn("Remove-Item -Force $scriptPath,$resultPath", script)
+        self.assertNotIn("exit 0", script)
+
     def test_windows_diagnostic_input_reaps_timed_out_process(self) -> None:
         original = portal.asyncio.create_subprocess_exec
 
