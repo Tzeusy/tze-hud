@@ -3499,6 +3499,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn primitive_plan_falls_back_for_style_attributes() {
         let styled = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
             <rect id="box" x="0" y="0" width="16" height="16" style="fill:#00ff00"/>
