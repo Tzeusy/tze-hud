@@ -87,14 +87,16 @@ following are true:
 | Prove strict smoke metrics | Short smoke with `live_metrics.ok=true`, nonzero input-latency buckets, and `process_count >= 1` resource samples | Implementations landed via PR #650/#651/#652; local unit/config/dry-run validation is recorded on `hud-nfl7n` | Awaiting live host |
 | Prove release-quality soak metrics | Accepted publish counts, frame-time p50/p99/p99.9, input latency, resource samples, idle GPU, private-memory drift, transparent-overlay composite delta, jitter/failure observations, and cleanup evidence | `hud-nfl7n` acceptance criteria and benchmark launch docs enumerate the required evidence | Awaiting live host |
 | Reconcile requirements to implementation | Final `hud-iygbd` closeout mapping every windows-first task/design budget to evidence or tracked gap | This preflight report maps current evidence and blockers; final closeout depends on `hud-nfl7n` | Incomplete |
-| Use `/project-direction` for gaps | Focused Beads for any uncovered or failed requirement | Known gaps are scheduled as `hud-9m47l`, `hud-nfl7n`, and `hud-iygbd`; if strict smoke or soak fails after recovery, create child beads under `hud-9wljr` with the failing artifact | Satisfied for known gaps |
-| Keep handoff durable | Pushed docs plus Beads notes/export state | Recovery, benchmark, and AGENTS handoff docs are pushed; `bd export --no-memories` includes the current `hud-9m47l`/`hud-nfl7n` notes. `.beads/backup/` is local-only unless a destination is configured | Satisfied locally and in git docs |
+| Use `/project-direction` for gaps | Focused Beads for any uncovered or failed requirement | Known soak/reconciliation gaps are scheduled as `hud-9m47l`, `hud-nfl7n`, and `hud-iygbd`; CI maintenance is tracked by deferred `hud-s4m8w`; Beads backup durability is tracked by deferred `hud-qdeh8`. If strict smoke or soak fails after recovery, create child beads under `hud-9wljr` with the failing artifact. | Satisfied for known gaps |
+| Keep handoff durable | Pushed docs plus Beads notes/export state | Recovery, benchmark, and AGENTS handoff docs are pushed. Local `bd export --no-memories` includes current Beads notes, but `.beads/issues.jsonl` and `.beads/backup/` are ignored by git, `bd dolt remote list` reports no remote, and `bd backup sync` fails without a configured destination. The tracked-doc handoff is durable; Beads remote durability remains `hud-qdeh8`. | Partially satisfied; infrastructure gap scheduled |
 
 ## Direction
 
-No new implementation or planning gap remains unscheduled. Cooperative HUD
-projection section 6 has separate closeout evidence and does not need new
-direction work. The TzeHouse recovery-procedure gap is documented and closed as
-`hud-9wljr.6`. If either live strict smoke or the full soak fails after TzeHouse
-reachability is restored, create focused child beads under `hud-9wljr` using the
-failing artifact as evidence, then rerun `hud-iygbd`.
+No new soak implementation or release-planning gap remains unscheduled.
+Cooperative HUD projection section 6 has separate closeout evidence and does not
+need new direction work. The TzeHouse recovery-procedure gap is documented and
+closed as `hud-9wljr.6`; Beads remote durability is separately scheduled as
+`hud-qdeh8` and does not unblock live soak evidence. If either live strict smoke
+or the full soak fails after TzeHouse reachability is restored, create focused
+child beads under `hud-9wljr` using the failing artifact as evidence, then rerun
+`hud-iygbd`.
