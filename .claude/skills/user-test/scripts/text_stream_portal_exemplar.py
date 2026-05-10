@@ -2545,6 +2545,15 @@ async def portal_interaction_loop(
         if focused and (composer_blink_task is None or composer_blink_task.done()):
             composer_blink_task = asyncio.create_task(composer_blink_worker())
 
+    own_pointer_tiles = {
+        tiles.capture_backstop,
+        tiles.frame,
+        tiles.input_scroll,
+        tiles.output_scroll,
+        tiles.drag_shield,
+        tiles.minimized_icon,
+    }
+
     async def render_output_scroll(offset_y: float) -> None:
         nonlocal output_view_start
         visible_body, output_view_start = visible_output_text(body_full, offset_y, output_rect.h)
@@ -2749,6 +2758,8 @@ async def portal_interaction_loop(
 
             if kind == "pointer_down":
                 ev = envelope.pointer_down
+                if ev.tile_id not in own_pointer_tiles:
+                    continue
                 if ev.interaction_id == PORTAL_MINIMIZE_INTERACTION_ID:
                     if drag is not None:
                         await finish_drag("superseded:minimize")
@@ -2890,6 +2901,8 @@ async def portal_interaction_loop(
 
             elif kind == "pointer_move" and drag is not None:
                 ev = envelope.pointer_move
+                if ev.tile_id not in own_pointer_tiles:
+                    continue
                 if ev.device_id != drag["device_id"]:
                     continue
                 now = time.monotonic()
@@ -2903,16 +2916,22 @@ async def portal_interaction_loop(
 
             elif kind == "pointer_up" and drag is not None:
                 ev = envelope.pointer_up
+                if ev.tile_id not in own_pointer_tiles:
+                    continue
                 if ev.device_id == drag["device_id"]:
                     await finish_drag("pointer_up", ev.display_x, ev.display_y)
 
             elif kind == "pointer_cancel" and drag is not None:
                 ev = envelope.pointer_cancel
+                if ev.tile_id not in own_pointer_tiles:
+                    continue
                 if ev.device_id == drag["device_id"]:
                     await finish_drag("pointer_cancel")
 
             elif kind == "capture_released" and drag is not None:
                 ev = envelope.capture_released
+                if ev.tile_id not in own_pointer_tiles:
+                    continue
                 if ev.device_id == drag["device_id"]:
                     reason_name = events_pb2.CaptureReleasedReason.Name(ev.reason)
                     await finish_drag(f"capture_released:{reason_name}")
