@@ -36,5 +36,5 @@
 
 - [x] 5.1 Reconcile implementation against `cooperative-hud-projection` and `text-stream-portals` requirements, including privacy, attention, and external-adapter isolation.
 - [x] 5.2 Generate a closeout report under `docs/reports/` with a requirement-to-evidence matrix and residual risk register.
-- [ ] 5.3 Sync accepted delta specs into `openspec/specs/` after implementation is verified.
-- [ ] 5.4 Archive the OpenSpec change after specs, implementation, validation evidence, and report are complete.
+- [x] 5.3 Sync accepted delta specs into `openspec/specs/` after implementation is verified.
+- [x] 5.4 Archive the OpenSpec change after specs, implementation, validation evidence, and report are complete.

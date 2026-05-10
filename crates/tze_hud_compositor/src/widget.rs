@@ -105,6 +105,8 @@ struct PrimitiveRect {
     y: f32,
     width: f32,
     height: f32,
+    rx: Option<f32>,
+    ry: Option<f32>,
     fill: Option<String>,
     fill_opacity: f32,
     stroke: Option<String>,
@@ -522,6 +524,8 @@ impl PrimitiveRect {
             y: parse_f32_attr(attrs, "y").unwrap_or(0.0),
             width: parse_f32_attr(attrs, "width")?,
             height: parse_f32_attr(attrs, "height")?,
+            rx: parse_f32_attr(attrs, "rx"),
+            ry: parse_f32_attr(attrs, "ry"),
             fill: attrs.get("fill").cloned(),
             fill_opacity: parse_f32_attr(attrs, "fill-opacity").unwrap_or(1.0),
             stroke: attrs.get("stroke").cloned(),
@@ -547,13 +551,38 @@ impl PrimitiveRect {
         let Some(rect) = tiny_skia::Rect::from_xywh(x, y, width, height) else {
             return;
         };
-        let path = tiny_skia::PathBuilder::from_rect(rect);
+        let path = self.path_for_rect(rect, bindings);
         if let Some(paint) = self.fill_paint(bindings) {
             pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, transform, None);
         }
         if let Some((paint, stroke)) = self.stroke_paint(bindings) {
             pixmap.stroke_path(&path, &paint, &stroke, transform, None);
         }
+    }
+
+    fn path_for_rect(
+        &self,
+        rect: tiny_skia::Rect,
+        bindings: &ResolvedLayerBindings,
+    ) -> tiny_skia::Path {
+        let bound_rx = self
+            .bound_attr(bindings, "rx")
+            .and_then(parse_svg_number)
+            .or(self.rx);
+        let bound_ry = self
+            .bound_attr(bindings, "ry")
+            .and_then(parse_svg_number)
+            .or(self.ry);
+        let mut rx = bound_rx.or(bound_ry).unwrap_or(0.0).max(0.0);
+        let mut ry = bound_ry.or(bound_rx).unwrap_or(0.0).max(0.0);
+        rx = rx.min(rect.width() * 0.5);
+        ry = ry.min(rect.height() * 0.5);
+
+        if rx <= 0.0 || ry <= 0.0 {
+            return tiny_skia::PathBuilder::from_rect(rect);
+        }
+
+        rounded_rect_path(rect, rx, ry).unwrap_or_else(|| tiny_skia::PathBuilder::from_rect(rect))
     }
 
     fn bound_attr<'a>(
@@ -863,8 +892,6 @@ fn contains_unsupported_primitive_svg(svg_text: &str) -> bool {
         "<radialGradient",
         "<pattern",
         " style=",
-        " rx=",
-        " ry=",
         " transform=",
     ]
     .iter()
@@ -1014,6 +1041,44 @@ fn paint_rgba(r: u8, g: u8, b: u8, a: f32) -> tiny_skia::Paint<'static> {
     paint.set_color_rgba8(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8);
     paint.anti_alias = true;
     paint
+}
+
+fn rounded_rect_path(rect: tiny_skia::Rect, rx: f32, ry: f32) -> Option<tiny_skia::Path> {
+    const KAPPA: f32 = 0.552_284_8;
+
+    let left = rect.left();
+    let top = rect.top();
+    let right = rect.right();
+    let bottom = rect.bottom();
+    let ox = rx * KAPPA;
+    let oy = ry * KAPPA;
+
+    let mut path = tiny_skia::PathBuilder::new();
+    path.move_to(left + rx, top);
+    path.line_to(right - rx, top);
+    path.cubic_to(right - rx + ox, top, right, top + ry - oy, right, top + ry);
+    path.line_to(right, bottom - ry);
+    path.cubic_to(
+        right,
+        bottom - ry + oy,
+        right - rx + ox,
+        bottom,
+        right - rx,
+        bottom,
+    );
+    path.line_to(left + rx, bottom);
+    path.cubic_to(
+        left + rx - ox,
+        bottom,
+        left,
+        bottom - ry + oy,
+        left,
+        bottom - ry,
+    );
+    path.line_to(left, top + ry);
+    path.cubic_to(left, top + ry - oy, left + rx - ox, top, left + rx, top);
+    path.close();
+    path.finish()
 }
 
 fn draw_tinted_text_mask(
@@ -2940,21 +3005,58 @@ mod tests {
     }
 
     #[test]
-    fn primitive_plan_falls_back_for_style_and_rounded_rect_attributes() {
+    fn primitive_plan_falls_back_for_style_attributes() {
         let styled = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
             <rect id="box" x="0" y="0" width="16" height="16" style="fill:#00ff00"/>
-        </svg>"##;
-        let rounded = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
-            <rect id="box" x="0" y="0" width="16" height="16" rx="2" ry="2" fill="#00ff00"/>
         </svg>"##;
 
         assert!(
             PrimitiveSvgLayerPlan::parse(styled).is_none(),
             "style attributes are outside the primitive fast path and must use resvg fallback"
         );
+    }
+
+    #[test]
+    fn primitive_plan_supports_rounded_rect_attributes() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect id="box" x="0" y="0" width="16" height="16" rx="4" ry="2" fill="#00ff00"/>
+        </svg>"##;
+
+        let plan = PrimitiveSvgLayerPlan::parse(svg).expect("rounded rect should stay primitive");
+        let PrimitiveItem::Rect(rect) = &plan.items[0] else {
+            panic!("expected rounded rect primitive");
+        };
+
+        assert_eq!(rect.rx, Some(4.0));
+        assert_eq!(rect.ry, Some(2.0));
+    }
+
+    #[test]
+    fn primitive_rounded_rect_rasterizes_corners_without_resvg_fallback() {
+        let _cache_guard = widget_cache_test_guard();
+        clear_widget_raster_caches();
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <rect id="box" x="0" y="0" width="16" height="16" rx="8" ry="8" fill="#00ff00"/>
+        </svg>"##;
+        let plan = WidgetRenderPlan::compile(&[(svg, &[])]);
         assert!(
-            PrimitiveSvgLayerPlan::parse(rounded).is_none(),
-            "rounded rects are outside the primitive fast path until rx/ry are rendered equivalently"
+            plan.layers[0].primitive_plan.is_some(),
+            "rounded rect layer should compile into the primitive fast path"
+        );
+
+        let pixmap = rasterize_widget_render_plan(&plan, &HashMap::new(), &HashMap::new(), 16, 16)
+            .expect("rounded rect should rasterize");
+        let corner = pixmap.pixel(0, 0).expect("corner pixel");
+        let center = pixmap.pixel(8, 8).expect("center pixel");
+
+        assert_eq!(
+            corner.alpha(),
+            0,
+            "rounded corner should remain transparent"
+        );
+        assert!(
+            center.green() > 0 && center.alpha() > 0,
+            "rounded rect center should be filled"
         );
     }
 

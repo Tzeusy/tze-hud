@@ -8,7 +8,7 @@ OpenSpec change: `openspec/changes/cooperative-hud-projection`
 
 `cooperative-hud-projection` is implementation-complete for the active delta requirements and scenarios. GAP-1 and GAP-2 are closed by landed code and tests. GAP-3 is closed for archive purposes only if the project accepts the documented evidence substitution: SSH-triggered Windows desktop capture could not observe the HUD overlay, so the proof set uses live resident gRPC transcripts and scene snapshots from Windows plus a runtime-native compositor readback artifact.
 
-OpenSpec sync is ready. Archive is ready after sync if the runtime-native readback substitution is accepted and preserved in the archive trail.
+OpenSpec sync and archive completed on 2026-05-10. The accepted runtime-native readback substitution is preserved in this report and in the archived change at `openspec/changes/archive/2026-05-10-cooperative-hud-projection/`.
 
 ## Inputs Audited
 
@@ -77,10 +77,7 @@ The readback metadata records `tile_count=1`, `node_count=1`, `active_leases=1`,
 
 ## Task Ledger
 
-`openspec/changes/cooperative-hud-projection/tasks.md` has been normalized to mark implementation, validation, reconciliation, and report tasks complete. The only remaining unchecked tasks are intentionally the final lifecycle tasks:
-
-- `5.3` Sync accepted delta specs into `openspec/specs/`.
-- `5.4` Archive the OpenSpec change after sync and evidence acceptance.
+`openspec/changes/archive/2026-05-10-cooperative-hud-projection/tasks.md` has been normalized to mark implementation, validation, reconciliation, report, spec-sync, and archive tasks complete.
 
 ## Residual Risk Register
 
@@ -93,13 +90,17 @@ The readback metadata records `tile_count=1`, `node_count=1`, `active_leases=1`,
 
 ## Sync / Archive Checklist
 
-1. Run `openspec validate cooperative-hud-projection --strict`.
+1. Run `openspec validate cooperative-hud-projection --type change --strict`.
 2. Sync accepted deltas into canonical specs:
    - `cooperative-hud-projection`
    - `text-stream-portals`
-3. Re-run validation after sync.
+3. Re-run validation after sync:
+   - `openspec validate cooperative-hud-projection --type spec --strict`
+   - `openspec validate text-stream-portals --type spec --strict`
 4. Record in the archive note that runtime-native readback is the accepted substitute for SSH desktop screenshot capture.
-5. Archive `cooperative-hud-projection`.
+5. Archive `cooperative-hud-projection` with `--skip-specs` because the accepted deltas were synced manually before archive.
+
+Status: complete.
 
 ## Follow-Ups
 
