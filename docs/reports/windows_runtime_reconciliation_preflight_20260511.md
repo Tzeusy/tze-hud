@@ -35,7 +35,7 @@ blocker set.
 | Locked Windows budgets and CI gate | `about/craft-and-care/engineering-bar.md`, `scripts/ci/check_windows_perf_budgets.py`, `hud-1vgkk` / PR #637 | Landed |
 | Benchmark-ready Windows config and launch path | `app/tze_hud_app/config/benchmark.toml`, `scripts/windows/install_benchmark_hud_task.ps1`, `hud-l7x8f` / PR #635 | Landed |
 | Overlay performance harness | `hud-3atp0` / PR #633 | Landed, but final reference-host overlay delta remains part of release evidence |
-| Widget raster optimization | `hud-8qkr0`, `hud-9wljr.1`, `hud-9wljr.2`, `hud-eeejt`, `hud-vzvna` / PR #648 | Landed; final release evidence remains part of soak closeout |
+| Widget raster optimization | `hud-8qkr0`, `hud-9wljr.1`, `hud-9wljr.2`, `hud-eeejt`, `hud-vzvna` / PR #648; PR #648 TzeHouse upper estimates: 0.514 ms numeric/color changing, 0.788 ms text-changing | Landed; final release evidence remains part of soak closeout |
 | Long-run widget publish response draining | `hud-qivb5` / PR #649 | Landed |
 | Live frame/input metrics in soak artifact | `hud-wydpo` / PR #650 | Landed; live validation remains part of strict smoke and soak |
 | Nonzero input-latency strict smoke | `hud-9wljr.3` / PR #652 | Implementation landed; blocked on TzeHouse reachability for live proof |

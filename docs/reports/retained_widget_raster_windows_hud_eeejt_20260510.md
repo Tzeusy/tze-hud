@@ -66,6 +66,19 @@ This confirms the review concern from PR #639: numeric/color updates alone do
 not characterize label/readout binding cost. Text updates still route through
 the text raster path and need separate optimization or a revised budget.
 
+## Follow-Up Resolution
+
+The suggested follow-up became `hud-vzvna` and landed in PR #648. The PR #648
+TzeHouse rerun reported:
+
+| Benchmark | TzeHouse point estimate | TzeHouse upper estimate | Proposed target |
+|---|---:|---:|---:|
+| `warm_parameter_changing` | 0.429 ms | 0.514 ms | <= 1.0 ms |
+| `warm_text_changing` | 0.585 ms | 0.788 ms | <= 1.0 ms |
+
+That resolves the changing-path widget raster miss identified by this report.
+The full Windows release gate still depends on the later `hud-nfl7n` live soak.
+
 ## Follow-Up Input
 
 Suggested follow-up bead for the coordinator:

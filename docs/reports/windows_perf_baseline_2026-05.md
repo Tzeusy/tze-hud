@@ -103,6 +103,18 @@ Windows-first target on the reference host. Text-changing labels/readouts are
 slower than numeric/color changes and must stay as a separately tracked
 benchmark case.
 
+Post-PR #648 follow-up (`hud-vzvna`) reduced the TzeHouse changing paths under
+the proposed <= 1.0 ms upper-bound target:
+
+| Benchmark | TzeHouse point estimate | TzeHouse upper estimate | Proposed target |
+|---|---:|---:|---:|
+| gauge 512x512 warm numeric/color parameter-changing | 0.429 ms | 0.514 ms | <= 1.0 ms |
+| gauge 512x512 warm text-changing | 0.585 ms | 0.788 ms | <= 1.0 ms |
+
+Those PR #648 measurements supersede the `hud-eeejt` changing-path miss above.
+The final release evidence still needs the 60-minute live soak, but widget
+512x512 changing-path rasterization is no longer an open performance gap.
+
 ### Widget Publish Load
 
 The Rust `widget_publish_load_harness` was built and run on the Windows host against `local-dev` (`127.0.0.1:50051`) to avoid tailnet RTT. It authenticated successfully and produced correlated RTT/error accounting, but the deployed runtime config grants `agent-alpha`, `agent-beta`, and `agent-gamma` only:
@@ -161,7 +173,7 @@ Observed behavior under the attempted load: the runtime stayed up, authenticated
 | input_to_local_ack p99 | <= 2 ms | 0.001 ms synthetic headless | Pass for synthetic path |
 | input_to_scene_commit p99 | <= 25 ms | 0.007 ms steady-state; 0.001 ms high-mutation | Pass for synthetic path |
 | input_to_next_present p99 | <= 16.6 ms | 2.533 ms / 2.437 ms headless | Pass for headless only |
-| Widget SVG re-rasterization 512x512 | <= 1 ms p99 | Baseline: 4.526 ms cold; 6.869 ms warm. Follow-up local retained path: 2.495 ms cold parse upper estimate; 0.0248 ms warm identical upper estimate; 0.291 ms warm numeric/color parameter-changing upper estimate. TzeHouse retained rerun: 0.332 ms warm identical upper estimate; 4.309 ms warm numeric/color parameter-changing upper estimate; 6.261 ms warm text-changing upper estimate | Fail overall; only the TzeHouse unchanged-params cache-reuse case passes. Retained numeric/color and text-changing re-raster paths miss target |
+| Widget SVG re-rasterization 512x512 | <= 1 ms p99 | Baseline: 4.526 ms cold; 6.869 ms warm. Follow-up retained path: 0.332 ms warm-identical upper on TzeHouse; PR #648 TzeHouse changing-path upper estimates are 0.514 ms numeric/color and 0.788 ms text-changing | Pass for warm 512x512 changing paths after PR #648; cold parse is not the publish-time reraster budget |
 | Transparent-overlay composite cost | <= +0.5 ms p99 vs fullscreen | Not instrumented | Unknown / gap |
 | Idle CPU | <= 1% on one core | 0.000% total processor sample | Pass in sample |
 | Idle GPU | <= 0.5% device utilization | 3.791% GPU engine sum sample | Fail / needs cleaner sample |
@@ -169,11 +181,11 @@ Observed behavior under the attempted load: the runtime stayed up, authenticated
 
 ## Top Three Gaps
 
-1. Widget rasterization baseline was over the proposed Windows budget. The original 512x512 gauge path measured 4.5-6.9 ms p99/max against a 1.0 ms proposed p99 target. The retained-plan follow-up decomposes cold parse, warm identical, warm numeric/color parameter-changing, and warm text-changing paths. The TzeHouse rerun passes only the unchanged-params cache-reuse path; numeric/color re-raster and text-changing re-raster remain above target.
+1. Transparent-overlay composite cost is not measurable with the current harness set. Headless frame histograms are strong, but the acceptance target is overlay-vs-fullscreen p99 delta on Windows/DWM. Suspected causes: no runtime telemetry export for live windowed frame histograms and no scripted fullscreen/overlay A/B mode.
 
-2. Transparent-overlay composite cost is not measurable with the current harness set. Headless frame histograms are strong, but the acceptance target is overlay-vs-fullscreen p99 delta on Windows/DWM. Suspected causes: no runtime telemetry export for live windowed frame histograms and no scripted fullscreen/overlay A/B mode.
+2. The reference runtime config was not soak-ready for the intended resident publish workload during the original baseline. The named agents could create/modify owned tiles but could not publish widgets or zones, so the canonical Rust widget publish-load harness produced only admission rejections. Later benchmark-config work addressed the launch/config path; final proof remains the `hud-nfl7n` soak.
 
-3. The reference runtime config is not soak-ready for the intended resident publish workload. The named agents can create/modify owned tiles but cannot publish widgets or zones, so the canonical Rust widget publish-load harness produces only admission rejections. Suspected cause: production config stayed aligned with earlier raw-tile/user-test flows and was not updated for the Windows-first publish-load baseline.
+3. Idle GPU and memory-growth evidence are still incomplete for release. The original idle GPU sample exceeded the aspirational <= 0.5% target, and the 60-minute memory drift gate still requires a successful soak artifact.
 
 ## Follow-Up Inputs For New Beads
 
@@ -181,6 +193,6 @@ Use these as inputs for follow-up bead creation by the coordinator:
 
 | Gap | Suggested bead shape |
 |---|---|
-| Widget raster p99 over budget | Optimize retained 512x512 re-raster on TzeHouse, with separate tracking for numeric/color primitive updates and text-changing label/readout updates |
 | Overlay composite cost unknown | Add live windowed frame histogram export plus scripted fullscreen-vs-overlay A/B run on TzeHouse |
 | Soak blocked by capabilities | Add a reference Windows perf config/profile that grants only the capabilities needed for three resident perf agents, then rerun widget/zone/tile soak |
+| Idle GPU / memory-growth evidence incomplete | Capture idle and loaded resource samples in the final `hud-nfl7n` artifact and create a blocking follow-up if either misses budget |
