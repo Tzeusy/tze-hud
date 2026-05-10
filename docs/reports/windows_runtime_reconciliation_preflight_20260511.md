@@ -66,7 +66,8 @@ following are true:
    triple samples, and resource samples with `process_count >= 1`.
 3. `hud-nfl7n` produces a valid 60-minute three-agent soak artifact with
    accepted publish artifacts, frame-time metrics, input latency, resource
-   samples, memory drift, jitter/failure observations, and cleanup evidence.
+   samples, idle GPU budget evidence, transparent-overlay composite delta,
+   memory drift, jitter/failure observations, and cleanup evidence.
 4. `hud-iygbd` closes with a final requirement-to-evidence reconciliation and a
    release/archive decision.
 
