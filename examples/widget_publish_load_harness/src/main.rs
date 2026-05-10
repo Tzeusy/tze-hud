@@ -4,12 +4,14 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use prost::Message;
-use serde::Deserialize;
-use tokio::sync::mpsc;
-use tokio::time::{Instant as TokioInstant, sleep_until, timeout};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant as TokioInstant, sleep, sleep_until, timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tze_hud_protocol::proto::WidgetParameterValueProto;
 use tze_hud_protocol::proto::session as session_proto;
@@ -339,6 +341,22 @@ struct RunStats {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Default)]
+struct RunState {
+    inflight: HashMap<u64, Instant>,
+    stats: RunStats,
+    ack_count: u64,
+    stream_terminal: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AckDrainOutcome {
+    Complete,
+    StreamEnded,
+    DeadlineExceeded,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), DynError> {
     let cli = Cli::parse().map_err(|e| format!("argument error: {e}"))?;
@@ -365,8 +383,8 @@ async fn main() -> Result<(), DynError> {
     wait_for_session_established(&mut response_stream, Duration::from_secs_f64(cli.timeout_s))
         .await?;
 
-    let mut inflight: HashMap<u64, Instant> = HashMap::new();
-    let mut stats = RunStats::default();
+    let run_state = Arc::new(Mutex::new(RunState::default()));
+    let mut response_drain_handle = spawn_response_drain(response_stream, Arc::clone(&run_state));
     let send_start = Instant::now();
 
     match cli.mode {
@@ -375,7 +393,7 @@ async fn main() -> Result<(), DynError> {
                 .publish_count
                 .expect("burst mode always has publish_count");
             for i in 0..count {
-                send_publish(&tx, &mut client_seq, &cli, i, &mut inflight, &mut stats).await?;
+                send_publish(&tx, &mut client_seq, &cli, i, &run_state).await?;
             }
         }
         WorkloadMode::Paced => {
@@ -406,23 +424,23 @@ async fn main() -> Result<(), DynError> {
                     sleep_until(TokioInstant::from_std(due)).await;
                 }
 
-                send_publish(&tx, &mut client_seq, &cli, index, &mut inflight, &mut stats).await?;
+                send_publish(&tx, &mut client_seq, &cli, index, &run_state).await?;
                 index += 1;
             }
         }
     }
 
     let send_done = Instant::now();
-    let expected_acks = stats.request_count;
-    drain_widget_publish_results(
-        &mut response_stream,
-        &mut inflight,
-        &mut stats,
+    let expected_acks = {
+        let state = run_state.lock().await;
+        state.stats.request_count
+    };
+    let ack_drain_outcome = wait_for_expected_acks(
+        &run_state,
         expected_acks,
         Duration::from_secs_f64(cli.timeout_s),
     )
     .await?;
-    stats.aggregate_ack_drain_time_us = elapsed_us(send_done, Instant::now());
 
     let close = session_proto::ClientMessage {
         sequence: client_seq,
@@ -434,6 +452,37 @@ async fn main() -> Result<(), DynError> {
     };
     let _ = tx.send(close).await;
     drop(tx);
+    wait_for_response_drain_shutdown(&mut response_drain_handle).await;
+
+    let mut state = run_state.lock().await;
+    state.stats.aggregate_ack_drain_time_us = elapsed_us(send_done, Instant::now());
+
+    if ack_drain_outcome != AckDrainOutcome::Complete {
+        state.stats.warnings.push(format!(
+            "final ack drain ended with outcome={:?} after timeout_s={:.3}",
+            ack_drain_outcome, cli.timeout_s
+        ));
+    }
+
+    let missing_acks = expected_acks.saturating_sub(state.ack_count);
+    if missing_acks > 0 {
+        state
+            .stats
+            .warnings
+            .push(format!("{missing_acks} publishes missing durable acks"));
+        let accounted_outcomes = state
+            .stats
+            .success_count
+            .saturating_add(state.stats.error_count);
+        let unaccounted_outcomes = state.stats.request_count.saturating_sub(accounted_outcomes);
+        state.stats.error_count = state
+            .stats
+            .error_count
+            .saturating_add(unaccounted_outcomes.min(missing_acks));
+    }
+
+    let stats = std::mem::take(&mut state.stats);
+    drop(state);
 
     let wall_duration_us = elapsed_us(send_start, Instant::now());
     let throughput_rps = if wall_duration_us == 0 {
@@ -443,13 +492,6 @@ async fn main() -> Result<(), DynError> {
     };
 
     let (rtt_p50_us, rtt_p95_us, rtt_p99_us, rtt_max_us) = percentile_summary(&stats.rtt_us);
-
-    if stats.success_count + stats.error_count < stats.request_count {
-        stats.warnings.push(format!(
-            "{} publishes missing durable acks",
-            stats.request_count - (stats.success_count + stats.error_count)
-        ));
-    }
 
     let uncalibrated = !cli.normalization_mapping_approved;
     let calibration_status = if uncalibrated {
@@ -562,6 +604,14 @@ async fn main() -> Result<(), DynError> {
         cli.output.display(),
     );
 
+    if missing_acks > 0 {
+        return Err(format!(
+            "publish-load incomplete: {missing_acks} WidgetPublishResult acks missing; diagnostic artifact written to {}",
+            cli.output.display()
+        )
+        .into());
+    }
+
     Ok(())
 }
 
@@ -615,8 +665,7 @@ async fn send_publish(
     next_seq: &mut u64,
     cli: &Cli,
     index: u64,
-    inflight: &mut HashMap<u64, Instant>,
-    stats: &mut RunStats,
+    run_state: &Arc<Mutex<RunState>>,
 ) -> Result<(), DynError> {
     let seq = *next_seq;
     let value = cli.param_start + (index as f32 * cli.param_step);
@@ -642,76 +691,139 @@ async fn send_publish(
         payload: Some(ClientPayload::WidgetPublish(publish)),
     };
 
-    stats.request_count += 1;
-    stats.payload_bytes_out += msg.encoded_len() as u64;
+    let payload_bytes_out = msg.encoded_len() as u64;
     let send_begin = Instant::now();
-    inflight.insert(seq, send_begin);
+    {
+        let mut state = run_state.lock().await;
+        state.inflight.insert(seq, send_begin);
+        state.stats.request_count += 1;
+        state.stats.payload_bytes_out += payload_bytes_out;
+    }
     tx.send(msg).await?;
-    stats.aggregate_send_time_us += send_begin.elapsed().as_micros() as u64;
+    {
+        let mut state = run_state.lock().await;
+        state.stats.aggregate_send_time_us += send_begin.elapsed().as_micros() as u64;
+    }
     *next_seq += 1;
 
     Ok(())
 }
 
-async fn drain_widget_publish_results(
-    response_stream: &mut tonic::Streaming<session_proto::ServerMessage>,
-    inflight: &mut HashMap<u64, Instant>,
-    stats: &mut RunStats,
-    expected_acks: u64,
-    timeout_dur: Duration,
-) -> Result<(), DynError> {
-    let mut received: u64 = 0;
-
-    while received < expected_acks {
-        let next = timeout(timeout_dur, response_stream.message()).await??;
-        let Some(message) = next else {
-            stats
-                .warnings
-                .push("stream closed while waiting for WidgetPublishResult acks".to_string());
-            break;
-        };
-
-        match message.payload {
-            Some(ServerPayload::WidgetPublishResult(ref result)) => {
-                stats.payload_bytes_in += message.encoded_len() as u64;
-                received += 1;
-
-                if result.accepted {
-                    stats.success_count += 1;
-                } else {
-                    stats.error_count += 1;
-                    let detail = if result.error_code.is_empty() {
-                        result.error_message.clone()
-                    } else {
-                        format!("{}: {}", result.error_code, result.error_message)
-                    };
-                    stats.warnings.push(format!(
-                        "publish rejected for request_sequence={}: {}",
-                        result.request_sequence, detail
-                    ));
+fn spawn_response_drain(
+    mut response_stream: tonic::Streaming<session_proto::ServerMessage>,
+    run_state: Arc<Mutex<RunState>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match response_stream.message().await {
+                Ok(Some(message)) => {
+                    let mut state = run_state.lock().await;
+                    apply_server_message(&message, &mut state);
                 }
-
-                if let Some(start) = inflight.remove(&result.request_sequence) {
-                    stats.rtt_us.push(elapsed_us(start, Instant::now()));
-                } else {
-                    stats.warnings.push(format!(
-                        "received ack for unknown request_sequence={}",
-                        result.request_sequence
+                Ok(None) => {
+                    let mut state = run_state.lock().await;
+                    state.stream_terminal = Some(
+                        "stream closed while waiting for WidgetPublishResult acks".to_string(),
+                    );
+                    state.stats.warnings.push(
+                        "stream closed while waiting for WidgetPublishResult acks".to_string(),
+                    );
+                    break;
+                }
+                Err(err) => {
+                    let mut state = run_state.lock().await;
+                    state.stream_terminal = Some(format!(
+                        "stream error while waiting for WidgetPublishResult acks: {err}"
                     ));
+                    state.stats.warnings.push(format!(
+                        "stream error while waiting for WidgetPublishResult acks: {err}"
+                    ));
+                    break;
                 }
             }
-            Some(ServerPayload::RuntimeError(err)) => {
-                stats.error_count += 1;
-                stats.warnings.push(format!(
-                    "runtime_error while draining acks: {} ({})",
-                    err.error_code, err.message
-                ));
-            }
-            _ => {}
         }
+    })
+}
+
+async fn wait_for_response_drain_shutdown(handle: &mut JoinHandle<()>) {
+    if handle.is_finished() {
+        let _ = handle.await;
+        return;
     }
 
-    Ok(())
+    if timeout(Duration::from_secs(1), &mut *handle).await.is_err() {
+        handle.abort();
+        let _ = handle.await;
+    }
+}
+
+fn apply_server_message(message: &session_proto::ServerMessage, state: &mut RunState) {
+    match &message.payload {
+        Some(ServerPayload::WidgetPublishResult(result)) => {
+            state.stats.payload_bytes_in += message.encoded_len() as u64;
+            state.ack_count += 1;
+
+            if result.accepted {
+                state.stats.success_count += 1;
+            } else {
+                state.stats.error_count += 1;
+                let detail = if result.error_code.is_empty() {
+                    result.error_message.clone()
+                } else {
+                    format!("{}: {}", result.error_code, result.error_message)
+                };
+                state.stats.warnings.push(format!(
+                    "publish rejected for request_sequence={}: {}",
+                    result.request_sequence, detail
+                ));
+            }
+
+            if let Some(start) = state.inflight.remove(&result.request_sequence) {
+                state.stats.rtt_us.push(elapsed_us(start, Instant::now()));
+            } else {
+                state.stats.warnings.push(format!(
+                    "received ack for unknown request_sequence={}",
+                    result.request_sequence
+                ));
+            }
+        }
+        Some(ServerPayload::RuntimeError(err)) => {
+            state.stats.error_count += 1;
+            state.stats.warnings.push(format!(
+                "runtime_error while draining acks: {} ({})",
+                err.error_code, err.message
+            ));
+        }
+        _ => {}
+    }
+}
+
+async fn wait_for_expected_acks(
+    run_state: &Arc<Mutex<RunState>>,
+    expected_acks: u64,
+    timeout_dur: Duration,
+) -> Result<AckDrainOutcome, DynError> {
+    let deadline = TokioInstant::now() + timeout_dur;
+
+    loop {
+        {
+            let state = run_state.lock().await;
+            if state.ack_count >= expected_acks {
+                return Ok(AckDrainOutcome::Complete);
+            }
+            if state.stream_terminal.is_some() {
+                return Ok(AckDrainOutcome::StreamEnded);
+            }
+        }
+
+        let now = TokioInstant::now();
+        if now >= deadline {
+            return Ok(AckDrainOutcome::DeadlineExceeded);
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        sleep(remaining.min(Duration::from_millis(25))).await;
+    }
 }
 
 fn resolve_target(path: &Path, target_id: &str) -> Result<TargetConfig, DynError> {
@@ -1003,6 +1115,106 @@ mod tests {
     fn percentile_summary_monotonic() {
         let (p50, p95, p99, max) = percentile_summary(&[100, 200, 300, 400, 500]);
         assert!(p50 <= p95 && p95 <= p99 && p99 <= max);
+    }
+
+    #[test]
+    fn apply_server_message_counts_widget_ack_and_rtt() {
+        let mut state = RunState::default();
+        state
+            .inflight
+            .insert(42, Instant::now() - Duration::from_millis(2));
+
+        let message = session_proto::ServerMessage {
+            sequence: 9,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::WidgetPublishResult(
+                session_proto::WidgetPublishResult {
+                    request_sequence: 42,
+                    accepted: true,
+                    widget_name: "main-progress".to_string(),
+                    error_code: String::new(),
+                    error_message: String::new(),
+                },
+            )),
+        };
+
+        apply_server_message(&message, &mut state);
+
+        assert_eq!(state.ack_count, 1);
+        assert_eq!(state.stats.success_count, 1);
+        assert_eq!(state.stats.error_count, 0);
+        assert!(state.inflight.is_empty());
+        assert_eq!(state.stats.rtt_us.len(), 1);
+        assert!(state.stats.payload_bytes_in > 0);
+    }
+
+    #[test]
+    fn apply_server_message_records_rejected_widget_ack() {
+        let mut state = RunState::default();
+        state.inflight.insert(7, Instant::now());
+
+        let message = session_proto::ServerMessage {
+            sequence: 10,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::WidgetPublishResult(
+                session_proto::WidgetPublishResult {
+                    request_sequence: 7,
+                    accepted: false,
+                    widget_name: "main-progress".to_string(),
+                    error_code: "WIDGET_PARAMETER_INVALID_VALUE".to_string(),
+                    error_message: "bad progress".to_string(),
+                },
+            )),
+        };
+
+        apply_server_message(&message, &mut state);
+
+        assert_eq!(state.ack_count, 1);
+        assert_eq!(state.stats.success_count, 0);
+        assert_eq!(state.stats.error_count, 1);
+        assert!(state.stats.warnings.iter().any(|warning| {
+            warning.contains("publish rejected for request_sequence=7")
+                && warning.contains("WIDGET_PARAMETER_INVALID_VALUE")
+        }));
+    }
+
+    #[tokio::test]
+    async fn wait_for_expected_acks_completes_after_concurrent_update() {
+        let run_state = Arc::new(Mutex::new(RunState::default()));
+        let updater_state = Arc::clone(&run_state);
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(5)).await;
+            let mut state = updater_state.lock().await;
+            state.ack_count = 3;
+        });
+
+        let outcome = wait_for_expected_acks(&run_state, 3, Duration::from_millis(200))
+            .await
+            .expect("wait should not fail");
+
+        assert_eq!(outcome, AckDrainOutcome::Complete);
+    }
+
+    #[tokio::test]
+    async fn wait_for_expected_acks_uses_bounded_deadline() {
+        let run_state = Arc::new(Mutex::new(RunState::default()));
+        {
+            let mut state = run_state.lock().await;
+            state.stats.request_count = 3;
+            state.ack_count = 1;
+        }
+
+        let started = Instant::now();
+        let outcome = wait_for_expected_acks(&run_state, 3, Duration::from_millis(20))
+            .await
+            .expect("wait should not fail");
+
+        assert_eq!(outcome, AckDrainOutcome::DeadlineExceeded);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "ack wait must be bounded, elapsed={:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
