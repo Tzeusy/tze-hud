@@ -46,16 +46,16 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
             labels,
             [
                 "focus-composer",
-                "type-composer-text",
                 "drag-portal-header",
                 "scroll-output-pane",
+                "type-composer-text",
             ],
         )
         self.assertEqual(plan[0]["kind"], "click")
-        self.assertEqual(plan[2]["kind"], "drag")
-        self.assertEqual(plan[3]["kind"], "wheel")
-        self.assertNotEqual(plan[2]["end_x"], plan[2]["start_x"])
-        self.assertGreater(plan[2]["end_y"], plan[2]["start_y"])
+        self.assertEqual(plan[1]["kind"], "drag")
+        self.assertEqual(plan[2]["kind"], "wheel")
+        self.assertNotEqual(plan[1]["end_x"], plan[1]["start_x"])
+        self.assertGreater(plan[1]["end_y"], plan[1]["start_y"])
 
     def test_diagnostic_input_plan_uses_clamped_drag_for_wheel_target(self) -> None:
         plan = portal.build_diagnostic_input_plan(
@@ -66,8 +66,8 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         )
         _, output_rect = portal.portal_pane_rects()
 
-        drag = plan[2]
-        wheel = plan[3]
+        drag = plan[1]
+        wheel = plan[2]
         self.assertEqual(drag["end_x"], drag["start_x"])
         self.assertEqual(wheel["x"], output_rect.x + output_rect.w / 2.0)
         self.assertEqual(
@@ -105,6 +105,8 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertIn("SendInput", script)
         self.assertIn("if (-not [HudDiagnosticInput]::SetCursorPos", script)
         self.assertIn("if ([HudDiagnosticInput]::SendInput", script)
+        self.assertIn("diagnostic-warning:SendInput failed", script)
+        self.assertNotIn("throw 'SendInput failed'", script)
         self.assertLess(
             script.index("$inputs = [HudDiagnosticInput+INPUT[]]::new(2)"),
             script.index("foreach ($ch in $text.ToCharArray())"),
@@ -113,6 +115,18 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertNotIn("EventBatch", script)
         self.assertNotIn("input_event_tx", script)
 
+    def test_windows_diagnostic_input_script_scales_scene_to_desktop_coordinates(self) -> None:
+        script = portal.windows_diagnostic_input_script(
+            [{"kind": "click", "label": "focus", "x": 3000.0, "y": 1200.0}],
+            scene_width=3840.0,
+            scene_height=2160.0,
+        )
+
+        self.assertIn("[System.Windows.Forms.Screen]::PrimaryScreen.Bounds", script)
+        self.assertIn("$HudDiagnosticScaleX", script)
+        self.assertIn("$targetX = $x * $HudDiagnosticScaleX", script)
+        self.assertIn("$targetY = $y * $HudDiagnosticScaleY", script)
+
     def test_windows_diagnostic_input_uses_ssh_connect_timeout(self) -> None:
         captured: dict[str, tuple[str, ...]] = {}
         original = portal.asyncio.create_subprocess_exec
@@ -120,11 +134,12 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         class FakeProcess:
             returncode = 0
 
-            async def communicate(self) -> tuple[bytes, bytes]:
+            async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
                 return b"ok", b""
 
         async def fake_create_subprocess_exec(
             *cmd: str,
+            stdin: object,
             stdout: object,
             stderr: object,
         ) -> FakeProcess:
@@ -149,6 +164,63 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         asyncio.run(run())
         self.assertIn("ConnectTimeout=2", captured["cmd"])
 
+    def test_windows_diagnostic_input_runs_as_interactive_scheduled_task(self) -> None:
+        captured: dict[str, tuple[str, ...]] = {}
+        captured_input: dict[str, bytes] = {}
+        original = portal.asyncio.create_subprocess_exec
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+                captured_input["input"] = input or b""
+                return (
+                    b'{"ok":true,"returncode":0,"stdout":"diagnostic:focus","stderr":""}',
+                    b"",
+                )
+
+        async def fake_create_subprocess_exec(
+            *cmd: str,
+            stdin: object,
+            stdout: object,
+            stderr: object,
+        ) -> FakeProcess:
+            captured["cmd"] = cmd
+            return FakeProcess()
+
+        async def run() -> None:
+            portal.asyncio.create_subprocess_exec = fake_create_subprocess_exec
+            try:
+                result = await portal.run_windows_diagnostic_input(
+                    "example.invalid",
+                    user="tester",
+                    ssh_key="/tmp/key",
+                    actions=[
+                        {
+                            "kind": "click",
+                            "label": "focus",
+                            "x": 10.0,
+                            "y": 20.0,
+                        }
+                    ],
+                    timeout_s=1.0,
+                    connect_timeout_s=2.0,
+                )
+            finally:
+                portal.asyncio.create_subprocess_exec = original
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["stdout"], "diagnostic:focus")
+
+        asyncio.run(run())
+        self.assertNotIn("-EncodedCommand", captured["cmd"])
+        self.assertIn("-", captured["cmd"])
+        remote_script = captured_input["input"].decode("utf-8")
+        self.assertIn("Register-ScheduledTask", remote_script)
+        self.assertIn("-LogonType Interactive", remote_script)
+        self.assertIn("Start-ScheduledTask", remote_script)
+        self.assertIn("TzeHudDiagnosticInput", remote_script)
+        self.assertIn("text_stream_portal_diagnostic_input_result_", remote_script)
+
     def test_windows_diagnostic_input_reaps_timed_out_process(self) -> None:
         original = portal.asyncio.create_subprocess_exec
 
@@ -159,7 +231,7 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
                 self.killed = False
                 self.waited = False
 
-            async def communicate(self) -> tuple[bytes, bytes]:
+            async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
                 await asyncio.sleep(1.0)
                 return b"", b""
 
@@ -174,6 +246,7 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
 
         async def fake_create_subprocess_exec(
             *cmd: str,
+            stdin: object,
             stdout: object,
             stderr: object,
         ) -> SlowProcess:

@@ -624,11 +624,6 @@ def build_diagnostic_input_plan(
             "y": composer_y,
         },
         {
-            "kind": "text",
-            "label": "type-composer-text",
-            "text": "diagnostic input",
-        },
-        {
             "kind": "drag",
             "label": "drag-portal-header",
             "start_x": header_x,
@@ -645,13 +640,26 @@ def build_diagnostic_input_plan(
             "delta": -360,
             "count": 3,
         },
+        {
+            "kind": "text",
+            "label": "type-composer-text",
+            "text": "diagnostic input",
+        },
     ]
 
 
-def windows_diagnostic_input_script(actions: list[dict[str, Any]]) -> str:
+def windows_diagnostic_input_script(
+    actions: list[dict[str, Any]],
+    *,
+    scene_width: Optional[float] = None,
+    scene_height: Optional[float] = None,
+) -> str:
     """Return a PowerShell script that injects real Windows OS input events."""
+    scene_width_value = float(scene_width or 0.0)
+    scene_height_value = float(scene_height or 0.0)
     lines = [
         "$ErrorActionPreference = 'Stop'",
+        "Add-Type -AssemblyName System.Windows.Forms",
         "Add-Type -TypeDefinition @\"",
         "using System;",
         "using System.Runtime.InteropServices;",
@@ -671,8 +679,21 @@ def windows_diagnostic_input_script(actions: list[dict[str, Any]]) -> str:
         "$KEYEVENTF_UNICODE = 0x0004",
         "$KEYEVENTF_KEYUP = 0x0002",
         "$InputSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][HudDiagnosticInput+INPUT])",
+        f"$HudDiagnosticSceneWidth = {scene_width_value:.1f}",
+        f"$HudDiagnosticSceneHeight = {scene_height_value:.1f}",
+        "$HudDiagnosticBounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds",
+        "$HudDiagnosticScaleX = 1.0",
+        "$HudDiagnosticScaleY = 1.0",
+        "if ($HudDiagnosticSceneWidth -gt 0 -and $HudDiagnosticBounds.Width -gt 0) {",
+        "  $HudDiagnosticScaleX = [double]$HudDiagnosticBounds.Width / [double]$HudDiagnosticSceneWidth",
+        "}",
+        "if ($HudDiagnosticSceneHeight -gt 0 -and $HudDiagnosticBounds.Height -gt 0) {",
+        "  $HudDiagnosticScaleY = [double]$HudDiagnosticBounds.Height / [double]$HudDiagnosticSceneHeight",
+        "}",
         "function Move-To([double]$x, [double]$y) {",
-        "  if (-not [HudDiagnosticInput]::SetCursorPos([int][Math]::Round($x), [int][Math]::Round($y))) { throw 'SetCursorPos failed' }",
+        "  $targetX = $x * $HudDiagnosticScaleX",
+        "  $targetY = $y * $HudDiagnosticScaleY",
+        "  if (-not [HudDiagnosticInput]::SetCursorPos([int][Math]::Round($targetX), [int][Math]::Round($targetY))) { throw 'SetCursorPos failed' }",
         "  Start-Sleep -Milliseconds 80",
         "}",
         "function Left-Down() { [HudDiagnosticInput]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 80 }",
@@ -696,7 +717,10 @@ def windows_diagnostic_input_script(actions: list[dict[str, Any]]) -> str:
         "    $inputs[1].U.ki.wVk = 0",
         "    $inputs[1].U.ki.wScan = $scan",
         "    $inputs[1].U.ki.dwFlags = $KEYEVENTF_UNICODE -bor $KEYEVENTF_KEYUP",
-        "    if ([HudDiagnosticInput]::SendInput(2, $inputs, $InputSize) -eq 0) { throw 'SendInput failed' }",
+        "    if ([HudDiagnosticInput]::SendInput(2, $inputs, $InputSize) -eq 0) {",
+        "      Write-Output 'diagnostic-warning:SendInput failed'",
+        "      return",
+        "    }",
         "    Start-Sleep -Milliseconds 25",
         "  }",
         "}",
@@ -744,6 +768,106 @@ def windows_diagnostic_input_script(actions: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def windows_diagnostic_task_script(
+    diagnostic_script: str,
+    *,
+    user: str,
+    timeout_s: float,
+    run_id: str,
+) -> str:
+    """Wrap the OS input script in an interactive scheduled task launcher."""
+    task_name = f"TzeHudDiagnosticInput_{run_id}"
+    script_path = (
+        f"C:\\tze_hud\\text_stream_portal_diagnostic_input_{run_id}.ps1"
+    )
+    result_path = (
+        f"C:\\tze_hud\\text_stream_portal_diagnostic_input_result_{run_id}.json"
+    )
+    timeout = max(1, int(round(timeout_s)))
+    wrapper = f"""$ErrorActionPreference = 'Stop'
+$stdoutLines = New-Object 'System.Collections.Generic.List[string]'
+$stderrLines = New-Object 'System.Collections.Generic.List[string]'
+$ok = $true
+$returnCode = 0
+try {{
+  $output = & {{
+{diagnostic_script}
+  }} 2>&1
+  foreach ($item in $output) {{
+    if ($item -is [System.Management.Automation.ErrorRecord]) {{
+      $stderrLines.Add($item.ToString())
+    }} else {{
+      $stdoutLines.Add([string]$item)
+    }}
+  }}
+}} catch {{
+  $ok = $false
+  $returnCode = 1
+  $stderrLines.Add($_.Exception.Message)
+  $stderrLines.Add($_.ScriptStackTrace)
+}}
+$result = [ordered]@{{
+  ok = $ok
+  returncode = $returnCode
+  stdout = ($stdoutLines -join "`n")
+  stderr = (($stderrLines | Where-Object {{ $_ }}) -join "`n")
+}}
+$result | ConvertTo-Json -Compress -Depth 4 | Set-Content -Encoding UTF8 -Path '{result_path}'
+"""
+    wrapper_base64 = base64.b64encode(wrapper.encode("utf-8")).decode("ascii")
+    wrapper_chunks = [
+        ps_single_quoted(wrapper_base64[i:i + 240])
+        for i in range(0, len(wrapper_base64), 240)
+    ]
+    wrapper_expr = " + ".join(wrapper_chunks)
+    statements = [
+        "$ErrorActionPreference = 'Stop'",
+        f"$taskName = {ps_single_quoted(task_name)}",
+        f"$scriptPath = {ps_single_quoted(script_path)}",
+        f"$resultPath = {ps_single_quoted(result_path)}",
+        "Remove-Item -Force $resultPath -ErrorAction SilentlyContinue",
+        f"$wrapperBase64 = {wrapper_expr}",
+        (
+            "[System.IO.File]::WriteAllBytes("
+            "$scriptPath, [Convert]::FromBase64String($wrapperBase64))"
+        ),
+        (
+            "$action = New-ScheduledTaskAction -Execute 'powershell.exe' "
+            "-Argument ('-NoProfile -ExecutionPolicy Bypass -File \"' + "
+            "$scriptPath + '\"')"
+        ),
+        (
+            f"$principal = New-ScheduledTaskPrincipal -UserId "
+            f"{ps_single_quoted(user)} -LogonType Interactive -RunLevel Highest"
+        ),
+        (
+            "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
+            "-DontStopIfGoingOnBatteries"
+        ),
+        (
+            "Register-ScheduledTask -TaskName $taskName -Action $action "
+            "-Principal $principal -Settings $settings -Force | Out-Null"
+        ),
+        "Start-ScheduledTask -TaskName $taskName",
+        f"$deadline = (Get-Date).AddSeconds({timeout})",
+        (
+            "while ((Get-Date) -lt $deadline) { "
+            "if (Test-Path $resultPath) { "
+            "$payload = Get-Content -Raw -Path $resultPath; "
+            "Unregister-ScheduledTask -TaskName $taskName -Confirm:$false "
+            "-ErrorAction SilentlyContinue; "
+            "Write-Output $payload; exit 0 }; "
+            "Start-Sleep -Milliseconds 200 }"
+        ),
+        (
+            "Unregister-ScheduledTask -TaskName $taskName -Confirm:$false "
+            "-ErrorAction SilentlyContinue"
+        ),
+        "throw ('scheduled diagnostic task timed out waiting for ' + $resultPath)",
+    ]
+    return "; ".join(statements) + "\n"
+
+
 async def run_windows_diagnostic_input(
     host: str,
     *,
@@ -752,9 +876,21 @@ async def run_windows_diagnostic_input(
     actions: list[dict[str, Any]],
     timeout_s: float,
     connect_timeout_s: float = 5.0,
+    scene_width: Optional[float] = None,
+    scene_height: Optional[float] = None,
 ) -> dict[str, Any]:
-    script = windows_diagnostic_input_script(actions)
-    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    script = windows_diagnostic_input_script(
+        actions,
+        scene_width=scene_width,
+        scene_height=scene_height,
+    )
+    run_id = uuid.uuid4().hex[:8]
+    task_script = windows_diagnostic_task_script(
+        script,
+        user=user,
+        timeout_s=timeout_s,
+        run_id=run_id,
+    )
     connect_timeout = max(1, int(round(connect_timeout_s)))
     cmd = [
         "ssh",
@@ -768,18 +904,22 @@ async def run_windows_diagnostic_input(
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
-        "-EncodedCommand",
-        encoded,
+        "-Command",
+        "-",
     ]
     started = time.monotonic()
     proc: Optional[asyncio.subprocess.Process] = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(task_script.encode("utf-8")),
+            timeout=timeout_s,
+        )
     except asyncio.TimeoutError:
         if proc is not None:
             with contextlib.suppress(Exception):
@@ -799,11 +939,19 @@ async def run_windows_diagnostic_input(
             "error": f"{type(exc).__name__}: {exc}",
             "duration_s": round(time.monotonic() - started, 3),
         }
+    stdout_text = stdout.decode("utf-8-sig", errors="replace").strip()
+    stderr_text = stderr.decode("utf-8", errors="replace").strip()
+    if proc.returncode == 0:
+        with contextlib.suppress(json.JSONDecodeError):
+            result = json.loads(stdout_text)
+            if isinstance(result, dict):
+                result["duration_s"] = round(time.monotonic() - started, 3)
+                return result
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
-        "stdout": stdout.decode("utf-8", errors="replace").strip(),
-        "stderr": stderr.decode("utf-8", errors="replace").strip(),
+        "stdout": stdout_text,
+        "stderr": stderr_text,
         "duration_s": round(time.monotonic() - started, 3),
     }
 
@@ -3313,6 +3461,8 @@ async def run_diagnostic_input_phase(
         actions=actions,
         timeout_s=timeout_s,
         connect_timeout_s=connect_timeout_s,
+        scene_width=tab_width,
+        scene_height=tab_height,
     )
     status = "completed" if result.get("ok") else "failed"
     emit_step_event(transcript, 6, status, {
