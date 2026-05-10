@@ -84,6 +84,15 @@ must contain frame-time p50/p99/p99.9 and non-empty
 buckets. Use `--allow-missing-live-metrics` only for an explicitly informational
 run that cannot satisfy the release closeout gate.
 
+For strict release evidence, pair the resident soak with a bounded
+`--benchmark-emit C:\tze_hud\perf\<bead-id>\windowed_live_metrics.json` run and
+pass that artifact to the soak summary as the live metrics source. The windowed
+benchmark exercises the real windowed compositor and a synthetic pointer probe
+through the same `FrameTelemetry.input_to_local_ack_us`,
+`input_to_scene_commit_us`, and `input_to_next_present_us` fields used by
+runtime telemetry. Treat those input samples as comparable windowed benchmark
+input-path evidence, not human desktop interaction.
+
 ## MCP Compatibility
 
 The `/user-test-performance` target registry now uses
