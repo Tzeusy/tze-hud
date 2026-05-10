@@ -4,12 +4,15 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep, sleep_until, timeout};
 use tokio_stream::wrappers::ReceiverStream;
@@ -341,12 +344,24 @@ struct RunStats {
     warnings: Vec<String>,
 }
 
-#[derive(Debug, Default)]
 struct RunState {
-    inflight: HashMap<u64, Instant>,
-    stats: RunStats,
-    ack_count: u64,
-    stream_terminal: Option<String>,
+    inflight: Mutex<HashMap<u64, Instant>>,
+    stats: Mutex<RunStats>,
+    ack_count: AtomicU64,
+    stream_terminal: Mutex<Option<String>>,
+    ack_notify: Notify,
+}
+
+impl Default for RunState {
+    fn default() -> Self {
+        Self {
+            inflight: Mutex::new(HashMap::new()),
+            stats: Mutex::new(RunStats::default()),
+            ack_count: AtomicU64::new(0),
+            stream_terminal: Mutex::new(None),
+            ack_notify: Notify::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -383,7 +398,7 @@ async fn main() -> Result<(), DynError> {
     wait_for_session_established(&mut response_stream, Duration::from_secs_f64(cli.timeout_s))
         .await?;
 
-    let run_state = Arc::new(Mutex::new(RunState::default()));
+    let run_state = Arc::new(RunState::default());
     let mut response_drain_handle = spawn_response_drain(response_stream, Arc::clone(&run_state));
     let send_start = Instant::now();
 
@@ -432,8 +447,8 @@ async fn main() -> Result<(), DynError> {
 
     let send_done = Instant::now();
     let expected_acks = {
-        let state = run_state.lock().await;
-        state.stats.request_count
+        let stats = run_state.stats.lock().await;
+        stats.request_count
     };
     let ack_drain_outcome = wait_for_expected_acks(
         &run_state,
@@ -441,6 +456,7 @@ async fn main() -> Result<(), DynError> {
         Duration::from_secs_f64(cli.timeout_s),
     )
     .await?;
+    let aggregate_ack_drain_time_us = elapsed_us(send_done, Instant::now());
 
     let close = session_proto::ClientMessage {
         sequence: client_seq,
@@ -452,37 +468,34 @@ async fn main() -> Result<(), DynError> {
     };
     let _ = tx.send(close).await;
     drop(tx);
-    wait_for_response_drain_shutdown(&mut response_drain_handle).await;
+    let drain_shutdown_warning = wait_for_response_drain_shutdown(&mut response_drain_handle).await;
 
-    let mut state = run_state.lock().await;
-    state.stats.aggregate_ack_drain_time_us = elapsed_us(send_done, Instant::now());
+    let mut stats = run_state.stats.lock().await;
+    stats.aggregate_ack_drain_time_us = aggregate_ack_drain_time_us;
 
     if ack_drain_outcome != AckDrainOutcome::Complete {
-        state.stats.warnings.push(format!(
+        stats.warnings.push(format!(
             "final ack drain ended with outcome={:?} after timeout_s={:.3}",
             ack_drain_outcome, cli.timeout_s
         ));
     }
+    if let Some(warning) = drain_shutdown_warning {
+        stats.warnings.push(warning);
+    }
 
-    let missing_acks = expected_acks.saturating_sub(state.ack_count);
+    let missing_acks = expected_acks.saturating_sub(run_state.ack_count.load(Ordering::Relaxed));
     if missing_acks > 0 {
-        state
-            .stats
+        stats
             .warnings
             .push(format!("{missing_acks} publishes missing durable acks"));
-        let accounted_outcomes = state
-            .stats
-            .success_count
-            .saturating_add(state.stats.error_count);
-        let unaccounted_outcomes = state.stats.request_count.saturating_sub(accounted_outcomes);
-        state.stats.error_count = state
-            .stats
+        let accounted_outcomes = stats.success_count.saturating_add(stats.error_count);
+        let unaccounted_outcomes = stats.request_count.saturating_sub(accounted_outcomes);
+        stats.error_count = stats
             .error_count
             .saturating_add(unaccounted_outcomes.min(missing_acks));
     }
 
-    let stats = std::mem::take(&mut state.stats);
-    drop(state);
+    let stats = std::mem::take(&mut *stats);
 
     let wall_duration_us = elapsed_us(send_start, Instant::now());
     let throughput_rps = if wall_duration_us == 0 {
@@ -665,7 +678,7 @@ async fn send_publish(
     next_seq: &mut u64,
     cli: &Cli,
     index: u64,
-    run_state: &Arc<Mutex<RunState>>,
+    run_state: &Arc<RunState>,
 ) -> Result<(), DynError> {
     let seq = *next_seq;
     let value = cli.param_start + (index as f32 * cli.param_step);
@@ -694,15 +707,18 @@ async fn send_publish(
     let payload_bytes_out = msg.encoded_len() as u64;
     let send_begin = Instant::now();
     {
-        let mut state = run_state.lock().await;
-        state.inflight.insert(seq, send_begin);
-        state.stats.request_count += 1;
-        state.stats.payload_bytes_out += payload_bytes_out;
+        let mut inflight = run_state.inflight.lock().await;
+        inflight.insert(seq, send_begin);
+    }
+    {
+        let mut stats = run_state.stats.lock().await;
+        stats.request_count += 1;
+        stats.payload_bytes_out += payload_bytes_out;
     }
     tx.send(msg).await?;
     {
-        let mut state = run_state.lock().await;
-        state.stats.aggregate_send_time_us += send_begin.elapsed().as_micros() as u64;
+        let mut stats = run_state.stats.lock().await;
+        stats.aggregate_send_time_us += send_begin.elapsed().as_micros() as u64;
     }
     *next_seq += 1;
 
@@ -711,33 +727,28 @@ async fn send_publish(
 
 fn spawn_response_drain(
     mut response_stream: tonic::Streaming<session_proto::ServerMessage>,
-    run_state: Arc<Mutex<RunState>>,
+    run_state: Arc<RunState>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match response_stream.message().await {
                 Ok(Some(message)) => {
-                    let mut state = run_state.lock().await;
-                    apply_server_message(&message, &mut state);
+                    apply_server_message(&message, &run_state).await;
                 }
                 Ok(None) => {
-                    let mut state = run_state.lock().await;
-                    state.stream_terminal = Some(
+                    record_stream_terminal(
+                        &run_state,
                         "stream closed while waiting for WidgetPublishResult acks".to_string(),
-                    );
-                    state.stats.warnings.push(
-                        "stream closed while waiting for WidgetPublishResult acks".to_string(),
-                    );
+                    )
+                    .await;
                     break;
                 }
                 Err(err) => {
-                    let mut state = run_state.lock().await;
-                    state.stream_terminal = Some(format!(
-                        "stream error while waiting for WidgetPublishResult acks: {err}"
-                    ));
-                    state.stats.warnings.push(format!(
-                        "stream error while waiting for WidgetPublishResult acks: {err}"
-                    ));
+                    record_stream_terminal(
+                        &run_state,
+                        format!("stream error while waiting for WidgetPublishResult acks: {err}"),
+                    )
+                    .await;
                     break;
                 }
             }
@@ -745,51 +756,82 @@ fn spawn_response_drain(
     })
 }
 
-async fn wait_for_response_drain_shutdown(handle: &mut JoinHandle<()>) {
-    if handle.is_finished() {
-        let _ = handle.await;
-        return;
-    }
-
-    if timeout(Duration::from_secs(1), &mut *handle).await.is_err() {
-        handle.abort();
-        let _ = handle.await;
+async fn wait_for_response_drain_shutdown(handle: &mut JoinHandle<()>) -> Option<String> {
+    match timeout(Duration::from_secs(1), &mut *handle).await {
+        Ok(Ok(())) => None,
+        Ok(Err(err)) => Some(format!("response drain task failed during shutdown: {err}")),
+        Err(_) => {
+            handle.abort();
+            match handle.await {
+                Ok(()) => {
+                    Some("response drain task completed only after shutdown timeout".to_string())
+                }
+                Err(err) if err.is_cancelled() => Some(
+                    "response drain task did not stop within 1s after SessionClose; aborted"
+                        .to_string(),
+                ),
+                Err(err) => Some(format!(
+                    "response drain task failed after shutdown abort: {err}"
+                )),
+            }
+        }
     }
 }
 
-fn apply_server_message(message: &session_proto::ServerMessage, state: &mut RunState) {
+async fn record_stream_terminal(run_state: &RunState, warning: String) {
+    {
+        let mut stream_terminal = run_state.stream_terminal.lock().await;
+        *stream_terminal = Some(warning.clone());
+    }
+    {
+        let mut stats = run_state.stats.lock().await;
+        stats.warnings.push(warning);
+    }
+    run_state.ack_notify.notify_waiters();
+}
+
+async fn apply_server_message(message: &session_proto::ServerMessage, run_state: &RunState) {
     match &message.payload {
         Some(ServerPayload::WidgetPublishResult(result)) => {
-            state.stats.payload_bytes_in += message.encoded_len() as u64;
-            state.ack_count += 1;
+            run_state.ack_count.fetch_add(1, Ordering::Relaxed);
+            let rtt_start = {
+                let mut inflight = run_state.inflight.lock().await;
+                inflight.remove(&result.request_sequence)
+            };
+
+            let mut stats = run_state.stats.lock().await;
+            stats.payload_bytes_in += message.encoded_len() as u64;
 
             if result.accepted {
-                state.stats.success_count += 1;
+                stats.success_count += 1;
             } else {
-                state.stats.error_count += 1;
+                stats.error_count += 1;
                 let detail = if result.error_code.is_empty() {
                     result.error_message.clone()
                 } else {
                     format!("{}: {}", result.error_code, result.error_message)
                 };
-                state.stats.warnings.push(format!(
+                stats.warnings.push(format!(
                     "publish rejected for request_sequence={}: {}",
                     result.request_sequence, detail
                 ));
             }
 
-            if let Some(start) = state.inflight.remove(&result.request_sequence) {
-                state.stats.rtt_us.push(elapsed_us(start, Instant::now()));
+            if let Some(start) = rtt_start {
+                stats.rtt_us.push(elapsed_us(start, Instant::now()));
             } else {
-                state.stats.warnings.push(format!(
+                stats.warnings.push(format!(
                     "received ack for unknown request_sequence={}",
                     result.request_sequence
                 ));
             }
+            drop(stats);
+            run_state.ack_notify.notify_waiters();
         }
         Some(ServerPayload::RuntimeError(err)) => {
-            state.stats.error_count += 1;
-            state.stats.warnings.push(format!(
+            let mut stats = run_state.stats.lock().await;
+            stats.error_count += 1;
+            stats.warnings.push(format!(
                 "runtime_error while draining acks: {} ({})",
                 err.error_code, err.message
             ));
@@ -799,19 +841,19 @@ fn apply_server_message(message: &session_proto::ServerMessage, state: &mut RunS
 }
 
 async fn wait_for_expected_acks(
-    run_state: &Arc<Mutex<RunState>>,
+    run_state: &Arc<RunState>,
     expected_acks: u64,
     timeout_dur: Duration,
 ) -> Result<AckDrainOutcome, DynError> {
     let deadline = TokioInstant::now() + timeout_dur;
 
     loop {
+        if run_state.ack_count.load(Ordering::Relaxed) >= expected_acks {
+            return Ok(AckDrainOutcome::Complete);
+        }
         {
-            let state = run_state.lock().await;
-            if state.ack_count >= expected_acks {
-                return Ok(AckDrainOutcome::Complete);
-            }
-            if state.stream_terminal.is_some() {
+            let stream_terminal = run_state.stream_terminal.lock().await;
+            if stream_terminal.is_some() {
                 return Ok(AckDrainOutcome::StreamEnded);
             }
         }
@@ -822,7 +864,10 @@ async fn wait_for_expected_acks(
         }
 
         let remaining = deadline.saturating_duration_since(now);
-        sleep(remaining.min(Duration::from_millis(25))).await;
+        tokio::select! {
+            _ = run_state.ack_notify.notified() => {}
+            _ = sleep(remaining.min(Duration::from_millis(25))) => {}
+        }
     }
 }
 
@@ -1117,11 +1162,13 @@ mod tests {
         assert!(p50 <= p95 && p95 <= p99 && p99 <= max);
     }
 
-    #[test]
-    fn apply_server_message_counts_widget_ack_and_rtt() {
-        let mut state = RunState::default();
+    #[tokio::test]
+    async fn apply_server_message_counts_widget_ack_and_rtt() {
+        let state = RunState::default();
         state
             .inflight
+            .lock()
+            .await
             .insert(42, Instant::now() - Duration::from_millis(2));
 
         let message = session_proto::ServerMessage {
@@ -1138,20 +1185,21 @@ mod tests {
             )),
         };
 
-        apply_server_message(&message, &mut state);
+        apply_server_message(&message, &state).await;
 
-        assert_eq!(state.ack_count, 1);
-        assert_eq!(state.stats.success_count, 1);
-        assert_eq!(state.stats.error_count, 0);
-        assert!(state.inflight.is_empty());
-        assert_eq!(state.stats.rtt_us.len(), 1);
-        assert!(state.stats.payload_bytes_in > 0);
+        assert_eq!(state.ack_count.load(Ordering::Relaxed), 1);
+        let stats = state.stats.lock().await;
+        assert_eq!(stats.success_count, 1);
+        assert_eq!(stats.error_count, 0);
+        assert!(state.inflight.lock().await.is_empty());
+        assert_eq!(stats.rtt_us.len(), 1);
+        assert!(stats.payload_bytes_in > 0);
     }
 
-    #[test]
-    fn apply_server_message_records_rejected_widget_ack() {
-        let mut state = RunState::default();
-        state.inflight.insert(7, Instant::now());
+    #[tokio::test]
+    async fn apply_server_message_records_rejected_widget_ack() {
+        let state = RunState::default();
+        state.inflight.lock().await.insert(7, Instant::now());
 
         let message = session_proto::ServerMessage {
             sequence: 10,
@@ -1167,12 +1215,13 @@ mod tests {
             )),
         };
 
-        apply_server_message(&message, &mut state);
+        apply_server_message(&message, &state).await;
 
-        assert_eq!(state.ack_count, 1);
-        assert_eq!(state.stats.success_count, 0);
-        assert_eq!(state.stats.error_count, 1);
-        assert!(state.stats.warnings.iter().any(|warning| {
+        assert_eq!(state.ack_count.load(Ordering::Relaxed), 1);
+        let stats = state.stats.lock().await;
+        assert_eq!(stats.success_count, 0);
+        assert_eq!(stats.error_count, 1);
+        assert!(stats.warnings.iter().any(|warning| {
             warning.contains("publish rejected for request_sequence=7")
                 && warning.contains("WIDGET_PARAMETER_INVALID_VALUE")
         }));
@@ -1180,12 +1229,12 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_expected_acks_completes_after_concurrent_update() {
-        let run_state = Arc::new(Mutex::new(RunState::default()));
+        let run_state = Arc::new(RunState::default());
         let updater_state = Arc::clone(&run_state);
         tokio::spawn(async move {
             sleep(Duration::from_millis(5)).await;
-            let mut state = updater_state.lock().await;
-            state.ack_count = 3;
+            updater_state.ack_count.store(3, Ordering::Relaxed);
+            updater_state.ack_notify.notify_waiters();
         });
 
         let outcome = wait_for_expected_acks(&run_state, 3, Duration::from_millis(200))
@@ -1197,11 +1246,11 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_expected_acks_uses_bounded_deadline() {
-        let run_state = Arc::new(Mutex::new(RunState::default()));
+        let run_state = Arc::new(RunState::default());
         {
-            let mut state = run_state.lock().await;
-            state.stats.request_count = 3;
-            state.ack_count = 1;
+            let mut stats = run_state.stats.lock().await;
+            stats.request_count = 3;
+            run_state.ack_count.store(1, Ordering::Relaxed);
         }
 
         let started = Instant::now();
