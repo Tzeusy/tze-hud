@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -341,6 +342,25 @@ def validate_live_metrics(metrics: dict[str, Any]) -> list[str]:
     return missing
 
 
+def required_live_metric_fields() -> list[str]:
+    fields = [
+        "frame_time.p50_us",
+        "frame_time.p99_us",
+        "frame_time.p99_9_us",
+        "frame_time.sample_count",
+    ]
+    for bucket_name in REQUIRED_INPUT_BUCKETS:
+        fields.extend(
+            [
+                f"{bucket_name}.p50_us",
+                f"{bucket_name}.p95_us",
+                f"{bucket_name}.p99_us",
+                f"{bucket_name}.sample_count",
+            ]
+        )
+    return fields
+
+
 def load_live_metrics_artifact(path: Path) -> dict[str, Any]:
     result: dict[str, Any] = {"artifact_path": str(path)}
     if not path.exists():
@@ -348,12 +368,7 @@ def load_live_metrics_artifact(path: Path) -> dict[str, Any]:
             **result,
             "ok": False,
             "error": "live metrics artifact missing",
-            "missing_metrics": [
-                "frame_time.p50_us",
-                "frame_time.p99_us",
-                "frame_time.p99_9_us",
-                *(f"{name}.p99_us" for name in REQUIRED_INPUT_BUCKETS),
-            ],
+            "missing_metrics": required_live_metric_fields(),
         }
     try:
         artifact_size = path.stat().st_size
@@ -378,6 +393,16 @@ def load_live_metrics_artifact(path: Path) -> dict[str, Any]:
         "missing_metrics": missing,
         **metrics,
     }
+
+
+def copy_local_live_metrics_artifact(path: Path, output_root: Path) -> Path:
+    if not path.exists():
+        return path
+
+    dest = output_root / LIVE_METRICS_COPY_NAME
+    if path.resolve() != dest.resolve():
+        shutil.copyfile(path, dest)
+    return dest
 
 
 def fetch_windows_live_metrics(args: argparse.Namespace, output_root: Path) -> Path | None:
@@ -420,7 +445,9 @@ def resolve_live_metrics(
     try:
         source_path = fetch_windows_live_metrics(args, output_root)
         if source_path is None and args.live_metrics_artifact:
-            source_path = Path(args.live_metrics_artifact)
+            source_path = copy_local_live_metrics_artifact(
+                Path(args.live_metrics_artifact), output_root
+            )
         if source_path is None:
             result.update(
                 {

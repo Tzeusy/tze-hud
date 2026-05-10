@@ -7,6 +7,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 
@@ -75,6 +76,35 @@ class LiveMetricsArtifactTests(unittest.TestCase):
             self.assertIn("input_to_scene_commit.sample_count", result["missing_metrics"])
             self.assertIn("input_to_next_present.p50_us", result["missing_metrics"])
 
+    def test_missing_artifact_reports_all_required_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing.json"
+
+            result = widget_soak_runner.load_live_metrics_artifact(path)
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(
+                result["missing_metrics"],
+                [
+                    "frame_time.p50_us",
+                    "frame_time.p99_us",
+                    "frame_time.p99_9_us",
+                    "frame_time.sample_count",
+                    "input_to_local_ack.p50_us",
+                    "input_to_local_ack.p95_us",
+                    "input_to_local_ack.p99_us",
+                    "input_to_local_ack.sample_count",
+                    "input_to_scene_commit.p50_us",
+                    "input_to_scene_commit.p95_us",
+                    "input_to_scene_commit.p99_us",
+                    "input_to_scene_commit.sample_count",
+                    "input_to_next_present.p50_us",
+                    "input_to_next_present.p95_us",
+                    "input_to_next_present.p99_us",
+                    "input_to_next_present.sample_count",
+                ],
+            )
+
     def test_headless_benchmark_sessions_are_aggregated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "benchmark.json"
@@ -112,6 +142,46 @@ class LiveMetricsArtifactTests(unittest.TestCase):
             self.assertEqual(result["frame_time"]["p99_9_us"], 400)
             self.assertEqual(result["input_latency"]["input_to_next_present"]["p99_us"], 24)
             self.assertEqual(result["sessions"], ["steady_state_render", "high_mutation"])
+
+    def test_local_live_metrics_artifact_is_copied_into_output_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "source.json"
+            output_root = tmp_path / "soak-output"
+            output_root.mkdir()
+            write_json(
+                source,
+                {
+                    "schema": "tze_hud.windowed_compositor_benchmark.v1",
+                    "benchmark": {"recorded_frames": 2},
+                    "frame_time": {"p50_us": 10, "p99_us": 20, "p99_9_us": 20},
+                    "summary": {
+                        "frame_time": {"samples": [10, 20]},
+                        "input_to_local_ack": {"samples": [1, 2]},
+                        "input_to_scene_commit": {"samples": [10, 20]},
+                        "input_to_next_present": {"samples": [16, 32]},
+                    },
+                },
+            )
+
+            result = widget_soak_runner.resolve_live_metrics(
+                args=Namespace(
+                    allow_missing_live_metrics=False,
+                    live_metrics_artifact=str(source),
+                    windows_live_metrics_path="",
+                    win_user="hudbot",
+                    win_host="tzehouse-windows.parrot-hen.ts.net",
+                    ssh_identity="",
+                ),
+                output_root=output_root,
+                dry_run=False,
+            )
+
+            copied = output_root / widget_soak_runner.LIVE_METRICS_COPY_NAME
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["artifact_path"], str(copied))
+            self.assertTrue(copied.exists())
+            self.assertTrue((output_root / widget_soak_runner.LIVE_METRICS_SUMMARY_NAME).exists())
 
 
 if __name__ == "__main__":
