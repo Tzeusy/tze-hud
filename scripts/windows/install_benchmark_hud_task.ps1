@@ -106,7 +106,7 @@ function Get-BenchmarkHudProcess {
 if (-not (Test-Path `$PskPath)) {
     throw "DPAPI-protected benchmark PSK not found: `$PskPath"
 }
-`$securePsk = Get-Content -Path `$PskPath -Raw | ConvertTo-SecureString
+`$securePsk = (Get-Content -Path `$PskPath -Raw).Trim() | ConvertTo-SecureString
 `$pskPtr = [System.IntPtr]::Zero
 try {
     `$pskPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(`$securePsk)
@@ -133,11 +133,14 @@ Start-Sleep -Milliseconds 300
 )
 
 `$workdir = Split-Path `$ExePath -Parent
-Start-Process -FilePath `$ExePath `
-    -ArgumentList `$args `
-    -WorkingDirectory `$workdir `
-    -RedirectStandardOutput `$stdout `
-    -RedirectStandardError `$stderr
+`$startArgs = @{
+    FilePath = `$ExePath
+    ArgumentList = `$args
+    WorkingDirectory = `$workdir
+    RedirectStandardOutput = `$stdout
+    RedirectStandardError = `$stderr
+}
+Start-Process @startArgs
 
 Start-Sleep -Milliseconds 500
 `$proc = Get-BenchmarkHudProcess |

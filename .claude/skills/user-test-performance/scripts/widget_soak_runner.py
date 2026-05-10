@@ -298,6 +298,7 @@ def main() -> int:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--sample-windows-resources", action="store_true")
+    parser.add_argument("--resource-sample-interval-s", type=float, default=300.0)
     parser.add_argument("--win-user", default="hudbot")
     parser.add_argument("--win-host", default="tzehouse-windows.parrot-hen.ts.net")
     parser.add_argument("--ssh-identity", default="")
@@ -307,6 +308,8 @@ def main() -> int:
         raise SystemExit("--duration-s must be > 0")
     if args.rate_rps <= 0:
         raise SystemExit("--rate-rps must be > 0")
+    if args.resource_sample_interval_s < 0:
+        raise SystemExit("--resource-sample-interval-s must be >= 0")
 
     agents = parse_agents(args.agent_ids)
     root = repo_root()
@@ -386,8 +389,20 @@ def main() -> int:
             log_handles.remove(stdout)
             log_handles.remove(stderr)
 
+        next_resource_sample = (
+            time.monotonic() + args.resource_sample_interval_s
+            if args.sample_windows_resources and args.resource_sample_interval_s > 0
+            else None
+        )
+        resource_sample_index = 1
         while any(proc.poll() is None for proc in processes.values()):
             time.sleep(2.0)
+            if next_resource_sample is not None and time.monotonic() >= next_resource_sample:
+                resource_samples.append(
+                    sample_windows_resources(args, f"during-{resource_sample_index}")
+                )
+                resource_sample_index += 1
+                next_resource_sample += args.resource_sample_interval_s
     except KeyboardInterrupt:
         interrupted = True
         for proc in processes.values():
