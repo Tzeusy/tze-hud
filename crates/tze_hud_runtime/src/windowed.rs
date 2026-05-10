@@ -706,9 +706,21 @@ impl WindowedBenchmarkRunState {
         }
         self.summary
             .record_frame(telemetry.frame_time_us, telemetry.tile_count);
-        self.summary
-            .input_to_next_present
-            .record(telemetry.input_to_next_present_us);
+        if telemetry.input_to_local_ack_us > 0 {
+            self.summary
+                .input_to_local_ack
+                .record(telemetry.input_to_local_ack_us);
+        }
+        if telemetry.input_to_scene_commit_us > 0 {
+            self.summary
+                .input_to_scene_commit
+                .record(telemetry.input_to_scene_commit_us);
+        }
+        if telemetry.input_to_next_present_us > 0 {
+            self.summary
+                .input_to_next_present
+                .record(telemetry.input_to_next_present_us);
+        }
         self.measured_seen += 1;
         self.measured_seen >= self.config.frames
     }
@@ -4152,6 +4164,58 @@ mod tests {
             "benchmark mode must activate its own deterministic tab"
         );
         assert_eq!(scene.tiles.len(), 20);
+    }
+
+    #[test]
+    fn windowed_benchmark_records_nonzero_split_input_latency() {
+        let config = WindowedBenchmarkConfig {
+            warmup_frames: 0,
+            frames: 10,
+            emit_path: std::env::temp_dir().join("windowed-benchmark-test.json"),
+        };
+        let mut state = WindowedBenchmarkRunState::new(
+            config,
+            WindowMode::Overlay,
+            WindowMode::Overlay,
+            1920,
+            1080,
+            60,
+        );
+        let mut telemetry = tze_hud_telemetry::FrameTelemetry::new(1);
+        telemetry.frame_time_us = 12_000;
+        telemetry.tile_count = 3;
+        telemetry.input_to_local_ack_us = 900;
+        telemetry.input_to_scene_commit_us = 10_500;
+        telemetry.input_to_next_present_us = 18_000;
+
+        assert!(!state.record(&telemetry));
+        assert_eq!(state.summary.input_to_local_ack.samples, vec![900]);
+        assert_eq!(state.summary.input_to_scene_commit.samples, vec![10_500]);
+        assert_eq!(state.summary.input_to_next_present.samples, vec![18_000]);
+    }
+
+    #[test]
+    fn windowed_benchmark_does_not_treat_zero_input_latency_as_sample() {
+        let config = WindowedBenchmarkConfig {
+            warmup_frames: 0,
+            frames: 10,
+            emit_path: std::env::temp_dir().join("windowed-benchmark-test.json"),
+        };
+        let mut state = WindowedBenchmarkRunState::new(
+            config,
+            WindowMode::Overlay,
+            WindowMode::Overlay,
+            1920,
+            1080,
+            60,
+        );
+        let mut telemetry = tze_hud_telemetry::FrameTelemetry::new(1);
+        telemetry.frame_time_us = 12_000;
+
+        assert!(!state.record(&telemetry));
+        assert!(state.summary.input_to_local_ack.samples.is_empty());
+        assert!(state.summary.input_to_scene_commit.samples.is_empty());
+        assert!(state.summary.input_to_next_present.samples.is_empty());
     }
 
     // ── overlay_auto_size field (hud-48ml) ────────────────────────────────────

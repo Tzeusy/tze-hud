@@ -63,6 +63,7 @@ python3 .claude/skills/user-test-performance/scripts/widget_soak_runner.py \
   --target-id user-test-windows-tailnet \
   --duration-s 3600 \
   --rate-rps 1 \
+  --windows-live-metrics-path 'C:\tze_hud\perf\<bead-id>\windowed_live_metrics.json' \
   --sample-windows-resources \
   --ssh-identity ~/.ssh/ecdsa_home
 ```
@@ -73,7 +74,15 @@ Artifacts are written under `benchmarks/soak/<timestamp>/`:
 |---|---|
 | `agents/<agent>.json` | per-agent Rust publish-load artifact |
 | `logs/<agent>.stdout.log` / `stderr.log` | harness transcripts |
-| `soak_summary.json` | aggregate request counts, success/error counts, RTT jitter, optional resource drift |
+| `live_metrics_source.json` / `live_metrics_summary.json` | copied windowed/runtime telemetry source and normalized frame/input latency metrics |
+| `soak_summary.json` | aggregate request counts, success/error counts, RTT jitter, live frame-time p50/p99/p99.9, the three input latency buckets, optional resource drift |
+
+Real soak runs fail closed unless live metrics are supplied with either
+`--windows-live-metrics-path` or `--live-metrics-artifact`. The metrics source
+must contain frame-time p50/p99/p99.9 and non-empty
+`input_to_local_ack`, `input_to_scene_commit`, and `input_to_next_present`
+buckets. Use `--allow-missing-live-metrics` only for an explicitly informational
+run that cannot satisfy the release closeout gate.
 
 ## MCP Compatibility
 

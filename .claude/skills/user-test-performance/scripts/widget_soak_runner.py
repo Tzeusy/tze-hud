@@ -20,6 +20,13 @@ DEFAULT_INSTANCE = "main-progress"
 DEFAULT_DURATION_S = 3600.0
 DEFAULT_RATE_RPS = 1.0
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
+LIVE_METRICS_COPY_NAME = "live_metrics_source.json"
+LIVE_METRICS_SUMMARY_NAME = "live_metrics_summary.json"
+REQUIRED_INPUT_BUCKETS = (
+    "input_to_local_ack",
+    "input_to_scene_commit",
+    "input_to_next_present",
+)
 
 
 def utc_now_iso() -> str:
@@ -196,6 +203,246 @@ def repo_relative_path(path: str | Path, root: Path) -> str:
         return str(path)
 
 
+def percentile(samples: list[int], pct: float) -> int | None:
+    if not samples:
+        return None
+    ordered = sorted(samples)
+    rank = int((pct / 100.0) * len(ordered) + 0.999999999)
+    idx = max(0, min(rank - 1, len(ordered) - 1))
+    return ordered[idx]
+
+
+def summarize_sample_bucket(bucket: Any, *, include_p95: bool = False) -> dict[str, Any]:
+    if not isinstance(bucket, dict):
+        return {"sample_count": 0}
+
+    samples = bucket.get("samples")
+    if isinstance(samples, list):
+        numeric_samples = [int(sample) for sample in samples if isinstance(sample, (int, float))]
+        result: dict[str, Any] = {
+            "sample_count": len(numeric_samples),
+            "p50_us": percentile(numeric_samples, 50.0),
+            "p99_us": percentile(numeric_samples, 99.0),
+        }
+        if include_p95:
+            result["p95_us"] = percentile(numeric_samples, 95.0)
+        else:
+            result["p99_9_us"] = percentile(numeric_samples, 99.9)
+        return result
+
+    result = {
+        "sample_count": bucket.get("sample_count") or bucket.get("count"),
+        "p50_us": bucket.get("p50_us") or bucket.get("p50"),
+        "p99_us": bucket.get("p99_us") or bucket.get("p99"),
+    }
+    if include_p95:
+        result["p95_us"] = bucket.get("p95_us") or bucket.get("p95")
+    else:
+        result["p99_9_us"] = (
+            bucket.get("p99_9_us") or bucket.get("p99.9_us") or bucket.get("p999_us")
+        )
+    return result
+
+
+def extract_summary_live_metrics(summary: dict[str, Any], *, source_schema: str) -> dict[str, Any]:
+    frame_time = summarize_sample_bucket(summary.get("frame_time"))
+    input_latency = {
+        bucket_name: summarize_sample_bucket(summary.get(bucket_name), include_p95=True)
+        for bucket_name in REQUIRED_INPUT_BUCKETS
+    }
+    return {
+        "source_schema": source_schema,
+        "frame_time": frame_time,
+        "input_latency": input_latency,
+    }
+
+
+def extract_live_metrics_payload(data: dict[str, Any]) -> dict[str, Any]:
+    schema = data.get("schema") or data.get("schema_version") or data.get("kind") or "unknown"
+    if isinstance(data.get("summary"), dict):
+        metrics = extract_summary_live_metrics(data["summary"], source_schema=str(schema))
+        if isinstance(data.get("frame_time"), dict):
+            frame_time = dict(metrics["frame_time"])
+            explicit = data["frame_time"]
+            frame_time.update(
+                {
+                    "p50_us": explicit.get("p50_us", frame_time.get("p50_us")),
+                    "p99_us": explicit.get("p99_us", frame_time.get("p99_us")),
+                    "p99_9_us": explicit.get("p99_9_us", frame_time.get("p99_9_us")),
+                    "peak_us": explicit.get("peak_us"),
+                    "sample_count": frame_time.get("sample_count")
+                    or data.get("benchmark", {}).get("recorded_frames"),
+                }
+            )
+            metrics["frame_time"] = frame_time
+        return metrics
+
+    if isinstance(data.get("sessions"), list):
+        frame_samples: list[int] = []
+        input_samples = {name: [] for name in REQUIRED_INPUT_BUCKETS}
+        session_names: list[str] = []
+        for session in data["sessions"]:
+            if not isinstance(session, dict):
+                continue
+            if isinstance(session.get("name"), str):
+                session_names.append(session["name"])
+            summary = session.get("summary")
+            if not isinstance(summary, dict):
+                continue
+            frame_bucket = summary.get("frame_time", {})
+            if isinstance(frame_bucket, dict) and isinstance(frame_bucket.get("samples"), list):
+                frame_samples.extend(
+                    int(v) for v in frame_bucket["samples"] if isinstance(v, (int, float))
+                )
+            for name in REQUIRED_INPUT_BUCKETS:
+                bucket = summary.get(name, {})
+                if isinstance(bucket, dict) and isinstance(bucket.get("samples"), list):
+                    input_samples[name].extend(
+                        int(v) for v in bucket["samples"] if isinstance(v, (int, float))
+                    )
+
+        return {
+            "source_schema": str(schema),
+            "sessions": session_names,
+            "frame_time": summarize_sample_bucket({"samples": frame_samples}),
+            "input_latency": {
+                name: summarize_sample_bucket({"samples": samples}, include_p95=True)
+                for name, samples in input_samples.items()
+            },
+        }
+
+    return {
+        "source_schema": str(schema),
+        "frame_time": summarize_sample_bucket(data.get("frame_time")),
+        "input_latency": {
+            name: summarize_sample_bucket(data.get(name), include_p95=True)
+            for name in REQUIRED_INPUT_BUCKETS
+        },
+    }
+
+
+def validate_live_metrics(metrics: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    frame_time = metrics.get("frame_time", {})
+    for field in ("p50_us", "p99_us", "p99_9_us"):
+        if frame_time.get(field) is None:
+            missing.append(f"frame_time.{field}")
+    if not frame_time.get("sample_count"):
+        missing.append("frame_time.sample_count")
+
+    input_latency = metrics.get("input_latency", {})
+    for bucket_name in REQUIRED_INPUT_BUCKETS:
+        bucket = input_latency.get(bucket_name, {})
+        for field in ("p50_us", "p95_us", "p99_us"):
+            if bucket.get(field) is None:
+                missing.append(f"{bucket_name}.{field}")
+        if not bucket.get("sample_count"):
+            missing.append(f"{bucket_name}.sample_count")
+    return missing
+
+
+def load_live_metrics_artifact(path: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {"artifact_path": str(path)}
+    if not path.exists():
+        return {
+            **result,
+            "ok": False,
+            "error": "live metrics artifact missing",
+            "missing_metrics": [
+                "frame_time.p50_us",
+                "frame_time.p99_us",
+                "frame_time.p99_9_us",
+                *(f"{name}.p99_us" for name in REQUIRED_INPUT_BUCKETS),
+            ],
+        }
+    try:
+        artifact_size = path.stat().st_size
+        if artifact_size > MAX_ARTIFACT_BYTES:
+            return {
+                **result,
+                "ok": False,
+                "error": f"live metrics artifact exceeds {MAX_ARTIFACT_BYTES} byte limit",
+                "artifact_size_bytes": artifact_size,
+            }
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return {**result, "ok": False, "error": str(exc)}
+
+    if not isinstance(data, dict):
+        return {**result, "ok": False, "error": "live metrics artifact must be a JSON object"}
+    metrics = extract_live_metrics_payload(data)
+    missing = validate_live_metrics(metrics)
+    return {
+        **result,
+        "ok": not missing,
+        "missing_metrics": missing,
+        **metrics,
+    }
+
+
+def fetch_windows_live_metrics(args: argparse.Namespace, output_root: Path) -> Path | None:
+    if not args.windows_live_metrics_path:
+        return None
+
+    dest = output_root / LIVE_METRICS_COPY_NAME
+    ssh_target = f"{args.win_user}@{args.win_host}"
+    remote_path = args.windows_live_metrics_path.replace("\\", "/")
+    remote = f"{ssh_target}:{remote_path}"
+    cmd = [
+        "scp",
+        "-o",
+        "BatchMode=yes",
+    ]
+    if args.ssh_identity:
+        cmd.extend(["-i", args.ssh_identity])
+    cmd.extend([remote, str(dest)])
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60)
+    return dest
+
+
+def resolve_live_metrics(
+    *,
+    args: argparse.Namespace,
+    output_root: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
+    required = not args.allow_missing_live_metrics
+    result: dict[str, Any] = {
+        "required": required,
+        "ok": False,
+        "collection": "not_attempted",
+    }
+    if dry_run:
+        result["collection"] = "dry_run"
+        result["expected_artifact"] = args.live_metrics_artifact or args.windows_live_metrics_path
+        return result
+
+    try:
+        source_path = fetch_windows_live_metrics(args, output_root)
+        if source_path is None and args.live_metrics_artifact:
+            source_path = Path(args.live_metrics_artifact)
+        if source_path is None:
+            result.update(
+                {
+                    "collection": "missing_source",
+                    "error": "no --live-metrics-artifact or --windows-live-metrics-path was provided",
+                }
+            )
+            return result
+
+        loaded = load_live_metrics_artifact(source_path)
+        result.update({"collection": "loaded", **loaded})
+        summary_path = output_root / LIVE_METRICS_SUMMARY_NAME
+        with summary_path.open("w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, sort_keys=True)
+            f.write("\n")
+        result["summary_path"] = str(summary_path)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result.update({"collection": "error", "error": str(exc)})
+        return result
+
+
 def summarize(
     *,
     args: argparse.Namespace,
@@ -206,6 +453,7 @@ def summarize(
     commands: dict[str, list[str]],
     agent_results: dict[str, dict[str, Any]],
     resource_samples: list[dict[str, Any]],
+    live_metrics: dict[str, Any],
     dry_run: bool,
 ) -> dict[str, Any]:
     metrics_by_agent: dict[str, Any] = {}
@@ -275,6 +523,7 @@ def summarize(
             "max_rtt_jitter_us": max_rtt_jitter_us,
         },
         "metrics_by_agent": metrics_by_agent,
+        "live_metrics": live_metrics,
         "resource_samples": resource_samples,
         "resource_drift": drift,
         "commands": {
@@ -313,6 +562,21 @@ def main() -> int:
     parser.add_argument("--layer4-output-root", default="")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--live-metrics-artifact",
+        default="",
+        help="Local JSON artifact containing live compositor frame/input metrics to embed in soak_summary.json.",
+    )
+    parser.add_argument(
+        "--windows-live-metrics-path",
+        default="",
+        help="Remote Windows JSON artifact path to copy into the soak output and parse after the run.",
+    )
+    parser.add_argument(
+        "--allow-missing-live-metrics",
+        action="store_true",
+        help="Do not fail a real soak when live frame/input metrics cannot be collected.",
+    )
     parser.add_argument("--sample-windows-resources", action="store_true")
     parser.add_argument("--resource-sample-interval-s", type=float, default=300.0)
     parser.add_argument("--win-user", default="hudbot")
@@ -371,6 +635,7 @@ def main() -> int:
             commands=commands,
             agent_results=dry_results,
             resource_samples=[],
+            live_metrics=resolve_live_metrics(args=args, output_root=output_root, dry_run=True),
             dry_run=True,
         )
         path = write_summary(output_root, summary)
@@ -442,6 +707,7 @@ def main() -> int:
                     proc.wait(timeout=10)
 
     resource_samples.append(sample_windows_resources(args, "after"))
+    live_metrics = resolve_live_metrics(args=args, output_root=output_root, dry_run=False)
     agent_results: dict[str, dict[str, Any]] = {}
     exit_code = 0
     for agent_id in agents:
@@ -460,6 +726,8 @@ def main() -> int:
         exit_code = exit_code or 1
     if interrupted:
         exit_code = exit_code or 130
+    if live_metrics.get("required") and not live_metrics.get("ok"):
+        exit_code = exit_code or 1
 
     summary = summarize(
         args=args,
@@ -470,6 +738,7 @@ def main() -> int:
         commands=commands,
         agent_results=agent_results,
         resource_samples=resource_samples,
+        live_metrics=live_metrics,
         dry_run=False,
     )
     if launch_error is not None:
