@@ -41,6 +41,7 @@ blocker set.
 | Nonzero input-latency strict smoke | `hud-9wljr.3` / PR #652 | Implementation landed; blocked on TzeHouse reachability for live proof |
 | Benchmark HUD process resource sampling | `hud-9wljr.4` / PR #651 | Implementation landed; blocked on TzeHouse reachability for live proof |
 | Full 60-minute three-agent Windows soak | `hud-nfl7n` | Blocked on `hud-9m47l` |
+| TzeHouse out-of-band recovery procedure | `docs/operations/tzehouse-windows-recovery.md`, `hud-9wljr.6` | Documented; current supported route is operator/manual recovery, then verification probes |
 | Cooperative HUD projection completion | `docs/reports/cooperative_hud_projection_gen2_reconciliation_20260510.md`, `openspec/changes/archive/2026-05-10-cooperative-hud-projection/`, `hud-ggntn.7`, `hud-ggntn.10`, `hud-ggntn.11`, `hud-ggntn.12` | Landed and archived |
 | Release tag / artifact with perf report | `openspec/changes/windows-first-performant-runtime/tasks.md` section 5.3 | Not ready; depends on successful `hud-nfl7n` |
 | Archive `windows-first-performant-runtime` | `openspec/changes/windows-first-performant-runtime/tasks.md` section 5.4 | Not ready; depends on reconciliation and release decision |
@@ -50,6 +51,12 @@ blocker set.
 `hud-9m47l` tracks the renewed TzeHouse outage. Fresh probes timed out for
 Tailscale ping, non-interactive SSH as `tzeus`, and TCP ports `22`, `50051`, and
 `9090`. This blocks the live strict smoke and full soak.
+
+The out-of-band recovery planning gap is closed by `hud-9wljr.6` and
+`docs/operations/tzehouse-windows-recovery.md`. The repository still does not
+define a safe Wake-on-LAN, Synology-mediated, router, or BIOS remote wake
+procedure; the supported route for the current outage is manual/operator host
+recovery followed by the documented Tailscale, SSH, TCP, MCP, and gRPC probes.
 
 The former approval blocker `hud-egd2j` is closed. Branch protection for `main`
 requires status checks but no pull-request reviews, and PRs #648, #650, #651,
@@ -73,8 +80,9 @@ following are true:
 
 ## Direction
 
-No new implementation gap remains unscheduled. Cooperative HUD projection
-section 6 has separate closeout evidence and does not need new direction work.
-If either live strict smoke or the full soak fails after TzeHouse reachability
-is restored, create focused child beads under `hud-9wljr` using the failing
-artifact as evidence, then rerun `hud-iygbd`.
+No new implementation or planning gap remains unscheduled. Cooperative HUD
+projection section 6 has separate closeout evidence and does not need new
+direction work. The TzeHouse recovery-procedure gap is documented and closed as
+`hud-9wljr.6`. If either live strict smoke or the full soak fails after TzeHouse
+reachability is restored, create focused child beads under `hud-9wljr` using the
+failing artifact as evidence, then rerun `hud-iygbd`.
