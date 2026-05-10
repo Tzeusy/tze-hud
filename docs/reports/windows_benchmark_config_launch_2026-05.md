@@ -65,6 +65,7 @@ python3 .claude/skills/user-test-performance/scripts/widget_soak_runner.py \
   --rate-rps 1 \
   --windows-live-metrics-path 'C:\tze_hud\perf\<bead-id>\windowed_live_metrics.json' \
   --sample-windows-resources \
+  --windows-process-command-match 'C:\tze_hud\benchmark.toml' \
   --ssh-identity ~/.ssh/ecdsa_home
 ```
 
@@ -76,6 +77,10 @@ Artifacts are written under `benchmarks/soak/<timestamp>/`:
 | `logs/<agent>.stdout.log` / `stderr.log` | harness transcripts |
 | `live_metrics_source.json` / `live_metrics_summary.json` | copied windowed/runtime telemetry source and normalized frame/input latency metrics |
 | `soak_summary.json` | aggregate request counts, success/error counts, RTT jitter, live frame-time p50/p99/p99.9, the three input latency buckets, optional resource drift |
+
+Use `--windows-process-command-match 'C:\tze_hud\benchmark.toml'` so resource
+sampling follows the benchmark-config HUD process instead of any unrelated
+`tze_hud*` process that may still be running.
 
 Real soak runs fail closed unless live metrics are supplied with either
 `--windows-live-metrics-path` or `--live-metrics-artifact`. The metrics source

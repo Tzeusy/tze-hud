@@ -126,9 +126,11 @@ soak must run the three-agent `widget_soak_runner.py` path with:
 - `--rate-rps 1`
 - `--windows-live-metrics-path 'C:\tze_hud\perf\hud-nfl7n\windowed_live_metrics.json'`
 - `--sample-windows-resources`
+- `--windows-process-command-match 'C:\tze_hud\benchmark.toml'`
 - `--ssh-identity ~/.ssh/ecdsa_home`
 
 Do not use `--allow-missing-live-metrics` for release evidence. The strict smoke
 or soak artifact must show `live_metrics.ok=true`, nonzero frame/input metrics,
-`process_count >= 1` resource samples, and the cleanup evidence required by
-`hud-nfl7n`.
+`process_count >= 1` resource samples for the benchmark-config HUD process, idle
+GPU evidence, private-memory drift, transparent-overlay composite delta, and the
+cleanup evidence required by `hud-nfl7n`.
