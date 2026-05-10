@@ -118,8 +118,27 @@ Only proceed to strict smoke or `hud-nfl7n` after:
 ## Strict Smoke and Soak Handoff
 
 After the recovery checks pass, use the benchmark launch and soak procedure in
-`docs/reports/windows_benchmark_config_launch_2026-05.md`. The release-gating
-soak must run the three-agent `widget_soak_runner.py` path with:
+`docs/reports/windows_benchmark_config_launch_2026-05.md`. First generate the
+bounded windowed live-metrics artifact described there with
+`--benchmark-emit C:\tze_hud\perf\hud-nfl7n\windowed_live_metrics.json`.
+
+Then run a short strict three-agent smoke with the same command shape as the
+release soak, but a shorter duration and a dedicated output root:
+
+```bash
+python3 .claude/skills/user-test-performance/scripts/widget_soak_runner.py \
+  --target-id user-test-windows-tailnet \
+  --duration-s 60 \
+  --rate-rps 1 \
+  --windows-live-metrics-path 'C:\tze_hud\perf\hud-nfl7n\windowed_live_metrics.json' \
+  --sample-windows-resources \
+  --windows-process-command-match 'C:\tze_hud\benchmark.toml' \
+  --ssh-identity ~/.ssh/ecdsa_home \
+  --output-root docs/reports/artifacts/hud-nfl7n-strict-smoke-<timestamp>
+```
+
+After the strict smoke passes, the release-gating soak must run the three-agent
+`widget_soak_runner.py` path with:
 
 - `--target-id user-test-windows-tailnet`
 - `--duration-s 3600`
