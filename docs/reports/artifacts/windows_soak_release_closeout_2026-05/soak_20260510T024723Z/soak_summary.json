@@ -12,7 +12,7 @@
   },
   "commands": {
     "agent-alpha": [
-      "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/target/release/widget_publish_load_harness",
+      "target/release/widget_publish_load_harness",
       "--targets-file",
       "targets/publish_load_targets.toml",
       "--target-id",
@@ -46,10 +46,10 @@
       "--agent-id",
       "agent-alpha",
       "--output",
-      "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-alpha.json"
+      "docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-alpha.json"
     ],
     "agent-beta": [
-      "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/target/release/widget_publish_load_harness",
+      "target/release/widget_publish_load_harness",
       "--targets-file",
       "targets/publish_load_targets.toml",
       "--target-id",
@@ -83,10 +83,10 @@
       "--agent-id",
       "agent-beta",
       "--output",
-      "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-beta.json"
+      "docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-beta.json"
     ],
     "agent-gamma": [
-      "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/target/release/widget_publish_load_harness",
+      "target/release/widget_publish_load_harness",
       "--targets-file",
       "targets/publish_load_targets.toml",
       "--target-id",
@@ -120,7 +120,7 @@
       "--agent-id",
       "agent-gamma",
       "--output",
-      "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-gamma.json"
+      "docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-gamma.json"
     ]
   },
   "dry_run": false,
@@ -133,7 +133,7 @@
     "agent-alpha": {
       "artifact_error": null,
       "artifact_missing": true,
-      "artifact_path": "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-alpha.json",
+      "artifact_path": "docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-alpha.json",
       "error_count": null,
       "request_count": null,
       "returncode": -15,
@@ -147,7 +147,7 @@
     "agent-beta": {
       "artifact_error": null,
       "artifact_missing": true,
-      "artifact_path": "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-beta.json",
+      "artifact_path": "docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-beta.json",
       "error_count": null,
       "request_count": null,
       "returncode": -15,
@@ -161,7 +161,7 @@
     "agent-gamma": {
       "artifact_error": null,
       "artifact_missing": true,
-      "artifact_path": "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-gamma.json",
+      "artifact_path": "docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z/agents/agent-gamma.json",
       "error_count": null,
       "request_count": null,
       "returncode": -15,
@@ -173,7 +173,7 @@
       "verdict": null
     }
   },
-  "output_root": "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-ok1y0/docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z",
+  "output_root": "docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z",
   "rate_rps_per_agent": 1.0,
   "resource_drift": {
     "cpu_seconds_delta": 2631.1875,

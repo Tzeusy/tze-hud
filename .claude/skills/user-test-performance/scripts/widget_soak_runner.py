@@ -186,9 +186,20 @@ def load_agent_artifact(path: Path) -> dict[str, Any]:
     return data
 
 
+def repo_relative_path(path: str | Path, root: Path) -> str:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return str(path)
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def summarize(
     *,
     args: argparse.Namespace,
+    root: Path,
     started_at: str,
     ended_at: str,
     output_root: Path,
@@ -222,7 +233,9 @@ def summarize(
             "rtt_p99_us": metrics.get("rtt_p99_us"),
             "rtt_jitter_us": rtt_jitter_us,
             "verdict": artifact.get("verdict"),
-            "artifact_path": artifact.get("artifact_path"),
+            "artifact_path": repo_relative_path(artifact.get("artifact_path"), root)
+            if artifact.get("artifact_path")
+            else None,
             "artifact_error": artifact.get("artifact_error"),
             "artifact_missing": artifact.get("artifact_missing"),
             "returncode": artifact.get("returncode"),
@@ -264,8 +277,11 @@ def summarize(
         "metrics_by_agent": metrics_by_agent,
         "resource_samples": resource_samples,
         "resource_drift": drift,
-        "commands": commands,
-        "output_root": str(output_root),
+        "commands": {
+            agent_id: [repo_relative_path(part, root) for part in command]
+            for agent_id, command in commands.items()
+        },
+        "output_root": repo_relative_path(output_root, root),
     }
 
 
@@ -348,6 +364,7 @@ def main() -> int:
         }
         summary = summarize(
             args=args,
+            root=root,
             started_at=started_at,
             ended_at=utc_now_iso(),
             output_root=output_root,
@@ -446,6 +463,7 @@ def main() -> int:
 
     summary = summarize(
         args=args,
+        root=root,
         started_at=started_at,
         ended_at=utc_now_iso(),
         output_root=output_root,
