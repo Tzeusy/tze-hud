@@ -45,6 +45,11 @@ Each managed LLM session SHALL be routed to existing v1 HUD surfaces only: named
 - **THEN** the route SHALL use ambient or gentle attention intent
 - **AND** backlog growth alone SHALL NOT escalate the interruption class
 
+#### Scenario: portal route identifies existing raw-tile materialization
+- **WHEN** a managed session requests a leased portal route
+- **THEN** the route plan SHALL identify the portal as the existing text-stream raw-tile surface
+- **AND** the live replay path SHALL use the resident gRPC text-stream portal adapter rather than a new compositor primitive
+
 ### Requirement: Multi-Session Lifecycle Management
 The authority SHALL maintain independent lifecycle state for every managed session, including launched/attached origin, provider-neutral identity, route state, last connection state, reconnect bookkeeping, owner token or equivalent verifier, and cleanup/expiry deadline. Cleanup, revocation, detach, and expiry SHALL purge private projection state for the affected session without exposing or mutating other sessions.
 

@@ -251,16 +251,19 @@ fn portal_routes_for_demo(
         .iter()
         .filter_map(|plan| match &plan.surface_command {
             tze_hud_projection::HudSurfaceCommandPlan::PortalLease {
+                portal_surface,
                 portal_id,
                 requested_capabilities,
                 lease_ttl_ms,
                 agent_id,
             } => Some(serde_json::json!({
                 "projection_id": plan.projection_id,
+                "portal_surface": portal_surface,
                 "portal_id": portal_id,
                 "agent_id": agent_id,
                 "requested_capabilities": requested_capabilities,
                 "lease_ttl_ms": lease_ttl_ms,
+                "materialization": "resident_raw_tile",
                 "replay": "resident_grpc_text_stream_portal",
             })),
             _ => None,
@@ -555,6 +558,7 @@ fn demo_session_requests() -> Vec<ManagedSessionRequest> {
             origin: ManagedSessionOrigin::Attached,
             hud_target_id: "windows-local".to_string(),
             surface_route: PresenceSurfaceRoute::Portal {
+                portal_surface: tze_hud_projection::PortalSurfaceKind::TextStreamRawTile,
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),

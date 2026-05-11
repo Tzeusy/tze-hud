@@ -1098,6 +1098,8 @@ pub enum PresenceSurfaceRoute {
     },
     Portal {
         #[serde(default)]
+        portal_surface: PortalSurfaceKind,
+        #[serde(default)]
         requested_capabilities: Vec<String>,
         lease_ttl_ms: u64,
     },
@@ -1132,6 +1134,7 @@ impl PresenceSurfaceRoute {
                 validate_non_zero("widget_ttl_ms", *ttl_ms)
             }
             Self::Portal {
+                portal_surface: _,
                 requested_capabilities,
                 lease_ttl_ms,
             } => {
@@ -1142,6 +1145,14 @@ impl PresenceSurfaceRoute {
             }
         }
     }
+}
+
+/// Existing v1 portal materialization requested by a managed session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortalSurfaceKind {
+    #[default]
+    TextStreamRawTile,
 }
 
 /// Bounded widget parameter value used by route plans.
@@ -1212,6 +1223,7 @@ pub enum HudSurfaceCommandPlan {
         agent_id: String,
     },
     PortalLease {
+        portal_surface: PortalSurfaceKind,
         portal_id: String,
         requested_capabilities: Vec<String>,
         lease_ttl_ms: u64,
@@ -2124,7 +2136,10 @@ impl ProjectionAuthority {
                 workspace_hint: request.workspace_hint,
                 repository_hint: request.repository_hint,
                 icon_profile_hint: request.icon_profile_hint,
-                portal_id: portal_id_for_projection(&request.envelope.projection_id),
+                portal_id: portal_id_for_projection(
+                    PortalSurfaceKind::TextStreamRawTile,
+                    &request.envelope.projection_id,
+                ),
                 portal_presentation: ProjectedPortalPresentation::Expanded,
                 owner_token_verifier,
                 owner_token_expires_at_wall_us: server_timestamp_wall_us
@@ -2865,10 +2880,12 @@ fn route_plan_for_request(
             agent_id,
         },
         PresenceSurfaceRoute::Portal {
+            portal_surface,
             requested_capabilities,
             lease_ttl_ms,
         } => HudSurfaceCommandPlan::PortalLease {
-            portal_id: portal_id_for_projection(&request.projection_id),
+            portal_surface: *portal_surface,
+            portal_id: portal_id_for_projection(*portal_surface, &request.projection_id),
             requested_capabilities: requested_capabilities.clone(),
             lease_ttl_ms: *lease_ttl_ms,
             agent_id,
@@ -2984,8 +3001,10 @@ fn redacted_feedback(feedback: &PortalInputFeedback) -> PortalInputFeedback {
     }
 }
 
-fn portal_id_for_projection(projection_id: &str) -> String {
-    let prefix = "text-stream://projection/";
+fn portal_id_for_projection(portal_surface: PortalSurfaceKind, projection_id: &str) -> String {
+    let prefix = match portal_surface {
+        PortalSurfaceKind::TextStreamRawTile => "text-stream://projection/",
+    };
     let mut portal_id = String::with_capacity(prefix.len() + projection_id.len());
     portal_id.push_str(prefix);
     portal_id.push_str(projection_id);
@@ -3617,6 +3636,7 @@ mod tests {
             origin: ManagedSessionOrigin::Attached,
             hud_target_id: "windows-local".to_string(),
             surface_route: PresenceSurfaceRoute::Portal {
+                portal_surface: PortalSurfaceKind::TextStreamRawTile,
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),

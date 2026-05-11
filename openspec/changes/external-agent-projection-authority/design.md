@@ -42,7 +42,7 @@ Each managed session declares a desired surface class:
 
 - `zone`: publish bounded semantic content to a named zone via the existing zone publish path.
 - `widget`: publish bounded typed parameters to an existing widget instance via the existing widget publish path.
-- `portal`: acquire or reuse a lease and materialize a text-stream/raw-tile portal through the existing resident adapter.
+- `portal`: acquire or reuse a lease and materialize the existing text-stream raw-tile portal through the resident adapter.
 
 The authority can build a route plan and audit it, but runtime policy remains authoritative at execution time.
 

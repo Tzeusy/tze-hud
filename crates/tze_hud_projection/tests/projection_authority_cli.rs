@@ -128,6 +128,14 @@ fn demo_plan_emits_three_redacted_surface_routes_without_owner_tokens() {
         demo["portal_routes"][0]["replay"],
         "resident_grpc_text_stream_portal"
     );
+    assert_eq!(
+        demo["portal_routes"][0]["portal_surface"],
+        "text_stream_raw_tile"
+    );
+    assert_eq!(
+        demo["portal_routes"][0]["materialization"],
+        "resident_raw_tile"
+    );
     assert!(
         demo["lifecycle_checks"]
             .as_array()

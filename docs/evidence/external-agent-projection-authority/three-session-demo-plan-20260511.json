@@ -55,6 +55,7 @@
       "attention_intent": "gentle",
       "surface_command": {
         "command": "portal_lease",
+        "portal_surface": "text_stream_raw_tile",
         "portal_id": "text-stream://projection/agent-question",
         "requested_capabilities": [
           "create_tiles",
@@ -118,7 +119,9 @@
     {
       "agent_id": "projection:agent-question",
       "lease_ttl_ms": 30000,
+      "materialization": "resident_raw_tile",
       "portal_id": "text-stream://projection/agent-question",
+      "portal_surface": "text_stream_raw_tile",
       "projection_id": "agent-question",
       "replay": "resident_grpc_text_stream_portal",
       "requested_capabilities": [

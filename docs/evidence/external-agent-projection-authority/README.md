@@ -4,7 +4,7 @@ This directory contains the headless demo artifact and replay fixtures for the 2
 
 ## Files
 
-- `three-session-demo-plan-20260511.json`: Redacted authority route-plan artifact for three provider-neutral sessions routed to widget, portal, and zone surfaces. Its lifecycle checks cover revoke isolation, expiry cleanup, reconnect fresh-lease behavior, and provider-process supervision with stdio capture disabled.
+- `three-session-demo-plan-20260511.json`: Redacted authority route-plan artifact for three provider-neutral sessions routed to widget, portal, and zone surfaces. The portal route is explicitly `portal_surface=text_stream_raw_tile` with `materialization=resident_raw_tile`, matching the existing text-stream portal raw-tile pilot. Its lifecycle checks cover revoke isolation, expiry cleanup, reconnect fresh-lease behavior, and provider-process supervision with stdio capture disabled.
 - `replay-zone-messages.json`: Zone publish payload extracted from the demo plan for `publish_zone_batch.py`.
 - `replay-widget-messages.json`: Widget publish payload extracted from the demo plan for `publish_widget_batch.py`.
 - `live-replay.sh`: Non-interactive replay harness for the live Windows `/user-test` path.
@@ -56,6 +56,8 @@ jq -e '(.route_plans | length) == 3
   and (.zone_messages | length) == 1
   and (.widget_messages | length) == 1
   and (.portal_routes | length) == 1
+  and (.portal_routes[0].portal_surface == "text_stream_raw_tile")
+  and (.portal_routes[0].materialization == "resident_raw_tile")
   and ([.lifecycle_checks[].accepted] | all)
   and any(.lifecycle_checks[]; .check == "provider_process_supervision"
     and .stdio_capture == "disabled")' \

@@ -8,7 +8,7 @@
 
 - [x] 2.1 Add provider-neutral launched/attached session records to `tze_hud_projection`.
 - [x] 2.2 Add Windows HUD target metadata and redacted credential-source handling.
-- [x] 2.3 Add governed route planning for zone, widget, and leased portal surfaces.
+- [x] 2.3 Add governed route planning for zone, widget, and leased text-stream raw-tile portal surfaces.
 - [x] 2.4 Add multi-session cleanup, revocation/expiry, and reconnect bookkeeping helpers.
 - [x] 2.5 Add a deterministic three-session demo plan API.
 - [x] 2.6 Add bounded provider process launch supervision for `Launched` sessions outside runtime/compositor core.
