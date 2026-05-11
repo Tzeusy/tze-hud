@@ -84,7 +84,11 @@ tcp_probe 50051 >/dev/null \
   || fail 12 "gRPC port 50051 is not reachable after $TASK_NAME start attempt"
 
 if [[ -z "${!PSK_ENV:-}" ]]; then
-  fail 13 "required PSK environment variable $PSK_ENV is not set"
+  if [[ "$PSK_ENV" != "MCP_TEST_PSK" && -n "${MCP_TEST_PSK:-}" ]]; then
+    export "$PSK_ENV=${MCP_TEST_PSK}"
+  else
+    fail 13 "required PSK environment variable $PSK_ENV is not set; MCP_TEST_PSK may be used as a fallback"
+  fi
 fi
 export MCP_TEST_PSK="${!PSK_ENV}"
 

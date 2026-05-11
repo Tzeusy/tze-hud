@@ -11,6 +11,7 @@ This directory contains the headless demo artifact and replay fixtures for the 2
 - `watch-live-replay.sh`: Bounded reachability watcher that polls Tailscale and runs `live-replay.sh` as soon as Windows responds.
 - `live-replay-blocked-watch-20260511T025838Z.txt`: Bounded 10-poll reachability watch showing the live replay remained blocked before SSH/MCP/gRPC.
 - `live-replay-blocked-20260511T042949Z.txt`: Latest direct live replay attempt after runtime-auth material hardening; still blocked at Tailscale reachability before SSH/MCP/gRPC.
+- `live-replay-blocked-20260511T053140Z.txt`: Latest direct live replay attempt after the bounded watcher landed; still blocked at Tailscale reachability before SSH/MCP/gRPC.
 
 ## Live Replay
 
@@ -20,7 +21,7 @@ After `tzehouse-windows.parrot-hen.ts.net` is reachable, verify SSH, start `TzeH
 bash docs/evidence/external-agent-projection-authority/live-replay.sh
 ```
 
-The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. It expects `TZE_HUD_PSK` to be set locally and never writes the value into artifacts.
+The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. It expects `TZE_HUD_PSK` to be set locally, but accepts `MCP_TEST_PSK` as a fallback for the MCP publish scripts and exports the same value for the portal smoke. It never writes the value into artifacts.
 
 For a bounded wait-and-run loop:
 
@@ -33,7 +34,7 @@ The watcher exits `20` if the host never becomes reachable. If Tailscale ping su
 
 The demo plan's lifecycle checks are headless evidence only; live replay must still verify runtime acceptance, visual behavior, and cleanup against the Windows HUD.
 
-Latest blocker evidence: `live-replay-blocked-20260511T042949Z.txt`
+Latest blocker evidence: `live-replay-blocked-20260511T053140Z.txt`
 shows the direct replay harness still exited `10` at the Tailscale gate:
 `100.87.181.125` timed out/no reply before SSH, MCP, or gRPC could run.
 The longer reachability watch in `live-replay-blocked-watch-20260511T025838Z.txt`
