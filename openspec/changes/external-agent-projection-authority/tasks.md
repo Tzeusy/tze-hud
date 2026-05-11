@@ -22,6 +22,6 @@
 
 ## 4. Follow-Up Tracking and Closeout
 
-- [x] 4.1 Create beads for any remaining live-validation, provider-launch, or hardening work that cannot be completed in this slice.
+- [x] 4.1 Create beads for remaining work that cannot be completed in this slice: `hud-dl3ys` for successful live Windows replay and `hud-opmuj` for provider process launch supervision hardening.
 - [x] 4.2 Update `docs/20260511_goals.md` with validation evidence and residual gaps.
 - [x] 4.3 Perform prompt-to-artifact completion audit and record that the overall goal remains incomplete until 3.5 passes.
