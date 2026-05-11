@@ -173,7 +173,7 @@ pub struct ResolvedConfig {
 /// The default is intentionally disabled and contains no approved zone, so
 /// runtimes cannot start media transport or decode workers without an explicit
 /// `[media_ingress]` table.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaIngressConfig {
     pub enabled: bool,
     pub approved_zone: Option<String>,
@@ -181,19 +181,6 @@ pub struct MediaIngressConfig {
     pub max_active_streams: u32,
     pub default_classification: Option<String>,
     pub operator_disabled: bool,
-}
-
-impl Default for MediaIngressConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            approved_zone: None,
-            zone_geometry: None,
-            max_active_streams: 0,
-            default_classification: None,
-            operator_disabled: false,
-        }
-    }
 }
 
 // ─── ConfigLoader Trait ───────────────────────────────────────────────────────

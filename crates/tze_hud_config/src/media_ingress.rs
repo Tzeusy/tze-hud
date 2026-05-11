@@ -11,6 +11,7 @@ use tze_hud_scene::types::{
     TransportConstraint, ZoneDefinition, ZoneMediaType,
 };
 
+use crate::profile::resolve_headless_dimensions;
 use crate::raw::{RawConfig, RawWidgetGeometry};
 
 pub const APPROVED_MEDIA_ZONE: &str = "media-pip";
@@ -72,6 +73,24 @@ pub fn validate_media_ingress(raw: &RawConfig, errors: &mut Vec<ConfigError>) {
         ));
     }
 
+    let (reference_width, reference_height) = resolve_headless_dimensions(raw);
+    if reference_width == 0 {
+        errors.push(invalid_media_ingress(
+            "runtime.headless_width",
+            "> 0",
+            "0",
+            "media-pip geometry normalization requires a positive reference width",
+        ));
+    }
+    if reference_height == 0 {
+        errors.push(invalid_media_ingress(
+            "runtime.headless_height",
+            "> 0",
+            "0",
+            "media-pip geometry normalization requires a positive reference height",
+        ));
+    }
+
     match media.geometry.as_ref() {
         Some(geometry) => validate_fixed_geometry(geometry, errors),
         None => errors.push(invalid_media_ingress(
@@ -83,7 +102,7 @@ pub fn validate_media_ingress(raw: &RawConfig, errors: &mut Vec<ConfigError>) {
     }
 }
 
-/// Resolve the frozen media-ingress config. Call only after validation passes.
+/// Resolve the frozen media-ingress config, failing closed when validation fails.
 pub fn resolve_media_ingress(raw: &RawConfig) -> ResolvedMediaIngressConfig {
     let Some(media) = raw.media_ingress.as_ref() else {
         return ResolvedMediaIngressConfig::default();
@@ -91,6 +110,16 @@ pub fn resolve_media_ingress(raw: &RawConfig) -> ResolvedMediaIngressConfig {
     if !media.enabled {
         return ResolvedMediaIngressConfig::default();
     }
+
+    let mut errors = Vec::new();
+    validate_media_ingress(raw, &mut errors);
+    if !errors.is_empty() {
+        return ResolvedMediaIngressConfig::default();
+    }
+
+    let (reference_width, reference_height) = resolve_headless_dimensions(raw);
+    let reference_width = reference_width as f32;
+    let reference_height = reference_height as f32;
 
     let zone_geometry = match media.geometry.as_ref() {
         Some(RawWidgetGeometry {
@@ -112,10 +141,10 @@ pub fn resolve_media_ingress(raw: &RawConfig) -> ResolvedMediaIngressConfig {
             && *y >= 0.0 =>
         {
             Some(GeometryPolicy::Relative {
-                x_pct: *x / 1920.0,
-                y_pct: *y / 1080.0,
-                width_pct: *width / 1920.0,
-                height_pct: *height / 1080.0,
+                x_pct: *x / reference_width,
+                y_pct: *y / reference_height,
+                width_pct: *width / reference_width,
+                height_pct: *height / reference_height,
             })
         }
         _ => None,
