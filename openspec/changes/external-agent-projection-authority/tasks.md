@@ -18,9 +18,10 @@
 - [x] 3.2 Add tests proving owner isolation, redacted secrets, ambient attention defaults, cleanup, and reconnect fresh-auth behavior.
 - [x] 3.3 Run focused `cargo test` gates for `tze_hud_projection`.
 - [x] 3.4 Run or attempt live Windows `/user-test` for three projected sessions; record evidence or exact blocker.
+- [ ] 3.5 Complete successful live Windows `/user-test` replay once `hud-9m47l` restores TzeHouse reachability; store evidence under `docs/evidence/external-agent-projection-authority/` and close `hud-dl3ys`.
 
 ## 4. Follow-Up Tracking and Closeout
 
 - [x] 4.1 Create beads for any remaining live-validation, provider-launch, or hardening work that cannot be completed in this slice.
 - [x] 4.2 Update `docs/20260511_goals.md` with validation evidence and residual gaps.
-- [x] 4.3 Perform final prompt-to-artifact completion audit before claiming the goal complete.
+- [x] 4.3 Perform prompt-to-artifact completion audit and record that the overall goal remains incomplete until 3.5 passes.
