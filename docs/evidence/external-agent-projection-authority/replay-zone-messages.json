@@ -1,0 +1,17 @@
+[
+  {
+    "zone_name": "status-bar",
+    "content": {
+      "type": "status_bar",
+      "entries": {
+        "agent": "Codex Status",
+        "provider": "codex",
+        "state": "attached",
+        "kind": "status"
+      }
+    },
+    "merge_key": "agent-status",
+    "namespace": "projection:agent-status",
+    "ttl_us": 10000000
+  }
+]

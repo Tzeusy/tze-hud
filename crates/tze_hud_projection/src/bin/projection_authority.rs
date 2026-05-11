@@ -7,13 +7,17 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tze_hud_projection::{
-    AcknowledgeInputRequest, AttachRequest, CleanupRequest, DetachRequest, GetPendingInputRequest,
-    ProjectionAuditRecord, ProjectionAuthority, ProjectionBounds, ProjectionErrorCode,
-    ProjectionOperation, ProjectionResponse, PublishOutputRequest, PublishStatusRequest,
+    AcknowledgeInputRequest, AdvisoryLeaseIdentity, AttachRequest, CleanupRequest,
+    ContentClassification, DetachRequest, ExternalAgentProjectionAuthority, GetPendingInputRequest,
+    HudConnectionMetadata, HudCredentialSource, ManagedSessionOrigin, ManagedSessionRequest,
+    PresenceSurfaceRoute, ProjectionAttentionIntent, ProjectionAuditRecord, ProjectionAuthority,
+    ProjectionBounds, ProjectionErrorCode, ProjectionOperation, ProjectionResponse, ProviderKind,
+    PublishOutputRequest, PublishStatusRequest, WidgetParameterValue, WindowsHudTarget,
 };
 
 const DEFAULT_CALLER_IDENTITY: &str = "projection-authority-stdio";
@@ -22,8 +26,15 @@ const MAX_STDIN_LINE_BYTES: usize = 65_536;
 
 #[derive(Debug)]
 struct CliConfig {
+    mode: CliMode,
     caller_identity: String,
     operator_authority: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliMode {
+    Stdio,
+    DemoPlan,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,6 +42,21 @@ struct CliOperationResult {
     response: ProjectionResponse,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     audit_records: Vec<ProjectionAuditRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct DemoPlanOutput {
+    demo_name: String,
+    hud_target_id: String,
+    route_plans: Vec<tze_hud_projection::ManagedSessionRoutePlan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    zone_messages: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    widget_messages: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    portal_routes: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lifecycle_checks: Vec<Value>,
 }
 
 fn main() {
@@ -42,6 +68,10 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config = parse_args(env::args().skip(1))?;
+    if config.mode == CliMode::DemoPlan {
+        return write_demo_plan(&config);
+    }
+
     let mut authority = ProjectionAuthority::new(ProjectionBounds::default())
         .map_err(|error| format!("failed to initialize projection authority: {error}"))?;
     if let Some(operator_authority) = config.operator_authority.as_deref() {
@@ -54,6 +84,7 @@ fn run() -> Result<(), String> {
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliConfig, String> {
+    let mut mode = CliMode::Stdio;
     let mut caller_identity = DEFAULT_CALLER_IDENTITY.to_string();
     let mut operator_authority = None;
     let mut iter = args.into_iter();
@@ -61,6 +92,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliConfig, Strin
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--stdio" => {}
+            "--demo-plan" => {
+                mode = CliMode::DemoPlan;
+            }
             "--caller-identity" => {
                 caller_identity = iter
                     .next()
@@ -89,6 +123,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliConfig, Strin
     }
 
     Ok(CliConfig {
+        mode,
         caller_identity,
         operator_authority,
     })
@@ -96,11 +131,391 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliConfig, Strin
 
 fn print_help() {
     println!(
-        "Usage: tze_hud_projection_authority [--stdio] [--caller-identity ID] [--operator-authority-env VAR]\n\
+        "Usage: tze_hud_projection_authority [--stdio|--demo-plan] [--caller-identity ID] [--operator-authority-env VAR]\n\
          \n\
          Reads one cooperative HUD projection operation JSON object per stdin line and writes one JSON result per stdout line.\n\
-         The process retains projection state in memory only and emits bounded operation responses plus newly written audit records."
+         The process retains projection state in memory only and emits bounded operation responses plus newly written audit records.\n\
+         --demo-plan emits a redacted three-session zone/widget/portal route-plan artifact without connecting to the HUD."
     );
+}
+
+fn write_demo_plan(config: &CliConfig) -> Result<(), String> {
+    let mut authority = ExternalAgentProjectionAuthority::default();
+    register_demo_target(&mut authority)?;
+
+    let now = now_wall_us();
+    for (offset, request) in demo_session_requests().into_iter().enumerate() {
+        authority
+            .manage_session(
+                request,
+                &config.caller_identity,
+                now.saturating_add(offset as u64 + 1),
+            )
+            .map_err(|error| format!("failed to build demo plan: {error}"))?;
+    }
+
+    let route_plans = authority.three_session_demo_plan();
+    let output = DemoPlanOutput {
+        demo_name: "external-agent-projection-authority-three-session-demo".to_string(),
+        hud_target_id: "windows-local".to_string(),
+        zone_messages: zone_messages_for_demo(&route_plans),
+        widget_messages: widget_messages_for_demo(&route_plans),
+        portal_routes: portal_routes_for_demo(&route_plans),
+        lifecycle_checks: lifecycle_checks_for_demo(&config.caller_identity)?,
+        route_plans,
+    };
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer_pretty(&mut stdout, &output)
+        .map_err(|error| format!("failed to encode demo plan: {error}"))?;
+    stdout
+        .write_all(b"\n")
+        .map_err(|error| format!("failed to write demo plan: {error}"))
+}
+
+fn register_demo_target(authority: &mut ExternalAgentProjectionAuthority) -> Result<(), String> {
+    authority
+        .register_windows_target(demo_windows_target())
+        .map_err(|error| format!("invalid demo HUD target: {error}"))
+}
+
+fn demo_windows_target() -> WindowsHudTarget {
+    WindowsHudTarget {
+        target_id: "windows-local".to_string(),
+        mcp_url: Some("http://tzehouse-windows.parrot-hen.ts.net:9090/mcp".to_string()),
+        grpc_endpoint: Some("tzehouse-windows.parrot-hen.ts.net:50051".to_string()),
+        credential_source: HudCredentialSource::EnvVar("TZE_HUD_PSK".to_string()),
+        runtime_audience: "local-windows-hud".to_string(),
+    }
+}
+
+fn zone_messages_for_demo(
+    route_plans: &[tze_hud_projection::ManagedSessionRoutePlan],
+) -> Vec<Value> {
+    route_plans
+        .iter()
+        .filter_map(|plan| match &plan.surface_command {
+            tze_hud_projection::HudSurfaceCommandPlan::ZonePublish {
+                zone_name,
+                content_kind,
+                ttl_ms,
+                agent_id,
+            } => Some(serde_json::json!({
+                "zone_name": zone_name,
+                "content": {
+                    "type": "status_bar",
+                    "entries": {
+                        "agent": plan.display_name,
+                        "provider": plan.provider_kind,
+                        "state": plan.lifecycle_state,
+                        "kind": content_kind,
+                    },
+                },
+                "merge_key": plan.projection_id,
+                "namespace": agent_id,
+                "ttl_us": ttl_ms.saturating_mul(1_000),
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
+fn widget_messages_for_demo(
+    route_plans: &[tze_hud_projection::ManagedSessionRoutePlan],
+) -> Vec<Value> {
+    route_plans
+        .iter()
+        .filter_map(|plan| match &plan.surface_command {
+            tze_hud_projection::HudSurfaceCommandPlan::WidgetPublish {
+                widget_name,
+                parameters,
+                ttl_ms,
+                agent_id,
+            } => Some(serde_json::json!({
+                "widget_name": widget_name,
+                "params": parameters
+                    .iter()
+                    .map(|(key, value)| (key.clone(), widget_value_to_json(value)))
+                    .collect::<serde_json::Map<String, Value>>(),
+                "namespace": agent_id,
+                "ttl_us": ttl_ms.saturating_mul(1_000),
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
+fn portal_routes_for_demo(
+    route_plans: &[tze_hud_projection::ManagedSessionRoutePlan],
+) -> Vec<Value> {
+    route_plans
+        .iter()
+        .filter_map(|plan| match &plan.surface_command {
+            tze_hud_projection::HudSurfaceCommandPlan::PortalLease {
+                portal_id,
+                requested_capabilities,
+                lease_ttl_ms,
+                agent_id,
+            } => Some(serde_json::json!({
+                "projection_id": plan.projection_id,
+                "portal_id": portal_id,
+                "agent_id": agent_id,
+                "requested_capabilities": requested_capabilities,
+                "lease_ttl_ms": lease_ttl_ms,
+                "replay": "resident_grpc_text_stream_portal",
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
+fn lifecycle_checks_for_demo(caller_identity: &str) -> Result<Vec<Value>, String> {
+    Ok(vec![
+        revoke_isolation_check(caller_identity)?,
+        expiry_cleanup_check(caller_identity)?,
+        reconnect_fresh_lease_check(caller_identity)?,
+    ])
+}
+
+fn revoke_isolation_check(caller_identity: &str) -> Result<Value, String> {
+    let mut authority = ExternalAgentProjectionAuthority::default();
+    register_demo_target(&mut authority)?;
+    for (offset, request) in demo_session_requests().into_iter().enumerate() {
+        authority
+            .manage_session(request, caller_identity, 10 + offset as u64)
+            .map_err(|error| format!("revoke check manage_session failed: {error}"))?;
+    }
+    authority
+        .revoke_session("agent-progress")
+        .map_err(|error| format!("revoke check failed: {error}"))?;
+    Ok(serde_json::json!({
+        "check": "revoke_isolation",
+        "accepted": authority.managed_session_count() == 2
+            && authority.route_plan("agent-progress").is_none()
+            && authority.route_plan("agent-status").is_some()
+            && authority.route_plan("agent-question").is_some(),
+        "remaining_sessions": authority.managed_session_count(),
+        "revoked_projection_absent": authority.route_plan("agent-progress").is_none(),
+        "other_routes_intact": [
+            authority.route_plan("agent-status").is_some(),
+            authority.route_plan("agent-question").is_some(),
+        ],
+    }))
+}
+
+fn expiry_cleanup_check(caller_identity: &str) -> Result<Value, String> {
+    let mut authority = ExternalAgentProjectionAuthority::new(ProjectionBounds {
+        owner_token_ttl_wall_us: 20,
+        ..ProjectionBounds::default()
+    })
+    .map_err(|error| format!("expiry check authority init failed: {error}"))?;
+    register_demo_target(&mut authority)?;
+    authority
+        .manage_session(managed_session_by_id("agent-status")?, caller_identity, 10)
+        .map_err(|error| format!("expiry check status manage_session failed: {error}"))?;
+    authority
+        .manage_session(
+            managed_session_by_id("agent-question")?,
+            caller_identity,
+            11,
+        )
+        .map_err(|error| format!("expiry check portal manage_session failed: {error}"))?;
+    let first_expired = authority.expire_token_expired_sessions(30);
+    let second_expired = authority.expire_token_expired_sessions(31);
+    Ok(serde_json::json!({
+        "check": "expiry_cleanup",
+        "accepted": first_expired == 1
+            && second_expired == 1
+            && authority.managed_session_count() == 0,
+        "first_expired_count": first_expired,
+        "second_expired_count": second_expired,
+        "remaining_sessions": authority.managed_session_count(),
+    }))
+}
+
+fn reconnect_fresh_lease_check(caller_identity: &str) -> Result<Value, String> {
+    let mut authority = ExternalAgentProjectionAuthority::default();
+    register_demo_target(&mut authority)?;
+    authority
+        .manage_session(
+            managed_session_by_id("agent-question")?,
+            caller_identity,
+            10,
+        )
+        .map_err(|error| format!("reconnect check manage_session failed: {error}"))?;
+    authority
+        .record_hud_connection(
+            "agent-question",
+            HudConnectionMetadata {
+                connection_id: "connection-1".to_string(),
+                authenticated_session_id: "runtime-session-1".to_string(),
+                granted_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                connected_at_wall_us: 20,
+                last_reconnect_wall_us: 20,
+            },
+        )
+        .map_err(|error| format!("reconnect check initial connection failed: {error}"))?;
+    authority
+        .projection_authority_mut()
+        .record_advisory_lease(
+            "agent-question",
+            AdvisoryLeaseIdentity {
+                lease_id: "lease-1".to_string(),
+                capabilities: vec!["create_tiles".to_string()],
+                acquired_at_wall_us: 21,
+                expires_at_wall_us: 100,
+            },
+            22,
+        )
+        .map_err(|error| format!("reconnect check initial lease failed: {error}"))?;
+    authority
+        .mark_hud_disconnected("agent-question", 30)
+        .map_err(|error| format!("reconnect check disconnect failed: {error}"))?;
+    authority
+        .record_hud_connection(
+            "agent-question",
+            HudConnectionMetadata {
+                connection_id: "connection-2".to_string(),
+                authenticated_session_id: "runtime-session-2".to_string(),
+                granted_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                connected_at_wall_us: 40,
+                last_reconnect_wall_us: 40,
+            },
+        )
+        .map_err(|error| format!("reconnect check reconnect failed: {error}"))?;
+    let stale_rejected = authority
+        .projection_authority_mut()
+        .authorize_portal_republish(
+            "agent-question",
+            "lease-1",
+            &["create_tiles".to_string()],
+            41,
+        )
+        == Err(ProjectionErrorCode::ProjectionUnauthorized);
+    authority
+        .projection_authority_mut()
+        .record_advisory_lease(
+            "agent-question",
+            AdvisoryLeaseIdentity {
+                lease_id: "lease-2".to_string(),
+                capabilities: vec!["create_tiles".to_string()],
+                acquired_at_wall_us: 42,
+                expires_at_wall_us: 100,
+            },
+            43,
+        )
+        .map_err(|error| format!("reconnect check fresh lease failed: {error}"))?;
+    let fresh_authorized = authority
+        .projection_authority_mut()
+        .authorize_portal_republish(
+            "agent-question",
+            "lease-2",
+            &["create_tiles".to_string()],
+            44,
+        )
+        .is_ok();
+    Ok(serde_json::json!({
+        "check": "reconnect_requires_fresh_lease",
+        "accepted": stale_rejected && fresh_authorized,
+        "stale_lease_rejected": stale_rejected,
+        "fresh_lease_authorized": fresh_authorized,
+    }))
+}
+
+fn managed_session_by_id(projection_id: &str) -> Result<ManagedSessionRequest, String> {
+    demo_session_requests()
+        .into_iter()
+        .find(|request| request.projection_id == projection_id)
+        .ok_or_else(|| format!("unknown demo projection id: {projection_id}"))
+}
+
+fn widget_value_to_json(value: &WidgetParameterValue) -> Value {
+    match value {
+        WidgetParameterValue::F32Milli(value) => serde_json::json!((*value as f64) / 1_000.0),
+        WidgetParameterValue::Text(value) => serde_json::json!(value),
+        WidgetParameterValue::ColorRgba([r, g, b, a]) => serde_json::json!({
+            "r": (*r as f64) / 255.0,
+            "g": (*g as f64) / 255.0,
+            "b": (*b as f64) / 255.0,
+            "a": (*a as f64) / 255.0,
+        }),
+        WidgetParameterValue::Enum(value) => serde_json::json!(value),
+    }
+}
+
+fn demo_session_requests() -> Vec<ManagedSessionRequest> {
+    let mut progress_parameters = HashMap::new();
+    progress_parameters.insert("progress".to_string(), WidgetParameterValue::F32Milli(420));
+    progress_parameters.insert(
+        "label".to_string(),
+        WidgetParameterValue::Text("External authority demo".to_string()),
+    );
+
+    vec![
+        ManagedSessionRequest {
+            projection_id: "agent-status".to_string(),
+            provider_kind: ProviderKind::Codex,
+            display_name: "Codex Status".to_string(),
+            origin: ManagedSessionOrigin::Attached,
+            hud_target_id: "windows-local".to_string(),
+            surface_route: PresenceSurfaceRoute::Zone {
+                zone_name: "status-bar".to_string(),
+                content_kind: "status".to_string(),
+                ttl_ms: 10_000,
+            },
+            content_classification: ContentClassification::Household,
+            attention_intent: ProjectionAttentionIntent::Ambient,
+            workspace_hint: Some("mayor/rig".to_string()),
+            repository_hint: None,
+            icon_profile_hint: None,
+        },
+        ManagedSessionRequest {
+            projection_id: "agent-progress".to_string(),
+            provider_kind: ProviderKind::Claude,
+            display_name: "Claude Progress".to_string(),
+            origin: ManagedSessionOrigin::Launched(tze_hud_projection::LaunchSessionSpec {
+                command: "claude".to_string(),
+                args: vec!["--continue".to_string()],
+                working_directory: Some("/home/tze/gt/tze_hud/mayor/rig".to_string()),
+                environment_keys: vec!["ANTHROPIC_API_KEY".to_string()],
+            }),
+            hud_target_id: "windows-local".to_string(),
+            surface_route: PresenceSurfaceRoute::Widget {
+                widget_name: "main-progress".to_string(),
+                parameters: progress_parameters,
+                ttl_ms: 10_000,
+            },
+            content_classification: ContentClassification::Private,
+            attention_intent: ProjectionAttentionIntent::Ambient,
+            workspace_hint: Some("mayor/rig".to_string()),
+            repository_hint: None,
+            icon_profile_hint: Some("claude".to_string()),
+        },
+        ManagedSessionRequest {
+            projection_id: "agent-question".to_string(),
+            provider_kind: ProviderKind::Opencode,
+            display_name: "Opencode Questions".to_string(),
+            origin: ManagedSessionOrigin::Attached,
+            hud_target_id: "windows-local".to_string(),
+            surface_route: PresenceSurfaceRoute::Portal {
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                lease_ttl_ms: 30_000,
+            },
+            content_classification: ContentClassification::Private,
+            attention_intent: ProjectionAttentionIntent::Gentle,
+            workspace_hint: Some("mayor/rig".to_string()),
+            repository_hint: None,
+            icon_profile_hint: Some("opencode".to_string()),
+        },
+    ]
 }
 
 fn serve_stdio(authority: &mut ProjectionAuthority, config: &CliConfig) -> Result<(), String> {

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+WIN_HOST="${WIN_HOST:-tzehouse-windows.parrot-hen.ts.net}"
+HUD_USER="${HUD_USER:-hudbot}"
+CONTROL_USER="${CONTROL_USER:-tzeus}"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/ecdsa_home}"
+TASK_NAME="${TASK_NAME:-TzeHudOverlay}"
+MCP_HTTP_URL="${MCP_HTTP_URL:-http://$WIN_HOST:9090/mcp}"
+GRPC_TARGET="${GRPC_TARGET:-$WIN_HOST:50051}"
+PSK_ENV="${PSK_ENV:-TZE_HUD_PSK}"
+PROBE_TIMEOUT_S="${PROBE_TIMEOUT_S:-12}"
+SSH_CONNECT_TIMEOUT_S="${SSH_CONNECT_TIMEOUT_S:-8}"
+STARTUP_WAIT_S="${STARTUP_WAIT_S:-5}"
+
+ZONE_MESSAGES="$SCRIPT_DIR/replay-zone-messages.json"
+WIDGET_MESSAGES="$SCRIPT_DIR/replay-widget-messages.json"
+PORTAL_TRANSCRIPT="$SCRIPT_DIR/live-portal-transcript.json"
+
+log() {
+  printf '[external-agent-projection-authority] %s\n' "$*"
+}
+
+fail() {
+  local code="$1"
+  shift
+  log "BLOCKED: $*"
+  exit "$code"
+}
+
+ssh_probe() {
+  local user="$1"
+  timeout "${PROBE_TIMEOUT_S}s" \
+    ssh -o BatchMode=yes \
+      -o IdentitiesOnly=yes \
+      -o ConnectTimeout="${SSH_CONNECT_TIMEOUT_S}" \
+      -i "$SSH_KEY" \
+      "$user@$WIN_HOST" \
+      whoami
+}
+
+tcp_probe() {
+  local port="$1"
+  timeout "${PROBE_TIMEOUT_S}s" bash -lc "exec 3<>/dev/tcp/$WIN_HOST/$port"
+}
+
+run_control_ssh() {
+  local command="$1"
+  timeout "${PROBE_TIMEOUT_S}s" \
+    ssh -o BatchMode=yes \
+      -o IdentitiesOnly=yes \
+      -o ConnectTimeout="${SSH_CONNECT_TIMEOUT_S}" \
+      -i "$SSH_KEY" \
+      "$CONTROL_USER@$WIN_HOST" \
+      "$command"
+}
+
+cd "$REPO_ROOT"
+
+log "checking Tailscale reachability for $WIN_HOST"
+timeout "${PROBE_TIMEOUT_S}s" tailscale ping --c 1 "$WIN_HOST" \
+  || fail 10 "tailscale ping failed for $WIN_HOST"
+
+log "checking SSH for $HUD_USER and $CONTROL_USER"
+ssh_probe "$HUD_USER" >/dev/null \
+  || fail 11 "SSH failed for $HUD_USER@$WIN_HOST with $SSH_KEY"
+ssh_probe "$CONTROL_USER" >/dev/null \
+  || fail 11 "SSH failed for $CONTROL_USER@$WIN_HOST with $SSH_KEY"
+
+if ! tcp_probe 9090 >/dev/null 2>&1 || ! tcp_probe 50051 >/dev/null 2>&1; then
+  log "MCP/gRPC ports are not both reachable; starting $TASK_NAME"
+  run_control_ssh "schtasks /Run /TN $TASK_NAME" \
+    || fail 12 "failed to start scheduled task $TASK_NAME"
+  sleep "$STARTUP_WAIT_S"
+fi
+
+log "checking MCP :9090 and gRPC :50051"
+tcp_probe 9090 >/dev/null \
+  || fail 12 "MCP port 9090 is not reachable after $TASK_NAME start attempt"
+tcp_probe 50051 >/dev/null \
+  || fail 12 "gRPC port 50051 is not reachable after $TASK_NAME start attempt"
+
+if [[ -z "${!PSK_ENV:-}" ]]; then
+  fail 13 "required PSK environment variable $PSK_ENV is not set"
+fi
+export MCP_TEST_PSK="${!PSK_ENV}"
+
+log "publishing zone replay through $MCP_HTTP_URL"
+python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file "$ZONE_MESSAGES" \
+  --list-zones
+
+log "publishing widget replay through $MCP_HTTP_URL"
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file "$WIDGET_MESSAGES" \
+  --list-widgets \
+  --cleanup-on-exit
+
+log "running portal composer smoke through $GRPC_TARGET"
+python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
+  --target "$GRPC_TARGET" \
+  --psk-env "$PSK_ENV" \
+  --agent-id projection:agent-question \
+  --phases composer-smoke \
+  --transcript-out "$PORTAL_TRANSCRIPT"
+
+log "live replay complete; portal transcript: $PORTAL_TRANSCRIPT"

@@ -91,6 +91,53 @@ fn stdio_surface_rejects_operator_authority_process_argument() {
     );
 }
 
+#[test]
+fn demo_plan_emits_three_redacted_surface_routes_without_owner_tokens() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tze_hud_projection_authority"))
+        .arg("--demo-plan")
+        .arg("--caller-identity")
+        .arg("demo-test-caller")
+        .output()
+        .expect("projection authority demo exits");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("demo output is utf-8");
+    let demo: Value = serde_json::from_str(&stdout).expect("demo output is JSON");
+    assert_eq!(
+        demo["demo_name"],
+        "external-agent-projection-authority-three-session-demo"
+    );
+    assert_eq!(demo["route_plans"].as_array().map(Vec::len), Some(3));
+    assert_eq!(demo["zone_messages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(demo["widget_messages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(demo["portal_routes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(demo["lifecycle_checks"].as_array().map(Vec::len), Some(3));
+    assert!(
+        demo["lifecycle_checks"]
+            .as_array()
+            .expect("lifecycle checks are an array")
+            .iter()
+            .all(|check| check["accepted"] == serde_json::json!(true))
+    );
+    assert_eq!(demo["zone_messages"][0]["content"]["type"], "status_bar");
+    assert_eq!(
+        demo["widget_messages"][0]["params"]["progress"],
+        serde_json::json!(0.42)
+    );
+    assert_eq!(
+        demo["portal_routes"][0]["replay"],
+        "resident_grpc_text_stream_portal"
+    );
+    assert!(stdout.contains("\"command\": \"widget_publish\""));
+    assert!(stdout.contains("\"command\": \"zone_publish\""));
+    assert!(stdout.contains("\"command\": \"portal_lease\""));
+    assert!(stdout.contains("env:TZE_HUD_PSK:redacted"));
+    assert!(!stdout.contains("owner_token"));
+    assert!(!stdout.contains("operator-secret"));
+    assert!(!stdout.contains("terminal_capture"));
+    assert!(!stdout.contains("raw_keystroke"));
+}
+
 impl Drop for AuthorityCli {
     fn drop(&mut self) {
         let _ = self.child.kill();

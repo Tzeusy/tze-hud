@@ -1,0 +1,11 @@
+[
+  {
+    "widget_name": "main-progress",
+    "params": {
+      "label": "External authority demo",
+      "progress": 0.42
+    },
+    "namespace": "projection:agent-progress",
+    "ttl_us": 10000000
+  }
+]

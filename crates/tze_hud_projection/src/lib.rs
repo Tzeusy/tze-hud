@@ -974,6 +974,431 @@ pub struct ProjectedPortalState {
     pub last_input_feedback: Option<PortalInputFeedback>,
 }
 
+/// How a provider-neutral LLM session entered projection authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedSessionOrigin {
+    /// Already-running session that opted in through the cooperative contract.
+    Attached,
+    /// Authority-supervised launch. This records intent and metadata; it is not
+    /// terminal capture or PTY ownership.
+    Launched(LaunchSessionSpec),
+}
+
+/// Redacted, provider-neutral launch metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchSessionSpec {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment_keys: Vec<String>,
+}
+
+impl LaunchSessionSpec {
+    fn validate(&self) -> Result<(), ProjectionContractError> {
+        validate_non_empty_bounded("launch_command", &self.command, MAX_HINT_BYTES)?;
+        for arg in &self.args {
+            validate_non_empty_bounded("launch_arg", arg, MAX_HINT_BYTES)?;
+        }
+        validate_optional_bounded(
+            "launch_working_directory",
+            &self.working_directory,
+            MAX_HINT_BYTES,
+        )?;
+        for key in &self.environment_keys {
+            validate_non_empty_bounded("launch_environment_key", key, MAX_HINT_BYTES)?;
+        }
+        Ok(())
+    }
+}
+
+/// Runtime credential source. Values are never stored here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "name")]
+pub enum HudCredentialSource {
+    EnvVar(String),
+    ProtectedConfigKey(String),
+}
+
+impl HudCredentialSource {
+    fn validate(&self) -> Result<(), ProjectionContractError> {
+        match self {
+            Self::EnvVar(name) => {
+                validate_non_empty_bounded("credential_env_var", name, MAX_HINT_BYTES)
+            }
+            Self::ProtectedConfigKey(name) => {
+                validate_non_empty_bounded("credential_config_key", name, MAX_HINT_BYTES)
+            }
+        }
+    }
+
+    fn redacted_marker(&self) -> String {
+        match self {
+            Self::EnvVar(name) => format!("env:{name}:redacted"),
+            Self::ProtectedConfigKey(name) => format!("protected-config:{name}:redacted"),
+        }
+    }
+}
+
+/// Local Windows HUD runtime target metadata retained by the external authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsHudTarget {
+    pub target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grpc_endpoint: Option<String>,
+    pub credential_source: HudCredentialSource,
+    pub runtime_audience: String,
+}
+
+impl WindowsHudTarget {
+    fn validate(&self) -> Result<(), ProjectionContractError> {
+        validate_non_empty_bounded("hud_target_id", &self.target_id, MAX_HINT_BYTES)?;
+        validate_optional_bounded("mcp_url", &self.mcp_url, MAX_HINT_BYTES)?;
+        validate_optional_bounded("grpc_endpoint", &self.grpc_endpoint, MAX_HINT_BYTES)?;
+        if self.mcp_url.is_none() && self.grpc_endpoint.is_none() {
+            return Err(ProjectionContractError::InvalidArgument(
+                "Windows HUD target requires mcp_url or grpc_endpoint".to_string(),
+            ));
+        }
+        self.credential_source.validate()?;
+        validate_non_empty_bounded("runtime_audience", &self.runtime_audience, MAX_HINT_BYTES)
+    }
+}
+
+/// Projection attention intent. V1 defaults to ambient presence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionAttentionIntent {
+    #[default]
+    Ambient,
+    Gentle,
+    Interruptive,
+}
+
+/// Surface class requested by an external managed session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "surface")]
+pub enum PresenceSurfaceRoute {
+    Zone {
+        zone_name: String,
+        content_kind: String,
+        ttl_ms: u64,
+    },
+    Widget {
+        widget_name: String,
+        #[serde(default)]
+        parameters: HashMap<String, WidgetParameterValue>,
+        ttl_ms: u64,
+    },
+    Portal {
+        #[serde(default)]
+        requested_capabilities: Vec<String>,
+        lease_ttl_ms: u64,
+    },
+}
+
+impl PresenceSurfaceRoute {
+    fn validate(&self) -> Result<(), ProjectionContractError> {
+        match self {
+            Self::Zone {
+                zone_name,
+                content_kind,
+                ttl_ms,
+            } => {
+                validate_non_empty_bounded("zone_name", zone_name, MAX_HINT_BYTES)?;
+                validate_non_empty_bounded("zone_content_kind", content_kind, MAX_HINT_BYTES)?;
+                validate_non_zero("zone_ttl_ms", *ttl_ms)
+            }
+            Self::Widget {
+                widget_name,
+                parameters,
+                ttl_ms,
+            } => {
+                validate_non_empty_bounded("widget_name", widget_name, MAX_HINT_BYTES)?;
+                if parameters.is_empty() {
+                    return Err(ProjectionContractError::InvalidArgument(
+                        "widget route requires at least one parameter".to_string(),
+                    ));
+                }
+                for key in parameters.keys() {
+                    validate_non_empty_bounded("widget_parameter_name", key, MAX_HINT_BYTES)?;
+                }
+                validate_non_zero("widget_ttl_ms", *ttl_ms)
+            }
+            Self::Portal {
+                requested_capabilities,
+                lease_ttl_ms,
+            } => {
+                for capability in requested_capabilities {
+                    validate_non_empty_bounded("portal_capability", capability, MAX_HINT_BYTES)?;
+                }
+                validate_non_zero("portal_lease_ttl_ms", *lease_ttl_ms)
+            }
+        }
+    }
+}
+
+/// Bounded widget parameter value used by route plans.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "value")]
+pub enum WidgetParameterValue {
+    F32Milli(i64),
+    Text(String),
+    ColorRgba([u8; 4]),
+    Enum(String),
+}
+
+/// Request to register or update one managed external session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedSessionRequest {
+    pub projection_id: String,
+    pub provider_kind: ProviderKind,
+    pub display_name: String,
+    pub origin: ManagedSessionOrigin,
+    pub hud_target_id: String,
+    pub surface_route: PresenceSurfaceRoute,
+    #[serde(default)]
+    pub content_classification: ContentClassification,
+    #[serde(default)]
+    pub attention_intent: ProjectionAttentionIntent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_profile_hint: Option<String>,
+}
+
+impl ManagedSessionRequest {
+    fn validate(&self) -> Result<(), ProjectionContractError> {
+        validate_non_empty_bounded(
+            "projection_id",
+            &self.projection_id,
+            MAX_PROJECTION_ID_BYTES,
+        )?;
+        validate_non_empty_bounded("display_name", &self.display_name, MAX_DISPLAY_NAME_BYTES)?;
+        validate_non_empty_bounded("hud_target_id", &self.hud_target_id, MAX_HINT_BYTES)?;
+        validate_optional_bounded("workspace_hint", &self.workspace_hint, MAX_HINT_BYTES)?;
+        validate_optional_bounded("repository_hint", &self.repository_hint, MAX_HINT_BYTES)?;
+        validate_optional_bounded("icon_profile_hint", &self.icon_profile_hint, MAX_HINT_BYTES)?;
+        if let ManagedSessionOrigin::Launched(spec) = &self.origin {
+            spec.validate()?;
+        }
+        self.surface_route.validate()
+    }
+}
+
+/// Runtime-facing command plan for a managed session. This is advisory: the
+/// runtime remains the final policy and capability authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "command")]
+pub enum HudSurfaceCommandPlan {
+    ZonePublish {
+        zone_name: String,
+        content_kind: String,
+        ttl_ms: u64,
+        agent_id: String,
+    },
+    WidgetPublish {
+        widget_name: String,
+        parameters: HashMap<String, WidgetParameterValue>,
+        ttl_ms: u64,
+        agent_id: String,
+    },
+    PortalLease {
+        portal_id: String,
+        requested_capabilities: Vec<String>,
+        lease_ttl_ms: u64,
+        agent_id: String,
+    },
+}
+
+/// Bounded, redacted route plan suitable for audit and demo evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedSessionRoutePlan {
+    pub projection_id: String,
+    pub provider_kind: ProviderKind,
+    pub display_name: String,
+    pub origin: ManagedSessionOrigin,
+    pub hud_target_id: String,
+    pub runtime_audience: String,
+    pub credential_redacted: String,
+    pub lifecycle_state: ProjectionLifecycleState,
+    pub content_classification: ContentClassification,
+    pub attention_intent: ProjectionAttentionIntent,
+    pub surface_command: HudSurfaceCommandPlan,
+    pub cleanup_on_detach: bool,
+}
+
+/// Handle returned after registering a managed session. The owner token is
+/// returned only to the caller and is intentionally absent from route plans.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedSessionHandle {
+    pub route_plan: ManagedSessionRoutePlan,
+    pub owner_token: String,
+}
+
+#[derive(Clone, Debug)]
+struct ManagedSessionRecord {
+    route_plan: ManagedSessionRoutePlan,
+}
+
+/// External authority layer for launched/attached provider-neutral sessions.
+#[derive(Debug)]
+pub struct ExternalAgentProjectionAuthority {
+    projection_authority: ProjectionAuthority,
+    targets: HashMap<String, WindowsHudTarget>,
+    managed_sessions: HashMap<String, ManagedSessionRecord>,
+}
+
+impl ExternalAgentProjectionAuthority {
+    pub fn new(bounds: ProjectionBounds) -> Result<Self, ProjectionContractError> {
+        Ok(Self {
+            projection_authority: ProjectionAuthority::new(bounds)?,
+            targets: HashMap::new(),
+            managed_sessions: HashMap::new(),
+        })
+    }
+
+    pub fn projection_authority(&self) -> &ProjectionAuthority {
+        &self.projection_authority
+    }
+
+    pub fn projection_authority_mut(&mut self) -> &mut ProjectionAuthority {
+        &mut self.projection_authority
+    }
+
+    pub fn register_windows_target(
+        &mut self,
+        target: WindowsHudTarget,
+    ) -> Result<(), ProjectionContractError> {
+        target.validate()?;
+        self.targets.insert(target.target_id.clone(), target);
+        Ok(())
+    }
+
+    pub fn manage_session(
+        &mut self,
+        request: ManagedSessionRequest,
+        caller_identity: &str,
+        server_timestamp_wall_us: u64,
+    ) -> Result<ManagedSessionHandle, ProjectionErrorCode> {
+        request.validate().map_err(|error| error.code())?;
+        let target = self
+            .targets
+            .get(&request.hud_target_id)
+            .ok_or(ProjectionErrorCode::ProjectionInvalidArgument)?
+            .clone();
+
+        let attach = AttachRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::Attach,
+                projection_id: request.projection_id.clone(),
+                request_id: format!("manage-{}", request.projection_id),
+                client_timestamp_wall_us: server_timestamp_wall_us,
+            },
+            provider_kind: request.provider_kind.clone(),
+            display_name: request.display_name.clone(),
+            workspace_hint: request.workspace_hint.clone(),
+            repository_hint: request.repository_hint.clone(),
+            icon_profile_hint: request.icon_profile_hint.clone(),
+            content_classification: request.content_classification,
+            hud_target: Some(target.target_id.clone()),
+            idempotency_key: Some(format!("managed-{}", request.projection_id)),
+        };
+        let response = self.projection_authority.handle_attach(
+            attach,
+            caller_identity,
+            server_timestamp_wall_us,
+        );
+        if !response.accepted {
+            return Err(response
+                .error_code
+                .unwrap_or(ProjectionErrorCode::ProjectionInternalError));
+        }
+        let owner_token = response
+            .owner_token
+            .ok_or(ProjectionErrorCode::ProjectionAlreadyAttached)?;
+        let route_plan = route_plan_for_request(&request, &target);
+        self.managed_sessions.insert(
+            request.projection_id.clone(),
+            ManagedSessionRecord {
+                route_plan: route_plan.clone(),
+            },
+        );
+        Ok(ManagedSessionHandle {
+            route_plan,
+            owner_token,
+        })
+    }
+
+    pub fn route_plan(&self, projection_id: &str) -> Option<&ManagedSessionRoutePlan> {
+        self.managed_sessions
+            .get(projection_id)
+            .map(|record| &record.route_plan)
+    }
+
+    pub fn managed_session_count(&self) -> usize {
+        self.managed_sessions.len()
+    }
+
+    pub fn revoke_session(&mut self, projection_id: &str) -> Result<(), ProjectionErrorCode> {
+        self.managed_sessions
+            .remove(projection_id)
+            .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
+        self.projection_authority.expire_projection(projection_id);
+        Ok(())
+    }
+
+    pub fn expire_token_expired_sessions(&mut self, server_timestamp_wall_us: u64) -> usize {
+        let expired_count = self
+            .projection_authority
+            .expire_token_expired_projections(server_timestamp_wall_us);
+        self.managed_sessions
+            .retain(|projection_id, _| self.projection_authority.has_projection(projection_id));
+        expired_count
+    }
+
+    pub fn mark_hud_disconnected(
+        &mut self,
+        projection_id: &str,
+        disconnected_at_wall_us: u64,
+    ) -> Result<(), ProjectionErrorCode> {
+        self.projection_authority
+            .mark_hud_disconnected(projection_id, disconnected_at_wall_us)
+    }
+
+    pub fn record_hud_connection(
+        &mut self,
+        projection_id: &str,
+        metadata: HudConnectionMetadata,
+    ) -> Result<(), ProjectionErrorCode> {
+        self.projection_authority
+            .record_hud_connection(projection_id, metadata)
+    }
+
+    pub fn three_session_demo_plan(&self) -> Vec<ManagedSessionRoutePlan> {
+        let mut plans: Vec<_> = self
+            .managed_sessions
+            .values()
+            .map(|record| record.route_plan.clone())
+            .collect();
+        plans.sort_by(|left, right| left.projection_id.cmp(&right.projection_id));
+        plans
+    }
+}
+
+impl Default for ExternalAgentProjectionAuthority {
+    fn default() -> Self {
+        Self::new(ProjectionBounds::default()).expect("default bounds are valid")
+    }
+}
+
 /// Errors raised by schema validation or token generation.
 #[derive(Debug, Error)]
 pub enum ProjectionContractError {
@@ -2173,6 +2598,59 @@ impl Default for ProjectionAuthority {
     }
 }
 
+fn route_plan_for_request(
+    request: &ManagedSessionRequest,
+    target: &WindowsHudTarget,
+) -> ManagedSessionRoutePlan {
+    let agent_id = format!("projection:{}", request.projection_id);
+    let surface_command = match &request.surface_route {
+        PresenceSurfaceRoute::Zone {
+            zone_name,
+            content_kind,
+            ttl_ms,
+        } => HudSurfaceCommandPlan::ZonePublish {
+            zone_name: zone_name.clone(),
+            content_kind: content_kind.clone(),
+            ttl_ms: *ttl_ms,
+            agent_id,
+        },
+        PresenceSurfaceRoute::Widget {
+            widget_name,
+            parameters,
+            ttl_ms,
+        } => HudSurfaceCommandPlan::WidgetPublish {
+            widget_name: widget_name.clone(),
+            parameters: parameters.clone(),
+            ttl_ms: *ttl_ms,
+            agent_id,
+        },
+        PresenceSurfaceRoute::Portal {
+            requested_capabilities,
+            lease_ttl_ms,
+        } => HudSurfaceCommandPlan::PortalLease {
+            portal_id: portal_id_for_projection(&request.projection_id),
+            requested_capabilities: requested_capabilities.clone(),
+            lease_ttl_ms: *lease_ttl_ms,
+            agent_id,
+        },
+    };
+
+    ManagedSessionRoutePlan {
+        projection_id: request.projection_id.clone(),
+        provider_kind: request.provider_kind.clone(),
+        display_name: request.display_name.clone(),
+        origin: request.origin.clone(),
+        hud_target_id: target.target_id.clone(),
+        runtime_audience: target.runtime_audience.clone(),
+        credential_redacted: target.credential_source.redacted_marker(),
+        lifecycle_state: ProjectionLifecycleState::Attached,
+        content_classification: request.content_classification,
+        attention_intent: request.attention_intent,
+        surface_command,
+        cleanup_on_detach: true,
+    }
+}
+
 fn projected_portal_state(
     session: &ProjectionSession,
     policy: &ProjectedPortalPolicy,
@@ -2689,6 +3167,15 @@ fn validate_optional_bounded(
     Ok(())
 }
 
+fn validate_non_zero(field: &str, value: u64) -> Result<(), ProjectionContractError> {
+    if value == 0 {
+        return Err(ProjectionContractError::InvalidArgument(format!(
+            "{field} must be non-zero"
+        )));
+    }
+    Ok(())
+}
+
 fn generate_owner_token() -> Result<String, ProjectionContractError> {
     let mut token_bytes = [0u8; OWNER_TOKEN_ENTROPY_BITS / 8];
     getrandom::fill(&mut token_bytes).map_err(|_| ProjectionContractError::TokenGeneration)?;
@@ -2814,6 +3301,372 @@ mod tests {
             expires_at_wall_us: Some(1_000),
             content_classification: ContentClassification::Private,
         }
+    }
+
+    fn windows_target() -> WindowsHudTarget {
+        WindowsHudTarget {
+            target_id: "windows-local".to_string(),
+            mcp_url: Some("http://tzehouse-windows.parrot-hen.ts.net:9090/mcp".to_string()),
+            grpc_endpoint: Some("tzehouse-windows.parrot-hen.ts.net:50051".to_string()),
+            credential_source: HudCredentialSource::EnvVar("TZE_HUD_PSK".to_string()),
+            runtime_audience: "local-windows-hud".to_string(),
+        }
+    }
+
+    fn managed_zone_session(projection_id: &str) -> ManagedSessionRequest {
+        ManagedSessionRequest {
+            projection_id: projection_id.to_string(),
+            provider_kind: ProviderKind::Codex,
+            display_name: "Codex Status".to_string(),
+            origin: ManagedSessionOrigin::Attached,
+            hud_target_id: "windows-local".to_string(),
+            surface_route: PresenceSurfaceRoute::Zone {
+                zone_name: "status-bar".to_string(),
+                content_kind: "status".to_string(),
+                ttl_ms: 10_000,
+            },
+            content_classification: ContentClassification::Household,
+            attention_intent: ProjectionAttentionIntent::Ambient,
+            workspace_hint: Some("mayor/rig".to_string()),
+            repository_hint: None,
+            icon_profile_hint: None,
+        }
+    }
+
+    fn managed_widget_session(projection_id: &str) -> ManagedSessionRequest {
+        let mut parameters = HashMap::new();
+        parameters.insert("progress".to_string(), WidgetParameterValue::F32Milli(420));
+        ManagedSessionRequest {
+            projection_id: projection_id.to_string(),
+            provider_kind: ProviderKind::Claude,
+            display_name: "Claude Progress".to_string(),
+            origin: ManagedSessionOrigin::Launched(LaunchSessionSpec {
+                command: "claude".to_string(),
+                args: vec!["--continue".to_string()],
+                working_directory: Some("/home/tze/gt/tze_hud/mayor/rig".to_string()),
+                environment_keys: vec!["ANTHROPIC_API_KEY".to_string()],
+            }),
+            hud_target_id: "windows-local".to_string(),
+            surface_route: PresenceSurfaceRoute::Widget {
+                widget_name: "main-progress".to_string(),
+                parameters,
+                ttl_ms: 10_000,
+            },
+            content_classification: ContentClassification::Private,
+            attention_intent: ProjectionAttentionIntent::Ambient,
+            workspace_hint: Some("mayor/rig".to_string()),
+            repository_hint: None,
+            icon_profile_hint: Some("claude".to_string()),
+        }
+    }
+
+    fn managed_portal_session(projection_id: &str) -> ManagedSessionRequest {
+        ManagedSessionRequest {
+            projection_id: projection_id.to_string(),
+            provider_kind: ProviderKind::Opencode,
+            display_name: "Opencode Questions".to_string(),
+            origin: ManagedSessionOrigin::Attached,
+            hud_target_id: "windows-local".to_string(),
+            surface_route: PresenceSurfaceRoute::Portal {
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                lease_ttl_ms: 30_000,
+            },
+            content_classification: ContentClassification::Private,
+            attention_intent: ProjectionAttentionIntent::Gentle,
+            workspace_hint: Some("mayor/rig".to_string()),
+            repository_hint: None,
+            icon_profile_hint: Some("opencode".to_string()),
+        }
+    }
+
+    #[test]
+    fn external_authority_plans_three_provider_neutral_sessions_across_existing_surfaces() {
+        let mut authority = ExternalAgentProjectionAuthority::default();
+        authority
+            .register_windows_target(windows_target())
+            .expect("target is valid");
+
+        let zone = authority
+            .manage_session(managed_zone_session("agent-status"), "manager", 10)
+            .expect("zone session is managed");
+        let widget = authority
+            .manage_session(managed_widget_session("agent-progress"), "manager", 11)
+            .expect("widget session is managed");
+        let portal = authority
+            .manage_session(managed_portal_session("agent-question"), "manager", 12)
+            .expect("portal session is managed");
+
+        assert_eq!(authority.managed_session_count(), 3);
+        assert!(
+            authority
+                .projection_authority()
+                .has_projection("agent-status")
+        );
+        assert!(
+            authority
+                .projection_authority()
+                .has_projection("agent-progress")
+        );
+        assert!(
+            authority
+                .projection_authority()
+                .has_projection("agent-question")
+        );
+
+        assert!(matches!(
+            zone.route_plan.surface_command,
+            HudSurfaceCommandPlan::ZonePublish { .. }
+        ));
+        assert!(matches!(
+            widget.route_plan.surface_command,
+            HudSurfaceCommandPlan::WidgetPublish { .. }
+        ));
+        assert!(matches!(
+            portal.route_plan.surface_command,
+            HudSurfaceCommandPlan::PortalLease { .. }
+        ));
+        assert_eq!(
+            zone.route_plan.attention_intent,
+            ProjectionAttentionIntent::Ambient
+        );
+        assert_eq!(
+            widget.route_plan.attention_intent,
+            ProjectionAttentionIntent::Ambient
+        );
+        assert_eq!(
+            portal.route_plan.attention_intent,
+            ProjectionAttentionIntent::Gentle
+        );
+
+        let demo = authority.three_session_demo_plan();
+        assert_eq!(demo.len(), 3);
+        assert_eq!(demo[0].projection_id, "agent-progress");
+        assert_eq!(demo[1].projection_id, "agent-question");
+        assert_eq!(demo[2].projection_id, "agent-status");
+    }
+
+    #[test]
+    fn external_authority_route_plans_redact_credentials_and_expose_no_capture_authority() {
+        let mut authority = ExternalAgentProjectionAuthority::default();
+        authority
+            .register_windows_target(windows_target())
+            .expect("target is valid");
+
+        let handle = authority
+            .manage_session(managed_widget_session("agent-progress"), "manager", 10)
+            .expect("widget session is managed");
+        let serialized = serde_json::to_string(&handle.route_plan).unwrap();
+
+        assert!(serialized.contains("env:TZE_HUD_PSK:redacted"));
+        assert!(!serialized.contains(&handle.owner_token));
+        assert!(!serialized.contains("operator-secret"));
+        for forbidden in [
+            "pty",
+            "terminal_capture",
+            "stdin",
+            "stdout",
+            "raw_keystroke",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "route plan must not expose {forbidden} authority"
+            );
+        }
+    }
+
+    #[test]
+    fn external_authority_revokes_one_session_without_mutating_others() {
+        let mut authority = ExternalAgentProjectionAuthority::default();
+        authority
+            .register_windows_target(windows_target())
+            .expect("target is valid");
+        authority
+            .manage_session(managed_zone_session("agent-status"), "manager", 10)
+            .unwrap();
+        authority
+            .manage_session(managed_widget_session("agent-progress"), "manager", 11)
+            .unwrap();
+        authority
+            .manage_session(managed_portal_session("agent-question"), "manager", 12)
+            .unwrap();
+
+        authority.revoke_session("agent-progress").unwrap();
+
+        assert_eq!(authority.managed_session_count(), 2);
+        assert!(authority.route_plan("agent-progress").is_none());
+        assert!(
+            authority
+                .projection_authority()
+                .state_summary("agent-progress")
+                .is_none()
+        );
+        assert!(authority.route_plan("agent-status").is_some());
+        assert!(authority.route_plan("agent-question").is_some());
+        assert!(
+            authority
+                .projection_authority()
+                .state_summary("agent-status")
+                .is_some()
+        );
+        assert!(
+            authority
+                .projection_authority()
+                .state_summary("agent-question")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn external_authority_expiry_purges_managed_session_and_preserves_unexpired_sessions() {
+        let mut authority = ExternalAgentProjectionAuthority::new(ProjectionBounds {
+            owner_token_ttl_wall_us: 20,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        authority
+            .register_windows_target(windows_target())
+            .expect("target is valid");
+        authority
+            .manage_session(managed_zone_session("agent-status"), "manager", 10)
+            .unwrap();
+        authority
+            .manage_session(managed_portal_session("agent-question"), "manager", 11)
+            .unwrap();
+
+        assert_eq!(authority.expire_token_expired_sessions(29), 0);
+        assert_eq!(authority.managed_session_count(), 2);
+
+        assert_eq!(authority.expire_token_expired_sessions(30), 1);
+        assert_eq!(authority.managed_session_count(), 1);
+        assert!(authority.route_plan("agent-status").is_none());
+        assert!(
+            authority
+                .projection_authority()
+                .state_summary("agent-status")
+                .is_none()
+        );
+        assert!(authority.route_plan("agent-question").is_some());
+        assert!(
+            authority
+                .projection_authority()
+                .state_summary("agent-question")
+                .is_some()
+        );
+
+        assert_eq!(authority.expire_token_expired_sessions(31), 1);
+        assert_eq!(authority.managed_session_count(), 0);
+        assert!(authority.route_plan("agent-question").is_none());
+        assert!(
+            authority
+                .projection_authority()
+                .state_summary("agent-question")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn external_authority_reconnect_requires_fresh_runtime_lease_authority() {
+        let mut authority = ExternalAgentProjectionAuthority::default();
+        authority
+            .register_windows_target(windows_target())
+            .expect("target is valid");
+        authority
+            .manage_session(managed_portal_session("agent-question"), "manager", 10)
+            .unwrap();
+        authority
+            .record_hud_connection(
+                "agent-question",
+                HudConnectionMetadata {
+                    connection_id: "connection-1".to_string(),
+                    authenticated_session_id: "runtime-session-1".to_string(),
+                    granted_capabilities: vec![
+                        "create_tiles".to_string(),
+                        "modify_own_tiles".to_string(),
+                    ],
+                    connected_at_wall_us: 20,
+                    last_reconnect_wall_us: 20,
+                },
+            )
+            .unwrap();
+        authority
+            .projection_authority_mut()
+            .record_advisory_lease(
+                "agent-question",
+                AdvisoryLeaseIdentity {
+                    lease_id: "lease-1".to_string(),
+                    capabilities: vec!["create_tiles".to_string()],
+                    acquired_at_wall_us: 21,
+                    expires_at_wall_us: 100,
+                },
+                22,
+            )
+            .unwrap();
+
+        authority
+            .mark_hud_disconnected("agent-question", 30)
+            .unwrap();
+        let disconnected = authority
+            .projection_authority()
+            .state_summary("agent-question")
+            .unwrap();
+        assert_eq!(
+            disconnected.lifecycle_state,
+            ProjectionLifecycleState::HudUnavailable
+        );
+        assert!(!disconnected.has_advisory_lease);
+
+        authority
+            .record_hud_connection(
+                "agent-question",
+                HudConnectionMetadata {
+                    connection_id: "connection-2".to_string(),
+                    authenticated_session_id: "runtime-session-2".to_string(),
+                    granted_capabilities: vec![
+                        "create_tiles".to_string(),
+                        "modify_own_tiles".to_string(),
+                    ],
+                    connected_at_wall_us: 40,
+                    last_reconnect_wall_us: 40,
+                },
+            )
+            .unwrap();
+        let stale = authority
+            .projection_authority_mut()
+            .authorize_portal_republish(
+                "agent-question",
+                "lease-1",
+                &["create_tiles".to_string()],
+                41,
+            );
+        assert_eq!(stale, Err(ProjectionErrorCode::ProjectionUnauthorized));
+
+        authority
+            .projection_authority_mut()
+            .record_advisory_lease(
+                "agent-question",
+                AdvisoryLeaseIdentity {
+                    lease_id: "lease-2".to_string(),
+                    capabilities: vec!["create_tiles".to_string()],
+                    acquired_at_wall_us: 42,
+                    expires_at_wall_us: 100,
+                },
+                43,
+            )
+            .unwrap();
+        assert_eq!(
+            authority
+                .projection_authority_mut()
+                .authorize_portal_republish(
+                    "agent-question",
+                    "lease-2",
+                    &["create_tiles".to_string()],
+                    44,
+                ),
+            Ok(())
+        );
     }
 
     #[test]

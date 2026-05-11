@@ -1,0 +1,36 @@
+# External Agent Projection Authority Evidence
+
+This directory contains the headless demo artifact and replay fixtures for the 2026-05-11 external agent projection authority vertical slice.
+
+## Files
+
+- `three-session-demo-plan-20260511.json`: Redacted authority route-plan artifact for three provider-neutral sessions routed to widget, portal, and zone surfaces.
+- `replay-zone-messages.json`: Zone publish payload extracted from the demo plan for `publish_zone_batch.py`.
+- `replay-widget-messages.json`: Widget publish payload extracted from the demo plan for `publish_widget_batch.py`.
+- `live-replay.sh`: Non-interactive replay harness for the live Windows `/user-test` path.
+
+## Live Replay
+
+After `tzehouse-windows.parrot-hen.ts.net` is reachable, verify SSH, start `TzeHudOverlay` if needed, and use the MCP `/mcp` endpoint:
+
+```bash
+bash docs/evidence/external-agent-projection-authority/live-replay.sh
+```
+
+The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. It expects `TZE_HUD_PSK` to be set locally and never writes the value into artifacts.
+
+The demo plan's lifecycle checks are headless evidence only; live replay must still verify runtime acceptance, visual behavior, and cleanup against the Windows HUD.
+
+## Local Checks
+
+```bash
+bash -n docs/evidence/external-agent-projection-authority/live-replay.sh
+jq -e '.zone_messages == input' \
+  docs/evidence/external-agent-projection-authority/three-session-demo-plan-20260511.json \
+  docs/evidence/external-agent-projection-authority/replay-zone-messages.json
+jq -e '.widget_messages == input' \
+  docs/evidence/external-agent-projection-authority/three-session-demo-plan-20260511.json \
+  docs/evidence/external-agent-projection-authority/replay-widget-messages.json
+rg -n 'owner[_]token|operator[-]secret|terminal[_]capture|raw[_]keystroke|p[t]y' \
+  docs/evidence/external-agent-projection-authority || true
+```

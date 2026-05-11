@@ -1,0 +1,5 @@
+[external-agent-projection-authority] checking Tailscale reachability for tzehouse-windows.parrot-hen.ts.net
+ping "100.87.181.125" timed out
+no reply
+[external-agent-projection-authority] BLOCKED: tailscale ping failed for tzehouse-windows.parrot-hen.ts.net
+exit_code=10
