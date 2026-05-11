@@ -13,6 +13,7 @@ pub mod resident_grpc;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::process::{Child, Command, Stdio};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
@@ -1248,12 +1249,98 @@ struct ManagedSessionRecord {
     route_plan: ManagedSessionRoutePlan,
 }
 
+/// Provider process lifecycle state retained by the external authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProcessState {
+    Running,
+    Exited { code: Option<i32> },
+}
+
+/// Bounded process status for an authority-supervised launched session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProcessStatus {
+    pub projection_id: String,
+    pub process_id: u32,
+    pub state: ProviderProcessState,
+}
+
+struct ProviderProcessRecord {
+    child: Child,
+    last_state: ProviderProcessState,
+}
+
+impl fmt::Debug for ProviderProcessRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderProcessRecord")
+            .field("process_id", &self.child.id())
+            .field("last_state", &self.last_state)
+            .finish()
+    }
+}
+
+impl ProviderProcessRecord {
+    fn status(
+        &mut self,
+        projection_id: &str,
+    ) -> Result<ProviderProcessStatus, ProjectionErrorCode> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.last_state = ProviderProcessState::Exited {
+                    code: status.code(),
+                };
+            }
+            Ok(None) => {
+                self.last_state = ProviderProcessState::Running;
+            }
+            Err(_) => return Err(ProjectionErrorCode::ProjectionInternalError),
+        }
+        Ok(ProviderProcessStatus {
+            projection_id: projection_id.to_string(),
+            process_id: self.child.id(),
+            state: self.last_state,
+        })
+    }
+
+    fn terminate(
+        mut self,
+        projection_id: &str,
+    ) -> Result<ProviderProcessStatus, ProjectionErrorCode> {
+        let process_id = self.child.id();
+        let state = match self.child.try_wait() {
+            Ok(Some(status)) => ProviderProcessState::Exited {
+                code: status.code(),
+            },
+            Ok(None) => {
+                self.child
+                    .kill()
+                    .map_err(|_| ProjectionErrorCode::ProjectionInternalError)?;
+                let status = self
+                    .child
+                    .wait()
+                    .map_err(|_| ProjectionErrorCode::ProjectionInternalError)?;
+                ProviderProcessState::Exited {
+                    code: status.code(),
+                }
+            }
+            Err(_) => return Err(ProjectionErrorCode::ProjectionInternalError),
+        };
+        Ok(ProviderProcessStatus {
+            projection_id: projection_id.to_string(),
+            process_id,
+            state,
+        })
+    }
+}
+
 /// External authority layer for launched/attached provider-neutral sessions.
 #[derive(Debug)]
 pub struct ExternalAgentProjectionAuthority {
     projection_authority: ProjectionAuthority,
     targets: HashMap<String, WindowsHudTarget>,
     managed_sessions: HashMap<String, ManagedSessionRecord>,
+    provider_processes: HashMap<String, ProviderProcessRecord>,
 }
 
 impl ExternalAgentProjectionAuthority {
@@ -1262,6 +1349,7 @@ impl ExternalAgentProjectionAuthority {
             projection_authority: ProjectionAuthority::new(bounds)?,
             targets: HashMap::new(),
             managed_sessions: HashMap::new(),
+            provider_processes: HashMap::new(),
         })
     }
 
@@ -1337,6 +1425,75 @@ impl ExternalAgentProjectionAuthority {
         })
     }
 
+    /// Spawn the provider command for a managed `Launched` session. The
+    /// authority supervises only process lifetime; it deliberately does not
+    /// capture stdin, stdout, stderr, PTY state, or transcript bytes.
+    pub fn launch_provider_process(
+        &mut self,
+        projection_id: &str,
+    ) -> Result<ProviderProcessStatus, ProjectionErrorCode> {
+        validate_non_empty_bounded("projection_id", projection_id, MAX_PROJECTION_ID_BYTES)
+            .map_err(|error| error.code())?;
+        let route_plan = self
+            .managed_sessions
+            .get(projection_id)
+            .ok_or(ProjectionErrorCode::ProjectionNotFound)?
+            .route_plan
+            .clone();
+        let ManagedSessionOrigin::Launched(spec) = route_plan.origin else {
+            return Err(ProjectionErrorCode::ProjectionInvalidArgument);
+        };
+
+        if let Some(process) = self.provider_processes.get_mut(projection_id) {
+            return process.status(projection_id);
+        }
+
+        let mut command = Command::new(&spec.command);
+        command
+            .args(&spec.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(working_directory) = &spec.working_directory {
+            command.current_dir(working_directory);
+        }
+        let child = command
+            .spawn()
+            .map_err(|_| ProjectionErrorCode::ProjectionInternalError)?;
+        let mut record = ProviderProcessRecord {
+            child,
+            last_state: ProviderProcessState::Running,
+        };
+        let status = record.status(projection_id)?;
+        self.provider_processes
+            .insert(projection_id.to_string(), record);
+        Ok(status)
+    }
+
+    pub fn provider_process_status(
+        &mut self,
+        projection_id: &str,
+    ) -> Result<Option<ProviderProcessStatus>, ProjectionErrorCode> {
+        validate_non_empty_bounded("projection_id", projection_id, MAX_PROJECTION_ID_BYTES)
+            .map_err(|error| error.code())?;
+        self.provider_processes
+            .get_mut(projection_id)
+            .map(|record| record.status(projection_id))
+            .transpose()
+    }
+
+    pub fn terminate_provider_process(
+        &mut self,
+        projection_id: &str,
+    ) -> Result<Option<ProviderProcessStatus>, ProjectionErrorCode> {
+        validate_non_empty_bounded("projection_id", projection_id, MAX_PROJECTION_ID_BYTES)
+            .map_err(|error| error.code())?;
+        self.provider_processes
+            .remove(projection_id)
+            .map(|record| record.terminate(projection_id))
+            .transpose()
+    }
+
     pub fn route_plan(&self, projection_id: &str) -> Option<&ManagedSessionRoutePlan> {
         self.managed_sessions
             .get(projection_id)
@@ -1351,6 +1508,7 @@ impl ExternalAgentProjectionAuthority {
         self.managed_sessions
             .remove(projection_id)
             .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
+        let _ = self.terminate_provider_process(projection_id);
         self.projection_authority.expire_projection(projection_id);
         Ok(())
     }
@@ -1361,6 +1519,15 @@ impl ExternalAgentProjectionAuthority {
             .expire_token_expired_projections(server_timestamp_wall_us);
         self.managed_sessions
             .retain(|projection_id, _| self.projection_authority.has_projection(projection_id));
+        let orphaned_processes: Vec<_> = self
+            .provider_processes
+            .keys()
+            .filter(|projection_id| !self.managed_sessions.contains_key(*projection_id))
+            .cloned()
+            .collect();
+        for projection_id in orphaned_processes {
+            let _ = self.terminate_provider_process(&projection_id);
+        }
         expired_count
     }
 
@@ -3475,6 +3642,116 @@ mod tests {
                 "route plan must not expose {forbidden} authority"
             );
         }
+    }
+
+    #[cfg(unix)]
+    fn managed_process_session(projection_id: &str, args: Vec<String>) -> ManagedSessionRequest {
+        let mut request = managed_widget_session(projection_id);
+        request.origin = ManagedSessionOrigin::Launched(LaunchSessionSpec {
+            command: "sh".to_string(),
+            args,
+            working_directory: None,
+            environment_keys: Vec::new(),
+        });
+        request
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_authority_launches_provider_process_without_terminal_capture() {
+        let mut authority = ExternalAgentProjectionAuthority::default();
+        authority
+            .register_windows_target(windows_target())
+            .expect("target is valid");
+        authority
+            .manage_session(
+                managed_process_session(
+                    "agent-progress",
+                    vec!["-c".to_string(), "exit 0".to_string()],
+                ),
+                "manager",
+                10,
+            )
+            .unwrap();
+
+        let launched = authority
+            .launch_provider_process("agent-progress")
+            .expect("provider process launches");
+        assert!(launched.process_id > 0);
+
+        let mut final_status = launched;
+        for _ in 0..20 {
+            final_status = authority
+                .provider_process_status("agent-progress")
+                .unwrap()
+                .expect("process remains tracked");
+            if matches!(final_status.state, ProviderProcessState::Exited { .. }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            final_status.state,
+            ProviderProcessState::Exited { code: Some(0) }
+        );
+
+        let status_json = serde_json::to_string(&final_status).unwrap();
+        for forbidden in ["pty", "terminal", "stdin", "stdout", "stderr"] {
+            assert!(
+                !status_json.contains(forbidden),
+                "process status must not expose {forbidden} capture authority"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_authority_rejects_process_launch_for_attached_session() {
+        let mut authority = ExternalAgentProjectionAuthority::default();
+        authority
+            .register_windows_target(windows_target())
+            .expect("target is valid");
+        authority
+            .manage_session(managed_zone_session("agent-status"), "manager", 10)
+            .unwrap();
+
+        assert_eq!(
+            authority.launch_provider_process("agent-status"),
+            Err(ProjectionErrorCode::ProjectionInvalidArgument)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_authority_revoke_terminates_tracked_provider_process() {
+        let mut authority = ExternalAgentProjectionAuthority::default();
+        authority
+            .register_windows_target(windows_target())
+            .expect("target is valid");
+        authority
+            .manage_session(
+                managed_process_session(
+                    "agent-progress",
+                    vec!["-c".to_string(), "sleep 30".to_string()],
+                ),
+                "manager",
+                10,
+            )
+            .unwrap();
+
+        let launched = authority
+            .launch_provider_process("agent-progress")
+            .expect("provider process launches");
+        assert_eq!(launched.state, ProviderProcessState::Running);
+
+        authority.revoke_session("agent-progress").unwrap();
+        assert!(
+            authority
+                .provider_process_status("agent-progress")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(authority.managed_session_count(), 0);
     }
 
     #[test]

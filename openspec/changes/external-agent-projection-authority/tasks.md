@@ -11,6 +11,7 @@
 - [x] 2.3 Add governed route planning for zone, widget, and leased portal surfaces.
 - [x] 2.4 Add multi-session cleanup, revocation/expiry, and reconnect bookkeeping helpers.
 - [x] 2.5 Add a deterministic three-session demo plan API.
+- [x] 2.6 Add bounded provider process launch supervision for `Launched` sessions outside runtime/compositor core.
 
 ## 3. Validation
 
@@ -22,6 +23,6 @@
 
 ## 4. Follow-Up Tracking and Closeout
 
-- [x] 4.1 Create beads for remaining work that cannot be completed in this slice: `hud-dl3ys` for successful live Windows replay and `hud-opmuj` for provider process launch supervision hardening.
+- [x] 4.1 Create beads for remaining work that cannot be completed in this slice; `hud-dl3ys` remains open for successful live Windows replay, and `hud-opmuj` was closed after provider process launch supervision landed.
 - [x] 4.2 Update `docs/20260511_goals.md` with validation evidence and residual gaps.
 - [x] 4.3 Perform prompt-to-artifact completion audit and record that the overall goal remains incomplete until 3.5 passes.
