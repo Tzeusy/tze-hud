@@ -1420,6 +1420,19 @@ struct StreamSession {
 
     /// Per-session upload-byte limiter for resident resource transport.
     resource_upload_rate_limiter: UploadByteRateLimiter,
+
+    /// Active Windows media ingress stream for the one-stream exemplar slice.
+    media_ingress: Option<ActiveMediaIngressStream>,
+
+    /// Next non-zero stream epoch assigned by this session.
+    next_media_stream_epoch: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveMediaIngressStream {
+    stream_epoch: u64,
+    zone_name: String,
+    surface_id: tze_hud_scene::SceneId,
 }
 
 impl StreamSession {
@@ -1470,6 +1483,12 @@ impl StreamSession {
         }
         self.last_client_sequence = seq;
         Ok(())
+    }
+
+    fn next_media_epoch(&mut self) -> u64 {
+        let epoch = self.next_media_stream_epoch.max(1);
+        self.next_media_stream_epoch = epoch.saturating_add(1).max(1);
+        epoch
     }
 }
 
@@ -1565,6 +1584,9 @@ pub struct HudSessionImpl {
     /// Message class: Transactional (never coalesced or dropped).
     pub element_repositioned_tx:
         tokio::sync::broadcast::Sender<crate::proto::ElementRepositionedEvent>,
+
+    /// Frozen Windows media-ingress admission config. Defaults disabled.
+    media_ingress_config: Arc<tze_hud_scene::config::MediaIngressConfig>,
 }
 
 impl HudSessionImpl {
@@ -1601,6 +1623,7 @@ impl HudSessionImpl {
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
+            media_ingress_config: Arc::new(tze_hud_scene::config::MediaIngressConfig::default()),
         }
     }
 
@@ -1624,6 +1647,7 @@ impl HudSessionImpl {
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
+            media_ingress_config: Arc::new(tze_hud_scene::config::MediaIngressConfig::default()),
         }
     }
 
@@ -1642,6 +1666,23 @@ impl HudSessionImpl {
         agent_capabilities: HashMap<String, Vec<String>>,
         fallback_unrestricted: bool,
     ) -> Self {
+        Self::from_shared_state_with_config_and_media_ingress(
+            state,
+            psk,
+            agent_capabilities,
+            fallback_unrestricted,
+            tze_hud_scene::config::MediaIngressConfig::default(),
+        )
+    }
+
+    /// Create from existing shared state with config-driven capability and media-ingress state.
+    pub fn from_shared_state_with_config_and_media_ingress(
+        state: Arc<Mutex<SharedState>>,
+        psk: &str,
+        agent_capabilities: HashMap<String, Vec<String>>,
+        fallback_unrestricted: bool,
+        media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
+    ) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
@@ -1657,6 +1698,7 @@ impl HudSessionImpl {
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
+            media_ingress_config: Arc::new(media_ingress_config),
         }
     }
 
@@ -1881,6 +1923,7 @@ impl HudSession for HudSessionImpl {
         // Clone the capability registry for use inside the session task.
         let agent_capabilities = self.agent_capabilities.clone();
         let fallback_unrestricted = self.fallback_unrestricted;
+        let media_ingress_config = self.media_ingress_config.clone();
         // Subscribe to the degradation broadcast channel before spawning the task.
         // Subscribing here (rather than inside the task) ensures we don't miss notices
         // that arrive between task spawn and channel subscription.
@@ -2126,6 +2169,7 @@ impl HudSession for HudSessionImpl {
                                         session,
                                         &tx,
                                         &upload_command_tx,
+                                        &media_ingress_config,
                                         msg,
                                     )
                                     .await;
@@ -2175,6 +2219,7 @@ impl HudSession for HudSessionImpl {
                                     session,
                                     &tx,
                                     &upload_command_tx,
+                                    &media_ingress_config,
                                     msg,
                                 )
                                 .await;
@@ -2306,7 +2351,9 @@ impl HudSession for HudSessionImpl {
                         match revocation_result {
                             Ok(event) => {
                                 // Only this session's leases are affected.
-                                if session.lease_ids.contains(&event.lease_id) {
+                                if event.capability_name == "media_ingress"
+                                    || session.lease_ids.contains(&event.lease_id)
+                                {
                                     handle_capability_revocation(
                                         &state,
                                         session,
@@ -2641,6 +2688,8 @@ async fn handle_session_init(
         resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
             upload_rate_limit_bytes_per_sec,
         ),
+        media_ingress: None,
+        next_media_stream_epoch: 1,
     };
 
     // ── Step 5: Clock skew estimation (RFC 0003 §1.3) ────────────────────────
@@ -2803,6 +2852,8 @@ async fn handle_session_resume(
         resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
             upload_rate_limit_bytes_per_sec,
         ),
+        media_ingress: None,
+        next_media_stream_epoch: 1,
     };
 
     let compositor_ts = now_wall_us();
@@ -2837,6 +2888,7 @@ async fn handle_client_message(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     upload_command_tx: &tokio::sync::mpsc::Sender<UploadWorkerCommand>,
+    media_ingress_config: &tze_hud_scene::config::MediaIngressConfig,
     msg: ClientMessage,
 ) {
     let client_sequence = msg.sequence;
@@ -2957,37 +3009,437 @@ async fn handle_client_message(
         // proto — no variant exists until phase 4 egress is defined. Any bytes at
         // field 64 are treated as an unrecognised payload by prost and will not match
         // this arm; the outer fallthrough handler covers that case.
-        ClientPayload::MediaIngressOpen(_)
-        | ClientPayload::MediaIngressClose(_)
-        | ClientPayload::MediaSdpAnswer(_)
+        ClientPayload::MediaIngressOpen(open) => {
+            handle_media_ingress_open(state, session, tx, media_ingress_config, open).await;
+        }
+        ClientPayload::MediaIngressClose(close) => {
+            handle_media_ingress_close(state, session, tx, close).await;
+        }
+        ClientPayload::MediaSdpAnswer(_)
         | ClientPayload::MediaPauseRequest(_)
         | ClientPayload::MediaResumeRequest(_)
         | ClientPayload::CloudRelayOpen(_)
         | ClientPayload::CloudRelayClose(_) => {
             // Reject with CAPABILITY_NOT_IMPLEMENTED (RFC 0014 §2.4).
-            let _ = tx
-                .send(Ok(ServerMessage {
-                    sequence: session.next_server_seq(),
-                    timestamp_wall_us: now_wall_us(),
-                    payload: Some(
-                        crate::proto::session::server_message::Payload::RuntimeError(
-                            crate::proto::session::RuntimeError {
-                                error_code: "CAPABILITY_NOT_IMPLEMENTED".to_string(),
-                                message: "media plane signaling is not implemented in v1"
-                                    .to_string(),
-                                context: "media-plane v2 RFC 0014".to_string(),
-                                hint: String::new(),
-                                error_code_enum: crate::proto::session::ErrorCode::Unknown as i32,
-                            },
-                        ),
-                    ),
-                }))
-                .await;
+            send_runtime_error(
+                session,
+                tx,
+                "CAPABILITY_NOT_IMPLEMENTED",
+                "media message is deferred outside the one-stream Windows ingress slice",
+                "windows-media-ingress-exemplar deferred media message",
+                ErrorCode::Unknown,
+            )
+            .await;
         }
 
         // Ephemeral realtime: silently drop ICE candidates in v1 stub to avoid
         // outbound error flooding if an agent mistakenly sends them (RFC 0014 §2.4).
         ClientPayload::MediaIceCandidate(_) => {}
+    }
+}
+
+async fn send_runtime_error(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    error_code: &str,
+    message: &str,
+    context: &str,
+    error_code_enum: ErrorCode,
+) {
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                error_code: error_code.to_string(),
+                message: message.to_string(),
+                context: context.to_string(),
+                hint: String::new(),
+                error_code_enum: error_code_enum as i32,
+            })),
+        }))
+        .await;
+}
+
+async fn send_media_open_result(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    result: MediaIngressOpenResult,
+) {
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::MediaIngressOpenResult(result)),
+        }))
+        .await;
+}
+
+async fn send_media_state(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    stream_epoch: u64,
+    state: i32,
+) {
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::MediaIngressState(MediaIngressState {
+                stream_epoch,
+                state,
+                current_step: 0,
+                effective_bitrate_kbps: 0,
+                effective_fps: 0,
+                effective_width_px: 0,
+                effective_height_px: 0,
+                dropped_frames_since_last: 0,
+                watchdog_warnings: 0,
+                sample_timestamp_wall_us: now_wall_us(),
+            })),
+        }))
+        .await;
+}
+
+async fn send_media_close_notice(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    stream_epoch: u64,
+    reason: i32,
+    detail: impl Into<String>,
+    retry_after_us: Option<u64>,
+) {
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::MediaIngressCloseNotice(
+                MediaIngressCloseNotice {
+                    stream_epoch,
+                    reason,
+                    detail: detail.into(),
+                    retry_after_us,
+                },
+            )),
+        }))
+        .await;
+}
+
+fn media_open_rejected(
+    client_stream_id: Vec<u8>,
+    code: &str,
+    reason: impl Into<String>,
+) -> MediaIngressOpenResult {
+    MediaIngressOpenResult {
+        client_stream_id,
+        admitted: false,
+        stream_epoch: 0,
+        assigned_surface_id: Vec::new(),
+        selected_codec: 0,
+        runtime_sdp_offer: Vec::new(),
+        reject_reason: reason.into(),
+        reject_code: code.to_string(),
+        runtime_sdp_answer: Vec::new(),
+    }
+}
+
+fn supported_video_codec(open: &MediaIngressOpen) -> Option<i32> {
+    open.codec_preference
+        .iter()
+        .copied()
+        .find(|codec| matches!(*codec, 1..=3))
+}
+
+const MEDIA_INGRESS_PEAK_KBPS_BUDGET: u32 = 25_000;
+
+fn media_open_rejection(
+    open: &MediaIngressOpen,
+    media_config: &tze_hud_scene::config::MediaIngressConfig,
+    session: &StreamSession,
+) -> Option<(&'static str, String)> {
+    if !media_config.enabled || media_config.operator_disabled {
+        return Some((
+            "MEDIA_DISABLED",
+            "media ingress is disabled by runtime configuration".to_string(),
+        ));
+    }
+    if !capability_set_covers(&session.capabilities, "media_ingress") {
+        return Some((
+            "CAPABILITY_REQUIRED",
+            "session does not hold media_ingress capability".to_string(),
+        ));
+    }
+    if session.media_ingress.is_some() {
+        return Some((
+            "SESSION_STREAM_LIMIT",
+            "one active media ingress stream is already admitted for this session".to_string(),
+        ));
+    }
+    if open.has_audio_track {
+        return Some((
+            "AUDIO_NOT_SUPPORTED",
+            "the Windows media ingress exemplar is video-only".to_string(),
+        ));
+    }
+    if !open.has_video_track {
+        return Some((
+            "INVALID_ARGUMENT",
+            "media ingress requires a video track".to_string(),
+        ));
+    }
+    if open
+        .transport
+        .as_ref()
+        .map(|transport| transport.mode != 1)
+        .unwrap_or(true)
+    {
+        return Some((
+            "CAPABILITY_NOT_IMPLEMENTED",
+            "only WEBRTC_STANDARD transport is active for this slice".to_string(),
+        ));
+    }
+    let zone_name = match open.surface_binding.as_ref() {
+        Some(media_ingress_open::SurfaceBinding::ZoneName(zone)) => zone,
+        Some(media_ingress_open::SurfaceBinding::TileId(_)) => {
+            return Some((
+                "SURFACE_NOT_FOUND",
+                "tile-bound media ingress is deferred; use approved zone media-pip".to_string(),
+            ));
+        }
+        None => {
+            return Some((
+                "SURFACE_NOT_FOUND",
+                "media ingress requires an approved zone binding".to_string(),
+            ));
+        }
+    };
+    let approved_zone = media_config.approved_zone.as_deref().unwrap_or_default();
+    if zone_name != approved_zone || zone_name != tze_hud_scene::config::APPROVED_MEDIA_ZONE {
+        return Some((
+            "SURFACE_NOT_FOUND",
+            format!("media ingress is only approved for zone {approved_zone:?}"),
+        ));
+    }
+    let Some(default_classification) = media_config.default_classification.as_deref() else {
+        return Some((
+            "CONTENT_CLASS_DENIED",
+            "media ingress has no default content classification".to_string(),
+        ));
+    };
+    if open.content_classification.is_empty() {
+        return Some((
+            "CONTENT_CLASS_DENIED",
+            "content_classification is required for media ingress".to_string(),
+        ));
+    }
+    if open.content_classification != default_classification {
+        return Some((
+            "CONTENT_CLASS_DENIED",
+            format!(
+                "content classification {:?} is not allowed for this media ingress surface",
+                open.content_classification
+            ),
+        ));
+    }
+    if open.declared_peak_kbps > MEDIA_INGRESS_PEAK_KBPS_BUDGET {
+        return Some((
+            "BUDGET_EXCEEDED",
+            format!(
+                "declared_peak_kbps {} exceeds one-stream media ingress budget {}",
+                open.declared_peak_kbps, MEDIA_INGRESS_PEAK_KBPS_BUDGET
+            ),
+        ));
+    }
+    if supported_video_codec(open).is_none() {
+        return Some((
+            "CODEC_UNSUPPORTED",
+            "no supported video codec preference was provided".to_string(),
+        ));
+    }
+    let timing = TimingHints {
+        present_at_wall_us: open.present_at_wall_us,
+        expires_at_wall_us: open.expires_at_wall_us,
+    };
+    if let Err((code, message)) = validate_timing_hints(
+        &timing,
+        session.session_open_at_wall_us,
+        DEFAULT_MAX_FUTURE_SCHEDULE_US,
+    ) {
+        return Some((code, message));
+    }
+    None
+}
+
+async fn handle_media_ingress_open(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    media_config: &tze_hud_scene::config::MediaIngressConfig,
+    open: MediaIngressOpen,
+) {
+    if let Some((code, reason)) = media_open_rejection(&open, media_config, session) {
+        tracing::warn!(
+            subsystem = "media_ingress",
+            agent = %session.agent_name,
+            reject_code = code,
+            reject_reason = %reason,
+            "media ingress admission rejected"
+        );
+        send_media_open_result(
+            session,
+            tx,
+            media_open_rejected(open.client_stream_id, code, reason),
+        )
+        .await;
+        return;
+    }
+
+    let zone_name = media_config
+        .approved_zone
+        .as_deref()
+        .unwrap_or(tze_hud_scene::config::APPROVED_MEDIA_ZONE)
+        .to_string();
+    let selected_codec = supported_video_codec(&open).unwrap_or(1);
+    let stream_epoch = session.next_media_epoch();
+    let surface_id = tze_hud_scene::SceneId::new();
+
+    let publish_result = {
+        let st = state.lock().await;
+        let mut scene = st.scene.lock().await;
+        scene.publish_to_zone(
+            &zone_name,
+            ZoneContent::VideoSurfaceRef(surface_id),
+            &session.namespace,
+            None,
+            if open.expires_at_wall_us == 0 {
+                None
+            } else {
+                Some(open.expires_at_wall_us)
+            },
+            Some(open.content_classification.clone()),
+        )
+    };
+    if let Err(err) = publish_result {
+        let reason = format!("approved media surface could not be published: {err}");
+        tracing::warn!(
+            subsystem = "media_ingress",
+            agent = %session.agent_name,
+            reject_code = "SURFACE_NOT_FOUND",
+            reject_reason = %reason,
+            "media ingress surface publish failed"
+        );
+        send_media_open_result(
+            session,
+            tx,
+            media_open_rejected(open.client_stream_id, "SURFACE_NOT_FOUND", reason),
+        )
+        .await;
+        return;
+    }
+
+    session.media_ingress = Some(ActiveMediaIngressStream {
+        stream_epoch,
+        zone_name,
+        surface_id,
+    });
+    tracing::info!(
+        subsystem = "media_ingress",
+        agent = %session.agent_name,
+        stream_epoch,
+        "media ingress admission granted"
+    );
+    send_media_open_result(
+        session,
+        tx,
+        MediaIngressOpenResult {
+            client_stream_id: open.client_stream_id,
+            admitted: true,
+            stream_epoch,
+            assigned_surface_id: scene_id_to_bytes(surface_id),
+            selected_codec,
+            runtime_sdp_offer: Vec::new(),
+            reject_reason: String::new(),
+            reject_code: String::new(),
+            runtime_sdp_answer: Vec::new(),
+        },
+    )
+    .await;
+    send_media_state(session, tx, stream_epoch, 1).await;
+}
+
+async fn close_active_media_ingress(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    reason: i32,
+    detail: impl Into<String>,
+    final_state: i32,
+    retry_after_us: Option<u64>,
+) -> bool {
+    let Some(active) = session.media_ingress.take() else {
+        return false;
+    };
+    let detail = detail.into();
+    {
+        let st = state.lock().await;
+        let _ = st
+            .scene
+            .lock()
+            .await
+            .clear_zone_for_publisher(&active.zone_name, &session.namespace);
+    }
+    tracing::info!(
+        subsystem = "media_ingress",
+        agent = %session.agent_name,
+        stream_epoch = active.stream_epoch,
+        surface_id = %active.surface_id,
+        close_reason = reason,
+        detail = %detail,
+        "media ingress stream closed"
+    );
+    send_media_state(session, tx, active.stream_epoch, final_state).await;
+    send_media_close_notice(
+        session,
+        tx,
+        active.stream_epoch,
+        reason,
+        detail,
+        retry_after_us,
+    )
+    .await;
+    true
+}
+
+async fn handle_media_ingress_close(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    close: MediaIngressClose,
+) {
+    match session.media_ingress.as_ref() {
+        Some(active) if active.stream_epoch == close.stream_epoch => {
+            let detail = if close.reason.is_empty() {
+                "agent closed media ingress stream".to_string()
+            } else {
+                close.reason
+            };
+            close_active_media_ingress(state, session, tx, 1, detail, 6, None).await;
+        }
+        _ => {
+            send_runtime_error(
+                session,
+                tx,
+                "MEDIA_STREAM_NOT_FOUND",
+                "no active media ingress stream matches the requested stream_epoch",
+                &format!("stream_epoch={}", close.stream_epoch),
+                ErrorCode::InvalidArgument,
+            )
+            .await;
+        }
     }
 }
 
@@ -5107,6 +5559,21 @@ async fn handle_capability_revocation(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     event: CapabilityRevocationEvent,
 ) {
+    if event.capability_name == "media_ingress" {
+        session.capabilities.retain(|c| c != &event.capability_name);
+        close_active_media_ingress(
+            state,
+            session,
+            tx,
+            3,
+            "media_ingress capability revoked",
+            7,
+            None,
+        )
+        .await;
+        return;
+    }
+
     // Map canonical capability name to enum value.
     let Some(cap) = canonical_name_to_capability(&event.capability_name) else {
         // Unknown capability name — emit a diagnostic and return.
@@ -6932,6 +7399,88 @@ mod tests {
         (client, handle)
     }
 
+    fn media_ingress_config(enabled: bool) -> tze_hud_scene::config::MediaIngressConfig {
+        tze_hud_scene::config::MediaIngressConfig {
+            enabled,
+            approved_zone: Some(tze_hud_scene::config::APPROVED_MEDIA_ZONE.to_string()),
+            zone_geometry: Some(tze_hud_scene::GeometryPolicy::Relative {
+                x_pct: 0.7,
+                y_pct: 0.05,
+                width_pct: 0.25,
+                height_pct: 0.2,
+            }),
+            max_active_streams: 1,
+            default_classification: Some("public".to_string()),
+            operator_disabled: false,
+        }
+    }
+
+    fn register_media_pip_zone(scene: &mut SceneGraph) {
+        scene.register_zone(tze_hud_scene::ZoneDefinition {
+            id: tze_hud_scene::SceneId::new(),
+            name: tze_hud_scene::config::APPROVED_MEDIA_ZONE.to_string(),
+            description: "test media pip".to_string(),
+            geometry_policy: tze_hud_scene::GeometryPolicy::Relative {
+                x_pct: 0.7,
+                y_pct: 0.05,
+                width_pct: 0.25,
+                height_pct: 0.2,
+            },
+            accepted_media_types: vec![tze_hud_scene::ZoneMediaType::VideoSurfaceRef],
+            rendering_policy: tze_hud_scene::RenderingPolicy::default(),
+            contention_policy: tze_hud_scene::ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: Some(tze_hud_scene::TransportConstraint::WebRtcRequired),
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: tze_hud_scene::LayerAttachment::Content,
+        });
+    }
+
+    async fn setup_media_ingress_test(
+        media_config: tze_hud_scene::config::MediaIngressConfig,
+    ) -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::broadcast::Sender<CapabilityRevocationEvent>,
+    ) {
+        let mut scene = SceneGraph::new(800.0, 600.0);
+        register_media_pip_zone(&mut scene);
+        let base = HudSessionImpl::new(scene, "test-key");
+        let mut caps = HashMap::new();
+        caps.insert(
+            "media-agent".to_string(),
+            vec![
+                "media_ingress".to_string(),
+                "publish_zone:media-pip".to_string(),
+            ],
+        );
+        caps.insert("guest-agent".to_string(), Vec::new());
+        let service = HudSessionImpl::from_shared_state_with_config_and_media_ingress(
+            base.state.clone(),
+            "test-key",
+            caps,
+            false,
+            media_config,
+        );
+        let revocation_tx = service.capability_revocation_tx.clone();
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        let client = connect_test_client_with_retry(addr.port()).await;
+        (client, handle, revocation_tx)
+    }
+
     async fn setup_test_with_input_capture_channel() -> (
         HudSessionClient<tonic::transport::Channel>,
         tokio::task::JoinHandle<()>,
@@ -7273,6 +7822,398 @@ mod tests {
 
         drop(_tx);
         drop(rx);
+    }
+
+    fn valid_media_open(zone_name: &str) -> MediaIngressOpen {
+        MediaIngressOpen {
+            client_stream_id: vec![0xA5; 16],
+            transport: Some(TransportDescriptor {
+                mode: 1,
+                agent_sdp_offer: Vec::new(),
+                agent_ice_credentials: Vec::new(),
+                relay_hint: 1,
+                preshared_srtp_material: Vec::new(),
+            }),
+            surface_binding: Some(media_ingress_open::SurfaceBinding::ZoneName(
+                zone_name.to_string(),
+            )),
+            codec_preference: vec![1, 3],
+            has_audio_track: false,
+            has_video_track: true,
+            content_classification: "public".to_string(),
+            present_at_wall_us: 0,
+            expires_at_wall_us: 0,
+            declared_peak_kbps: 2_000,
+        }
+    }
+
+    async fn media_handshake(
+        client: &mut HudSessionClient<tonic::transport::Channel>,
+        agent_id: &str,
+        requested_capabilities: Vec<String>,
+    ) -> (
+        tokio::sync::mpsc::Sender<ClientMessage>,
+        tonic::Streaming<ServerMessage>,
+    ) {
+        let (tx, _messages, stream) = handshake_with_requested_capabilities(
+            client,
+            agent_id,
+            "test-key",
+            requested_capabilities,
+        )
+        .await;
+        (tx, stream)
+    }
+
+    #[tokio::test]
+    async fn media_ingress_open_admits_one_configured_video_stream() {
+        let (mut client, _server, _revocation_tx) =
+            setup_media_ingress_test(media_ingress_config(true)).await;
+        let (tx, mut stream) = media_handshake(
+            &mut client,
+            "media-agent",
+            vec![
+                "media_ingress".to_string(),
+                "publish_zone:media-pip".to_string(),
+            ],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+                "media-pip",
+            ))),
+        })
+        .await
+        .unwrap();
+
+        let result = next_non_state_change(&mut stream).await;
+        match result.payload {
+            Some(ServerPayload::MediaIngressOpenResult(result)) => {
+                assert!(result.admitted, "valid media ingress should admit");
+                assert_ne!(result.stream_epoch, 0);
+                assert_eq!(result.assigned_surface_id.len(), 16);
+                assert_eq!(result.selected_codec, 1);
+                assert!(result.reject_code.is_empty());
+            }
+            other => panic!("expected MediaIngressOpenResult, got {other:?}"),
+        }
+        let state = next_non_state_change(&mut stream).await;
+        match state.payload {
+            Some(ServerPayload::MediaIngressState(state)) => {
+                assert_eq!(state.state, 1, "admitted state should be emitted");
+                assert_ne!(state.stream_epoch, 0);
+            }
+            other => panic!("expected MediaIngressState, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn media_ingress_disabled_gate_rejects_without_admission() {
+        let (mut client, _server, _revocation_tx) =
+            setup_media_ingress_test(media_ingress_config(false)).await;
+        let (tx, mut stream) = media_handshake(
+            &mut client,
+            "media-agent",
+            vec![
+                "media_ingress".to_string(),
+                "publish_zone:media-pip".to_string(),
+            ],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+                "media-pip",
+            ))),
+        })
+        .await
+        .unwrap();
+
+        let result = next_non_state_change(&mut stream).await;
+        match result.payload {
+            Some(ServerPayload::MediaIngressOpenResult(result)) => {
+                assert!(!result.admitted);
+                assert_eq!(result.stream_epoch, 0);
+                assert_eq!(result.reject_code, "MEDIA_DISABLED");
+            }
+            other => panic!("expected rejected MediaIngressOpenResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn media_ingress_rejects_second_stream_wrong_zone_missing_classification_and_audio() {
+        let (mut client, _server, _revocation_tx) =
+            setup_media_ingress_test(media_ingress_config(true)).await;
+        let (tx, mut stream) = media_handshake(
+            &mut client,
+            "media-agent",
+            vec![
+                "media_ingress".to_string(),
+                "publish_zone:media-pip".to_string(),
+            ],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+                "media-pip",
+            ))),
+        })
+        .await
+        .unwrap();
+        let first = next_non_state_change(&mut stream).await;
+        assert!(matches!(
+            first.payload,
+            Some(ServerPayload::MediaIngressOpenResult(
+                MediaIngressOpenResult { admitted: true, .. }
+            ))
+        ));
+        let _state = next_non_state_change(&mut stream).await;
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+                "media-pip",
+            ))),
+        })
+        .await
+        .unwrap();
+        let second = next_non_state_change(&mut stream).await;
+        match second.payload {
+            Some(ServerPayload::MediaIngressOpenResult(result)) => {
+                assert!(!result.admitted);
+                assert_eq!(result.reject_code, "SESSION_STREAM_LIMIT");
+            }
+            other => panic!("expected second stream rejection, got {other:?}"),
+        }
+
+        let (mut client_b, _server_b, _revocation_b) =
+            setup_media_ingress_test(media_ingress_config(true)).await;
+        let (tx_b, mut stream_b) = media_handshake(
+            &mut client_b,
+            "media-agent",
+            vec![
+                "media_ingress".to_string(),
+                "publish_zone:media-pip".to_string(),
+            ],
+        )
+        .await;
+        for (seq, open, expected) in [
+            (2, valid_media_open("subtitle"), "SURFACE_NOT_FOUND"),
+            (
+                3,
+                {
+                    let mut open = valid_media_open("media-pip");
+                    open.content_classification.clear();
+                    open
+                },
+                "CONTENT_CLASS_DENIED",
+            ),
+            (
+                4,
+                {
+                    let mut open = valid_media_open("media-pip");
+                    open.has_audio_track = true;
+                    open
+                },
+                "AUDIO_NOT_SUPPORTED",
+            ),
+            (
+                5,
+                {
+                    let mut open = valid_media_open("media-pip");
+                    open.content_classification = "private".to_string();
+                    open
+                },
+                "CONTENT_CLASS_DENIED",
+            ),
+            (
+                6,
+                {
+                    let mut open = valid_media_open("media-pip");
+                    open.declared_peak_kbps = MEDIA_INGRESS_PEAK_KBPS_BUDGET + 1;
+                    open
+                },
+                "BUDGET_EXCEEDED",
+            ),
+            (
+                7,
+                {
+                    let mut open = valid_media_open("media-pip");
+                    open.transport.as_mut().unwrap().mode = 3;
+                    open
+                },
+                "CAPABILITY_NOT_IMPLEMENTED",
+            ),
+        ] {
+            tx_b.send(ClientMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::MediaIngressOpen(open)),
+            })
+            .await
+            .unwrap();
+            let msg = next_non_state_change(&mut stream_b).await;
+            match msg.payload {
+                Some(ServerPayload::MediaIngressOpenResult(result)) => {
+                    assert!(!result.admitted);
+                    assert_eq!(result.reject_code, expected);
+                }
+                other => panic!("expected {expected} rejection, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn media_ingress_close_and_capability_revoke_emit_state_and_notice() {
+        let (mut client, _server, _revocation_tx) =
+            setup_media_ingress_test(media_ingress_config(true)).await;
+        let (tx, mut stream) = media_handshake(
+            &mut client,
+            "media-agent",
+            vec![
+                "media_ingress".to_string(),
+                "publish_zone:media-pip".to_string(),
+            ],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+                "media-pip",
+            ))),
+        })
+        .await
+        .unwrap();
+        let stream_epoch = match next_non_state_change(&mut stream).await.payload {
+            Some(ServerPayload::MediaIngressOpenResult(result)) => result.stream_epoch,
+            other => panic!("expected open result, got {other:?}"),
+        };
+        let _admitted = next_non_state_change(&mut stream).await;
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MediaIngressClose(MediaIngressClose {
+                stream_epoch,
+                reason: "test complete".to_string(),
+            })),
+        })
+        .await
+        .unwrap();
+        let closed_state = next_non_state_change(&mut stream).await;
+        assert!(matches!(
+            closed_state.payload,
+            Some(ServerPayload::MediaIngressState(MediaIngressState {
+                state: 6,
+                ..
+            }))
+        ));
+        let notice = next_non_state_change(&mut stream).await;
+        match notice.payload {
+            Some(ServerPayload::MediaIngressCloseNotice(notice)) => {
+                assert_eq!(notice.stream_epoch, stream_epoch);
+                assert_eq!(notice.reason, 1);
+            }
+            other => panic!("expected close notice, got {other:?}"),
+        }
+
+        let (mut client, _server, revocation_tx) =
+            setup_media_ingress_test(media_ingress_config(true)).await;
+        let (tx, mut stream) = media_handshake(
+            &mut client,
+            "media-agent",
+            vec![
+                "media_ingress".to_string(),
+                "publish_zone:media-pip".to_string(),
+            ],
+        )
+        .await;
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+                "media-pip",
+            ))),
+        })
+        .await
+        .unwrap();
+        let _result = next_non_state_change(&mut stream).await;
+        let _state = next_non_state_change(&mut stream).await;
+        let lease_id = tze_hud_scene::SceneId::new();
+        let _ = revocation_tx.send(CapabilityRevocationEvent {
+            lease_id,
+            capability_name: "media_ingress".to_string(),
+        });
+        let mut saw_revoked_state = false;
+        let mut saw_revoke_notice = false;
+        for _ in 0..4 {
+            let msg = next_non_state_change(&mut stream).await;
+            match msg.payload {
+                Some(ServerPayload::MediaIngressState(state)) if state.state == 7 => {
+                    saw_revoked_state = true;
+                }
+                Some(ServerPayload::MediaIngressCloseNotice(notice)) if notice.reason == 3 => {
+                    saw_revoke_notice = true;
+                }
+                _ => {}
+            }
+            if saw_revoked_state && saw_revoke_notice {
+                break;
+            }
+        }
+        assert!(
+            saw_revoked_state,
+            "capability revoke should emit REVOKED state"
+        );
+        assert!(
+            saw_revoke_notice,
+            "capability revoke should emit CAPABILITY_REVOKED notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_ingress_still_deferred_messages_return_runtime_error() {
+        let (mut client, _server, _revocation_tx) =
+            setup_media_ingress_test(media_ingress_config(true)).await;
+        let (tx, mut stream) = media_handshake(
+            &mut client,
+            "media-agent",
+            vec![
+                "media_ingress".to_string(),
+                "publish_zone:media-pip".to_string(),
+            ],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MediaPauseRequest(MediaPauseRequest {
+                stream_epoch: 1,
+                reason: "not active in slice".to_string(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = next_non_state_change(&mut stream).await;
+        match msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(err.error_code, "CAPABILITY_NOT_IMPLEMENTED");
+            }
+            other => panic!("expected deferred media RuntimeError, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -9711,6 +10652,8 @@ mod tests {
             resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
                 tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
             ),
+            media_ingress: None,
+            next_media_stream_epoch: 1,
         };
 
         // seq=2 (gap=1): OK
@@ -10416,6 +11359,8 @@ mod tests {
             resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
                 tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
             ),
+            media_ingress: None,
+            next_media_stream_epoch: 1,
         };
 
         handle_capability_request(
@@ -10482,6 +11427,8 @@ mod tests {
             resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
                 tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
             ),
+            media_ingress: None,
+            next_media_stream_epoch: 1,
         };
 
         // Request both an authorized and an unauthorized capability
@@ -10793,6 +11740,8 @@ mod tests {
             resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
                 tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
             ),
+            media_ingress: None,
+            next_media_stream_epoch: 1,
         };
 
         handle_capability_request(

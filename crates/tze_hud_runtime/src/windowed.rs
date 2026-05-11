@@ -3515,11 +3515,12 @@ fn start_network_services(
 
     // Wire config-driven capability registry into the session service.
     let agent_caps = runtime_context.snapshot_agent_capabilities();
-    let service = HudSessionImpl::from_shared_state_with_config(
+    let service = HudSessionImpl::from_shared_state_with_config_and_media_ingress(
         shared_state,
         psk,
         agent_caps,
         fallback_unrestricted,
+        runtime_context.media_ingress.clone(),
     );
 
     // Clone the broadcast senders before moving the service into the gRPC task.
