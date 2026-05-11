@@ -19,10 +19,14 @@ SSH_CONNECT_TIMEOUT_S="${SSH_CONNECT_TIMEOUT_S:-8}"
 STARTUP_WAIT_S="${STARTUP_WAIT_S:-5}"
 RECREATE_TASK_ON_START="${RECREATE_TASK_ON_START:-0}"
 TASK_START_TIME="${TASK_START_TIME:-23:59}"
+RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$SCRIPT_DIR}"
 
 ZONE_MESSAGES="$SCRIPT_DIR/replay-zone-messages.json"
 WIDGET_MESSAGES="$SCRIPT_DIR/replay-widget-messages.json"
-PORTAL_TRANSCRIPT="$SCRIPT_DIR/live-portal-transcript.json"
+ZONE_OUTPUT="${ZONE_OUTPUT:-$EVIDENCE_DIR/live-zone-replay-${RUN_STAMP}.json}"
+WIDGET_OUTPUT="${WIDGET_OUTPUT:-$EVIDENCE_DIR/live-widget-replay-${RUN_STAMP}.json}"
+PORTAL_TRANSCRIPT="${PORTAL_TRANSCRIPT:-$EVIDENCE_DIR/live-portal-transcript-${RUN_STAMP}.json}"
 
 log() {
   printf '[external-agent-projection-authority] %s\n' "$*"
@@ -119,6 +123,8 @@ POWERSHELL
 
 run_json_command_checked() {
   local label="$1"
+  local evidence_output="$2"
+  shift
   shift
   local output
   output="$(mktemp)"
@@ -149,10 +155,12 @@ run_json_command_checked() {
     rm -f "$output"
     fail 14 "$label produced invalid JSON output"
   fi
+  cp -f "$output" "$evidence_output"
   rm -f "$output"
 }
 
 cd "$REPO_ROOT"
+mkdir -p "$EVIDENCE_DIR"
 
 log "checking Tailscale reachability for $WIN_HOST"
 timeout "${PROBE_TIMEOUT_S}s" tailscale ping --c 1 "$WIN_HOST" \
@@ -186,6 +194,7 @@ tcp_probe 50051 >/dev/null \
 
 log "publishing zone replay through $MCP_HTTP_URL"
 run_json_command_checked "zone replay" \
+  "$ZONE_OUTPUT" \
   python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
@@ -194,6 +203,7 @@ run_json_command_checked "zone replay" \
 
 log "publishing widget replay through $MCP_HTTP_URL"
 run_json_command_checked "widget replay" \
+  "$WIDGET_OUTPUT" \
   python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
@@ -209,4 +219,6 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --phases composer-smoke \
   --transcript-out "$PORTAL_TRANSCRIPT"
 
+log "live replay complete; zone evidence: $ZONE_OUTPUT"
+log "live replay complete; widget evidence: $WIDGET_OUTPUT"
 log "live replay complete; portal transcript: $PORTAL_TRANSCRIPT"

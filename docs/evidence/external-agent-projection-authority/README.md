@@ -24,7 +24,7 @@ After `tzehouse-windows.parrot-hen.ts.net` is reachable, verify SSH, start `TzeH
 bash docs/evidence/external-agent-projection-authority/live-replay.sh
 ```
 
-The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. Zone and widget replay steps fail if either the command exits nonzero or any JSON line contains a top-level error, discovery error, publish response error, or cleanup response error. It expects `TZE_HUD_PSK` to be set locally, but accepts `MCP_TEST_PSK` as a fallback for the MCP publish scripts and exports the same value for the portal smoke. It never writes the value into artifacts.
+The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. Zone and widget replay steps fail if either the command exits nonzero or any JSON line contains a top-level error, discovery error, publish response error, or cleanup response error. On successful publish steps it writes timestamped `live-zone-replay-<stamp>.json`, `live-widget-replay-<stamp>.json`, and `live-portal-transcript-<stamp>.json` evidence files under this directory by default. It expects `TZE_HUD_PSK` to be set locally, but accepts `MCP_TEST_PSK` as a fallback for the MCP publish scripts and exports the same value for the portal smoke. It never writes the value into artifacts.
 
 If the host is reachable but the existing scheduled task starts without a non-default PSK, opt into task recreation before launch:
 
