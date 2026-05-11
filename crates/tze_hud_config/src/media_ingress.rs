@@ -4,7 +4,8 @@
 //! Windows-local, video-only stream in a config-owned `media-pip` content zone.
 
 use tze_hud_scene::config::{
-    ConfigError, ConfigErrorCode, MediaIngressConfig as ResolvedMediaIngressConfig,
+    APPROVED_MEDIA_ZONE, ConfigError, ConfigErrorCode,
+    MediaIngressConfig as ResolvedMediaIngressConfig,
 };
 use tze_hud_scene::types::{
     ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, SceneId,
@@ -14,7 +15,6 @@ use tze_hud_scene::types::{
 use crate::profile::resolve_headless_dimensions;
 use crate::raw::{RawConfig, RawWidgetGeometry};
 
-pub const APPROVED_MEDIA_ZONE: &str = "media-pip";
 pub const REQUIRED_MAX_ACTIVE_STREAMS: u32 = 1;
 
 /// Validate the optional `[media_ingress]` table.

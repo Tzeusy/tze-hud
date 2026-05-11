@@ -12,6 +12,7 @@
 //!
 //! - **Profile budgets** — max tiles, max texture MB, max agents, target/min FPS.
 //! - **Agent capability registry** — per-agent capability grants from `[agents.registered]`.
+//! - **Media ingress policy** — frozen Windows media-ingress startup gate.
 //! - **Hot-reloadable policy** — privacy, degradation, chrome, and dynamic agent policy
 //!   sections, which can be updated live without restart.
 //!
@@ -32,8 +33,8 @@
 //!
 //! ### Frozen fields
 //!
-//! `profile`, `agent_capabilities`, and `fallback_policy` are frozen at startup.
-//! A restart is required to change them.
+//! `profile`, `media_ingress`, `agent_capabilities`, and `fallback_policy` are
+//! frozen at startup. A restart is required to change them.
 //!
 //! ### Hot-reloadable fields
 //!
@@ -110,8 +111,9 @@ impl Default for FallbackPolicy {
 ///
 /// Built once at startup; shared via `Arc<RuntimeContext>` across all subsystems.
 ///
-/// **Frozen fields** (`profile`, `agent_capabilities`, `fallback_policy`) are
-/// immutable after construction. A restart is required to change them.
+/// **Frozen fields** (`profile`, `media_ingress`, `agent_capabilities`,
+/// `fallback_policy`) are immutable after construction. A restart is required
+/// to change them.
 ///
 /// **Hot-reloadable fields** are held in `hot` as an `ArcSwap<HotReloadableConfig>`.
 /// Call `reload_hot_config()` to atomically swap in a freshly validated config subset

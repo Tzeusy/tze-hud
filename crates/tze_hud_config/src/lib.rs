@@ -83,8 +83,7 @@ pub use component_profiles::{ComponentProfile, ZoneRenderingOverride, scan_profi
 pub use component_types::{ComponentType, ComponentTypeContract, ReadabilityTechnique};
 pub use loader::TzeHudConfig;
 pub use media_ingress::{
-    APPROVED_MEDIA_ZONE, REQUIRED_MAX_ACTIVE_STREAMS, approved_media_zone, resolve_media_ingress,
-    validate_media_ingress,
+    REQUIRED_MAX_ACTIVE_STREAMS, approved_media_zone, resolve_media_ingress, validate_media_ingress,
 };
 pub use policy_builder::{
     ProfileSelection, apply_token_defaults_for_zone, build_all_effective_policies,
@@ -111,3 +110,5 @@ pub use widgets::{
     LoadedWidgetType, build_widget_instance, validate_widget_bundles, validate_widget_instances,
 };
 pub use zones::{BUILTIN_ZONE_TYPES, is_known_zone_type, validate_zone_type_ref, validate_zones};
+
+pub use tze_hud_scene::config::APPROVED_MEDIA_ZONE;

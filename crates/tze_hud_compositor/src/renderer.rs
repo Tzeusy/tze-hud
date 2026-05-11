@@ -164,11 +164,6 @@ const VIDEO_SURFACE_PLACEHOLDER_COLOR: Rgba = Rgba {
     a: 1.0,
 };
 
-/// The only zone allowed to render v2 preview video frames in the accepted
-/// Windows media ingress slice.
-#[cfg(feature = "v2_preview")]
-const APPROVED_WINDOWS_MEDIA_ZONE: &str = "media-pip";
-
 /// Size of a notification icon in pixels (square, 24×24).
 ///
 /// Icons are rendered left-aligned within the notification backdrop, at the
@@ -2280,11 +2275,7 @@ impl Compositor {
                 );
                 return false;
             }
-            VideoRenderState::Placeholder => {
-                self.video_surfaces.ensure(surface_id);
-                self.video_surfaces
-                    .handle(surface_id, &MediaEvent::Admitted);
-            }
+            VideoRenderState::Placeholder => {}
             VideoRenderState::Streaming | VideoRenderState::LastFrameWithBadge => {}
         }
 
@@ -2387,8 +2378,16 @@ impl Compositor {
                 height: frame.height,
             },
         );
+        if matches!(
+            self.video_surfaces.render_state_for(&surface_id),
+            VideoRenderState::Placeholder
+        ) {
+            self.video_surfaces.ensure(surface_id);
+            self.video_surfaces
+                .handle(surface_id, &MediaEvent::Admitted);
+        }
         self.video_surfaces
-            .handle(surface_id, &MediaEvent::FrameDecoded(frame.clone()));
+            .handle_decoded_frame(surface_id, frame.clone());
 
         true
     }
@@ -2445,57 +2444,64 @@ impl Compositor {
         use crate::video_surface::VideoRenderState;
 
         let mut cmds = Vec::new();
-        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
-            if zone_name != APPROVED_WINDOWS_MEDIA_ZONE {
-                continue;
-            }
-            if publishes.is_empty() {
-                continue;
-            }
-            // Check whether any publication in this zone is a VideoSurfaceRef.
-            let surface_id = publishes.iter().rev().find_map(|record| {
-                if let ZoneContent::VideoSurfaceRef(sid) = &record.content {
-                    Some(*sid)
-                } else {
-                    None
-                }
-            });
-            let surface_id = match surface_id {
-                Some(sid) => sid,
-                None => continue,
-            };
-
-            // Only draw the real texture when a GPU texture is cached (upload_video_frame
-            // was called) AND the surface is in a frame-visible render state.
-            let render_state = self.video_surfaces.render_state_for(&surface_id);
-            let has_texture = self.video_frame_cache.contains_key(&surface_id);
-            if !has_texture {
-                continue; // no frame uploaded yet — dark placeholder from render_zone_content
-            }
-            match render_state {
-                VideoRenderState::Streaming | VideoRenderState::LastFrameWithBadge => {}
-                VideoRenderState::Placeholder | VideoRenderState::Closed => continue,
-            }
-
-            // Resolve zone geometry.
-            let zone_def = match scene.zone_registry.zones.get(zone_name) {
-                Some(z) => z,
-                None => continue,
-            };
-            let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
-            if w <= 0.0 || h <= 0.0 {
-                continue;
-            }
-
-            cmds.push(VideoFrameDrawCmd {
-                surface_id,
-                x,
-                y,
-                w,
-                h,
-                tint: [1.0, 1.0, 1.0, 1.0],
-            });
+        let Some(publishes) = scene
+            .zone_registry
+            .active_publishes
+            .get(tze_hud_scene::config::APPROVED_MEDIA_ZONE)
+        else {
+            return cmds;
+        };
+        if publishes.is_empty() {
+            return cmds;
         }
+
+        // Check whether any publication in this zone is a VideoSurfaceRef.
+        let surface_id = publishes.iter().rev().find_map(|record| {
+            if let ZoneContent::VideoSurfaceRef(sid) = &record.content {
+                Some(*sid)
+            } else {
+                None
+            }
+        });
+        let surface_id = match surface_id {
+            Some(sid) => sid,
+            None => return cmds,
+        };
+
+        // Only draw the real texture when a GPU texture is cached (upload_video_frame
+        // was called) AND the surface is in a frame-visible render state.
+        let render_state = self.video_surfaces.render_state_for(&surface_id);
+        let has_texture = self.video_frame_cache.contains_key(&surface_id);
+        if !has_texture {
+            return cmds; // no frame uploaded yet — dark placeholder from render_zone_content
+        }
+        match render_state {
+            VideoRenderState::Streaming | VideoRenderState::LastFrameWithBadge => {}
+            VideoRenderState::Placeholder | VideoRenderState::Closed => return cmds,
+        }
+
+        // Resolve zone geometry.
+        let zone_def = match scene
+            .zone_registry
+            .zones
+            .get(tze_hud_scene::config::APPROVED_MEDIA_ZONE)
+        {
+            Some(z) => z,
+            None => return cmds,
+        };
+        let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
+        if w <= 0.0 || h <= 0.0 {
+            return cmds;
+        }
+
+        cmds.push(VideoFrameDrawCmd {
+            surface_id,
+            x,
+            y,
+            w,
+            h,
+            tint: [1.0, 1.0, 1.0, 1.0],
+        });
         cmds
     }
 
@@ -14578,7 +14584,7 @@ mod tests {
         let mut scene = SceneGraph::new(320.0, 180.0);
         scene.register_zone(ZoneDefinition {
             id: SceneId::new(),
-            name: "media-pip".to_owned(),
+            name: tze_hud_scene::config::APPROVED_MEDIA_ZONE.to_owned(),
             description: "approved media surface zone".to_owned(),
             geometry_policy: GeometryPolicy::Relative {
                 x_pct: 0.25,
@@ -14597,7 +14603,7 @@ mod tests {
         });
         scene
             .publish_to_zone(
-                "media-pip",
+                tze_hud_scene::config::APPROVED_MEDIA_ZONE,
                 ZoneContent::VideoSurfaceRef(surface_id),
                 "synthetic-media-test",
                 None,
@@ -14693,6 +14699,37 @@ mod tests {
         assert!(
             after[0] < 80 && after[1] < 80 && after[2] < 80 && after[3] > 200,
             "after teardown, media-pip should return to deterministic placeholder, got {after:?}"
+        );
+    }
+
+    /// Invalid synthetic frames must not admit a placeholder surface into
+    /// Streaming or populate the GPU texture cache.
+    #[tokio::test]
+    #[cfg(feature = "v2_preview")]
+    async fn test_invalid_video_surface_frame_does_not_mutate_state() {
+        use crate::video_surface::VideoRenderState;
+
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
+        let surface_id = SceneId::new();
+        let invalid = crate::video_surface::VideoFrame {
+            rgba: vec![255, 0, 0],
+            width: 1,
+            height: 1,
+            presented_at_us: 1,
+        };
+
+        assert!(
+            !compositor.upload_video_frame(surface_id, &invalid),
+            "invalid byte count must be rejected"
+        );
+        assert_eq!(
+            compositor.video_render_state(&surface_id),
+            VideoRenderState::Placeholder,
+            "rejected first frame must not advance the surface to Streaming"
+        );
+        assert!(
+            !compositor.video_frame_cache.contains_key(&surface_id),
+            "rejected first frame must not cache a texture"
         );
     }
 

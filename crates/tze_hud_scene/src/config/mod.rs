@@ -5,6 +5,12 @@
 //! and related requirements.  This module defines **only** the trait contract
 //! and supporting types — no implementation is provided here.
 
+/// Canonical approved Windows media-ingress zone.
+///
+/// Runtime config validation, compositor rendering, and test fixtures must use
+/// the same value so media admission and rendering scope cannot drift.
+pub const APPROVED_MEDIA_ZONE: &str = "media-pip";
+
 // ─── Error Codes ─────────────────────────────────────────────────────────────
 
 /// Stable configuration error codes.
