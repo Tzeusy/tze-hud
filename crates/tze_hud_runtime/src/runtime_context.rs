@@ -307,6 +307,7 @@ mod tests {
             profile: DisplayProfile::headless(),
             tab_names: vec!["main".to_string()],
             agent_capabilities,
+            media_ingress: Default::default(),
             source_path: None,
         }
     }

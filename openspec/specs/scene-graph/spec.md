@@ -574,6 +574,7 @@ Scope: post-v1
 
 ### Requirement: VideoSurfaceRef and WebRtcRequired (Deferred)
 The VideoSurfaceRef zone media type and the WebRtcRequired transport constraint are deferred to the post-v1 media layer. Implementations SHALL treat VideoSurfaceRef as unsupported in v1.
+Narrow exception: the accepted `openspec/changes/windows-media-ingress-exemplar/` change may enable `VideoSurfaceRef` only for the explicitly configured Windows `media-pip` zone. Existing default zones such as `pip` and `ambient-background` MUST NOT implicitly accept `VideoSurfaceRef`.
 Source: RFC 0001 §2.5
 Scope: post-v1
 

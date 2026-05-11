@@ -38,6 +38,7 @@ use tze_hud_scene::config::{
 
 use crate::agents;
 use crate::capability::{capability_hint, has_reserved_event_prefix};
+use crate::media_ingress;
 use crate::privacy;
 use crate::profile;
 use crate::raw::{RawConfig, RawDegradation};
@@ -221,6 +222,9 @@ impl ConfigLoader for TzeHudConfig {
             zones::validate_zones(zone_registry, &mut errors);
         }
 
+        // ── (10b) Windows media ingress configuration ─────────────────────────
+        media_ingress::validate_media_ingress(&self.raw, &mut errors);
+
         // ── (11) Agent registration budgets ───────────────────────────────────
         // We need the resolved profile for budget ceiling checks.  Derive it
         // here from the raw config (best-effort; skip if profile is invalid).
@@ -379,6 +383,7 @@ impl ConfigLoader for TzeHudConfig {
             profile,
             tab_names,
             agent_capabilities,
+            media_ingress: media_ingress::resolve_media_ingress(&self.raw),
             source_path,
         })
     }

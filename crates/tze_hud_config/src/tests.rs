@@ -973,7 +973,7 @@ capabilities = ["zone_publish"]
     );
 }
 
-/// WHEN all 14 flat canonical capabilities in agent config THEN no errors.
+/// WHEN all flat canonical capabilities in agent config THEN no errors.
 #[test]
 fn spec_all_flat_canonical_capabilities_accepted() {
     let caps = [
@@ -990,6 +990,7 @@ fn spec_all_flat_canonical_capabilities_accepted() {
         "high_priority_z_order",
         "exceed_default_budgets",
         "read_telemetry",
+        "media_ingress",
         "resident_mcp",
     ];
     let cap_list = caps
@@ -1023,6 +1024,103 @@ capabilities = [{cap_list}]
     assert!(
         cap_errors.is_empty(),
         "all flat canonical capabilities should be accepted, got errors: {cap_errors:?}"
+    );
+}
+
+#[test]
+fn media_ingress_absent_defaults_to_disabled() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+"#;
+    let resolved = parse_ok(toml).freeze().expect("config should freeze");
+    assert!(!resolved.media_ingress.enabled);
+    assert_eq!(resolved.media_ingress.max_active_streams, 0);
+    assert!(resolved.media_ingress.approved_zone.is_none());
+}
+
+#[test]
+fn media_ingress_explicit_windows_slice_freezes() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[media_ingress]
+enabled = true
+approved_zone = "media-pip"
+max_active_streams = 1
+default_classification = "household"
+operator_disabled = false
+
+[media_ingress.geometry]
+x = 1440
+y = 756
+width = 420
+height = 236
+
+[agents.registered.windows-local-media-producer]
+capabilities = ["media_ingress", "publish_zone:media-pip"]
+"#;
+    let resolved = parse_ok(toml).freeze().expect("config should freeze");
+    assert!(resolved.media_ingress.enabled);
+    assert_eq!(
+        resolved.media_ingress.approved_zone.as_deref(),
+        Some("media-pip")
+    );
+    assert_eq!(resolved.media_ingress.max_active_streams, 1);
+    assert_eq!(
+        resolved.media_ingress.default_classification.as_deref(),
+        Some("household")
+    );
+    assert!(!resolved.media_ingress.operator_disabled);
+    assert_eq!(
+        resolved
+            .agent_capabilities
+            .get("windows-local-media-producer")
+            .expect("producer should be registered"),
+        &vec![
+            "media_ingress".to_string(),
+            "publish_zone:media-pip".to_string()
+        ]
+    );
+}
+
+#[test]
+fn media_ingress_enabled_requires_approved_zone_and_fixed_geometry() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[media_ingress]
+enabled = true
+approved_zone = "pip"
+max_active_streams = 2
+default_classification = ""
+
+[media_ingress.geometry]
+x_pct = 0.75
+y_pct = 0.70
+width_pct = 0.22
+height_pct = 0.26
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let media_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| matches!(e.code, ConfigErrorCode::ConfigInvalidMediaIngress))
+        .collect();
+    assert!(
+        media_errors.len() >= 4,
+        "invalid media ingress config should report all media errors: {media_errors:?}"
     );
 }
 

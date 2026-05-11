@@ -69,6 +69,8 @@ pub enum ConfigErrorCode {
     ConfigUnknownComponentProfile,
     /// A `[component_profiles]` entry maps a component type to a profile of a different type.
     ConfigProfileTypeMismatch,
+    /// A `[media_ingress]` field is missing, malformed, or outside the approved Windows slice.
+    ConfigInvalidMediaIngress,
     Other(String),
 }
 
@@ -160,8 +162,38 @@ pub struct ResolvedConfig {
     pub profile: DisplayProfile,
     pub tab_names: Vec<String>,
     pub agent_capabilities: std::collections::HashMap<String, Vec<String>>,
+    /// Frozen Windows media-ingress config. Defaults to disabled.
+    pub media_ingress: MediaIngressConfig,
     /// Sourced TOML file path.
     pub source_path: Option<String>,
+}
+
+/// Frozen Windows media-ingress configuration.
+///
+/// The default is intentionally disabled and contains no approved zone, so
+/// runtimes cannot start media transport or decode workers without an explicit
+/// `[media_ingress]` table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaIngressConfig {
+    pub enabled: bool,
+    pub approved_zone: Option<String>,
+    pub zone_geometry: Option<crate::types::GeometryPolicy>,
+    pub max_active_streams: u32,
+    pub default_classification: Option<String>,
+    pub operator_disabled: bool,
+}
+
+impl Default for MediaIngressConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            approved_zone: None,
+            zone_geometry: None,
+            max_active_streams: 0,
+            default_classification: None,
+            operator_disabled: false,
+        }
+    }
 }
 
 // ─── ConfigLoader Trait ───────────────────────────────────────────────────────
@@ -231,6 +263,7 @@ pub const CANONICAL_CAPABILITIES: &[&str] = &[
     "high_priority_z_order",
     "exceed_default_budgets",
     "read_telemetry",
+    "media_ingress",
     "resident_mcp",
     // Parameterized — wildcard or specific zone.
     "publish_zone:*",
@@ -418,6 +451,7 @@ capabilities = ["createTiles"]
         assert!(is_canonical_capability("read_scene_topology"));
         assert!(is_canonical_capability("access_input_events"));
         assert!(is_canonical_capability("register_widget_asset"));
+        assert!(is_canonical_capability("media_ingress"));
         assert!(is_canonical_capability("publish_zone:subtitle"));
         assert!(is_canonical_capability("emit_scene_event:doorbell.ring"));
         assert!(is_canonical_capability("lease:priority:1"));

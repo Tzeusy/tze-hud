@@ -190,7 +190,7 @@ pub enum MediaCloseReason {
     AgentClosed,
     /// Owning lease was revoked (RFC 0008 §3).
     LeaseRevoked,
-    /// `media-ingress` capability revoked (RFC 0008 A1 §A3.4).
+    /// `media_ingress` capability revoked (RFC 0008 A1 §A3.4).
     CapabilityRevoked,
     /// Human override (chrome mute).
     OperatorMute,
@@ -934,7 +934,7 @@ impl MediaIngressStateMachine {
 /// (SHOUTY_SNAKE_CASE strings).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaAdmissionRejectCode {
-    /// Session does not hold `media-ingress` capability (RFC 0008 A1 §A2).
+    /// Session does not hold `media_ingress` capability (RFC 0008 A1 §A2).
     CapabilityRequired,
     /// Operator denied the capability dialog (RFC 0008 A1 §A6).
     CapabilityDialogDenied,
@@ -1032,10 +1032,10 @@ pub enum MediaAdmissionError {
 /// validation.
 #[derive(Debug, Clone)]
 pub struct MediaAdmissionRequest {
-    /// Session holds the `media-ingress` capability (RFC 0008 A1 §A2).
+    /// Session holds the `media_ingress` capability (RFC 0008 A1 §A2).
     pub has_media_ingress_capability: bool,
 
-    /// `media-ingress` capability is enabled at deployment level.
+    /// `media_ingress` capability is enabled at deployment level.
     pub capability_enabled: bool,
 
     /// Number of currently active streams for the requesting session.
@@ -1085,17 +1085,17 @@ pub fn check_media_admission(req: &MediaAdmissionRequest) -> MediaAdmissionOutco
         );
         return MediaAdmissionOutcome::Rejected {
             code: MediaAdmissionRejectCode::CapabilityNotEnabled,
-            reason: "media-ingress capability is disabled at deployment level".to_string(),
+            reason: "media_ingress capability is disabled at deployment level".to_string(),
         };
     }
     if !req.has_media_ingress_capability {
         warn!(
             reject_code = "CAPABILITY_REQUIRED",
-            "session lacks media-ingress capability"
+            "session lacks media_ingress capability"
         );
         return MediaAdmissionOutcome::Rejected {
             code: MediaAdmissionRejectCode::CapabilityRequired,
-            reason: "session does not hold media-ingress capability".to_string(),
+            reason: "session does not hold media_ingress capability".to_string(),
         };
     }
 

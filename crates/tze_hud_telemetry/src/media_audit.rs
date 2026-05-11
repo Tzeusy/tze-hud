@@ -18,7 +18,7 @@
 //! | `media_stream_close` | `MediaIngressCloseNotice` emitted (any reason) |
 //! | `media_stream_revoke` | Stream transitions to `REVOKED` state |
 //! | `media_degradation_step` | `MediaDegradationNotice` with non-zero `ladder_step` |
-//! | `media_capability_revoke` | `media-ingress` (or related) capability revoked mid-session |
+//! | `media_capability_revoke` | `media_ingress` (or related) capability revoked mid-session |
 //! | `media_preempt` | Pool preemption (RFC 0002 A1 §A3.2) |
 //! | `media_operator_override` | Operator chrome-level mute/pause/revoke |
 //!
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MediaRejectCode {
-    /// `media-ingress` (or related) capability is not present in the session.
+    /// `media_ingress` (or related) capability is not present in the session.
     CapabilityRequired,
     /// Capability is disabled at deployment config level.
     CapabilityNotEnabled,
@@ -163,7 +163,7 @@ pub enum MediaCloseReason {
     EmbodimentRevoked,
     /// E25 step 10 / session teardown.
     SessionDisconnected,
-    /// `media-ingress` capability revoked mid-session.
+    /// `media_ingress` capability revoked mid-session.
     CapabilityRevoked,
     /// Operator chrome-level mute affordance.
     OperatorMute,
@@ -203,7 +203,7 @@ pub enum OperatorOverrideKind {
     Pause,
     /// Operator resumed a paused stream.
     Resume,
-    /// Operator revoked the `media-ingress` capability for this session.
+    /// Operator revoked the `media_ingress` capability for this session.
     RevokeCapability,
 }
 
@@ -247,7 +247,7 @@ pub enum MediaAuditEvent {
         agent_namespace: String,
         /// Stream epoch assigned to the newly admitted stream.
         stream_epoch: String,
-        /// Capability token that was granted (e.g. `"media-ingress"`).
+        /// Capability token that was granted (e.g. `"media_ingress"`).
         capability: String,
         /// UTC microseconds when the grant was recorded.
         timestamp_us: u64,
@@ -309,7 +309,7 @@ pub enum MediaAuditEvent {
         timestamp_us: u64,
     },
 
-    /// `media-ingress` (or related) capability revoked mid-session.
+    /// `media_ingress` (or related) capability revoked mid-session.
     MediaCapabilityRevoke {
         /// Session from which the capability was revoked.
         session_id: String,
@@ -521,7 +521,7 @@ mod tests {
             session_id: "sess-abc".to_string(),
             agent_namespace: "agent-x".to_string(),
             stream_epoch: "epoch-1".to_string(),
-            capability: "media-ingress".to_string(),
+            capability: "media_ingress".to_string(),
             timestamp_us: 1_000_000,
         };
         let json = serde_json::to_string(&event).expect("serialize should succeed");
@@ -530,7 +530,7 @@ mod tests {
             "event tag missing: {json}"
         );
         assert!(json.contains(r#""session_id":"sess-abc""#));
-        assert!(json.contains(r#""capability":"media-ingress""#));
+        assert!(json.contains(r#""capability":"media_ingress""#));
         assert_eq!(event.event_name(), "media_admission_grant");
     }
 
@@ -572,7 +572,7 @@ mod tests {
         let event = MediaAuditEvent::CapabilityDialogGrant {
             session_id: "sess-g".to_string(),
             agent_namespace: "agent-a".to_string(),
-            capability: "media-ingress".to_string(),
+            capability: "media_ingress".to_string(),
             granted_by: "operator-uuid".to_string(),
             granted_at_us: 1_234_567_890_000_000,
             remember_written: true,

@@ -747,6 +747,23 @@ fn video_surface_ref_schema_defined_but_not_rendered() {
     );
 }
 
+#[test]
+fn default_pip_and_ambient_background_do_not_accept_video_surface_ref() {
+    let registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+    for zone_name in ["pip", "ambient-background"] {
+        let zone = registry
+            .zones
+            .get(zone_name)
+            .expect("default zone should exist");
+        assert!(
+            !zone
+                .accepted_media_types
+                .contains(&ZoneMediaType::VideoSurfaceRef),
+            "{zone_name} must not implicitly accept VideoSurfaceRef"
+        );
+    }
+}
+
 // ─── ZonePublishToken validation ──────────────────────────────────────────────
 
 #[test]
