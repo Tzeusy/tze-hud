@@ -11,7 +11,8 @@ This directory contains the headless demo artifact and replay fixtures for the 2
 - `watch-live-replay.sh`: Bounded reachability watcher that polls Tailscale and runs `live-replay.sh` as soon as Windows responds.
 - `live-replay-blocked-watch-20260511T025838Z.txt`: Bounded 10-poll reachability watch showing the live replay remained blocked before SSH/MCP/gRPC.
 - `live-replay-blocked-20260511T042949Z.txt`: Latest direct live replay attempt after runtime-auth material hardening; still blocked at Tailscale reachability before SSH/MCP/gRPC.
-- `live-replay-blocked-20260511T053140Z.txt`: Latest direct live replay attempt after the bounded watcher landed; still blocked at Tailscale reachability before SSH/MCP/gRPC.
+- `live-replay-blocked-20260511T053140Z.txt`: Direct live replay attempt after the bounded watcher landed; still blocked at Tailscale reachability before SSH/MCP/gRPC.
+- `live-replay-blocked-20260511T072612Z.txt`: Latest direct live replay attempt; still blocked at Tailscale reachability before SSH/MCP/gRPC.
 - `live-replay-blocked-watch-20260511T055927Z.txt`: Bounded 3-poll reachability watch; still blocked at Tailscale reachability before SSH/MCP/gRPC.
 - `live-replay-blocked-watch-20260511T070511Z.txt`: Latest bounded 3-poll reachability watch; still blocked at Tailscale reachability before SSH/MCP/gRPC.
 
@@ -45,7 +46,9 @@ The watcher exits `20` if the host never becomes reachable. If Tailscale ping su
 
 The demo plan's lifecycle checks are headless evidence only; live replay must still verify runtime acceptance, visual behavior, and cleanup against the Windows HUD.
 
-Latest blocker evidence: `live-replay-blocked-watch-20260511T070511Z.txt`
+Latest blocker evidence: direct harness run `live-replay-blocked-20260511T072612Z.txt`
+exited `10` at the Tailscale gate before SSH, MCP, or gRPC could run. The
+latest bounded watch `live-replay-blocked-watch-20260511T070511Z.txt`
 shows a 3-poll window where the watcher exited `20` after Windows remained
 offline in Tailscale and `100.87.181.125` timed out/no reply before SSH, MCP,
 or gRPC could run.
