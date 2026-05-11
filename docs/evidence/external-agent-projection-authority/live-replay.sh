@@ -11,7 +11,6 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/ecdsa_home}"
 TASK_NAME="${TASK_NAME:-TzeHudOverlay}"
 HUD_EXE="${HUD_EXE:-C:\\tze_hud\\tze_hud.exe}"
 HUD_CONFIG="${HUD_CONFIG:-C:\\tze_hud\\tze_hud.toml}"
-HUD_WORKDIR="${HUD_WORKDIR:-C:\\tze_hud}"
 MCP_HTTP_URL="${MCP_HTTP_URL:-http://$WIN_HOST:9090/mcp}"
 GRPC_TARGET="${GRPC_TARGET:-$WIN_HOST:50051}"
 PSK_ENV="${PSK_ENV:-TZE_HUD_PSK}"
@@ -19,6 +18,7 @@ PROBE_TIMEOUT_S="${PROBE_TIMEOUT_S:-12}"
 SSH_CONNECT_TIMEOUT_S="${SSH_CONNECT_TIMEOUT_S:-8}"
 STARTUP_WAIT_S="${STARTUP_WAIT_S:-5}"
 RECREATE_TASK_ON_START="${RECREATE_TASK_ON_START:-0}"
+TASK_START_TIME="${TASK_START_TIME:-23:59}"
 
 ZONE_MESSAGES="$SCRIPT_DIR/replay-zone-messages.json"
 WIDGET_MESSAGES="$SCRIPT_DIR/replay-widget-messages.json"
@@ -93,25 +93,26 @@ register_overlay_task_with_psk() {
   local psk_literal
   local exe_literal
   local config_literal
-  local workdir_literal
   local task_literal
+  local start_time_literal
   psk_literal="$(ps_single_quote "$psk_value")"
   exe_literal="$(ps_single_quote "$HUD_EXE")"
   config_literal="$(ps_single_quote "$HUD_CONFIG")"
-  workdir_literal="$(ps_single_quote "$HUD_WORKDIR")"
   task_literal="$(ps_single_quote "$TASK_NAME")"
+  start_time_literal="$(ps_single_quote "$TASK_START_TIME")"
 
   {
     printf '$taskName = %s\n' "$task_literal"
     printf '$exe = %s\n' "$exe_literal"
     printf '$config = %s\n' "$config_literal"
-    printf '$workdir = %s\n' "$workdir_literal"
     printf '$psk = %s\n' "$psk_literal"
+    printf '$startTime = %s\n' "$start_time_literal"
     cat <<'POWERSHELL'
-$argument = "--config `"$config`" --window-mode overlay --grpc-port 50051 --mcp-port 9090 --psk `"$psk`""
-$action = New-ScheduledTaskAction -Execute $exe -Argument $argument -WorkingDirectory $workdir
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries
-Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Force | Out-Null
+$taskRun = "`"$exe`" --config `"$config`" --window-mode overlay --grpc-port 50051 --mcp-port 9090 --psk `"$psk`""
+& schtasks /Create /F /TN $taskName /SC ONCE /ST $startTime /IT /RL HIGHEST /TR $taskRun | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  exit $LASTEXITCODE
+}
 POWERSHELL
   } | run_control_powershell_stdin
 }

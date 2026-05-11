@@ -31,7 +31,7 @@ RECREATE_TASK_ON_START=1 \
   bash docs/evidence/external-agent-projection-authority/live-replay.sh
 ```
 
-This recreates `TzeHudOverlay` over SSH with the local PSK value from `TZE_HUD_PSK` or `MCP_TEST_PSK`, then starts the task. The PSK value is transmitted only over the SSH session and is not written to repo evidence files.
+This recreates `TzeHudOverlay` over SSH with `schtasks /Create /IT /RL HIGHEST`, the local PSK value from `TZE_HUD_PSK` or `MCP_TEST_PSK`, and the same overlay/gRPC/MCP arguments used by the recovery runbook, then starts the task. The PSK value is transmitted only over the SSH session and is not written to repo evidence files.
 
 For a bounded wait-and-run loop:
 
