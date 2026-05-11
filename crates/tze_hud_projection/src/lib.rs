@@ -12,8 +12,8 @@ pub mod resident_grpc;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt;
 use std::process::{Child, Command, Stdio};
+use std::{env, fmt};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
@@ -1244,6 +1244,39 @@ pub struct ManagedSessionHandle {
     pub owner_token: String,
 }
 
+/// Secret-bearing runtime authentication material resolved just-in-time by
+/// the external authority. This intentionally has no `Serialize` impl.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RuntimeAuthenticationMaterial {
+    pub target_id: String,
+    pub mcp_url: Option<String>,
+    pub grpc_endpoint: Option<String>,
+    pub runtime_audience: String,
+    pub credential_redacted: String,
+    credential_secret: String,
+}
+
+impl RuntimeAuthenticationMaterial {
+    /// Return the credential value for the runtime client that will perform the
+    /// MCP/gRPC authentication attempt. Callers must not log this value.
+    pub fn credential_secret(&self) -> &str {
+        &self.credential_secret
+    }
+}
+
+impl fmt::Debug for RuntimeAuthenticationMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeAuthenticationMaterial")
+            .field("target_id", &self.target_id)
+            .field("mcp_url", &self.mcp_url)
+            .field("grpc_endpoint", &self.grpc_endpoint)
+            .field("runtime_audience", &self.runtime_audience)
+            .field("credential_redacted", &self.credential_redacted)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ManagedSessionRecord {
     route_plan: ManagedSessionRoutePlan,
@@ -1498,6 +1531,46 @@ impl ExternalAgentProjectionAuthority {
         self.managed_sessions
             .get(projection_id)
             .map(|record| &record.route_plan)
+    }
+
+    /// Resolve runtime authentication material for the managed session's HUD
+    /// target. Credential values are read at the edge, never stored in route
+    /// plans or audit-ready structs.
+    pub fn resolve_runtime_authentication(
+        &self,
+        projection_id: &str,
+        mut protected_config_lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<RuntimeAuthenticationMaterial, ProjectionErrorCode> {
+        validate_non_empty_bounded("projection_id", projection_id, MAX_PROJECTION_ID_BYTES)
+            .map_err(|error| error.code())?;
+        let route_plan = self
+            .managed_sessions
+            .get(projection_id)
+            .ok_or(ProjectionErrorCode::ProjectionNotFound)?
+            .route_plan
+            .clone();
+        let target = self
+            .targets
+            .get(&route_plan.hud_target_id)
+            .ok_or(ProjectionErrorCode::ProjectionInvalidArgument)?;
+        let credential_secret = match &target.credential_source {
+            HudCredentialSource::EnvVar(name) => {
+                env::var(name).map_err(|_| ProjectionErrorCode::ProjectionUnauthorized)?
+            }
+            HudCredentialSource::ProtectedConfigKey(name) => {
+                protected_config_lookup(name).ok_or(ProjectionErrorCode::ProjectionUnauthorized)?
+            }
+        };
+        validate_non_empty_bounded("runtime_credential", &credential_secret, MAX_HINT_BYTES)
+            .map_err(|error| error.code())?;
+        Ok(RuntimeAuthenticationMaterial {
+            target_id: target.target_id.clone(),
+            mcp_url: target.mcp_url.clone(),
+            grpc_endpoint: target.grpc_endpoint.clone(),
+            runtime_audience: target.runtime_audience.clone(),
+            credential_redacted: target.credential_source.redacted_marker(),
+            credential_secret,
+        })
     }
 
     pub fn managed_session_count(&self) -> usize {
@@ -3480,6 +3553,15 @@ mod tests {
         }
     }
 
+    fn protected_windows_target() -> WindowsHudTarget {
+        WindowsHudTarget {
+            credential_source: HudCredentialSource::ProtectedConfigKey(
+                "windows-runtime-psk".to_string(),
+            ),
+            ..windows_target()
+        }
+    }
+
     fn managed_zone_session(projection_id: &str) -> ManagedSessionRequest {
         ManagedSessionRequest {
             projection_id: projection_id.to_string(),
@@ -3642,6 +3724,65 @@ mod tests {
                 "route plan must not expose {forbidden} authority"
             );
         }
+    }
+
+    #[test]
+    fn external_authority_resolves_runtime_auth_material_without_serializing_secret() {
+        let mut authority = ExternalAgentProjectionAuthority::default();
+        authority
+            .register_windows_target(protected_windows_target())
+            .expect("target is valid");
+        authority
+            .manage_session(managed_zone_session("agent-status"), "manager", 10)
+            .unwrap();
+
+        let material = authority
+            .resolve_runtime_authentication("agent-status", |key| {
+                (key == "windows-runtime-psk").then(|| "operator-secret".to_string())
+            })
+            .expect("runtime auth material resolves");
+
+        assert_eq!(material.target_id, "windows-local");
+        assert_eq!(material.runtime_audience, "local-windows-hud");
+        assert_eq!(
+            material.credential_redacted,
+            "protected-config:windows-runtime-psk:redacted"
+        );
+        assert_eq!(material.credential_secret(), "operator-secret");
+        assert!(material.mcp_url.as_deref().unwrap().ends_with(":9090/mcp"));
+        assert!(
+            material
+                .grpc_endpoint
+                .as_deref()
+                .unwrap()
+                .ends_with(":50051")
+        );
+
+        let debug = format!("{material:?}");
+        assert!(debug.contains("protected-config:windows-runtime-psk:redacted"));
+        assert!(!debug.contains("operator-secret"));
+    }
+
+    #[test]
+    fn external_authority_rejects_missing_runtime_auth_material() {
+        let mut authority = ExternalAgentProjectionAuthority::default();
+        authority
+            .register_windows_target(protected_windows_target())
+            .expect("target is valid");
+        authority
+            .manage_session(managed_zone_session("agent-status"), "manager", 10)
+            .unwrap();
+
+        assert_eq!(
+            authority.resolve_runtime_authentication("agent-status", |_| None),
+            Err(ProjectionErrorCode::ProjectionUnauthorized)
+        );
+        assert_eq!(
+            authority.resolve_runtime_authentication("missing-agent", |_| {
+                Some("operator-secret".to_string())
+            }),
+            Err(ProjectionErrorCode::ProjectionNotFound)
+        );
     }
 
     #[cfg(unix)]

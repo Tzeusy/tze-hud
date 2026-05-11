@@ -21,6 +21,12 @@ The authority SHALL target the local Windows `tze_hud` runtime through explicit 
 - **THEN** the route plan SHALL include only the credential source identity or redacted credential marker
 - **AND** no secret value SHALL be serialized into the route plan or audit record
 
+#### Scenario: runtime auth material is resolved only at execution edge
+- **WHEN** a managed session is ready to execute an MCP or gRPC runtime command
+- **THEN** the authority MAY resolve credential material from the registered environment or protected config source
+- **AND** the secret-bearing material SHALL NOT be serializable or included in debug/audit output
+- **AND** missing or empty credential material SHALL fail closed before attempting runtime publish or lease operations
+
 #### Scenario: runtime remains final authorizer
 - **WHEN** the authority routes a session to a zone, widget, or portal surface
 - **THEN** the runtime SHALL still enforce the authenticated session capabilities, content policy, lease scope, TTL, revocation, safe mode, and resource budgets

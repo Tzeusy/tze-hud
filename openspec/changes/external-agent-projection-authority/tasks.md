@@ -12,6 +12,7 @@
 - [x] 2.4 Add multi-session cleanup, revocation/expiry, and reconnect bookkeeping helpers.
 - [x] 2.5 Add a deterministic three-session demo plan API.
 - [x] 2.6 Add bounded provider process launch supervision for `Launched` sessions outside runtime/compositor core.
+- [x] 2.7 Add just-in-time runtime authentication material resolution for registered Windows HUD targets without serializing credential values.
 
 ## 3. Validation
 
