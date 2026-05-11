@@ -3166,6 +3166,7 @@ impl WindowedRuntime {
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
+            media_ingress_active: None,
             input_capture_tx: Some(input_capture_tx),
         }));
 
@@ -3515,11 +3516,12 @@ fn start_network_services(
 
     // Wire config-driven capability registry into the session service.
     let agent_caps = runtime_context.snapshot_agent_capabilities();
-    let service = HudSessionImpl::from_shared_state_with_config(
+    let service = HudSessionImpl::from_shared_state_with_config_and_media_ingress(
         shared_state,
         psk,
         agent_caps,
         fallback_unrestricted,
+        runtime_context.media_ingress.clone(),
     );
 
     // Clone the broadcast senders before moving the service into the gRPC task.
@@ -4928,6 +4930,7 @@ mod tests {
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: RuntimeDegradationLevel::Normal,
+            media_ingress_active: None,
             input_capture_tx: None,
         }))
     }

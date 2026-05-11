@@ -339,6 +339,7 @@ impl HeadlessRuntime {
             token_store: tze_hud_protocol::token::TokenStore::new(),
             freeze_active: false,
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
+            media_ingress_active: None,
             input_capture_tx: None,
         }));
 
@@ -604,11 +605,12 @@ impl HeadlessRuntime {
         // guest policy (no capabilities) unless fallback_unrestricted is true (dev mode).
         let agent_caps = self.runtime_context.snapshot_agent_capabilities();
 
-        let service = HudSessionImpl::from_shared_state_with_config(
+        let service = HudSessionImpl::from_shared_state_with_config_and_media_ingress(
             self.state.clone(),
             &self.config.psk,
             agent_caps,
             self.fallback_unrestricted,
+            self.runtime_context.media_ingress.clone(),
         );
 
         let handle = tokio::spawn(async move {
