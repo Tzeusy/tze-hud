@@ -8,6 +8,7 @@ This directory contains the headless demo artifact and replay fixtures for the 2
 - `replay-zone-messages.json`: Zone publish payload extracted from the demo plan for `publish_zone_batch.py`.
 - `replay-widget-messages.json`: Widget publish payload extracted from the demo plan for `publish_widget_batch.py`.
 - `live-replay.sh`: Non-interactive replay harness for the live Windows `/user-test` path.
+- `live-replay-blocked-watch-20260511T025838Z.txt`: Bounded 10-poll reachability watch showing the live replay remained blocked before SSH/MCP/gRPC.
 
 ## Live Replay
 
@@ -20,6 +21,12 @@ bash docs/evidence/external-agent-projection-authority/live-replay.sh
 The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. It expects `TZE_HUD_PSK` to be set locally and never writes the value into artifacts.
 
 The demo plan's lifecycle checks are headless evidence only; live replay must still verify runtime acceptance, visual behavior, and cleanup against the Windows HUD.
+
+Latest blocker evidence: `live-replay-blocked-watch-20260511T025838Z.txt`
+shows a 10-poll watch from `2026-05-11T02:53:21Z` to
+`2026-05-11T02:58:38Z` where Windows stayed offline in Tailscale, ping
+returned no reply, and ports `22`, `50051`, and `9090` stayed
+`closed_or_timeout`.
 
 ## Local Checks
 
