@@ -129,6 +129,44 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
 `list_widgets` returns `widget_instances` (with `instance_name`) — use those names as `widget_name`.
 If `list_widgets` returns no instances, the HUD binary is running without a config that declares instances.
 
+## Windows Media Ingress Exemplar
+
+Use this lane only with `app/tze_hud_app/config/windows-media-ingress.toml`, which explicitly enables the one-stream `media-pip` surface and grants `windows-local-media-producer` the `media_ingress` capability.
+
+HUD media-ingress proof uses a self-owned/local synthetic video source. It is video-only and does not route audio:
+
+```bash
+TZE_HUD_PSK="$PSK" python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
+  local-producer \
+  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --agent-id windows-local-media-producer \
+  --zone-name media-pip \
+  --source-label synthetic-color-bars \
+  --hold-s 30 \
+  --evidence-json build/windows-media-ingress/local-producer-evidence.json
+```
+
+YouTube source evidence is separate from HUD frame-ingress proof. Launch video ID `O0FGCxkHM-U` through the official embedded-player URL; do not bridge raw YouTube frames into the HUD runtime:
+
+```bash
+python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
+  youtube-sidecar \
+  --windows-host tzehouse-windows.parrot-hen.ts.net \
+  --windows-user tzeus \
+  --ssh-key ~/.ssh/ecdsa_home \
+  --evidence-json build/windows-media-ingress/youtube-source-evidence.json
+```
+
+Record the policy boundary before validation:
+
+```bash
+python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
+  policy-review \
+  --evidence-json build/windows-media-ingress/policy-review.json
+```
+
+The media exemplar must not introduce `yt-dlp`, direct YouTube media URL extraction, downloads, a browser/WebView node inside the compositor, raw YouTube frame bridging, or a YouTube audio route into the HUD runtime.
+
 ## Workflow
 
 ### Step 0: SSH Connectivity Gate
