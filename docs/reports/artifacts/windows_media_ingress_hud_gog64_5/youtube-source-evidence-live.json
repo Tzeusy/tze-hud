@@ -1,0 +1,26 @@
+{
+  "download_or_extraction": "not_used",
+  "html_evidence_path": "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-gog64.5/docs/reports/artifacts/windows_media_ingress_hud_gog64_5/youtube_source_evidence.html",
+  "hud_runtime_receives_youtube_frames": false,
+  "lane": "youtube-source-evidence",
+  "launched_by": "ssh:tzeus@tzehouse-windows.parrot-hen.ts.net",
+  "official_player_url": "https://www.youtube.com/embed/O0FGCxkHM-U",
+  "policy_review": {
+    "audio_route_to_hud": "none",
+    "hud_ingress_source": "self-owned/local synthetic video-only source",
+    "official_player_url": "https://www.youtube.com/embed/O0FGCxkHM-U",
+    "prohibited_paths": [
+      "yt-dlp",
+      "youtube-dl",
+      "googlevideo.com",
+      "videoplayback",
+      "download",
+      "direct media url"
+    ],
+    "rationale": "First acceptance separates HUD media-ingress proof from YouTube source evidence. YouTube launches only through the official embedded player URL; raw-frame bridging remains blocked until a separate policy review approves a compliant bridge.",
+    "raw_youtube_frame_bridge": "blocked_pending_policy_approval",
+    "youtube_video_id": "O0FGCxkHM-U"
+  },
+  "raw_youtube_frame_bridge": "blocked_pending_policy_approval",
+  "video_id": "O0FGCxkHM-U"
+}
