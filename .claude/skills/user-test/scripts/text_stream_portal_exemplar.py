@@ -60,6 +60,8 @@ PORTAL_MIN_W = 640.0
 PORTAL_MIN_H = 480.0
 PORTAL_MAX_W = 1280.0
 PORTAL_MAX_H = 960.0
+PORTAL_DEFAULT_WIDTH_PCT = PORTAL_W / 1920.0
+PORTAL_DEFAULT_HEIGHT_PCT = PORTAL_H / 1080.0
 PORTAL_RADIUS = 14.0
 PORTAL_X_FROM_RIGHT = 28.0
 PORTAL_Y = 120.0
@@ -487,6 +489,15 @@ def clamp_portal_size(w: float, h: float, tab_width: float, tab_height: float) -
     return (
         max(PORTAL_MIN_W, min(w, min(PORTAL_MAX_W, tab_width))),
         max(PORTAL_MIN_H, min(h, min(PORTAL_MAX_H, tab_height))),
+    )
+
+
+def default_portal_size(tab_width: float, tab_height: float) -> tuple[float, float]:
+    return clamp_portal_size(
+        tab_width * PORTAL_DEFAULT_WIDTH_PCT,
+        tab_height * PORTAL_DEFAULT_HEIGHT_PCT,
+        tab_width,
+        tab_height,
     )
 
 
@@ -3551,7 +3562,21 @@ async def run_scenario(args: argparse.Namespace) -> int:
         }, scene_width=scene_width, scene_height=scene_height)
         lease_ttl_ms = max(600_000, int(args.baseline_hold_s * 1000) + 120_000)
         lease_id = await client.request_lease(ttl_ms=lease_ttl_ms)
-        set_portal_size(PORTAL_W, PORTAL_H, scene_width, scene_height)
+        default_w, default_h = default_portal_size(scene_width, scene_height)
+        set_portal_size(
+            args.portal_width if args.portal_width is not None else default_w,
+            args.portal_height if args.portal_height is not None else default_h,
+            scene_width,
+            scene_height,
+        )
+        emit_step_event(transcript, 0, "checkpoint", {
+            "code": "portal:size",
+            "title": "Portal size resolved",
+            "action": "scale portal defaults from live scene dimensions unless explicit size overrides were provided",
+            "expected_visual": "portal occupies a readable portion of the detected display",
+        }, portal_w=PORTAL_W, portal_h=PORTAL_H,
+           explicit_width=args.portal_width is not None,
+           explicit_height=args.portal_height is not None)
         portal_x = (
             args.portal_x
             if args.portal_x is not None
@@ -3801,6 +3826,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tab-width", type=float, default=1920.0)
     p.add_argument("--tab-height", type=float, default=1080.0)
     p.add_argument("--portal-x", type=float, default=None)
+    p.add_argument(
+        "--portal-width",
+        type=float,
+        default=None,
+        help="Override responsive portal width in scene pixels",
+    )
+    p.add_argument(
+        "--portal-height",
+        type=float,
+        default=None,
+        help="Override responsive portal height in scene pixels",
+    )
     p.add_argument("--phases", default="baseline,scroll",
                    help="Comma list: baseline,scroll,streaming,rapid,composer-smoke,diagnostic-input")
     p.add_argument("--baseline-hold-s", type=float, default=20.0)
