@@ -15,6 +15,9 @@ This directory contains the headless demo artifact and replay fixtures for the 2
 - `live-replay-blocked-20260511T072612Z.txt`: Latest direct live replay attempt; still blocked at Tailscale reachability before SSH/MCP/gRPC.
 - `live-replay-blocked-watch-20260511T055927Z.txt`: Bounded 3-poll reachability watch; still blocked at Tailscale reachability before SSH/MCP/gRPC.
 - `live-replay-blocked-watch-20260511T070511Z.txt`: Latest bounded 3-poll reachability watch; still blocked at Tailscale reachability before SSH/MCP/gRPC.
+- `live-zone-replay-20260511T125016Z.json`: Successful recovered-host MCP `/mcp` zone replay evidence.
+- `live-widget-replay-20260511T125016Z.json`: Successful recovered-host MCP `/mcp` widget replay and cleanup evidence.
+- `live-portal-transcript-20260511T125016Z.json`: Successful recovered-host resident gRPC text-stream portal composer-smoke transcript, including lease release cleanup.
 
 ## Live Replay
 
@@ -24,7 +27,7 @@ After `tzehouse-windows.parrot-hen.ts.net` is reachable, verify SSH, start `TzeH
 bash docs/evidence/external-agent-projection-authority/live-replay.sh
 ```
 
-The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. Zone and widget replay steps fail if either the command exits nonzero or any JSON line contains a top-level error, discovery error, publish response error, or cleanup response error. On successful publish steps it writes timestamped `live-zone-replay-<stamp>.json`, `live-widget-replay-<stamp>.json`, and `live-portal-transcript-<stamp>.json` evidence files under this directory by default. It expects `TZE_HUD_PSK` to be set locally, but accepts `MCP_TEST_PSK` as a fallback for the MCP publish scripts and exports the same value for the portal smoke. It never writes the value into artifacts.
+The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. Zone and widget replay steps fail if either the command exits nonzero or any JSON line contains a top-level error, discovery error, publish response error, or cleanup response error. On successful publish steps it writes timestamped `live-zone-replay-<stamp>.json`, `live-widget-replay-<stamp>.json`, and `live-portal-transcript-<stamp>.json` evidence files under this directory by default. It expects `TZE_HUD_PSK` to be set locally, but accepts `MCP_TEST_PSK` as a fallback for the MCP publish scripts and exports the same value for the portal smoke. It never writes the value into artifacts. `PORTAL_AGENT_ID` can override the resident gRPC agent used for the portal smoke; the recovered-host replay used `agent-alpha` because the deployed Windows config grants that agent `create_tiles`, `modify_own_tiles`, and `access_input_events`.
 
 If the host is reachable but the existing scheduled task starts without a non-default PSK, opt into task recreation before launch:
 
@@ -46,12 +49,20 @@ The watcher exits `20` if the host never becomes reachable. If Tailscale ping su
 
 The demo plan's lifecycle checks are headless evidence only; live replay must still verify runtime acceptance, visual behavior, and cleanup against the Windows HUD.
 
-Latest blocker evidence: direct harness run `live-replay-blocked-20260511T072612Z.txt`
-exited `10` at the Tailscale gate before SSH, MCP, or gRPC could run. The
-latest bounded watch `live-replay-blocked-watch-20260511T070511Z.txt`
-shows a 3-poll window where the watcher exited `20` after Windows remained
-offline in Tailscale and `100.87.181.125` timed out/no reply before SSH, MCP,
-or gRPC could run.
+Latest live evidence: direct harness run with `RECREATE_TASK_ON_START=1` and
+`PORTAL_AGENT_ID=agent-alpha` succeeded at `20260511T125016Z`. It used a
+transient non-default PSK supplied through `TZE_HUD_PSK`, recreated
+`TzeHudOverlay`, listed six zones, published the status-bar zone replay, listed
+two widget instances, published and cleaned up `main-progress`, ran the
+resident gRPC portal composer smoke, and released the portal lease. The PSK
+value was not written to evidence artifacts.
+
+Historical blocker evidence: direct harness run
+`live-replay-blocked-20260511T072612Z.txt` exited `10` at the Tailscale gate
+before SSH, MCP, or gRPC could run. The bounded watch
+`live-replay-blocked-watch-20260511T070511Z.txt` shows a 3-poll window where
+the watcher exited `20` after Windows remained offline in Tailscale and
+`100.87.181.125` timed out/no reply before SSH, MCP, or gRPC could run.
 The longer reachability watch in `live-replay-blocked-watch-20260511T025838Z.txt`
 shows a 10-poll window where Windows stayed offline in Tailscale and ports
 `22`, `50051`, and `9090` stayed `closed_or_timeout`.

@@ -20,7 +20,7 @@
 - [x] 3.2 Add tests proving owner isolation, redacted secrets, ambient attention defaults, cleanup, and reconnect fresh-auth behavior.
 - [x] 3.3 Run focused `cargo test` gates for `tze_hud_projection`.
 - [x] 3.4 Run or attempt live Windows `/user-test` for three projected sessions; record evidence or exact blocker.
-- [ ] 3.5 Complete successful live Windows `/user-test` replay once TzeHouse reachability and non-default HUD PSK auth are available (`hud-9m47l`, `hud-o48in`); store evidence under `docs/evidence/external-agent-projection-authority/` and close `hud-dl3ys`.
+- [x] 3.5 Complete successful live Windows `/user-test` replay once TzeHouse reachability and non-default HUD PSK auth are available (`hud-9m47l`, `hud-o48in`); store evidence under `docs/evidence/external-agent-projection-authority/` and close `hud-dl3ys`.
 
 ## 4. Follow-Up Tracking and Closeout
 

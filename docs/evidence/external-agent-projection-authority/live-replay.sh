@@ -13,6 +13,7 @@ HUD_EXE="${HUD_EXE:-C:\\tze_hud\\tze_hud.exe}"
 HUD_CONFIG="${HUD_CONFIG:-C:\\tze_hud\\tze_hud.toml}"
 MCP_HTTP_URL="${MCP_HTTP_URL:-http://$WIN_HOST:9090/mcp}"
 GRPC_TARGET="${GRPC_TARGET:-$WIN_HOST:50051}"
+PORTAL_AGENT_ID="${PORTAL_AGENT_ID:-agent-alpha}"
 PSK_ENV="${PSK_ENV:-TZE_HUD_PSK}"
 PROBE_TIMEOUT_S="${PROBE_TIMEOUT_S:-12}"
 SSH_CONNECT_TIMEOUT_S="${SSH_CONNECT_TIMEOUT_S:-8}"
@@ -215,7 +216,7 @@ log "running portal composer smoke through $GRPC_TARGET"
 python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --target "$GRPC_TARGET" \
   --psk-env "$PSK_ENV" \
-  --agent-id projection:agent-question \
+  --agent-id "$PORTAL_AGENT_ID" \
   --phases composer-smoke \
   --transcript-out "$PORTAL_TRANSCRIPT"
 
