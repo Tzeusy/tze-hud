@@ -3166,6 +3166,7 @@ impl WindowedRuntime {
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
+            media_ingress_active: None,
             input_capture_tx: Some(input_capture_tx),
         }));
 
@@ -4929,6 +4930,7 @@ mod tests {
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: RuntimeDegradationLevel::Normal,
+            media_ingress_active: None,
             input_capture_tx: None,
         }))
     }

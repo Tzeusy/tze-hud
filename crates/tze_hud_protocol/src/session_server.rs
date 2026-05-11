@@ -37,7 +37,7 @@ use crate::proto::session::hud_session_server::HudSession;
 use crate::proto::session::server_message::Payload as ServerPayload;
 use crate::proto::session::*;
 use crate::proto::{ElementInfo, ListElementsRequest, ListElementsResponse};
-use crate::session::{SESSION_EVENT_CHANNEL_CAPACITY, SharedState};
+use crate::session::{MediaIngressSharedState, SESSION_EVENT_CHANNEL_CAPACITY, SharedState};
 use crate::subscriptions;
 use crate::token::{DEFAULT_GRACE_PERIOD_MS, TokenStore};
 use quick_xml::Reader;
@@ -1507,12 +1507,14 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 1024;
 /// this event. Each session handler checks whether any of its leases match `lease_id`
 /// and, if so, applies the revocation to the scene graph and notifies the agent via
 /// `CapabilityNotice(revoked=[capability_name])` and a `LeaseStateChange` audit event.
+/// A null `lease_id` is reserved for runtime-global session capabilities that
+/// are not represented in scene-graph leases, currently only `media_ingress`.
 ///
 /// RFC 0001 §3.3: capability checks are enforced at mutation time against the live scope,
 /// not merely at grant time.
 #[derive(Clone, Debug)]
 pub struct CapabilityRevocationEvent {
-    /// The lease to narrow.
+    /// The lease to narrow, or null for an explicit runtime-global session-capability revocation.
     pub lease_id: tze_hud_scene::SceneId,
     /// Canonical name of the capability to remove (e.g. `"create_tiles"`, `"publish_zone:subtitle"`).
     pub capability_name: String,
@@ -1614,6 +1616,7 @@ impl HudSessionImpl {
                 token_store: TokenStore::new(),
                 freeze_active: false,
                 degradation_level: crate::session::RuntimeDegradationLevel::Normal,
+                media_ingress_active: None,
                 input_capture_tx: None,
             })),
             psk: psk.to_string(),
@@ -2351,7 +2354,10 @@ impl HudSession for HudSessionImpl {
                         match revocation_result {
                             Ok(event) => {
                                 // Only this session's leases are affected.
-                                if event.capability_name == "media_ingress"
+                                let global_media_ingress_revoke =
+                                    event.capability_name == "media_ingress"
+                                        && event.lease_id.is_null();
+                                if global_media_ingress_revoke
                                     || session.lease_ids.contains(&event.lease_id)
                                 {
                                     handle_capability_revocation(
@@ -2460,6 +2466,19 @@ impl HudSession for HudSessionImpl {
                         }
                     }
                 }
+            }
+
+            if session.media_ingress.is_some() {
+                close_active_media_ingress(
+                    &state,
+                    session,
+                    &tx,
+                    MediaCloseReason::SessionDisconnected as i32,
+                    "session closed with active media ingress stream",
+                    MediaSessionState::Closed as i32,
+                    None,
+                )
+                .await;
             }
 
             // Cleanup: remove session from registry and store resume token.
@@ -3191,12 +3210,13 @@ fn media_open_rejection(
             "media ingress requires a video track".to_string(),
         ));
     }
-    if open
-        .transport
-        .as_ref()
-        .map(|transport| transport.mode != 1)
-        .unwrap_or(true)
-    {
+    let Some(transport) = open.transport.as_ref() else {
+        return Some((
+            "INVALID_ARGUMENT",
+            "media ingress requires a transport descriptor".to_string(),
+        ));
+    };
+    if transport.mode != MediaTransportMode::WebrtcStandard as i32 {
         return Some((
             "CAPABILITY_NOT_IMPLEMENTED",
             "only WEBRTC_STANDARD transport is active for this slice".to_string(),
@@ -3218,7 +3238,13 @@ fn media_open_rejection(
         }
     };
     let approved_zone = media_config.approved_zone.as_deref().unwrap_or_default();
-    if zone_name != approved_zone || zone_name != tze_hud_scene::config::APPROVED_MEDIA_ZONE {
+    if approved_zone != tze_hud_scene::config::APPROVED_MEDIA_ZONE {
+        return Some((
+            "SURFACE_NOT_FOUND",
+            format!("configured media ingress zone {approved_zone:?} is not active in this slice"),
+        ));
+    }
+    if zone_name != approved_zone {
         return Some((
             "SURFACE_NOT_FOUND",
             format!("media ingress is only approved for zone {approved_zone:?}"),
@@ -3307,38 +3333,80 @@ async fn handle_media_ingress_open(
     let stream_epoch = session.next_media_epoch();
     let surface_id = tze_hud_scene::SceneId::new();
 
+    enum MediaPublishAdmission {
+        Published,
+        GlobalLimit,
+        PublishFailed(String),
+    }
+
     let publish_result = {
-        let st = state.lock().await;
-        let mut scene = st.scene.lock().await;
-        scene.publish_to_zone(
-            &zone_name,
-            ZoneContent::VideoSurfaceRef(surface_id),
-            &session.namespace,
-            None,
-            if open.expires_at_wall_us == 0 {
-                None
+        let mut st = state.lock().await;
+        if st.media_ingress_active.is_some() {
+            MediaPublishAdmission::GlobalLimit
+        } else {
+            let mut scene = st.scene.lock().await;
+            let result = scene.publish_to_zone(
+                &zone_name,
+                ZoneContent::VideoSurfaceRef(surface_id),
+                &session.namespace,
+                None,
+                if open.expires_at_wall_us == 0 {
+                    None
+                } else {
+                    Some(open.expires_at_wall_us)
+                },
+                Some(open.content_classification.clone()),
+            );
+            drop(scene);
+            if let Err(err) = result {
+                MediaPublishAdmission::PublishFailed(err.to_string())
             } else {
-                Some(open.expires_at_wall_us)
-            },
-            Some(open.content_classification.clone()),
-        )
+                st.media_ingress_active = Some(MediaIngressSharedState {
+                    publisher_namespace: session.namespace.clone(),
+                    stream_epoch,
+                    zone_name: zone_name.clone(),
+                    surface_id,
+                });
+                MediaPublishAdmission::Published
+            }
+        }
     };
-    if let Err(err) = publish_result {
-        let reason = format!("approved media surface could not be published: {err}");
-        tracing::warn!(
-            subsystem = "media_ingress",
-            agent = %session.agent_name,
-            reject_code = "SURFACE_NOT_FOUND",
-            reject_reason = %reason,
-            "media ingress surface publish failed"
-        );
-        send_media_open_result(
-            session,
-            tx,
-            media_open_rejected(open.client_stream_id, "SURFACE_NOT_FOUND", reason),
-        )
-        .await;
-        return;
+    match publish_result {
+        MediaPublishAdmission::Published => {}
+        MediaPublishAdmission::GlobalLimit => {
+            let reason = "one active media ingress stream is already admitted globally".to_string();
+            tracing::warn!(
+                subsystem = "media_ingress",
+                agent = %session.agent_name,
+                reject_code = "SESSION_STREAM_LIMIT",
+                reject_reason = %reason,
+                "media ingress admission rejected"
+            );
+            send_media_open_result(
+                session,
+                tx,
+                media_open_rejected(open.client_stream_id, "SESSION_STREAM_LIMIT", reason),
+            )
+            .await;
+            return;
+        }
+        MediaPublishAdmission::PublishFailed(err) => {
+            let reason = format!("approved media surface could not be published: {err}");
+            tracing::warn!(
+                subsystem = "media_ingress",
+                agent = %session.agent_name,
+                reject_code = "SURFACE_NOT_FOUND",
+                reject_reason = %reason,
+                "media ingress surface publish failed"
+            );
+            send_media_open_result(
+                session,
+                tx,
+                media_open_rejected(open.client_stream_id, "SURFACE_NOT_FOUND", reason),
+            )
+            .await;
+            return;
+        }
     }
 
     session.media_ingress = Some(ActiveMediaIngressStream {
@@ -3368,7 +3436,13 @@ async fn handle_media_ingress_open(
         },
     )
     .await;
-    send_media_state(session, tx, stream_epoch, 1).await;
+    send_media_state(
+        session,
+        tx,
+        stream_epoch,
+        MediaSessionState::Admitted as i32,
+    )
+    .await;
 }
 
 async fn close_active_media_ingress(
@@ -3385,12 +3459,24 @@ async fn close_active_media_ingress(
     };
     let detail = detail.into();
     {
-        let st = state.lock().await;
-        let _ = st
-            .scene
-            .lock()
-            .await
-            .clear_zone_for_publisher(&active.zone_name, &session.namespace);
+        let mut st = state.lock().await;
+        if st
+            .media_ingress_active
+            .as_ref()
+            .map(|global| {
+                global.publisher_namespace == session.namespace
+                    && global.stream_epoch == active.stream_epoch
+                    && global.surface_id == active.surface_id
+            })
+            .unwrap_or(false)
+        {
+            st.media_ingress_active = None;
+            let _ = st
+                .scene
+                .lock()
+                .await
+                .clear_zone_for_publisher(&active.zone_name, &session.namespace);
+        }
     }
     tracing::info!(
         subsystem = "media_ingress",
@@ -3427,7 +3513,16 @@ async fn handle_media_ingress_close(
             } else {
                 close.reason
             };
-            close_active_media_ingress(state, session, tx, 1, detail, 6, None).await;
+            close_active_media_ingress(
+                state,
+                session,
+                tx,
+                MediaCloseReason::AgentClosed as i32,
+                detail,
+                MediaSessionState::Closed as i32,
+                None,
+            )
+            .await;
         }
         _ => {
             send_runtime_error(
@@ -5561,13 +5656,46 @@ async fn handle_capability_revocation(
 ) {
     if event.capability_name == "media_ingress" {
         session.capabilities.retain(|c| c != &event.capability_name);
+        let reason = "CAPABILITY_REVOKED:media_ingress".to_string();
+
+        let notice_seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: notice_seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::CapabilityNotice(CapabilityNotice {
+                    granted: Vec::new(),
+                    revoked: vec![event.capability_name.clone()],
+                    reason: reason.clone(),
+                    effective_at_server_seq: notice_seq,
+                })),
+            }))
+            .await;
+
+        if !event.lease_id.is_null() {
+            let state_seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: state_seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::LeaseStateChange(LeaseStateChange {
+                        lease_id: scene_id_to_bytes(event.lease_id),
+                        previous_state: "ACTIVE".to_string(),
+                        new_state: "ACTIVE".to_string(),
+                        reason: reason.clone(),
+                        timestamp_wall_us: now_wall_us(),
+                    })),
+                }))
+                .await;
+        }
+
         close_active_media_ingress(
             state,
             session,
             tx,
-            3,
+            MediaCloseReason::CapabilityRevoked as i32,
             "media_ingress capability revoked",
-            7,
+            MediaSessionState::Revoked as i32,
             None,
         )
         .await;
@@ -8053,6 +8181,15 @@ mod tests {
                 },
                 "CAPABILITY_NOT_IMPLEMENTED",
             ),
+            (
+                8,
+                {
+                    let mut open = valid_media_open("media-pip");
+                    open.transport = None;
+                    open
+                },
+                "INVALID_ARGUMENT",
+            ),
         ] {
             tx_b.send(ClientMessage {
                 sequence: seq,
@@ -8150,28 +8287,42 @@ mod tests {
         .unwrap();
         let _result = next_non_state_change(&mut stream).await;
         let _state = next_non_state_change(&mut stream).await;
-        let lease_id = tze_hud_scene::SceneId::new();
+        let lease_id = tze_hud_scene::SceneId::null();
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id,
             capability_name: "media_ingress".to_string(),
         });
+        let mut saw_capability_notice = false;
         let mut saw_revoked_state = false;
         let mut saw_revoke_notice = false;
         for _ in 0..4 {
             let msg = next_non_state_change(&mut stream).await;
             match msg.payload {
-                Some(ServerPayload::MediaIngressState(state)) if state.state == 7 => {
+                Some(ServerPayload::CapabilityNotice(notice))
+                    if notice.revoked.contains(&"media_ingress".to_string()) =>
+                {
+                    saw_capability_notice = true;
+                }
+                Some(ServerPayload::MediaIngressState(state))
+                    if state.state == MediaSessionState::Revoked as i32 =>
+                {
                     saw_revoked_state = true;
                 }
-                Some(ServerPayload::MediaIngressCloseNotice(notice)) if notice.reason == 3 => {
+                Some(ServerPayload::MediaIngressCloseNotice(notice))
+                    if notice.reason == MediaCloseReason::CapabilityRevoked as i32 =>
+                {
                     saw_revoke_notice = true;
                 }
                 _ => {}
             }
-            if saw_revoked_state && saw_revoke_notice {
+            if saw_capability_notice && saw_revoked_state && saw_revoke_notice {
                 break;
             }
         }
+        assert!(
+            saw_capability_notice,
+            "capability revoke should emit CapabilityNotice"
+        );
         assert!(
             saw_revoked_state,
             "capability revoke should emit REVOKED state"
@@ -8180,6 +8331,89 @@ mod tests {
             saw_revoke_notice,
             "capability revoke should emit CAPABILITY_REVOKED notice"
         );
+    }
+
+    #[tokio::test]
+    async fn media_ingress_limit_is_global_and_disconnect_releases_slot() {
+        let (mut client, _server, _revocation_tx) =
+            setup_media_ingress_test(media_ingress_config(true)).await;
+        let requested = vec![
+            "media_ingress".to_string(),
+            "publish_zone:media-pip".to_string(),
+        ];
+        let (first_tx, mut first_stream) =
+            media_handshake(&mut client, "media-agent", requested.clone()).await;
+
+        first_tx
+            .send(ClientMessage {
+                sequence: 2,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+                    "media-pip",
+                ))),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_non_state_change(&mut first_stream).await.payload,
+            Some(ServerPayload::MediaIngressOpenResult(
+                MediaIngressOpenResult { admitted: true, .. }
+            ))
+        ));
+        let _state = next_non_state_change(&mut first_stream).await;
+
+        let (second_tx, mut second_stream) =
+            media_handshake(&mut client, "media-agent", requested).await;
+        second_tx
+            .send(ClientMessage {
+                sequence: 2,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+                    "media-pip",
+                ))),
+            })
+            .await
+            .unwrap();
+        match next_non_state_change(&mut second_stream).await.payload {
+            Some(ServerPayload::MediaIngressOpenResult(result)) => {
+                assert!(!result.admitted, "second live session must not admit");
+                assert_eq!(result.reject_code, "SESSION_STREAM_LIMIT");
+            }
+            other => panic!("expected global stream-limit rejection, got {other:?}"),
+        }
+
+        drop(first_tx);
+        let saw_close_notice = tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+            while let Some(Ok(msg)) = first_stream.next().await {
+                if matches!(msg.payload, Some(ServerPayload::MediaIngressCloseNotice(_))) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("disconnect should close the active media ingress stream");
+        assert!(
+            saw_close_notice,
+            "disconnect should emit a media close notice before stream termination"
+        );
+
+        second_tx
+            .send(ClientMessage {
+                sequence: 3,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+                    "media-pip",
+                ))),
+            })
+            .await
+            .unwrap();
+        match next_non_state_change(&mut second_stream).await.payload {
+            Some(ServerPayload::MediaIngressOpenResult(result)) => {
+                assert!(result.admitted, "released global slot should admit again");
+            }
+            other => panic!("expected admission after disconnect cleanup, got {other:?}"),
+        }
     }
 
     #[tokio::test]

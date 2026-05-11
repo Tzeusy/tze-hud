@@ -617,6 +617,7 @@ mod tests {
             freeze_active: false,
             token_store: TokenStore::new(),
             degradation_level: RuntimeDegradationLevel::Normal,
+            media_ingress_active: None,
             input_capture_tx: None,
         }))
     }
