@@ -9,12 +9,16 @@ HUD_USER="${HUD_USER:-hudbot}"
 CONTROL_USER="${CONTROL_USER:-tzeus}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/ecdsa_home}"
 TASK_NAME="${TASK_NAME:-TzeHudOverlay}"
+HUD_EXE="${HUD_EXE:-C:\\tze_hud\\tze_hud.exe}"
+HUD_CONFIG="${HUD_CONFIG:-C:\\tze_hud\\tze_hud.toml}"
+HUD_WORKDIR="${HUD_WORKDIR:-C:\\tze_hud}"
 MCP_HTTP_URL="${MCP_HTTP_URL:-http://$WIN_HOST:9090/mcp}"
 GRPC_TARGET="${GRPC_TARGET:-$WIN_HOST:50051}"
 PSK_ENV="${PSK_ENV:-TZE_HUD_PSK}"
 PROBE_TIMEOUT_S="${PROBE_TIMEOUT_S:-12}"
 SSH_CONNECT_TIMEOUT_S="${SSH_CONNECT_TIMEOUT_S:-8}"
 STARTUP_WAIT_S="${STARTUP_WAIT_S:-5}"
+RECREATE_TASK_ON_START="${RECREATE_TASK_ON_START:-0}"
 
 ZONE_MESSAGES="$SCRIPT_DIR/replay-zone-messages.json"
 WIDGET_MESSAGES="$SCRIPT_DIR/replay-widget-messages.json"
@@ -58,6 +62,60 @@ run_control_ssh() {
       "$command"
 }
 
+run_control_powershell_stdin() {
+  timeout "${PROBE_TIMEOUT_S}s" \
+    ssh -o BatchMode=yes \
+      -o IdentitiesOnly=yes \
+      -o ConnectTimeout="${SSH_CONNECT_TIMEOUT_S}" \
+      -i "$SSH_KEY" \
+      "$CONTROL_USER@$WIN_HOST" \
+      powershell -NoProfile -NonInteractive -Command -
+}
+
+ps_single_quote() {
+  local value="${1//\'/\'\'}"
+  printf "'%s'" "$value"
+}
+
+resolve_psk_env() {
+  if [[ -z "${!PSK_ENV:-}" ]]; then
+    if [[ "$PSK_ENV" != "MCP_TEST_PSK" && -n "${MCP_TEST_PSK:-}" ]]; then
+      export "$PSK_ENV=${MCP_TEST_PSK}"
+    else
+      fail 13 "required PSK environment variable $PSK_ENV is not set; MCP_TEST_PSK may be used as a fallback"
+    fi
+  fi
+  export MCP_TEST_PSK="${!PSK_ENV}"
+}
+
+register_overlay_task_with_psk() {
+  local psk_value="${!PSK_ENV}"
+  local psk_literal
+  local exe_literal
+  local config_literal
+  local workdir_literal
+  local task_literal
+  psk_literal="$(ps_single_quote "$psk_value")"
+  exe_literal="$(ps_single_quote "$HUD_EXE")"
+  config_literal="$(ps_single_quote "$HUD_CONFIG")"
+  workdir_literal="$(ps_single_quote "$HUD_WORKDIR")"
+  task_literal="$(ps_single_quote "$TASK_NAME")"
+
+  {
+    printf '$taskName = %s\n' "$task_literal"
+    printf '$exe = %s\n' "$exe_literal"
+    printf '$config = %s\n' "$config_literal"
+    printf '$workdir = %s\n' "$workdir_literal"
+    printf '$psk = %s\n' "$psk_literal"
+    cat <<'POWERSHELL'
+$argument = "--config `"$config`" --window-mode overlay --grpc-port 50051 --mcp-port 9090 --psk `"$psk`""
+$action = New-ScheduledTaskAction -Execute $exe -Argument $argument -WorkingDirectory $workdir
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries
+Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Force | Out-Null
+POWERSHELL
+  } | run_control_powershell_stdin
+}
+
 cd "$REPO_ROOT"
 
 log "checking Tailscale reachability for $WIN_HOST"
@@ -70,8 +128,15 @@ ssh_probe "$HUD_USER" >/dev/null \
 ssh_probe "$CONTROL_USER" >/dev/null \
   || fail 11 "SSH failed for $CONTROL_USER@$WIN_HOST with $SSH_KEY"
 
+resolve_psk_env
+
 if ! tcp_probe 9090 >/dev/null 2>&1 || ! tcp_probe 50051 >/dev/null 2>&1; then
   log "MCP/gRPC ports are not both reachable; starting $TASK_NAME"
+  if [[ "$RECREATE_TASK_ON_START" == "1" ]]; then
+    log "recreating $TASK_NAME with non-default PSK from $PSK_ENV before launch"
+    register_overlay_task_with_psk \
+      || fail 12 "failed to register scheduled task $TASK_NAME"
+  fi
   run_control_ssh "schtasks /Run /TN $TASK_NAME" \
     || fail 12 "failed to start scheduled task $TASK_NAME"
   sleep "$STARTUP_WAIT_S"
@@ -82,15 +147,6 @@ tcp_probe 9090 >/dev/null \
   || fail 12 "MCP port 9090 is not reachable after $TASK_NAME start attempt"
 tcp_probe 50051 >/dev/null \
   || fail 12 "gRPC port 50051 is not reachable after $TASK_NAME start attempt"
-
-if [[ -z "${!PSK_ENV:-}" ]]; then
-  if [[ "$PSK_ENV" != "MCP_TEST_PSK" && -n "${MCP_TEST_PSK:-}" ]]; then
-    export "$PSK_ENV=${MCP_TEST_PSK}"
-  else
-    fail 13 "required PSK environment variable $PSK_ENV is not set; MCP_TEST_PSK may be used as a fallback"
-  fi
-fi
-export MCP_TEST_PSK="${!PSK_ENV}"
 
 log "publishing zone replay through $MCP_HTTP_URL"
 python3 .claude/skills/user-test/scripts/publish_zone_batch.py \

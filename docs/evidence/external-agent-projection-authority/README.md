@@ -24,6 +24,15 @@ bash docs/evidence/external-agent-projection-authority/live-replay.sh
 
 The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. It expects `TZE_HUD_PSK` to be set locally, but accepts `MCP_TEST_PSK` as a fallback for the MCP publish scripts and exports the same value for the portal smoke. It never writes the value into artifacts.
 
+If the host is reachable but the existing scheduled task starts without a non-default PSK, opt into task recreation before launch:
+
+```bash
+RECREATE_TASK_ON_START=1 \
+  bash docs/evidence/external-agent-projection-authority/live-replay.sh
+```
+
+This recreates `TzeHudOverlay` over SSH with the local PSK value from `TZE_HUD_PSK` or `MCP_TEST_PSK`, then starts the task. The PSK value is transmitted only over the SSH session and is not written to repo evidence files.
+
 For a bounded wait-and-run loop:
 
 ```bash
