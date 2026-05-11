@@ -63,6 +63,8 @@ use tze_hud_scene::HitResult;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::ZoneInteractionKind;
+#[cfg(feature = "v2_preview")]
+use tze_hud_scene::types::{SceneId, ZoneContent};
 use tze_hud_telemetry::{FrameTelemetry, TelemetryCollector};
 use wgpu::TextureFormat;
 
@@ -502,6 +504,64 @@ impl HeadlessRuntime {
     /// Per spec line 208: "pixel readback MUST be on-demand via copy_texture_to_buffer."
     pub fn read_pixels(&self) -> Vec<u8> {
         self.surface.read_pixels(&self.compositor.device)
+    }
+
+    /// Publish a synthetic `VideoSurfaceRef` into the approved media zone and,
+    /// optionally, upload one generated frame for it.
+    ///
+    /// This is the deterministic validation hook for the Windows media ingress
+    /// slice. It is available without GStreamer so CI can prove compositor
+    /// ownership, placeholder behavior, clipping, and teardown using in-process
+    /// frames. The same explicit media-ingress config gate used by startup must
+    /// be enabled; default runtime configuration rejects the call.
+    #[cfg(feature = "v2_preview")]
+    pub async fn publish_synthetic_media_surface(
+        &mut self,
+        surface_id: SceneId,
+        frame: Option<&tze_hud_compositor::video_surface::VideoFrame>,
+        publisher_namespace: &str,
+    ) -> Result<(), String> {
+        let media = &self.runtime_context.media_ingress;
+        if !media.enabled {
+            return Err("media ingress is disabled by runtime config".to_string());
+        }
+        if media.operator_disabled {
+            return Err("media ingress is operator-disabled".to_string());
+        }
+        let approved_zone = media
+            .approved_zone
+            .as_deref()
+            .ok_or_else(|| "media ingress has no approved zone".to_string())?;
+        if approved_zone != tze_hud_config::APPROVED_MEDIA_ZONE {
+            return Err(format!(
+                "unsupported media ingress zone {approved_zone:?}; expected {:?}",
+                tze_hud_config::APPROVED_MEDIA_ZONE
+            ));
+        }
+
+        let state = self.state.lock().await;
+        let scene_arc = state.scene.clone();
+        drop(state);
+        let mut scene = scene_arc.lock().await;
+        scene
+            .publish_to_zone(
+                approved_zone,
+                ZoneContent::VideoSurfaceRef(surface_id),
+                publisher_namespace,
+                None,
+                None,
+                None,
+            )
+            .map_err(|e| format!("publish VideoSurfaceRef to {approved_zone}: {e}"))?;
+        drop(scene);
+
+        if let Some(frame) = frame {
+            if !self.compositor.upload_video_frame(surface_id, frame) {
+                return Err("synthetic video frame upload was rejected".to_string());
+            }
+        }
+
+        Ok(())
     }
 
     /// Start the gRPC server in the background, serving the HudSession streaming service.
@@ -1213,5 +1273,111 @@ default_tab = true
             runtime.compositor.token_map.is_empty(),
             "compositor token_map should be empty when config_toml is None"
         );
+    }
+
+    #[cfg(feature = "v2_preview")]
+    fn media_ingress_test_config() -> String {
+        r#"
+[runtime]
+profile = "full-display"
+headless_width = 320
+headless_height = 180
+
+[[tabs]]
+name = "Main"
+
+[media_ingress]
+enabled = true
+approved_zone = "media-pip"
+max_active_streams = 1
+default_classification = "household"
+operator_disabled = false
+
+[media_ingress.geometry]
+x = 80
+y = 45
+width = 160
+height = 90
+
+[agents.registered.windows-local-media-producer]
+capabilities = ["media_ingress", "publish_zone:media-pip"]
+"#
+        .to_string()
+    }
+
+    #[cfg(feature = "v2_preview")]
+    fn media_test_frame(rgba: [u8; 4]) -> tze_hud_compositor::VideoFrame {
+        tze_hud_compositor::VideoFrame {
+            rgba: rgba.into_iter().cycle().take(4 * 4 * 4).collect(),
+            width: 4,
+            height: 4,
+            presented_at_us: 1,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "v2_preview")]
+    async fn synthetic_media_surface_rejects_default_off_config() {
+        let config = HeadlessConfig {
+            width: 320,
+            height: 180,
+            grpc_port: 0,
+            psk: "test".to_string(),
+            config_toml: None,
+        };
+        let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+        let err = runtime
+            .publish_synthetic_media_surface(
+                tze_hud_scene::types::SceneId::new(),
+                Some(&media_test_frame([255, 0, 0, 255])),
+                "windows-local-media-producer",
+            )
+            .await
+            .expect_err("default-off media ingress config must reject synthetic publish");
+
+        assert!(
+            err.contains("disabled"),
+            "default-off rejection should be explicit, got {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "v2_preview")]
+    async fn synthetic_media_surface_publishes_when_media_gate_enabled() {
+        let config = HeadlessConfig {
+            width: 320,
+            height: 180,
+            grpc_port: 0,
+            psk: "test".to_string(),
+            config_toml: Some(media_ingress_test_config()),
+        };
+        let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+        let surface_id = tze_hud_scene::types::SceneId::new();
+        runtime
+            .publish_synthetic_media_surface(
+                surface_id,
+                Some(&media_test_frame([0, 0, 255, 255])),
+                "windows-local-media-producer",
+            )
+            .await
+            .expect("enabled media ingress config should accept synthetic publish");
+
+        assert_eq!(
+            runtime.compositor.video_render_state(&surface_id),
+            tze_hud_compositor::VideoRenderState::Streaming,
+            "synthetic frame upload should make the surface renderable"
+        );
+
+        let state = runtime.shared_state().lock().await;
+        let scene = state.scene.lock().await;
+        let publishes = scene
+            .zone_registry
+            .active_publishes
+            .get("media-pip")
+            .expect("media-pip should have one VideoSurfaceRef publish");
+        assert!(matches!(
+            publishes.last().map(|record| &record.content),
+            Some(tze_hud_scene::types::ZoneContent::VideoSurfaceRef(id)) if *id == surface_id
+        ));
     }
 }

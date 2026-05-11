@@ -224,6 +224,12 @@ pub enum MediaEvent {
     Admitted,
     /// A decoded frame arrived.
     FrameDecoded(VideoFrame),
+    /// A decoded frame was captured by [`VideoSurfaceEntry::handle_decoded_frame`].
+    ///
+    /// This payload-free variant lets high-frequency upload paths retain the
+    /// accepted frame with one copy, then drive the state machine without
+    /// cloning the RGBA buffer again.
+    FrameDecodedAccepted,
     /// Network/decode hiccup, below teardown threshold — `STREAMING → DEGRADED`.
     Degraded,
     /// Recovered from a degraded episode — `DEGRADED → STREAMING`.
@@ -274,6 +280,12 @@ impl VideoSurfaceEntry {
             self.last_frame = Some(frame.clone());
         }
         self.machine.handle(event);
+    }
+
+    /// Capture an accepted decoded frame and notify the state machine.
+    pub fn handle_decoded_frame(&mut self, frame: VideoFrame) {
+        self.last_frame = Some(frame);
+        self.machine.handle(&MediaEvent::FrameDecodedAccepted);
     }
 
     /// What the renderer should draw this frame.
@@ -356,7 +368,7 @@ impl VideoSurface {
             MediaEvent::MediaDropped => Transition(State::paused()),
             MediaEvent::Close => Transition(State::closing()),
             MediaEvent::Revoke => Transition(State::revoked()),
-            MediaEvent::FrameDecoded(_) => Handled,
+            MediaEvent::FrameDecoded(_) | MediaEvent::FrameDecodedAccepted => Handled,
             _ => Super,
         }
     }
@@ -376,7 +388,7 @@ impl VideoSurface {
             MediaEvent::MediaDropped => Transition(State::paused()),
             MediaEvent::Close => Transition(State::closing()),
             MediaEvent::Revoke => Transition(State::revoked()),
-            MediaEvent::FrameDecoded(_) => Handled,
+            MediaEvent::FrameDecoded(_) | MediaEvent::FrameDecodedAccepted => Handled,
             _ => Super,
         }
     }
@@ -478,6 +490,16 @@ impl VideoSurfaceMap {
     pub fn handle(&mut self, surface_id: SceneId, event: &MediaEvent) {
         if let Some(entry) = self.entries.get_mut(&surface_id) {
             entry.handle(event);
+        }
+    }
+
+    /// Capture an accepted decoded frame for a tracked surface.
+    ///
+    /// No-op if the surface is not tracked; callers should call
+    /// [`ensure`][Self::ensure] after validation and upload succeed.
+    pub fn handle_decoded_frame(&mut self, surface_id: SceneId, frame: VideoFrame) {
+        if let Some(entry) = self.entries.get_mut(&surface_id) {
+            entry.handle_decoded_frame(frame);
         }
     }
 

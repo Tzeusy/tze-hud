@@ -12,6 +12,7 @@
 //!
 //! - **Profile budgets** — max tiles, max texture MB, max agents, target/min FPS.
 //! - **Agent capability registry** — per-agent capability grants from `[agents.registered]`.
+//! - **Media ingress policy** — frozen Windows media-ingress startup gate.
 //! - **Hot-reloadable policy** — privacy, degradation, chrome, and dynamic agent policy
 //!   sections, which can be updated live without restart.
 //!
@@ -32,8 +33,8 @@
 //!
 //! ### Frozen fields
 //!
-//! `profile`, `agent_capabilities`, and `fallback_policy` are frozen at startup.
-//! A restart is required to change them.
+//! `profile`, `media_ingress`, `agent_capabilities`, and `fallback_policy` are
+//! frozen at startup. A restart is required to change them.
 //!
 //! ### Hot-reloadable fields
 //!
@@ -82,7 +83,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tze_hud_config::HotReloadableConfig;
 use tze_hud_protocol::auth::CapabilityPolicy;
-use tze_hud_scene::config::{DisplayProfile, ResolvedConfig};
+use tze_hud_scene::config::{DisplayProfile, MediaIngressConfig, ResolvedConfig};
 
 // ─── FallbackPolicy ───────────────────────────────────────────────────────────
 
@@ -110,8 +111,9 @@ impl Default for FallbackPolicy {
 ///
 /// Built once at startup; shared via `Arc<RuntimeContext>` across all subsystems.
 ///
-/// **Frozen fields** (`profile`, `agent_capabilities`, `fallback_policy`) are
-/// immutable after construction. A restart is required to change them.
+/// **Frozen fields** (`profile`, `media_ingress`, `agent_capabilities`,
+/// `fallback_policy`) are immutable after construction. A restart is required
+/// to change them.
 ///
 /// **Hot-reloadable fields** are held in `hot` as an `ArcSwap<HotReloadableConfig>`.
 /// Call `reload_hot_config()` to atomically swap in a freshly validated config subset
@@ -126,6 +128,12 @@ pub struct RuntimeContext {
     // Immutable after construction. Require restart to change.
     /// Resolved display profile with budget values.
     pub profile: DisplayProfile,
+
+    /// Frozen Windows media-ingress configuration.
+    ///
+    /// Default-off unless the startup configuration explicitly enables the
+    /// approved one-stream `media-pip` slice.
+    pub media_ingress: MediaIngressConfig,
 
     /// Per-agent capability grants keyed by agent name.
     /// Populated from `[agents.registered]` in config.
@@ -157,6 +165,7 @@ impl RuntimeContext {
     pub fn from_config(config: ResolvedConfig, fallback_policy: FallbackPolicy) -> Self {
         Self {
             profile: config.profile,
+            media_ingress: config.media_ingress,
             agent_capabilities: config.agent_capabilities,
             fallback_policy,
             hot: ArcSwap::from_pointee(HotReloadableConfig::default()),
@@ -176,6 +185,7 @@ impl RuntimeContext {
     ) -> Self {
         Self {
             profile: config.profile,
+            media_ingress: config.media_ingress,
             agent_capabilities: config.agent_capabilities,
             fallback_policy,
             hot: ArcSwap::from_pointee(hot),
@@ -190,6 +200,7 @@ impl RuntimeContext {
     pub fn headless_default() -> Self {
         Self {
             profile: DisplayProfile::headless(),
+            media_ingress: MediaIngressConfig::default(),
             agent_capabilities: HashMap::new(),
             fallback_policy: FallbackPolicy::Guest,
             hot: ArcSwap::from_pointee(HotReloadableConfig::default()),
