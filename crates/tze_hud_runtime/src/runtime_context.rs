@@ -82,7 +82,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tze_hud_config::HotReloadableConfig;
 use tze_hud_protocol::auth::CapabilityPolicy;
-use tze_hud_scene::config::{DisplayProfile, ResolvedConfig};
+use tze_hud_scene::config::{DisplayProfile, MediaIngressConfig, ResolvedConfig};
 
 // ─── FallbackPolicy ───────────────────────────────────────────────────────────
 
@@ -127,6 +127,12 @@ pub struct RuntimeContext {
     /// Resolved display profile with budget values.
     pub profile: DisplayProfile,
 
+    /// Frozen Windows media-ingress configuration.
+    ///
+    /// Default-off unless the startup configuration explicitly enables the
+    /// approved one-stream `media-pip` slice.
+    pub media_ingress: MediaIngressConfig,
+
     /// Per-agent capability grants keyed by agent name.
     /// Populated from `[agents.registered]` in config.
     agent_capabilities: HashMap<String, Vec<String>>,
@@ -157,6 +163,7 @@ impl RuntimeContext {
     pub fn from_config(config: ResolvedConfig, fallback_policy: FallbackPolicy) -> Self {
         Self {
             profile: config.profile,
+            media_ingress: config.media_ingress,
             agent_capabilities: config.agent_capabilities,
             fallback_policy,
             hot: ArcSwap::from_pointee(HotReloadableConfig::default()),
@@ -176,6 +183,7 @@ impl RuntimeContext {
     ) -> Self {
         Self {
             profile: config.profile,
+            media_ingress: config.media_ingress,
             agent_capabilities: config.agent_capabilities,
             fallback_policy,
             hot: ArcSwap::from_pointee(hot),
@@ -190,6 +198,7 @@ impl RuntimeContext {
     pub fn headless_default() -> Self {
         Self {
             profile: DisplayProfile::headless(),
+            media_ingress: MediaIngressConfig::default(),
             agent_capabilities: HashMap::new(),
             fallback_policy: FallbackPolicy::Guest,
             hot: ArcSwap::from_pointee(HotReloadableConfig::default()),

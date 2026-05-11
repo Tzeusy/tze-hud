@@ -164,6 +164,11 @@ const VIDEO_SURFACE_PLACEHOLDER_COLOR: Rgba = Rgba {
     a: 1.0,
 };
 
+/// The only zone allowed to render v2 preview video frames in the accepted
+/// Windows media ingress slice.
+#[cfg(feature = "v2_preview")]
+const APPROVED_WINDOWS_MEDIA_ZONE: &str = "media-pip";
+
 /// Size of a notification icon in pixels (square, 24×24).
 ///
 /// Icons are rendered left-aligned within the notification backdrop, at the
@@ -2264,6 +2269,25 @@ impl Compositor {
         surface_id: tze_hud_scene::types::SceneId,
         frame: &crate::video_surface::VideoFrame,
     ) -> bool {
+        use crate::video_surface::{MediaEvent, VideoRenderState};
+
+        match self.video_surfaces.render_state_for(&surface_id) {
+            VideoRenderState::Closed => {
+                self.evict_video_frame_texture(&surface_id);
+                tracing::warn!(
+                    surface_id = %surface_id,
+                    "upload_video_frame: terminal surface rejected"
+                );
+                return false;
+            }
+            VideoRenderState::Placeholder => {
+                self.video_surfaces.ensure(surface_id);
+                self.video_surfaces
+                    .handle(surface_id, &MediaEvent::Admitted);
+            }
+            VideoRenderState::Streaming | VideoRenderState::LastFrameWithBadge => {}
+        }
+
         // Validate dimensions — fail fast with a diagnostic message.
         if frame.width == 0 || frame.height == 0 {
             tracing::warn!(
@@ -2363,6 +2387,8 @@ impl Compositor {
                 height: frame.height,
             },
         );
+        self.video_surfaces
+            .handle(surface_id, &MediaEvent::FrameDecoded(frame.clone()));
 
         true
     }
@@ -2420,6 +2446,9 @@ impl Compositor {
 
         let mut cmds = Vec::new();
         for (zone_name, publishes) in &scene.zone_registry.active_publishes {
+            if zone_name != APPROVED_WINDOWS_MEDIA_ZONE {
+                continue;
+            }
             if publishes.is_empty() {
                 continue;
             }
@@ -14541,6 +14570,177 @@ mod tests {
             color[3] > 0.5,
             "VideoSurfaceRef placeholder must be opaque (A > 0.5), got {}",
             color[3]
+        );
+    }
+
+    #[cfg(feature = "v2_preview")]
+    fn media_pip_scene(surface_id: SceneId) -> SceneGraph {
+        let mut scene = SceneGraph::new(320.0, 180.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "media-pip".to_owned(),
+            description: "approved media surface zone".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.25,
+                y_pct: 0.25,
+                width_pct: 0.50,
+                height_pct: 0.50,
+            },
+            accepted_media_types: vec![ZoneMediaType::VideoSurfaceRef],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: Some(TransportConstraint::WebRtcRequired),
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+        scene
+            .publish_to_zone(
+                "media-pip",
+                ZoneContent::VideoSurfaceRef(surface_id),
+                "synthetic-media-test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+    }
+
+    #[cfg(feature = "v2_preview")]
+    fn pixel_at(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+        let idx = (y * width + x) * 4;
+        [
+            pixels[idx],
+            pixels[idx + 1],
+            pixels[idx + 2],
+            pixels[idx + 3],
+        ]
+    }
+
+    #[cfg(feature = "v2_preview")]
+    fn solid_frame(rgba: [u8; 4]) -> crate::video_surface::VideoFrame {
+        crate::video_surface::VideoFrame {
+            rgba: rgba.into_iter().cycle().take(4 * 4 * 4).collect(),
+            width: 4,
+            height: 4,
+            presented_at_us: 1,
+        }
+    }
+
+    /// Synthetic VideoSurfaceRef frames upload into compositor-owned textures,
+    /// replace the placeholder, stay inside media-pip geometry, update on later
+    /// frames, and return to placeholder after teardown.
+    #[tokio::test]
+    #[cfg(feature = "v2_preview")]
+    async fn test_synthetic_video_surface_frames_render_clip_and_teardown() {
+        use crate::video_surface::{MediaEvent, VideoRenderState};
+
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(320, 180).await);
+        let surface_id = SceneId::new();
+        let mut scene = media_pip_scene(surface_id);
+
+        compositor.render_frame_headless(&mut scene, &surface);
+        let placeholder = surface.read_pixels(&compositor.device);
+        let before = pixel_at(&placeholder, 320, 160, 90);
+        assert!(
+            before[0] < 80 && before[1] < 80 && before[2] < 80 && before[3] > 200,
+            "before first frame, media-pip must render the deterministic dark placeholder, got {before:?}"
+        );
+
+        let red = solid_frame([255, 0, 0, 255]);
+        assert!(
+            compositor.upload_video_frame(surface_id, &red),
+            "valid synthetic frame should upload"
+        );
+        assert_eq!(
+            compositor.video_render_state(&surface_id),
+            VideoRenderState::Streaming,
+            "upload should move the runtime-owned surface into Streaming"
+        );
+        compositor.render_frame_headless(&mut scene, &surface);
+        let pixels = surface.read_pixels(&compositor.device);
+        let inside = pixel_at(&pixels, 320, 160, 90);
+        let outside = pixel_at(&pixels, 320, 20, 20);
+        assert!(
+            inside[0] > 180 && inside[1] < 80 && inside[2] < 80,
+            "uploaded red synthetic frame should visibly replace placeholder inside media-pip, got {inside:?}"
+        );
+        assert!(
+            !(outside[0] > 180 && outside[1] < 80 && outside[2] < 80),
+            "video frame must be clipped to media-pip geometry; outside sample was red: {outside:?}"
+        );
+
+        let blue = solid_frame([0, 0, 255, 255]);
+        assert!(
+            compositor.upload_video_frame(surface_id, &blue),
+            "second synthetic frame should replace the cached texture"
+        );
+        compositor.render_frame_headless(&mut scene, &surface);
+        let changed = surface.read_pixels(&compositor.device);
+        let inside_changed = pixel_at(&changed, 320, 160, 90);
+        assert!(
+            inside_changed[2] > 180 && inside_changed[0] < 80 && inside_changed[1] < 80,
+            "later synthetic frame should update visible media-pip pixels, got {inside_changed:?}"
+        );
+
+        compositor.handle_media_event(surface_id, &MediaEvent::Close);
+        compositor.handle_media_event(surface_id, &MediaEvent::Close);
+        compositor.render_frame_headless(&mut scene, &surface);
+        let torn_down = surface.read_pixels(&compositor.device);
+        let after = pixel_at(&torn_down, 320, 160, 90);
+        assert!(
+            after[0] < 80 && after[1] < 80 && after[2] < 80 && after[3] > 200,
+            "after teardown, media-pip should return to deterministic placeholder, got {after:?}"
+        );
+    }
+
+    /// Cached video textures remain scoped to the approved Windows media zone.
+    /// A VideoSurfaceRef in any other zone keeps the deterministic placeholder.
+    #[tokio::test]
+    #[cfg(feature = "v2_preview")]
+    async fn test_video_surface_texture_is_scoped_to_media_pip() {
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(160, 120).await);
+        let surface_id = SceneId::new();
+        let mut scene = SceneGraph::new(160.0, 120.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "other-video-zone".to_owned(),
+            description: "non-approved media zone".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 1.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::VideoSurfaceRef],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: Some(TransportConstraint::WebRtcRequired),
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+        scene
+            .publish_to_zone(
+                "other-video-zone",
+                ZoneContent::VideoSurfaceRef(surface_id),
+                "synthetic-media-test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(compositor.upload_video_frame(surface_id, &solid_frame([255, 0, 0, 255])));
+        compositor.render_frame_headless(&mut scene, &surface);
+        let pixels = surface.read_pixels(&compositor.device);
+        let center = pixel_at(&pixels, 160, 80, 60);
+        assert!(
+            center[0] < 80 && center[1] < 80 && center[2] < 80,
+            "non-media-pip VideoSurfaceRef must not render cached video texture, got {center:?}"
         );
     }
 

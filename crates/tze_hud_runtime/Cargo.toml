@@ -19,6 +19,9 @@ gstreamer = [
     "dep:gstreamer-app",
     "tze_hud_compositor/v2_preview",
 ]
+## Enable the bounded v2 media-surface hooks without requiring GStreamer.
+## Used by synthetic/headless validation lanes where frames are generated in-process.
+v2_preview = ["tze_hud_compositor/v2_preview"]
 
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
