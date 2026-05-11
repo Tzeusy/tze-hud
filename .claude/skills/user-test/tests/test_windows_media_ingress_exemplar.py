@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -49,6 +51,32 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         )
         self.assertEqual(review["audio_route_to_hud"], "none")
         self.assertIn("self-owned/local", review["hud_ingress_source"])
+
+    def test_rejects_invalid_youtube_video_id_before_launch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "YouTube id format"):
+            media.validate_youtube_video_id("O0FGCxkHM-U'; calc; '")
+
+    def test_rejects_unapproved_media_zone(self) -> None:
+        with self.assertRaisesRegex(ValueError, "approved zone"):
+            media.validate_approved_media_zone("desktop")
+
+    def test_local_youtube_sidecar_launches_generated_html(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = media.build_parser().parse_args(
+                [
+                    "youtube-sidecar",
+                    "--output-dir",
+                    tmpdir,
+                ]
+            )
+            with mock.patch.object(media.webbrowser, "open", return_value=True) as opened:
+                evidence = media.launch_youtube_sidecar(args)
+
+        opened.assert_called_once()
+        opened_url = opened.call_args.args[0]
+        self.assertTrue(opened_url.startswith("file://"), opened_url)
+        self.assertEqual(evidence["official_player_url"], media.YOUTUBE_EMBED_URL)
+        self.assertTrue(Path(evidence["html_evidence_path"]).name.endswith(".html"))
 
 
 if __name__ == "__main__":

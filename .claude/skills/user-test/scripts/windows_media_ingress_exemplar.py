@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -32,6 +34,7 @@ from proto_gen import session_pb2  # noqa: E402
 
 YOUTUBE_VIDEO_ID = "O0FGCxkHM-U"
 YOUTUBE_EMBED_URL = f"https://www.youtube.com/embed/{YOUTUBE_VIDEO_ID}"
+YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 APPROVED_MEDIA_ZONE = "media-pip"
 LOCAL_PRODUCER_AGENT_ID = "windows-local-media-producer"
 DEFAULT_SOURCE_LABEL = "synthetic-color-bars"
@@ -44,6 +47,31 @@ BANNED_SOURCE_MARKERS = (
     "download",
     "direct media url",
 )
+
+
+def validate_youtube_video_id(video_id: str) -> str:
+    """Return a valid YouTube video id or raise before shell/browser use."""
+    if not YOUTUBE_VIDEO_ID_RE.fullmatch(video_id):
+        raise ValueError("video_id must match the 11-character YouTube id format")
+    return video_id
+
+
+def validate_ssh_arg(name: str, value: str) -> str:
+    """Reject values that OpenSSH could parse as options."""
+    if not value:
+        raise ValueError(f"{name} is required")
+    if value.startswith("-"):
+        raise ValueError(f"{name} must not start with '-'")
+    return value
+
+
+def validate_approved_media_zone(zone_name: str) -> str:
+    """Return the only currently approved media ingress zone."""
+    if zone_name != APPROVED_MEDIA_ZONE:
+        raise ValueError(
+            f"media ingress exemplar only supports approved zone {APPROVED_MEDIA_ZONE!r}"
+        )
+    return zone_name
 
 
 def build_video_only_sdp_offer(
@@ -93,6 +121,7 @@ def build_video_only_sdp_offer(
 
 def build_source_evidence_html(video_id: str = YOUTUBE_VIDEO_ID) -> str:
     """Return a small external-player evidence page using the official embed URL."""
+    video_id = validate_youtube_video_id(video_id)
     embed_url = f"https://www.youtube.com/embed/{video_id}"
     return f"""<!doctype html>
 <html lang="en">
@@ -141,6 +170,7 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
     psk = args.psk or os.getenv(args.psk_env)
     if not psk:
         raise RuntimeError(f"set {args.psk_env} or pass --psk")
+    zone_name = validate_approved_media_zone(args.zone_name)
 
     stream_uuid = uuid.uuid4()
     sdp_offer = build_video_only_sdp_offer(
@@ -160,7 +190,7 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
         result = await client.open_media_ingress(
             client_stream_id=stream_uuid.bytes,
             agent_sdp_offer=sdp_offer,
-            zone_name=args.zone_name,
+            zone_name=zone_name,
             content_classification=args.content_classification,
             declared_peak_kbps=args.declared_peak_kbps,
             codec_preference=[session_pb2.VIDEO_H264_BASELINE],
@@ -182,7 +212,7 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
         "source_label": args.source_label,
         "video_only": True,
         "audio_route_to_hud": "none",
-        "zone_name": args.zone_name,
+        "zone_name": zone_name,
         "content_classification": args.content_classification,
         "declared_peak_kbps": args.declared_peak_kbps,
         "client_stream_id": stream_uuid.hex,
@@ -198,38 +228,52 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
+    video_id = validate_youtube_video_id(args.video_id)
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     html_path = output_dir / "youtube_source_evidence.html"
-    html_path.write_text(build_source_evidence_html(args.video_id), encoding="utf-8")
-    official_url = f"https://www.youtube.com/embed/{args.video_id}"
+    html = build_source_evidence_html(video_id)
+    html_path.write_text(html, encoding="utf-8")
+    official_url = f"https://www.youtube.com/embed/{video_id}"
 
     launched_by = "dry-run"
     if not args.dry_run:
         if args.windows_host:
+            windows_user = validate_ssh_arg("windows_user", args.windows_user)
+            windows_host = validate_ssh_arg("windows_host", args.windows_host)
             cmd = [
                 "ssh",
                 "-o",
                 "BatchMode=yes",
                 "-o",
                 f"ConnectTimeout={args.connect_timeout_s}",
+                "-l",
+                windows_user,
             ]
             if args.ssh_key:
                 cmd.extend(["-i", args.ssh_key])
-            cmd.append(f"{args.windows_user}@{args.windows_host}")
-            cmd.append(
-                "powershell -NoProfile -Command "
-                f"\"Start-Process '{official_url}'\""
+            cmd.append(windows_host)
+            remote_html_b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
+            remote_script = (
+                f"$htmlBytes=[Convert]::FromBase64String('{remote_html_b64}');"
+                "$html=[Text.Encoding]::UTF8.GetString($htmlBytes);"
+                "$path=Join-Path $env:TEMP 'tze_hud_youtube_source_evidence.html';"
+                "Set-Content -LiteralPath $path -Value $html -Encoding UTF8;"
+                "Start-Process -FilePath $path"
             )
+            encoded_script = base64.b64encode(remote_script.encode("utf-16le")).decode(
+                "ascii"
+            )
+            cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", encoded_script])
             subprocess.run(cmd, check=True)
-            launched_by = f"ssh:{args.windows_user}@{args.windows_host}"
+            launched_by = f"ssh:{windows_user}@{windows_host}"
         else:
-            webbrowser.open(official_url, new=1, autoraise=True)
+            webbrowser.open(html_path.as_uri(), new=1, autoraise=True)
             launched_by = "local-browser"
 
     return {
         "lane": "youtube-source-evidence",
-        "video_id": args.video_id,
+        "video_id": video_id,
         "official_player_url": official_url,
         "html_evidence_path": str(html_path),
         "launched_by": launched_by,

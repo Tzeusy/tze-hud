@@ -703,7 +703,12 @@ class HudClient:
         except Exception as e:
             print(f"  [grpc] Reader error: {e}", flush=True)
 
-    async def _wait_for(self, payload_name: str, timeout: float = 10.0) -> Any:
+    async def _wait_for(
+        self,
+        payload_name: str,
+        timeout: float = 10.0,
+        matcher: Optional[Callable[[Any], bool]] = None,
+    ) -> Any:
         """Wait for a ServerMessage with the given payload type."""
         deadline = time.monotonic() + timeout
         async with self._response_wait_lock:
@@ -712,8 +717,11 @@ class HudClient:
                 if remaining <= 0:
                     raise TimeoutError(f"Timed out waiting for {payload_name}")
                 msg = self._pop_deferred_response(
-                    lambda candidate: candidate.WhichOneof("payload")
-                    in {payload_name, "session_error"}
+                    lambda candidate: self._matches_payload_wait(
+                        candidate,
+                        payload_name,
+                        matcher,
+                    )
                 )
                 if msg is None:
                     try:
@@ -724,7 +732,7 @@ class HudClient:
                         raise TimeoutError(f"Timed out waiting for {payload_name}")
 
                 which = msg.WhichOneof("payload")
-                if which == payload_name:
+                if which == payload_name and (matcher is None or matcher(msg)):
                     return msg
                 if which == "session_error":
                     raise RuntimeError(
@@ -825,6 +833,8 @@ class HudClient:
             raise ValueError("client_stream_id must be exactly 16 bytes")
         if not agent_sdp_offer:
             raise ValueError("agent_sdp_offer is required for the local producer path")
+        if zone_name != "media-pip":
+            raise ValueError("media ingress is currently approved only for zone 'media-pip'")
         codecs = codec_preference or [session_pb2.VIDEO_H264_BASELINE]
         await self._send(
             media_ingress_open=session_pb2.MediaIngressOpen(
@@ -871,21 +881,18 @@ class HudClient:
                 reason=reason,
             )
         )
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Timed out waiting for media_ingress_close_notice")
-            resp = await self._wait_for("media_ingress_close_notice", timeout=remaining)
-            notice = resp.media_ingress_close_notice
-            if notice.stream_epoch == stream_epoch:
-                print(
-                    f"  [grpc] Media ingress closed: epoch={stream_epoch} "
-                    f"reason={notice.reason}",
-                    flush=True,
-                )
-                return notice
-            self._deferred_responses.append(resp)
+        resp = await self._wait_for(
+            "media_ingress_close_notice",
+            timeout=timeout,
+            matcher=lambda msg: msg.media_ingress_close_notice.stream_epoch == stream_epoch,
+        )
+        notice = resp.media_ingress_close_notice
+        print(
+            f"  [grpc] Media ingress closed: epoch={stream_epoch} "
+            f"reason={notice.reason}",
+            flush=True,
+        )
+        return notice
 
     async def close(self, reason: str = "test complete", expect_resume: bool = False):
         """Gracefully close the session."""
@@ -987,6 +994,19 @@ class HudClient:
             if matcher(msg):
                 return self._deferred_responses.pop(index)
         return None
+
+    @staticmethod
+    def _matches_payload_wait(
+        msg: Any,
+        payload_name: str,
+        matcher: Optional[Callable[[Any], bool]],
+    ) -> bool:
+        which = msg.WhichOneof("payload")
+        if which == "session_error":
+            return True
+        if which != payload_name:
+            return False
+        return matcher is None or matcher(msg)
 
     @staticmethod
     def _matches_resource_upload_wait(msg: Any, request_sequence: int) -> bool:
