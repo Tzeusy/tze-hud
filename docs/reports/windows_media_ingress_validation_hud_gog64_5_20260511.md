@@ -14,7 +14,7 @@ YouTube source identity: `O0FGCxkHM-U` through `https://www.youtube.com/embed/O0
 
 Synthetic/local deterministic validation is complete and passing. It covers media enablement/config shape, approved zone registration, admission, frame presentation, placeholder-before-first-frame, clipping, teardown, second-stream rejection, policy denial, lease/capability revoke, reconnect/disconnect slot release, disabled-gate responses, and operator-disabled admission behavior.
 
-Live Windows reachability is currently good, but authenticated live media ingress did not run because this worker shell has neither `TZE_HUD_PSK` nor `MCP_TEST_PSK` set. The 10-minute record-only soak is blocked for the same reason. No live HUD frame-ingress proof is claimed.
+Live Windows reachability is currently good. The first live attempt stopped at missing local PSK provisioning. A follow-up coordinator attempt used a generated transient non-default PSK, deployed the current Windows media-ingress binary/config on alternate ports, and launched a temporary `TzeHudMediaIngress` scheduled task. That task exited before binding gRPC because the production `tze_hud.exe` overlay already owned the Windows GPU lock. The 10-minute record-only soak is therefore blocked on an exclusive Windows GPU validation window. No live HUD frame-ingress proof is claimed.
 
 ## Evidence Artifacts
 
@@ -28,6 +28,7 @@ Artifact directory: `docs/reports/artifacts/windows_media_ingress_hud_gog64_5/`
 | `youtube-source-evidence.json` | Dry-run source-evidence artifact for the same official-player lane. |
 | `youtube_source_evidence.html` | Generated official-player sidecar HTML. |
 | `local-producer-blocked-missing-psk.txt` | Auth preflight failure for the live HUD local-producer lane. |
+| `media-task-blocked-gpu-lock.txt` | Follow-up transient-PSK launch attempt blocked by the active production HUD GPU lock. |
 
 ## Commands Run
 
@@ -106,6 +107,18 @@ python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
 
 Result: blocked before network I/O with `RuntimeError: set TZE_HUD_PSK or pass --psk`. This worker did not have `TZE_HUD_PSK` or `MCP_TEST_PSK` set.
 
+```bash
+cargo build -p tze_hud_app --bin tze_hud --target x86_64-pc-windows-gnu --release
+scp target/x86_64-pc-windows-gnu/release/tze_hud.exe \
+  tzeus@tzehouse-windows.parrot-hen.ts.net:C:/tze_hud/tze_hud_media_ingress.exe
+scp app/tze_hud_app/config/windows-media-ingress.toml \
+  tzeus@tzehouse-windows.parrot-hen.ts.net:C:/tze_hud/windows-media-ingress.toml
+# Temporary interactive task TzeHudMediaIngress launched with generated transient PSK,
+# config C:\tze_hud\windows-media-ingress.toml, and ports 50052/9092.
+```
+
+Result: blocked before gRPC bind. The media-ingress process exited with `[gpu-lock] GPU is already in use` because production `tze_hud.exe` was running in the interactive session. The temporary scheduled task was removed and any `tze_hud_media_ingress` process was stopped.
+
 ## Functional Gate Matrix
 
 | Gate | Status | Evidence |
@@ -124,24 +137,24 @@ Result: blocked before network I/O with `RuntimeError: set TZE_HUD_PSK or pass -
 | Reconnect/disconnect gating | Pass | `media_ingress_limit_is_global_and_disconnect_releases_slot` |
 | Disabled-gate response | Pass | `media_ingress_disabled_gate_rejects_without_admission`, `synthetic_media_surface_rejects_default_off_config` |
 | Operator-disable behavior | Pass, deterministic only | `test_dialog_gate_rejects_operator_disabled_media_ingress` |
-| Live Windows local producer rendered in `media-pip` | Blocked | Missing local non-default PSK env; see `local-producer-blocked-missing-psk.txt` |
+| Live Windows local producer rendered in `media-pip` | Blocked | Transient-PSK launch reached the runtime but the media task exited on Windows GPU lock; see `media-task-blocked-gpu-lock.txt` |
 | YouTube official-player source evidence | Pass | `youtube-source-evidence-live.json` |
-| 10-minute record-only soak | Blocked | Same PSK blocker as live local-producer lane |
+| 10-minute record-only soak | Blocked | Requires exclusive Windows GPU validation window; current production HUD owns the GPU lock |
 
 ## Record-Only Metrics
 
 | Metric | Value |
 |---|---|
-| First-frame time | Not collected; live authenticated producer did not start. |
-| Dropped frames | Not collected; live authenticated producer did not start. |
-| CPU/GPU/memory | Not collected for media soak; authenticated live/soak lane blocked before launch. |
-| Soak duration | 0s; 10-minute record-only soak blocked by missing local PSK. |
+| First-frame time | Not collected; media-ingress HUD did not bind gRPC due to Windows GPU lock. |
+| Dropped frames | Not collected; media-ingress HUD did not bind gRPC due to Windows GPU lock. |
+| CPU/GPU/memory | Not collected for media soak; the temporary media-ingress HUD exited on GPU-lock preflight. |
+| Soak duration | 0s; 10-minute record-only soak blocked by active production HUD GPU ownership. |
 | Teardown behavior | Deterministic pass in compositor frame test; live teardown not collected. |
 | Operator-disable behavior | Deterministic admission pass; live operator-disable proof not collected. |
 
 ## Blocker And Unblock Condition
 
-The Windows host is reachable. The active blocker is authentication material in this worker environment: set a non-default HUD PSK in `TZE_HUD_PSK` or `MCP_TEST_PSK`, or provide an approved no-output retrieval path, then rerun the local producer and 10-minute soak against a HUD launched with `app/tze_hud_app/config/windows-media-ingress.toml`.
+The Windows host is reachable. A local no-secret authentication path exists for this validation lane by generating a transient non-default PSK and launching a temporary media-ingress scheduled task. The remaining active blocker is Windows GPU exclusivity: the production `tze_hud.exe` overlay owns the GPU lock, and the coordinator did not stop it because that would disrupt the active user HUD. Schedule an exclusive validation window, stop or replace the production overlay deliberately, then rerun the local producer and 10-minute soak against `app/tze_hud_app/config/windows-media-ingress.toml`.
 
 Do not count YouTube sidecar evidence as HUD frame-ingress proof. The sidecar only proves official-player source handling for `O0FGCxkHM-U`; raw YouTube frame bridging remains blocked pending separate policy approval.
 
@@ -152,18 +165,18 @@ The worker did not mutate Beads lifecycle state. The coordinator should create o
 ```json
 [
   {
-    "title": "Provision no-secret PSK path for Windows media ingress validation",
+    "title": "Schedule exclusive GPU window for Windows media ingress validation",
     "type": "task",
     "priority": 1,
     "depends_on": "hud-gog64.5",
-    "rationale": "TzeHouse is reachable, but this worker cannot run authenticated gRPC/MCP media validation because TZE_HUD_PSK and MCP_TEST_PSK are unset. Provide a no-secret retrieval/provisioning path or operator-set env var, then rerun local-producer and soak."
+    "rationale": "TzeHouse is reachable and a transient no-secret PSK path can launch the media-ingress task, but production tze_hud.exe owns the Windows GPU lock. An operator-approved exclusive GPU window is needed before running the live local producer and soak."
   },
   {
     "title": "Run authenticated 10-minute Windows media ingress record-only soak",
     "type": "task",
     "priority": 1,
     "depends_on": "hud-gog64.5",
-    "rationale": "The deterministic gates and YouTube sidecar evidence passed, but the live local-producer and soak metrics were blocked before authentication. The soak must record first-frame time, dropped frames, CPU/GPU/memory, operator-disable behavior, and teardown behavior."
+    "rationale": "The deterministic gates and YouTube sidecar evidence passed, but live local-producer and soak metrics are blocked until an exclusive GPU validation window is available. The soak must record first-frame time, dropped frames, CPU/GPU/memory, operator-disable behavior, and teardown behavior."
   }
 ]
 ```

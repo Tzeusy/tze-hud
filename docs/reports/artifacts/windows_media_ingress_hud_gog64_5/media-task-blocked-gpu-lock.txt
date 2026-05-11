@@ -1,0 +1,26 @@
+# media ingress task launch blocked by Windows GPU lock 2026-05-11T16:39Z
+
+Attempted path:
+
+- Built current `tze_hud_app` Windows release binary.
+- Deployed it as `C:\tze_hud\tze_hud_media_ingress.exe`.
+- Deployed `app/tze_hud_app/config/windows-media-ingress.toml` as `C:\tze_hud\windows-media-ingress.toml`.
+- Created and started a temporary interactive scheduled task `TzeHudMediaIngress`.
+- Used alternate ports `50052` and `9092`.
+- Used a generated transient non-default PSK for this attempt only; it is not recorded in this artifact.
+- Cleanup removed the temporary scheduled task and stopped any `tze_hud_media_ingress` process.
+
+Result:
+
+The media-ingress HUD process exited before binding gRPC port `50052`.
+
+Observed stderr:
+
+```text
+error: [gpu-lock] GPU is already in use: SESSION_TYPE=interactive PID=15808 STARTED_AT=2026-05-11T15:59:01Z - tze_hud.exe interactive session
+hint: A CI real-decode job or another tze_hud session is using the GPU. Wait for it to finish, then retry. See docs/design/tzehouse-windows-gpu-scheduling.md.
+```
+
+Interpretation:
+
+The local no-secret authentication path is viable with a transient generated PSK, but the live HUD media-ingress proof and 10-minute soak require an exclusive Windows GPU validation window. The coordinator did not stop the existing production `TzeHudOverlay` process because that would disrupt the user's active HUD and might lose the current production task's PSK context.
