@@ -1,6 +1,6 @@
 # Specification: Media/WebRTC Post-v1 Bounded Ingress
 
-> **DEFERRED INDEFINITELY (2026-05-09).** This contract is parked. The project has refocused on a performant single-device Rust HUD runtime for Windows; all media-plane work is deferred. Do not implement against this spec or gate v1 work on it. Active source of truth: `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`.
+> **DEFERRED INDEFINITELY (2026-05-09).** This contract is parked. The project has refocused on a performant single-device Rust HUD runtime for Windows; all media-plane work is deferred. Do not implement against this spec or gate v1 work on it, except where the accepted `openspec/changes/windows-media-ingress-exemplar/` change names a default-off Windows-only, one-stream, video-only `media-pip` exception. Active source of truth: `openspec/changes/windows-first-performant-runtime/`, `openspec/changes/windows-media-ingress-exemplar/` for the exception, and epic `hud-9wljr`.
 >
 > Original spec follows.
 

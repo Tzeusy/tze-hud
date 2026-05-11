@@ -502,7 +502,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Capability Vocabulary
-Capability identifiers in agent grants MUST use the canonical `snake_case` wire-format names. The capability vocabulary defined in this specification is CANONICAL — all other specs, protocol handlers, example code, and MCP tool implementations MUST use these exact names when referencing capabilities. No synonyms, aliases, or legacy names are permitted in v1. The runtime MUST recognize all v1 capabilities: `create_tiles`, `modify_own_tiles`, `manage_tabs`, `manage_sync_groups`, `upload_resource`, `register_widget_asset`, `read_scene_topology`, `subscribe_scene_events`, `overlay_privileges`, `access_input_events`, `high_priority_z_order`, `exceed_default_budgets`, `read_telemetry`, `publish_zone:<zone_name>`, `publish_zone:*`, `emit_scene_event:<event_name>`, `resident_mcp`, `lease:priority:<N>`, `publish_widget:<widget_name>`, and `publish_widget:*`. Any capability name not in this canonical list (including misspellings, camelCase variants, or legacy names) MUST be rejected. Parameterized capability grants using the `system.` or `scene.` prefix for `emit_scene_event` MUST be rejected with `CONFIG_RESERVED_EVENT_PREFIX`. Note: RFC 0009 §8.1 contains older names (`read_scene`, `receive_input`, `zone_publish`) superseded by RFC 0005 Round 14 (rig-b2s); RFC 0006 §6.3 (this requirement) is the canonical authority.
+Capability identifiers in agent grants MUST use the canonical `snake_case` wire-format names. The capability vocabulary defined in this specification is CANONICAL — all other specs, protocol handlers, example code, and MCP tool implementations MUST use these exact names when referencing capabilities. No synonyms, aliases, or legacy names are permitted in v1. The runtime MUST recognize all v1 capabilities: `create_tiles`, `modify_own_tiles`, `manage_tabs`, `manage_sync_groups`, `upload_resource`, `register_widget_asset`, `read_scene_topology`, `subscribe_scene_events`, `overlay_privileges`, `access_input_events`, `high_priority_z_order`, `exceed_default_budgets`, `read_telemetry`, `media_ingress`, `publish_zone:<zone_name>`, `publish_zone:*`, `emit_scene_event:<event_name>`, `resident_mcp`, `lease:priority:<N>`, `publish_widget:<widget_name>`, and `publish_widget:*`. Any capability name not in this canonical list (including misspellings, camelCase variants, or legacy names) MUST be rejected. Parameterized capability grants using the `system.` or `scene.` prefix for `emit_scene_event` MUST be rejected with `CONFIG_RESERVED_EVENT_PREFIX`. Note: RFC 0009 §8.1 contains older names (`read_scene`, `receive_input`, `zone_publish`) superseded by RFC 0005 Round 14 (rig-b2s); RFC 0006 §6.3 (this requirement) is the canonical authority.
 Source: RFC 0006 §6.3, RFC 0005 Round 14
 Scope: v1-mandatory
 
@@ -529,6 +529,26 @@ Scope: v1-mandatory
 #### Scenario: Non-canonical widget capability rejected
 - **WHEN** an agent's capabilities include a non-canonical name such as `"widget_publish:gauge"` or `"publishWidget:gauge"`
 - **THEN** startup fails with `CONFIG_UNKNOWN_CAPABILITY` identifying the unrecognized capability name
+
+---
+
+### Requirement: Windows Media Ingress Configuration
+Windows media ingress MUST be disabled by default. The runtime MUST only enable media ingress when `[media_ingress]` explicitly sets `enabled = true`, `approved_zone = "media-pip"`, `max_active_streams = 1`, a non-empty `default_classification`, explicit `operator_disabled` state, and fixed absolute `geometry` (`x`, `y`, `width`, `height`). The approved zone MUST be content-layer, MUST accept only `VideoSurfaceRef`, MUST use `transport_constraint = WebRtcRequired`, and MUST NOT be inferred from existing default zones such as `pip` or `ambient-background`. Authenticated resident/local producers MUST receive the canonical `media_ingress` capability explicitly through `[agents.registered]`.
+Source: `openspec/changes/windows-media-ingress-exemplar/specs/configuration/spec.md`
+Scope: windows-media-ingress-exemplar only
+
+#### Scenario: media ingress absent remains disabled
+- **WHEN** the configuration has no `[media_ingress]` table
+- **THEN** media ingress is disabled and no approved media zone is registered
+
+#### Scenario: explicit media-pip configuration accepted
+- **WHEN** `[media_ingress]` enables `media-pip` with fixed geometry, `max_active_streams = 1`, default classification, and operator-disabled state
+- **THEN** the resolved config records the approved Windows media-ingress surface
+- **AND** only agents explicitly granted `media_ingress` can request media admission
+
+#### Scenario: non-approved media zone rejected
+- **WHEN** `[media_ingress]` names `pip`, `ambient-background`, or any zone other than `media-pip`
+- **THEN** startup fails with `CONFIG_INVALID_MEDIA_INGRESS`
 
 ---
 

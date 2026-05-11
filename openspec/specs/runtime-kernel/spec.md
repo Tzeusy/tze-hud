@@ -379,6 +379,7 @@ Scope: v1-mandatory
 
 ### Requirement: Media Worker Pool (Deferred)
 The media worker pool boundary (GStreamer internal scheduler, DecodedFrameReady channel with capacity 4 per stream) is reserved for post-v1. The pool MUST NOT be spawned in v1. The channel interface and GPU device ownership rules are pre-defined so that adding media workers post-v1 does not require restructuring the thread model.
+Narrow exception: the accepted `openspec/changes/windows-media-ingress-exemplar/` change may configure the default-off Windows-only one-stream media surface, but default runtime startup without explicit media ingress configuration MUST still spawn no media workers.
 Source: RFC 0002 §2.8
 Scope: post-v1
 

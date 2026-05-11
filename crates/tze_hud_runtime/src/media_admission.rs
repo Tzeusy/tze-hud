@@ -7,7 +7,7 @@
 //!
 //! Admission is evaluated in strict short-circuit order:
 //!
-//! 1. **Capability gate** (§A2.1): `media-ingress` granted, dialog / 7-day remember passed
+//! 1. **Capability gate** (§A2.1): `media_ingress` granted, dialog / 7-day remember passed
 //!    per RFC 0008 A1 §A2.
 //! 2. **Budget headroom** (§A2.2): per-session stream limit
 //!    (`max_concurrent_media_streams`, default 1); global GPU texture headroom ≥ 128 MiB.
@@ -88,7 +88,7 @@ pub const REMEMBER_TTL_US: u64 = 7 * 24 * 60 * 60 * 1_000_000;
 pub const DEFAULT_DIALOG_TIMEOUT_MS: u64 = 30_000;
 
 /// Capability token for live inbound visual streams (RFC 0008 A1 §A1).
-pub const CAPABILITY_MEDIA_INGRESS: &str = "media-ingress";
+pub const CAPABILITY_MEDIA_INGRESS: &str = "media_ingress";
 
 /// Capability token for microphone input (RFC 0008 A1 §A1).
 pub const CAPABILITY_MICROPHONE_INGRESS: &str = "microphone-ingress";
@@ -282,6 +282,8 @@ pub struct MediaCapabilityConfig {
     enabled: HashMap<String, bool>,
     /// Maximum concurrent media streams per session.
     pub max_concurrent_streams: u32,
+    /// Persistent operator-disable state. When true, media admissions are denied.
+    pub operator_disabled: bool,
     /// Whether cloud-relay transport is enabled (C15 trust boundary).
     pub cloud_relay_enabled: bool,
 }
@@ -289,8 +291,9 @@ pub struct MediaCapabilityConfig {
 impl Default for MediaCapabilityConfig {
     fn default() -> Self {
         let mut enabled = HashMap::new();
-        // By default, only `media-ingress` is enabled; all others off.
-        enabled.insert(CAPABILITY_MEDIA_INGRESS.to_string(), true);
+        // Media ingress is default-off. Explicit deployment config must enable
+        // it before admission, transport, decode, or worker startup can occur.
+        enabled.insert(CAPABILITY_MEDIA_INGRESS.to_string(), false);
         enabled.insert(CAPABILITY_MICROPHONE_INGRESS.to_string(), false);
         enabled.insert(CAPABILITY_AUDIO_EMIT.to_string(), false);
         enabled.insert(CAPABILITY_RECORDING.to_string(), false);
@@ -301,12 +304,32 @@ impl Default for MediaCapabilityConfig {
         Self {
             enabled,
             max_concurrent_streams: DEFAULT_MAX_CONCURRENT_MEDIA_STREAMS,
+            operator_disabled: false,
             cloud_relay_enabled: false,
         }
     }
 }
 
 impl MediaCapabilityConfig {
+    /// Build an explicit config for the approved one-stream Windows media slice.
+    pub fn windows_media_ingress_enabled(max_concurrent_streams: u32) -> Self {
+        let mut config = Self::default();
+        config.set_enabled(CAPABILITY_MEDIA_INGRESS, true);
+        config.max_concurrent_streams = max_concurrent_streams;
+        config
+    }
+
+    /// Build from frozen config-loader media ingress state.
+    pub fn from_media_ingress_config(media: &tze_hud_scene::config::MediaIngressConfig) -> Self {
+        let mut config = Self::default();
+        if media.enabled {
+            config.set_enabled(CAPABILITY_MEDIA_INGRESS, true);
+            config.max_concurrent_streams = media.max_active_streams;
+        }
+        config.operator_disabled = media.operator_disabled;
+        config
+    }
+
     /// Returns `true` if the named capability is enabled at deployment level.
     pub fn is_enabled(&self, capability: &str) -> bool {
         self.enabled.get(capability).copied().unwrap_or(false)
@@ -333,7 +356,7 @@ pub struct ActivationGateRequest<'a> {
     pub agent_namespace: &'a str,
     /// Stream epoch for the new stream (assigned by caller before evaluation).
     pub stream_epoch: &'a str,
-    /// Which C13 capability is being requested (typically `"media-ingress"`).
+    /// Which C13 capability is being requested (typically `"media_ingress"`).
     pub capability: &'a str,
     /// Transport path (local vs. cloud-relay).
     pub transport: MediaTransport,
@@ -603,6 +626,10 @@ impl MediaActivationGate {
         // `federated-send` is defined but not active in v2 (RFC 0008 A1 §A1).
         if capability == CAPABILITY_FEDERATED_SEND {
             return Err(MediaRejectCode::CapabilityNotImplemented);
+        }
+
+        if capability == CAPABILITY_MEDIA_INGRESS && self.config.operator_disabled {
+            return Err(MediaRejectCode::CapabilityNotEnabled);
         }
 
         // Check deployment-level enable flag.
@@ -1087,6 +1114,10 @@ mod tests {
         MediaActivationGate::new(config, Box::new(sink.clone()))
     }
 
+    fn enabled_media_config() -> MediaCapabilityConfig {
+        MediaCapabilityConfig::windows_media_ingress_enabled(DEFAULT_MAX_CONCURRENT_MEDIA_STREAMS)
+    }
+
     fn admitted_request<'a>(
         session_id: &'a str,
         agent_namespace: &'a str,
@@ -1146,18 +1177,27 @@ mod tests {
     // ── Dialog gate ───────────────────────────────────────────────────────────
 
     #[test]
-    fn test_dialog_gate_returns_dialog_required_when_no_cache() {
+    fn test_media_ingress_default_config_disabled() {
         let config = MediaCapabilityConfig::default();
+        assert!(
+            !config.is_enabled(CAPABILITY_MEDIA_INGRESS),
+            "media_ingress must be default-off"
+        );
+    }
+
+    #[test]
+    fn test_dialog_gate_returns_dialog_required_when_no_cache() {
+        let config = enabled_media_config();
         let sink = std::sync::Arc::new(CollectingMediaAuditSink::default());
         let gate = make_gate_with_sink(config, &sink);
-        // media-ingress is enabled but no session cache or remember record.
+        // media_ingress is enabled but no session cache or remember record.
         let result = gate.evaluate_dialog_gate("sess-1", "agent-a", CAPABILITY_MEDIA_INGRESS, NOW);
         assert_eq!(result, Ok(false), "dialog required without cache");
     }
 
     #[test]
     fn test_dialog_gate_passes_with_valid_remember_record() {
-        let config = MediaCapabilityConfig::default();
+        let config = enabled_media_config();
         let sink = std::sync::Arc::new(CollectingMediaAuditSink::default());
         let mut gate = make_gate_with_sink(config, &sink);
 
@@ -1176,7 +1216,7 @@ mod tests {
 
     #[test]
     fn test_dialog_gate_passes_with_session_cache() {
-        let config = MediaCapabilityConfig::default();
+        let config = enabled_media_config();
         let sink = std::sync::Arc::new(CollectingMediaAuditSink::default());
         let mut gate = make_gate_with_sink(config, &sink);
 
@@ -1219,8 +1259,18 @@ mod tests {
     }
 
     #[test]
+    fn test_dialog_gate_rejects_operator_disabled_media_ingress() {
+        let mut config = enabled_media_config();
+        config.operator_disabled = true;
+        let sink = std::sync::Arc::new(CollectingMediaAuditSink::default());
+        let gate = make_gate_with_sink(config, &sink);
+        let result = gate.evaluate_dialog_gate("sess-1", "agent-a", CAPABILITY_MEDIA_INGRESS, NOW);
+        assert_eq!(result, Err(MediaRejectCode::CapabilityNotEnabled));
+    }
+
+    #[test]
     fn test_expired_remember_record_requires_dialog() {
-        let config = MediaCapabilityConfig::default();
+        let config = enabled_media_config();
         let sink = std::sync::Arc::new(CollectingMediaAuditSink::default());
         let mut gate = make_gate_with_sink(config, &sink);
 
@@ -1249,8 +1299,7 @@ mod tests {
         std::sync::Arc<CollectingMediaAuditSink>,
     ) {
         let sink = std::sync::Arc::new(CollectingMediaAuditSink::default());
-        let mut gate =
-            MediaActivationGate::new(MediaCapabilityConfig::default(), Box::new(sink.clone()));
+        let mut gate = MediaActivationGate::new(enabled_media_config(), Box::new(sink.clone()));
         let cache = gate
             .session_caches
             .entry(session_id.to_string())
@@ -1366,7 +1415,7 @@ mod tests {
     #[test]
     fn test_deny_cloud_relay_when_trust_boundary_blocks() {
         let (mut gate, sink) = make_gate_preloaded_cache("sess-1", "agent-a");
-        let mut config = MediaCapabilityConfig::default();
+        let mut config = enabled_media_config();
         config.cloud_relay_enabled = false;
         gate.config = config;
 
@@ -1389,8 +1438,7 @@ mod tests {
     fn test_dialog_required_when_no_session_cache() {
         let sink = std::sync::Arc::new(CollectingMediaAuditSink::default());
 
-        let mut gate =
-            MediaActivationGate::new(MediaCapabilityConfig::default(), Box::new(sink.clone()));
+        let mut gate = MediaActivationGate::new(enabled_media_config(), Box::new(sink.clone()));
         // No session cache — dialog required.
         let req = admitted_request("sess-2", "agent-b", "epoch-1");
         let outcome = gate.evaluate(&req, NOW);
