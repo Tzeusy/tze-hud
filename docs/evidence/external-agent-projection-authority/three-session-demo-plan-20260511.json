@@ -150,6 +150,17 @@
       "check": "reconnect_requires_fresh_lease",
       "fresh_lease_authorized": true,
       "stale_lease_rejected": true
+    },
+    {
+      "accepted": true,
+      "check": "provider_process_supervision",
+      "final_state": {
+        "exited": {
+          "code": 0
+        }
+      },
+      "process_id_present": true,
+      "stdio_capture": "disabled"
     }
   ]
 }

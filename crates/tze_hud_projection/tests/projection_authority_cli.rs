@@ -111,7 +111,7 @@ fn demo_plan_emits_three_redacted_surface_routes_without_owner_tokens() {
     assert_eq!(demo["zone_messages"].as_array().map(Vec::len), Some(1));
     assert_eq!(demo["widget_messages"].as_array().map(Vec::len), Some(1));
     assert_eq!(demo["portal_routes"].as_array().map(Vec::len), Some(1));
-    assert_eq!(demo["lifecycle_checks"].as_array().map(Vec::len), Some(3));
+    assert_eq!(demo["lifecycle_checks"].as_array().map(Vec::len), Some(4));
     assert!(
         demo["lifecycle_checks"]
             .as_array()
@@ -127,6 +127,14 @@ fn demo_plan_emits_three_redacted_surface_routes_without_owner_tokens() {
     assert_eq!(
         demo["portal_routes"][0]["replay"],
         "resident_grpc_text_stream_portal"
+    );
+    assert!(
+        demo["lifecycle_checks"]
+            .as_array()
+            .expect("lifecycle checks are an array")
+            .iter()
+            .any(|check| check["check"] == "provider_process_supervision"
+                && check["stdio_capture"] == "disabled")
     );
     assert!(stdout.contains("\"command\": \"widget_publish\""));
     assert!(stdout.contains("\"command\": \"zone_publish\""));

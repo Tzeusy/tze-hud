@@ -273,6 +273,7 @@ fn lifecycle_checks_for_demo(caller_identity: &str) -> Result<Vec<Value>, String
         revoke_isolation_check(caller_identity)?,
         expiry_cleanup_check(caller_identity)?,
         reconnect_fresh_lease_check(caller_identity)?,
+        provider_process_supervision_check(caller_identity)?,
     ])
 }
 
@@ -424,6 +425,57 @@ fn reconnect_fresh_lease_check(caller_identity: &str) -> Result<Value, String> {
         "accepted": stale_rejected && fresh_authorized,
         "stale_lease_rejected": stale_rejected,
         "fresh_lease_authorized": fresh_authorized,
+    }))
+}
+
+fn provider_process_supervision_check(caller_identity: &str) -> Result<Value, String> {
+    let mut authority = ExternalAgentProjectionAuthority::default();
+    register_demo_target(&mut authority)?;
+    let mut request = managed_session_by_id("agent-progress")?;
+    let current_exe =
+        env::current_exe().map_err(|error| format!("provider process check failed: {error}"))?;
+    request.origin = ManagedSessionOrigin::Launched(tze_hud_projection::LaunchSessionSpec {
+        command: current_exe.display().to_string(),
+        args: vec!["--help".to_string()],
+        working_directory: None,
+        environment_keys: Vec::new(),
+    });
+    authority
+        .manage_session(request, caller_identity, 10)
+        .map_err(|error| format!("provider process check manage_session failed: {error}"))?;
+    let launched = authority
+        .launch_provider_process("agent-progress")
+        .map_err(|error| format!("provider process check launch failed: {error}"))?;
+    let mut final_status = launched.clone();
+    for _ in 0..20 {
+        final_status = authority
+            .provider_process_status("agent-progress")
+            .map_err(|error| format!("provider process check status failed: {error}"))?
+            .ok_or("provider process check lost tracked process".to_string())?;
+        if matches!(
+            final_status.state,
+            tze_hud_projection::ProviderProcessState::Exited { .. }
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    authority
+        .terminate_provider_process("agent-progress")
+        .map_err(|error| format!("provider process check cleanup failed: {error}"))?;
+    Ok(serde_json::json!({
+        "check": "provider_process_supervision",
+        "accepted": launched.process_id > 0
+            && matches!(
+                final_status.state,
+                tze_hud_projection::ProviderProcessState::Exited { .. }
+            )
+            && authority.provider_process_status("agent-progress")
+                .map_err(|error| format!("provider process check final status failed: {error}"))?
+                .is_none(),
+        "process_id_present": launched.process_id > 0,
+        "final_state": final_status.state,
+        "stdio_capture": "disabled",
     }))
 }
 
