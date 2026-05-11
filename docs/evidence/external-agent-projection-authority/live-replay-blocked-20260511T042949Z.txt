@@ -1,0 +1,10 @@
+External agent projection authority live replay attempt
+timestamp_utc=20260511T042949Z
+command=./docs/evidence/external-agent-projection-authority/live-replay.sh
+
+[external-agent-projection-authority] checking Tailscale reachability for tzehouse-windows.parrot-hen.ts.net
+ping "100.87.181.125" timed out
+no reply
+[external-agent-projection-authority] BLOCKED: tailscale ping failed for tzehouse-windows.parrot-hen.ts.net
+
+exit_code=10
