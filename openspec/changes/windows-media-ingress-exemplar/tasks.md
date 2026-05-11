@@ -36,11 +36,11 @@ No implementation begins until `windows-first-performant-runtime` release/perfor
 
 ## 5. Windows live producer and YouTube source evidence
 
-- [ ] 5.1 Perform and record YouTube policy/feasibility review before any raw-frame bridge is attempted
-- [ ] 5.2 Build a Windows local producer using a self-owned/local video source and bridge its video-only output to the HUD media ingress path
-- [ ] 5.3 Build a sidecar/source-evidence runner that launches YouTube video ID `O0FGCxkHM-U` through an official embed/player path
-- [ ] 5.4 Keep audio out of the HUD runtime for this tranche
-- [ ] 5.5 Add a live `/user-test` script or exemplar runner that verifies HUD presentation with the self-owned/local source and records YouTube sidecar evidence separately
+- [x] 5.1 Perform and record YouTube policy/feasibility review before any raw-frame bridge is attempted
+- [x] 5.2 Build a Windows local producer using a self-owned/local video source and bridge its video-only output to the HUD media ingress path
+- [x] 5.3 Build a sidecar/source-evidence runner that launches YouTube video ID `O0FGCxkHM-U` through an official embed/player path
+- [x] 5.4 Keep audio out of the HUD runtime for this tranche
+- [x] 5.5 Add a live `/user-test` script or exemplar runner that verifies HUD presentation with the self-owned/local source and records YouTube sidecar evidence separately
 
 ## 6. Evidence, soak, and closeout
 

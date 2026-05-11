@@ -198,6 +198,36 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
         mutation_resp = await client._wait_for("mutation_result", timeout=0.1)
         self.assertEqual(mutation_resp.mutation_result.batch_id, b"\x01" * 16)
 
+    async def test_wait_for_matcher_does_not_replay_wrong_deferred_payload(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        client._response_queue = asyncio.Queue()
+        await client._response_queue.put(
+            session_pb2.ServerMessage(
+                media_ingress_close_notice=session_pb2.MediaIngressCloseNotice(
+                    stream_epoch=41,
+                    reason=session_pb2.AGENT_CLOSED,
+                )
+            )
+        )
+        await client._response_queue.put(
+            session_pb2.ServerMessage(
+                media_ingress_close_notice=session_pb2.MediaIngressCloseNotice(
+                    stream_epoch=42,
+                    reason=session_pb2.AGENT_CLOSED,
+                )
+            )
+        )
+
+        close_resp = await client._wait_for(
+            "media_ingress_close_notice",
+            timeout=0.1,
+            matcher=lambda msg: msg.media_ingress_close_notice.stream_epoch == 42,
+        )
+
+        self.assertEqual(close_resp.media_ingress_close_notice.stream_epoch, 42)
+        deferred_resp = await client._wait_for("media_ingress_close_notice", timeout=0.1)
+        self.assertEqual(deferred_resp.media_ingress_close_notice.stream_epoch, 41)
+
     async def test_await_resource_upload_result_does_not_drop_other_responses(self):
         client = HudClient("example.invalid:50051", psk="test-key")
         client._response_queue = asyncio.Queue()
