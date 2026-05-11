@@ -117,6 +117,41 @@ POWERSHELL
   } | run_control_powershell_stdin
 }
 
+run_json_command_checked() {
+  local label="$1"
+  shift
+  local output
+  output="$(mktemp)"
+  set +e
+  "$@" >"$output"
+  local command_code="$?"
+  set -e
+  cat "$output"
+  if [[ "$command_code" -ne 0 ]]; then
+    rm -f "$output"
+    fail 14 "$label command failed with exit_code=$command_code"
+  fi
+  set +e
+  jq -e '
+    has("error")
+    or ((.list_zones? | type == "object") and (.list_zones.error? != null))
+    or ((.list_widgets? | type == "object") and (.list_widgets.error? != null))
+    or any(.published[]?; (.response? | type == "object") and (.response.error? != null))
+    or any(.cleanup[]?; (.response? | type == "object") and (.response.error? != null))
+  ' "$output" >/dev/null
+  local jq_code="$?"
+  set -e
+  if [[ "$jq_code" -eq 0 ]]; then
+    rm -f "$output"
+    fail 14 "$label returned a JSON-RPC error payload"
+  fi
+  if [[ "$jq_code" -gt 1 ]]; then
+    rm -f "$output"
+    fail 14 "$label produced invalid JSON output"
+  fi
+  rm -f "$output"
+}
+
 cd "$REPO_ROOT"
 
 log "checking Tailscale reachability for $WIN_HOST"
@@ -150,14 +185,16 @@ tcp_probe 50051 >/dev/null \
   || fail 12 "gRPC port 50051 is not reachable after $TASK_NAME start attempt"
 
 log "publishing zone replay through $MCP_HTTP_URL"
-python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
+run_json_command_checked "zone replay" \
+  python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
   --messages-file "$ZONE_MESSAGES" \
   --list-zones
 
 log "publishing widget replay through $MCP_HTTP_URL"
-python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+run_json_command_checked "widget replay" \
+  python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --url "$MCP_HTTP_URL" \
   --psk-env MCP_TEST_PSK \
   --messages-file "$WIDGET_MESSAGES" \
