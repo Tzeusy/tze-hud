@@ -1,9 +1,48 @@
 import unittest
 import asyncio
+import json
 import shutil
 from pathlib import Path
 
 import windows_media_ingress_exemplar as exemplar
+
+
+def valid_frame_capture_fixture() -> dict:
+    return {
+        "adapter": exemplar.YOUTUBE_FRAME_CAPTURE_ADAPTER,
+        "video_id": exemplar.YOUTUBE_VIDEO_ID,
+        "official_player_url": exemplar.YOUTUBE_EMBED_URL,
+        "capture_surface": "operator-visible official YouTube player window",
+        "capture_api": "fixture",
+        "operator_visible_player_controls": True,
+        "download_or_extraction": "not_used",
+        "cache_or_offline_copy": "not_used",
+        "audio_route_to_hud": "none",
+        "saved_frame_files": [],
+        "window": {
+            "title": "tze_hud YouTube source evidence - YouTube",
+            "left": 10,
+            "top": 20,
+            "width": 960,
+            "height": 540,
+        },
+        "captured_frames": [
+            {
+                "index": 0,
+                "sha256": "a" * 64,
+                "png_bytes": 1200,
+                "sampled_pixels": 64,
+                "mean_rgb": [12.0, 20.0, 30.0],
+            },
+            {
+                "index": 1,
+                "sha256": "b" * 64,
+                "png_bytes": 1210,
+                "sampled_pixels": 64,
+                "mean_rgb": [14.0, 24.0, 38.0],
+            },
+        ],
+    }
 
 
 class WindowsMediaIngressExemplarTests(unittest.TestCase):
@@ -67,6 +106,54 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertFalse(evidence["hud_runtime_receives_youtube_frames"])
         self.assertEqual(evidence["download_or_extraction"], "not_used")
         self.assertEqual(evidence["cache_or_offline_copy"], "not_used")
+        self.assertFalse(evidence["captured_youtube_frames_available_to_bridge"])
+
+    def test_frame_capture_fixture_validates_official_player_boundary(self):
+        evidence = exemplar.validate_frame_capture_evidence(valid_frame_capture_fixture())
+
+        self.assertTrue(evidence["capture_validated"])
+        self.assertEqual(evidence["captured_frame_count"], 2)
+        self.assertEqual(evidence["distinct_frame_hashes"], 2)
+        self.assertEqual(evidence["download_or_extraction"], "not_used")
+        self.assertEqual(evidence["cache_or_offline_copy"], "not_used")
+        self.assertEqual(evidence["audio_route_to_hud"], "none")
+
+    def test_frame_capture_fixture_rejects_cached_frames(self):
+        fixture = valid_frame_capture_fixture()
+        fixture["saved_frame_files"] = ["C:/temp/frame.png"]
+
+        with self.assertRaisesRegex(RuntimeError, "persist captured frame"):
+            exemplar.validate_frame_capture_evidence(fixture)
+
+    def test_bridge_dry_run_can_validate_frame_capture_fixture_without_hud(self):
+        output_dir = Path("build/test-windows-media-ingress-bridge")
+        fixture_path = output_dir / "frame-capture.json"
+        shutil.rmtree(output_dir, ignore_errors=True)
+        try:
+            output_dir.mkdir(parents=True)
+            fixture_path.write_text(
+                json.dumps(valid_frame_capture_fixture()),
+                encoding="utf-8",
+            )
+            args = exemplar.build_parser().parse_args(
+                [
+                    "youtube-bridge",
+                    "--dry-run",
+                    "--media-ingress-dry-run",
+                    "--frame-capture-fixture-json",
+                    str(fixture_path),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+            evidence = asyncio.run(exemplar.run_youtube_bridge(args))
+
+            self.assertFalse(evidence["media_ingress_open_attempted"])
+            self.assertTrue(evidence["captured_youtube_frames_available_to_bridge"])
+            self.assertTrue(evidence["frame_capture"]["capture_validated"])
+            self.assertFalse(evidence["hud_runtime_receives_youtube_frames"])
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
 
     def test_youtube_bridge_parser_defaults_to_bridge_agent(self):
         args = exemplar.build_parser().parse_args(
@@ -77,11 +164,12 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertEqual(args.agent_id, exemplar.YOUTUBE_BRIDGE_AGENT_ID)
         self.assertEqual(args.source_label, exemplar.YOUTUBE_BRIDGE_SOURCE_LABEL)
         self.assertEqual(args.zone_name, exemplar.APPROVED_MEDIA_ZONE)
+        self.assertEqual(args.capture_frame_samples, 3)
 
-    def test_youtube_bridge_live_path_fails_until_capture_adapter_exists(self):
+    def test_youtube_bridge_live_path_requires_windows_capture_adapter(self):
         args = exemplar.build_parser().parse_args(["youtube-bridge", "--dry-run"])
 
-        with self.assertRaisesRegex(RuntimeError, "frame-capture adapter"):
+        with self.assertRaisesRegex(RuntimeError, "Windows frame-capture adapter requires"):
             asyncio.run(exemplar.run_youtube_bridge(args))
 
     def test_invalid_approved_zone_is_rejected(self):
