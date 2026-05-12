@@ -1,0 +1,21 @@
+## tailscale status
+{
+  "HostName": "TzeHouse",
+  "DNSName": "tzehouse-windows.parrot-hen.ts.net.",
+  "Online": true,
+  "LastSeen": "2026-05-11T16:39:14.1Z",
+  "TailscaleIPs": [
+    "100.87.181.125",
+    "fd7a:115c:a1e0:ab12:4843:cd96:6257:b57d"
+  ]
+}
+## tailscale ping
+pong from tzehouse-windows (100.87.181.125) via [2406:3003:2001:183a:9199:e0f6:eee:31f8]:41641 in 73ms
+## ssh tzeus
+tzehouse\tzeus
+## ssh hudbot
+tzehouse\hudbot
+## tcp ports
+22 open
+50051 open
+9090 open
