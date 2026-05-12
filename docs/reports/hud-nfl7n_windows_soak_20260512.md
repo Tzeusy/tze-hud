@@ -20,7 +20,8 @@ missed the locked budget, and the completed workload is the canonical
 `widget_soak_runner.py` widget workload rather than a combined scene/widget/zone
 resident soak with lease cleanup proof. The per-agent RTT p99 values are low for
 this 1 rps workload, but each agent also recorded a single max RTT outlier near
-3.8 seconds; that should be classified before treating the run as latency-clean.
+3.8 seconds; that follow-up is now classified below as a shared transient stall
+that does not undermine the p99 RTT envelope.
 
 ## Reference Hardware
 
@@ -149,9 +150,12 @@ Each agent artifact includes the harness's normal stream-terminal warning after
 `SessionClose`: `stream closed while waiting for WidgetPublishResult acks`.
 Because each agent reports `success_count == request_count == 3600` and
 `error_count == 0`, no unexplained missing durable ack is indicated by this run.
-Each agent also recorded one max RTT outlier near 3.8 seconds despite p99 staying
-below 58 ms; this remains a jitter follow-up rather than accepted release
-evidence.
+The max RTT outliers near 3.8 seconds were classified in
+`docs/reports/hud-1u5ox_rtt_outlier_classification_20260512.md` as one shared
+transient stall in the benchmark path, not as shutdown/drain artifacts and not
+as sustained material jitter. They do not undermine the reported p99 RTT
+envelope for this 1 rps widget soak, but they do prevent a clean max-tail
+latency claim from this artifact alone.
 
 ## Live Metrics
 
@@ -243,5 +247,5 @@ Do not create the Windows release tag yet. Do not archive
 
 The soak fixed the previous missing-artifact blocker and proves successful
 three-agent widget publishing over 60 minutes, but release/archive remains
-blocked on overlay composite cost, idle GPU budget evidence, scene/zone/lease
-workload coverage, and RTT outlier classification.
+blocked on overlay composite cost, idle GPU budget evidence, and
+scene/zone/lease workload coverage.
