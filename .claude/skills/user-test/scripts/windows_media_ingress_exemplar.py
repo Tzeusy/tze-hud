@@ -137,7 +137,7 @@ def build_source_evidence_html(video_id: str = YOUTUBE_VIDEO_ID) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="referrer" content="strict-origin-when-cross-origin">
-  <title>tze_hud YouTube source evidence</title>
+  <title>tze_hud YouTube source evidence {video_id}</title>
   <style>
     html, body {{ margin: 0; height: 100%; background: #111; }}
     iframe {{ width: 100vw; height: 100vh; border: 0; }}
@@ -255,20 +255,7 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
     launched_by = "dry-run"
     if not args.dry_run:
         if args.windows_host:
-            windows_user = validate_ssh_arg("windows_user", args.windows_user)
-            windows_host = validate_ssh_arg("windows_host", args.windows_host)
-            cmd = [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                f"ConnectTimeout={args.connect_timeout_s}",
-                "-l",
-                windows_user,
-            ]
-            if args.ssh_key:
-                cmd.extend(["-i", args.ssh_key])
-            cmd.append(windows_host)
+            cmd = _ssh_base_command(args)
             remote_html_b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
             remote_script = (
                 f"$htmlBytes=[Convert]::FromBase64String('{remote_html_b64}');"
@@ -282,7 +269,7 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
             )
             cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", encoded_script])
             subprocess.run(cmd, check=True)
-            launched_by = f"ssh:{windows_user}@{windows_host}"
+            launched_by = f"ssh:{args.windows_user}@{args.windows_host}"
         else:
             webbrowser.open(html_path.resolve().as_uri(), new=1, autoraise=True)
             launched_by = "local-browser"
@@ -349,6 +336,7 @@ def build_windows_frame_capture_powershell(
 $ErrorActionPreference = 'Stop'
 $VideoId = '__VIDEO_ID__'
 $OfficialUrl = "https://www.youtube.com/embed/$VideoId"
+$ExpectedTitlePrefix = "tze_hud YouTube source evidence $VideoId"
 $SampleCount = __SAMPLE_COUNT__
 $SampleIntervalMs = __SAMPLE_INTERVAL_MS__
 $SettleMs = __SETTLE_MS__
@@ -404,7 +392,7 @@ $callback = [TzeHudNativeWindow+EnumWindowsProc]{
     if ($width -lt 160 -or $height -lt 120) {
         return $true
     }
-    if ($title -match 'YouTube|tze_hud YouTube|O0FGCxkHM-U') {
+    if ($title.StartsWith($ExpectedTitlePrefix, [StringComparison]::Ordinal)) {
         $windows.Add([pscustomobject]@{
             hwnd = $hWnd.ToInt64()
             title = $title
@@ -519,6 +507,9 @@ def validate_frame_capture_evidence(
         raise RuntimeError("frame-capture adapter evidence has an unexpected adapter")
     if evidence.get("video_id") != validate_youtube_video_id(video_id):
         raise RuntimeError("frame-capture adapter captured the wrong YouTube video id")
+    expected_url = f"https://www.youtube.com/embed/{video_id}"
+    if evidence.get("official_player_url") != expected_url:
+        raise RuntimeError("frame-capture adapter captured from the wrong official player URL")
     if evidence.get("download_or_extraction") != "not_used":
         raise RuntimeError("frame-capture adapter must not download or extract media")
     if evidence.get("cache_or_offline_copy") != "not_used":
@@ -541,15 +532,16 @@ def validate_frame_capture_evidence(
         digest = frame.get("sha256")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise RuntimeError("captured frame entry has an invalid sha256 digest")
-        if int(frame.get("png_bytes", 0)) <= 0:
+        png_bytes = frame.get("png_bytes", 0)
+        if not isinstance(png_bytes, int) or png_bytes <= 0:
             raise RuntimeError("captured frame entry has no image bytes")
         hashes.append(digest)
         mean_rgb = frame.get("mean_rgb", [])
-        if (
-            isinstance(mean_rgb, list)
-            and len(mean_rgb) == 3
-            and sum(float(channel) for channel in mean_rgb) > 3.0
-        ):
+        if not isinstance(mean_rgb, list) or len(mean_rgb) != 3:
+            raise RuntimeError("captured frame entry has invalid mean_rgb samples")
+        if not all(isinstance(channel, (int, float)) for channel in mean_rgb):
+            raise RuntimeError("captured frame entry has invalid mean_rgb samples")
+        if sum(float(channel) for channel in mean_rgb) > 3.0:
             nonblank_samples += 1
     if nonblank_samples == 0:
         raise RuntimeError("captured frames appear blank")
@@ -668,6 +660,9 @@ def build_youtube_bridge_dry_run_evidence(
 async def run_youtube_bridge(args: argparse.Namespace) -> dict[str, Any]:
     """Launch the approved sidecar and open the bridge's MediaIngressOpen lane."""
     zone_name = validate_approved_media_zone(args.zone_name)
+    psk = args.psk or os.getenv(args.psk_env)
+    if not args.media_ingress_dry_run and not psk:
+        raise RuntimeError(f"set {args.psk_env} or pass --psk")
     sidecar_evidence = launch_youtube_sidecar(args)
     if args.media_ingress_dry_run:
         frame_capture_evidence = None
@@ -682,10 +677,6 @@ async def run_youtube_bridge(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     frame_capture_evidence = run_windows_frame_capture(args)
-    psk = args.psk or os.getenv(args.psk_env)
-    if not psk:
-        raise RuntimeError(f"set {args.psk_env} or pass --psk")
-
     stream_uuid = uuid.uuid4()
     sdp_offer = build_video_only_sdp_offer(
         stream_id=stream_uuid,

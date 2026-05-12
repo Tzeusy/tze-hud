@@ -1,7 +1,7 @@
 import unittest
 import asyncio
 import json
-import shutil
+import tempfile
 from pathlib import Path
 
 import windows_media_ingress_exemplar as exemplar
@@ -68,14 +68,30 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
             f"https://www.youtube.com/embed/{exemplar.YOUTUBE_VIDEO_ID}",
             html,
         )
+        self.assertIn(
+            f"tze_hud YouTube source evidence {exemplar.YOUTUBE_VIDEO_ID}",
+            html,
+        )
         self.assertIn("allowfullscreen", html)
         self.assertNotIn("controls=0", html)
         self.assertNotIn("noreferrer", html)
 
+    def test_frame_capture_window_match_uses_controlled_title_for_selected_video(self):
+        script = exemplar.build_windows_frame_capture_powershell(
+            video_id="abcdefghijk",
+            sample_count=1,
+            sample_interval_s=0.0,
+            settle_s=0.0,
+        )
+
+        self.assertIn("tze_hud YouTube source evidence $VideoId", script)
+        self.assertIn("$title.StartsWith($ExpectedTitlePrefix", script)
+        self.assertNotIn("O0FGCxkHM-U", script)
+        self.assertNotIn("YouTube|", script)
+
     def test_sidecar_evidence_keeps_relative_output_path_relative(self):
-        output_dir = Path("build/test-windows-media-ingress-sidecar")
-        shutil.rmtree(output_dir, ignore_errors=True)
-        try:
+        with tempfile.TemporaryDirectory(dir=".") as tmpdir:
+            output_dir = Path(tmpdir) / "sidecar"
             args = exemplar.build_parser().parse_args(
                 ["youtube-sidecar", "--dry-run", "--output-dir", str(output_dir)]
             )
@@ -85,8 +101,6 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
                 evidence["html_evidence_path"],
                 str(output_dir / "youtube_source_evidence.html"),
             )
-        finally:
-            shutil.rmtree(output_dir, ignore_errors=True)
 
     def test_bridge_dry_run_evidence_does_not_claim_live_frames(self):
         sidecar = {
@@ -125,11 +139,24 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "persist captured frame"):
             exemplar.validate_frame_capture_evidence(fixture)
 
+    def test_frame_capture_fixture_rejects_wrong_official_player_url(self):
+        fixture = valid_frame_capture_fixture()
+        fixture["official_player_url"] = "https://example.invalid/not-youtube"
+
+        with self.assertRaisesRegex(RuntimeError, "official player URL"):
+            exemplar.validate_frame_capture_evidence(fixture)
+
+    def test_frame_capture_fixture_rejects_malformed_mean_rgb(self):
+        fixture = valid_frame_capture_fixture()
+        fixture["captured_frames"][0]["mean_rgb"] = ["12", None, 30]
+
+        with self.assertRaisesRegex(RuntimeError, "mean_rgb"):
+            exemplar.validate_frame_capture_evidence(fixture)
+
     def test_bridge_dry_run_can_validate_frame_capture_fixture_without_hud(self):
-        output_dir = Path("build/test-windows-media-ingress-bridge")
-        fixture_path = output_dir / "frame-capture.json"
-        shutil.rmtree(output_dir, ignore_errors=True)
-        try:
+        with tempfile.TemporaryDirectory(dir=".") as tmpdir:
+            output_dir = Path(tmpdir) / "bridge"
+            fixture_path = output_dir / "frame-capture.json"
             output_dir.mkdir(parents=True)
             fixture_path.write_text(
                 json.dumps(valid_frame_capture_fixture()),
@@ -152,8 +179,6 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
             self.assertTrue(evidence["captured_youtube_frames_available_to_bridge"])
             self.assertTrue(evidence["frame_capture"]["capture_validated"])
             self.assertFalse(evidence["hud_runtime_receives_youtube_frames"])
-        finally:
-            shutil.rmtree(output_dir, ignore_errors=True)
 
     def test_youtube_bridge_parser_defaults_to_bridge_agent(self):
         args = exemplar.build_parser().parse_args(
@@ -167,9 +192,25 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertEqual(args.capture_frame_samples, 3)
 
     def test_youtube_bridge_live_path_requires_windows_capture_adapter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = exemplar.build_parser().parse_args(
+                [
+                    "youtube-bridge",
+                    "--dry-run",
+                    "--psk",
+                    "test-psk",
+                    "--output-dir",
+                    tmpdir,
+                ]
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "Windows frame-capture adapter requires"):
+                asyncio.run(exemplar.run_youtube_bridge(args))
+
+    def test_youtube_bridge_live_path_requires_psk_before_frame_capture(self):
         args = exemplar.build_parser().parse_args(["youtube-bridge", "--dry-run"])
 
-        with self.assertRaisesRegex(RuntimeError, "Windows frame-capture adapter requires"):
+        with self.assertRaisesRegex(RuntimeError, "set TZE_HUD_PSK"):
             asyncio.run(exemplar.run_youtube_bridge(args))
 
     def test_invalid_approved_zone_is_rejected(self):
