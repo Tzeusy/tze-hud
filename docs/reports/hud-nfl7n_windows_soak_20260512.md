@@ -15,13 +15,16 @@ present, resource sampling found the benchmark HUD process on every sample, and
 private-memory drift was below the 5 MiB gate.
 
 Release/archive is still blocked because the transparent-overlay composite
-cost harness did not emit the fullscreen-vs-overlay report, idle GPU evidence
-missed the locked budget, and the completed workload is the canonical
-`widget_soak_runner.py` widget workload rather than a combined scene/widget/zone
-resident soak with lease cleanup proof. The per-agent RTT p99 values are low for
-this 1 rps workload, but each agent also recorded a single max RTT outlier near
-3.8 seconds; that follow-up is now classified below as a shared transient stall
-that does not undermine the p99 RTT envelope.
+cost harness did not emit the fullscreen-vs-overlay report, and the completed
+workload is the canonical `widget_soak_runner.py` widget workload rather than a
+combined scene/widget/zone resident soak with lease cleanup proof. The idle GPU
+follow-up was later classified in
+`docs/reports/hud-7oafx_idle_gpu_classification_20260512.md`: the hard locked
+engineering-bar ceiling is `<= 4.0%` Windows GPU engine sum, while `<= 0.5%`
+is aspirational. The per-agent RTT p99 values are low for this 1 rps workload,
+but each agent also recorded a single max RTT outlier near 3.8 seconds; that
+follow-up is now classified below as a shared transient stall that does not
+undermine the p99 RTT envelope.
 
 ## Reference Hardware
 
@@ -177,9 +180,10 @@ The runner sampled the benchmark-config HUD process with
 `process_count=1`.
 
 GPU samples from `nvidia-smi` ranged from 14% to 54%, average 24.38%. The
-post-soak sample was 16%. That is useful loaded/idle evidence, but it does not
-meet the locked idle GPU target from the baseline report (`<= 0.5%`) and remains
-a release blocker.
+post-soak sample was 16%. These are whole-device `nvidia-smi` readings from the
+soak context, not per-process idle GPU attribution. The idle release gate is
+classified separately in `docs/reports/hud-7oafx_idle_gpu_classification_20260512.md`
+against the current locked engineering bar.
 
 Private-memory drift passed the 5 MiB gate:
 
@@ -201,7 +205,12 @@ delta:               +1,634,304 bytes (+1.56 MiB)
 This is widget stale-UI cleanup evidence. It is not a full scene lease cleanup
 proof because the completed soak did not create leased scene tiles.
 
-## Blocking Follow-Ups JSON
+## Original Blocking Follow-Ups JSON
+
+This block is the original follow-up source captured at `hud-nfl7n` closeout.
+The idle GPU item is now resolved by
+`docs/reports/hud-7oafx_idle_gpu_classification_20260512.md`; the JSON remains
+here to preserve the source artifact that created the child beads.
 
 ```json
 [
@@ -247,5 +256,4 @@ Do not create the Windows release tag yet. Do not archive
 
 The soak fixed the previous missing-artifact blocker and proves successful
 three-agent widget publishing over 60 minutes, but release/archive remains
-blocked on overlay composite cost, idle GPU budget evidence, and
-scene/zone/lease workload coverage.
+blocked on overlay composite cost and scene/zone/lease workload coverage.

@@ -165,5 +165,6 @@ After the strict smoke passes, the release-gating soak must run the three-agent
 Do not use `--allow-missing-live-metrics` for release evidence. The strict smoke
 or soak artifact must show `live_metrics.ok=true`, nonzero frame/input metrics,
 `process_count >= 1` resource samples for the benchmark-config HUD process, idle
-GPU evidence, private-memory drift, transparent-overlay composite delta, and the
+GPU evidence classified against the current `about/craft-and-care/engineering-bar.md`
+ceiling, private-memory drift, transparent-overlay composite delta, and the
 cleanup evidence required by `hud-nfl7n`.

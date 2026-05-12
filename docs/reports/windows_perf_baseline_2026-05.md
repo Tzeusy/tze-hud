@@ -144,7 +144,12 @@ Source: 10-second sample of the live overlay process (`tze_hud`, PID 31380) with
 | Working set | 200.2 MiB |
 | Private memory | 289.5 MiB |
 
-Interpretation: CPU is within the proposed idle target. GPU idle is above the proposed <= 0.5% target, though this single sample uses Windows GPU Engine counters and should be repeated after eliminating unrelated desktop GPU activity.
+Interpretation: CPU is within the proposed idle target. GPU idle is above the
+original proposed `<= 0.5%` target, but later budget locking in
+`about/craft-and-care/engineering-bar.md` set the hard release ceiling to
+`<= 4.0%` Windows GPU engine sum and kept `<= 0.5%` as aspirational after
+cleaner sampling. Under that locked bar, this `3.791%` idle sample passes as
+release evidence; see `docs/reports/hud-7oafx_idle_gpu_classification_20260512.md`.
 
 ### Overlay Composite Cost
 
@@ -176,7 +181,7 @@ Observed behavior under the attempted load: the runtime stayed up, authenticated
 | Widget SVG re-rasterization 512x512 | <= 1 ms p99 | Baseline: 4.526 ms cold; 6.869 ms warm. Follow-up retained path: 0.332 ms warm-identical upper on TzeHouse; PR #648 TzeHouse changing-path upper estimates are 0.514 ms numeric/color and 0.788 ms text-changing | Pass for warm 512x512 changing paths after PR #648; cold parse is not the publish-time reraster budget |
 | Transparent-overlay composite cost | <= +0.5 ms p99 vs fullscreen | Not instrumented | Unknown / gap |
 | Idle CPU | <= 1% on one core | 0.000% total processor sample | Pass in sample |
-| Idle GPU | <= 0.5% device utilization | 3.791% GPU engine sum sample | Fail / needs cleaner sample |
+| Idle GPU | <= 4.0% Windows GPU engine sum; <= 0.5% aspirational | 3.791% GPU engine sum sample | Pass against locked ceiling; misses aspirational target |
 | Memory growth, 60-min soak | <= 5 MB drift | Not run | Unknown / gap |
 
 ## Top Three Gaps
@@ -185,7 +190,9 @@ Observed behavior under the attempted load: the runtime stayed up, authenticated
 
 2. The reference runtime config was not soak-ready for the intended resident publish workload during the original baseline. The named agents could create/modify owned tiles but could not publish widgets or zones, so the canonical Rust widget publish-load harness produced only admission rejections. Later benchmark-config work addressed the launch/config path; final proof remains the `hud-nfl7n` soak.
 
-3. Idle GPU and memory-growth evidence are still incomplete for release. The original idle GPU sample exceeded the aspirational <= 0.5% target, and the 60-minute memory drift gate still requires a successful soak artifact.
+3. Idle GPU now has pass-level evidence against the locked release ceiling, but
+   still misses the aspirational <= 0.5% target. The 60-minute memory drift gate
+   still requires a successful soak artifact.
 
 ## Follow-Up Inputs For New Beads
 
@@ -195,4 +202,4 @@ Use these as inputs for follow-up bead creation by the coordinator:
 |---|---|
 | Overlay composite cost unknown | Add live windowed frame histogram export plus scripted fullscreen-vs-overlay A/B run on TzeHouse |
 | Soak blocked by capabilities | Add a reference Windows perf config/profile that grants only the capabilities needed for three resident perf agents, then rerun widget/zone/tile soak |
-| Idle GPU / memory-growth evidence incomplete | Capture idle and loaded resource samples in the final `hud-nfl7n` artifact and create a blocking follow-up if either misses budget |
+| Idle GPU / memory-growth evidence | Treat the 3.791% idle GPU engine-sum sample as pass-level evidence against the locked 4.0% ceiling; capture memory-growth evidence in the final `hud-nfl7n` artifact and create a blocking follow-up if it misses budget |
