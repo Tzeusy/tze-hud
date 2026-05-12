@@ -6,7 +6,7 @@ tze_hud is a Windows-first agent-native presence engine: the runtime owns pixels
 
 The current implementation is closer to a reactivation seam than a blank slate. `VideoSurfaceRef`, media ingress proto messages, media admission/state machines, a `VideoSurfaceMap`, and an optional GStreamer appsink pipeline already exist, but the active doctrine/spec surface still says live media is parked and the compositor currently renders only a dark placeholder for `VideoSurfaceRef`.
 
-The highest-priority next work is a narrow OpenSpec change: `windows-media-ingress-exemplar`. It should admit exactly one Windows-only, video-only inbound media stream into one approved runtime-owned media zone. The machine-verifiable HUD proof should use a self-owned/local video source; the YouTube video `O0FGCxkHM-U` should be treated as official-player/operator-visible source evidence unless a separate policy review approves raw-frame bridging. It must not revive mobile/glasses, bidirectional AV, audio policy, browser-surface embedding, or embodied presence.
+The highest-priority next work is a narrow OpenSpec change: `windows-media-ingress-exemplar`. It should admit exactly one Windows-only, video-only inbound media stream into one approved runtime-owned media zone. The machine-verifiable HUD proof should use a self-owned/local video source and, after the 2026-05-12 operator/maintainer approval, may also use a Windows-only raw-frame bridge from an operator-visible official YouTube player sidecar for video ID `O0FGCxkHM-U`. It must not revive mobile/glasses, bidirectional AV, audio policy, browser-surface embedding, or embodied presence.
 
 ## Project Spirit
 
@@ -33,7 +33,7 @@ The highest-priority next work is a narrow OpenSpec change: `windows-media-ingre
 
 - [Observed] Doctrine/spec says all media/WebRTC is deferred indefinitely, but code now contains proto messages, runtime state machines, compositor state, tests, and a GStreamer feature flag for media ingress.
 - [Observed] The deferred media spec defines a bounded first slice, while the current active Windows refocus says media-plane work is parked. The user now wants this surface reactivated for the Windows machine, so the correct move is a fresh Windows-only OpenSpec proposal rather than implementing against the parked deferral blocks.
-- [Observed] The YouTube exemplar creates a product and policy constraint: YouTube should be embedded through official player surfaces, not downloaded, ripped, or silently separated from the player experience. Therefore YouTube is source evidence first; HUD frame-ingress acceptance uses a self-owned/local stream until a policy review approves any bridge.
+- [Observed] The YouTube exemplar creates a product and policy constraint: YouTube should be embedded through official player surfaces, not downloaded, ripped, or silently separated from the player experience. The 2026-05-12 approval permits a Windows-only video-frame bridge from that official player sidecar into the HUD media ingress path, while keeping the self-owned/local stream as the independent baseline proof.
 
 ## Current State
 
@@ -57,13 +57,13 @@ The architecture is fit for a one-stream Windows vertical slice because the scen
 | Reactivate bounded Windows media ingress spec | Core | High | High | Needs spec | Now, after prerequisite/exception | Medium | Low |
 | Wire synthetic media source to real `VideoSurfaceRef` rendering | Core | High | High | Ready after spec | Soon | Medium | Medium |
 | Add Windows GStreamer/WebRTC producer path | Core | High | High | Needs architecture | Soon | High | Medium |
-| Add YouTube official-player source evidence | Supporting | High | Medium | Needs policy review for bridging | Soon | High | Low |
+| Add YouTube official-player source evidence and approved bridge | Supporting | High | Medium | Policy approval recorded 2026-05-12; bridge implementation still needed | Soon | High | Low |
 | Add live Windows user-test | Core | High | Medium | Blocked by implementation | Later | Medium | Low |
 
 ### Misaligned directions
 
 - Embedding a full browser surface directly in the compositor for YouTube playback. This contradicts the "not a browser shell" and "native GPU pipeline" doctrine and would bypass the runtime's media surface contract.
-- Downloading, extracting, or raw-capturing YouTube media streams as the first acceptance path. It is brittle, policy-hostile without review, and not the capability we need to prove.
+- Downloading or extracting YouTube media streams as the first acceptance path. Raw frame bridging is now approved only from an operator-visible official player sidecar into the HUD media ingress contract; it must not become download/extraction/caching or a compositor browser surface.
 
 ### Premature work
 
@@ -87,7 +87,7 @@ The architecture is fit for a one-stream Windows vertical slice because the scen
 |---|---|---|---|---|---|
 | Active spec still defers media. | Implementation would violate source of truth. | Maintainers | `v1.md:123-129` | OpenSpec change first. | M |
 | No end-to-end admission-to-frame path. | The exemplar cannot show real video. | Operator/developers | renderer placeholder branches | Wire runtime media source to compositor texture upload. | L |
-| Windows producer path undefined. | HUD media needs a lawful supported source path and YouTube needs policy-safe evidence. | Operator | YouTube IFrame docs, repo has no producer | Specify self-owned/local producer for HUD ingress and official-player sidecar for YouTube evidence. | L |
+| Windows producer path undefined. | HUD media needs a lawful supported source path and YouTube needs policy-safe evidence. | Operator | YouTube IFrame docs, repo has no producer | Specify self-owned/local producer for baseline HUD ingress and official-player sidecar for the approved YouTube bridge. | L |
 | Governance gate is not active end to end. | Media can leak sensitive content or ignore override. | Operator/viewers | media policy specs deferred | Wire explicit enablement, capability, privacy, and operator disable. | M |
 
 ### Important Enhancements
@@ -184,7 +184,7 @@ The architecture is fit for a one-stream Windows vertical slice because the scen
 **Acceptance criteria**:
 - [ ] Producer emits video-only stream/frames from a self-owned/local source to the local Windows HUD runtime.
 - [ ] Sidecar/source-evidence runner uses the YouTube embed/player path for video ID `O0FGCxkHM-U`.
-- [ ] YouTube frame bridging is not attempted unless policy review approves it.
+- [ ] YouTube frame bridging uses the 2026-05-12 approved official-player sidecar path and enters the HUD only through media ingress.
 - [ ] No YouTube download/ripping path is introduced.
 - [ ] User-test evidence shows the local video source in the HUD media zone and separately records YouTube source evidence.
 
@@ -232,7 +232,7 @@ The architecture is fit for a one-stream Windows vertical slice because the scen
 1. Synthetic media: config enables media -> approved zone exists -> synthetic source produces frames -> compositor uploads and renders -> teardown clears.
 2. Protocol media: resident agent opens media ingress -> admission gate checks policy -> `VideoSurfaceRef` published -> state messages emitted.
 3. Live producer: local/self-owned video source -> authenticated producer sends video-only media -> HUD renders governed media zone.
-4. YouTube source evidence: source sidecar embeds video ID `O0FGCxkHM-U` through official player path -> report records player state/policy bridge decision.
+4. YouTube source evidence and bridge: source sidecar embeds video ID `O0FGCxkHM-U` through official player path -> report records player state, approved bridge path, and whether video frames reached HUD through `MediaIngressOpen`.
 5. Override: operator disables/dismisses/safe mode -> media stops within one frame -> no auto-resume.
 
 ### C. Spec Inventory
@@ -267,7 +267,7 @@ R2 spec-spine review found the initial deltas too thin. The change now adds `Sou
 
 R3 scheduling review found the original tasks were a checklist rather than an execution graph. The handoff now uses one epic and six child beads: config, synthetic rendering, protocol/admission, producer/source evidence, validation/report, and terminal gen-1 reconciliation.
 
-R4 handoff review found the YouTube acceptance path was the main weak assumption. The final scope separates YouTube official-player source evidence from machine-verifiable HUD frame-ingress proof. Any raw YouTube frame bridge is policy-gated follow-up work, not required for first acceptance.
+R4 handoff review found the YouTube acceptance path was the main weak assumption. The final scope separates YouTube official-player source evidence from baseline machine-verifiable HUD frame-ingress proof. As of 2026-05-12, raw YouTube frame bridging is policy-approved for a Windows-only official-player sidecar that feeds video frames through `MediaIngressOpen`; it remains constrained by the no-download, no-cache, no-audio, no-compositor-browser boundaries.
 
 ### F. Beads Handoff Graph
 

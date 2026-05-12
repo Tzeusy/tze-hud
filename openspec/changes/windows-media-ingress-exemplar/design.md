@@ -41,7 +41,7 @@ The runtime remains sovereign. Agents or producers request media ingress; they d
 5. The compositor uploads the latest frame to a runtime-owned `wgpu::Texture` and renders it clipped to the zone geometry.
 6. Operator disable, safe mode, lease revoke, expiry, or budget breach tears down presentation within one compositor frame.
 
-The first implementation uses synthetic frames and a self-owned/local video source before any YouTube frame bridge is attempted. A YouTube sidecar may load the official embeddable/player path for operator-visible evidence, but it MUST NOT provide raw frames or media tracks to the HUD unless a documented policy/legal review approves the chosen bridge.
+The first implementation uses synthetic frames and a self-owned/local video source to keep the media path independently verifiable. A YouTube sidecar may load the official embeddable/player path for operator-visible evidence. As of 2026-05-12, operator/maintainer policy approval allows a Windows-only bridge from that official player sidecar into the HUD media ingress path, provided the bridge is video-only, keeps the player/control model operator-visible, and does not download, rip, extract, cache, or directly host YouTube media content.
 
 ## 3. Zone Contract
 
@@ -66,9 +66,9 @@ The YouTube player is not part of the compositor. It may be an example applicati
 - use `yt-dlp`/download extractors,
 - bypass the YouTube player surface,
 - route audio into the HUD runtime in this tranche,
-- feed raw frames or media tracks into the HUD without policy approval.
+- feed raw frames or media tracks into the HUD except through the approved Windows-only video-frame bridge.
 
-The first HUD frame-ingress proof uses a self-owned/local test source. If YouTube frame bridging is desired later, the implementation must first create a policy-review bead and record the approved path.
+The baseline HUD frame-ingress proof uses a self-owned/local test source. The approved YouTube bridge is a follow-on validation lane and must record the exact bridge path, player/control model, and evidence that only video frames enter the HUD through `MediaIngressOpen`.
 
 ## 5. Validation Strategy
 
@@ -78,11 +78,11 @@ Validation runs in two lanes:
 - Lane B: live Windows user-test with a self-owned/local video source feeding the HUD media ingress path on the target Windows machine.
 - Lane C: operator-visible YouTube source evidence that launches video ID `O0FGCxkHM-U` through the official embed/player on the target Windows machine.
 
-Lane A gates implementation correctness. Lane B provides release evidence for HUD media ingress. Lane C provides YouTube exemplar evidence but is not equivalent to HUD frame-ingress proof unless a separate policy review approves bridging the player output.
+Lane A gates implementation correctness. Lane B provides release evidence for HUD media ingress. Lane C provides YouTube exemplar evidence. With the 2026-05-12 approval, a Windows-only Lane C bridge may also count as HUD frame-ingress proof if it uses the official player sidecar, enters the HUD only through `MediaIngressOpen`, remains video-only, and preserves the operator-visible player/control model.
 
 ## 6. Risks
 
-- YouTube embed/player capture may be constrained by DRM, browser, platform capture policy, or YouTube terms. This change therefore treats YouTube as operator-visible source evidence, not as required HUD frame-ingress input.
+- YouTube embed/player capture may be constrained by DRM, browser, platform capture policy, or YouTube terms. The approved bridge must fail closed and preserve the local/synthetic HUD lane as the independent fallback proof.
 - GStreamer Windows bootstrap may require MSVC, plugin, or PATH work that is not currently captured by CI.
 - CPU readback from a WebView/player can be too expensive. The first acceptance bar is correctness; the later Windows soak decides whether optimization is required.
 - Audio must remain rejected despite YouTube being an audiovisual source.

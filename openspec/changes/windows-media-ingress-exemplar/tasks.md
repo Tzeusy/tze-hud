@@ -41,12 +41,13 @@ No implementation begins until `windows-first-performant-runtime` release/perfor
 - [x] 5.3 Build a sidecar/source-evidence runner that launches YouTube video ID `O0FGCxkHM-U` through an official embed/player path
 - [x] 5.4 Keep audio out of the HUD runtime for this tranche
 - [x] 5.5 Add a live `/user-test` script or exemplar runner that verifies HUD presentation with the self-owned/local source and records YouTube sidecar evidence separately
+- [ ] 5.6 Implement the 2026-05-12 approved Windows-only YouTube frame bridge from the official player sidecar into `MediaIngressOpen`, with no download/extraction/cache path, no audio route, no compositor browser surface, and operator-visible player controls preserved
 
 ## 6. Evidence, soak, and closeout
 
 - [ ] 6.1 Record live Windows validation evidence under `docs/reports/`
 - [ ] 6.2 Run a 10-minute Windows media soak and capture frame timing, dropped frames, CPU/GPU/memory, and teardown behavior; treat performance metrics as record-only until a follow-up budget is approved
-- [ ] 6.3 Create follow-up beads for any performance, policy, or Windows dependency gaps
+- [ ] 6.3 Create follow-up beads for any performance, policy, bridge, or Windows dependency gaps
 - [ ] 6.4 Reconcile implementation against every requirement in this change before archive/sync
 
 ## 7. Beads handoff graph

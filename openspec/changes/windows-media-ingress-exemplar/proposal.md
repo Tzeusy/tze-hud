@@ -12,7 +12,7 @@ Implementation MUST NOT begin until either `windows-first-performant-runtime` sa
 - Add a canonical `media_ingress` capability and explicit Windows media configuration for a single approved media zone.
 - Modify the existing deferred media contracts so their bounded one-way visual ingress requirements become active under this change's explicit Windows-only enablement gate.
 - Modify scene/protocol/runtime/validation requirements enough to make `VideoSurfaceRef` render real decoded frames rather than only a placeholder.
-- Treat the YouTube exemplar as an official-player/operator-visible source demonstration unless a documented policy review approves a raw-frame bridge. Machine-verifiable HUD frame-ingress acceptance uses a self-owned, local, or synthetic video source.
+- Treat the YouTube exemplar as an official-player/operator-visible source demonstration. A documented 2026-05-12 operator/maintainer approval permits a Windows-only raw-frame bridge from that official player sidecar into the HUD media ingress path, provided the bridge is video-only, does not download/rip/extract/cache content, and does not make the compositor a browser shell.
 - Require any YouTube path to use the supported IFrame/embed player surface; the runtime must not download/rip/extract YouTube content and must not become a browser shell.
 - Keep media disabled by default unless explicit config, capability, privacy, operator, and budget gates pass.
 - Keep audio rejected in this tranche, even if the external source contains an audio track.
@@ -53,4 +53,4 @@ Implementation MUST NOT begin until either `windows-first-performant-runtime` sa
   - headless and live Windows validation
 - New dependency risk:
   - Windows GStreamer/WebRTC/WebView2 producer bootstrap must be documented and validated.
-  - YouTube playback must use an official embed/player path; no download or extraction tooling is admitted by this change. Bridging YouTube player frames into the HUD is blocked until a policy review records that the chosen approach complies with YouTube terms.
+  - YouTube playback must use an official embed/player path; no download or extraction tooling is admitted by this change. Bridging YouTube player frames into the HUD is policy-approved only for a Windows-only operator-visible sidecar that feeds video frames through the media ingress contract.

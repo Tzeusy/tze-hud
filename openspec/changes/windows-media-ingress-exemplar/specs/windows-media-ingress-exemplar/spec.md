@@ -20,7 +20,7 @@ Scope: Active only for the accepted Windows-only one-stream media slice.
 
 ### Requirement: YouTube Source Evidence Boundary
 
-The YouTube exemplar SHALL use a local sidecar/source-evidence runner that relies on a supported YouTube embed/player path for video ID `O0FGCxkHM-U`. The HUD runtime SHALL NOT receive raw YouTube frames or media tracks unless a documented policy review approves the chosen bridge. The runtime SHALL NOT download, rip, extract, or directly host YouTube media content. The compositor SHALL NOT become a browser surface host for this exemplar.
+The YouTube exemplar SHALL use a local sidecar/source-evidence runner that relies on a supported YouTube embed/player path for video ID `O0FGCxkHM-U`. A documented 2026-05-12 operator/maintainer policy approval permits a Windows-only raw-frame bridge from that official player sidecar into the HUD media ingress path. The bridge SHALL remain video-only, SHALL keep the player/control model operator-visible, and SHALL enter the HUD runtime only through `MediaIngressOpen`. The runtime SHALL NOT download, rip, extract, cache, or directly host YouTube media content. The compositor SHALL NOT become a browser surface host for this exemplar.
 
 Source: `about/heart-and-soul/architecture.md`, YouTube IFrame Player API, YouTube API Services Developer Policies
 Scope: Active only for source-evidence and policy-gated bridge decisions in the accepted Windows-only media slice.
@@ -29,7 +29,8 @@ Scope: Active only for source-evidence and policy-gated bridge decisions in the 
 
 - **WHEN** the exemplar is launched for `https://www.youtube.com/watch?v=O0FGCxkHM-U`
 - **THEN** the producer MUST use the video ID `O0FGCxkHM-U` through a supported embed/player source path
-- **AND** the HUD runtime MUST NOT see raw YouTube frames or media tracks unless the policy review allows that bridge
+- **AND** the HUD runtime MAY receive bridged video frames only through the approved Windows-only media ingress bridge
+- **AND** the HUD runtime MUST NOT receive audio, downloaded media, extracted direct media URLs, cached media files, or browser/compositor plugin content
 
 #### Scenario: download or browser-shell path is rejected
 
@@ -39,7 +40,7 @@ Scope: Active only for source-evidence and policy-gated bridge decisions in the 
 #### Scenario: HUD proof uses self-owned or local source
 
 - **WHEN** validation requires machine-verifiable HUD frame-ingress proof
-- **THEN** the producer MUST use a self-owned, local, or synthetic video source unless a policy-approved YouTube bridge exists
+- **THEN** the producer MAY use a self-owned, local, synthetic, or policy-approved YouTube bridge source
 - **AND** the report MUST distinguish HUD media-ingress proof from YouTube source-evidence proof
 
 ### Requirement: Exemplar Demonstrates Operator Control
