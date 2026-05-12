@@ -165,7 +165,7 @@ python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
   --evidence-json build/windows-media-ingress/policy-review.json
 ```
 
-The approved bridge lane is `operator-visible-official-player-window-capture-to-media-ingress-open`: the official player/control surface must stay operator-visible, any HUD ingress must enter only through `MediaIngressOpen`, and the current script's non-dry-run bridge path intentionally fails until the Windows frame-capture adapter exists. Use `--media-ingress-dry-run` for policy evidence only.
+The approved bridge lane is `operator-visible-official-player-window-capture-to-media-ingress-open`: the official player/control surface must stay operator-visible and any HUD ingress must enter only through `MediaIngressOpen`. The non-dry-run bridge first captures visible Windows player frames with the `windows-visible-player-copyfromscreen-frame-capture` adapter, then opens the dedicated bridge agent's media-ingress lane. Use `--media-ingress-dry-run` for policy evidence only; add `--frame-capture-in-dry-run` or `--frame-capture-fixture-json` only when validating the adapter without touching the HUD runtime.
 
 The media exemplar must not introduce `yt-dlp`, direct YouTube media URL extraction, downloads, cache/offline copies, a browser/WebView node inside the compositor, or a YouTube audio route into the HUD runtime.
 
