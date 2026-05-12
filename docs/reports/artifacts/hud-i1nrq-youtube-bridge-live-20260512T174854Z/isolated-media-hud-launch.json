@@ -1,0 +1,7 @@
+{
+  "task": "TzeHudS0pitRerun",
+  "alternate_ports_ready": false,
+  "result": "not_launched",
+  "error": "Temporary scheduled-task cleanup aborted before task creation because schtasks /Delete reported the absent task as ERROR: The system cannot find the file specified while ErrorActionPreference was Stop.",
+  "ports": [50052, 9091]
+}
