@@ -131,7 +131,10 @@ def build_video_only_sdp_offer(
 def build_source_evidence_html(video_id: str = YOUTUBE_VIDEO_ID) -> str:
     """Return a small external-player evidence page using the official embed URL."""
     video_id = validate_youtube_video_id(video_id)
-    embed_url = f"https://www.youtube.com/embed/{video_id}"
+    embed_url = (
+        f"https://www.youtube.com/embed/{video_id}"
+        "?autoplay=1&mute=1&playsinline=1&rel=0"
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -342,6 +345,7 @@ $SampleIntervalMs = __SAMPLE_INTERVAL_MS__
 $SettleMs = __SETTLE_MS__
 Start-Sleep -Milliseconds $SettleMs
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -362,6 +366,21 @@ public static class TzeHudNativeWindow {
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int X, int Y);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT {
         public int Left;
@@ -371,6 +390,19 @@ public static class TzeHudNativeWindow {
     }
 }
 "@
+$primary = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+function Get-VisibleAreaOnPrimary($left, $top, $width, $height) {
+    $right = $left + $width
+    $bottom = $top + $height
+    $visibleLeft = [Math]::Max($left, $primary.Left)
+    $visibleTop = [Math]::Max($top, $primary.Top)
+    $visibleRight = [Math]::Min($right, $primary.Right)
+    $visibleBottom = [Math]::Min($bottom, $primary.Bottom)
+    if ($visibleRight -le $visibleLeft -or $visibleBottom -le $visibleTop) {
+        return 0
+    }
+    return ($visibleRight - $visibleLeft) * ($visibleBottom - $visibleTop)
+}
 $windows = [System.Collections.Generic.List[object]]::new()
 $callback = [TzeHudNativeWindow+EnumWindowsProc]{
     param([IntPtr]$hWnd, [IntPtr]$lParam)
@@ -393,14 +425,18 @@ $callback = [TzeHudNativeWindow+EnumWindowsProc]{
         return $true
     }
     if ($title.StartsWith($ExpectedTitlePrefix, [StringComparison]::Ordinal)) {
+        $visibleArea = Get-VisibleAreaOnPrimary $rect.Left $rect.Top $width $height
         $windows.Add([pscustomobject]@{
-            hwnd = $hWnd.ToInt64()
+            hwnd = $hWnd
+            hwnd_int = $hWnd.ToInt64()
             title = $title
             left = $rect.Left
             top = $rect.Top
             width = $width
             height = $height
             area = $width * $height
+            visible_area = $visibleArea
+            exact_title = [int]($title -eq $ExpectedTitlePrefix)
         })
     }
     return $true
@@ -409,7 +445,45 @@ $callback = [TzeHudNativeWindow+EnumWindowsProc]{
 if ($windows.Count -eq 0) {
     throw "No visible official YouTube player window found for $VideoId"
 }
-$window = $windows | Sort-Object area -Descending | Select-Object -First 1
+$window = $windows |
+    Sort-Object `
+        @{ Expression = 'visible_area'; Descending = $true }, `
+        @{ Expression = 'exact_title'; Descending = $true }, `
+        @{ Expression = 'area'; Descending = $true } |
+    Select-Object -First 1
+$targetWidth = [Math]::Min($window.width, [Math]::Max(640, $primary.Width - 160))
+$targetHeight = [Math]::Min($window.height, [Math]::Max(360, $primary.Height - 160))
+$targetLeft = $primary.Left + [Math]::Max(0, [int](($primary.Width - $targetWidth) / 2))
+$targetTop = $primary.Top + [Math]::Max(0, [int](($primary.Height - $targetHeight) / 2))
+[void][TzeHudNativeWindow]::ShowWindow($window.hwnd, 9)
+[void][TzeHudNativeWindow]::SetWindowPos($window.hwnd, [IntPtr]::Zero, $targetLeft, $targetTop, $targetWidth, $targetHeight, 0x0040)
+[void][TzeHudNativeWindow]::SetForegroundWindow($window.hwnd)
+Start-Sleep -Milliseconds 750
+$rect = New-Object TzeHudNativeWindow+RECT
+if ([TzeHudNativeWindow]::GetWindowRect($window.hwnd, [ref]$rect)) {
+    $refreshedWidth = $rect.Right - $rect.Left
+    $refreshedHeight = $rect.Bottom - $rect.Top
+    $window = [pscustomobject]@{
+        hwnd = $window.hwnd
+        hwnd_int = $window.hwnd_int
+        title = $window.title
+        left = $rect.Left
+        top = $rect.Top
+        width = $refreshedWidth
+        height = $refreshedHeight
+        area = $refreshedWidth * $refreshedHeight
+        visible_area = Get-VisibleAreaOnPrimary $rect.Left $rect.Top $refreshedWidth $refreshedHeight
+        exact_title = $window.exact_title
+    }
+}
+[void][TzeHudNativeWindow]::SetCursorPos(
+    [int]($window.left + ($window.width / 2)),
+    [int]($window.top + ($window.height / 2))
+)
+[void][TzeHudNativeWindow]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 80
+[void][TzeHudNativeWindow]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 1500
 $frames = @()
 for ($i = 0; $i -lt $SampleCount; $i++) {
     $bitmap = New-Object System.Drawing.Bitmap $window.width, $window.height, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -483,6 +557,9 @@ $distinct = @($frames | Select-Object -ExpandProperty sha256 -Unique).Count
         width = $window.width
         height = $window.height
     }
+    selected_window_visible_area = $window.visible_area
+    selected_window_moved_to_primary = $true
+    playback_click_sent = $true
     captured_frames = @($frames)
     captured_frame_count = $frames.Count
     distinct_frame_hashes = $distinct
@@ -520,6 +597,11 @@ def validate_frame_capture_evidence(
         raise RuntimeError("frame-capture adapter must not persist captured frame files")
     if not evidence.get("operator_visible_player_controls"):
         raise RuntimeError("frame-capture adapter must preserve visible player controls")
+    visible_area = evidence.get("selected_window_visible_area")
+    if not isinstance(visible_area, (int, float)) or visible_area <= 0:
+        raise RuntimeError("frame-capture adapter selected an offscreen player window")
+    if evidence.get("playback_click_sent") is not True:
+        raise RuntimeError("frame-capture adapter did not request official-player playback")
 
     frames = evidence.get("captured_frames")
     if not isinstance(frames, list) or not frames:
@@ -558,7 +640,7 @@ def validate_frame_capture_evidence(
 
 def load_frame_capture_fixture(path: str, args: argparse.Namespace) -> dict[str, Any]:
     fixture_path = Path(path)
-    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    payload = json.loads(fixture_path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise RuntimeError("frame-capture fixture must contain a JSON object")
     evidence = validate_frame_capture_evidence(
