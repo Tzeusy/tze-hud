@@ -243,7 +243,7 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
 
 def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
     video_id = validate_youtube_video_id(args.video_id)
-    output_dir = Path(args.output_dir).resolve()
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     html_path = output_dir / "youtube_source_evidence.html"
     html = build_source_evidence_html(video_id)
@@ -282,7 +282,7 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
             subprocess.run(cmd, check=True)
             launched_by = f"ssh:{windows_user}@{windows_host}"
         else:
-            webbrowser.open(html_path.as_uri(), new=1, autoraise=True)
+            webbrowser.open(html_path.resolve().as_uri(), new=1, autoraise=True)
             launched_by = "local-browser"
 
     return {
@@ -327,7 +327,10 @@ def build_youtube_bridge_dry_run_evidence(
         "media_ingress_open_attempted": False,
         "media_ingress_open_admitted": False,
         "hud_runtime_receives_youtube_frames": False,
-        "blocked_reason": "dry-run; run without --media-ingress-dry-run for live proof",
+        "blocked_reason": (
+            "dry-run; live proof requires the Windows frame-capture adapter and "
+            "exclusive validation access"
+        ),
         "sidecar": sidecar_evidence,
     }
 
@@ -335,8 +338,8 @@ def build_youtube_bridge_dry_run_evidence(
 async def run_youtube_bridge(args: argparse.Namespace) -> dict[str, Any]:
     """Launch the approved sidecar and open the bridge's MediaIngressOpen lane."""
     zone_name = validate_approved_media_zone(args.zone_name)
-    sidecar_evidence = launch_youtube_sidecar(args)
     if args.media_ingress_dry_run:
+        sidecar_evidence = launch_youtube_sidecar(args)
         return build_youtube_bridge_dry_run_evidence(
             sidecar_evidence=sidecar_evidence,
             target=args.target,
@@ -344,26 +347,11 @@ async def run_youtube_bridge(args: argparse.Namespace) -> dict[str, Any]:
             zone_name=zone_name,
         )
 
-    media_evidence = await run_local_producer(args)
-    return {
-        "lane": "youtube-official-player-frame-bridge",
-        "video_id": sidecar_evidence["video_id"],
-        "official_player_url": sidecar_evidence["official_player_url"],
-        "bridge_path_name": YOUTUBE_BRIDGE_PATH,
-        "bridge_source": "operator-visible official YouTube player sidecar",
-        "bridge_sink": "HUD media ingress approved zone",
-        "media_ingress_entrypoint": "MediaIngressOpen",
-        "video_only": True,
-        "operator_visible_player_controls": True,
-        "download_or_extraction": "not_used",
-        "cache_or_offline_copy": "not_used",
-        "audio_route_to_hud": "none",
-        "media_ingress_open_attempted": True,
-        "media_ingress_open_admitted": media_evidence["admitted"],
-        "hud_runtime_receives_youtube_frames": "requires live pixel/readback evidence",
-        "sidecar": sidecar_evidence,
-        "media_ingress": media_evidence,
-    }
+    raise RuntimeError(
+        "live YouTube bridge proof requires a Windows frame-capture adapter from "
+        "the operator-visible official player sidecar into MediaIngressOpen; "
+        "do not substitute the local/synthetic producer for YouTube frame proof"
+    )
 
 
 def write_evidence(path: str | None, evidence: dict[str, Any]) -> None:

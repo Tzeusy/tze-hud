@@ -1,7 +1,7 @@
 {
   "agent_id": "windows-youtube-frame-bridge",
   "audio_route_to_hud": "none",
-  "blocked_reason": "dry-run; run without --media-ingress-dry-run for live proof",
+  "blocked_reason": "dry-run; live proof requires the Windows frame-capture adapter and exclusive validation access",
   "bridge_path_name": "operator-visible-official-player-window-capture-to-media-ingress-open",
   "bridge_sink": "HUD media ingress approved zone",
   "bridge_source": "operator-visible official YouTube player sidecar",
@@ -38,7 +38,7 @@
     "audio_route_to_hud": "none",
     "cache_or_offline_copy": "not_used",
     "download_or_extraction": "not_used",
-    "html_evidence_path": "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-o33hj/docs/reports/artifacts/windows_media_ingress_hud_o33hj/youtube_source_evidence.html",
+    "html_evidence_path": "docs/reports/artifacts/windows_media_ingress_hud_o33hj/youtube_source_evidence.html",
     "hud_runtime_receives_youtube_frames": false,
     "lane": "youtube-source-evidence",
     "launched_by": "dry-run",
