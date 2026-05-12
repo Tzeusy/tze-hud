@@ -1,0 +1,81 @@
+{
+  "adapter": "windows-visible-player-copyfromscreen-frame-capture",
+  "video_id": "O0FGCxkHM-U",
+  "official_player_url": "https://www.youtube.com/embed/O0FGCxkHM-U",
+  "capture_surface": "operator-visible official YouTube player window",
+  "capture_api": "System.Drawing.Graphics.CopyFromScreen",
+  "operator_visible_player_controls": true,
+  "download_or_extraction": "not_used",
+  "cache_or_offline_copy": "not_used",
+  "audio_route_to_hud": "none",
+  "saved_frame_files": [],
+  "window": {
+    "title": "tze_hud YouTube source evidence O0FGCxkHM-U - Google Chrome",
+    "left": 80,
+    "top": 80,
+    "width": 2400,
+    "height": 1232
+  },
+  "selected_window_visible_area": 2956800,
+  "selected_window_moved_to_primary": true,
+  "playback_click_sent": true,
+  "captured_frames": [
+    {
+      "index": 0,
+      "sha256": "fcaf0df1de8adb2cc4d4c21d59cef70a588918676c03c1a7297c747ed3a5ff82",
+      "png_bytes": 4933880,
+      "sampled_pixels": 64,
+      "mean_rgb": [
+        169.3,
+        150.14,
+        116.67
+      ]
+    },
+    {
+      "index": 1,
+      "sha256": "1f577f4a1c664a666a7b935be5adea66d5fa1bc4458c4b34901f8c573d977255",
+      "png_bytes": 4481749,
+      "sampled_pixels": 64,
+      "mean_rgb": [
+        151.19,
+        134.3,
+        104.25
+      ]
+    },
+    {
+      "index": 2,
+      "sha256": "1f577f4a1c664a666a7b935be5adea66d5fa1bc4458c4b34901f8c573d977255",
+      "png_bytes": 4481749,
+      "sampled_pixels": 64,
+      "mean_rgb": [
+        151.19,
+        134.3,
+        104.25
+      ]
+    },
+    {
+      "index": 3,
+      "sha256": "1f577f4a1c664a666a7b935be5adea66d5fa1bc4458c4b34901f8c573d977255",
+      "png_bytes": 4481749,
+      "sampled_pixels": 64,
+      "mean_rgb": [
+        151.19,
+        134.3,
+        104.25
+      ]
+    },
+    {
+      "index": 4,
+      "sha256": "1f577f4a1c664a666a7b935be5adea66d5fa1bc4458c4b34901f8c573d977255",
+      "png_bytes": 4481749,
+      "sampled_pixels": 64,
+      "mean_rgb": [
+        151.19,
+        134.3,
+        104.25
+      ]
+    }
+  ],
+  "captured_frame_count": 5,
+  "distinct_frame_hashes": 2
+}

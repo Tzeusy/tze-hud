@@ -36,21 +36,26 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         html = media.build_source_evidence_html()
 
         self.assertIn("https://www.youtube.com/embed/O0FGCxkHM-U", html)
+        self.assertIn("tze_hud YouTube source evidence O0FGCxkHM-U", html)
         self.assertIn('id="youtube-source-evidence"', html)
         self.assertIn("strict-origin-when-cross-origin", html)
         for banned in media.BANNED_SOURCE_MARKERS:
             self.assertNotIn(banned, html.lower())
 
-    def test_policy_review_blocks_raw_youtube_frame_bridge(self) -> None:
+    def test_policy_review_names_approved_frame_bridge(self) -> None:
         review = media.policy_review()
 
         self.assertEqual(review["youtube_video_id"], "O0FGCxkHM-U")
         self.assertEqual(
             review["raw_youtube_frame_bridge"],
-            "blocked_pending_policy_approval",
+            "approved_operator_visible_player_frame_bridge",
+        )
+        self.assertEqual(
+            review["bridge_path_name"],
+            "operator-visible-official-player-window-capture-to-media-ingress-open",
         )
         self.assertEqual(review["audio_route_to_hud"], "none")
-        self.assertIn("self-owned/local", review["hud_ingress_source"])
+        self.assertIn("official-player raw-frame bridge", review["hud_ingress_source"])
 
     def test_rejects_invalid_youtube_video_id_before_launch(self) -> None:
         with self.assertRaisesRegex(ValueError, "YouTube id format"):
