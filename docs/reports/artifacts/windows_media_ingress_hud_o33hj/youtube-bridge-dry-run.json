@@ -6,6 +6,7 @@
   "bridge_sink": "HUD media ingress approved zone",
   "bridge_source": "operator-visible official YouTube player sidecar",
   "cache_or_offline_copy": "not_used",
+  "captured_youtube_frames_available_to_bridge": false,
   "download_or_extraction": "not_used",
   "hud_runtime_receives_youtube_frames": false,
   "lane": "youtube-official-player-frame-bridge",
