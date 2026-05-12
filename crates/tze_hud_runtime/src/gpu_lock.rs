@@ -246,6 +246,66 @@ mod windows_impl {
         }
     }
 
+    /// Find another live `tze_hud.exe` process that may predate the lock file.
+    ///
+    /// The GPU lock was added after some deployed HUD binaries already existed.
+    /// If one of those older processes is still running, a fresh process could
+    /// otherwise acquire a new lock file and race the existing overlay for the
+    /// same GPU/window resources. Treating the already-running binary as a lock
+    /// holder makes this failure mode explicit at startup.
+    fn find_existing_tze_hud_process(exclude_pid: u32) -> Option<u32> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        };
+
+        // SAFETY: CreateToolhelp32Snapshot has no memory safety preconditions.
+        let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
+            Ok(handle) => handle,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "[gpu-lock] Could not enumerate processes for pre-lock HUD detection"
+                );
+                return None;
+            }
+        };
+
+        // SAFETY: PROCESSENTRY32W is a plain old data Win32 struct. The API
+        // requires dwSize to be initialized before the first call.
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        let mut found = None;
+        // SAFETY: snapshot is a valid handle and entry points to initialized storage.
+        if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+            loop {
+                if entry.th32ProcessID != exclude_pid && exe_name_is_tze_hud(&entry.szExeFile) {
+                    found = Some(entry.th32ProcessID);
+                    break;
+                }
+                // SAFETY: snapshot is valid and entry remains initialized storage.
+                if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                    break;
+                }
+            }
+        }
+
+        // SAFETY: snapshot is a valid handle returned by CreateToolhelp32Snapshot.
+        unsafe { CloseHandle(snapshot).ok() };
+        found
+    }
+
+    fn exe_name_is_tze_hud(raw_name: &[u16]) -> bool {
+        let nul = raw_name
+            .iter()
+            .position(|ch| *ch == 0)
+            .unwrap_or(raw_name.len());
+        let name = String::from_utf16_lossy(&raw_name[..nul]);
+        name.eq_ignore_ascii_case("tze_hud.exe")
+    }
+
     // ── Lock release helper (shared by Drop and panic hook) ───────────────────
 
     fn release_lock(lock_path: &Path, owner_pid: u32) {
@@ -374,6 +434,20 @@ mod windows_impl {
                     }
                 }
             }
+        }
+
+        if let Some(existing_pid) = find_existing_tze_hud_process(pid) {
+            tracing::error!(
+                existing_pid,
+                "[gpu-lock] Found an already-running tze_hud.exe without a live lock. \
+                 Refusing startup to avoid concurrent overlay/GPU ownership."
+            );
+            return Err(GpuLockConflict {
+                session_type: "interactive-untracked".to_string(),
+                pid: existing_pid,
+                started_at: "unknown".to_string(),
+                description: "existing tze_hud.exe process without a live gpu.lock".to_string(),
+            });
         }
 
         // Acquire: write the interactive lock.
