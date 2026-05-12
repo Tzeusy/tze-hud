@@ -14,7 +14,7 @@ The approved bridge path is:
 operator-visible-official-player-window-capture-to-media-ingress-open
 ```
 
-The helper command is:
+The intended live validation shape is:
 
 ```bash
 python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py youtube-bridge \
@@ -25,10 +25,14 @@ python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py youtu
   --evidence-json docs/reports/artifacts/windows_media_ingress_hud_o33hj/youtube-bridge-live.json
 ```
 
-It launches the official YouTube embed/player sidecar for
+The bridge must launch the official YouTube embed/player sidecar for
 `https://www.youtube.com/embed/O0FGCxkHM-U`, keeps the player/control surface
-operator-visible, and opens the dedicated bridge agent's video-only
-`MediaIngressOpen` lane into `media-pip`.
+operator-visible, and feed sidecar-captured video frames through the dedicated
+bridge agent's video-only `MediaIngressOpen` lane into `media-pip`. The current
+helper intentionally fails before HUD auth when run without
+`--media-ingress-dry-run`, because the Windows frame-capture adapter has not yet
+landed and the local/synthetic producer must not be substituted for YouTube
+frame proof.
 
 ## Evidence
 
@@ -41,7 +45,7 @@ docs/reports/artifacts/windows_media_ingress_hud_o33hj/
 Artifacts produced in this worker:
 
 - `policy-review.json`: machine-readable approved boundary and prohibited paths.
-- `youtube-bridge-dry-run.json`: bridge path evidence with `MediaIngressOpen` named as the only HUD entrypoint.
+- `youtube-bridge-dry-run.json`: bridge path evidence with `MediaIngressOpen` named as the only HUD entrypoint and the missing live adapter called out.
 - `youtube_source_evidence.html`: generated official-player sidecar HTML.
 
 The dry-run artifact intentionally records:
@@ -99,9 +103,10 @@ python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py local
 
 ## Blocked Live Step
 
-Live Windows validation still needs an exclusive validation window after
-`hud-nfl7n` releases the benchmark HUD. Resume by running the `youtube-bridge`
-command without `--media-ingress-dry-run` against a HUD launched with
+Live Windows validation still needs both the Windows frame-capture adapter and an
+exclusive validation window after `hud-nfl7n` releases the benchmark HUD. After
+the adapter exists, run the `youtube-bridge` command without
+`--media-ingress-dry-run` against a HUD launched with
 `app/tze_hud_app/config/windows-media-ingress.toml`, then attach pixel/readback
 or screenshot evidence proving bridged video frames entered `media-pip` through
 `MediaIngressOpen`.

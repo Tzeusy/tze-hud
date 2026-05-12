@@ -1,4 +1,7 @@
 import unittest
+import asyncio
+import shutil
+from pathlib import Path
 
 import windows_media_ingress_exemplar as exemplar
 
@@ -30,6 +33,22 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertNotIn("controls=0", html)
         self.assertNotIn("noreferrer", html)
 
+    def test_sidecar_evidence_keeps_relative_output_path_relative(self):
+        output_dir = Path("build/test-windows-media-ingress-sidecar")
+        shutil.rmtree(output_dir, ignore_errors=True)
+        try:
+            args = exemplar.build_parser().parse_args(
+                ["youtube-sidecar", "--dry-run", "--output-dir", str(output_dir)]
+            )
+            evidence = exemplar.launch_youtube_sidecar(args)
+
+            self.assertEqual(
+                evidence["html_evidence_path"],
+                str(output_dir / "youtube_source_evidence.html"),
+            )
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+
     def test_bridge_dry_run_evidence_does_not_claim_live_frames(self):
         sidecar = {
             "video_id": exemplar.YOUTUBE_VIDEO_ID,
@@ -58,6 +77,12 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertEqual(args.agent_id, exemplar.YOUTUBE_BRIDGE_AGENT_ID)
         self.assertEqual(args.source_label, exemplar.YOUTUBE_BRIDGE_SOURCE_LABEL)
         self.assertEqual(args.zone_name, exemplar.APPROVED_MEDIA_ZONE)
+
+    def test_youtube_bridge_live_path_fails_until_capture_adapter_exists(self):
+        args = exemplar.build_parser().parse_args(["youtube-bridge", "--dry-run"])
+
+        with self.assertRaisesRegex(RuntimeError, "frame-capture adapter"):
+            asyncio.run(exemplar.run_youtube_bridge(args))
 
     def test_invalid_approved_zone_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "approved zone"):

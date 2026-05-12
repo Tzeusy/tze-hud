@@ -131,7 +131,7 @@ If `list_widgets` returns no instances, the HUD binary is running without a conf
 
 ## Windows Media Ingress Exemplar
 
-Use this lane only with `app/tze_hud_app/config/windows-media-ingress.toml`, which explicitly enables the one-stream `media-pip` surface and grants `windows-local-media-producer` the `media_ingress` capability.
+Use this lane only with `app/tze_hud_app/config/windows-media-ingress.toml`, which explicitly enables the one-stream `media-pip` surface and grants the media producer agents the `media_ingress` capability.
 
 HUD media-ingress proof uses a self-owned/local synthetic video source. It is video-only and does not route audio:
 
@@ -146,7 +146,7 @@ TZE_HUD_PSK="$PSK" python3 .claude/skills/user-test/scripts/windows_media_ingres
   --evidence-json build/windows-media-ingress/local-producer-evidence.json
 ```
 
-YouTube source evidence is separate from HUD frame-ingress proof. Launch video ID `O0FGCxkHM-U` through the official embedded-player URL; do not bridge raw YouTube frames into the HUD runtime:
+YouTube source evidence uses video ID `O0FGCxkHM-U` through the official embedded-player URL:
 
 ```bash
 python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
@@ -165,7 +165,9 @@ python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
   --evidence-json build/windows-media-ingress/policy-review.json
 ```
 
-The media exemplar must not introduce `yt-dlp`, direct YouTube media URL extraction, downloads, a browser/WebView node inside the compositor, raw YouTube frame bridging, or a YouTube audio route into the HUD runtime.
+The approved bridge lane is `operator-visible-official-player-window-capture-to-media-ingress-open`: the official player/control surface must stay operator-visible, any HUD ingress must enter only through `MediaIngressOpen`, and the current script's non-dry-run bridge path intentionally fails until the Windows frame-capture adapter exists. Use `--media-ingress-dry-run` for policy evidence only.
+
+The media exemplar must not introduce `yt-dlp`, direct YouTube media URL extraction, downloads, cache/offline copies, a browser/WebView node inside the compositor, or a YouTube audio route into the HUD runtime.
 
 ## Workflow
 
