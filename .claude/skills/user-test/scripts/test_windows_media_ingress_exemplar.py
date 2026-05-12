@@ -26,6 +26,9 @@ def valid_frame_capture_fixture() -> dict:
             "width": 960,
             "height": 540,
         },
+        "selected_window_visible_area": 960 * 540,
+        "selected_window_moved_to_primary": True,
+        "playback_click_sent": True,
         "captured_frames": [
             {
                 "index": 0,
@@ -73,6 +76,8 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
             html,
         )
         self.assertIn("allowfullscreen", html)
+        self.assertIn("autoplay=1", html)
+        self.assertIn("mute=1", html)
         self.assertNotIn("controls=0", html)
         self.assertNotIn("noreferrer", html)
 
@@ -86,6 +91,13 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
 
         self.assertIn("tze_hud YouTube source evidence $VideoId", script)
         self.assertIn("$title.StartsWith($ExpectedTitlePrefix", script)
+        self.assertIn("Get-VisibleAreaOnPrimary", script)
+        self.assertIn("selected_window_visible_area", script)
+        self.assertIn("SetWindowPos", script)
+        self.assertIn("SetCursorPos", script)
+        self.assertIn("playback_click_sent", script)
+        self.assertIn("visible_area", script)
+        self.assertNotIn("Sort-Object area -Descending", script)
         self.assertNotIn("O0FGCxkHM-U", script)
         self.assertNotIn("YouTube|", script)
 
@@ -153,6 +165,13 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "mean_rgb"):
             exemplar.validate_frame_capture_evidence(fixture)
 
+    def test_frame_capture_fixture_rejects_offscreen_selected_window(self):
+        fixture = valid_frame_capture_fixture()
+        fixture["selected_window_visible_area"] = 0
+
+        with self.assertRaisesRegex(RuntimeError, "offscreen player window"):
+            exemplar.validate_frame_capture_evidence(fixture)
+
     def test_bridge_dry_run_can_validate_frame_capture_fixture_without_hud(self):
         with tempfile.TemporaryDirectory(dir=".") as tmpdir:
             output_dir = Path(tmpdir) / "bridge"
@@ -179,6 +198,27 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
             self.assertTrue(evidence["captured_youtube_frames_available_to_bridge"])
             self.assertTrue(evidence["frame_capture"]["capture_validated"])
             self.assertFalse(evidence["hud_runtime_receives_youtube_frames"])
+
+    def test_frame_capture_fixture_accepts_windows_utf8_bom(self):
+        with tempfile.TemporaryDirectory(dir=".") as tmpdir:
+            fixture_path = Path(tmpdir) / "frame-capture.json"
+            fixture_path.write_bytes(
+                b"\xef\xbb\xbf"
+                + json.dumps(valid_frame_capture_fixture()).encode("utf-8")
+            )
+            args = exemplar.build_parser().parse_args(
+                [
+                    "youtube-bridge",
+                    "--dry-run",
+                    "--media-ingress-dry-run",
+                    "--frame-capture-fixture-json",
+                    str(fixture_path),
+                ]
+            )
+
+            evidence = exemplar.load_frame_capture_fixture(str(fixture_path), args)
+
+            self.assertTrue(evidence["capture_validated"])
 
     def test_youtube_bridge_parser_defaults_to_bridge_agent(self):
         args = exemplar.build_parser().parse_args(
