@@ -158,6 +158,11 @@ fn windows_media_config_names_approved_media_zone_and_producer() {
         "windows-local-media-producer",
         &["media_ingress", "publish_zone:media-pip"],
     );
+    assert_caps(
+        &resolved,
+        "windows-youtube-frame-bridge",
+        &["media_ingress", "publish_zone:media-pip"],
+    );
 }
 
 #[tokio::test]
