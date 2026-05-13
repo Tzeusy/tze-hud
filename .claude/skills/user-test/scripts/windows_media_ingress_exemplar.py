@@ -2,10 +2,12 @@
 """
 Windows media ingress exemplar producer and YouTube source-evidence sidecar.
 
-The HUD lane uses a self-owned/local synthetic source and opens the runtime's
-video-only MediaIngressOpen path. The YouTube lane launches the requested video
-through the official embedded player URL as source evidence only; it does not
-download, extract, capture, or bridge YouTube frames into the HUD runtime.
+The baseline HUD lane uses a self-owned/local synthetic source and opens the
+runtime's video-only MediaIngressOpen path. The approved YouTube bridge lane
+keeps the official player/control surface operator-visible, names the Windows
+raw-frame bridge path, and enters the HUD runtime only through MediaIngressOpen.
+It does not download, extract, cache, route audio, or host a browser/WebView
+inside the compositor.
 """
 
 from __future__ import annotations
@@ -37,15 +39,20 @@ YOUTUBE_EMBED_URL = f"https://www.youtube.com/embed/{YOUTUBE_VIDEO_ID}"
 YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 APPROVED_MEDIA_ZONE = "media-pip"
 LOCAL_PRODUCER_AGENT_ID = "windows-local-media-producer"
+YOUTUBE_BRIDGE_AGENT_ID = "windows-youtube-frame-bridge"
 DEFAULT_SOURCE_LABEL = "synthetic-color-bars"
-RAW_YOUTUBE_BRIDGE_DECISION = "blocked_pending_policy_approval"
+YOUTUBE_BRIDGE_SOURCE_LABEL = "youtube-official-player-frame-bridge"
+YOUTUBE_BRIDGE_PATH = "operator-visible-official-player-window-capture-to-media-ingress-open"
+RAW_YOUTUBE_BRIDGE_DECISION = "approved_operator_visible_player_frame_bridge"
 BANNED_SOURCE_MARKERS = (
     "yt-dlp",
     "youtube-dl",
     "googlevideo.com",
     "videoplayback",
     "download",
+    "cache",
     "direct media url",
+    "audio route",
 )
 
 
@@ -154,14 +161,20 @@ def policy_review() -> dict[str, Any]:
         "youtube_video_id": YOUTUBE_VIDEO_ID,
         "official_player_url": YOUTUBE_EMBED_URL,
         "raw_youtube_frame_bridge": RAW_YOUTUBE_BRIDGE_DECISION,
-        "hud_ingress_source": "self-owned/local synthetic video-only source",
+        "bridge_path_name": YOUTUBE_BRIDGE_PATH,
+        "hud_ingress_source": (
+            "official-player raw-frame bridge or self-owned/local fallback; "
+            "both enter through MediaIngressOpen"
+        ),
+        "operator_visible_player_controls": "required",
         "audio_route_to_hud": "none",
         "prohibited_paths": list(BANNED_SOURCE_MARKERS),
         "rationale": (
-            "First acceptance separates HUD media-ingress proof from YouTube "
-            "source evidence. YouTube launches only through the official embedded "
-            "player URL; raw-frame bridging remains blocked until a separate "
-            "policy review approves a compliant bridge."
+            "Operator/maintainer approval recorded on 2026-05-12 permits a "
+            "narrow Windows-only raw-frame bridge from an operator-visible "
+            "official YouTube player sidecar into the HUD media ingress path. "
+            "The bridge remains video-only and does not download, extract, "
+            "cache, route audio, or embed a browser in the compositor."
         ),
     }
 
@@ -210,6 +223,7 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
         "target": args.target,
         "agent_id": args.agent_id,
         "source_label": args.source_label,
+        "media_ingress_entrypoint": "MediaIngressOpen",
         "video_only": True,
         "audio_route_to_hud": "none",
         "zone_name": zone_name,
@@ -229,7 +243,7 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
 
 def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
     video_id = validate_youtube_video_id(args.video_id)
-    output_dir = Path(args.output_dir).resolve()
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     html_path = output_dir / "youtube_source_evidence.html"
     html = build_source_evidence_html(video_id)
@@ -268,7 +282,7 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
             subprocess.run(cmd, check=True)
             launched_by = f"ssh:{windows_user}@{windows_host}"
         else:
-            webbrowser.open(html_path.as_uri(), new=1, autoraise=True)
+            webbrowser.open(html_path.resolve().as_uri(), new=1, autoraise=True)
             launched_by = "local-browser"
 
     return {
@@ -279,8 +293,65 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
         "launched_by": launched_by,
         "raw_youtube_frame_bridge": RAW_YOUTUBE_BRIDGE_DECISION,
         "download_or_extraction": "not_used",
+        "cache_or_offline_copy": "not_used",
+        "audio_route_to_hud": "none",
+        "operator_visible_player_controls": True,
         "hud_runtime_receives_youtube_frames": False,
     }
+
+
+def build_youtube_bridge_dry_run_evidence(
+    *,
+    sidecar_evidence: dict[str, Any],
+    target: str,
+    agent_id: str,
+    zone_name: str,
+) -> dict[str, Any]:
+    """Return evidence for the approved bridge path without opening gRPC."""
+    return {
+        "lane": "youtube-official-player-frame-bridge",
+        "video_id": sidecar_evidence["video_id"],
+        "official_player_url": sidecar_evidence["official_player_url"],
+        "bridge_path_name": YOUTUBE_BRIDGE_PATH,
+        "bridge_source": "operator-visible official YouTube player sidecar",
+        "bridge_sink": "HUD media ingress approved zone",
+        "media_ingress_entrypoint": "MediaIngressOpen",
+        "target": target,
+        "agent_id": agent_id,
+        "zone_name": zone_name,
+        "video_only": True,
+        "operator_visible_player_controls": True,
+        "download_or_extraction": "not_used",
+        "cache_or_offline_copy": "not_used",
+        "audio_route_to_hud": "none",
+        "media_ingress_open_attempted": False,
+        "media_ingress_open_admitted": False,
+        "hud_runtime_receives_youtube_frames": False,
+        "blocked_reason": (
+            "dry-run; live proof requires the Windows frame-capture adapter and "
+            "exclusive validation access"
+        ),
+        "sidecar": sidecar_evidence,
+    }
+
+
+async def run_youtube_bridge(args: argparse.Namespace) -> dict[str, Any]:
+    """Launch the approved sidecar and open the bridge's MediaIngressOpen lane."""
+    zone_name = validate_approved_media_zone(args.zone_name)
+    if args.media_ingress_dry_run:
+        sidecar_evidence = launch_youtube_sidecar(args)
+        return build_youtube_bridge_dry_run_evidence(
+            sidecar_evidence=sidecar_evidence,
+            target=args.target,
+            agent_id=args.agent_id,
+            zone_name=zone_name,
+        )
+
+    raise RuntimeError(
+        "live YouTube bridge proof requires a Windows frame-capture adapter from "
+        "the operator-visible official player sidecar into MediaIngressOpen; "
+        "do not substitute the local/synthetic producer for YouTube frame proof"
+    )
 
 
 def write_evidence(path: str | None, evidence: dict[str, Any]) -> None:
@@ -290,7 +361,9 @@ def write_evidence(path: str | None, evidence: dict[str, Any]) -> None:
         payload["policy_review"] = review
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if path:
-        Path(path).write_text(text, encoding="utf-8")
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(text, encoding="utf-8")
     print(text, end="")
 
 
@@ -298,35 +371,65 @@ def add_common_evidence_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--evidence-json", help="optional JSON evidence output path")
 
 
+def add_media_ingress_args(
+    parser: argparse.ArgumentParser,
+    *,
+    default_agent_id: str = LOCAL_PRODUCER_AGENT_ID,
+    default_source_label: str = DEFAULT_SOURCE_LABEL,
+) -> None:
+    parser.add_argument("--target", default="tzehouse-windows.parrot-hen.ts.net:50051")
+    parser.add_argument("--psk-env", default="TZE_HUD_PSK")
+    parser.add_argument("--psk", help="PSK value; prefer --psk-env for normal runs")
+    parser.add_argument("--agent-id", default=default_agent_id)
+    parser.add_argument("--zone-name", default=APPROVED_MEDIA_ZONE)
+    parser.add_argument("--content-classification", default="household")
+    parser.add_argument("--source-label", default=default_source_label)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=360)
+    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--declared-peak-kbps", type=int, default=2_000)
+    parser.add_argument("--hold-s", type=float, default=10.0)
+    parser.add_argument("--timeout-s", type=float, default=10.0)
+
+
+def add_youtube_sidecar_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--video-id", default=YOUTUBE_VIDEO_ID)
+    parser.add_argument("--output-dir", default="build/windows-media-ingress")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--windows-host")
+    parser.add_argument("--windows-user", default="tzeus")
+    parser.add_argument("--ssh-key")
+    parser.add_argument("--connect-timeout-s", type=int, default=5)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
     local = sub.add_parser("local-producer", help="open a video-only HUD media ingress stream")
-    local.add_argument("--target", default="tzehouse-windows.parrot-hen.ts.net:50051")
-    local.add_argument("--psk-env", default="TZE_HUD_PSK")
-    local.add_argument("--psk", help="PSK value; prefer --psk-env for normal runs")
-    local.add_argument("--agent-id", default=LOCAL_PRODUCER_AGENT_ID)
-    local.add_argument("--zone-name", default=APPROVED_MEDIA_ZONE)
-    local.add_argument("--content-classification", default="household")
-    local.add_argument("--source-label", default=DEFAULT_SOURCE_LABEL)
-    local.add_argument("--width", type=int, default=640)
-    local.add_argument("--height", type=int, default=360)
-    local.add_argument("--fps", type=int, default=30)
-    local.add_argument("--declared-peak-kbps", type=int, default=2_000)
-    local.add_argument("--hold-s", type=float, default=10.0)
-    local.add_argument("--timeout-s", type=float, default=10.0)
+    add_media_ingress_args(local)
     add_common_evidence_arg(local)
 
     youtube = sub.add_parser("youtube-sidecar", help="launch official YouTube embed evidence")
-    youtube.add_argument("--video-id", default=YOUTUBE_VIDEO_ID)
-    youtube.add_argument("--output-dir", default="build/windows-media-ingress")
-    youtube.add_argument("--dry-run", action="store_true")
-    youtube.add_argument("--windows-host")
-    youtube.add_argument("--windows-user", default="tzeus")
-    youtube.add_argument("--ssh-key")
-    youtube.add_argument("--connect-timeout-s", type=int, default=5)
+    add_youtube_sidecar_args(youtube)
     add_common_evidence_arg(youtube)
+
+    bridge = sub.add_parser(
+        "youtube-bridge",
+        help="launch the official player sidecar and open the approved MediaIngressOpen lane",
+    )
+    add_youtube_sidecar_args(bridge)
+    add_media_ingress_args(
+        bridge,
+        default_agent_id=YOUTUBE_BRIDGE_AGENT_ID,
+        default_source_label=YOUTUBE_BRIDGE_SOURCE_LABEL,
+    )
+    bridge.add_argument(
+        "--media-ingress-dry-run",
+        action="store_true",
+        help="name the approved bridge path without authenticating to the HUD",
+    )
+    add_common_evidence_arg(bridge)
 
     review = sub.add_parser("policy-review", help="print the YouTube bridge policy decision")
     add_common_evidence_arg(review)
@@ -339,6 +442,8 @@ def main(argv: list[str] | None = None) -> int:
         evidence = asyncio.run(run_local_producer(args))
     elif args.command == "youtube-sidecar":
         evidence = launch_youtube_sidecar(args)
+    elif args.command == "youtube-bridge":
+        evidence = asyncio.run(run_youtube_bridge(args))
     elif args.command == "policy-review":
         evidence = policy_review()
     else:
