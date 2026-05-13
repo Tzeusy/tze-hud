@@ -52,6 +52,7 @@ $configPath = Join-Path $OutputDir "windowed-benchmark.toml"
 $fullscreenPath = Join-Path $OutputDir "fullscreen.json"
 $overlayPath = Join-Path $OutputDir "overlay.json"
 $reportPath = Join-Path $OutputDir "windowed_fullscreen_vs_overlay_report.json"
+$logDir = Join-Path $OutputDir "logs"
 $psk = "windowed-benchmark-$([Guid]::NewGuid().ToString('N'))"
 
 $config = @"
@@ -62,6 +63,7 @@ profile = "full-display"
 name = "Benchmark"
 "@
 Set-Content -Path $configPath -Value $config -Encoding UTF8
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 function Invoke-WindowedBenchmarkMode {
     param(
@@ -74,6 +76,8 @@ function Invoke-WindowedBenchmarkMode {
     )
 
     Write-Host "[windowed-perf] Running $Mode benchmark..."
+    $stdoutPath = Join-Path $logDir "$Mode.stdout.log"
+    $stderrPath = Join-Path $logDir "$Mode.stderr.log"
     $args = @(
         "--config", $configPath,
         "--window-mode", $Mode,
@@ -87,13 +91,24 @@ function Invoke-WindowedBenchmarkMode {
         "--benchmark-warmup-frames", "$WarmupFrames"
     )
 
-    & $ExePath @args
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Mode benchmark failed with exit code $LASTEXITCODE"
+    $process = Start-Process `
+        -FilePath $ExePath `
+        -ArgumentList $args `
+        -Wait `
+        -PassThru `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath
+
+    if ($null -eq $process.ExitCode) {
+        throw "$Mode benchmark exited without an exit code; stdout=$stdoutPath stderr=$stderrPath"
+    }
+
+    if ($process.ExitCode -ne 0) {
+        throw "$Mode benchmark failed with exit code $($process.ExitCode); stdout=$stdoutPath stderr=$stderrPath"
     }
 
     if (-not (Test-Path $EmitPath)) {
-        throw "$Mode benchmark did not produce expected artifact: $EmitPath"
+        throw "$Mode benchmark did not produce expected artifact: $EmitPath; stdout=$stdoutPath stderr=$stderrPath"
     }
 
     return Get-Content -Path $EmitPath -Raw | ConvertFrom-Json

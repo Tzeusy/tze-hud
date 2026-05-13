@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import webbrowser
@@ -258,7 +259,6 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
     launched_by = "dry-run"
     if not args.dry_run:
         if args.windows_host:
-            cmd = _ssh_base_command(args)
             remote_html_b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
             remote_script = (
                 f"$htmlBytes=[Convert]::FromBase64String('{remote_html_b64}');"
@@ -267,11 +267,11 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
                 "Set-Content -LiteralPath $path -Value $html -Encoding UTF8;"
                 "Start-Process -FilePath $path"
             )
-            encoded_script = base64.b64encode(remote_script.encode("utf-16le")).decode(
-                "ascii"
+            _run_remote_powershell_script_file(
+                args,
+                remote_script,
+                prefix="tze_hud_youtube_sidecar",
             )
-            cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", encoded_script])
-            subprocess.run(cmd, check=True)
             launched_by = f"ssh:{args.windows_user}@{args.windows_host}"
         else:
             webbrowser.open(html_path.resolve().as_uri(), new=1, autoraise=True)
@@ -308,6 +308,274 @@ def _ssh_base_command(args: argparse.Namespace) -> list[str]:
         cmd.extend(["-i", args.ssh_key])
     cmd.append(windows_host)
     return cmd
+
+
+def _scp_base_command(args: argparse.Namespace) -> list[str]:
+    windows_user = validate_ssh_arg("windows_user", args.windows_user)
+    windows_host = validate_ssh_arg("windows_host", args.windows_host)
+    cmd = [
+        "scp",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={args.connect_timeout_s}",
+    ]
+    if args.ssh_key:
+        cmd.extend(["-i", args.ssh_key])
+    cmd.append(f"{windows_user}@{windows_host}")
+    return cmd
+
+
+def _run_remote_powershell_script_file(
+    args: argparse.Namespace,
+    script: str,
+    *,
+    prefix: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run a large PowerShell script through an interactive Windows task."""
+    run_id = uuid.uuid4().hex
+    remote_dir = f"C:/tze_hud/tmp/{prefix}_{run_id}"
+    remote_dir_arg = remote_dir.replace("/", "\\")
+    remote_script_path = f"{remote_dir}/script.ps1"
+    remote_runner_path = f"{remote_dir}/runner.ps1"
+    remote_stdout_path = f"{remote_dir}/stdout.txt"
+    remote_stderr_path = f"{remote_dir}/stderr.txt"
+    remote_rc_path = f"{remote_dir}/rc.txt"
+    task_name = f"TzeHudFrameCapture{run_id[:12]}"
+
+    mkdir_script = (
+        "$ErrorActionPreference='Stop';"
+        f"New-Item -ItemType Directory -Force -Path '{remote_dir_arg}' | Out-Null"
+    )
+    mkdir_encoded = base64.b64encode(mkdir_script.encode("utf-16le")).decode("ascii")
+    mkdir_cmd = _ssh_base_command(args)
+    mkdir_cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", mkdir_encoded])
+
+    local_script_path: Path | None = None
+    local_runner_path: Path | None = None
+    local_stdout_path: Path | None = None
+    local_stderr_path: Path | None = None
+    local_rc_path: Path | None = None
+    try:
+        subprocess.run(
+            mkdir_cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".ps1",
+            prefix=f"{prefix}_",
+            encoding="utf-8-sig",
+            delete=False,
+        ) as handle:
+            handle.write(script)
+            local_script_path = Path(handle.name)
+
+        remote_script_arg = remote_script_path.replace("/", "\\")
+        remote_runner_arg = remote_runner_path.replace("/", "\\")
+        remote_stdout_arg = remote_stdout_path.replace("/", "\\")
+        remote_stderr_arg = remote_stderr_path.replace("/", "\\")
+        remote_rc_arg = remote_rc_path.replace("/", "\\")
+        runner = f"""$ErrorActionPreference = 'Stop'
+$out = '{remote_stdout_arg}'
+$err = '{remote_stderr_arg}'
+$rc = '{remote_rc_arg}'
+try {{
+  & '{remote_script_arg}' 1> $out 2> $err
+  $code = $LASTEXITCODE
+  if ($null -eq $code) {{ $code = 0 }}
+  Set-Content -LiteralPath $rc -Value ([string]$code) -Encoding ASCII
+}} catch {{
+  $_ | Out-String | Set-Content -LiteralPath $err -Encoding UTF8
+  Set-Content -LiteralPath $rc -Value '1' -Encoding ASCII
+}}
+"""
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".ps1",
+            prefix=f"{prefix}_runner_",
+            encoding="utf-8-sig",
+            delete=False,
+        ) as handle:
+            handle.write(runner)
+            local_runner_path = Path(handle.name)
+
+        for local_path, remote_path in (
+            (local_script_path, remote_script_path),
+            (local_runner_path, remote_runner_path),
+        ):
+            scp_cmd = _scp_base_command(args)
+            remote_target = f"{scp_cmd.pop()}:{remote_path}"
+            scp_cmd.extend([str(local_path), remote_target])
+            subprocess.run(
+                scp_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+        task_command = (
+            "powershell.exe -NoProfile -ExecutionPolicy Bypass "
+            f"-File {remote_runner_arg}"
+        )
+        delete_cmd = _ssh_base_command(args)
+        delete_cmd.extend(["schtasks", "/Delete", "/F", "/TN", task_name])
+        subprocess.run(
+            delete_cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        create_cmd = _ssh_base_command(args)
+        create_cmd.extend(
+            [
+                "schtasks",
+                "/Create",
+                "/F",
+                "/TN",
+                task_name,
+                "/SC",
+                "ONCE",
+                "/ST",
+                "23:59",
+                "/IT",
+                "/RL",
+                "HIGHEST",
+                "/TR",
+                task_command,
+            ]
+        )
+        subprocess.run(
+            create_cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        run_cmd = _ssh_base_command(args)
+        run_cmd.extend(["schtasks", "/Run", "/TN", task_name])
+        subprocess.run(
+            run_cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        for _ in range(60):
+            poll_script = (
+                f"$p='{remote_rc_arg}';"
+                "if (Test-Path -LiteralPath $p) { Get-Content -Raw -LiteralPath $p }"
+            )
+            poll_encoded = base64.b64encode(poll_script.encode("utf-16le")).decode(
+                "ascii"
+            )
+            poll_cmd = _ssh_base_command(args)
+            poll_cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", poll_encoded])
+            poll = subprocess.run(
+                poll_cmd,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if poll.stdout.strip():
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("timed out waiting for Windows frame-capture task")
+
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            local_stdout_path = Path(handle.name)
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            local_stderr_path = Path(handle.name)
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            local_rc_path = Path(handle.name)
+
+        for remote_path, local_path in (
+            (remote_stdout_path, local_stdout_path),
+            (remote_stderr_path, local_stderr_path),
+            (remote_rc_path, local_rc_path),
+        ):
+            scp_cmd = _scp_base_command(args)
+            remote_source = f"{scp_cmd.pop()}:{remote_path}"
+            scp_cmd.extend([remote_source, str(local_path)])
+            subprocess.run(
+                scp_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+        stdout = _read_text_with_windows_fallback(local_stdout_path)
+        stderr = _read_text_with_windows_fallback(local_stderr_path)
+        rc_text = _read_text_with_windows_fallback(local_rc_path).strip()
+        returncode = int(rc_text or "1")
+        completed = subprocess.CompletedProcess(
+            args=["schtasks", "/Run", "/TN", task_name],
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        if returncode != 0:
+            raise subprocess.CalledProcessError(
+                returncode,
+                completed.args,
+                output=stdout,
+                stderr=stderr,
+            )
+        return completed
+    finally:
+        for path in (
+            local_script_path,
+            local_runner_path,
+            local_stdout_path,
+            local_stderr_path,
+            local_rc_path,
+        ):
+            if path is not None:
+                path.unlink(missing_ok=True)
+        delete_cmd = _ssh_base_command(args)
+        delete_cmd.extend(["schtasks", "/Delete", "/F", "/TN", task_name])
+        subprocess.run(
+            delete_cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        cleanup_script = (
+            "$ErrorActionPreference='SilentlyContinue';"
+            f"Remove-Item -LiteralPath '{remote_dir_arg}' -Recurse -Force"
+        )
+        cleanup_encoded = base64.b64encode(cleanup_script.encode("utf-16le")).decode(
+            "ascii"
+        )
+        cleanup_cmd = _ssh_base_command(args)
+        cleanup_cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", cleanup_encoded])
+        subprocess.run(
+            cleanup_cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+
+def _read_text_with_windows_fallback(path: Path) -> str:
+    data = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-16"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 def _json_from_command_stdout(stdout: str) -> dict[str, Any]:
@@ -665,26 +933,29 @@ def run_windows_frame_capture(args: argparse.Namespace) -> dict[str, Any]:
     )
     encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     if args.windows_host:
-        cmd = _ssh_base_command(args)
-        cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", encoded_script])
+        proc = _run_remote_powershell_script_file(
+            args,
+            script,
+            prefix="tze_hud_frame_capture",
+        )
     elif os.name == "nt":
         powershell = shutil.which("powershell") or shutil.which("powershell.exe")
         if not powershell:
             raise RuntimeError("Windows frame-capture adapter requires PowerShell")
         cmd = [powershell, "-NoProfile", "-EncodedCommand", encoded_script]
+        proc = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
     else:
         raise RuntimeError(
             "Windows frame-capture adapter requires --windows-host, a local Windows run, "
             "or --frame-capture-fixture-json for synthetic validation"
         )
 
-    proc = subprocess.run(
-        cmd,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
     evidence = _json_from_command_stdout(proc.stdout)
     return validate_frame_capture_evidence(
         evidence,
