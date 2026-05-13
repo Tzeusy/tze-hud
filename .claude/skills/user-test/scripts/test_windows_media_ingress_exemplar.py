@@ -1,8 +1,10 @@
 import unittest
 import asyncio
 import json
+import subprocess
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import windows_media_ingress_exemplar as exemplar
 
@@ -114,6 +116,34 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
                 str(output_dir / "youtube_source_evidence.html"),
             )
 
+    def test_remote_sidecar_launch_uses_interactive_script_transport(self):
+        args = exemplar.build_parser().parse_args(
+            [
+                "youtube-sidecar",
+                "--windows-host",
+                "tzehouse-windows.parrot-hen.ts.net",
+                "--windows-user",
+                "tzeus",
+                "--ssh-key",
+                "~/.ssh/ecdsa_home",
+            ]
+        )
+
+        with mock.patch.object(
+            exemplar,
+            "_run_remote_powershell_script_file",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0),
+        ) as run_remote:
+            evidence = exemplar.launch_youtube_sidecar(args)
+
+        run_remote.assert_called_once()
+        _call_args, call_kwargs = run_remote.call_args
+        self.assertEqual(call_kwargs["prefix"], "tze_hud_youtube_sidecar")
+        self.assertEqual(
+            evidence["launched_by"],
+            "ssh:tzeus@tzehouse-windows.parrot-hen.ts.net",
+        )
+
     def test_bridge_dry_run_evidence_does_not_claim_live_frames(self):
         sidecar = {
             "video_id": exemplar.YOUTUBE_VIDEO_ID,
@@ -219,6 +249,69 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
             evidence = exemplar.load_frame_capture_fixture(str(fixture_path), args)
 
             self.assertTrue(evidence["capture_validated"])
+
+    def test_remote_frame_capture_uses_script_file_transport(self):
+        args = exemplar.build_parser().parse_args(
+            [
+                "youtube-bridge",
+                "--windows-host",
+                "tzehouse-windows.parrot-hen.ts.net",
+                "--windows-user",
+                "tzeus",
+                "--ssh-key",
+                "~/.ssh/ecdsa_home",
+                "--allow-static-captured-frames",
+            ]
+        )
+
+        commands = []
+
+        def fake_run(cmd, **_kwargs):
+            commands.append(cmd)
+            if cmd[0] == "scp" and len(cmd) >= 3 and cmd[-2].endswith("/stdout.txt"):
+                Path(cmd[-1]).write_bytes(
+                    json.dumps(valid_frame_capture_fixture()).encode("utf-16")
+                )
+            elif cmd[0] == "scp" and len(cmd) >= 3 and cmd[-2].endswith("/stderr.txt"):
+                Path(cmd[-1]).write_text("", encoding="utf-8")
+            elif cmd[0] == "scp" and len(cmd) >= 3 and cmd[-2].endswith("/rc.txt"):
+                Path(cmd[-1]).write_text("0", encoding="ascii")
+            stdout = "0\n" if "-EncodedCommand" in cmd else ""
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+            )
+
+        with mock.patch.object(
+            exemplar.subprocess,
+            "run",
+            side_effect=fake_run,
+        ), mock.patch.object(exemplar.time, "sleep"):
+            evidence = exemplar.run_windows_frame_capture(args)
+
+        upload_commands = [
+            cmd for cmd in commands if cmd[0] == "scp" and cmd[-1].endswith(".ps1")
+        ]
+        create_commands = [
+            cmd for cmd in commands if cmd[:1] == ["ssh"] and "/Create" in cmd
+        ]
+        self.assertEqual(len(upload_commands), 2)
+        self.assertTrue(create_commands)
+        create_command = create_commands[0]
+        self.assertIn("/IT", create_command)
+        self.assertIn("/TR", create_command)
+        task_index = create_command.index("/TR") + 1
+        self.assertIn(
+            "-File C:\\tze_hud\\tmp\\tze_hud_frame_capture_",
+            create_command[task_index],
+        )
+        self.assertNotIn("-EncodedCommand", create_command[task_index])
+        self.assertTrue(
+            any(cmd[0] == "scp" and cmd[-2].endswith("/stdout.txt") for cmd in commands)
+        )
+        self.assertTrue(evidence["capture_validated"])
 
     def test_youtube_bridge_parser_defaults_to_bridge_agent(self):
         args = exemplar.build_parser().parse_args(
