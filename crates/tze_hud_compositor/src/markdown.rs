@@ -1173,8 +1173,10 @@ mod tests {
     /// Link text styled with token link color if present.
     #[test]
     fn link_styled_with_token_color() {
-        let mut t = MarkdownTokens::default();
-        t.link_color = Some(Rgba::new(0.0, 0.5, 1.0, 1.0));
+        let t = MarkdownTokens {
+            link_color: Some(Rgba::new(0.0, 0.5, 1.0, 1.0)),
+            ..MarkdownTokens::default()
+        };
         let md = parse_markdown_subset("[click here](https://x.com)", &t);
         assert_eq!(md.plain_text, "click here");
         let link_span = md.spans.iter().find(|s| s.attr.color.is_some());
