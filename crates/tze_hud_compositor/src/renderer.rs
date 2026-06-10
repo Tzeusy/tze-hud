@@ -4135,8 +4135,11 @@ impl Compositor {
             // stripped plain_text), so the cache path is incompatible.  Skip
             // it when the node carries inline color_runs and fall through to
             // `from_text_markdown_node` which preserves them correctly.
-            let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
+            //
+            // `compute_key` is deferred into the `is_empty()` branch so we
+            // avoid the BLAKE3 hash entirely on the color_runs bypass path.
             let mut item = if tm.color_runs.is_empty() {
+                let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
                 if let Some(parsed) = self.markdown_cache.get_by_key(&content_key) {
                     TextItem::from_text_markdown_cached(
                         tm,
@@ -7209,8 +7212,11 @@ fn collect_ellipsis_text_items_from_node(
             // color_runs bypass: same as in collect_text_items_from_node —
             // the markdown cache path drops color_runs, so skip it when the
             // node carries inline color_runs.
-            let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
+            //
+            // `compute_key` is deferred into the `is_empty()` branch so we
+            // avoid the BLAKE3 hash entirely on the color_runs bypass path.
             let item = if tm.color_runs.is_empty() {
+                let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
                 if let Some(parsed) = markdown_cache.get_by_key(&content_key) {
                     TextItem::from_text_markdown_cached(tm, tile_x, tile_y, parsed)
                 } else {

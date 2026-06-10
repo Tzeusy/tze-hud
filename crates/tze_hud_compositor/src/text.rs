@@ -861,6 +861,14 @@ impl TextItem {
         tile_y: f32,
         parsed: &crate::markdown::ParsedMarkdown,
     ) -> Self {
+        // Callers must not invoke this constructor when color_runs is non-empty
+        // (see the # color_runs incompatibility doc comment above).  Assert in
+        // debug builds so misuse is caught early without any release overhead.
+        debug_assert!(
+            node.color_runs.is_empty(),
+            "from_text_markdown_cached called with non-empty color_runs; \
+             use from_text_markdown_node instead"
+        );
         use crate::markdown::StyledSpan;
 
         let text = parsed.plain_text.clone();
