@@ -81,6 +81,11 @@ pub const PORTAL_TOKEN_TRANSITION_OUT_MS: &str = "portal.transition.out_ms";
 /// profile-swap test can distinguish between the canonical and portal layers.
 /// Colors use the same palette as the existing exemplar adapter literals,
 /// expressed as resolved token defaults rather than inline constants.
+///
+/// NOTE: The numeric defaults here (as strings) must match the float/integer
+/// defaults in `tze_hud_projection::resident_grpc::PortalVisualTokens::default`.
+/// There is no compile-time link (the crates are independent), so update both
+/// sides if you change any default value.
 mod defaults {
     pub const FRAME_BACKGROUND: &str = "#111720";
     pub const FRAME_OPACITY: &str = "0.90";
@@ -238,8 +243,16 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
         ($key:expr, $fallback:expr) => {
             token_map
                 .get($key)
-                .and_then(|v| parse_numeric(v))
-                .map(|n| n as u32)
+                .and_then(|v| {
+                    // Require a positive integer string: no negatives, no
+                    // decimals, no very-large floats that would overflow u32.
+                    // parse_numeric accepts any finite f32 — we add strictness.
+                    let n = parse_numeric(v)?;
+                    if n < 1.0 || n > u32::MAX as f32 || n.fract() != 0.0 {
+                        return None;
+                    }
+                    Some(n as u32)
+                })
                 .unwrap_or($fallback)
         };
     }
@@ -547,6 +560,49 @@ mod tests {
         assert_eq!(
             tokens.frame_opacity, defaults.frame_opacity,
             "unparseable numeric must fall back to default"
+        );
+    }
+
+    // ── resolve_u32 validation ────────────────────────────────────────────
+
+    /// Verifies that resolve_u32 rejects invalid transition duration values and
+    /// falls back to defaults. Invalid values include negatives (which would cast
+    /// to 0 via `as u32`), decimals, and excessively large floats.
+    #[test]
+    fn invalid_transition_ms_falls_back_to_default() {
+        let defaults = PortalPartTokens::default();
+
+        // Negative value → fallback (0 would violate the > 0 invariant)
+        let mut bad = DesignTokenMap::new();
+        bad.insert(PORTAL_TOKEN_TRANSITION_IN_MS.to_string(), "-1".to_string());
+        let resolved = resolve_tokens(&empty_map(), &bad);
+        let tokens = resolve_portal_tokens(&resolved);
+        assert_eq!(
+            tokens.transition_in_ms, defaults.transition_in_ms,
+            "negative transition_in_ms must fall back to default"
+        );
+
+        // Decimal value → fallback
+        let mut bad2 = DesignTokenMap::new();
+        bad2.insert(
+            PORTAL_TOKEN_TRANSITION_OUT_MS.to_string(),
+            "0.5".to_string(),
+        );
+        let resolved2 = resolve_tokens(&empty_map(), &bad2);
+        let tokens2 = resolve_portal_tokens(&resolved2);
+        assert_eq!(
+            tokens2.transition_out_ms, defaults.transition_out_ms,
+            "decimal transition_out_ms must fall back to default"
+        );
+
+        // Zero value → fallback (> 0 invariant)
+        let mut bad3 = DesignTokenMap::new();
+        bad3.insert(PORTAL_TOKEN_TRANSITION_IN_MS.to_string(), "0".to_string());
+        let resolved3 = resolve_tokens(&empty_map(), &bad3);
+        let tokens3 = resolve_portal_tokens(&resolved3);
+        assert_eq!(
+            tokens3.transition_in_ms, defaults.transition_in_ms,
+            "zero transition_in_ms must fall back to default"
         );
     }
 }

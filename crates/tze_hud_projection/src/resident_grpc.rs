@@ -53,9 +53,16 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 ///
 /// This struct also carries `transition_in_ms` and `transition_out_ms` for
 /// the collapsed↔expanded zone-transition mechanics. Transitions derive their
-/// durations from these token values. The adapter is responsible for using
-/// `redaction_safe = true` during transitions so that a restricted viewer sees
-/// only the redaction placeholder — never a flash of transcript content.
+/// durations from these token values.
+///
+/// Redaction is **structural**, not time-based: the `redacted` flag on
+/// `ProjectedPortalState` is computed from viewer clearance vs. content
+/// classification by the `ProjectionAuthority`, independently of any transition
+/// animation position. A restricted viewer therefore sees `redacted = true` in
+/// every frame — expanded, collapsed, and any intermediate transition state —
+/// regardless of `transition_in_ms` / `transition_out_ms` values. There is no
+/// `redaction_safe` field in the protocol; the safety guarantee comes from the
+/// structural model, not from the adapter.
 ///
 /// ## Part inventory
 ///
@@ -110,6 +117,12 @@ impl Default for PortalVisualTokens {
     /// accepts the runtime's resolved token set. This default is used only
     /// in tests that do not exercise the token path, and as a fallback when
     /// no tokens are supplied to the adapter.
+    ///
+    /// NOTE: The numeric defaults here (colors as linear floats, font sizes,
+    /// transition durations) must match the string defaults in
+    /// `tze_hud_config::portal_tokens::defaults`. If you change either side,
+    /// update both — there is no compile-time link because `tze_hud_projection`
+    /// does not depend on `tze_hud_config`.
     fn default() -> Self {
         Self {
             frame_background: proto::Rgba {

@@ -221,35 +221,47 @@ fn adapter_publish_path_sources_colors_from_visual_tokens() {
 
 /// Verifies that all portal parts in the inventory have a non-zero token value
 /// after resolution from the default (empty) token map.
+///
+/// All assertions check `tokens.*` (the output of `resolve_portal_tokens`) to
+/// verify the resolver produces sane defaults, not `PortalVisualTokens::default`
+/// which exercises a different code path.
 #[test]
 fn portal_part_inventory_all_parts_have_non_zero_defaults() {
     use std::collections::HashMap;
     let empty: HashMap<String, String> = HashMap::new();
     let tokens = resolve_portal_tokens(&empty);
-    let visual = PortalVisualTokens::default();
 
     // Frame
-    assert!(visual.frame_opacity > 0.0 && visual.frame_opacity <= 1.0);
+    assert!(
+        tokens.frame_opacity > 0.0 && tokens.frame_opacity <= 1.0,
+        "portal part inventory: frame opacity must be in (0, 1]"
+    );
 
     // Header
-    assert!(visual.header_font_size_px > 0.0);
     assert!(
         tokens.header_font_size_px > 0.0,
         "portal part inventory: header font size must be positive"
     );
 
     // Composer
-    assert!(visual.composer_font_size_px > 0.0);
+    assert!(
+        tokens.composer_font_size_px > 0.0,
+        "portal part inventory: composer font size must be positive"
+    );
 
     // Transcript
-    assert!(visual.transcript_font_size_px > 0.0);
+    assert!(
+        tokens.transcript_font_size_px > 0.0,
+        "portal part inventory: transcript font size must be positive"
+    );
 
     // Collapsed
-    assert!(visual.collapsed_font_size_px > 0.0);
+    assert!(
+        tokens.collapsed_font_size_px > 0.0,
+        "portal part inventory: collapsed font size must be positive"
+    );
 
     // Transitions
-    assert!(visual.transition_in_ms > 0);
-    assert!(visual.transition_out_ms > 0);
     assert!(
         tokens.transition_in_ms > 0,
         "portal part inventory: transition_in_ms must be positive"
