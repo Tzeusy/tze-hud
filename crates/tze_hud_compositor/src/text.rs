@@ -814,17 +814,27 @@ impl TextItem {
     ///
     /// `tile_x` / `tile_y` are the pixel-space position of the tile origin.
     ///
-    /// When `node.color_runs` is non-empty, Markdown stripping is skipped and
-    /// the raw content is used as-is, so byte offsets in the runs are preserved
-    /// exactly.  Callers that supply `color_runs` must pre-strip Markdown before
-    /// populating `content`, or accept that markup characters appear in the output.
+    /// When `node.color_runs` contains at least one non-empty range
+    /// (`start_byte < end_byte`), Markdown stripping is skipped and the raw
+    /// content is used as-is so byte offsets in the runs remain valid against
+    /// the text.  Callers that supply such runs must pre-strip Markdown before
+    /// populating `content`, or accept that markup characters appear in the
+    /// output.
+    ///
+    /// Zero-length runs (`start_byte == end_byte`) are treated as pure
+    /// sentinels (no pixel coverage); their presence does **not** suppress
+    /// Markdown stripping.
     pub fn from_text_markdown_node(node: &TextMarkdownNode, tile_x: f32, tile_y: f32) -> Self {
-        // When color_runs are present, skip Markdown stripping so that the raw
-        // byte offsets in the runs remain valid against `text`.
-        let text = if node.color_runs.is_empty() {
-            strip_markdown_v1(&node.content)
-        } else {
+        // Skip Markdown stripping only when at least one run has a non-empty
+        // byte range — those runs reference offsets into the raw (un-stripped)
+        // content and stripping would invalidate them.
+        // Zero-length sentinel runs (start_byte == end_byte) carry metadata
+        // only; they do not reference content offsets, so we can still strip.
+        let has_pixel_runs = node.color_runs.iter().any(|r| r.start_byte < r.end_byte);
+        let text = if has_pixel_runs {
             node.content.clone()
+        } else {
+            strip_markdown_v1(&node.content)
         };
 
         // Convert linear f32 color [0..1] to sRGB u8 [0..255].

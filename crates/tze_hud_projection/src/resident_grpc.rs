@@ -88,10 +88,13 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 ///
 /// When a draft is active, `portal_node` renders the draft text with an inline
 /// `▌` caret marker at the cursor byte offset. When `at_capacity == true`, the
-/// rendered composer line uses `composer_at_capacity_color` instead of
-/// `composer_text_color` as a visible limit-reached indicator. This is entirely
-/// local — the compositor reads from the adapter's draft display state without
-/// any remote roundtrip.
+/// composer line receives a text-visible `[!] ` prefix. The
+/// `composer_at_capacity_color` token is carried in the `color_runs` field of
+/// the `TextMarkdownNodeProto` as a zero-length Phase-1 sentinel (bytes `[0..0]`)
+/// for machine-readable detection; it does **not** apply a visible color to the
+/// text in Phase-1 (precise per-line coloring is deferred to hud-9gyao).
+/// This is entirely local — the compositor reads from the adapter's draft
+/// display state without any remote roundtrip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PortalVisualTokens {
     // Transcript body (expanded presentation)
@@ -563,9 +566,14 @@ impl ResidentGrpcPortalAdapter {
             }
         }
 
-        // Transactional cancel — clear composer display state
+        // Transactional cancel — clear composer display state.
+        // Advance last_draft_sequence to the cancel's sequence so that any
+        // delayed state-stream notifications that arrived before the cancel
+        // event (sequence ≤ cancel.sequence) are silently dropped instead of
+        // re-populating composer_display after the clear.
         if let Some(cancel) = &batch.cancel {
             self.composer_display = None;
+            self.last_draft_sequence = self.last_draft_sequence.max(cancel.sequence);
             commands.push(ResidentGrpcDraftCommand {
                 kind: ResidentGrpcDraftCommandKind::ProcessCancel,
                 budget: sample_budget(started, RESIDENT_PORTAL_INPUT_FEEDBACK_BUDGET_US),
@@ -579,8 +587,11 @@ impl ResidentGrpcPortalAdapter {
         // Transactional submission (handled separately; caller should also
         // call `submit_composer_text` with the submission text).
         // Submission clears composer display state (post-submit display clear).
+        // Advance last_draft_sequence so that any delayed state-stream
+        // notifications with sequence ≤ submission.sequence are ignored.
         if let Some(submission) = &batch.submission {
             self.composer_display = None;
+            self.last_draft_sequence = self.last_draft_sequence.max(submission.sequence);
             commands.push(ResidentGrpcDraftCommand {
                 kind: ResidentGrpcDraftCommandKind::ProcessSubmission,
                 budget: sample_budget(started, RESIDENT_PORTAL_INPUT_FEEDBACK_BUDGET_US),
@@ -865,8 +876,8 @@ fn composer_line(
     let cursor = display.cursor.min(text.len());
 
     // Insert the caret marker (▌ U+258C LEFT HALF BLOCK) at the cursor position.
-    // The cursor is a byte offset; we snap to the nearest valid char boundary to
-    // avoid panics on multi-byte characters.
+    // The cursor is a byte offset; we snap backward to the nearest valid char
+    // boundary at or before the offset to avoid panics on multi-byte characters.
     let mut snap = cursor;
     while snap > 0 && !text.is_char_boundary(snap) {
         snap -= 1;
@@ -906,6 +917,10 @@ fn composer_line(
 /// detect the at-capacity state. The text-visible `[!]` prefix in
 /// `composer_line` additionally signals the state for environments where
 /// color runs are not inspected.
+///
+/// The zero-length run (`start_byte == end_byte == 0`) has no pixel coverage;
+/// `from_text_markdown_node` treats it as a pure sentinel and does **not**
+/// suppress Markdown stripping for it (only non-empty runs require that).
 ///
 /// Promotion-era structured multi-node layout (one node per surface part) will
 /// allow a precise, isolated composer-region color run without this limitation.
