@@ -19,8 +19,9 @@
 //! Any code that constructs a `ResidentGrpcPortalAdapter` MUST call this
 //! function instead of hand-constructing `PortalVisualTokens`. When a token-map
 //! swap occurs (e.g. profile hot-reload via `compositor.set_token_map`), call
-//! this function with the new `DesignTokenMap` and pass the result to
-//! `adapter.set_visual_tokens(...)`.
+//! `resolve_portal_tokens` on the new `DesignTokenMap` to get `PortalPartTokens`,
+//! then pass the result to this function, and forward the resulting
+//! `PortalVisualTokens` to `adapter.set_visual_tokens(...)`.
 //!
 //! ```rust,ignore
 //! use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
@@ -102,7 +103,7 @@ mod tests {
         let visual = portal_visual_tokens_from_part_tokens(&part_tokens);
         let default = PortalVisualTokens::default();
 
-        // Transcript background
+        // Transcript background (all four channels, including alpha)
         let eps = 1e-2_f32;
         assert!(
             (visual.transcript_background.r - default.transcript_background.r).abs() < eps,
@@ -118,6 +119,12 @@ mod tests {
             (visual.transcript_background.b - default.transcript_background.b).abs() < eps,
             "transcript_background.b mismatch"
         );
+        assert!(
+            (visual.transcript_background.a - default.transcript_background.a).abs() < eps,
+            "transcript_background.a mismatch: got {}, expected {}",
+            visual.transcript_background.a,
+            default.transcript_background.a
+        );
 
         // Transcript text color
         assert!(
@@ -125,6 +132,20 @@ mod tests {
             "transcript_text_color.r mismatch: got {}, expected {}",
             visual.transcript_text_color.r,
             default.transcript_text_color.r
+        );
+
+        // Collapsed background (all four channels, including alpha)
+        assert!(
+            (visual.collapsed_background.r - default.collapsed_background.r).abs() < eps,
+            "collapsed_background.r mismatch: got {}, expected {}",
+            visual.collapsed_background.r,
+            default.collapsed_background.r
+        );
+        assert!(
+            (visual.collapsed_background.a - default.collapsed_background.a).abs() < eps,
+            "collapsed_background.a mismatch: got {}, expected {}",
+            visual.collapsed_background.a,
+            default.collapsed_background.a
         );
 
         // Font sizes

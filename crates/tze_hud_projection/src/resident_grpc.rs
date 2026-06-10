@@ -45,9 +45,11 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 /// are permitted in the adapter publish path. A profile/token change must
 /// reskin the portal end-to-end with zero adapter logic changes.
 ///
-/// Build from the runtime's resolved `DesignTokenMap` using
-/// `tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens`,
-/// then pass to `ResidentGrpcPortalAdapter::with_tokens`.
+/// Build by first calling `tze_hud_config::resolve_portal_tokens` on the
+/// runtime's resolved `DesignTokenMap` to get `PortalPartTokens`, then
+/// converting with
+/// `tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens`.
+/// Pass the result to `ResidentGrpcPortalAdapter::with_tokens`.
 ///
 /// ## Phase-1 scope limitation
 ///
@@ -113,7 +115,7 @@ impl Default for PortalVisualTokens {
                 r: 0.039,
                 g: 0.051,
                 b: 0.067,
-                a: 0.90,
+                a: 1.0,
             },
             transcript_text_color: proto::Rgba {
                 r: 0.90,
@@ -126,7 +128,7 @@ impl Default for PortalVisualTokens {
                 r: 0.102,
                 g: 0.122,
                 b: 0.157,
-                a: 0.88,
+                a: 1.0,
             },
             collapsed_text_color: proto::Rgba {
                 r: 0.784,
@@ -291,10 +293,11 @@ impl ResidentGrpcPortalAdapter {
     /// Create a new adapter with the given resolved visual tokens.
     ///
     /// This is the preferred constructor for production use. Build
-    /// `tokens` from the runtime's resolved `DesignTokenMap` using
+    /// `tokens` from the runtime's resolved `DesignTokenMap` by calling
+    /// `tze_hud_config::resolve_portal_tokens` first to get `PortalPartTokens`,
+    /// then converting with
     /// `tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens`
-    /// (which calls `tze_hud_config::resolve_portal_tokens` and converts
-    /// the result to `PortalVisualTokens` for the Phase-1 pilot).
+    /// to obtain the Phase-1 pilot `PortalVisualTokens`.
     pub fn with_tokens(config: ResidentGrpcPortalConfig, tokens: PortalVisualTokens) -> Self {
         Self {
             config,
