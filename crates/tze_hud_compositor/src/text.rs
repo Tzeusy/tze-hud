@@ -840,6 +840,17 @@ impl TextItem {
     /// used directly — **no markdown parsing happens here**, satisfying the
     /// zero-per-frame-parse-cost requirement.
     ///
+    /// # color_runs incompatibility
+    ///
+    /// This constructor uses `parsed.plain_text` as the text base (the
+    /// Markdown-stripped version), which makes `node.color_runs` byte offsets
+    /// invalid.  Consequently, `color_runs` is **not** preserved: the returned
+    /// `TextItem` always has `color_runs: Box::default()`.
+    ///
+    /// Callers **must not** invoke this constructor when `node.color_runs` is
+    /// non-empty.  Use [`TextItem::from_text_markdown_node`] instead; it
+    /// preserves the raw content and maps `color_runs` correctly.
+    ///
     /// `tile_x` / `tile_y` are the pixel-space position of the tile origin.
     ///
     /// [`ParsedMarkdown`]: crate::markdown::ParsedMarkdown
