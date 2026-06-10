@@ -37,121 +37,78 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 
 // ── PortalVisualTokens ────────────────────────────────────────────────────────
 
-/// Resolved visual values for all portal surface parts, sourced from the
-/// runtime's resolved design token set.
+/// Resolved visual values for the portal surface parts consumed by the
+/// raw-tile pilot, sourced from the runtime's resolved design token set.
 ///
 /// **Pre-promotion rule (§6.1):** the exemplar adapter MUST source every
 /// published visual value from this struct. No literal colors or font sizes
 /// are permitted in the adapter publish path. A profile/token change must
 /// reskin the portal end-to-end with zero adapter logic changes.
 ///
-/// Build from the runtime's resolved `DesignTokenMap` using the companion
-/// `tze_hud_config::resolve_portal_tokens` function, then pass to
-/// `ResidentGrpcPortalAdapter::with_tokens`.
+/// Build from the runtime's resolved `DesignTokenMap` using
+/// `tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens`,
+/// then pass to `ResidentGrpcPortalAdapter::with_tokens`.
 ///
-/// ## Collapse/expand transition safety (§6.3)
+/// ## Phase-1 scope limitation
 ///
-/// This struct also carries `transition_in_ms` and `transition_out_ms` for
-/// the collapsed↔expanded zone-transition mechanics. Transitions derive their
-/// durations from these token values.
+/// The Phase-1 raw-tile pilot publishes a **single** `TextMarkdownNodeProto`,
+/// which carries only `color`, `background`, and `font_size_px`. This struct
+/// therefore contains only the six fields that `portal_node` actually consumes
+/// (transcript and collapsed parts). The full part inventory defined in
+/// `PortalPartTokens` (frame, header, composer, divider, transitions) requires
+/// a structured multi-node layout (one node per surface part) that is deferred
+/// to promotion-era work (see spec §7.5 and RFC 0013 §7.2 promotion gate).
+///
+/// If you need the full part inventory for promotion-era work, consume
+/// `PortalPartTokens` directly from `tze_hud_config::resolve_portal_tokens`.
+///
+/// ## Redaction safety (§6.3)
 ///
 /// Redaction is **structural**, not time-based: the `redacted` flag on
 /// `ProjectedPortalState` is computed from viewer clearance vs. content
 /// classification by the `ProjectionAuthority`, independently of any transition
 /// animation position. A restricted viewer therefore sees `redacted = true` in
-/// every frame — expanded, collapsed, and any intermediate transition state —
-/// regardless of `transition_in_ms` / `transition_out_ms` values. There is no
-/// `redaction_safe` field in the protocol; the safety guarantee comes from the
-/// structural model, not from the adapter.
+/// every frame — expanded, collapsed, and any intermediate transition state.
 ///
-/// ## Part inventory
+/// ## Part inventory (Phase-1 pilot — single TextMarkdownNodeProto)
 ///
 /// | Part | Fields |
 /// |------|--------|
-/// | frame | `frame_background`, `frame_opacity` |
-/// | header | `header_text_color`, `header_font_size_px` |
-/// | composer | `composer_background`, `composer_text_color`, `composer_font_size_px` |
 /// | transcript body | `transcript_background`, `transcript_text_color`, `transcript_font_size_px` |
-/// | divider | `divider_color` |
 /// | collapsed card | `collapsed_background`, `collapsed_text_color`, `collapsed_font_size_px` |
-/// | transitions | `transition_in_ms`, `transition_out_ms` |
+///
+/// Frame, header, composer, divider, and transition fields are omitted because
+/// `TextMarkdownNodeProto` has no slots for them. They are wired in
+/// `PortalPartTokens` (in `tze_hud_config`) for promotion-era structured layout.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PortalVisualTokens {
-    // Frame
-    pub frame_background: proto::Rgba,
-    pub frame_opacity: f32,
-
-    // Header
-    pub header_text_color: proto::Rgba,
-    pub header_font_size_px: f32,
-
-    // Composer
-    pub composer_background: proto::Rgba,
-    pub composer_text_color: proto::Rgba,
-    pub composer_font_size_px: f32,
-
-    // Transcript body
+    // Transcript body (expanded presentation)
     pub transcript_background: proto::Rgba,
     pub transcript_text_color: proto::Rgba,
     pub transcript_font_size_px: f32,
 
-    // Divider
-    pub divider_color: proto::Rgba,
-
-    // Collapsed card
+    // Collapsed card (collapsed presentation)
     pub collapsed_background: proto::Rgba,
     pub collapsed_text_color: proto::Rgba,
     pub collapsed_font_size_px: f32,
-
-    // Zone-transition durations (token-derived, used by collapsed/expanded
-    // transition mechanics)
-    pub transition_in_ms: u32,
-    pub transition_out_ms: u32,
 }
 
 impl Default for PortalVisualTokens {
     /// Default visual tokens — same palette as the Phase-0 exemplar literals,
-    /// expressed as resolved token defaults.
+    /// expressed as resolved token defaults, scoped to the fields consumed by
+    /// the raw-tile pilot's single `TextMarkdownNodeProto`.
     ///
     /// In production these values are superseded by `with_tokens()` which
-    /// accepts the runtime's resolved token set. This default is used only
-    /// in tests that do not exercise the token path, and as a fallback when
-    /// no tokens are supplied to the adapter.
+    /// accepts tokens produced by
+    /// `tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens`.
+    /// This default is used only in tests that do not exercise the token path,
+    /// and as a fallback when no tokens are supplied to the adapter.
     ///
-    /// NOTE: The numeric defaults here (colors as linear floats, font sizes,
-    /// transition durations) must match the string defaults in
-    /// `tze_hud_config::portal_tokens::defaults`. If you change either side,
-    /// update both — there is no compile-time link because `tze_hud_projection`
-    /// does not depend on `tze_hud_config`.
+    /// NOTE: The numeric defaults here must match the string defaults in
+    /// `tze_hud_config::portal_tokens::defaults` for the corresponding keys.
+    /// There is no compile-time link; update both sides together.
     fn default() -> Self {
         Self {
-            frame_background: proto::Rgba {
-                r: 0.067,
-                g: 0.094,
-                b: 0.129,
-                a: 0.90,
-            },
-            frame_opacity: 0.90,
-            header_text_color: proto::Rgba {
-                r: 0.96,
-                g: 0.97,
-                b: 1.0,
-                a: 1.0,
-            },
-            header_font_size_px: 14.0,
-            composer_background: proto::Rgba {
-                r: 0.059,
-                g: 0.078,
-                b: 0.094,
-                a: 0.90,
-            },
-            composer_text_color: proto::Rgba {
-                r: 0.878,
-                g: 0.910,
-                b: 0.953,
-                a: 1.0,
-            },
-            composer_font_size_px: 13.0,
             transcript_background: proto::Rgba {
                 r: 0.039,
                 g: 0.051,
@@ -165,12 +122,6 @@ impl Default for PortalVisualTokens {
                 a: 1.0,
             },
             transcript_font_size_px: 13.0,
-            divider_color: proto::Rgba {
-                r: 0.165,
-                g: 0.200,
-                b: 0.267,
-                a: 1.0,
-            },
             collapsed_background: proto::Rgba {
                 r: 0.102,
                 g: 0.122,
@@ -184,8 +135,6 @@ impl Default for PortalVisualTokens {
                 a: 1.0,
             },
             collapsed_font_size_px: 12.0,
-            transition_in_ms: 120,
-            transition_out_ms: 80,
         }
     }
 }
@@ -343,8 +292,9 @@ impl ResidentGrpcPortalAdapter {
     ///
     /// This is the preferred constructor for production use. Build
     /// `tokens` from the runtime's resolved `DesignTokenMap` using
-    /// `tze_hud_config::resolve_portal_tokens` followed by conversion
-    /// to `PortalVisualTokens`.
+    /// `tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens`
+    /// (which calls `tze_hud_config::resolve_portal_tokens` and converts
+    /// the result to `PortalVisualTokens` for the Phase-1 pilot).
     pub fn with_tokens(config: ResidentGrpcPortalConfig, tokens: PortalVisualTokens) -> Self {
         Self {
             config,
