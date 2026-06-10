@@ -43,16 +43,20 @@ use tze_hud_scene::types::{
 };
 use wgpu::{Device, MultisampleState, Queue};
 
-use crate::overflow::{self, TruncationResult};
+use crate::overflow::{self, TruncationResult, TruncationViewport};
 
 // ─── TruncationCache ─────────────────────────────────────────────────────────
 
 /// Cache key for one truncation computation.
 ///
 /// Keyed on `(content_hash, bounds_width, bounds_height, font_size_px,
-/// font_family, font_weight)`.  Float fields are stored as IEEE 754 bit
-/// patterns (endian-stable because the process never crosses a machine
-/// boundary) so they are `Eq + Hash` without lossy rounding.
+/// font_family, font_weight, viewport_mode)`.  Float fields are stored as
+/// IEEE 754 bit patterns (endian-stable because the process never crosses a
+/// machine boundary) so they are `Eq + Hash` without lossy rounding.
+///
+/// `viewport_mode` distinguishes head-anchored from tail-anchored truncation:
+/// the same content at the same geometry produces different display text
+/// depending on which anchor mode is active (spec tasks 3.2 and 3.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct TruncationKey {
     /// BLAKE3 hash of the content string (32 bytes).
@@ -67,6 +71,11 @@ pub(crate) struct TruncationKey {
     font_family: u8,
     /// CSS font weight (100–900).
     font_weight: u16,
+    /// Viewport anchor mode: 0 = `HeadAnchored`, 1 = `TailAnchored`.
+    ///
+    /// Same content at the same geometry produces different truncated text
+    /// depending on anchor mode, so it must be part of the cache key.
+    viewport_mode: u8,
 }
 
 impl TruncationKey {
@@ -77,6 +86,7 @@ impl TruncationKey {
         font_size_px: f32,
         font_family: FontFamily,
         font_weight: u16,
+        viewport: TruncationViewport,
     ) -> Self {
         Self {
             content_hash: *blake3::hash(content.as_bytes()).as_bytes(),
@@ -89,6 +99,10 @@ impl TruncationKey {
                 FontFamily::SystemSerif => 2,
             },
             font_weight,
+            viewport_mode: match viewport {
+                TruncationViewport::HeadAnchored => 0,
+                TruncationViewport::TailAnchored => 1,
+            },
         }
     }
 }
@@ -141,8 +155,21 @@ impl TruncationCache {
     /// Compute and cache the truncation result if not already present.
     ///
     /// Returns a reference to the cached result.  Calling this twice for the
-    /// same key is a no-op after the first call (same content + same geometry
-    /// → same result).
+    /// same key is a no-op after the first call (same content + same geometry +
+    /// same viewport mode → same result).
+    ///
+    /// # Viewport dispatch
+    ///
+    /// The `viewport` parameter selects the truncation algorithm:
+    ///
+    /// - [`TruncationViewport::HeadAnchored`] (default) — calls
+    ///   [`overflow::truncate_for_ellipsis`].  Used for static tiles and
+    ///   scrolled-back viewports (spec task 3.3 append-stability guarantee).
+    ///
+    /// - [`TruncationViewport::TailAnchored`] — calls
+    ///   [`overflow::truncate_tail_anchored`].  Used for follow-tail streaming
+    ///   transcripts whose viewport is at the tail (spec task 3.2 whole-line
+    ///   advancement guarantee).
     ///
     /// Call this at content-commit time, **not** on the frame path.
     #[allow(clippy::too_many_arguments)]
@@ -155,6 +182,7 @@ impl TruncationCache {
         font_size_px: f32,
         font_family: FontFamily,
         font_weight: u16,
+        viewport: TruncationViewport,
         font_system: &mut FontSystem,
     ) -> &'a TruncationResult {
         self.entries.entry(key).or_insert_with(|| {
@@ -166,15 +194,29 @@ impl TruncationCache {
             let weight = Weight(font_weight.clamp(100, 900));
             let base_attrs = Attrs::new().family(family).weight(weight);
             let line_height = font_size_px * 1.4;
-            overflow::truncate_for_ellipsis(
-                content,
-                base_attrs,
-                bounds_width,
-                bounds_height,
-                font_size_px,
-                line_height,
-                font_system,
-            )
+            // Dispatch to the correct truncation algorithm via TruncationViewport.
+            // TailAnchored shows the LAST max_lines runs (newest content visible).
+            // HeadAnchored shows the FIRST max_lines runs (default / scrolled-back).
+            match viewport {
+                TruncationViewport::TailAnchored => overflow::truncate_tail_anchored(
+                    content,
+                    base_attrs,
+                    bounds_width,
+                    bounds_height,
+                    font_size_px,
+                    line_height,
+                    font_system,
+                ),
+                TruncationViewport::HeadAnchored => overflow::truncate_for_ellipsis(
+                    content,
+                    base_attrs,
+                    bounds_width,
+                    bounds_height,
+                    font_size_px,
+                    line_height,
+                    font_system,
+                ),
+            }
         })
     }
 
@@ -322,6 +364,14 @@ impl TextRasterizer {
     /// call, the frame path resolves each Ellipsis item in O(1) via
     /// `TruncationCache::get_by_key`.
     ///
+    /// The `viewport` field on each `TextItem` drives truncation-mode selection:
+    /// - [`TruncationViewport::TailAnchored`] items call
+    ///   [`overflow::truncate_tail_anchored`] (spec task 3.2 — newest content
+    ///   always visible for follow-tail streaming transcripts).
+    /// - [`TruncationViewport::HeadAnchored`] items call
+    ///   [`overflow::truncate_for_ellipsis`] (default / scrolled-back viewports,
+    ///   spec task 3.3 append-stability guarantee).
+    ///
     /// Returns the set of live [`TruncationKey`]s so the caller can evict stale
     /// entries with [`TruncationCache::evict_except`].
     pub(crate) fn prime_truncation_cache(&mut self, items: &[TextItem]) -> Vec<TruncationKey> {
@@ -337,6 +387,7 @@ impl TextRasterizer {
                 item.font_size_px,
                 item.font_family,
                 item.font_weight,
+                item.viewport,
             );
             live_keys.push(key);
             self.truncation_cache.prime(
@@ -347,6 +398,7 @@ impl TextRasterizer {
                 item.font_size_px,
                 item.font_family,
                 item.font_weight,
+                item.viewport,
                 &mut self.font_system,
             );
         }
@@ -420,6 +472,7 @@ impl TextRasterizer {
                     item.font_size_px,
                     item.font_family,
                     item.font_weight,
+                    item.viewport,
                 ))
             })
             .collect();
@@ -436,6 +489,7 @@ impl TextRasterizer {
                     item.font_size_px,
                     item.font_family,
                     item.font_weight,
+                    item.viewport,
                     &mut self.font_system,
                 );
             }
@@ -708,6 +762,17 @@ pub struct TextItem {
     /// Populated by [`TextItem::from_text_markdown_cached`]; empty for all
     /// other constructors.
     pub styled_runs: Box<[StyledRunItem]>,
+    /// Truncation viewport anchor mode.
+    ///
+    /// Controls which lines are shown when the text overflows the bounds:
+    /// - [`TruncationViewport::HeadAnchored`] (default) — show the FIRST
+    ///   `max_lines` (static tiles, scrolled-back viewports, spec task 3.3).
+    /// - [`TruncationViewport::TailAnchored`] — show the LAST `max_lines`
+    ///   (follow-tail streaming tiles at the tail, spec task 3.2).
+    ///
+    /// Set by `collect_text_items_from_node` / `collect_ellipsis_text_items_from_node`
+    /// based on the tile's current `follow_tail_at_tail` state in the scene.
+    pub viewport: TruncationViewport,
 }
 
 /// A single styled run for Phase-1 markdown rendering, with byte offsets into
@@ -829,6 +894,9 @@ impl TextItem {
             opacity: 1.0,
             color_runs,
             styled_runs: Box::default(),
+            // Viewport defaults to HeadAnchored; callers that know the tile is
+            // at-tail (follow-tail streaming tiles) override this after construction.
+            viewport: TruncationViewport::HeadAnchored,
         }
     }
 
@@ -938,6 +1006,9 @@ impl TextItem {
             opacity: 1.0,
             color_runs: Box::default(),
             styled_runs,
+            // Viewport defaults to HeadAnchored; callers that know the tile is
+            // at-tail (follow-tail streaming tiles) override this after construction.
+            viewport: TruncationViewport::HeadAnchored,
         }
     }
 
@@ -1012,6 +1083,7 @@ impl TextItem {
             opacity,
             color_runs: Box::default(),
             styled_runs: Box::default(),
+            viewport: TruncationViewport::HeadAnchored,
         }
     }
 
@@ -1055,6 +1127,7 @@ impl TextItem {
             opacity: 1.0,
             color_runs: Box::default(),
             styled_runs: Box::default(),
+            viewport: TruncationViewport::HeadAnchored,
         }
     }
 
@@ -1097,6 +1170,7 @@ impl TextItem {
             opacity: 1.0,
             color_runs: Box::default(),
             styled_runs: Box::default(),
+            viewport: TruncationViewport::HeadAnchored,
         }
     }
 }
@@ -2434,19 +2508,43 @@ mod tests {
         let family = FontFamily::SystemSansSerif;
         let weight = 400u16;
 
-        let key = TruncationKey::new(content, bounds_w, bounds_h, font_size, family, weight);
+        let key = TruncationKey::new(
+            content,
+            bounds_w,
+            bounds_h,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
 
         // Prime: first call computes truncation.
         let first = cache
             .prime(
-                key, content, bounds_w, bounds_h, font_size, family, weight, &mut fs,
+                key,
+                content,
+                bounds_w,
+                bounds_h,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+                &mut fs,
             )
             .clone();
 
         // Second call with identical key: must hit the cache (no re-shaping).
         let second = cache
             .prime(
-                key, content, bounds_w, bounds_h, font_size, family, weight, &mut fs,
+                key,
+                content,
+                bounds_w,
+                bounds_h,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+                &mut fs,
             )
             .clone();
 
@@ -2472,14 +2570,46 @@ mod tests {
         let weight = 400u16;
         let font_size = 16.0_f32;
 
-        let key_narrow = TruncationKey::new(content, 60.0, 50.0, font_size, family, weight);
-        let key_wide = TruncationKey::new(content, 300.0, 50.0, font_size, family, weight);
+        let key_narrow = TruncationKey::new(
+            content,
+            60.0,
+            50.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
+        let key_wide = TruncationKey::new(
+            content,
+            300.0,
+            50.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
 
         cache.prime(
-            key_narrow, content, 60.0, 50.0, font_size, family, weight, &mut fs,
+            key_narrow,
+            content,
+            60.0,
+            50.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+            &mut fs,
         );
         cache.prime(
-            key_wide, content, 300.0, 50.0, font_size, family, weight, &mut fs,
+            key_wide,
+            content,
+            300.0,
+            50.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+            &mut fs,
         );
 
         assert_eq!(
@@ -2503,7 +2633,15 @@ mod tests {
     #[test]
     fn truncation_cache_miss_before_prime() {
         let cache = TruncationCache::new();
-        let key = TruncationKey::new("text", 100.0, 50.0, 16.0, FontFamily::SystemSansSerif, 400);
+        let key = TruncationKey::new(
+            "text",
+            100.0,
+            50.0,
+            16.0,
+            FontFamily::SystemSansSerif,
+            400,
+            TruncationViewport::HeadAnchored,
+        );
         assert!(
             cache.get_by_key(&key).is_none(),
             "cache must be empty before prime"
@@ -2528,12 +2666,28 @@ mod tests {
         let family = FontFamily::SystemSansSerif;
         let weight = 400u16;
 
-        let key = TruncationKey::new(content, bounds_w, bounds_h, font_size, family, weight);
+        let key = TruncationKey::new(
+            content,
+            bounds_w,
+            bounds_h,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
 
         // Frame 1: cold start — cache miss, computes and stores result.
         let frame1_result = cache
             .prime(
-                key, content, bounds_w, bounds_h, font_size, family, weight, &mut fs,
+                key,
+                content,
+                bounds_w,
+                bounds_h,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+                &mut fs,
             )
             .clone();
 
@@ -2542,7 +2696,15 @@ mod tests {
         for _ in 0..9 {
             let frame_n_result = cache
                 .prime(
-                    key, content, bounds_w, bounds_h, font_size, family, weight, &mut fs,
+                    key,
+                    content,
+                    bounds_w,
+                    bounds_h,
+                    font_size,
+                    family,
+                    weight,
+                    TruncationViewport::HeadAnchored,
+                    &mut fs,
                 )
                 .clone();
             assert_eq!(
@@ -2572,14 +2734,46 @@ mod tests {
         let content_a = "Keep this line";
         let content_b = "Evict this line";
 
-        let key_a = TruncationKey::new(content_a, 120.0, 30.0, font_size, family, weight);
-        let key_b = TruncationKey::new(content_b, 120.0, 30.0, font_size, family, weight);
+        let key_a = TruncationKey::new(
+            content_a,
+            120.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
+        let key_b = TruncationKey::new(
+            content_b,
+            120.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
 
         cache.prime(
-            key_a, content_a, 120.0, 30.0, font_size, family, weight, &mut fs,
+            key_a,
+            content_a,
+            120.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+            &mut fs,
         );
         cache.prime(
-            key_b, content_b, 120.0, 30.0, font_size, family, weight, &mut fs,
+            key_b,
+            content_b,
+            120.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+            &mut fs,
         );
         assert_eq!(cache.len(), 2);
 
@@ -2608,9 +2802,25 @@ mod tests {
 
         for i in 0..3 {
             let content = format!("Content line {i}");
-            let key = TruncationKey::new(&content, 120.0, 30.0, font_size, family, weight);
+            let key = TruncationKey::new(
+                &content,
+                120.0,
+                30.0,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+            );
             cache.prime(
-                key, &content, 120.0, 30.0, font_size, family, weight, &mut fs,
+                key,
+                &content,
+                120.0,
+                30.0,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+                &mut fs,
             );
         }
         assert_eq!(cache.len(), 3);
@@ -2631,7 +2841,15 @@ mod tests {
         let mut cache = TruncationCache::new();
 
         let content = "Short text for O(1) lookup test";
-        let key = TruncationKey::new(content, 200.0, 50.0, 16.0, FontFamily::SystemSansSerif, 400);
+        let key = TruncationKey::new(
+            content,
+            200.0,
+            50.0,
+            16.0,
+            FontFamily::SystemSansSerif,
+            400,
+            TruncationViewport::HeadAnchored,
+        );
 
         // Prime once (commit-time cost).
         cache.prime(
@@ -2642,6 +2860,7 @@ mod tests {
             16.0,
             FontFamily::SystemSansSerif,
             400,
+            TruncationViewport::HeadAnchored,
             &mut fs,
         );
 

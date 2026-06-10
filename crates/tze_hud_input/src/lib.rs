@@ -98,7 +98,8 @@ pub use pointer::{
     PointerMoveEvent, PointerUpEvent, RawPointerEvent, RawPointerEventKind,
 };
 pub use scroll::{
-    ScrollConfig, ScrollEvent, ScrollOffsetChangedEvent, ScrollState, SetScrollOffsetRequest,
+    FollowTailAnchor, ScrollConfig, ScrollEvent, ScrollOffsetChangedEvent, ScrollState,
+    SetScrollOffsetRequest, follow_tail_offset,
 };
 
 pub mod command;
@@ -375,6 +376,15 @@ impl InputProcessor {
         }
         let (offset_x, offset_y) = self.scroll_state.offset(tile_id);
         let _ = scene.set_tile_scroll_offset_local(tile_id, offset_x, offset_y);
+
+        // Sync follow-tail anchor state to scene after user scroll.
+        // A user scroll-back transitions AtTail → ScrolledBack, which must
+        // be reflected in the scene so the compositor primes with HeadAnchored
+        // truncation (spec §3.3 — viewport stability after scroll-back).
+        let at_tail = self.scroll_state.follow_tail_anchor(tile_id)
+            == crate::scroll::FollowTailAnchor::AtTail;
+        scene.set_tile_follow_tail_at_tail(tile_id, at_tail);
+
         self.scroll_state.changed_event(tile_id)
     }
 
@@ -409,6 +419,84 @@ impl InputProcessor {
             },
             scene,
         )
+    }
+
+    /// Notify the input processor that a scrollable tile's content has grown.
+    ///
+    /// This is the primary wiring point for portal/stream-text append events.
+    /// It delegates to [`ScrollState::notify_content_appended`] to advance
+    /// the scroll offset when the tile is at-tail (spec §3.2), or leave it
+    /// unchanged when the user has scrolled back (spec §3.3).
+    ///
+    /// After updating the scroll offset, the method syncs the tile's
+    /// follow-tail anchor state into the scene so `prime_truncation_cache`
+    /// can select `TailAnchored` vs `HeadAnchored` truncation correctly.
+    ///
+    /// # Parameters
+    ///
+    /// - `tile_id`: the tile whose content grew.
+    /// - `new_content_height_px`: **total** content height in physical pixels
+    ///   (NOT the max-scroll-offset; those differ by viewport height).
+    /// - `viewport_height_px`: the tile's visible viewport height in physical pixels.
+    /// - `line_height_px`: logical line height (used to snap advancement to whole lines).
+    ///
+    /// # Returns
+    ///
+    /// `true` if the scroll offset changed (i.e. the tile was at-tail and
+    /// advanced), `false` if the viewport was stable (ScrolledBack or no
+    /// change).
+    pub fn notify_tile_content_appended(
+        &mut self,
+        tile_id: SceneId,
+        new_content_height_px: f32,
+        viewport_height_px: f32,
+        line_height_px: f32,
+        scene: &mut SceneGraph,
+    ) -> bool {
+        // Auto-register the tile in scroll_state if it has a TileScrollConfig in
+        // the scene but has not yet been registered (e.g. first append before the
+        // user has scrolled).  This mirrors the auto-registration in
+        // `process_scroll_event`.
+        if !self.scroll_state.is_scrollable(tile_id) {
+            if let Some(config) = scene.tile_scroll_config(tile_id) {
+                // content_height starts at 0 (total pixels); the caller's
+                // new_content_height_px drives the first update below.
+                self.scroll_state.register_tile(
+                    tile_id,
+                    ScrollConfig {
+                        scrollable_x: config.scrollable_x,
+                        scrollable_y: config.scrollable_y,
+                        content_width: config.content_width,
+                        content_height: config.content_height,
+                    },
+                );
+            }
+        }
+
+        let changed = self.scroll_state.notify_content_appended(
+            tile_id,
+            new_content_height_px,
+            viewport_height_px,
+            line_height_px,
+        );
+
+        if changed {
+            // Apply the updated offset to the scene for compositor use.
+            let (offset_x, offset_y) = self.scroll_state.offset(tile_id);
+            let _ = scene.set_tile_scroll_offset_local(tile_id, offset_x, offset_y);
+        }
+
+        // Sync follow-tail anchor to the scene, but only if the tile is actually
+        // registered as scrollable.  Calling this for a non-scrollable tile would
+        // wrongly force tile_follow_tail_at_tail = true (the default for unregistered
+        // ScrollState entries) and switch its ellipsis truncation to TailAnchored.
+        if self.scroll_state.is_scrollable(tile_id) {
+            let at_tail = self.scroll_state.follow_tail_anchor(tile_id)
+                == crate::scroll::FollowTailAnchor::AtTail;
+            scene.set_tile_follow_tail_at_tail(tile_id, at_tail);
+        }
+
+        changed
     }
 
     /// Commit queued adapter-driven scroll requests and apply local offsets.
@@ -2738,6 +2826,235 @@ mod tests {
         assert!(
             (scene_y - KEYBOARD_PAGE_SCROLL_PX).abs() < 1e-4,
             "scene tile offset_y must equal KEYBOARD_PAGE_SCROLL_PX, got {scene_y}"
+        );
+    }
+
+    // ── Spec task 3.2 / 3.3 end-to-end behavioural tests ──────────────────────
+
+    /// Spec task 3.2 — at-tail tile advances by whole lines on append.
+    ///
+    /// `notify_tile_content_appended` on an at-tail tile must:
+    /// 1. Advance the scroll offset by `floor(delta / line_h) * line_h`.
+    /// 2. Update `scene.tile_follow_tail_at_tail(tile_id)` to `true` (at-tail preserved).
+    /// 3. Apply the new offset to the scene for the compositor.
+    #[test]
+    fn spec_3_2_at_tail_tile_advances_by_whole_lines_on_append() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                // viewport_height = 300px (5 × 60px lines = room for 5 lines)
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        // Register with content_height=0 (no content yet; first append populates it).
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                tze_hud_scene::TileScrollConfig {
+                    scrollable_x: false,
+                    scrollable_y: true,
+                    content_width: None,
+                    content_height: None,
+                },
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+        let line_h = 60.0_f32;
+        let viewport_h = 300.0_f32; // 5 lines
+        let new_content = 8.0 * line_h; // 8 lines total (3 new lines overflow)
+
+        let changed = processor.notify_tile_content_appended(
+            tile_id,
+            new_content,
+            viewport_h,
+            line_h,
+            &mut scene,
+        );
+
+        assert!(
+            changed,
+            "spec 3.2: offset must change when at-tail and new content overflows the viewport"
+        );
+
+        // Offset must have advanced by exactly 3 whole lines (8 lines - 5 visible = 3).
+        let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
+        let expected_offset = 3.0 * line_h; // 180px
+        assert!(
+            (offset_y - expected_offset).abs() < 1.0,
+            "spec 3.2: at-tail offset must advance to {expected_offset}px; got {offset_y}px"
+        );
+
+        // Tile remains at-tail in the scene.
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "spec 3.2: scene must reflect AtTail after at-tail append"
+        );
+    }
+
+    /// Spec task 3.3 — append does not disturb a scrolled-back viewport.
+    ///
+    /// After the user scrolls back, `notify_tile_content_appended` must:
+    /// 1. Leave the scroll offset unchanged.
+    /// 2. Update `scene.tile_follow_tail_at_tail(tile_id)` to `false` (ScrolledBack preserved).
+    #[test]
+    fn spec_3_3_scrolled_back_append_does_not_disturb_viewport() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                // viewport = 100px (5 × 20px lines)
+                Rect::new(100.0, 100.0, 400.0, 100.0),
+                1,
+            )
+            .unwrap();
+        // Start with 20 lines of content.
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                tze_hud_scene::TileScrollConfig {
+                    scrollable_x: false,
+                    scrollable_y: true,
+                    content_width: None,
+                    content_height: Some(300.0), // max-scroll = 400px - 100px viewport = 300px
+                },
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32;
+
+        // Scroll to the tail (offset 300 = max-scroll for 20 lines × 20px - 100px viewport).
+        let _ = processor.process_scroll_event(
+            &ScrollEvent {
+                x: 200.0,
+                y: 150.0,
+                delta_x: 0.0,
+                delta_y: 300.0,
+            },
+            &mut scene,
+        );
+        // Scroll back up 120px (6 lines) so anchor becomes ScrolledBack.
+        let _ = processor.process_scroll_event(
+            &ScrollEvent {
+                x: 200.0,
+                y: 150.0,
+                delta_x: 0.0,
+                delta_y: -120.0,
+            },
+            &mut scene,
+        );
+
+        let (_, offset_before) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            !scene.tile_follow_tail_at_tail(tile_id),
+            "spec 3.3: anchor must be ScrolledBack after user scrolled up"
+        );
+
+        // Append 5 more lines.
+        let new_content = 25.0 * line_h;
+        let changed = processor.notify_tile_content_appended(
+            tile_id,
+            new_content,
+            viewport_h,
+            line_h,
+            &mut scene,
+        );
+
+        assert!(
+            !changed,
+            "spec 3.3: offset must NOT change when ScrolledBack and content grows"
+        );
+
+        let (_, offset_after) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (offset_after - offset_before).abs() < 1.0,
+            "spec 3.3: scroll offset must be stable after append; \
+             before={offset_before}px, after={offset_after}px"
+        );
+
+        // Still scrolled-back in the scene.
+        assert!(
+            !scene.tile_follow_tail_at_tail(tile_id),
+            "spec 3.3: scene must still reflect ScrolledBack after append"
+        );
+    }
+
+    /// Coordinate reconciliation: `total_content_height_px` is stored correctly
+    /// so that repeated appends produce correct offsets.
+    ///
+    /// `ScrollConfig.content_height` = MAX-SCROLL-OFFSET (total - viewport).
+    /// `follow_tail_offset` uses TOTAL CONTENT PIXELS.
+    /// Mixing these would produce wrong offsets on the second append.
+    #[test]
+    fn coordinate_reconciliation_total_vs_max_scroll_offset() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 100.0),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                tze_hud_scene::TileScrollConfig {
+                    scrollable_x: false,
+                    scrollable_y: true,
+                    content_width: None,
+                    content_height: None,
+                },
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32; // 5 lines
+
+        // First append: 8 lines (160px total). Tile is at-tail, so offset advances to
+        // 8*20 - 100 = 60px (3 lines above viewport bottom).
+        processor.notify_tile_content_appended(
+            tile_id,
+            8.0 * line_h,
+            viewport_h,
+            line_h,
+            &mut scene,
+        );
+        let (_, offset_1) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (offset_1 - 3.0 * line_h).abs() < 1.0,
+            "first append: expected offset 60px; got {offset_1}px"
+        );
+
+        // Second append: 3 more lines (11 lines = 220px total).
+        // With correct coordinate tracking, the new offset should be 220-100 = 120px.
+        processor.notify_tile_content_appended(
+            tile_id,
+            11.0 * line_h,
+            viewport_h,
+            line_h,
+            &mut scene,
+        );
+        let (_, offset_2) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (offset_2 - 6.0 * line_h).abs() < 1.0,
+            "second append: expected offset 120px (6 lines × 20px); got {offset_2}px"
         );
     }
 }
