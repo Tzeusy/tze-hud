@@ -989,6 +989,14 @@ pub(crate) fn styled_run_spans<'t, 'a>(
         if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
             continue;
         }
+        // Clamp start to cursor so overlapping runs (which should not occur
+        // after the fill_gaps_with_base fix, but may in edge cases) never
+        // cause duplicate text slices or backward indexing.
+        let start = start.max(cursor);
+        if start >= end {
+            cursor = cursor.max(end);
+            continue;
+        }
 
         // Emit unstyled gap before this run.
         if cursor < start && text.is_char_boundary(cursor) {

@@ -237,10 +237,32 @@ impl MarkdownCache {
     /// Return the cached parsed result for `content`, or `None` if it has
     /// not been primed yet.
     ///
-    /// For a hit, this is O(32-byte hash comparison) — zero parse work.
+    /// This hashes `content` on every call (O(content_bytes)).  Prefer
+    /// [`MarkdownCache::get_by_key`] when a precomputed key is available
+    /// (e.g. stored on the scene node at commit time) to keep lookups O(1).
     pub fn get(&self, content: &str) -> Option<&ParsedMarkdown> {
         let key = blake3::hash(content.as_bytes());
         self.entries.get(key.as_bytes())
+    }
+
+    /// Return the cached parsed result for a precomputed BLAKE3 key, or
+    /// `None` if it has not been primed yet.
+    ///
+    /// This is a true O(32-byte) lookup with zero hashing cost.  Use this
+    /// on the frame path: compute the key once at content-commit time, store
+    /// it on the scene node, and pass it here every frame.
+    #[inline]
+    pub fn get_by_key(&self, key: &[u8; 32]) -> Option<&ParsedMarkdown> {
+        self.entries.get(key)
+    }
+
+    /// Compute the BLAKE3 content key for `content`.
+    ///
+    /// Call this once at content-commit time and store the key alongside the
+    /// node so frame-time lookups can use [`MarkdownCache::get_by_key`].
+    #[inline]
+    pub fn compute_key(content: &str) -> [u8; 32] {
+        *blake3::hash(content.as_bytes()).as_bytes()
     }
 
     /// Parse and cache the content if it is not already present.
@@ -403,41 +425,14 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                 };
                 let start = plain.len();
                 // Process inline markup inside the heading text.
+                // base_override propagates heading weight into nested spans.
                 process_inline(heading_text, &mut plain, &mut spans, tokens, Some(&attr));
                 let end = plain.len();
-                // Wrap the whole heading in a single styled span if no
-                // inline markup was added inside — ensures at minimum bold weight.
-                // If inline processing did add spans, they carry the inner markup;
-                // we still need a "base heading" span covering the whole region.
-                // Strategy: add a heading span first (lower priority), then let
-                // inline spans overwrite on overlap.  Since spans are later merged
-                // with inline wins, prepend the heading span before those added
-                // by process_inline.
-                let inline_spans_added = spans.len();
-                let _ = inline_spans_added; // we track the range differently below
-
-                // Replace: after process_inline, any spans in [start, end) that
-                // don't have weight override should inherit heading weight.
-                // Simpler approach: insert a base heading span then let the
-                // `to_styled_run_items` consumer merge. We just mark the whole
-                // region with heading attrs.
+                // Fill only the unstyled *gaps* within [start, end) with the
+                // heading base style.  This avoids inserting a wide overlapping
+                // span across ranges that already have inner-markup spans.
                 if start < end {
-                    // Find the index where heading span should be inserted
-                    // (before spans added by process_inline for this range).
-                    // We rely on the fact that spans are emitted in order.
-                    // Insert at the position BEFORE the first span in [start..end].
-                    let insert_pos = spans
-                        .iter()
-                        .position(|s| s.start_byte >= start)
-                        .unwrap_or(spans.len());
-                    spans.insert(
-                        insert_pos,
-                        StyledSpan {
-                            start_byte: start,
-                            end_byte: end,
-                            attr,
-                        },
-                    );
+                    fill_gaps_with_base(&attr, start, end, &mut spans);
                 }
                 prev_was_empty = false;
                 i += 1;
@@ -520,23 +515,21 @@ fn process_inline(
     while i < n {
         let ch = chars[i];
 
-        // ── Images: `![alt](url)` → excluded, render literally ───────────
+        // ── Images: `![alt](url)` → excluded, render full literal source ──
+        // Per contract: excluded constructs are never silently dropped or
+        // transformed — emit the verbatim source substring so agents can
+        // see exactly what was in the input.
         if ch == '!' && i + 1 < n && chars[i + 1] == '[' {
-            // Find the closing `](url)` pattern or give up and emit literally.
             if let Some(end) = find_link_end(&chars, i + 1) {
-                // Emit alt text literally (image not rendered).
-                let alt_start = i + 2;
-                let alt_end = find_bracket_close(&chars, i + 1);
-                if let Some(bracket_close) = alt_end {
-                    let alt_text: String = chars[alt_start..bracket_close].iter().collect();
-                    out.push_str(&alt_text);
-                    i = end + 1;
-                    _byte_pos += alt_text.len();
-                    continue;
-                }
-                // Fall through to emit literally if we can't parse the alt.
-                let _ = end;
+                // Emit the full `![alt](url)` construct verbatim.
+                let literal: String = chars[i..=end].iter().collect();
+                out.push_str(&literal);
+                _byte_pos += literal.len();
+                i = end + 1;
+                continue;
             }
+            // No matching `](...)` — emit the `!` literally and let the `[`
+            // branch handle the rest on the next iteration.
             out.push(ch);
             _byte_pos += ch.len_utf8();
             i += 1;
@@ -633,20 +626,9 @@ fn process_inline(
                 };
                 process_inline(&inner, out, spans, tokens, Some(&inner_attr));
                 let end = out.len();
+                // Fill only unstyled gaps to avoid overlapping spans.
                 if start < end {
-                    // Prepend a base bold-italic span so partial inner markup works.
-                    let insert_pos = spans
-                        .iter()
-                        .position(|s| s.start_byte >= start)
-                        .unwrap_or(spans.len());
-                    spans.insert(
-                        insert_pos,
-                        StyledSpan {
-                            start_byte: start,
-                            end_byte: end,
-                            attr: inner_attr,
-                        },
-                    );
+                    fill_gaps_with_base(&inner_attr, start, end, spans);
                 }
                 i = close_start + 3;
                 continue;
@@ -669,19 +651,9 @@ fn process_inline(
                 };
                 process_inline(&inner, out, spans, tokens, Some(&bold_attr));
                 let end = out.len();
+                // Fill only unstyled gaps to avoid overlapping spans.
                 if start < end {
-                    let insert_pos = spans
-                        .iter()
-                        .position(|s| s.start_byte >= start)
-                        .unwrap_or(spans.len());
-                    spans.insert(
-                        insert_pos,
-                        StyledSpan {
-                            start_byte: start,
-                            end_byte: end,
-                            attr: bold_attr,
-                        },
-                    );
+                    fill_gaps_with_base(&bold_attr, start, end, spans);
                 }
                 i = close_start + 2;
                 continue;
@@ -711,19 +683,9 @@ fn process_inline(
                     };
                     process_inline(&inner, out, spans, tokens, Some(&italic_attr));
                     let end = out.len();
+                    // Fill only unstyled gaps to avoid overlapping spans.
                     if start < end {
-                        let insert_pos = spans
-                            .iter()
-                            .position(|s| s.start_byte >= start)
-                            .unwrap_or(spans.len());
-                        spans.insert(
-                            insert_pos,
-                            StyledSpan {
-                                start_byte: start,
-                                end_byte: end,
-                                attr: italic_attr,
-                            },
-                        );
+                        fill_gaps_with_base(&italic_attr, start, end, spans);
                     }
                     i = close_start + 1;
                     continue;
@@ -735,6 +697,53 @@ fn process_inline(
         out.push(ch);
         _byte_pos += ch.len_utf8();
         i += 1;
+    }
+}
+
+// ─── Span helpers ─────────────────────────────────────────────────────────────
+
+/// Fill the unstyled byte *gaps* within `[block_start, block_end)` with
+/// `base_attr`, appending the new spans to `spans`.
+///
+/// This is the non-overlapping alternative to inserting a single wide "base"
+/// span that would overlap all inner spans.  The caller must have already
+/// emitted all inner spans for the block via [`process_inline`]; those spans
+/// are already in `spans` (appended after `prev_len` — we look for spans
+/// whose `start_byte >= block_start`).
+fn fill_gaps_with_base(
+    base_attr: &StyleAttr,
+    block_start: usize,
+    block_end: usize,
+    spans: &mut Vec<StyledSpan>,
+) {
+    // Collect the inner spans for this block (spans covering [block_start, block_end)).
+    // We need their byte ranges to identify gaps; make a snapshot to avoid borrow issues.
+    let inner_ranges: Vec<(usize, usize)> = spans
+        .iter()
+        .filter(|s| s.start_byte >= block_start && s.end_byte <= block_end)
+        .map(|s| (s.start_byte, s.end_byte))
+        .collect();
+
+    // Walk the block range and emit a base-style span for each gap not covered
+    // by an inner span.
+    let mut cursor = block_start;
+    for (s, e) in &inner_ranges {
+        if cursor < *s {
+            spans.push(StyledSpan {
+                start_byte: cursor,
+                end_byte: *s,
+                attr: base_attr.clone(),
+            });
+        }
+        cursor = cursor.max(*e);
+    }
+    // Trailing gap.
+    if cursor < block_end {
+        spans.push(StyledSpan {
+            start_byte: cursor,
+            end_byte: block_end,
+            attr: base_attr.clone(),
+        });
     }
 }
 
@@ -774,14 +783,9 @@ fn parse_list_item(line: &str) -> Option<(usize, &str)> {
     let rest = line.trim_start();
 
     // Unordered: starts with `- `, `* `, or `+ `.
-    if (rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ "))
-        && rest.len() > 2
-    {
-        return Some((trimmed_start, &rest[2..]));
-    }
-    // Unordered (lone marker with no following space but content)
+    // `&rest[2..]` is safe even when `rest.len() == 2` (returns "").
     if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
-        return Some((trimmed_start, ""));
+        return Some((trimmed_start, &rest[2..]));
     }
 
     // Ordered: starts with digits followed by `.` or `)` and a space.
@@ -950,6 +954,10 @@ fn srgb_u8_to_linear(v: u8) -> f32 {
 /// any supported format.
 fn parse_hex_color(s: &str) -> Option<Rgba> {
     let s = s.trim().strip_prefix('#')?;
+    // Guard: non-ASCII bytes would make byte-index slicing below unsafe.
+    if !s.is_ascii() {
+        return None;
+    }
     match s.len() {
         3 => {
             let r = u8::from_str_radix(&s[0..1], 16).ok()?;
@@ -1191,24 +1199,22 @@ mod tests {
         );
     }
 
-    /// Image `![alt](url)` renders the alt text (not the URL, not dropped).
+    /// Image `![alt](url)` renders as its full literal source — not dropped, not transformed.
+    ///
+    /// Per the excluded-construct contract: the verbatim source substring is
+    /// emitted so no content is silently lost.
     #[test]
-    fn excluded_image_renders_alt_text_not_dropped() {
+    fn excluded_image_renders_literal_source() {
         let md = parse("![diagram](img.png)");
-        // Alt text should appear; URL should not; content must not be silently dropped.
+        // The full source must appear verbatim — not silently dropped.
         assert!(
             !md.plain_text.is_empty(),
-            "image content must not be silently dropped"
+            "image construct must not be silently dropped"
         );
-        // The alt text 'diagram' should appear.
-        assert!(
-            md.plain_text.contains("diagram"),
-            "image alt text must appear in output; got: {:?}",
+        assert_eq!(
+            md.plain_text, "![diagram](img.png)",
+            "image must render as verbatim source; got: {:?}",
             md.plain_text
-        );
-        assert!(
-            !md.plain_text.contains("img.png"),
-            "image URL must not appear in output"
         );
     }
 

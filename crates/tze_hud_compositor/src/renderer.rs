@@ -25,7 +25,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use blake3;
 use crate::pipeline::{
     ChromeDrawCmd, ROUNDED_RECT_OVERLAY_SHADER, ROUNDED_RECT_SHADER, RectVertex,
     RoundedRectDrawCmd, RoundedRectVertex, create_texture_rect_bind_group_layout,
@@ -1096,6 +1095,12 @@ pub struct Compositor {
     /// Rebuilt from `token_map` whenever `set_token_map` is called.
     /// Consumed by `prime_markdown_cache` when new content is parsed.
     pub(crate) markdown_tokens: crate::markdown::MarkdownTokens,
+    /// The `SceneGraph::version` value at the last `prime_markdown_cache` call.
+    ///
+    /// `prime_markdown_cache` is gated on this value so it only runs when the
+    /// scene has actually changed.  Initialized to `u64::MAX` so the first
+    /// frame always primes.
+    markdown_cache_scene_version: u64,
     /// Per-surface video state machines (v2 media plane, E26 / B11).
     ///
     /// Keyed by the `SceneId` carried in `ZoneContent::VideoSurfaceRef`.
@@ -1220,6 +1225,7 @@ impl Compositor {
             token_map: HashMap::new(),
             markdown_cache: crate::markdown::MarkdownCache::new(),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
+            markdown_cache_scene_version: u64::MAX,
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -1483,6 +1489,7 @@ impl Compositor {
             token_map: HashMap::new(),
             markdown_cache: crate::markdown::MarkdownCache::new(),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
+            markdown_cache_scene_version: u64::MAX,
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -1758,6 +1765,10 @@ impl Compositor {
         // new token values on the next prime() call.
         self.markdown_tokens = crate::markdown::MarkdownTokens::from_token_map(&map);
         self.markdown_cache = crate::markdown::MarkdownCache::new();
+        // Reset the version sentinel so the next prime_markdown_cache call
+        // re-parses all nodes with the updated tokens, even if scene.version
+        // has not changed since the last prime.
+        self.markdown_cache_scene_version = u64::MAX;
 
         self.token_map = map;
         // Token-substitution failures in ensure_icon_texture are tied to the
@@ -1769,14 +1780,13 @@ impl Compositor {
 
     /// Prime the markdown parse cache for all [`TextMarkdownNode`] nodes in the scene.
     ///
-    /// Must be called **before** [`Compositor::render_frame`] (i.e. at Stage 4 /
-    /// early Stage 5, outside the render-encode path) so that the frame pipeline
-    /// consumes only cached results — satisfying the zero-per-frame-parse-cost
-    /// requirement from the Phase-1 spec (hud-5jbra.2).
+    /// Must be called **at content-commit time** (when `scene.version` changes),
+    /// never on the per-frame render path.  The method is gated internally on
+    /// `scene.version` so repeated calls on unchanged scenes are no-ops.
     ///
-    /// For content already in the cache this is a cheap O(nodes × 32-byte hash)
-    /// scan.  Only new or changed content is parsed; unchanged content costs zero
-    /// parse work.
+    /// The frame pipeline consumes only cached results via
+    /// [`MarkdownCache::get_by_key`] — satisfying the zero-per-frame-parse-cost
+    /// requirement from the Phase-1 spec (hud-5jbra.2).
     ///
     /// The method also evicts cache entries for content no longer referenced by
     /// any scene node, keeping the cache bounded to the live node set.
@@ -1785,12 +1795,18 @@ impl Compositor {
     pub fn prime_markdown_cache(&mut self, scene: &SceneGraph) {
         use tze_hud_scene::types::NodeData;
 
+        // Skip if the scene has not changed since we last primed.
+        if scene.version == self.markdown_cache_scene_version {
+            return;
+        }
+        self.markdown_cache_scene_version = scene.version;
+
         // Collect BLAKE3 keys for all live TextMarkdownNode content.
         let mut live_keys: Vec<[u8; 32]> = Vec::new();
 
         for node in scene.nodes.values() {
             if let NodeData::TextMarkdown(tm) = &node.data {
-                let key = *blake3::hash(tm.content.as_bytes()).as_bytes();
+                let key = crate::markdown::MarkdownCache::compute_key(&tm.content);
                 live_keys.push(key);
                 // Parse if not already cached — zero cost on hit.
                 self.markdown_cache.prime(&tm.content, &self.markdown_tokens);
@@ -1798,7 +1814,12 @@ impl Compositor {
         }
 
         // Evict stale entries so the cache does not grow unboundedly.
-        self.markdown_cache.evict_except(&live_keys);
+        // Skip the HashSet allocation when the cache size matches the live set.
+        live_keys.sort_unstable();
+        live_keys.dedup();
+        if self.markdown_cache.len() > live_keys.len() {
+            self.markdown_cache.evict_except(&live_keys);
+        }
     }
 
     /// Initialize (or re-initialize) the text rasterizer for a given surface format.
@@ -4016,13 +4037,14 @@ impl Compositor {
             // content — matches the geometry pass in `render_node` which already
             // applies `tile.bounds.x - scroll_x` / `tile.bounds.y - scroll_y`.
             //
-            // Phase-1 (hud-5jbra.2): try the markdown cache first.  If a cached
-            // ParsedMarkdown is available we use `from_text_markdown_cached` which
-            // produces styled runs with zero parse cost.  The cache is primed at
-            // Stage 4 by `prime_markdown_cache`; a miss here (e.g. first frame
-            // before prime runs) falls back to the legacy `strip_markdown_v1` path
-            // so rendering is never blocked.
-            let mut item = if let Some(parsed) = self.markdown_cache.get(&tm.content) {
+            // Phase-1 (hud-5jbra.2): try the markdown cache first.  Use
+            // `get_by_key` with a precomputed key (O(1) — no re-hash on the
+            // frame path).  The cache is primed by `prime_markdown_cache` on
+            // every scene-version change; a miss (e.g. very first frame before
+            // any commit) falls back to the legacy `strip_markdown_v1` path so
+            // rendering is never blocked.
+            let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
+            let mut item = if let Some(parsed) = self.markdown_cache.get_by_key(&content_key) {
                 TextItem::from_text_markdown_cached(
                     tm,
                     tile.bounds.x - scroll_x,

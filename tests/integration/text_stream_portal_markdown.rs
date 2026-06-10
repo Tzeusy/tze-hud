@@ -247,7 +247,7 @@ fn excluded_strikethrough_renders_literally_not_dropped() {
 #[test]
 fn link_non_navigable_with_custom_token_color() {
     let mut map = HashMap::new();
-    map.insert("markdown.link.color".to_string(), "#0000FF".to_string());
+    map.insert("color.link.text".to_string(), "#0000FF".to_string());
     let tokens = MarkdownTokens::from_token_map(&map);
     let mut cache = MarkdownCache::new();
     let content = "[Visit site](https://not-in-output.example.org/path?q=1)";
