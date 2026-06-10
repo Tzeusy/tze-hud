@@ -308,7 +308,7 @@ impl ComposerDraft {
         }
         let remaining = self.cap.saturating_sub(self.text.len());
         if remaining == 0 {
-            self.bump_sequence();
+            // Nothing was mutated; do not bump sequence to avoid redundant notifications.
             return EditOutcome::AtCapacity;
         }
         // Truncate to remaining byte capacity at UTF-8 boundary
@@ -348,7 +348,7 @@ impl ComposerDraft {
         }
         let remaining = self.cap.saturating_sub(self.text.len());
         if remaining == 0 {
-            self.bump_sequence();
+            // Nothing was mutated; do not bump sequence to avoid redundant notifications.
             return EditOutcome::AtCapacity;
         }
         let truncated = truncate_at_utf8_boundary(text, remaining);
@@ -576,12 +576,21 @@ impl ComposerDraft {
     }
 
     /// Set pointer selection: `anchor` is the click position, `cursor` is the
-    /// drag position. Both must be valid UTF-8 byte offsets ≤ `text.len()`.
+    /// drag position. Both are raw byte offsets from the UI layer and are
+    /// snapped down to the nearest valid UTF-8 character boundary before
+    /// storage, preventing panics in subsequent `replace_range`/`insert_str`
+    /// calls on multi-byte characters.
     pub fn set_pointer_selection(&mut self, anchor: usize, cursor: usize) -> EditOutcome {
         debug_assert!(anchor <= self.text.len(), "anchor out of bounds");
         debug_assert!(cursor <= self.text.len(), "cursor out of bounds");
-        let anchor = anchor.min(self.text.len());
-        let cursor = cursor.min(self.text.len());
+        let mut anchor = anchor.min(self.text.len());
+        while !self.text.is_char_boundary(anchor) {
+            anchor -= 1;
+        }
+        let mut cursor = cursor.min(self.text.len());
+        while !self.text.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
         if self.selection_anchor == anchor && self.cursor == cursor {
             return EditOutcome::Unchanged;
         }
@@ -596,13 +605,17 @@ impl ComposerDraft {
     /// Submit the draft: returns a [`DraftSubmission`] with the current buffer
     /// content and resets the draft to empty.
     ///
-    /// Returns `None` if the draft is suspended (§4.5) or empty (caller should
-    /// decide policy on empty submit).
+    /// Returns `None` if the draft is suspended (§4.5) or if the buffer is
+    /// empty. Callers that want to allow explicit empty-submit must check
+    /// `draft.text().is_empty()` first and decide their own policy.
     ///
     /// Spec: §4.3 (submission is transactional, content == local buffer).
     /// Spec: §4.7 (submit-content fidelity).
     pub fn submit(&mut self) -> Option<DraftSubmission> {
         if self.suspended {
+            return None;
+        }
+        if self.text.is_empty() {
             return None;
         }
         let text = std::mem::take(&mut self.text);
@@ -781,17 +794,20 @@ impl DraftNotificationBatch {
         }
     }
 
-    /// Record a transactional submission. Only the first submission is
-    /// preserved (submission cannot be coalesced).
+    /// Record a transactional submission (first wins; clears any pending cancel
+    /// to enforce submit-XOR-cancel semantics).
     pub fn record_submission(&mut self, submission: DraftSubmission) {
         if self.submission.is_none() {
+            self.cancel = None;
             self.submission = Some(submission);
         }
     }
 
-    /// Record a transactional cancel.
+    /// Record a transactional cancel (first wins; clears any pending submission
+    /// to enforce submit-XOR-cancel semantics).
     pub fn record_cancel(&mut self, cancel: DraftCancel) {
         if self.cancel.is_none() {
+            self.submission = None;
             self.cancel = Some(cancel);
         }
     }

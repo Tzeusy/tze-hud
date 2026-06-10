@@ -339,13 +339,14 @@ impl ResidentGrpcPortalAdapter {
         &mut self,
         notification: &AdapterDraftNotification,
     ) -> Option<ResidentGrpcDraftCommand> {
+        let started = Instant::now();
         if notification.sequence <= self.last_draft_sequence {
             return None;
         }
         self.last_draft_sequence = notification.sequence;
         Some(ResidentGrpcDraftCommand {
             kind: ResidentGrpcDraftCommandKind::UpdateComposerDisplay,
-            budget: sample_budget(Instant::now(), RESIDENT_PORTAL_UPDATE_BUILD_BUDGET_US),
+            budget: sample_budget(started, RESIDENT_PORTAL_UPDATE_BUILD_BUDGET_US),
             draft_text: notification.text.clone(),
             cursor: notification.cursor,
             at_capacity: notification.at_capacity,

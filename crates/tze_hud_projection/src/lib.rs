@@ -1067,16 +1067,20 @@ impl AdapterDraftBatch {
         }
     }
 
-    /// Record a transactional submission (first wins).
+    /// Record a transactional submission (first wins; clears any pending cancel
+    /// to enforce submit-XOR-cancel semantics).
     pub fn record_submission(&mut self, sub: AdapterDraftSubmission) {
         if self.submission.is_none() {
+            self.cancel = None;
             self.submission = Some(sub);
         }
     }
 
-    /// Record a transactional cancel (first wins).
+    /// Record a transactional cancel (first wins; clears any pending submission
+    /// to enforce submit-XOR-cancel semantics).
     pub fn record_cancel(&mut self, cancel: AdapterDraftCancel) {
         if self.cancel.is_none() {
+            self.submission = None;
             self.cancel = Some(cancel);
         }
     }
