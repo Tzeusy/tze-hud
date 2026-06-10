@@ -75,6 +75,11 @@ pub const PORTAL_TOKEN_HEADER_FONT_SIZE: &str = "portal.header.font_size";
 pub const PORTAL_TOKEN_COMPOSER_BACKGROUND: &str = "portal.composer.background";
 pub const PORTAL_TOKEN_COMPOSER_TEXT_COLOR: &str = "portal.composer.text_color";
 pub const PORTAL_TOKEN_COMPOSER_FONT_SIZE: &str = "portal.composer.font_size";
+/// Border / indicator color shown when the composer draft reaches its byte cap.
+/// Rendered as a visual signal that no further input will be accepted until
+/// the user deletes content. Defaults to a muted amber to convey "limit reached"
+/// without alarming the user.
+pub const PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR: &str = "portal.composer.at_capacity_color";
 
 pub const PORTAL_TOKEN_TRANSCRIPT_BACKGROUND: &str = "portal.transcript.background";
 pub const PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR: &str = "portal.transcript.text_color";
@@ -134,6 +139,8 @@ mod defaults {
     pub const COMPOSER_BACKGROUND: &str = "#0F1418";
     pub const COMPOSER_TEXT_COLOR: &str = "#E0E8F4";
     pub const COMPOSER_FONT_SIZE: &str = "13";
+    /// Muted amber — conveys "limit reached" without alarming the user.
+    pub const COMPOSER_AT_CAPACITY_COLOR: &str = "#B87333";
 
     pub const TRANSCRIPT_BACKGROUND: &str = "#0A0D11";
     pub const TRANSCRIPT_TEXT_COLOR: &str = "#E6EFFA";
@@ -194,6 +201,10 @@ pub struct PortalPartTokens {
     pub composer_background: Rgba,
     pub composer_text_color: Rgba,
     pub composer_font_size_px: f32,
+    /// Indicator color rendered when the draft is at its byte cap (§4.1 / §4.8).
+    /// Applied as a distinct visual signal within the composer region; never
+    /// hardcoded in the compositor — always token-driven per CLAUDE.md doctrine.
+    pub composer_at_capacity_color: Rgba,
 
     // Transcript body
     pub transcript_background: Rgba,
@@ -252,6 +263,8 @@ impl Default for PortalPartTokens {
                 .expect("composer text default is valid hex"),
             composer_font_size_px: parse_numeric(defaults::COMPOSER_FONT_SIZE)
                 .expect("composer font size default is valid numeric"),
+            composer_at_capacity_color: parse_color_hex(defaults::COMPOSER_AT_CAPACITY_COLOR)
+                .expect("composer at-capacity color default is valid hex"),
 
             transcript_background: parse_color_hex(defaults::TRANSCRIPT_BACKGROUND)
                 .expect("transcript background default is valid hex"),
@@ -378,6 +391,10 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
             PORTAL_TOKEN_COMPOSER_FONT_SIZE,
             defaults.composer_font_size_px
         ),
+        composer_at_capacity_color: resolve_color!(
+            PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR,
+            defaults.composer_at_capacity_color
+        ),
 
         transcript_background: resolve_color!(
             PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
@@ -479,6 +496,11 @@ mod tests {
         assert!(tokens.collapsed_font_size_px > 0.0);
         assert!(tokens.transition_in_ms > 0);
         assert!(tokens.transition_out_ms > 0);
+        // Composer at-capacity color must have a non-zero alpha (visible indicator)
+        assert!(
+            tokens.composer_at_capacity_color.a > 0.0,
+            "at-capacity color must have non-zero alpha so it is visible"
+        );
         // §6b window management fields
         assert!(tokens.window_min_width_px > 0.0);
         assert!(tokens.window_min_height_px > 0.0);

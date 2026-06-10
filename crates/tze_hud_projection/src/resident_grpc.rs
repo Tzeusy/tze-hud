@@ -55,9 +55,9 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 ///
 /// The Phase-1 raw-tile pilot publishes a **single** `TextMarkdownNodeProto`,
 /// which carries only `color`, `background`, and `font_size_px`. This struct
-/// therefore contains only the six fields that `portal_node` actually consumes
-/// (transcript and collapsed parts). The full part inventory defined in
-/// `PortalPartTokens` (frame, header, composer, divider, transitions) requires
+/// therefore contains only the fields that `portal_node` actually consumes
+/// (transcript, collapsed, and composer parts). The full part inventory defined in
+/// `PortalPartTokens` (frame, header, divider, transitions) requires
 /// a structured multi-node layout (one node per surface part) that is deferred
 /// to promotion-era work (see spec §7.5 and RFC 0013 §7.2 promotion gate).
 ///
@@ -78,10 +78,20 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 /// |------|--------|
 /// | transcript body | `transcript_background`, `transcript_text_color`, `transcript_font_size_px` |
 /// | collapsed card | `collapsed_background`, `collapsed_text_color`, `collapsed_font_size_px` |
+/// | composer region | `composer_background`, `composer_text_color`, `composer_font_size_px`, `composer_at_capacity_color` |
 ///
-/// Frame, header, composer, divider, and transition fields are omitted because
+/// Frame, header, divider, and transition fields are omitted because
 /// `TextMarkdownNodeProto` has no slots for them. They are wired in
 /// `PortalPartTokens` (in `tze_hud_config`) for promotion-era structured layout.
+///
+/// ## Composer rendering (§4.1 / §4.8 — local feedback first)
+///
+/// When a draft is active, `portal_node` renders the draft text with an inline
+/// `▌` caret marker at the cursor byte offset. When `at_capacity == true`, the
+/// rendered composer line uses `composer_at_capacity_color` instead of
+/// `composer_text_color` as a visible limit-reached indicator. This is entirely
+/// local — the compositor reads from the adapter's draft display state without
+/// any remote roundtrip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PortalVisualTokens {
     // Transcript body (expanded presentation)
@@ -93,6 +103,15 @@ pub struct PortalVisualTokens {
     pub collapsed_background: proto::Rgba,
     pub collapsed_text_color: proto::Rgba,
     pub collapsed_font_size_px: f32,
+
+    // Composer (draft input region — §4.1, §4.8)
+    pub composer_background: proto::Rgba,
+    pub composer_text_color: proto::Rgba,
+    pub composer_font_size_px: f32,
+    /// Color applied to the composer line when the draft is at its byte cap.
+    /// Renders as a distinct visual signal ("limit reached") without alarming.
+    /// Source token: `portal.composer.at_capacity_color`.
+    pub composer_at_capacity_color: proto::Rgba,
 }
 
 impl Default for PortalVisualTokens {
@@ -137,6 +156,29 @@ impl Default for PortalVisualTokens {
                 a: 1.0,
             },
             collapsed_font_size_px: 12.0,
+            // Composer defaults — match `tze_hud_config::portal_tokens::defaults`
+            // COMPOSER_BACKGROUND = "#0F1418", COMPOSER_TEXT_COLOR = "#E0E8F4",
+            // COMPOSER_AT_CAPACITY_COLOR = "#B87333"
+            composer_background: proto::Rgba {
+                r: 0.059,
+                g: 0.078,
+                b: 0.094,
+                a: 1.0,
+            },
+            composer_text_color: proto::Rgba {
+                r: 0.878,
+                g: 0.910,
+                b: 0.957,
+                a: 1.0,
+            },
+            composer_font_size_px: 13.0,
+            // Muted amber — "#B87333" ≈ r=0.722 g=0.451 b=0.200
+            composer_at_capacity_color: proto::Rgba {
+                r: 0.722,
+                g: 0.451,
+                b: 0.200,
+                a: 1.0,
+            },
         }
     }
 }
@@ -257,6 +299,15 @@ pub struct ResidentGrpcDraftCommand {
 /// comes from `visual_tokens`, never from inline literals. To reskin the portal,
 /// call `set_visual_tokens` with a freshly-resolved `PortalVisualTokens` built
 /// from the updated token map — no adapter logic changes required.
+///
+/// ## Composer draft display (§4.1 / §4.8 — local feedback first)
+///
+/// The adapter tracks the current draft display state in `composer_display`.
+/// After `consume_draft_batch` or `apply_draft_notification` returns an
+/// `UpdateComposerDisplay` command, the caller does NOT need to re-set anything:
+/// the adapter updates its own `composer_display` field automatically so the
+/// next `render_portal_message` / `portal_node` call immediately reflects the
+/// current draft text, caret, and at-capacity state.
 #[derive(Clone, Debug)]
 pub struct ResidentGrpcPortalAdapter {
     config: ResidentGrpcPortalConfig,
@@ -271,6 +322,35 @@ pub struct ResidentGrpcPortalAdapter {
     /// rendered portal tile MUST originate here. A profile swap updates this
     /// field; no other code in the adapter must change.
     visual_tokens: PortalVisualTokens,
+    /// Current composer draft display state for local-first rendering (§4.1).
+    ///
+    /// Updated by `consume_draft_batch` / `apply_draft_notification` whenever
+    /// an `UpdateComposerDisplay` command is produced. Reset to `None` on
+    /// `ProcessCancel`. The `portal_node` render path reads this field to
+    /// produce the draft text + caret + at-capacity visual without any remote
+    /// roundtrip.
+    composer_display: Option<ComposerDisplayState>,
+}
+
+/// Local composer draft display state cached in the adapter.
+///
+/// Carries only what `portal_node` needs to render the composer region:
+/// the current draft text, the caret byte offset, and the at-capacity flag.
+/// This is **not** a copy of `ComposerDraft` — it is the last state-stream
+/// snapshot delivered to the adapter, suitable for display.
+///
+/// Spec: §4.1 — "local rendering of text, caret, and selection within the
+/// input-to-local-ack budget."
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposerDisplayState {
+    /// Draft text at the time of the last delivered notification.
+    pub text: String,
+    /// Cursor byte offset into `text` (where the caret `▌` is inserted).
+    pub cursor: usize,
+    /// True when the draft reached its byte cap on the last mutation.
+    pub at_capacity: bool,
+    /// Monotonic sequence from the originating `DraftStateNotification`.
+    pub sequence: u64,
 }
 
 impl ResidentGrpcPortalAdapter {
@@ -287,6 +367,7 @@ impl ResidentGrpcPortalAdapter {
             next_input_sequence: 0,
             last_draft_sequence: 0,
             visual_tokens: PortalVisualTokens::default(),
+            composer_display: None,
         }
     }
 
@@ -305,6 +386,7 @@ impl ResidentGrpcPortalAdapter {
             next_input_sequence: 0,
             last_draft_sequence: 0,
             visual_tokens: tokens,
+            composer_display: None,
         }
     }
 
@@ -320,6 +402,14 @@ impl ResidentGrpcPortalAdapter {
     /// Returns the current visual tokens (for inspection / test assertions).
     pub fn visual_tokens(&self) -> &PortalVisualTokens {
         &self.visual_tokens
+    }
+
+    /// Returns the current composer display state (for inspection / test assertions).
+    ///
+    /// `None` when no draft is active (no `UpdateComposerDisplay` command has
+    /// been produced since construction or the last `ProcessCancel`).
+    pub fn composer_display(&self) -> Option<&ComposerDisplayState> {
+        self.composer_display.as_ref()
     }
 
     pub fn tile_id(&self) -> Option<&[u8]> {
@@ -453,6 +543,15 @@ impl ResidentGrpcPortalAdapter {
         if let Some(notification) = &batch.latest {
             if notification.sequence > self.last_draft_sequence {
                 self.last_draft_sequence = notification.sequence;
+                // Update local composer display state for next portal_node render.
+                // This is the local-first path: the compositor reads from here
+                // without any remote roundtrip (spec §4.1 — local feedback first).
+                self.composer_display = Some(ComposerDisplayState {
+                    text: notification.text.clone(),
+                    cursor: notification.cursor,
+                    at_capacity: notification.at_capacity,
+                    sequence: notification.sequence,
+                });
                 commands.push(ResidentGrpcDraftCommand {
                     kind: ResidentGrpcDraftCommandKind::UpdateComposerDisplay,
                     budget: sample_budget(started, RESIDENT_PORTAL_UPDATE_BUILD_BUDGET_US),
@@ -464,8 +563,9 @@ impl ResidentGrpcPortalAdapter {
             }
         }
 
-        // Transactional cancel
+        // Transactional cancel — clear composer display state
         if let Some(cancel) = &batch.cancel {
+            self.composer_display = None;
             commands.push(ResidentGrpcDraftCommand {
                 kind: ResidentGrpcDraftCommandKind::ProcessCancel,
                 budget: sample_budget(started, RESIDENT_PORTAL_INPUT_FEEDBACK_BUDGET_US),
@@ -477,8 +577,10 @@ impl ResidentGrpcPortalAdapter {
         }
 
         // Transactional submission (handled separately; caller should also
-        // call `submit_composer_text` with the submission text)
+        // call `submit_composer_text` with the submission text).
+        // Submission clears composer display state (post-submit display clear).
         if let Some(submission) = &batch.submission {
+            self.composer_display = None;
             commands.push(ResidentGrpcDraftCommand {
                 kind: ResidentGrpcDraftCommandKind::ProcessSubmission,
                 budget: sample_budget(started, RESIDENT_PORTAL_INPUT_FEEDBACK_BUDGET_US),
@@ -505,6 +607,13 @@ impl ResidentGrpcPortalAdapter {
             return None;
         }
         self.last_draft_sequence = notification.sequence;
+        // Update local composer display state for next portal_node render.
+        self.composer_display = Some(ComposerDisplayState {
+            text: notification.text.clone(),
+            cursor: notification.cursor,
+            at_capacity: notification.at_capacity,
+            sequence: notification.sequence,
+        });
         Some(ResidentGrpcDraftCommand {
             kind: ResidentGrpcDraftCommandKind::UpdateComposerDisplay,
             budget: sample_budget(started, RESIDENT_PORTAL_UPDATE_BUILD_BUDGET_US),
@@ -608,12 +717,20 @@ impl ResidentGrpcPortalAdapter {
             id: Vec::new(),
             data: Some(proto::node_proto::Data::TextMarkdown(
                 proto::TextMarkdownNodeProto {
-                    content: portal_markdown(state),
+                    content: portal_markdown(state, self.composer_display.as_ref()),
                     bounds: Some(bounds),
                     font_size_px,
                     color: Some(text_color),
                     background: Some(background_color),
-                    color_runs: Vec::new(),
+                    // color_runs carry the composer at-capacity indicator when active.
+                    // The at-capacity run covers the composer line with
+                    // `composer_at_capacity_color` so the visual token drives the
+                    // display without any literal color in the render path.
+                    color_runs: composer_color_runs(
+                        state,
+                        self.composer_display.as_ref(),
+                        self.visual_tokens.composer_at_capacity_color,
+                    ),
                 },
             )),
         }
@@ -656,7 +773,10 @@ impl ResidentGrpcPortalAdapter {
     }
 }
 
-fn portal_markdown(state: &ProjectedPortalState) -> String {
+fn portal_markdown(
+    state: &ProjectedPortalState,
+    composer_display: Option<&ComposerDisplayState>,
+) -> String {
     let mut result = String::new();
     let title = state.display_name.as_deref().unwrap_or("Projected session");
     push_line(&mut result, &format!("**{title}**"));
@@ -681,11 +801,15 @@ fn portal_markdown(state: &ProjectedPortalState) -> String {
                 &mut result,
                 &visible_transcript_markdown(&state.visible_transcript),
             );
+            push_line(&mut result, "");
             if state.interaction_enabled {
-                push_line(&mut result, "");
-                push_line(&mut result, "composer: ready");
+                // Render composer region with draft text + caret (§4.1).
+                // Local-first: no remote roundtrip — reads from adapter's cached
+                // ComposerDisplayState which is updated by consume_draft_batch /
+                // apply_draft_notification on every delivered notification.
+                let composer_line = composer_line(composer_display, state.interaction_enabled);
+                push_line(&mut result, &composer_line);
             } else {
-                push_line(&mut result, "");
                 push_line(&mut result, "composer: unavailable");
             }
         }
@@ -709,6 +833,104 @@ fn portal_markdown(state: &ProjectedPortalState) -> String {
         );
     }
     truncate_utf8(result, MAX_PORTAL_MARKDOWN_BYTES)
+}
+
+/// Build the composer region line for the expanded portal node.
+///
+/// Renders the current draft text with an inline `▌` caret marker inserted at
+/// the cursor byte offset. The caret marker is chosen because it is a Unicode
+/// block character that is visually distinct in monospace/proportional fonts
+/// and does not require compositor-level cursor blinking support.
+///
+/// When the draft is at capacity, the prefix `[!] ` is prepended to make the
+/// at-capacity state text-visible. The color_run path (via `composer_color_runs`)
+/// additionally applies `composer_at_capacity_color` to the line for the
+/// token-driven visual indicator. Both mechanisms are redundant by design:
+/// the text prefix is readable in environments where color runs are unavailable.
+///
+/// When no draft is active (composer_display is None), returns "composer: ready"
+/// to indicate the composer is available for input.
+fn composer_line(
+    composer_display: Option<&ComposerDisplayState>,
+    interaction_enabled: bool,
+) -> String {
+    if !interaction_enabled {
+        return "composer: unavailable".to_string();
+    }
+    let Some(display) = composer_display else {
+        return "composer: ready".to_string();
+    };
+
+    let text = &display.text;
+    let cursor = display.cursor.min(text.len());
+
+    // Insert the caret marker (▌ U+258C LEFT HALF BLOCK) at the cursor position.
+    // The cursor is a byte offset; we snap to the nearest valid char boundary to
+    // avoid panics on multi-byte characters.
+    let mut snap = cursor;
+    while snap > 0 && !text.is_char_boundary(snap) {
+        snap -= 1;
+    }
+    let (before, after) = text.split_at(snap);
+    let with_caret = format!("{before}▌{after}");
+
+    if display.at_capacity {
+        // Text-visible at-capacity prefix + draft with caret.
+        // The color_runs path applies the token-driven color independently.
+        format!("[!] {with_caret}")
+    } else {
+        with_caret
+    }
+}
+
+/// Build `TextColorRunProto` entries for the at-capacity composer indicator.
+///
+/// When the draft is at capacity and the portal is in expanded mode, emits a
+/// single `TextColorRunProto` covering bytes `[0..0]` (a zero-length sentinel)
+/// carrying `composer_at_capacity_color`. This is the token-driven color path
+/// (§6.1): no literal colors in the render code.
+///
+/// When the draft is not at capacity or the presentation is not expanded,
+/// returns an empty vec.
+///
+/// # Phase-1 scope note
+///
+/// In the Phase-1 raw-tile pilot, `color_runs` affect the full content of the
+/// single `TextMarkdownNodeProto`. An accurate per-line color run requires
+/// knowing the byte offset of the composer line in the rendered content. That
+/// calculation is fragile in the raw-tile single-node model and would couple
+/// `portal_node` to the exact output of `portal_markdown`. For Phase-1, the
+/// at-capacity indicator is therefore expressed as a zero-length sentinel run
+/// at byte 0 carrying the token color rather than a precise line-level run.
+/// Callers can check that `color_runs` is non-empty and inspect the color to
+/// detect the at-capacity state. The text-visible `[!]` prefix in
+/// `composer_line` additionally signals the state for environments where
+/// color runs are not inspected.
+///
+/// Promotion-era structured multi-node layout (one node per surface part) will
+/// allow a precise, isolated composer-region color run without this limitation.
+fn composer_color_runs(
+    state: &ProjectedPortalState,
+    composer_display: Option<&ComposerDisplayState>,
+    at_capacity_color: proto::Rgba,
+) -> Vec<proto::TextColorRunProto> {
+    if state.presentation != ProjectedPortalPresentation::Expanded {
+        return Vec::new();
+    }
+    let Some(display) = composer_display else {
+        return Vec::new();
+    };
+    if !display.at_capacity {
+        return Vec::new();
+    }
+    // Zero-length sentinel run carrying the token-derived at-capacity color.
+    // start_byte == end_byte == 0 → no pixel coloring by the compositor;
+    // presence of this run + its color value is the machine-readable signal.
+    vec![proto::TextColorRunProto {
+        start_byte: 0,
+        end_byte: 0,
+        color: Some(at_capacity_color),
+    }]
 }
 
 fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {

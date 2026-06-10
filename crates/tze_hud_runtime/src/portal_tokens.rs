@@ -45,11 +45,9 @@ use tze_hud_protocol::proto;
 /// Convert a fully-resolved `PortalPartTokens` (from `tze_hud_config`) into
 /// the Phase-1 pilot's `PortalVisualTokens` (from `tze_hud_projection`).
 ///
-/// Only the transcript-body and collapsed-card fields are mapped because the
-/// raw-tile pilot's `portal_node` publishes a single `TextMarkdownNodeProto`
-/// which carries only `color`, `background`, and `font_size_px`. The remaining
-/// parts of `PortalPartTokens` (frame, header, composer, divider, transitions)
-/// require a structured multi-node layout deferred to promotion-era work.
+/// Maps transcript, collapsed, and composer parts. The remaining parts of
+/// `PortalPartTokens` (frame, header, divider, transitions) require a structured
+/// multi-node layout deferred to promotion-era work.
 ///
 /// This is the canonical production-path conversion. Tests MUST NOT hand-roll
 /// a second copy of this mapping — use this function instead.
@@ -81,6 +79,28 @@ pub fn portal_visual_tokens_from_part_tokens(part: &PortalPartTokens) -> PortalV
             a: part.collapsed_text_color.a,
         },
         collapsed_font_size_px: part.collapsed_font_size_px,
+        // Composer part — wired in Phase-1 for draft text + caret + at-capacity
+        // visual (spec §4.1, §4.8). The raw-tile pilot's single
+        // TextMarkdownNodeProto carries color_runs for the at-capacity indicator.
+        composer_background: proto::Rgba {
+            r: part.composer_background.r,
+            g: part.composer_background.g,
+            b: part.composer_background.b,
+            a: part.composer_background.a,
+        },
+        composer_text_color: proto::Rgba {
+            r: part.composer_text_color.r,
+            g: part.composer_text_color.g,
+            b: part.composer_text_color.b,
+            a: part.composer_text_color.a,
+        },
+        composer_font_size_px: part.composer_font_size_px,
+        composer_at_capacity_color: proto::Rgba {
+            r: part.composer_at_capacity_color.r,
+            g: part.composer_at_capacity_color.g,
+            b: part.composer_at_capacity_color.b,
+            a: part.composer_at_capacity_color.a,
+        },
     }
 }
 
@@ -156,6 +176,17 @@ mod tests {
         assert!(
             (visual.collapsed_font_size_px - default.collapsed_font_size_px).abs() < eps,
             "collapsed_font_size_px mismatch"
+        );
+
+        // Composer fields
+        assert!(
+            (visual.composer_font_size_px - default.composer_font_size_px).abs() < eps,
+            "composer_font_size_px mismatch"
+        );
+        // Composer at-capacity color must have non-zero alpha (visible)
+        assert!(
+            visual.composer_at_capacity_color.a > 0.0,
+            "composer_at_capacity_color must have non-zero alpha"
         );
     }
 
