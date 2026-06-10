@@ -131,9 +131,51 @@ Source: RFC 0013 §4.3 (bounded input), scene-graph spec TextMarkdownNode conten
 - **THEN** every draft-state notification and the eventual transactional submission SHALL contain at most the capped draft content
 - **AND** the runtime SHALL NOT transmit the rejected overflow bytes to the adapter
 
+### Requirement: Portal Window Management
+
+Expanded portal surfaces SHALL support viewer-driven move and resize with local-first feedback. Move continues through the existing header drag affordance. Resize SHALL be available through both (a) pointer-driven resize affordances on the portal frame (corner or edge capture regions in the content layer) and (b) focus-scoped keyboard shortcuts: while the portal surface holds keyboard focus, Ctrl+`+` (and its unshifted form Ctrl+`=`) SHALL grow and Ctrl+`-` SHALL shrink the portal by a token-defined step. Shortcuts MUST be focus-scoped: a portal that does not hold focus MUST NOT consume them, chrome- and shell-reserved shortcuts take precedence, and safe-mode input capture overrides them entirely. Geometry feedback during a move or resize gesture SHALL render locally within the input-to-local-ack budget (`about/craft-and-care/engineering-bar.md` §2); the owning adapter SHALL observe geometry changes only as coalescible state-stream snapshots and MUST NOT veto or reposition the surface mid-gesture. Resize SHALL clamp to token-defined minimum legible bounds and to maxima within the portal's lease bounds and scene budgets. At every intermediate and final geometry, pane layout SHALL re-resolve under the Transcript Overflow and Ellipsis Contract: no partially clipped glyphs. When transcript or composer content overflows its pane, the surface SHALL show a token-styled scroll-position indicator; the indicator conveys geometry only and SHALL remain present under redaction without revealing content.
+
+Source: RFC 0013 §4.1 and §4.2, RFC 0004 (input model, focus), `about/craft-and-care/engineering-bar.md` §2, CLAUDE.md core rules "local feedback first" and "screen is sovereign"
+
+#### Scenario: pointer resize is local-first
+
+- **WHEN** the viewer drags a portal resize affordance
+- **THEN** the portal's geometry SHALL update locally within the input-to-local-ack budget for the duration of the gesture
+- **AND** the owning adapter SHALL observe the geometry change only through coalescible state-stream snapshots after the fact
+
+#### Scenario: focused portal responds to resize shortcuts
+
+- **WHEN** a portal surface holds keyboard focus and the viewer presses Ctrl+`+` or Ctrl+`-`
+- **THEN** the portal SHALL grow or shrink by the token-defined step with local-first feedback
+- **AND** pane layout SHALL re-resolve without partially clipped glyphs at the new geometry
+
+#### Scenario: unfocused portal ignores resize shortcuts
+
+- **WHEN** the viewer presses Ctrl+`+` or Ctrl+`-` while no portal surface holds keyboard focus
+- **THEN** no portal SHALL change size
+- **AND** the key events SHALL remain available to chrome and other focus targets per the existing input-routing contract
+
+#### Scenario: resize clamps to bounds
+
+- **WHEN** repeated shrink or grow operations are applied past the configured limits
+- **THEN** the portal SHALL clamp at the token-defined minimum legible bounds and at the maxima permitted by its lease bounds and scene budgets
+- **AND** no intermediate geometry SHALL render partially clipped glyphs
+
+#### Scenario: adapter cannot override an active gesture
+
+- **WHEN** the owning adapter publishes portal content or geometry while a viewer move or resize gesture is in progress
+- **THEN** the viewer's gesture SHALL remain authoritative for surface geometry until the gesture ends
+- **AND** the adapter's content updates SHALL apply within the gesture-defined geometry
+
+#### Scenario: scroll-position indicator is geometry-only under redaction
+
+- **WHEN** transcript content overflows its pane for a viewer whose policy redacts the portal's content
+- **THEN** the token-styled scroll-position indicator SHALL remain present and reflect scroll position
+- **AND** the indicator SHALL NOT convey transcript content beyond geometry
+
 ### Requirement: Sustained Streaming Cadence
 
-Portal output presentation SHALL remain within the engineering-bar budgets under representative streaming workloads. For a sustained stream (appends totaling at least 200 Unicode scalar values per second, in at least 10 increments per second, for at least 60 seconds) and for bursts (at least 4096 bytes arriving within 250 ms), the runtime SHALL hold: total frame time within the frame budget (< 16.6 ms p99 general; `high_mutation` p99 ≤ 8.3 ms and p99.9 ≤ 16.6 ms under the Windows locked lane), concurrent input responsiveness within input-to-local-ack and input-to-next-present budgets, per-stage budgets per `about/craft-and-care/engineering-bar.md` §2, and aggregate portal event traffic within the 1000 events/second ceiling. Coalescing SHALL be work-conserving: when committed transcript units are pending and render capacity exists, a newer coherent window snapshot SHALL be presented. With multiple portals streaming concurrently, coalescing MUST NOT starve any portal: under equal sustained rates, presented-window progress across portals MUST NOT diverge unboundedly. Arrival timestamps remain advisory; this requirement defines no arrival-to-presentation deadline, because transcript appends are state-stream traffic whose presentation timing belongs to the runtime. A 60-minute sustained-streaming soak SHALL stay within the ≤ 5 MiB memory-drift budget.
+Portal output presentation SHALL remain within the engineering-bar budgets under representative streaming workloads. For a sustained stream (appends totaling at least 200 Unicode scalar values per second, in at least 10 increments per second, for at least 60 seconds) and for bursts (at least 4096 bytes arriving within 250 ms), the runtime SHALL hold: total frame time within the frame budget (< 16.6 ms p99 general; `high_mutation` p99 ≤ 8.3 ms and p99.9 ≤ 16.6 ms under the Windows locked lane), concurrent input responsiveness within input-to-local-ack and input-to-next-present budgets, per-stage budgets per `about/craft-and-care/engineering-bar.md` §2, and aggregate portal event traffic within the 1000 events/second ceiling. Coalescing SHALL be work-conserving: when committed transcript units are pending and render capacity exists, a newer coherent window snapshot SHALL be presented. With multiple portals streaming concurrently, coalescing MUST NOT starve any portal: under equal sustained rates, presented-window progress across portals MUST NOT diverge unboundedly. Arrival timestamps remain advisory; this requirement defines no arrival-to-presentation deadline, because transcript appends are state-stream traffic whose presentation timing belongs to the runtime. Runtime processing overhead is nonetheless bounded: for an append that is presented (not superseded by a newer coalesced window), elapsed time from mutation arrival to the next present SHALL stay within the `high_mutation` input-to-next-present budget (p99 ≤ 16.6 ms under the Windows locked lane), so the end-to-end latency a remote agent observes is transport RTT plus bounded runtime overhead. Live cadence evidence SHALL record a transport RTT baseline and per-append publish-to-present measurements so the runtime-added overhead is reported explicitly, separate from transport latency. A 60-minute sustained-streaming soak SHALL stay within the ≤ 5 MiB memory-drift budget.
 
 Source: `about/craft-and-care/engineering-bar.md` §2, RFC 0013 §5, CLAUDE.md core rule "arrival time ≠ presentation time"
 
@@ -155,6 +197,12 @@ Source: `about/craft-and-care/engineering-bar.md` §2, RFC 0013 §5, CLAUDE.md c
 - **WHEN** two portals stream at equal sustained rates under coalescing pressure
 - **THEN** each portal's presented window SHALL continue to advance
 - **AND** neither portal's presented progress SHALL fall unboundedly behind the other's
+
+#### Scenario: runtime overhead beyond transport RTT is bounded and evidenced
+
+- **WHEN** the live cadence phase streams appends while recording a transport RTT baseline and per-append publish-to-present timestamps
+- **THEN** for appends that are presented rather than coalesced away, arrival-to-present SHALL stay within the `high_mutation` input-to-next-present budget
+- **AND** the evidence artifact SHALL report measured runtime overhead separately from transport RTT
 
 #### Scenario: streaming soak does not leak
 
@@ -188,15 +236,21 @@ Source: `about/heart-and-soul/vision.md` (visual identity is modular), `about/he
 
 ### Requirement: Phase-1 Promotion Evidence Gate
 
-Promotion from the raw-tile pilot to a first-class portal surface SHALL occur only after a refreshed live evidence package satisfies all RFC 0013 §7.2 criteria. The package SHALL consist of live exemplar runs on the reference Windows host covering markdown fidelity, overflow correctness, composer draft editing, sustained streaming cadence, and profile-swap styling, executed against at least two distinct adapter families (the exemplar script adapter and the cooperative projection adapter), with artifacts recorded under `docs/evidence/text-stream-portals/` carrying the engineering-bar reference hardware tag. The package SHALL also record raw-tile complexity observations (tile counts, mutation batch shapes, workarounds) as the recurring-complexity evidence, and SHALL confirm that governance behavior (redaction, safe mode, freeze, orphan path) remained correct during the Phase-1 runs. A failed or incomplete gate SHALL leave the raw-tile pilot as the authoritative scope; Phase-1 behavioral requirements remain in force on raw tiles regardless of gate outcome.
+Promotion from the raw-tile pilot to a first-class portal surface SHALL occur only after a refreshed live evidence package satisfies all RFC 0013 §7.2 criteria. The package SHALL consist of live exemplar runs on the reference Windows host covering markdown fidelity, overflow correctness, composer draft editing, window management, sustained streaming cadence (including the publish-to-present-vs-RTT overhead measurement), and profile-swap styling, executed against at least two distinct adapter families (the exemplar script adapter and the cooperative projection adapter), with artifacts recorded under `docs/evidence/text-stream-portals/` carrying the engineering-bar reference hardware tag. The package SHALL also include an agent-ergonomics demonstration: an LLM session driving the full portal lifecycle — attach or create, stream output, poll and acknowledge input, detach — exclusively through the vendored skill surface (the cooperative projection contract or its successor), with zero scene-graph mutations authored in the LLM's context; the ceremony observed (operation count, glue required outside the skill) SHALL be recorded alongside the raw-tile complexity observations. The package SHALL also record raw-tile complexity observations (tile counts, mutation batch shapes, workarounds) as the recurring-complexity evidence, and SHALL confirm that governance behavior (redaction, safe mode, freeze, orphan path) remained correct during the Phase-1 runs. A failed or incomplete gate SHALL leave the raw-tile pilot as the authoritative scope; Phase-1 behavioral requirements remain in force on raw tiles regardless of gate outcome.
 
 Source: RFC 0013 §7.2, `about/craft-and-care/engineering-bar.md` §2 (reference hardware tag), `.claude/skills/user-test/SKILL.md` (live exemplar)
 
 #### Scenario: gate passes with complete evidence
 
-- **WHEN** the refreshed live runs cover all five Phase-1 axes across both adapter families with budget-passing, reference-tagged artifacts and governance confirmation
+- **WHEN** the refreshed live runs cover all six Phase-1 axes across both adapter families with budget-passing, reference-tagged artifacts, governance confirmation, and the agent-ergonomics demonstration
 - **THEN** promotion to a first-class portal surface MAY proceed under this change's approval
 - **AND** the evidence package SHALL be linked from the promotion implementation work
+
+#### Scenario: agent ergonomics is a gate criterion
+
+- **WHEN** the evidence package lacks an LLM-driven run that exercises the portal lifecycle exclusively through the vendored skill surface
+- **THEN** the gate SHALL NOT pass
+- **AND** a run in which the LLM authors scene-graph mutations or tile assembly directly in its context SHALL NOT satisfy this criterion
 
 #### Scenario: gate fails closed
 

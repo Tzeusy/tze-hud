@@ -9,9 +9,10 @@ In scope:
 - markdown rendering subset with token-driven styling
 - normative overflow/ellipsis contract
 - runtime-owned, local-first composer draft editing (bounded)
-- sustained streaming cadence under engineering-bar budgets
+- sustained streaming cadence under engineering-bar budgets, with publish-to-present-vs-RTT overhead evidence (amendment, §8)
+- viewer window management: pointer resize, focus-scoped resize hotkeys, scroll-position indicators (amendment, §8)
 - portal component profile and collapsed/expanded transitions
-- RFC 0013 §7.2 promotion evidence gate and promotion scope boundary
+- RFC 0013 §7.2 promotion evidence gate — including the agent-ergonomics criterion (amendment, §8) — and promotion scope boundary
 
 Out of scope (unchanged non-goals from RFC 0013 §1.2/§4.4): terminal emulation, PTY hosting, ANSI cursor addressing, full scene-graph transcript history, chrome-layer portal UI, dedicated portal transport, runtime process-lifecycle ownership, IME composition, markdown tables/images/HTML, link navigation.
 
@@ -119,7 +120,17 @@ What promotion changes: it permits a first-class portal surface or node type (RF
 
 If the gate fails — budgets miss, governance behavior regresses, or raw-tile expression turns out not to be the bottleneck — the raw-tile pilot remains the correct scope per RFC 0013 §7.2, and the Phase-1 behavioral requirements still stand on raw tiles.
 
-## 8. Risks
+## 8. Amendment (2026-06-10): Window Management, Overhead Evidence, Agent Ergonomics
+
+Owner-directed amendment after acceptance, before implementation start. Three additions; no prior decision is reversed.
+
+**Window management is viewer-sovereign, local-first interaction — and hotkeys are focus-scoped, not global.** Move existed (header drag); Phase 1 adds resize through frame affordances and keyboard steps (Ctrl+`+`/`-`, with Ctrl+`=` as the unshifted plus). The shortcuts bind only while the portal holds keyboard focus: the runtime owns global input routing, chrome- and shell-reserved shortcuts always win, and a content-layer surface claiming global keymaps would violate "screen is sovereign." Gesture geometry is local-first like every other interaction; the adapter sees coalescible state-stream geometry snapshots and cannot fight an active gesture. Min bounds come from tokens (legibility), max bounds from lease and scene budgets (governance). Resize stresses the overflow contract on purpose: every intermediate geometry must satisfy "no clipped glyphs," which makes the resize path a continuous test of the ellipsis algorithm rather than a separate layout mode. Scroll-position indicators are geometry-only so they survive redaction without leaking content.
+
+**Overhead is a processing bound, not a delivery deadline.** §5's refusal to define an arrival-to-present deadline stands: coalescing may supersede any individual append. What the amendment adds is the complementary bound the owner asked for — when an append *is* presented, arrival-to-next-present sits within the existing `high_mutation` input-to-next-present row (p99 ≤ 16.6 ms Windows lane). No new number is invented; the row already exists in the engineering bar. The real addition is evidential: the live cadence phase must measure a transport RTT baseline (session-stream echo) and per-append publish-to-present timestamps, and report runtime-added overhead explicitly. "End-to-end latency is RTT plus about one frame" becomes a measured artifact instead of an inference.
+
+**Agent ergonomics joins the promotion gate.** The gate already measured raw-tile complexity from the implementer's seat (tile counts, batch shapes, workarounds). The amendment adds the agent's seat: an LLM session must drive the full portal lifecycle — attach, stream output, poll and acknowledge input, detach — purely through the vendored skill surface (the cooperative projection contract), with zero scene-graph ceremony in its context. This is the operational definition of the exemplar being "easy for a model to drive": if the demonstration needs hand-written tile assembly or mutation authoring in the LLM's context, the gate fails and that friction is exactly the promotion evidence RFC 0013 §7.2 asks for. Ceremony metrics (operation count, glue outside the skill) are recorded with the complexity observations.
+
+## 9. Risks
 
 - **Editor scope creep.** The draft buffer is the most likely place for "just one more editing feature" drift. The bounds in §4 are normative; anything beyond them (undo, rich text, IME) requires a new change.
 - **Shaping cost in layout resolve.** Word-boundary ellipsis with styled runs could pressure the Stage 5 < 1 ms budget on large transcripts. Mitigation: cache shaped runs with content identity; re-shape only on content/geometry change. If the budget still misses, the fallback is restricting measured truncation to the viewport-adjacent window, not reverting to clipped glyphs.
