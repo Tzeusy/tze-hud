@@ -753,8 +753,7 @@ mod tests {
         // Verify all characters in the prefix are 'W' (no corruption / mid-codepoint split).
         assert!(
             prefix.chars().all(|c| c == 'W'),
-            "prefix before ellipsis must consist only of source characters; got: {:?}",
-            prefix
+            "prefix before ellipsis must consist only of source characters; got: {prefix:?}",
         );
     }
 
