@@ -32,15 +32,16 @@
 //! ## Usage pattern
 //!
 //! ```rust,ignore
-//! let mut coalescer = PortalCadenceCoalescer::new(MAX_INFLIGHT_PER_PORTAL);
+//! let mut coalescer = PortalCadenceCoalescer::new();
 //!
 //! // On each transcript append (from the adapter):
-//! coalescer.record_append("portal://a", snapshot_bytes, seq);
+//! // record_append(portal_key, payload_bytes, sequence, submitted_at_us)
+//! coalescer.record_append("portal://a", snapshot_bytes, seq, now_us);
 //!
 //! // On each frame (Stage 3 Mutation Intake):
 //! while let Some(key) = coalescer.next_ready_portal() {
-//!     let snapshot = coalescer.take_snapshot(&key).unwrap();
-//!     // … apply snapshot to scene graph …
+//!     let (payload, _seq) = coalescer.take_snapshot(&key).unwrap();
+//!     // … apply payload to scene graph …
 //! }
 //! ```
 
@@ -48,13 +49,17 @@ use std::collections::{HashMap, VecDeque};
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
-/// Maximum number of coalesced snapshot bytes held per portal key.
+/// Maximum number of bytes held for a single portal snapshot.
 ///
-/// At 200 scalars/s (average 4 bytes/scalar) the sustained byte rate is
-/// ~800 B/s. With a 60 Hz frame budget the maximum snapshot size per portal
-/// is ~13 bytes per frame on average; burst headroom is accounted for by the
-/// 4 KiB ceiling from the normative workload spec (tasks.md §5.2).
-/// We keep only the *latest* snapshot so the byte cap is the snapshot maximum.
+/// This is an upper safety cap on the snapshot buffer, not a normative
+/// workload budget. The normative workload (tasks.md §5.2) specifies ≥ 4 KiB
+/// burst payloads and ≥ 200 scalars/s sustained; a single portal snapshot
+/// will be much smaller in practice. 65,535 bytes is chosen as a generous
+/// hard ceiling that prevents unbounded memory growth from a misbehaving
+/// producer without imposing an artificial constraint on legitimate large
+/// transcript windows (e.g. long tool-output flushes).
+/// We keep only the *latest* snapshot per portal, so this is the maximum
+/// retained size per portal key.
 pub const MAX_PORTAL_SNAPSHOT_BYTES: usize = 65_535;
 
 /// Cadence harness: minimum sustained scalar rate (scalars/second).
@@ -143,7 +148,15 @@ impl PortalCadenceCoalescer {
         submitted_at_us: u64,
     ) -> bool {
         let payload = if payload.len() > MAX_PORTAL_SNAPSHOT_BYTES {
-            payload[..MAX_PORTAL_SNAPSHOT_BYTES].to_vec()
+            // Truncate at a valid UTF-8 character boundary to avoid producing
+            // invalid UTF-8 when the payload is a text transcript.
+            let mut limit = MAX_PORTAL_SNAPSHOT_BYTES;
+            if let Ok(s) = std::str::from_utf8(&payload) {
+                while limit > 0 && !s.is_char_boundary(limit) {
+                    limit -= 1;
+                }
+            }
+            payload[..limit].to_vec()
         } else {
             payload
         };
@@ -161,8 +174,12 @@ impl PortalCadenceCoalescer {
                 self.total_coalesced += 1;
             }
             None => {
-                // New portal key — add to service order.
-                self.service_order.push_back(portal_key.to_string());
+                // New snapshot for this key. Add to service order only if the
+                // key is not already present (it may have been drained via
+                // take_snapshot but remains in service_order for round-robin).
+                if !self.service_order.contains(&portal_key.to_string()) {
+                    self.service_order.push_back(portal_key.to_string());
+                }
                 self.pending.insert(
                     portal_key.to_string(),
                     PendingPortalSnapshot {
@@ -416,6 +433,20 @@ impl FairnessProbe {
         Self::default()
     }
 
+    /// Pre-register a portal key so that portals with zero services are
+    /// included in the fairness check.
+    ///
+    /// Without pre-registration, a portal that is completely starved (receives
+    /// 0 services) will be absent from `service_counts`, causing `assert_fair`
+    /// to see fewer portals than expected and potentially return `Ok(())`
+    /// incorrectly. Call this for every portal that participates in the
+    /// workload before beginning the fairness measurement.
+    pub fn register_portal(&mut self, portal_key: &str) {
+        self.service_counts
+            .entry(portal_key.to_string())
+            .or_insert(0);
+    }
+
     /// Record one service event for `portal_key`.
     pub fn record_service(&mut self, portal_key: &str) {
         *self
@@ -620,9 +651,10 @@ mod tests {
     #[test]
     fn build_burst_meets_size() {
         let (_, payload, _scalar_count) = CadenceWorkload::build_burst(0);
-        assert!(
-            payload.len() >= CADENCE_BURST_BYTES,
-            "burst payload must be ≥ {CADENCE_BURST_BYTES} bytes"
+        assert_eq!(
+            payload.len(),
+            CADENCE_BURST_BYTES,
+            "burst payload must be exactly {CADENCE_BURST_BYTES} bytes"
         );
     }
 

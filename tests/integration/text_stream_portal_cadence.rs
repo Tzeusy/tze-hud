@@ -25,7 +25,7 @@ use tze_hud_scene::{
     mutation::{MutationBatch, SceneMutation},
     types::{Node, NodeData, Rect, Rgba, SceneId, SolidColorNode},
 };
-use tze_hud_telemetry::SessionSummary;
+use tze_hud_telemetry::{LatencyBucket, SessionSummary};
 
 // ─── Test configuration ────────────────────────────────────────────────────────
 
@@ -113,9 +113,10 @@ fn cadence_harness_sustained_workload_meets_spec() {
 fn cadence_harness_burst_workload_meets_spec() {
     let (ts, payload, _scalars) = CadenceWorkload::build_burst(0);
     assert_eq!(ts, 0);
-    assert!(
-        payload.len() >= CADENCE_BURST_BYTES,
-        "burst payload must be ≥{} bytes; got {}",
+    assert_eq!(
+        payload.len(),
+        CADENCE_BURST_BYTES,
+        "burst payload must be exactly {} bytes; got {}",
         CADENCE_BURST_BYTES,
         payload.len()
     );
@@ -167,6 +168,11 @@ fn cross_portal_fairness_dual_portals_equal_rate() {
     let portal_a = "portal://fair/a";
     let portal_b = "portal://fair/b";
 
+    // Pre-register both portals so that a completely-starved portal (0 services)
+    // is correctly detected by assert_fair rather than silently ignored.
+    probe.register_portal(portal_a);
+    probe.register_portal(portal_b);
+
     // 100 rounds: each portal gets one append per round, then we drain.
     for round in 0u64..100 {
         let payload_a = format!("a-{round}").into_bytes();
@@ -201,6 +207,11 @@ fn cross_portal_no_starvation_under_skewed_rates() {
 
     let portal_a = "portal://skew/a";
     let portal_b = "portal://skew/b";
+
+    // Pre-register both portals so that a completely-starved portal (0 services)
+    // is correctly detected by assert_fair rather than silently ignored.
+    probe.register_portal(portal_a);
+    probe.register_portal(portal_b);
 
     for round in 0u64..20 {
         // A gets 5 rapid updates (coalesced to 1); B gets 1 update.
@@ -288,6 +299,12 @@ async fn frame_budgets_hold_under_sustained_portal_stream() {
 
     let mut summary = SessionSummary::new();
     let mut append_idx = 0usize;
+    // Per-stage latency buckets: record only on frames where mutation intake ran
+    // (stage3_mutation_intake_us > 0) to avoid conflating idle frames with
+    // mutation-processing frames when computing p99.
+    let mut stage3_bucket = LatencyBucket::new("stage3_mutation_intake");
+    let mut stage4_bucket = LatencyBucket::new("stage4_scene_commit");
+    let mut stage5_bucket = LatencyBucket::new("stage5_layout_resolve");
 
     for frame_idx in 0..BENCH_FRAME_COUNT {
         // Apply one portal append every 6 frames to hit ≥ 10 appends/s at 60Hz.
@@ -321,6 +338,10 @@ async fn frame_budgets_hold_under_sustained_portal_stream() {
             summary
                 .input_to_scene_commit
                 .record(telemetry.stage3_mutation_intake_us + telemetry.stage4_scene_commit_us);
+            // Record per-stage samples only on frames with mutation work.
+            stage3_bucket.record(telemetry.stage3_mutation_intake_us);
+            stage4_bucket.record(telemetry.stage4_scene_commit_us);
+            stage5_bucket.record(telemetry.stage5_layout_resolve_us);
         }
         summary
             .input_to_next_present
@@ -337,6 +358,31 @@ async fn frame_budgets_hold_under_sustained_portal_stream() {
         "p99 frame time {p99_frame}µs exceeded headless budget {HEADLESS_FRAME_BUDGET_US}µs \
          under sustained portal stream"
     );
+
+    // Per-stage p99 budget assertions (engineering-bar.md §2):
+    // Stage 3 (Mutation Intake) < 1ms, Stage 4 (Scene Commit) < 1ms,
+    // Stage 5 (Layout Resolve) < 1ms.
+    // These are checked only when mutation frames were actually recorded.
+    if stage3_bucket.samples.len() >= 3 {
+        let p99_s3 = stage3_bucket.p99().unwrap_or(0);
+        assert!(
+            p99_s3 <= STAGE3_P99_BUDGET_US,
+            "Stage 3 (Mutation Intake) p99 {p99_s3}µs exceeded budget {STAGE3_P99_BUDGET_US}µs \
+             under sustained portal stream"
+        );
+        let p99_s4 = stage4_bucket.p99().unwrap_or(0);
+        assert!(
+            p99_s4 <= STAGE4_P99_BUDGET_US,
+            "Stage 4 (Scene Commit) p99 {p99_s4}µs exceeded budget {STAGE4_P99_BUDGET_US}µs \
+             under sustained portal stream"
+        );
+        let p99_s5 = stage5_bucket.p99().unwrap_or(0);
+        assert!(
+            p99_s5 <= STAGE5_P99_BUDGET_US,
+            "Stage 5 (Layout Resolve) p99 {p99_s5}µs exceeded budget {STAGE5_P99_BUDGET_US}µs \
+             under sustained portal stream"
+        );
+    }
 
     // Verify the total event count stayed within the 1000 events/s aggregate ceiling.
     // At 10 appends/s (1 per 6 frames at 60Hz) over BENCH_FRAME_COUNT frames, the
@@ -778,18 +824,26 @@ async fn input_latency_not_degraded_under_portal_stream() {
 
     // Input to local ack p99 must be within budget when samples are available.
     //
-    // The locked Windows budget is ≤ 2 ms; headless CI allows ≤ 4 ms.
+    // The locked Windows budget is ≤ 2 ms (engineering-bar.md §2). On headless
+    // Linux CI with a software GPU (llvmpipe), frame times run 8–12× slower
+    // than reference hardware; we use a generous 250 ms headless ceiling here
+    // so the test is not flaky on CI while still catching catastrophic
+    // regressions (a true regression pushes software-GPU times into seconds).
+    // The real performance guard is the Windows CI gate.
+    //
     // On a headless runner without a display server, pointer events may not
     // produce non-zero local_ack values (no hit region in the headless scene
     // from this path), so we only assert when we have ≥ 5 non-zero samples.
     let non_zero_samples: Vec<u64> = local_ack_samples.into_iter().filter(|&v| v > 0).collect();
     if non_zero_samples.len() >= 5 {
-        let mut sorted = non_zero_samples;
-        sorted.sort_unstable();
-        let p99_idx = (sorted.len() as f64 * 0.99) as usize;
-        let p99 = sorted[p99_idx.min(sorted.len() - 1)];
-        // Headless budget: generous for software-GPU CI; real gate is on Windows.
+        let mut ack_bucket = LatencyBucket::new("input_to_local_ack");
+        for sample in non_zero_samples {
+            ack_bucket.record(sample);
+        }
+        // Headless budget: 250 ms (generous for software-GPU CI).
+        // Windows locked budget: ≤ 2 ms (enforced by the Windows CI gate).
         let headless_ack_budget_us = 250_000u64;
+        let p99 = ack_bucket.p99().unwrap_or(0);
         assert!(
             p99 <= headless_ack_budget_us,
             "input_to_local_ack p99 {p99}µs exceeded headless budget {headless_ack_budget_us}µs \
