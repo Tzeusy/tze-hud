@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # ── Checkout ──────────────────────────────────────────────────────────────
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # ── Rust toolchain + Android targets ─────────────────────────────────────
       # Pin to 1.88 — same as ci.yml — to avoid Cargo.lock conflicts.
@@ -73,7 +73,7 @@ jobs:
 
       # ── Android NDK via SDK manager ───────────────────────────────────────────
       - name: Install Android NDK r27
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
           packages: "ndk;${{ env.NDK_VERSION }}"
 
@@ -88,7 +88,7 @@ jobs:
       # ── GStreamer Android SDK download + verify ───────────────────────────────
       - name: Cache GStreamer Android SDK
         id: cache-gst
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/gstreamer-android
           key: gstreamer-android-${{ env.GST_VERSION }}-universal
