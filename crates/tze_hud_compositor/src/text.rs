@@ -26,10 +26,11 @@
 //! # Overflow modes
 //!
 //! - `Clip` — the `TextBounds` rectangle hard-clips rendered glyphs.
-//! - `Ellipsis` — glyphon does not natively support trailing ellipsis; we
-//!   approximate it by setting the cosmic-text `Wrap::Word` and truncating the
-//!   visible line count to fit the bounds, appending "…" if truncation occurs.
-//!   Full ellipsis support is deferred to post-MVP.
+//! - `Ellipsis` — measured word-boundary truncation with the ellipsis glyph
+//!   included in the shaped-width budget, implemented in [`crate::overflow`]
+//!   (hud-5jbra.3).  Grapheme-cluster fallback applies when no word boundary
+//!   fits.  Whole-line vertical visibility is enforced: no partially clipped
+//!   glyph rows.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -41,6 +42,8 @@ use tze_hud_scene::types::{
     FontFamily, RenderingPolicy, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
 };
 use wgpu::{Device, MultisampleState, Queue};
+
+use crate::overflow;
 
 // ─── TextRasterizer ───────────────────────────────────────────────────────────
 
@@ -186,10 +189,45 @@ impl TextRasterizer {
         // Items without outline produce 1 TextArea each.
         // We build all Buffers first, then construct TextArea references.
 
+        // Phase 0 (hud-5jbra.3): precompute ellipsis-truncated text strings for
+        // items with `overflow == Ellipsis`.  This must happen before the buffer-
+        // build phase because truncation calls `font_system` for measurement, and
+        // we cannot borrow `font_system` twice in the same expression.
+        //
+        // For Clip items the entry is `None` (use `item.text` directly).
+        // For Ellipsis items the entry is `Some(truncated_text_string)`.
+        let truncated_texts: Vec<Option<String>> = items
+            .iter()
+            .map(|item| {
+                if item.overflow != TextOverflow::Ellipsis {
+                    return None;
+                }
+                let line_height = item.font_size_px * 1.4;
+                let family = match item.font_family {
+                    FontFamily::SystemSansSerif => Family::SansSerif,
+                    FontFamily::SystemMonospace => Family::Monospace,
+                    FontFamily::SystemSerif => Family::Serif,
+                };
+                let weight = Weight(item.font_weight.clamp(100, 900));
+                let base_attrs = Attrs::new().family(family).weight(weight);
+                let result = overflow::truncate_for_ellipsis(
+                    &item.text,
+                    base_attrs,
+                    item.bounds_width,
+                    item.bounds_height,
+                    item.font_size_px,
+                    line_height,
+                    &mut self.font_system,
+                );
+                Some(result.text)
+            })
+            .collect();
+
         // Phase 1: build one Buffer per item (shared by all outline + fill passes).
         let buffers: Vec<Buffer> = items
             .iter()
-            .map(|item| {
+            .zip(truncated_texts.iter())
+            .map(|(item, truncated)| {
                 let line_height = item.font_size_px * 1.4;
                 let mut buf = Buffer::new(
                     &mut self.font_system,
@@ -211,24 +249,42 @@ impl TextRasterizer {
                 let weight = Weight(item.font_weight.clamp(100, 900));
                 let base_attrs = Attrs::new().family(family).weight(weight);
 
+                // Use the pre-truncated text when overflow == Ellipsis; otherwise use item.text.
+                let effective_text: &str = truncated.as_deref().unwrap_or(&item.text);
+
                 if !item.styled_runs.is_empty() {
                     // Phase-1 markdown styled-run path (hud-5jbra.2).
                     //
                     // `styled_runs` carry per-span weight, italic, monospace, and
                     // optional color from the parse cache.  We build `(text_slice,
                     // Attrs)` pairs and call `set_rich_text` once — zero re-parse cost.
-                    let spans = styled_run_spans(
-                        &item.text,
-                        &item.styled_runs,
-                        base_attrs,
-                        item.font_family,
-                    );
-                    buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
+                    //
+                    // When ellipsis truncation was applied, the truncated text is a
+                    // plain-text prefix + "…"; we fall back to set_text for it because
+                    // the original styled_runs byte offsets are no longer valid against
+                    // the truncated string.
+                    if truncated.is_some() {
+                        // Ellipsis path: use the pre-truncated plain text.
+                        buf.set_text(
+                            &mut self.font_system,
+                            effective_text,
+                            base_attrs,
+                            Shaping::Basic,
+                        );
+                    } else {
+                        let spans = styled_run_spans(
+                            &item.text,
+                            &item.styled_runs,
+                            base_attrs,
+                            item.font_family,
+                        );
+                        buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
+                    }
                 } else if item.color_runs.is_empty() {
                     // Fast path: no inline runs — use uniform base color.
                     buf.set_text(
                         &mut self.font_system,
-                        &item.text,
+                        effective_text,
                         base_attrs,
                         Shaping::Basic,
                     );
@@ -246,8 +302,21 @@ impl TextRasterizer {
                     // `default_color` on TextArea acts as the fallback for glyphs
                     // without a color_opt set, so base_attrs carries no color_opt and
                     // run attrs carry explicit Color values.
-                    let spans = color_run_spans(&item.text, &item.color_runs, base_attrs);
-                    buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
+                    //
+                    // When ellipsis truncation was applied, the color_runs may no
+                    // longer be valid against the truncated text — fall back to
+                    // plain set_text for the truncated case.
+                    if truncated.is_some() {
+                        buf.set_text(
+                            &mut self.font_system,
+                            effective_text,
+                            base_attrs,
+                            Shaping::Basic,
+                        );
+                    } else {
+                        let spans = color_run_spans(&item.text, &item.color_runs, base_attrs);
+                        buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
+                    }
                 }
 
                 // Apply text alignment to all lines in the buffer.

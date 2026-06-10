@@ -3966,6 +3966,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "glyphon",
+ "proptest",
  "resvg",
  "statig",
  "thiserror 2.0.18",
@@ -3976,6 +3977,7 @@ dependencies = [
  "tze_hud_scene",
  "tze_hud_telemetry",
  "tze_hud_widget",
+ "unicode-segmentation",
  "wgpu",
  "winit",
 ]
