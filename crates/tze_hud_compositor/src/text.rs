@@ -32,7 +32,7 @@
 //!   fits.  Whole-line vertical visibility is enforced: no partially clipped
 //!   glyph rows.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
@@ -43,7 +43,155 @@ use tze_hud_scene::types::{
 };
 use wgpu::{Device, MultisampleState, Queue};
 
-use crate::overflow;
+use crate::overflow::{self, TruncationResult};
+
+// ─── TruncationCache ─────────────────────────────────────────────────────────
+
+/// Cache key for one truncation computation.
+///
+/// Keyed on `(content_hash, bounds_width, bounds_height, font_size_px,
+/// font_family, font_weight)`.  Float fields are stored as IEEE 754 bit
+/// patterns (endian-stable because the process never crosses a machine
+/// boundary) so they are `Eq + Hash` without lossy rounding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct TruncationKey {
+    /// BLAKE3 hash of the content string (32 bytes).
+    content_hash: [u8; 32],
+    /// `bounds_width` as IEEE 754 bits.
+    bounds_width_bits: u32,
+    /// `bounds_height` as IEEE 754 bits.
+    bounds_height_bits: u32,
+    /// `font_size_px` as IEEE 754 bits.
+    font_size_px_bits: u32,
+    /// Font family discriminant (SansSerif=0, Monospace=1, Serif=2).
+    font_family: u8,
+    /// CSS font weight (100–900).
+    font_weight: u16,
+}
+
+impl TruncationKey {
+    fn new(
+        content: &str,
+        bounds_width: f32,
+        bounds_height: f32,
+        font_size_px: f32,
+        font_family: FontFamily,
+        font_weight: u16,
+    ) -> Self {
+        Self {
+            content_hash: *blake3::hash(content.as_bytes()).as_bytes(),
+            bounds_width_bits: bounds_width.to_bits(),
+            bounds_height_bits: bounds_height.to_bits(),
+            font_size_px_bits: font_size_px.to_bits(),
+            font_family: match font_family {
+                FontFamily::SystemSansSerif => 0,
+                FontFamily::SystemMonospace => 1,
+                FontFamily::SystemSerif => 2,
+            },
+            font_weight,
+        }
+    }
+}
+
+/// Content-addressed cache of [`TruncationResult`] values.
+///
+/// Keyed on `(content_hash, bounds_width, bounds_height, font_size_px,
+/// font_family, font_weight)`.  The cache is populated outside the per-frame
+/// pipeline by [`TruncationCache::prime`] and looked up in O(1) on the frame
+/// path via [`TruncationCache::get_by_key`].
+///
+/// This enforces the "stable-shape-caching" contract from RFC 0013 §3.4 and
+/// §4.2, Phase-1 design §3: truncation is called only when content or geometry
+/// changes — never on every frame.
+///
+/// Mirrors [`crate::markdown::MarkdownCache`] in structure and ownership model.
+#[derive(Default)]
+pub(crate) struct TruncationCache {
+    entries: HashMap<TruncationKey, TruncationResult>,
+}
+
+impl TruncationCache {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of cached entries.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if no entries are cached.
+    #[inline]
+    #[allow(dead_code)] // used in tests; companion to len()
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Look up a cached truncation result.  Returns `None` on a cache miss.
+    ///
+    /// O(1) hash-map lookup; no shaping, no hashing of the content string.
+    /// Callers on the frame path must pre-compute the key via [`TruncationKey::new`]
+    /// and call [`TruncationCache::get_by_key`].
+    #[inline]
+    pub(crate) fn get_by_key(&self, key: &TruncationKey) -> Option<&TruncationResult> {
+        self.entries.get(key)
+    }
+
+    /// Compute and cache the truncation result if not already present.
+    ///
+    /// Returns a reference to the cached result.  Calling this twice for the
+    /// same key is a no-op after the first call (same content + same geometry
+    /// → same result).
+    ///
+    /// Call this at content-commit time, **not** on the frame path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prime<'a>(
+        &'a mut self,
+        key: TruncationKey,
+        content: &str,
+        bounds_width: f32,
+        bounds_height: f32,
+        font_size_px: f32,
+        font_family: FontFamily,
+        font_weight: u16,
+        font_system: &mut FontSystem,
+    ) -> &'a TruncationResult {
+        self.entries.entry(key).or_insert_with(|| {
+            let family = match font_family {
+                FontFamily::SystemSansSerif => Family::SansSerif,
+                FontFamily::SystemMonospace => Family::Monospace,
+                FontFamily::SystemSerif => Family::Serif,
+            };
+            let weight = Weight(font_weight.clamp(100, 900));
+            let base_attrs = Attrs::new().family(family).weight(weight);
+            let line_height = font_size_px * 1.4;
+            overflow::truncate_for_ellipsis(
+                content,
+                base_attrs,
+                bounds_width,
+                bounds_height,
+                font_size_px,
+                line_height,
+                font_system,
+            )
+        })
+    }
+
+    /// Evict all entries whose key is not in `live_keys`.
+    ///
+    /// Call this after priming to keep the cache bounded to the live node set.
+    pub(crate) fn evict_except(&mut self, live_keys: &[TruncationKey]) {
+        let keep: HashSet<TruncationKey> = live_keys.iter().copied().collect();
+        self.entries.retain(|k, _| keep.contains(k));
+    }
+
+    /// Drop all cached entries.  Used when token map changes and font metrics
+    /// may shift (font fallback / substitution may change after `set_token_map`).
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
 
 // ─── TextRasterizer ───────────────────────────────────────────────────────────
 
@@ -65,6 +213,17 @@ pub struct TextRasterizer {
     /// The ID is the raw 32-byte BLAKE3 digest (`ResourceId` wire form) of
     /// the font bytes, matching the key used by `tze_hud_resource::FontBytesStore`.
     loaded_font_ids: HashSet<[u8; 32]>,
+    /// Truncation result cache for `TextOverflow::Ellipsis` items.
+    ///
+    /// Keyed on `(content_hash, bounds_width, bounds_height, font_size_px,
+    /// font_family, font_weight)`.  Populated outside the frame loop by
+    /// [`TextRasterizer::prime_truncation_cache`]; the frame path looks up
+    /// pre-computed results in O(1) via [`TruncationCache::get_by_key`].
+    ///
+    /// This satisfies the Phase-1 stable-shape-caching contract (RFC 0013
+    /// §3.4, §4.2): `truncate_for_ellipsis` is called exactly once per
+    /// content/geometry change, never on every frame.
+    pub(crate) truncation_cache: TruncationCache,
 }
 
 impl TextRasterizer {
@@ -87,6 +246,7 @@ impl TextRasterizer {
             atlas,
             renderer,
             loaded_font_ids: HashSet::new(),
+            truncation_cache: TruncationCache::new(),
         }
     }
 
@@ -155,6 +315,44 @@ impl TextRasterizer {
         self.viewport.update(queue, Resolution { width, height });
     }
 
+    /// Prime the truncation cache for all `TextOverflow::Ellipsis` items in `items`.
+    ///
+    /// Must be called **outside the per-frame pipeline** (at content-commit time
+    /// or on geometry change), never inside `prepare_text_items`.  After this
+    /// call, the frame path resolves each Ellipsis item in O(1) via
+    /// `TruncationCache::get_by_key`.
+    ///
+    /// Returns the set of live [`TruncationKey`]s so the caller can evict stale
+    /// entries with [`TruncationCache::evict_except`].
+    pub(crate) fn prime_truncation_cache(&mut self, items: &[TextItem]) -> Vec<TruncationKey> {
+        let mut live_keys: Vec<TruncationKey> = Vec::new();
+        for item in items {
+            if item.overflow != TextOverflow::Ellipsis {
+                continue;
+            }
+            let key = TruncationKey::new(
+                &item.text,
+                item.bounds_width,
+                item.bounds_height,
+                item.font_size_px,
+                item.font_family,
+                item.font_weight,
+            );
+            live_keys.push(key);
+            self.truncation_cache.prime(
+                key,
+                &item.text,
+                item.bounds_width,
+                item.bounds_height,
+                item.font_size_px,
+                item.font_family,
+                item.font_weight,
+                &mut self.font_system,
+            );
+        }
+        live_keys
+    }
+
     /// Prepare text areas for the upcoming render pass.
     ///
     /// Collects all `TextItem`s, builds glyphon `Buffer`s, and calls
@@ -189,37 +387,69 @@ impl TextRasterizer {
         // Items without outline produce 1 TextArea each.
         // We build all Buffers first, then construct TextArea references.
 
-        // Phase 0 (hud-5jbra.3): precompute ellipsis-truncated text strings for
-        // items with `overflow == Ellipsis`.  This must happen before the buffer-
-        // build phase because truncation calls `font_system` for measurement, and
-        // we cannot borrow `font_system` twice in the same expression.
+        // Phase 0 (hud-5jbra.3 / hud-wgq7j): resolve ellipsis-truncated text
+        // strings from the truncation cache.
+        //
+        // The cache is primed outside the frame loop by `prime_truncation_cache`
+        // (called from `Compositor::prime_truncation_cache` gated on scene.version).
+        // On a warm path (after at least one commit), a cache hit is one BLAKE3
+        // hash to reconstruct the key plus one HashMap lookup — zero shaping work.
+        //
+        // On a cache miss (e.g. very first frame before any commit, or a newly
+        // added item whose geometry was not yet in the cache), we fall back to
+        // calling `truncate_for_ellipsis` inline to avoid dropped glyphs.  This
+        // fallback also populates the cache so the next frame is free.
         //
         // For Clip items the entry is `None` (use `item.text` directly).
         // For Ellipsis items the entry is `Some(truncated_text_string)`.
-        let truncated_texts: Vec<Option<String>> = items
+        //
+        // Two-pass structure: we first build all keys and prime any misses
+        // (requiring &mut self.truncation_cache + &mut self.font_system), then
+        // do the final HashMap lookup pass.  This avoids interleaving mutable
+        // and immutable borrows of the same struct fields inside a single closure.
+        let keys: Vec<Option<TruncationKey>> = items
             .iter()
             .map(|item| {
                 if item.overflow != TextOverflow::Ellipsis {
                     return None;
                 }
-                let line_height = item.font_size_px * 1.4;
-                let family = match item.font_family {
-                    FontFamily::SystemSansSerif => Family::SansSerif,
-                    FontFamily::SystemMonospace => Family::Monospace,
-                    FontFamily::SystemSerif => Family::Serif,
-                };
-                let weight = Weight(item.font_weight.clamp(100, 900));
-                let base_attrs = Attrs::new().family(family).weight(weight);
-                let result = overflow::truncate_for_ellipsis(
+                Some(TruncationKey::new(
                     &item.text,
-                    base_attrs,
                     item.bounds_width,
                     item.bounds_height,
                     item.font_size_px,
-                    line_height,
+                    item.font_family,
+                    item.font_weight,
+                ))
+            })
+            .collect();
+
+        // Pass 1: prime any cache misses.  Misses are uncommon (first frame or
+        // newly-added items); hits are no-ops via `entry().or_insert_with`.
+        for (item, key_opt) in items.iter().zip(keys.iter()) {
+            if let Some(key) = key_opt {
+                self.truncation_cache.prime(
+                    *key,
+                    &item.text,
+                    item.bounds_width,
+                    item.bounds_height,
+                    item.font_size_px,
+                    item.font_family,
+                    item.font_weight,
                     &mut self.font_system,
                 );
-                Some(result.text)
+            }
+        }
+
+        // Pass 2: collect final truncated strings.  All Ellipsis entries are now
+        // in the cache; `get_by_key` will not return None for any Ellipsis item.
+        let truncated_texts: Vec<Option<String>> = keys
+            .iter()
+            .map(|key_opt| {
+                key_opt
+                    .as_ref()
+                    .and_then(|k| self.truncation_cache.get_by_key(k))
+                    .map(|r| r.text.clone())
             })
             .collect();
 
@@ -2159,6 +2389,252 @@ mod tests {
         assert_eq!(
             reconstructed, text,
             "spans must reconstruct the original text exactly"
+        );
+    }
+
+    // ── TruncationCache tests (hud-wgq7j) ────────────────────────────────────
+    //
+    // These tests verify the stable-shape-caching contract: `truncate_for_ellipsis`
+    // is called exactly once per content/geometry change and zero times on
+    // subsequent frames with the same scene.
+
+    /// Cache hit for the same (content, geometry) pair is guaranteed after prime().
+    ///
+    /// This is the key invariant: zero truncation work per frame on unchanged
+    /// content — mirroring `cache_hit_after_prime` in `markdown.rs`.
+    #[test]
+    fn truncation_cache_hit_after_prime() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        let content =
+            "This is a long sentence that will definitely need truncation at narrow widths.";
+        let bounds_w = 80.0_f32;
+        let bounds_h = 50.0_f32;
+        let font_size = 16.0_f32;
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+
+        let key = TruncationKey::new(content, bounds_w, bounds_h, font_size, family, weight);
+
+        // Prime: first call computes truncation.
+        let first = cache
+            .prime(
+                key, content, bounds_w, bounds_h, font_size, family, weight, &mut fs,
+            )
+            .clone();
+
+        // Second call with identical key: must hit the cache (no re-shaping).
+        let second = cache
+            .prime(
+                key, content, bounds_w, bounds_h, font_size, family, weight, &mut fs,
+            )
+            .clone();
+
+        assert_eq!(
+            first, second,
+            "cached truncation result must be identical to the computed result"
+        );
+        assert_eq!(
+            cache.len(),
+            1,
+            "only one cache entry for the same (content, geometry) pair"
+        );
+    }
+
+    /// Different geometry produces a separate cache entry.
+    #[test]
+    fn truncation_cache_different_geometry_different_entry() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        let content = "Hello world this is a somewhat long string";
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+        let font_size = 16.0_f32;
+
+        let key_narrow = TruncationKey::new(content, 60.0, 50.0, font_size, family, weight);
+        let key_wide = TruncationKey::new(content, 300.0, 50.0, font_size, family, weight);
+
+        cache.prime(
+            key_narrow, content, 60.0, 50.0, font_size, family, weight, &mut fs,
+        );
+        cache.prime(
+            key_wide, content, 300.0, 50.0, font_size, family, weight, &mut fs,
+        );
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "two distinct geometries → two cache entries"
+        );
+
+        // The wide result should not be truncated; the narrow one should be.
+        let narrow_result = cache
+            .get_by_key(&key_narrow)
+            .expect("narrow must be cached");
+        let wide_result = cache.get_by_key(&key_wide).expect("wide must be cached");
+        assert!(
+            wide_result.text.len() >= narrow_result.text.len(),
+            "wider bounds must produce an equal-or-longer result"
+        );
+    }
+
+    /// get_by_key returns None for a key that has not been primed.
+    #[test]
+    fn truncation_cache_miss_before_prime() {
+        let cache = TruncationCache::new();
+        let key = TruncationKey::new("text", 100.0, 50.0, 16.0, FontFamily::SystemSansSerif, 400);
+        assert!(
+            cache.get_by_key(&key).is_none(),
+            "cache must be empty before prime"
+        );
+    }
+
+    /// Zero-truncation-work invariant: after priming, a second `prime` call
+    /// must not call `truncate_for_ellipsis` again (proven via cache.len()
+    /// staying at 1, not 2, after the second call with the same key).
+    ///
+    /// This is the per-frame zero-cost assertion: once primed, the frame path
+    /// pays only O(1) for a lookup, not O(n) for shaping.
+    #[test]
+    fn truncation_cache_zero_work_on_unchanged_scene() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        let content = "Transcript line that is long enough to require ellipsis truncation here";
+        let bounds_w = 120.0_f32;
+        let bounds_h = 30.0_f32;
+        let font_size = 14.0_f32;
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+
+        let key = TruncationKey::new(content, bounds_w, bounds_h, font_size, family, weight);
+
+        // Frame 1: cold start — cache miss, computes and stores result.
+        let frame1_result = cache
+            .prime(
+                key, content, bounds_w, bounds_h, font_size, family, weight, &mut fs,
+            )
+            .clone();
+
+        // Frame 2+: unchanged scene — cache hit, zero shaping work.
+        // We call prime() 9 more times to simulate 9 subsequent frames.
+        for _ in 0..9 {
+            let frame_n_result = cache
+                .prime(
+                    key, content, bounds_w, bounds_h, font_size, family, weight, &mut fs,
+                )
+                .clone();
+            assert_eq!(
+                frame1_result, frame_n_result,
+                "repeated prime() with unchanged scene must return the cached result"
+            );
+        }
+
+        // The cache still holds exactly one entry — no spurious re-insertions.
+        assert_eq!(
+            cache.len(),
+            1,
+            "cache must hold exactly one entry for one (content, geometry) pair"
+        );
+    }
+
+    /// evict_except removes entries not in the live set.
+    #[test]
+    fn truncation_cache_evict_removes_stale_entries() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+        let font_size = 14.0_f32;
+
+        let content_a = "Keep this line";
+        let content_b = "Evict this line";
+
+        let key_a = TruncationKey::new(content_a, 120.0, 30.0, font_size, family, weight);
+        let key_b = TruncationKey::new(content_b, 120.0, 30.0, font_size, family, weight);
+
+        cache.prime(
+            key_a, content_a, 120.0, 30.0, font_size, family, weight, &mut fs,
+        );
+        cache.prime(
+            key_b, content_b, 120.0, 30.0, font_size, family, weight, &mut fs,
+        );
+        assert_eq!(cache.len(), 2);
+
+        cache.evict_except(&[key_a]);
+
+        assert_eq!(cache.len(), 1, "evict_except must remove the stale entry");
+        assert!(
+            cache.get_by_key(&key_a).is_some(),
+            "kept entry must remain after eviction"
+        );
+        assert!(
+            cache.get_by_key(&key_b).is_none(),
+            "evicted entry must be gone"
+        );
+    }
+
+    /// clear() empties the cache entirely.
+    #[test]
+    fn truncation_cache_clear_empties_all_entries() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+        let font_size = 14.0_f32;
+
+        for i in 0..3 {
+            let content = format!("Content line {i}");
+            let key = TruncationKey::new(&content, 120.0, 30.0, font_size, family, weight);
+            cache.prime(
+                key, &content, 120.0, 30.0, font_size, family, weight, &mut fs,
+            );
+        }
+        assert_eq!(cache.len(), 3);
+
+        cache.clear();
+        assert_eq!(cache.len(), 0, "clear() must empty the cache");
+        assert!(
+            cache.is_empty(),
+            "is_empty() must return true after clear()"
+        );
+    }
+
+    /// Frame-path lookup is O(1): get_by_key with a pre-computed key returns
+    /// the result without touching font_system.
+    #[test]
+    fn truncation_cache_frame_path_lookup_is_o1() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        let content = "Short text for O(1) lookup test";
+        let key = TruncationKey::new(content, 200.0, 50.0, 16.0, FontFamily::SystemSansSerif, 400);
+
+        // Prime once (commit-time cost).
+        cache.prime(
+            key,
+            content,
+            200.0,
+            50.0,
+            16.0,
+            FontFamily::SystemSansSerif,
+            400,
+            &mut fs,
+        );
+
+        // Frame-path: get_by_key must return Some without touching font_system.
+        let result = cache.get_by_key(&key);
+        assert!(result.is_some(), "frame-path lookup must hit after prime");
+
+        // Result must not be truncated for a 200px-wide box and short text.
+        let result = result.unwrap();
+        assert!(
+            result.text.contains("Short text"),
+            "short text must pass through unchanged"
         );
     }
 }

@@ -1101,6 +1101,12 @@ pub struct Compositor {
     /// scene has actually changed.  Initialized to `u64::MAX` so the first
     /// frame always primes.
     markdown_cache_scene_version: u64,
+    /// The `SceneGraph::version` value at the last `prime_truncation_cache` call.
+    ///
+    /// `prime_truncation_cache` is gated on this value so it only runs when the
+    /// scene has actually changed.  Initialized to `u64::MAX` so the first
+    /// frame always primes.
+    truncation_cache_scene_version: u64,
     /// Per-surface video state machines (v2 media plane, E26 / B11).
     ///
     /// Keyed by the `SceneId` carried in `ZoneContent::VideoSurfaceRef`.
@@ -1226,6 +1232,7 @@ impl Compositor {
             markdown_cache: crate::markdown::MarkdownCache::new(),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
+            truncation_cache_scene_version: u64::MAX,
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -1490,6 +1497,7 @@ impl Compositor {
             markdown_cache: crate::markdown::MarkdownCache::new(),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
+            truncation_cache_scene_version: u64::MAX,
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -1770,6 +1778,15 @@ impl Compositor {
         // has not changed since the last prime.
         self.markdown_cache_scene_version = u64::MAX;
 
+        // Clear the truncation cache: a token-map change can alter font metrics
+        // (monospace vs. sans-serif substitution, heading-scale changes) which
+        // affects the shaped width and thus the truncation point.  Re-prime
+        // unconditionally on the next frame.
+        if let Some(rasterizer) = &mut self.text_rasterizer {
+            rasterizer.truncation_cache.clear();
+        }
+        self.truncation_cache_scene_version = u64::MAX;
+
         self.token_map = map;
         // Token-substitution failures in ensure_icon_texture are tied to the
         // token map state, not to the SVG file on disk.  Clearing the negative
@@ -1820,6 +1837,73 @@ impl Compositor {
         live_keys.dedup();
         if self.markdown_cache.len() > live_keys.len() {
             self.markdown_cache.evict_except(&live_keys);
+        }
+    }
+
+    /// Prime the ellipsis-truncation cache for all `TextOverflow::Ellipsis` items
+    /// currently in the scene (hud-wgq7j).
+    ///
+    /// Must be called **at content-commit time** (when `scene.version` changes),
+    /// never on the per-frame render path.  The method is gated internally on
+    /// `scene.version` so repeated calls on unchanged scenes are no-ops.
+    ///
+    /// After this call, `prepare_text_items` resolves each Ellipsis item in O(1)
+    /// via `TruncationCache::get_by_key` — satisfying the "stable-shape-caching"
+    /// contract from RFC 0013 §3.4 and §4.2, Phase-1 design §3.
+    pub fn prime_truncation_cache(&mut self, scene: &SceneGraph) {
+        // Skip if the scene has not changed since we last primed.
+        if scene.version == self.truncation_cache_scene_version {
+            return;
+        }
+
+        // Build the set of TextItems with Ellipsis overflow that are currently
+        // reachable in the scene.  We need TextItem geometry, which is the same
+        // geometry produced by `collect_text_items_from_node`.  Rather than
+        // duplicating that traversal here, we ask each tile's node tree for its
+        // Ellipsis TextMarkdownNodes and reconstruct the same geometry that
+        // `collect_text_items_from_node` would compute.
+        //
+        // NOTE: the scene-version sentinel is updated only after confirming the
+        // rasterizer is available.  If we returned early here (rasterizer = None)
+        // while recording the version, subsequent frames would skip priming even
+        // once the rasterizer is initialized — until the scene changes again.
+        let rasterizer = match &mut self.text_rasterizer {
+            Some(r) => r,
+            None => return, // text renderer not yet initialized; retry next version change
+        };
+
+        // Record the version now that we know priming will proceed.
+        self.truncation_cache_scene_version = scene.version;
+
+        let mut live_items: Vec<crate::text::TextItem> = Vec::new();
+        for tile in scene.visible_tiles() {
+            let tile_x = tile.bounds.x;
+            let tile_y = tile.bounds.y;
+            if let Some(root_id) = tile.root_node {
+                collect_ellipsis_text_items_from_node(
+                    root_id,
+                    scene,
+                    tile_x,
+                    tile_y,
+                    &self.markdown_cache,
+                    &mut live_items,
+                );
+            }
+        }
+
+        let mut live_keys = rasterizer.prime_truncation_cache(&live_items);
+
+        // Evict stale truncation entries for nodes/geometry no longer in the scene.
+        //
+        // Deduplicate live_keys before the length comparison: duplicate scene
+        // items (same content + geometry) produce the same TruncationKey.
+        // Without dedup, `live_keys.len()` may exceed the number of distinct
+        // cache entries, causing the `len > live_keys.len()` condition to be
+        // false even when stale entries exist — a memory leak.
+        live_keys.sort_unstable();
+        live_keys.dedup();
+        if rasterizer.truncation_cache.len() > live_keys.len() {
+            rasterizer.truncation_cache.evict_except(&live_keys);
         }
     }
 
@@ -4085,6 +4169,9 @@ impl Compositor {
     /// single `CommandEncoder`.  The encoder is returned to the caller **before**
     /// `queue.submit` so that headless callers can append a `copy_to_buffer`
     /// command (which must precede submit).
+    // NOTE: collect_ellipsis_text_items_from_node is a free function below the
+    // impl block to avoid a mutable borrow conflict between self.text_rasterizer
+    // and self.markdown_cache inside prime_truncation_cache.
     ///
     /// # Parameters
     ///
@@ -4320,6 +4407,12 @@ impl Compositor {
         // parsed exactly once here; unchanged content hits the cache at O(1).
         self.prime_markdown_cache(scene);
 
+        // ── Phase-1 truncation cache prime (hud-wgq7j) ────────────────────────
+        // Must run after prime_markdown_cache (so markdown plain-text is cached
+        // and TextItem geometry is stable) and before render-encode stages.
+        // Gated on scene.version — no work on unchanged scenes.
+        self.prime_truncation_cache(scene);
+
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
         // Collect visible tiles, re-sorted with drag-z-order boost applied.
@@ -4511,6 +4604,9 @@ impl Compositor {
 
         // ── Phase-1 markdown cache prime (hud-5jbra.2) ───────────────────────
         self.prime_markdown_cache(scene);
+
+        // ── Phase-1 truncation cache prime (hud-wgq7j) ────────────────────────
+        self.prime_truncation_cache(scene);
 
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
@@ -7064,6 +7160,53 @@ impl Compositor {
         for child_id in &node.children {
             self.render_node(*child_id, tile, scene, vertices, textured_cmds, sw, sh);
         }
+    }
+}
+
+/// Collect [`TextItem`]s for all `TextOverflow::Ellipsis` nodes reachable from
+/// `node_id`, without scroll offset (prime-time geometry).
+///
+/// This is a free function (not a method) to avoid a split-borrow conflict in
+/// [`Compositor::prime_truncation_cache`], where `self.text_rasterizer` is
+/// borrowed mutably while `self.markdown_cache` is borrowed immutably.
+///
+/// The geometry produced here is identical to what `collect_text_items_from_node`
+/// produces at scroll_x=0, scroll_y=0 (valid because truncation is geometry-
+/// dependent only on `bounds_width` / `bounds_height`, which are scroll-invariant).
+fn collect_ellipsis_text_items_from_node(
+    node_id: SceneId,
+    scene: &SceneGraph,
+    tile_x: f32,
+    tile_y: f32,
+    markdown_cache: &crate::markdown::MarkdownCache,
+    items: &mut Vec<TextItem>,
+) {
+    let node = match scene.nodes.get(&node_id) {
+        Some(n) => n,
+        None => return,
+    };
+
+    if let NodeData::TextMarkdown(tm) = &node.data {
+        if tm.overflow == tze_hud_scene::types::TextOverflow::Ellipsis {
+            let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
+            let item = if let Some(parsed) = markdown_cache.get_by_key(&content_key) {
+                TextItem::from_text_markdown_cached(tm, tile_x, tile_y, parsed)
+            } else {
+                TextItem::from_text_markdown_node(tm, tile_x, tile_y)
+            };
+            items.push(item);
+        }
+    }
+
+    for child_id in &node.children {
+        collect_ellipsis_text_items_from_node(
+            *child_id,
+            scene,
+            tile_x,
+            tile_y,
+            markdown_cache,
+            items,
+        );
     }
 }
 
