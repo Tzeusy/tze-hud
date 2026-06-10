@@ -1092,6 +1092,26 @@ struct WindowedRuntimeState {
     /// `INPUT_EVENTS` subscription.
     input_event_tx:
         Option<tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>>,
+    /// Delivery context (namespace, node_id_bytes) captured at the moment a
+    /// composer node loses focus (blur transition).
+    ///
+    /// When `InputProcessor::process_with_focus` processes a focus-lost event
+    /// for a composer region it calls `ComposerDraftManager::on_focus_lost()`,
+    /// which clears `focused_node` and stores the terminal draft batch in
+    /// `pending_flushed_batch`.  By the time `flush_composer_draft_at_settle`
+    /// runs later that same frame, `composer_focused_node()` already returns
+    /// `None` — so `composer_delivery_context()` cannot resolve the namespace
+    /// or node_id.  Without this field the pending batch would be silently
+    /// dropped, violating the §4.3 flush guarantee on blur.
+    ///
+    /// This field is written by the focus-transition handler immediately after
+    /// `process_with_focus` returns (while the namespace and node_id are still
+    /// available from the `FocusTransition`) and consumed by
+    /// `flush_composer_draft_at_settle` as a fallback delivery context.
+    ///
+    /// Cleared on focus-gain to prevent stale context from leaking across
+    /// focus boundaries.
+    pending_blur_delivery_context: Option<(String, [u8; 16])>,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -2115,6 +2135,10 @@ impl WinitApp {
                             source = ?ev.source,
                             "click-to-focus: focus gained"
                         );
+                        // A new focus-gain clears any stale blur delivery context
+                        // from a previous composer blur so it cannot leak across
+                        // focus boundaries.
+                        self.state.pending_blur_delivery_context = None;
                     }
                     if let Some((ev, ns)) = &transition.lost {
                         tracing::debug!(
@@ -2124,6 +2148,18 @@ impl WinitApp {
                             reason = ?ev.reason,
                             "click-to-focus: focus lost"
                         );
+                        // Capture the composer delivery context (namespace +
+                        // node_id) while both are still known.  If this blur
+                        // triggered a composer flush (InputProcessor stored a
+                        // pending_flushed_batch), composer_focused_node() is now
+                        // None, so composer_delivery_context() can no longer
+                        // resolve the context at flush time.  By stashing it here
+                        // we allow flush_composer_draft_at_settle to deliver the
+                        // terminal draft batch (§4.3 flush guarantee on blur).
+                        if let Some(node_id) = ev.node_id {
+                            self.state.pending_blur_delivery_context =
+                                Some((ns.clone(), *node_id.as_uuid().as_bytes()));
+                        }
                     }
                 }
                 if let Some(transition) = focus_transition {
@@ -2422,7 +2458,7 @@ impl WinitApp {
                 if let Some((namespace, node_id_bytes)) = self.composer_delivery_context() {
                     deliver_composer_batch(
                         &self.state.input_event_tx,
-                        &namespace,
+                        namespace,
                         &node_id_bytes,
                         b,
                     );
@@ -2516,7 +2552,7 @@ impl WinitApp {
                 if let Some((namespace, node_id_bytes)) = self.composer_delivery_context() {
                     deliver_composer_batch(
                         &self.state.input_event_tx,
-                        &namespace,
+                        namespace,
                         &node_id_bytes,
                         b,
                     );
@@ -2566,14 +2602,28 @@ impl WinitApp {
     /// as proto messages and broadcast on the `INPUT_EVENTS` channel to the
     /// owning adapter namespace.
     fn flush_composer_draft_at_settle(&mut self) {
-        // Snapshot the delivery context before flushing so that if the flush
-        // triggers a focus-lost clear the node_id is still valid.
-        let ctx = self.composer_delivery_context();
+        // Resolve delivery context.  Two cases:
+        //
+        // 1. Normal path (keystroke / timer settle): the composer node is still
+        //    focused, so composer_delivery_context() resolves namespace + node_id
+        //    from the live focus state.
+        //
+        // 2. Blur path: a focus-lost transition happened earlier this frame
+        //    (process_with_focus cleared focused_node and stored the terminal
+        //    batch in pending_flushed_batch).  composer_delivery_context()
+        //    returns None because focused_node is None.  We fall back to
+        //    pending_blur_delivery_context which was captured at blur time and
+        //    consume it here so it is not reused across frames.
+        //
+        // This two-path resolution upholds the §4.3 flush guarantee on blur.
+        let ctx = self
+            .composer_delivery_context()
+            .or_else(|| self.state.pending_blur_delivery_context.take());
         if let Some(batch) = self.state.input_processor.try_flush_composer_draft() {
             if let Some((namespace, node_id_bytes)) = ctx {
                 deliver_composer_batch(
                     &self.state.input_event_tx,
-                    &namespace,
+                    namespace,
                     &node_id_bytes,
                     batch,
                 );
@@ -2602,9 +2652,9 @@ impl WinitApp {
     /// Used by `dispatch_key_down_event`, `dispatch_character_event`, and
     /// `flush_composer_draft_at_settle` to supply the delivery context to
     /// `deliver_composer_batch`.
-    fn composer_delivery_context(&self) -> Option<(String, Vec<u8>)> {
+    fn composer_delivery_context(&self) -> Option<(String, [u8; 16])> {
         let node_id = self.state.input_processor.composer_focused_node()?;
-        let node_id_bytes = node_id.as_uuid().as_bytes().to_vec();
+        let node_id_bytes = *node_id.as_uuid().as_bytes();
 
         // The focus manager's active tab holds the authoritative FocusOwner.
         // For a composer region the owner is FocusOwner::Node { tile_id, .. };
@@ -3434,6 +3484,7 @@ impl WindowedRuntime {
             global_tokens: startup_compositor_tokens,
             element_repositioned_tx,
             input_event_tx,
+            pending_blur_delivery_context: None,
         };
 
         let mut app = WinitApp { state: app_state };
@@ -3877,7 +3928,7 @@ fn dispatch_keyboard_event(
 /// - `batch`: the coalesced draft batch to deliver.
 fn deliver_composer_batch(
     tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
-    namespace: &str,
+    namespace: String,
     node_id_bytes: &[u8],
     batch: tze_hud_input::DraftNotificationBatch,
 ) {
@@ -3894,8 +3945,15 @@ fn deliver_composer_batch(
     // transactional), each wrapped in an InputEnvelope.
     let mut events: Vec<InputEnvelope> = Vec::new();
 
+    // Destructure to take ownership of the text fields — avoids cloning.
+    let tze_hud_input::DraftNotificationBatch {
+        latest,
+        submission,
+        cancel,
+    } = batch;
+
     // 1. State-stream notification (UpdateComposerDisplay).
-    if let Some(ref notif) = batch.latest {
+    if let Some(notif) = latest {
         tracing::debug!(
             namespace = %namespace,
             text_len = notif.text.len(),
@@ -3908,7 +3966,7 @@ fn deliver_composer_batch(
             event: Some(InputEvent::ComposerDraftState(
                 tze_hud_protocol::proto::ComposerDraftStateEvent {
                     node_id: node_id_bytes.to_vec(),
-                    text: notif.text.clone(),
+                    text: notif.text,
                     cursor: notif.cursor as u64,
                     at_capacity: notif.at_capacity,
                     sequence: notif.sequence,
@@ -3918,7 +3976,7 @@ fn deliver_composer_batch(
     }
 
     // 2. Transactional submission.
-    if let Some(ref sub) = batch.submission {
+    if let Some(sub) = submission {
         tracing::debug!(
             namespace = %namespace,
             text_len = sub.text.len(),
@@ -3929,7 +3987,7 @@ fn deliver_composer_batch(
             event: Some(InputEvent::ComposerDraftSubmit(
                 tze_hud_protocol::proto::ComposerDraftSubmitEvent {
                     node_id: node_id_bytes.to_vec(),
-                    text: sub.text.clone(),
+                    text: sub.text,
                     sequence: sub.sequence,
                 },
             )),
@@ -3938,7 +3996,7 @@ fn deliver_composer_batch(
 
     // 3. Transactional cancel (mutually exclusive with submission per batch
     //    XOR semantics enforced by DraftScheduler).
-    if let Some(ref cancel) = batch.cancel {
+    if let Some(cancel) = cancel {
         tracing::debug!(
             namespace = %namespace,
             sequence = cancel.sequence,
@@ -3967,7 +4025,7 @@ fn deliver_composer_batch(
     // Broadcast to all session handler tasks; each one delivers only if the
     // namespace matches and INPUT_EVENTS is active. Errors (no receivers,
     // channel lagged) are silently ignored.
-    let _ = tx.send((namespace.to_string(), event_batch));
+    let _ = tx.send((namespace, event_batch));
 }
 
 /// Broadcast `FocusGainedEvent` and/or `FocusLostEvent` to the owning agents
@@ -6457,7 +6515,7 @@ redaction_style = "blank"
         let node_id_bytes = vec![0u8; 16];
 
         let batch = make_latest_batch("hello", 5, 1);
-        deliver_composer_batch(&tx_opt, "test-agent", &node_id_bytes, batch);
+        deliver_composer_batch(&tx_opt, "test-agent".to_string(), &node_id_bytes, batch);
 
         let (ns, ev_batch) = rx.try_recv().expect("event must be sent");
         assert_eq!(ns, "test-agent");
@@ -6486,7 +6544,7 @@ redaction_style = "blank"
         let node_id_bytes = vec![1u8; 16];
 
         let batch = make_submit_batch("send this", 42);
-        deliver_composer_batch(&tx_opt, "portal-agent", &node_id_bytes, batch);
+        deliver_composer_batch(&tx_opt, "portal-agent".to_string(), &node_id_bytes, batch);
 
         let (ns, ev_batch) = rx.try_recv().expect("event must be sent");
         assert_eq!(ns, "portal-agent");
@@ -6512,7 +6570,7 @@ redaction_style = "blank"
         let node_id_bytes = vec![2u8; 16];
 
         let batch = make_cancel_batch(7);
-        deliver_composer_batch(&tx_opt, "test-agent", &node_id_bytes, batch);
+        deliver_composer_batch(&tx_opt, "test-agent".to_string(), &node_id_bytes, batch);
 
         let (ns, ev_batch) = rx.try_recv().expect("event must be sent");
         assert_eq!(ns, "test-agent");
@@ -6561,7 +6619,7 @@ redaction_style = "blank"
             sequence: 4,
         });
 
-        deliver_composer_batch(&tx_opt, "test-agent", &node_id_bytes, batch1);
+        deliver_composer_batch(&tx_opt, "test-agent".to_string(), &node_id_bytes, batch1);
 
         let (_ns, batch_out1) = rx.try_recv().expect("batch 1 must be sent");
         assert_eq!(
@@ -6596,7 +6654,7 @@ redaction_style = "blank"
             sequence: 5,
         });
 
-        deliver_composer_batch(&tx_opt, "test-agent", &node_id_bytes, batch2);
+        deliver_composer_batch(&tx_opt, "test-agent".to_string(), &node_id_bytes, batch2);
 
         let (_ns, batch_out2) = rx
             .try_recv()
@@ -6623,7 +6681,7 @@ redaction_style = "blank"
     fn deliver_composer_batch_no_op_when_tx_is_none() {
         let batch = make_latest_batch("text", 4, 1);
         // Should not panic
-        deliver_composer_batch(&None, "test-agent", &[0u8; 16], batch);
+        deliver_composer_batch(&None, "test-agent".to_string(), &[0u8; 16], batch);
     }
 
     /// An empty batch produces no broadcast.
@@ -6635,7 +6693,7 @@ redaction_style = "blank"
 
         deliver_composer_batch(
             &tx_opt,
-            "test-agent",
+            "test-agent".to_string(),
             &[0u8; 16],
             tze_hud_input::DraftNotificationBatch::new(),
         );
@@ -6665,7 +6723,7 @@ redaction_style = "blank"
             text: "msg".to_string(),
             sequence: 10,
         });
-        deliver_composer_batch(&tx_opt, "agent", &node_id_bytes, submit_batch);
+        deliver_composer_batch(&tx_opt, "agent".to_string(), &node_id_bytes, submit_batch);
 
         let mut clear_batch = tze_hud_input::DraftNotificationBatch::new();
         clear_batch.coalesce_state(tze_hud_input::DraftStateNotification {
@@ -6675,7 +6733,7 @@ redaction_style = "blank"
             at_capacity: false,
             sequence: 11,
         });
-        deliver_composer_batch(&tx_opt, "agent", &node_id_bytes, clear_batch);
+        deliver_composer_batch(&tx_opt, "agent".to_string(), &node_id_bytes, clear_batch);
 
         let (_ns, sub_out) = rx.try_recv().expect("submission event");
         let (_ns, clear_out) = rx.try_recv().expect("clear event");
