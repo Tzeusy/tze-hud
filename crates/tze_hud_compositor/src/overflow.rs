@@ -1930,4 +1930,322 @@ mod tests {
         assert_eq!(result.text, "");
         assert!(result.was_truncated);
     }
+
+    // ── Task 3.2: property-based tests for truncate_tail_anchored (hud-347b4) ──
+    //
+    // These proptests verify the four core invariants of tail-anchored truncation:
+    //
+    //   1. Tail content always visible — the LAST line(s) of the input always
+    //      appear in the output when truncation occurs.
+    //   2. Leading ellipsis — when leading lines are omitted, the result starts
+    //      with ELLIPSIS (the omission indicator for tail-anchored display).
+    //   3. Result is strictly shorter — truncated result is shorter than the
+    //      original text plus the ELLIPSIS prefix overhead.
+    //   4. Grapheme-cluster integrity — result is valid UTF-8 and no grapheme
+    //      cluster is split at the truncation boundary.
+    //
+    // A fifth proptest exercises RTL/bidi inputs to guard the run_logical_start
+    // path (hud-676 semantics) under tail-anchored truncation.
+    //
+    // Configuration mirrors the existing proptest! blocks above: 32 cases, same
+    // source_file annotation.  FontSystem is not Send so each closure owns its
+    // own instance.
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 32,
+            source_file: Some("crates/tze_hud_compositor/src/overflow.rs"),
+            ..proptest::test_runner::Config::default()
+        })]
+
+        /// Invariant 1 — Tail content is always visible.
+        ///
+        /// For any multi-line input that gets truncated, the LAST line of the
+        /// original text must appear in the result.  The newest content (tail)
+        /// is the whole point of tail-anchored mode.
+        #[test]
+        fn proptest_tail_anchored_last_line_always_visible(
+            n_lines in 3usize..8usize,
+            width_px in 200.0_f32..600.0_f32,
+        ) {
+            let mut fs = make_font_system();
+            let font_size = 14.0_f32;
+            let line_h = font_size * 1.4;
+            // Build `n_lines` lines; the last one is the "newest" content we guard.
+            let lines: Vec<String> = (0..n_lines)
+                .map(|i| format!("Content line number {i}"))
+                .collect();
+            let last_line = lines.last().unwrap().clone();
+            let text = lines.join("\n");
+
+            // Constrain height so that at most n_lines-1 lines fit — forcing truncation.
+            let bounds_h = line_h * ((n_lines - 1) as f32) + 1.0;
+
+            let result = truncate_tail_anchored(
+                &text, base_attrs(), width_px, bounds_h, font_size, line_h, &mut fs,
+            );
+
+            if result.was_truncated {
+                prop_assert!(
+                    result.text.contains(&last_line),
+                    "tail-anchored: last line must be visible after truncation; \
+                     last_line={last_line:?} result={:?}",
+                    result.text,
+                );
+            }
+        }
+
+        /// Invariant 2 — Leading ellipsis when leading lines are omitted.
+        ///
+        /// Whenever `truncate_tail_anchored` sets `was_truncated = true` due to
+        /// vertical overflow (more lines than fit), the result must START with
+        /// ELLIPSIS — the signal that leading content has been omitted.
+        ///
+        /// This is the mirror of the head-anchored invariant (result ends with
+        /// ELLIPSIS); for tail-anchored the omission indicator is at the front.
+        #[test]
+        fn proptest_tail_anchored_truncated_starts_with_ellipsis(
+            n_lines in 3usize..8usize,
+            width_px in 200.0_f32..600.0_f32,
+        ) {
+            let mut fs = make_font_system();
+            let font_size = 14.0_f32;
+            let line_h = font_size * 1.4;
+            let lines: Vec<String> = (0..n_lines)
+                .map(|i| format!("Line {i} of streamed transcript content"))
+                .collect();
+            let text = lines.join("\n");
+
+            // Force truncation: only n_lines-1 lines fit vertically.
+            let bounds_h = line_h * ((n_lines - 1) as f32) + 1.0;
+
+            let result = truncate_tail_anchored(
+                &text, base_attrs(), width_px, bounds_h, font_size, line_h, &mut fs,
+            );
+
+            if result.was_truncated {
+                prop_assert!(
+                    result.text.starts_with(ELLIPSIS),
+                    "tail-anchored truncated result must START with '…' (leading-ellipsis \
+                     omission indicator); was_truncated=true but result does not begin with \
+                     ELLIPSIS; n_lines={n_lines} width={width_px} result={:?}",
+                    result.text,
+                );
+            }
+        }
+
+        /// Invariant 3 — Result is strictly shorter than original + ellipsis overhead.
+        ///
+        /// When truncation occurs the result's byte length must be strictly less
+        /// than `original.len() + ELLIPSIS.len() + 1` (the "+1" accounts for the
+        /// newline separator between the ellipsis line and the visible tail).
+        /// If the result were as long or longer the caller would have gained nothing
+        /// from truncation.
+        #[test]
+        fn proptest_tail_anchored_result_shorter_when_truncated(
+            n_lines in 3usize..8usize,
+            width_px in 200.0_f32..600.0_f32,
+        ) {
+            let mut fs = make_font_system();
+            let font_size = 14.0_f32;
+            let line_h = font_size * 1.4;
+            let lines: Vec<String> = (0..n_lines)
+                .map(|i| format!("Transcript line {i} with some content"))
+                .collect();
+            let text = lines.join("\n");
+
+            // Force truncation: only n_lines-1 lines fit vertically.
+            let bounds_h = line_h * ((n_lines - 1) as f32) + 1.0;
+
+            let result = truncate_tail_anchored(
+                &text, base_attrs(), width_px, bounds_h, font_size, line_h, &mut fs,
+            );
+
+            if result.was_truncated {
+                // The result is the ELLIPSIS header + "\n" + visible tail.
+                // Even with the overhead it must be shorter than the original.
+                let overhead = ELLIPSIS.len() + 1; // "…\n"
+                prop_assert!(
+                    result.text.len() < text.len() + overhead,
+                    "tail-anchored truncated result must be shorter than original + ellipsis overhead; \
+                     result.len()={} original.len()={} overhead={overhead}; \
+                     n_lines={n_lines} width={width_px} result={:?}",
+                    result.text.len(), text.len(), result.text,
+                );
+            }
+        }
+
+        /// Invariant 4 — Grapheme-cluster integrity.
+        ///
+        /// The result must be valid UTF-8 and every grapheme cluster in the result
+        /// must be whole — no grapheme may begin with a combining codepoint
+        /// (which would indicate a split mid-cluster).  This mirrors the existing
+        /// `proptest_grapheme_fallback_valid_utf8_boundary` for the head-anchored
+        /// path and guards the same `truncate_line_to_ellipsis` code path reached
+        /// from the tail-anchored entry point.
+        ///
+        /// Uses multi-codepoint clusters (NFD "e\u{0301}" = 'é') as the stress input
+        /// so that any mid-codepoint split would produce a lone combining codepoint
+        /// as the first character of a grapheme.
+        #[test]
+        fn proptest_tail_anchored_grapheme_cluster_integrity(
+            repeat in 8usize..30usize,
+            width_px in 40.0_f32..120.0_f32,
+        ) {
+            let mut fs = make_font_system();
+            let font_size = 16.0_f32;
+            let line_h = 22.4_f32;
+
+            // Build a single long line of NFD "é" clusters (no word boundaries).
+            // NFD form: 'e' + combining acute (U+0301), 3 bytes per cluster ('e'=1, U+0301=2).
+            let cluster = "e\u{0301}";
+            let long_line = cluster.repeat(repeat);
+
+            // Wrap in a multi-line string so vertical truncation is guaranteed.
+            // Three copies separated by newlines ensure at least one line is dropped.
+            let text = format!("{long_line}\n{long_line}\n{long_line}");
+            let bounds_h = line_h * 1.5; // only ~1 line fits
+
+            let result = truncate_tail_anchored(
+                &text, base_attrs(), width_px, bounds_h, font_size, line_h, &mut fs,
+            );
+
+            // Must always be valid UTF-8.
+            prop_assert!(
+                std::str::from_utf8(result.text.as_bytes()).is_ok(),
+                "tail-anchored result is not valid UTF-8; result={:?}",
+                result.text,
+            );
+
+            // No grapheme in the result may start with a bare combining codepoint.
+            for g in result.text.graphemes(true) {
+                let has_lone_combining = g
+                    .chars()
+                    .next()
+                    .map(|c| (c as u32) >= 0x0300 && (c as u32) <= 0x036F)
+                    .unwrap_or(false);
+                prop_assert!(
+                    !has_lone_combining,
+                    "grapheme cluster boundary violated in tail-anchored result: \
+                     grapheme {g:?} starts with a combining codepoint — cluster was split; \
+                     repeat={repeat} width={width_px} result={:?}",
+                    result.text,
+                );
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 32,
+            source_file: Some("crates/tze_hud_compositor/src/overflow.rs"),
+            ..proptest::test_runner::Config::default()
+        })]
+
+        /// Invariant 5 — RTL/bidi logical-offset correctness (hud-676 semantics).
+        ///
+        /// `truncate_tail_anchored` uses the same `run_logical_start` helper as
+        /// the head-anchored path to resolve the byte start of each layout run.
+        /// For RTL runs, cosmic-text orders glyphs visually (highest logical byte
+        /// first), so `run_logical_start` must take `min(g.start)` not `glyphs[0].start`.
+        ///
+        /// This proptest exercises RTL Arabic and mixed-bidi (LTR + Arabic) inputs
+        /// to confirm that:
+        ///   (a) the result is valid UTF-8 (no byte-boundary misalignment),
+        ///   (b) when truncated, the result starts with ELLIPSIS,
+        ///   (c) the visible tail contains at least one character from the source text
+        ///       (no silent byte-drop that produces garbage).
+        ///
+        /// Strategy: generate a repetition count to guarantee overflow, then run
+        /// with Arabic text and with mixed LTR+Arabic text.
+        #[test]
+        fn proptest_tail_anchored_rtl_bidi_logical_offset(
+            repeat in 2usize..5usize,
+        ) {
+            let mut fs = make_font_system();
+            let font_size = 14.0_f32;
+            let line_h = font_size * 1.4;
+            let bounds_w = 150.0_f32;
+
+            // Arabic greeting repeated across multiple lines to guarantee both
+            // horizontal overflow (on each line) and vertical overflow (>max_lines).
+            let arabic_unit = "السلام عليكم";
+            let arabic_line = arabic_unit.repeat(repeat);
+            // Three lines so vertical truncation forces tail-anchored selection.
+            let arabic_text = format!("{arabic_line}\n{arabic_line}\n{arabic_line}");
+
+            // Height for only 1 line — ensures truncation.
+            let bounds_h = line_h * 1.5;
+
+            let result = truncate_tail_anchored(
+                &arabic_text, base_attrs(), bounds_w, bounds_h, font_size, line_h, &mut fs,
+            );
+
+            // (a) Valid UTF-8.
+            prop_assert!(
+                std::str::from_utf8(result.text.as_bytes()).is_ok(),
+                "RTL tail-anchored result is not valid UTF-8; result={:?}",
+                result.text,
+            );
+
+            if result.was_truncated {
+                // (b) Leading ellipsis.
+                prop_assert!(
+                    result.text.starts_with(ELLIPSIS),
+                    "RTL tail-anchored truncated result must start with '…'; \
+                     repeat={repeat} result={:?}",
+                    result.text,
+                );
+
+                // (c) Non-empty visible content after the ellipsis line.
+                // Strip the leading "…\n" and verify something remains.
+                let after_ellipsis = result.text
+                    .strip_prefix(ELLIPSIS)
+                    .map(|s| s.trim_start_matches('\n'))
+                    .unwrap_or("");
+                prop_assert!(
+                    !after_ellipsis.is_empty(),
+                    "RTL tail-anchored result must have visible content after the ellipsis line; \
+                     got empty tail; repeat={repeat} result={:?}",
+                    result.text,
+                );
+
+                // (d) Tail contains only valid Arabic or ASCII characters (no garbage bytes).
+                for ch in after_ellipsis.chars() {
+                    prop_assert!(
+                        ch.is_ascii() || ('\u{0600}'..='\u{06FF}').contains(&ch)
+                            || ch == ' ' || ch == '\n' || ch == '\u{2026}',
+                        "RTL tail-anchored result contains unexpected codepoint U+{:04X} ({ch:?}); \
+                         this may indicate a logical-offset corruption (hud-676 regression); \
+                         repeat={repeat} result={:?}",
+                        ch as u32, result.text,
+                    );
+                }
+            }
+
+            // Also test mixed LTR+RTL input.
+            let mixed_unit = "Hello السلام";
+            let mixed_line = mixed_unit.repeat(repeat);
+            let mixed_text = format!("{mixed_line}\n{mixed_line}\n{mixed_line}");
+
+            let mixed_result = truncate_tail_anchored(
+                &mixed_text, base_attrs(), bounds_w, bounds_h, font_size, line_h, &mut fs,
+            );
+
+            prop_assert!(
+                std::str::from_utf8(mixed_result.text.as_bytes()).is_ok(),
+                "mixed-bidi tail-anchored result is not valid UTF-8; result={:?}",
+                mixed_result.text,
+            );
+
+            if mixed_result.was_truncated {
+                prop_assert!(
+                    mixed_result.text.starts_with(ELLIPSIS),
+                    "mixed-bidi tail-anchored truncated result must start with '…'; \
+                     repeat={repeat} result={:?}",
+                    mixed_result.text,
+                );
+            }
+        }
+    }
 }
