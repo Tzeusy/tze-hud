@@ -42,7 +42,7 @@
 //! # Size cap
 //!
 //! `ComposerDraft::new(cap)` enforces `cap ≤ MAX_DRAFT_BYTES` (65535). Paste
-//! and insert that would exceed the cap are truncated at a UTF-8 character
+//! and insert that would exceed the cap are truncated at a grapheme-cluster
 //! boundary; `EditOutcome::AtCapacity` is returned and no notification leaves
 //! the runtime with content exceeding the cap.
 
@@ -954,20 +954,27 @@ impl DraftScheduler {
             self.pending_cancel = None;
             self.pending_submission = Some(submission);
         }
-        // Install the clear as the pending notification so it is delivered after
-        // the submission in the same batch.
+        // Install the clear as the pending notification so it is delivered in
+        // the same batch as the submission. The clear's sequence is strictly
+        // greater than the submission's, allowing adapters that check sequence
+        // ordering to treat it as newer regardless of batch processing order.
         self.pending_notification = Some(clear);
         self.flush_pending = true;
     }
 
     /// Record a transactional cancel.
     ///
-    /// Forces a flush so the cancel and any pending notification are delivered.
+    /// Forces a flush so the cancel is delivered. Any coalesced state-stream
+    /// notification pending before the cancel is discarded: it represents an
+    /// intermediate state that is now superseded by the cancel itself, and
+    /// delivering it alongside the cancel would produce a contradictory pair
+    /// (the display shows the pre-cancel text, then immediately a cancel event).
     pub fn flush_cancel(&mut self, cancel: DraftCancel) {
         if self.pending_cancel.is_none() {
             self.pending_submission = None;
             self.pending_cancel = Some(cancel);
         }
+        self.pending_notification = None;
         self.flush_pending = true;
     }
 
@@ -987,6 +994,13 @@ impl DraftScheduler {
             self.pending_notification.is_some() && self.flush_pending;
 
         if !has_transactional && !has_deliverable_notification {
+            // If flush was requested but there is nothing to deliver (e.g.
+            // `on_focus_lost` with no edits since last drain), clear the sticky
+            // flush flag so it does not prematurely collapse the next coalescing
+            // window after new edits arrive.
+            if self.flush_pending {
+                self.flush_pending = false;
+            }
             return None;
         }
 
@@ -1073,11 +1087,14 @@ impl ComposerDraftManager {
     ///
     /// Creates a new `ComposerDraft` (with `DEFAULT_DRAFT_CAP`) for the region.
     /// Any previous draft from a stale focus is discarded (focus is exclusive).
+    /// The scheduler is also reset to ensure no pending state from the previous
+    /// node leaks into the new focus window (state hygiene).
     pub fn on_focus_gained(&mut self, node_id: SceneId, suspended: bool) {
         let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
         draft.set_suspended(suspended);
         self.draft = Some(draft);
         self.focused_node = Some(node_id);
+        self.scheduler = DraftScheduler::new();
     }
 
     /// Called when the focused composer region loses focus.
