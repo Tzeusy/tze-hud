@@ -494,13 +494,13 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
 // ─── Inline processing ───────────────────────────────────────────────────────
 
 /// Process inline markdown constructs within a single paragraph/heading/list
-/// item `text` and append the result to `out`, emitting styled spans.
+/// item `chars` and append the result to `out`, emitting styled spans.
 ///
 /// `base_override` is a style that has already been applied to the containing
 /// block (e.g. heading weight); inline markup *adds* to it.
 ///
 /// Callers that start from a `&str` should convert once with
-/// [`str::chars`]`.collect::<Vec<char>>()` and pass the resulting slice.
+/// `.chars().collect::<Vec<char>>()` and pass the resulting slice.
 /// Recursive calls pass sub-slices of the already-collected `Vec<char>`,
 /// eliminating the per-call allocation that the original `text: &str`
 /// approach incurred.
