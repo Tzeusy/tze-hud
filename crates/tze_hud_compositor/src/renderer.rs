@@ -1855,7 +1855,6 @@ impl Compositor {
         if scene.version == self.truncation_cache_scene_version {
             return;
         }
-        self.truncation_cache_scene_version = scene.version;
 
         // Build the set of TextItems with Ellipsis overflow that are currently
         // reachable in the scene.  We need TextItem geometry, which is the same
@@ -1863,10 +1862,18 @@ impl Compositor {
         // duplicating that traversal here, we ask each tile's node tree for its
         // Ellipsis TextMarkdownNodes and reconstruct the same geometry that
         // `collect_text_items_from_node` would compute.
+        //
+        // NOTE: the scene-version sentinel is updated only after confirming the
+        // rasterizer is available.  If we returned early here (rasterizer = None)
+        // while recording the version, subsequent frames would skip priming even
+        // once the rasterizer is initialized — until the scene changes again.
         let rasterizer = match &mut self.text_rasterizer {
             Some(r) => r,
-            None => return, // text renderer not yet initialized
+            None => return, // text renderer not yet initialized; retry next version change
         };
+
+        // Record the version now that we know priming will proceed.
+        self.truncation_cache_scene_version = scene.version;
 
         let mut live_items: Vec<crate::text::TextItem> = Vec::new();
         for tile in scene.visible_tiles() {
@@ -1884,9 +1891,17 @@ impl Compositor {
             }
         }
 
-        let live_keys = rasterizer.prime_truncation_cache(&live_items);
+        let mut live_keys = rasterizer.prime_truncation_cache(&live_items);
 
         // Evict stale truncation entries for nodes/geometry no longer in the scene.
+        //
+        // Deduplicate live_keys before the length comparison: duplicate scene
+        // items (same content + geometry) produce the same TruncationKey.
+        // Without dedup, `live_keys.len()` may exceed the number of distinct
+        // cache entries, causing the `len > live_keys.len()` condition to be
+        // false even when stale entries exist — a memory leak.
+        live_keys.sort_unstable();
+        live_keys.dedup();
         if rasterizer.truncation_cache.len() > live_keys.len() {
             rasterizer.truncation_cache.evict_except(&live_keys);
         }

@@ -53,7 +53,7 @@ use crate::overflow::{self, TruncationResult};
 /// font_family, font_weight)`.  Float fields are stored as IEEE 754 bit
 /// patterns (endian-stable because the process never crosses a machine
 /// boundary) so they are `Eq + Hash` without lossy rounding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct TruncationKey {
     /// BLAKE3 hash of the content string (32 bytes).
     content_hash: [u8; 32],
@@ -392,36 +392,44 @@ impl TextRasterizer {
         //
         // The cache is primed outside the frame loop by `prime_truncation_cache`
         // (called from `Compositor::prime_truncation_cache` gated on scene.version).
-        // A cache hit is an O(1) hash-map lookup — zero shaping, zero allocation.
+        // On a warm path (after at least one commit), a cache hit is one BLAKE3
+        // hash to reconstruct the key plus one HashMap lookup — zero shaping work.
         //
         // On a cache miss (e.g. very first frame before any commit, or a newly
         // added item whose geometry was not yet in the cache), we fall back to
         // calling `truncate_for_ellipsis` inline to avoid dropped glyphs.  This
-        // fallback also updates the cache so the next frame is free.
+        // fallback also populates the cache so the next frame is free.
         //
         // For Clip items the entry is `None` (use `item.text` directly).
         // For Ellipsis items the entry is `Some(truncated_text_string)`.
-        let truncated_texts: Vec<Option<String>> = items
+        //
+        // Two-pass structure: we first build all keys and prime any misses
+        // (requiring &mut self.truncation_cache + &mut self.font_system), then
+        // do the final HashMap lookup pass.  This avoids interleaving mutable
+        // and immutable borrows of the same struct fields inside a single closure.
+        let keys: Vec<Option<TruncationKey>> = items
             .iter()
             .map(|item| {
                 if item.overflow != TextOverflow::Ellipsis {
                     return None;
                 }
-                let key = TruncationKey::new(
+                Some(TruncationKey::new(
                     &item.text,
                     item.bounds_width,
                     item.bounds_height,
                     item.font_size_px,
                     item.font_family,
                     item.font_weight,
-                );
-                // O(1) cache lookup.
-                if let Some(cached) = self.truncation_cache.get_by_key(&key) {
-                    return Some(cached.text.clone());
-                }
-                // Cache miss: compute inline and populate the cache for subsequent frames.
-                let result = self.truncation_cache.prime(
-                    key,
+                ))
+            })
+            .collect();
+
+        // Pass 1: prime any cache misses.  Misses are uncommon (first frame or
+        // newly-added items); hits are no-ops via `entry().or_insert_with`.
+        for (item, key_opt) in items.iter().zip(keys.iter()) {
+            if let Some(key) = key_opt {
+                self.truncation_cache.prime(
+                    *key,
                     &item.text,
                     item.bounds_width,
                     item.bounds_height,
@@ -430,7 +438,18 @@ impl TextRasterizer {
                     item.font_weight,
                     &mut self.font_system,
                 );
-                Some(result.text.clone())
+            }
+        }
+
+        // Pass 2: collect final truncated strings.  All Ellipsis entries are now
+        // in the cache; `get_by_key` will not return None for any Ellipsis item.
+        let truncated_texts: Vec<Option<String>> = keys
+            .iter()
+            .map(|key_opt| {
+                key_opt
+                    .as_ref()
+                    .and_then(|k| self.truncation_cache.get_by_key(k))
+                    .map(|r| r.text.clone())
             })
             .collect();
 
