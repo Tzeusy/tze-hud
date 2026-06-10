@@ -32,7 +32,9 @@ pub mod widget;
 
 pub use adapter::{AdapterSelectionError, PlatformBackends, select_gpu_adapter};
 pub use markdown::{MarkdownCache, MarkdownTokens, ParsedMarkdown, StyleAttr, StyledSpan};
-pub use overflow::{ELLIPSIS, TruncationResult, truncate_for_ellipsis};
+pub use overflow::{
+    ELLIPSIS, TruncationResult, TruncationViewport, truncate_for_ellipsis, truncate_tail_anchored,
+};
 pub use pipeline::{ChromeDrawCmd, RoundedRectDrawCmd, TexturedRectVertex};
 pub use renderer::{Compositor, CompositorError, ImageTextureEntry};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};

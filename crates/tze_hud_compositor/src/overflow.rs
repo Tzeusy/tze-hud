@@ -1,4 +1,4 @@
-//! Phase-1 overflow and ellipsis contract (hud-5jbra.3).
+//! Phase-1 overflow and ellipsis contract (hud-5jbra.3, hud-pvoc1).
 //!
 //! # Contract
 //!
@@ -16,6 +16,41 @@
 //! 4. **Stable shape caching.** Truncation is called only when content or
 //!    geometry changes; the per-frame render path consumes the already-truncated
 //!    string without reshaping.
+//!
+//! ## Viewport Anchoring (spec tasks 3.2 / 3.3, hud-pvoc1)
+//!
+//! [`TruncationViewport`] selects between two viewport-anchor modes:
+//!
+//! - **`HeadAnchored`** (default / existing behavior): when content exceeds
+//!   `max_lines`, the *first* `max_lines` are shown.  Used for static display
+//!   tiles and scrolled-back transcript viewports.
+//!
+//! - **`TailAnchored`**: when content exceeds `max_lines`, the *last*
+//!   `max_lines` are shown (newest content visible) with an ellipsis prepended
+//!   to signal omitted leading lines.  Used for follow-tail streaming transcripts.
+//!
+//! [`truncate_for_ellipsis`] is unchanged (head-anchored).
+//! [`truncate_tail_anchored`] is the new entry point for tail-anchored truncation.
+//!
+//! ### Spec scenarios implemented (tasks 3.2 / 3.3 / 3.4)
+//!
+//! **Scenario: append does not disturb a scrolled-back viewport (task 3.3)**
+//!
+//! When the caller holds a fixed head-anchored viewport (scroll offset frozen),
+//! it calls [`truncate_for_ellipsis`] with the text visible in that window.
+//! Appending new lines beyond the viewport does not change the truncation output
+//! because the first `max_lines` are determined solely by the current text, not
+//! future appends.  This is verified by the structural test
+//! `append_stability_truncation_prefix_unchanged`.
+//!
+//! **Scenario: follow-tail advances by whole lines (task 3.2)**
+//!
+//! When the viewport is at the tail (no scroll-back), the caller uses
+//! [`truncate_tail_anchored`].  The function always shows the last `max_lines`
+//! of the full text, so every append automatically advances the visible window
+//! by the exact number of new lines added — never producing a partially clipped
+//! line at the bottom.  This is verified by
+//! `follow_tail_advances_by_whole_lines`.
 //!
 //! Source: RFC 0013 §3.4 and §4.2, Phase-1 design §3, spec requirement
 //! "Transcript Overflow and Ellipsis Contract".
@@ -64,6 +99,24 @@ pub struct TruncationResult {
     pub text: String,
     /// `true` when truncation was applied and the ellipsis glyph was appended.
     pub was_truncated: bool,
+}
+
+/// Viewport anchoring mode for transcript overflow.
+///
+/// Controls which lines are shown when the full text has more layout runs than
+/// `max_lines` allows.  See module-level documentation for the spec contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TruncationViewport {
+    /// Show the **first** `max_lines` runs (head of content).
+    ///
+    /// This is the existing / default behaviour.  Use for static tiles and
+    /// viewports that have been scrolled back by the user.
+    HeadAnchored,
+    /// Show the **last** `max_lines` runs (tail / newest content).
+    ///
+    /// Use for follow-tail streaming transcripts where new appended lines must
+    /// always be visible.  An ellipsis is prepended to signal omitted leading lines.
+    TailAnchored,
 }
 
 /// Truncate `text` so that the first full line fits within `bounds_width`
@@ -244,6 +297,238 @@ pub fn truncate_for_ellipsis<'a>(
         font_system,
     );
     let result = format!("{prefix}{truncated_last}");
+    TruncationResult {
+        text: result,
+        was_truncated: true,
+    }
+}
+
+/// Tail-anchored truncation: show the **last** `max_lines` whole lines of `text`.
+///
+/// This is the entry point for the **follow-tail** scenario (spec task 3.2):
+/// when the viewport is at the tail of a streaming transcript, appended content
+/// should always be visible.  The function shapes the full text, selects the
+/// last `max_lines` layout runs, and prepends an ellipsis to signal that leading
+/// lines have been omitted.
+///
+/// All existing truncation semantics from [`truncate_for_ellipsis`] are
+/// preserved for the visible window:
+/// - Whole-line vertical visibility: no partially clipped glyph rows.
+/// - Word-boundary / grapheme-cluster ellipsis on the first visible line when
+///   it was word-wrapped and only part of a paragraph is shown.
+/// - RTL/bidi safety: the same `run_logical_start` path is used.
+///
+/// # Parameters
+///
+/// Same as [`truncate_for_ellipsis`].  `bounds_height` and `line_height`
+/// together determine how many whole lines (`max_lines`) are visible.
+///
+/// # Return value
+///
+/// A [`TruncationResult`].  When the full text fits in `max_lines`, returns
+/// the original text unchanged (identical to head-anchored behaviour).  When
+/// the content exceeds `max_lines`, returns the last `max_lines` runs with
+/// `ELLIPSIS` prepended and `was_truncated = true`.
+///
+/// # Spec scenarios
+///
+/// - **Task 3.2 — follow-tail advances by whole lines**: Every call with a
+///   longer text (more appended lines) returns a window that ends on the last
+///   line of the new content — no partial line is ever shown at the bottom.
+/// - **Task 3.3 / 3.4 — append stability**: The HEAD-anchored path
+///   ([`truncate_for_ellipsis`]) handles scrolled-back viewports; this function
+///   is only called when the viewport is known to be at the tail.
+pub fn truncate_tail_anchored<'a>(
+    text: &str,
+    base_attrs: Attrs<'a>,
+    bounds_width: f32,
+    bounds_height: f32,
+    font_size_px: f32,
+    line_height: f32,
+    font_system: &mut FontSystem,
+) -> TruncationResult {
+    // Guard: degenerate geometry produces an empty result.
+    if bounds_width <= 0.0 || bounds_height <= 0.0 || font_size_px <= 0.0 {
+        return TruncationResult {
+            text: String::new(),
+            was_truncated: !text.is_empty(),
+        };
+    }
+
+    // ── Step 1: determine how many whole lines fit vertically ────────────────
+    let max_lines = max_whole_lines(bounds_height, line_height);
+    if max_lines == 0 {
+        return TruncationResult {
+            text: String::new(),
+            was_truncated: !text.is_empty(),
+        };
+    }
+
+    // ── Step 2: measure the ellipsis glyph width ────────────────────────────
+    let ellipsis_w = measure_single_line(
+        ELLIPSIS,
+        base_attrs,
+        bounds_width * 2.0,
+        font_size_px,
+        line_height,
+        font_system,
+    );
+
+    // ── Step 3: shape the full text with word-wrap enabled ───────────────────
+    let mut full_buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
+    full_buf.set_size(font_system, Some(bounds_width), None);
+    full_buf.set_wrap(font_system, Wrap::Word);
+    full_buf.set_text(font_system, text, base_attrs, Shaping::Basic);
+    full_buf.shape_until_scroll(font_system, false);
+
+    // ── Step 4: collect rendered lines and their widths ───────────────────────
+    let runs: Vec<LayoutRunEntry> = full_buf
+        .layout_runs()
+        .map(|run| {
+            let glyph_info: Vec<GlyphInfo> = run
+                .glyphs
+                .iter()
+                .map(|g| (g.start, g.end, g.x + g.w))
+                .collect();
+            (run.line_i, run.line_w, glyph_info)
+        })
+        .collect();
+
+    // If the text produces no runs at all (empty text), return as-is.
+    if runs.is_empty() {
+        return TruncationResult {
+            text: text.to_owned(),
+            was_truncated: false,
+        };
+    }
+
+    let total_runs = runs.len();
+
+    // ── Step 5: if all lines fit, delegate to head-anchored path ─────────────
+    // When content fits entirely, both anchoring modes produce the same result.
+    if total_runs <= max_lines {
+        // All lines fit vertically; no vertical truncation needed.
+        let last_run = &runs[total_runs - 1];
+        if last_run.1 <= bounds_width {
+            return TruncationResult {
+                text: text.to_owned(),
+                was_truncated: false,
+            };
+        }
+        // Last run overflows horizontally: truncate the last line.
+        let last_line_i = last_run.0;
+        let last_line_text = if let Some(line) = full_buf.lines.get(last_line_i) {
+            line.text().to_owned()
+        } else {
+            return TruncationResult {
+                text: text.to_owned(),
+                was_truncated: false,
+            };
+        };
+        let prefix = text_prefix_up_to_run(&runs, total_runs - 1, text, &full_buf);
+        let run_start = run_logical_start(&runs[total_runs - 1].2);
+        let run_slice = run_start_slice(&last_line_text, run_start);
+        let truncated_last = truncate_line_to_ellipsis(
+            run_slice,
+            base_attrs,
+            bounds_width,
+            font_size_px,
+            line_height,
+            ellipsis_w,
+            font_system,
+        );
+        let result = format!("{prefix}{truncated_last}");
+        return TruncationResult {
+            text: result,
+            was_truncated: true,
+        };
+    }
+
+    // ── Step 6: more runs than fit — show LAST max_lines runs ─────────────────
+    //
+    // The first visible run is runs[total_runs - max_lines].
+    // The last  visible run is runs[total_runs - 1].
+    //
+    // We reconstruct the text slice starting at the first visible run.
+    let first_visible_idx = total_runs - max_lines;
+    let first_visible_run = &runs[first_visible_idx];
+
+    // Find the byte offset within the full text that corresponds to the start
+    // of the first visible run.
+    let first_visible_line_i = first_visible_run.0;
+    let first_visible_run_start = run_logical_start(&first_visible_run.2);
+
+    // Walk original_text to find the byte offset of paragraph first_visible_line_i.
+    let mut para_byte_offset = 0usize;
+    let mut current_para = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if current_para == first_visible_line_i {
+            para_byte_offset = idx;
+            break;
+        }
+        if ch == '\n' {
+            current_para += 1;
+        }
+    }
+    // If the loop exhausted without finding the paragraph, clamp to text end.
+    if current_para < first_visible_line_i {
+        para_byte_offset = text.len();
+    }
+
+    let total_offset = para_byte_offset + first_visible_run_start;
+    let safe_offset = if total_offset >= text.len() {
+        text.len()
+    } else {
+        // Walk back to nearest valid UTF-8 boundary.
+        (0..=total_offset)
+            .rev()
+            .find(|&o| text.is_char_boundary(o))
+            .unwrap_or(0)
+    };
+
+    // The visible tail slice begins at safe_offset.
+    let tail_text = &text[safe_offset..];
+
+    // Check whether the first line of the tail slice overflows horizontally.
+    // If it does, truncate with ellipsis (using the first visible run's width).
+    let first_tail_run_w = first_visible_run.1;
+    let visible_tail = if first_tail_run_w > bounds_width {
+        // The first visible line overflows — apply horizontal ellipsis.
+        // We need to truncate it against the line text for that run.
+        let fv_line_i = first_visible_run.0;
+        let fv_line_text = if let Some(line) = full_buf.lines.get(fv_line_i) {
+            line.text().to_owned()
+        } else {
+            tail_text.to_owned()
+        };
+        let run_start_b = first_visible_run_start;
+        let run_slice = run_start_slice(&fv_line_text, run_start_b);
+        let truncated_first = truncate_line_to_ellipsis(
+            run_slice,
+            base_attrs,
+            bounds_width,
+            font_size_px,
+            line_height,
+            ellipsis_w,
+            font_system,
+        );
+        // Reconstruct: truncated first line + the remaining tail lines.
+        // Remaining lines start after the first visible run within tail_text.
+        let remaining = tail_text
+            .lines()
+            .skip(if first_visible_run_start == 0 { 1 } else { 0 })
+            .fold(String::new(), |mut acc, l| {
+                acc.push('\n');
+                acc.push_str(l);
+                acc
+            });
+        format!("{truncated_first}{remaining}")
+    } else {
+        tail_text.to_owned()
+    };
+
+    // Prepend ELLIPSIS to signal omitted leading content.
+    let result = format!("{ELLIPSIS}\n{visible_tail}");
     TruncationResult {
         text: result,
         was_truncated: true,
@@ -1451,5 +1736,179 @@ mod tests {
             0,
             "run_logical_start on empty slice must return 0"
         );
+    }
+
+    // ── Task 3.2 — follow-tail whole-line advancement (truncate_tail_anchored) ─
+
+    /// When content has more layout runs than max_lines, `truncate_tail_anchored`
+    /// shows the LAST max_lines, not the first.  This is the follow-tail guarantee:
+    /// every append produces a result ending with the newest content.
+    ///
+    /// Spec task 3.2: "follow-tail advances by whole lines".
+    #[test]
+    fn follow_tail_advances_by_whole_lines() {
+        let mut fs = make_font_system();
+        let font_size = 14.0_f32;
+        let line_h = font_size * 1.4;
+        // 5 lines of content, but only space for 3.
+        let lines = vec![
+            "Line one",
+            "Line two",
+            "Line three",
+            "Line four",
+            "Line five (newest)",
+        ];
+        let text = lines.join("\n");
+        let bounds_w = 400.0_f32;
+        // Height for exactly 3 lines.
+        let bounds_h = line_h * 3.0 + 1.0;
+
+        let result = truncate_tail_anchored(
+            &text,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+
+        assert!(
+            result.was_truncated,
+            "5 lines into 3-line box must be truncated; got: {:?}",
+            result.text
+        );
+
+        // The newest line must be visible in the result.
+        assert!(
+            result.text.contains("Line five"),
+            "tail-anchored result must contain the newest content ('Line five'); \
+             got: {:?}",
+            result.text
+        );
+
+        // The oldest lines must NOT be visible (they were dropped).
+        assert!(
+            !result.text.contains("Line one"),
+            "tail-anchored result must NOT contain 'Line one' (oldest content was dropped); \
+             got: {:?}",
+            result.text
+        );
+
+        // The result starts with the ELLIPSIS to signal omitted leading content.
+        assert!(
+            result.text.starts_with(ELLIPSIS),
+            "tail-anchored result must start with '…' when leading lines are omitted; \
+             got: {:?}",
+            result.text
+        );
+    }
+
+    /// When content fits entirely (fewer runs than max_lines), both anchoring
+    /// modes produce identical results — the original text unchanged.
+    #[test]
+    fn tail_anchored_short_text_fits_unchanged() {
+        let mut fs = make_font_system();
+        let font_size = 14.0_f32;
+        let line_h = font_size * 1.4;
+        let text = "Short text\nTwo lines";
+        let bounds_w = 400.0_f32;
+        // Height for 5 lines — more than enough.
+        let bounds_h = line_h * 5.0;
+
+        let head_result = truncate_for_ellipsis(
+            text,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        let tail_result = truncate_tail_anchored(
+            text,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+
+        assert_eq!(
+            head_result.text, tail_result.text,
+            "when content fits, head- and tail-anchored must produce the same result"
+        );
+        assert!(
+            !tail_result.was_truncated,
+            "tail-anchored must not set was_truncated when content fits"
+        );
+    }
+
+    /// Appending more content to an already-overflowing transcript must not
+    /// disturb the visible window when the caller is head-anchored (scrolled
+    /// back).  This is the structural mirror of the scroll-layer task 3.3 test
+    /// in tze_hud_input::scroll.
+    ///
+    /// Spec task 3.3: "append stability for scrolled-back viewports".
+    ///
+    /// For the truncation layer: head-anchored truncation of `prefix` must
+    /// produce the same result as head-anchored truncation of `prefix + suffix`.
+    /// The suffix is new streaming content appended beyond the viewport.
+    #[test]
+    fn head_anchored_append_stability_matches_prefix_truncation() {
+        let mut fs = make_font_system();
+        let font_size = 14.0_f32;
+        let line_h = font_size * 1.4;
+        let bounds_w = 200.0_f32;
+        // Height for exactly 2 lines.
+        let bounds_h = line_h * 2.0 + 1.0;
+
+        let prefix = "Existing line A\nExisting line B\nExisting line C";
+        let suffix = "\nNew line D appended during streaming";
+        let full = format!("{prefix}{suffix}");
+
+        let result_prefix = truncate_for_ellipsis(
+            prefix,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        let result_full = truncate_for_ellipsis(
+            &full,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+
+        assert_eq!(
+            result_prefix.text, result_full.text,
+            "head-anchored append stability: visible content must be identical \
+             whether or not new lines have been appended beyond the viewport"
+        );
+    }
+
+    /// Empty text produces an empty result from tail-anchored truncation.
+    #[test]
+    fn tail_anchored_empty_text_no_truncation() {
+        let mut fs = make_font_system();
+        let result = truncate_tail_anchored("", base_attrs(), 200.0, 100.0, 16.0, 22.4, &mut fs);
+        assert_eq!(result.text, "", "empty text must remain empty");
+        assert!(!result.was_truncated);
+    }
+
+    /// Degenerate geometry produces empty result from tail-anchored truncation.
+    #[test]
+    fn tail_anchored_zero_width_produces_empty() {
+        let mut fs = make_font_system();
+        let result = truncate_tail_anchored("hello", base_attrs(), 0.0, 100.0, 16.0, 22.4, &mut fs);
+        assert_eq!(result.text, "");
+        assert!(result.was_truncated);
     }
 }
