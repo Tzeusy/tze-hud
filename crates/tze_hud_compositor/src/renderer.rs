@@ -4463,14 +4463,17 @@ impl Compositor {
         // pipeline consumes only cached styled runs.  New/changed content is
         // parsed exactly once here; unchanged content hits the cache at O(1).
         //
-        // Timed and recorded in telemetry (markdown_prime_us) so parse cost is
-        // visible to stage budgets.  On unchanged scenes the gate fires in O(1)
-        // and prime_us is effectively 0.
-        {
+        // Timing is gated on scene version so that unchanged-content frames
+        // emit exactly 0 for markdown_prime_us — matching the documented
+        // contract in FrameTelemetry.  Only frames that actually perform parse
+        // work incur the timer overhead.
+        if scene.version != self.markdown_cache_scene_version {
             let prime_start = std::time::Instant::now();
             self.prime_markdown_cache(scene);
             telemetry.markdown_prime_us = prime_start.elapsed().as_micros() as u64;
         }
+        // On unchanged scenes: prime_markdown_cache is skipped entirely and
+        // markdown_prime_us stays 0 (zero-initialized by FrameTelemetry::new).
 
         // ── Phase-1 truncation cache prime (hud-wgq7j) ────────────────────────
         // Must run after prime_markdown_cache (so markdown plain-text is cached
@@ -4668,13 +4671,17 @@ impl Compositor {
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
         // ── Phase-1 markdown cache prime (hud-5jbra.2 / hud-gpqde) ──────────
-        // Timed and recorded in telemetry (markdown_prime_us) so parse cost is
-        // visible to stage budgets.  On unchanged scenes the gate fires in O(1).
-        {
+        // Timing is gated on scene version so that unchanged-content frames
+        // emit exactly 0 for markdown_prime_us — matching the documented
+        // contract in FrameTelemetry.  Only frames that actually perform parse
+        // work incur the timer overhead.
+        if scene.version != self.markdown_cache_scene_version {
             let prime_start = std::time::Instant::now();
             self.prime_markdown_cache(scene);
             telemetry.markdown_prime_us = prime_start.elapsed().as_micros() as u64;
         }
+        // On unchanged scenes: prime_markdown_cache is skipped entirely and
+        // markdown_prime_us stays 0 (zero-initialized by FrameTelemetry::new).
 
         // ── Phase-1 truncation cache prime (hud-wgq7j) ────────────────────────
         self.prime_truncation_cache(scene);
@@ -15304,14 +15311,16 @@ mod tests {
 
     // ── hud-gpqde: markdown prime instrumentation and node_key_cache ─────────
 
-    /// prime_markdown_cache populates node_key_cache with the correct BLAKE3
-    /// key for each TextMarkdown node in the scene.
+    /// MarkdownCache::compute_key is deterministic and content-addressed: same
+    /// content produces the same BLAKE3 key; distinct content produces distinct
+    /// keys; get_by_key returns the parsed entry after prime.
     ///
-    /// The frame path (`collect_text_items_from_node`) looks up the key from
-    /// node_key_cache instead of re-hashing content, satisfying the O(1) per-frame
-    /// requirement.
+    /// This is a CPU-only prerequisite test for the node_key_cache contract — it
+    /// does not call Compositor::prime_markdown_cache. The compositor-level test
+    /// that verifies node_key_cache population is
+    /// `prime_markdown_cache_builds_node_key_cache_entry` (GPU-gated).
     #[test]
-    fn prime_markdown_cache_populates_node_key_cache() {
+    fn markdown_cache_compute_key_is_deterministic_and_content_addressed() {
         use tze_hud_scene::types::{
             FontFamily, NodeData, Rect, TextAlign, TextMarkdownNode, TextOverflow,
         };
@@ -15404,15 +15413,18 @@ mod tests {
         let _ = (scene, node_a_id, tile_id, content_b); // mark used
     }
 
-    /// prime_markdown_cache on an unchanged scene (same scene.version) is a
-    /// no-op: it does not clear or rebuild node_key_cache.
+    /// MarkdownCache::prime is idempotent: repeated calls with the same content
+    /// return the identical cached ParsedMarkdown without re-parsing.
     ///
-    /// Contract: the version gate must fire before any map mutation so
-    /// consecutive calls on the same version are zero-work.
+    /// This is a CPU-only test of MarkdownCache hit behavior. It does not test
+    /// the Compositor scene-version gate. The compositor-level no-op gate is
+    /// validated by `prime_markdown_cache_builds_node_key_cache_entry` — calling
+    /// prime_markdown_cache twice on the same scene version leaves node_key_cache
+    /// unchanged on the second call.
     #[test]
-    fn prime_markdown_cache_is_noop_on_unchanged_scene() {
-        // We test the gate logic by verifying that MarkdownCache version tracking
-        // only re-parses when the scene version actually changes.
+    fn markdown_cache_prime_is_idempotent_for_same_content() {
+        // Verify that MarkdownCache::prime returns the same value on repeated
+        // calls with identical content (cache hit, no re-parse).
         let tokens = crate::markdown::MarkdownTokens::default();
         let content = "**bold** text";
 
@@ -15470,8 +15482,9 @@ mod tests {
         let content = "## Heading\n\nParagraph with *italic* text.";
         let expected_key = crate::markdown::MarkdownCache::compute_key(content);
 
+        let node_id = SceneId::new();
         let node = Node {
-            id: SceneId::new(),
+            id: node_id,
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
                 content: content.to_string(),
@@ -15501,7 +15514,9 @@ mod tests {
 
         compositor.prime_markdown_cache(&scene);
 
-        // After priming: exactly one entry whose value matches the expected key.
+        // After priming: exactly one entry inserted under the correct SceneId.
+        // Assert via node_id (not values().next()) so that a wrong-key insertion
+        // is not masked by a length-1 coincidence.
         assert_eq!(
             compositor.node_key_cache.len(),
             1,
@@ -15510,10 +15525,9 @@ mod tests {
 
         let cached_key = compositor
             .node_key_cache
-            .values()
-            .next()
+            .get(&node_id)
             .copied()
-            .expect("one entry must be present");
+            .expect("node_key_cache must contain an entry for node_id");
 
         assert_eq!(
             cached_key, expected_key,
