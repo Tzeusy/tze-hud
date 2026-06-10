@@ -152,10 +152,13 @@ impl PortalDriveState {
     /// Register a new adapter for `projection_id` with runtime-resolved tokens.
     ///
     /// Called on every `Attach` for sessions that will use the portal path.
-    /// The adapter is constructed with a default lease ID of all-zeros (the
-    /// caller should call `attach_adapter_with_lease` if a real lease ID is
-    /// known). Token swap propagation is immediate — `set_token_map` will reach
-    /// this adapter on the next `SetTokenMap` operation.
+    /// The adapter is constructed with the supplied `lease_id`. Callers that
+    /// attach before a live gRPC session is established pass `Vec::new()` as a
+    /// placeholder; the placeholder is acceptable for the CreatePortalTile path
+    /// because the resident session layer is responsible for setting the actual
+    /// lease before sending any `MutationBatch`. Token swap propagation is
+    /// immediate — `set_token_map` will reach this adapter on the next
+    /// `SetTokenMap` operation.
     fn attach_adapter(&mut self, projection_id: &str, lease_id: Vec<u8>) {
         let tokens = self.resolve_visual_tokens();
         let config = ResidentGrpcPortalConfig::new(lease_id);
@@ -187,12 +190,12 @@ impl PortalDriveState {
     }
 }
 
-/// Kind of stdout line emitted by the portal drain loop.
-///
-/// The drain loop emits `CliPortalDrainRecord` lines interleaved with the
-/// normal `CliOperationResult` lines. Callers distinguish them by the
-/// `record_type` field.
 /// Serialized form of one drained portal update produced by the drive loop.
+///
+/// Drain records are embedded in `CliOperationResult.portal_drain` and
+/// serialized as part of the single JSON line emitted per operation. They are
+/// NOT emitted as separate stdout lines; the one-JSON-line-per-operation
+/// invariant is preserved.
 ///
 /// This is the "present path" output: a coalesced portal transcript update
 /// that the caller should forward to the resident gRPC session (build and send
@@ -967,8 +970,10 @@ fn dispatch_line(
     let response = match operation {
         ProjectionOperation::Attach => deserialize_then(value, |request: AttachRequest| {
             // Register an adapter for this projection on successful attach.
-            // We use an empty lease ID initially; the caller sets a real lease
-            // ID via the advisory lease path when the HUD session is live.
+            // A placeholder lease ID (empty vec) is used here because the gRPC
+            // session may not yet be live at attach time. The resident session
+            // layer is responsible for supplying the real lease ID in any
+            // MutationBatch it sends; the placeholder is never sent on the wire.
             // Part (a): adapter hosted here with runtime-resolved tokens.
             let proj_id = request.envelope.projection_id.clone();
             let result =

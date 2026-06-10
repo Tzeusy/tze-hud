@@ -8,6 +8,7 @@ license.workspace = true
 [[bin]]
 name = "tze_hud_projection_authority"
 path = "src/bin/projection_authority.rs"
+required-features = ["resident-grpc"]
 
 [dependencies]
 serde = { workspace = true }
