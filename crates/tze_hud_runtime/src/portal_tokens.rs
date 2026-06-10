@@ -1,27 +1,22 @@
 //! Production bridge: `PortalPartTokens` → `PortalVisualTokens`.
 //!
-//! `tze_hud_config::PortalPartTokens` is the authoritative resolved token struct
-//! for the full portal part inventory (frame, header, composer, transcript,
-//! divider, collapsed card, transitions, window management, scroll indicators).
+//! The canonical conversion function lives in `tze_hud_projection::resident_grpc`
+//! so that it can be used directly from the projection authority binary without
+//! pulling in the full runtime crate (which would create a circular dependency:
+//! `tze_hud_runtime` already depends on `tze_hud_projection`).
 //!
-//! `tze_hud_projection::resident_grpc::PortalVisualTokens` is the Phase-1
-//! raw-tile pilot subset — only the fields that `portal_node` actually publishes
-//! into a `TextMarkdownNodeProto` (transcript and collapsed parts).
-//!
-//! This module provides the single authoritative conversion function used to
-//! propagate the runtime's resolved token set into the adapter on construction
-//! and on every token-map swap (profile hot-reload). De-duplicates the
-//! hand-rolled conversions that previously appeared in two separate test helpers
-//! (~60 lines each).
+//! This module re-exports `portal_visual_tokens_from_part_tokens` for consumers
+//! that import from `tze_hud_runtime`.
 //!
 //! ## Production wiring contract
 //!
-//! Any code that constructs a `ResidentGrpcPortalAdapter` MUST call this
-//! function instead of hand-constructing `PortalVisualTokens`. When a token-map
-//! swap occurs (e.g. profile hot-reload via `compositor.set_token_map`), call
-//! `resolve_portal_tokens` on the new `DesignTokenMap` to get `PortalPartTokens`,
-//! then pass the result to this function, and forward the resulting
-//! `PortalVisualTokens` to `adapter.set_visual_tokens(...)`.
+//! Any code that constructs a `ResidentGrpcPortalAdapter` MUST call
+//! `portal_visual_tokens_from_part_tokens` instead of hand-constructing
+//! `PortalVisualTokens`. When a token-map swap occurs (e.g. profile hot-reload
+//! via `compositor.set_token_map`), call `resolve_portal_tokens` on the new
+//! `DesignTokenMap` to get `PortalPartTokens`, then pass the result to this
+//! function, and forward the resulting `PortalVisualTokens` to
+//! `adapter.set_visual_tokens(...)`.
 //!
 //! ```rust,ignore
 //! use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
@@ -38,71 +33,7 @@
 //! adapter.set_visual_tokens(portal_visual_tokens_from_part_tokens(&new_part_tokens));
 //! ```
 
-use tze_hud_config::PortalPartTokens;
-use tze_hud_projection::resident_grpc::PortalVisualTokens;
-use tze_hud_protocol::proto;
-
-/// Convert a fully-resolved `PortalPartTokens` (from `tze_hud_config`) into
-/// the Phase-1 pilot's `PortalVisualTokens` (from `tze_hud_projection`).
-///
-/// Maps transcript, collapsed, and composer parts. The remaining parts of
-/// `PortalPartTokens` (frame, header, divider, transitions) require a structured
-/// multi-node layout deferred to promotion-era work.
-///
-/// This is the canonical production-path conversion. Tests MUST NOT hand-roll
-/// a second copy of this mapping — use this function instead.
-pub fn portal_visual_tokens_from_part_tokens(part: &PortalPartTokens) -> PortalVisualTokens {
-    PortalVisualTokens {
-        transcript_background: proto::Rgba {
-            r: part.transcript_background.r,
-            g: part.transcript_background.g,
-            b: part.transcript_background.b,
-            a: part.transcript_background.a,
-        },
-        transcript_text_color: proto::Rgba {
-            r: part.transcript_text_color.r,
-            g: part.transcript_text_color.g,
-            b: part.transcript_text_color.b,
-            a: part.transcript_text_color.a,
-        },
-        transcript_font_size_px: part.transcript_font_size_px,
-        collapsed_background: proto::Rgba {
-            r: part.collapsed_background.r,
-            g: part.collapsed_background.g,
-            b: part.collapsed_background.b,
-            a: part.collapsed_background.a,
-        },
-        collapsed_text_color: proto::Rgba {
-            r: part.collapsed_text_color.r,
-            g: part.collapsed_text_color.g,
-            b: part.collapsed_text_color.b,
-            a: part.collapsed_text_color.a,
-        },
-        collapsed_font_size_px: part.collapsed_font_size_px,
-        // Composer part — wired in Phase-1 for draft text + caret + at-capacity
-        // visual (spec §4.1, §4.8). The raw-tile pilot's single
-        // TextMarkdownNodeProto carries color_runs for the at-capacity indicator.
-        composer_background: proto::Rgba {
-            r: part.composer_background.r,
-            g: part.composer_background.g,
-            b: part.composer_background.b,
-            a: part.composer_background.a,
-        },
-        composer_text_color: proto::Rgba {
-            r: part.composer_text_color.r,
-            g: part.composer_text_color.g,
-            b: part.composer_text_color.b,
-            a: part.composer_text_color.a,
-        },
-        composer_font_size_px: part.composer_font_size_px,
-        composer_at_capacity_color: proto::Rgba {
-            r: part.composer_at_capacity_color.r,
-            g: part.composer_at_capacity_color.g,
-            b: part.composer_at_capacity_color.b,
-            a: part.composer_at_capacity_color.a,
-        },
-    }
-}
+pub use tze_hud_projection::resident_grpc::portal_visual_tokens_from_part_tokens;
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -110,6 +41,7 @@ pub fn portal_visual_tokens_from_part_tokens(part: &PortalPartTokens) -> PortalV
 mod tests {
     use super::*;
     use tze_hud_config::resolve_portal_tokens;
+    use tze_hud_projection::resident_grpc::PortalVisualTokens;
 
     /// Round-trip: `resolve_portal_tokens` → `portal_visual_tokens_from_part_tokens`
     /// must yield the same transcript/collapsed values as `PortalVisualTokens::default`.
