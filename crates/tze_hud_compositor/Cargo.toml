@@ -36,3 +36,7 @@ tze_hud_widget = { path = "../tze_hud_widget" }
 [[bench]]
 name = "widget_rasterize"
 harness = false
+
+[[bench]]
+name = "overflow_truncate"
+harness = false

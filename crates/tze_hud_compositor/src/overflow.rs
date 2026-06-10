@@ -22,9 +22,14 @@
 //!
 //! # Complexity
 //!
-//! Shaping is O(n) in the text length via glyphon/cosmic-text.  For Phase-1
-//! the 65535-byte content ceiling bounds the work.  Results must be cached by
-//! the caller keyed on `(content_hash, bounds_width, bounds_height, font_size_px)`.
+//! `truncate_for_ellipsis` shapes the full text once (O(n)) and then locates
+//! the ellipsis cut point with O(log W) additional shape calls via binary
+//! search, where W is the number of word (or grapheme) boundaries.  Each
+//! individual shape call is O(k) in the prefix length k, giving a total of
+//! O(n + k·log W) ≈ O(n log n) — sub-quadratic in text length.  The old
+//! linear scan over candidates was O(W²) because it issued one full reshape
+//! per candidate in worst-case order.  Results must be cached by the caller
+//! keyed on `(content_hash, bounds_width, bounds_height, font_size_px)`.
 
 use glyphon::{Attrs, Buffer, FontSystem, Metrics, Shaping, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
@@ -363,16 +368,33 @@ fn run_start_slice(paragraph_text: &str, run_start_byte: usize) -> &str {
 /// Truncate a single line of text so that the result (with `"…"` appended)
 /// fits within `bounds_width`.
 ///
-/// Algorithm (per spec):
-/// 1. Try each *non-empty* word boundary (from the end) — use the last one
-///    whose measured width + ellipsis_w ≤ bounds_width.
-/// 2. If no non-empty word boundary prefix fits, fall back to grapheme-cluster
-///    boundaries (from the end) so that at least one visible cluster is shown.
-/// 3. If even a single grapheme + ellipsis does not fit, return just `"…"`.
+/// # Algorithm (sub-quadratic — O(n log n))
 ///
-/// The empty-prefix boundary (byte offset 0) is intentionally excluded from
-/// the word-boundary pass so that the grapheme-cluster fallback runs for long
-/// unbroken tokens instead of returning a bare `"…"` with zero visible clusters.
+/// The old O(n²) implementation issued one full `measure_single_line` reshape
+/// per candidate in a right-to-left linear scan.  This version uses binary
+/// search to reduce shape calls from O(W) to O(log W):
+///
+/// 1. Collect word-boundary byte offsets into a sorted slice.
+/// 2. Binary-search for the largest boundary whose prefix width + ellipsis_w ≤
+///    bounds_width.  The predicate `fits(b)` (prefix width ≤ budget) is
+///    monotone: once a prefix is too wide, all longer prefixes are also too
+///    wide.  Binary search therefore issues O(log W) shape calls.
+/// 3. If no non-empty word boundary fits, repeat the binary search over
+///    grapheme-cluster boundaries (O(log G) shapes, G = grapheme count).
+/// 4. If even a single grapheme + ellipsis does not fit, return just `"…"`.
+///
+/// # RTL / bidi safety
+///
+/// Width is measured by reshaping the candidate prefix — the same
+/// `measure_single_line` path used before.  Logical vs visual glyph ordering
+/// (cosmic-text RTL fix, PR #676) is therefore preserved: we shape the logical
+/// prefix and measure `line_w`, not glyph x-positions.
+///
+/// # Grapheme-cluster safety
+///
+/// Boundaries come from `unicode_segmentation::grapheme_indices`, which
+/// guarantees whole-cluster cuts.  The binary-search pivot is always clamped
+/// to a `char_boundary` before slicing.
 fn truncate_line_to_ellipsis<'a>(
     line: &str,
     base_attrs: Attrs<'a>,
@@ -389,66 +411,124 @@ fn truncate_line_to_ellipsis<'a>(
         return ELLIPSIS.to_owned();
     }
 
-    // Try word boundaries first (unicode word segmentation).
-    // We iterate word boundaries right-to-left and take the first that fits.
+    // ── Helper: measure prefix width ─────────────────────────────────────────
+    // Returns the shaped advance width of `line[..boundary]`.
+    let mut measure_prefix = |boundary: usize| -> f32 {
+        if boundary == 0 {
+            return 0.0;
+        }
+        let candidate = &line[..boundary];
+        measure_single_line(
+            candidate,
+            base_attrs,
+            bounds_width * 2.0,
+            font_size_px,
+            line_height,
+            font_system,
+        )
+    };
+
+    // ── Step 1: word-boundary binary search ──────────────────────────────────
+    //
+    // Collect only valid char-boundary word ends (unicode_word_indices yields
+    // pairs whose end bytes are always char boundaries, but we guard anyway).
     //
     // `unicode_word_indices()` yields `(start, word)` pairs where every word
-    // has length >= 1, so `i + word.len() >= 1` — the mapped boundary values
-    // are always > 0.  No empty-prefix guard is needed here; if no word-boundary
-    // prefix fits the budget, we fall through to the grapheme-cluster loop.
+    // has length >= 1, so every boundary > 0.  No empty-prefix guard needed.
     let word_boundaries: Vec<usize> = line
         .unicode_word_indices()
         .map(|(i, word)| i + word.len())
+        .filter(|&b| line.is_char_boundary(b))
         .collect();
 
-    for &boundary in word_boundaries.iter().rev() {
-        if !line.is_char_boundary(boundary) {
-            continue;
-        }
+    // Binary search: find the rightmost index `hi` such that
+    // `word_boundaries[hi]` prefix fits within budget.
+    //
+    // Predicate: `fits(i)` ≡ measure_prefix(word_boundaries[i]) ≤ budget.
+    // `fits` is monotone-decreasing: if index i fits, all j < i also fit.
+    // We want the largest i where fits(i) is true.
+    if let Some(boundary) =
+        binary_search_largest_fitting(&word_boundaries, budget, &mut measure_prefix)
+    {
         let candidate = &line[..boundary];
-        let w = measure_single_line(
-            candidate,
-            base_attrs,
-            bounds_width * 2.0,
-            font_size_px,
-            line_height,
-            font_system,
-        );
-        if w <= budget {
-            // Trim trailing whitespace before appending ellipsis, so we get
-            // "foo…" rather than "foo …".
-            let trimmed = candidate.trim_end();
-            return format!("{trimmed}{ELLIPSIS}");
-        }
+        let trimmed = candidate.trim_end();
+        return format!("{trimmed}{ELLIPSIS}");
     }
 
-    // No word boundary fits — fall back to grapheme-cluster boundaries.
+    // ── Step 2: grapheme-cluster fallback (binary search) ────────────────────
+    //
+    // No word boundary fits — fall back to grapheme-cluster boundaries so that
+    // long unbroken tokens still show a visible prefix before the ellipsis.
     let grapheme_boundaries: Vec<usize> = line
         .grapheme_indices(true)
         .map(|(i, g)| i + g.len())
+        .filter(|&b| line.is_char_boundary(b))
         .collect();
 
-    for &boundary in grapheme_boundaries.iter().rev() {
-        if !line.is_char_boundary(boundary) {
-            continue;
-        }
+    if let Some(boundary) =
+        binary_search_largest_fitting(&grapheme_boundaries, budget, &mut measure_prefix)
+    {
         let candidate = &line[..boundary];
-        let w = measure_single_line(
-            candidate,
-            base_attrs,
-            bounds_width * 2.0,
-            font_size_px,
-            line_height,
-            font_system,
-        );
-        if w <= budget {
-            let trimmed = candidate.trim_end();
-            return format!("{trimmed}{ELLIPSIS}");
-        }
+        let trimmed = candidate.trim_end();
+        return format!("{trimmed}{ELLIPSIS}");
     }
 
     // Even a single grapheme + ellipsis does not fit — return just the ellipsis.
     ELLIPSIS.to_owned()
+}
+
+/// Find the largest element in the **sorted, ascending** `boundaries` slice
+/// such that `measure(boundary) ≤ budget`, using binary search.
+///
+/// Returns `None` if no boundary fits (all are too wide or the slice is empty).
+///
+/// # Correctness requirement
+///
+/// The predicate `measure(b) ≤ budget` must be **monotone**: if boundary `b`
+/// fits, all boundaries `b' < b` also fit.  This holds for text width because
+/// removing characters from a prefix cannot increase its shaped width.
+///
+/// # Complexity
+///
+/// O(log N) calls to `measure` where N = `boundaries.len()`.
+fn binary_search_largest_fitting(
+    boundaries: &[usize],
+    budget: f32,
+    measure: &mut impl FnMut(usize) -> f32,
+) -> Option<usize> {
+    if boundaries.is_empty() {
+        return None;
+    }
+
+    // Quick check: does the largest boundary fit?  If yes, return it directly
+    // (common case: the line nearly fits and only needs a tiny trim).
+    let last = *boundaries.last().unwrap();
+    if measure(last) <= budget {
+        return Some(last);
+    }
+
+    // Quick check: does even the smallest boundary fit?  If not, nothing fits.
+    let first = boundaries[0];
+    if measure(first) > budget {
+        return None;
+    }
+
+    // Binary search over the index space [0, boundaries.len()).
+    // Invariant: boundaries[lo] fits, boundaries[hi] does not fit.
+    let mut lo = 0usize;
+    let mut hi = boundaries.len() - 1;
+
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        if measure(boundaries[mid]) <= budget {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    // `lo` is the last index where the predicate holds.
+    Some(boundaries[lo])
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -843,7 +923,7 @@ mod tests {
     // Iteration count is 32 to keep total CI time well under 10 s in debug mode
     // with software font rasterisation.  The invariant guarantee comes from random
     // input coverage, not iteration count; real regression detection uses criterion
-    // benchmarks in benchmarks/.
+    // benchmarks in crates/tze_hud_compositor/benches/overflow_truncate.rs.
 
     proptest! {
         #![proptest_config(proptest::test_runner::Config {
@@ -1085,10 +1165,10 @@ mod tests {
 
         // We allow up to 500ms here to tolerate debug-mode unoptimised builds and
         // headless CI environments (no GPU, software-renderer font rasterisation).
-        // The real budget (< 1ms p99 in release) is enforced in the benchmarks/
-        // directory with hardware calibration.  This test is a catastrophic-
-        // regression guard: it catches algorithmic complexity explosions (e.g.
-        // O(n²) shaping loops), not framework overhead.
+        // The real budget (< 1ms p99 in release) is enforced by the Criterion
+        // benchmark in benches/overflow_truncate.rs with hardware calibration.
+        // This test is a catastrophic-regression guard: it catches algorithmic
+        // complexity explosions (e.g. O(n²) shaping loops), not framework overhead.
         assert!(
             elapsed_ms < 500.0,
             "truncate_for_ellipsis exceeded catastrophic regression threshold (500ms) for \
