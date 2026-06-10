@@ -309,3 +309,6 @@ git push                # Push to remote
 - Retained widget SVG text has a simple sans-serif fast path in `crates/tze_hud_compositor/src/widget.rs` using `ab_glyph`; unsupported font families or dominant-baseline values intentionally fall back to the cropped `resvg` text-mask path.
 - Current `main` branch protection requires status checks but not pull-request reviews. Empty GitHub `reviewDecision` is not itself a blocker for Windows soak PR lanes; verify required checks and merge state before creating approval blocker beads.
 - OpenSpec strict validation can fail a requirement when its first scenarios appear only after a fenced schema/code block; place at least one `#### Scenario` before long fenced examples.
+- The live Windows HUD PSK can be recovered with `schtasks /Query /TN TzeHudOverlay /XML` (it is embedded in the task's `<Arguments>`); no local env var or file holds it on the Linux side.
+- A `tze_hud.exe` process showing ~16 K memory in `tasklist` with both 9090/50051 closed is a stuck startup zombie, not a running HUD: `taskkill /F /IM tze_hud.exe` via `tzeus`, then `schtasks /Run /TN TzeHudOverlay` recovers it (the task definition persists across kills).
+- `test_results/` is gitignored; evidence transcripts that must be committed are selectively force-added with `git add -f`, matching prior tracked files in that directory.
