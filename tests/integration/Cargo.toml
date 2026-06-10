@@ -120,6 +120,15 @@ path = "text_stream_portal_governance.rs"
 name = "text_stream_portal_markdown"
 path = "text_stream_portal_markdown.rs"
 
+# hud-5jbra.4: Phase-1 composer draft editing verification (task 4.7).
+# Covers: local echo independence from adapter latency, word-wise delete,
+# coalesced notifications, oversized-paste truncation and non-forwarding,
+# submit-content fidelity, safe-mode suspension, keystroke non-passthrough
+# across both adapter families (runtime draft + cooperative projection adapter).
+[[test]]
+name = "text_stream_portal_composer"
+path = "text_stream_portal_composer.rs"
+
 # hud-bs2q.5: Long-press drag-to-reposition interaction.
 # Tests: long-press recognizer activation/cancellation, multi-touch independence,
 # snap quantisation, boundary clamping at all 4 edges, full drag lifecycle
