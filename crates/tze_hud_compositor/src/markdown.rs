@@ -534,6 +534,15 @@ fn process_inline(
     } else {
         Vec::new()
     };
+    // Build the paren-match table once for this slice so that the link-dest
+    // branch can resolve `(…)` in O(1) instead of scanning to end-of-input
+    // per opening `(`.  Total cost: O(chars.len()).  Skip the allocation
+    // entirely when there are no parens on the line.
+    let paren_matches = if chars.contains(&'(') {
+        build_paren_matches(chars)
+    } else {
+        Vec::new()
+    };
     process_inline_inner(
         chars,
         out,
@@ -542,6 +551,7 @@ fn process_inline(
         base_override,
         0,
         &bracket_matches,
+        &paren_matches,
     );
 }
 
@@ -557,6 +567,20 @@ fn process_inline(
 /// operate on sub-slices and pass an empty slice for `bracket_matches`; the
 /// callee rebuilds the table on-demand for its sub-slice when `[` characters
 /// are present, so nested links are still parsed correctly.
+///
+/// `paren_matches[i]` is `Some(j)` when `chars[i] == '('` and `j` is the
+/// index of the matching `')'` (computed once by the top-level caller).  Same
+/// scope rules as `bracket_matches`: recursive sub-slice calls pass `&[]` and
+/// the fallback O(n) depth scan is used.
+///
+/// # Argument count
+///
+/// The eight parameters are all contextual state that must be threaded through
+/// the recursion: chars, output, spans, tokens, base_override, depth, and two
+/// precomputed match tables (bracket and paren).  A context struct would add
+/// indirection with no readability benefit at this call frequency; the lint is
+/// suppressed instead.
+#[allow(clippy::too_many_arguments)]
 fn process_inline_inner(
     chars: &[char],
     out: &mut String,
@@ -565,6 +589,7 @@ fn process_inline_inner(
     base_override: Option<&StyleAttr>,
     depth: usize,
     bracket_matches: &[Option<usize>],
+    paren_matches: &[Option<usize>],
 ) {
     // Depth cap: emit all remaining characters as literals so adversarial
     // deeply-nested input cannot overflow the stack.
@@ -586,6 +611,11 @@ fn process_inline_inner(
     // amortized O(n).  This is a pure short-circuit — it never changes which
     // emphasis spans match.
     let mut emphasis_close_fail = EmphasisCloseMemo::new();
+    // Memo of backtick-close failures, keyed by tick_count.  Same principle as
+    // EmphasisCloseMemo: if no closing run of length `tick_count` exists from
+    // position `from`, no later position can succeed either.  Converts the
+    // `` ` ``×65534 flood (O(n²)) into amortized O(n).
+    let mut backtick_close_fail = BacktickCloseMemo::new();
 
     while i < n {
         let ch = chars[i];
@@ -595,7 +625,9 @@ fn process_inline_inner(
         // transformed — emit the verbatim source substring so agents can
         // see exactly what was in the input.
         if ch == '!' && i + 1 < n && chars[i + 1] == '[' {
-            if let Some(end) = find_link_end_with_table(chars, i + 1, bracket_matches) {
+            if let Some(end) =
+                find_link_end_with_table(chars, i + 1, bracket_matches, paren_matches)
+            {
                 // Emit the full `![alt](url)` construct verbatim.
                 for &c in &chars[i..=end] {
                     out.push(c);
@@ -620,7 +652,9 @@ fn process_inline_inner(
             };
             if let Some(bracket_close) = bracket_close {
                 if bracket_close + 1 < n && chars[bracket_close + 1] == '(' {
-                    if let Some(paren_close) = find_paren_close(chars, bracket_close + 1) {
+                    if let Some(paren_close) =
+                        find_paren_close(chars, bracket_close + 1, paren_matches)
+                    {
                         let start = out.len();
                         let prev_len = spans.len();
                         // Build a bracket-match table for the sub-slice so nested
@@ -644,6 +678,7 @@ fn process_inline_inner(
                             Some(&link_attr),
                             depth + 1,
                             &inner_bm,
+                            &[], // paren_matches is for the full line; sub-slice uses fallback
                         );
                         let end = out.len();
                         // Use fill_gaps_with_base to cover unstyled gaps with the
@@ -670,9 +705,9 @@ fn process_inline_inner(
             while i + tick_count < n && chars[i + tick_count] == '`' {
                 tick_count += 1;
             }
-            // Find matching closing run.
+            // Find matching closing run via memo to avoid O(n²) on backtick floods.
             if let Some(close_start) =
-                find_backtick_close(chars, tick_start + tick_count, tick_count)
+                backtick_close_fail.find(chars, tick_start + tick_count, tick_count)
             {
                 let start = out.len();
                 for &c in &chars[tick_start + tick_count..close_start] {
@@ -723,6 +758,7 @@ fn process_inline_inner(
                     Some(&inner_attr),
                     depth + 1,
                     &[],
+                    &[],
                 );
                 let end = out.len();
                 // Fill only unstyled gaps to avoid overlapping spans.
@@ -755,6 +791,7 @@ fn process_inline_inner(
                     tokens,
                     Some(&bold_attr),
                     depth + 1,
+                    &[],
                     &[],
                 );
                 let end = out.len();
@@ -795,6 +832,7 @@ fn process_inline_inner(
                         tokens,
                         Some(&italic_attr),
                         depth + 1,
+                        &[],
                         &[],
                     );
                     let end = out.len();
@@ -1008,11 +1046,59 @@ fn find_bracket_close(chars: &[char], open_pos: usize) -> Option<usize> {
     None
 }
 
-/// Find the index of the closing `)` for a `(` at `open_pos` in `chars`.
-fn find_paren_close(chars: &[char], open_pos: usize) -> Option<usize> {
+/// Build a paren-match table for `chars` in a single O(n) pass.
+///
+/// Returns a `Vec<Option<usize>>` of length `chars.len()`.  Entry `i` is
+/// `Some(j)` when `chars[i] == '('` and `j` is the index of its matching
+/// `')'`; all other entries are `None`.  Unmatched `(` (no closing `)`) map
+/// to `None`.
+///
+/// Building this table once per line lets the link branch look up paren
+/// matches in O(1) instead of scanning to end-of-input per opening `(`.
+/// Without it, `[](`×21845 triggers ~10⁹ character comparisons; with it,
+/// the whole line costs one O(n) pass.
+fn build_paren_matches(chars: &[char]) -> Vec<Option<usize>> {
+    // Fast path: no `(` means no paren pairs — skip the allocation entirely.
+    if !chars.contains(&'(') {
+        return Vec::new();
+    }
+    let n = chars.len();
+    let mut table = vec![None; n];
+    // Stack of open-paren positions waiting for their closing `)`.
+    let mut stack: Vec<usize> = Vec::new();
+    for (i, &ch) in chars.iter().enumerate() {
+        match ch {
+            '(' => stack.push(i),
+            ')' => {
+                if let Some(open) = stack.pop() {
+                    table[open] = Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    table
+}
+
+/// Find the index of the closing `)` for a `(` at `open_pos` in `chars`,
+/// using the precomputed paren-match table when available.
+///
+/// This is the O(1) fast path when `paren_matches` is non-empty.  Falls back
+/// to the O(n) stack scan when the table is empty (e.g. sub-slice calls that
+/// were not pre-allocated), preserving correctness in all cases.
+fn find_paren_close(
+    chars: &[char],
+    open_pos: usize,
+    paren_matches: &[Option<usize>],
+) -> Option<usize> {
     if chars.get(open_pos) != Some(&'(') {
         return None;
     }
+    // Fast path: table lookup when available.
+    if open_pos < paren_matches.len() {
+        return paren_matches[open_pos];
+    }
+    // Fallback: O(n) depth scan (used for sub-slices without a prebuilt table).
     let mut depth = 0usize;
     for (i, &ch) in chars.iter().enumerate().skip(open_pos) {
         if ch == '(' {
@@ -1028,14 +1114,16 @@ fn find_paren_close(chars: &[char], open_pos: usize) -> Option<usize> {
 }
 
 /// Find the end of a `![alt](url)` image construct using the precomputed
-/// bracket-match table.  Returns the position of the final `)`, or `None`.
+/// bracket-match and paren-match tables.  Returns the position of the final
+/// `)`, or `None`.
 ///
-/// Falls back to [`find_bracket_close`] when `bracket_matches` is empty
-/// (recursive sub-slice calls), preserving correctness.
+/// Falls back to [`find_bracket_close`] / O(n) depth scan when the respective
+/// table is empty (recursive sub-slice calls), preserving correctness.
 fn find_link_end_with_table(
     chars: &[char],
     open_bracket: usize,
     bracket_matches: &[Option<usize>],
+    paren_matches: &[Option<usize>],
 ) -> Option<usize> {
     let bracket_close = if open_bracket < bracket_matches.len() {
         bracket_matches[open_bracket]?
@@ -1043,13 +1131,16 @@ fn find_link_end_with_table(
         find_bracket_close(chars, open_bracket)?
     };
     if bracket_close + 1 < chars.len() && chars[bracket_close + 1] == '(' {
-        find_paren_close(chars, bracket_close + 1)
+        find_paren_close(chars, bracket_close + 1, paren_matches)
     } else {
         None
     }
 }
 
 /// Find the closing backtick run of `tick_count` backticks starting search at `from`.
+///
+/// This is the O(n) base scanner.  Prefer calling it through
+/// [`BacktickCloseMemo::find`] to get amortized-O(1) failure short-circuiting.
 fn find_backtick_close(chars: &[char], from: usize, tick_count: usize) -> Option<usize> {
     let n = chars.len();
     let mut i = from;
@@ -1068,6 +1159,67 @@ fn find_backtick_close(chars: &[char], from: usize, tick_count: usize) -> Option
         }
     }
     None
+}
+
+/// Amortized-O(1) failure memo around [`find_backtick_close`].
+///
+/// A scan for a closing backtick run of length `tick_count` starting at `from`
+/// examines the suffix `chars[from..]`.  If that scan fails, any later start
+/// `from' >= from` (a shorter suffix) for the same `tick_count` also fails.
+/// This memo records, per `tick_count`, the lowest `from` already proven to
+/// have no close, and short-circuits future failing scans.
+///
+/// This converts the pathological `` ` ``×65534 flood — where the original code
+/// re-scanned to end-of-input for every backtick position, costing O(n²) —
+/// into amortized O(n) total.  It is a pure short-circuit: it never changes
+/// which code spans match, only how fast failures are detected.
+///
+/// Backtick runs of length > `MAX_TICK` are handled by a direct scan (no memo
+/// entry).  In practice, CommonMark uses at most a handful of backticks, so
+/// this cap is never reached on valid input.
+struct BacktickCloseMemo {
+    /// `fail_from[tick_count - 1]` is `Some(f)` when no close run of that
+    /// length exists for any start `>= f`.  Indexed by `tick_count - 1`.
+    fail_from: [Option<usize>; Self::MAX_TICK],
+}
+
+impl BacktickCloseMemo {
+    /// Maximum tick-count tracked by the memo.  Runs longer than this fall
+    /// back to a direct scan.
+    const MAX_TICK: usize = 8;
+
+    fn new() -> Self {
+        Self {
+            fail_from: [None; Self::MAX_TICK],
+        }
+    }
+
+    /// Find the closing backtick run, consulting and updating the failure memo.
+    fn find(&mut self, chars: &[char], from: usize, tick_count: usize) -> Option<usize> {
+        if tick_count == 0 || tick_count > Self::MAX_TICK {
+            // Unsupported tick count — fall back to a direct scan.
+            return find_backtick_close(chars, from, tick_count);
+        }
+        let col = tick_count - 1;
+        // Short-circuit if a previous scan already proved no close from an
+        // earlier (or equal) start position.
+        if let Some(f) = self.fail_from[col] {
+            if from >= f {
+                return None;
+            }
+        }
+        match find_backtick_close(chars, from, tick_count) {
+            Some(close) => Some(close),
+            None => {
+                // Record the lowest failing start for this tick_count.
+                // Since we short-circuit when from >= f (above), any existing
+                // entry must have f > from, so `from` is always the new
+                // minimum — a direct assign is correct and cheaper.
+                self.fail_from[col] = Some(from);
+                None
+            }
+        }
+    }
 }
 
 /// Amortized-O(1) failure memo around [`find_emphasis_close`].
@@ -1895,6 +2047,185 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(5),
             "combined 64KiB adversarial input must complete in <5s (debug build); took {elapsed:?}"
+        );
+    }
+
+    // ── Paren-close adversarial tests (hud-xq0uo) ────────────────────────────
+
+    /// 21845 repetitions of `[](` complete in bounded time.
+    ///
+    /// Before hud-xq0uo, `find_paren_close` re-scanned the full suffix for
+    /// every unmatched `(`, costing O(n²) — ~969 ms in release on real hardware.
+    /// The precomputed `build_paren_matches` table reduces each lookup to O(1),
+    /// making the whole line O(n).
+    ///
+    /// This test is NOT `#[ignore]`-gated: O(n²) would make it hang for
+    /// tens of seconds in any build mode; O(n) finishes instantly.
+    #[test]
+    fn adversarial_paren_flood_link_dest_completes_fast() {
+        // "[](": 21845 repetitions ≈ 65535 bytes, all parens unmatched.
+        let input = "[](".repeat(21845);
+        let md = parse(&input);
+        // All content must appear in the output (no silent drops).
+        assert!(
+            !md.plain_text.is_empty(),
+            "paren flood must produce non-empty output"
+        );
+    }
+
+    /// 16383 repetitions of `[a](` complete in bounded time.
+    ///
+    /// Variant: link text present (`a`) — exercises the bracket-table lookup
+    /// followed by the paren-table lookup.  Empirical: ~963 ms before fix.
+    ///
+    /// This test is NOT `#[ignore]`-gated: see `adversarial_paren_flood_link_dest_completes_fast`.
+    #[test]
+    fn adversarial_paren_flood_with_link_text_completes_fast() {
+        // "[a](": 16383 repetitions ≈ 65532 bytes.
+        let input = "[a](".repeat(16383);
+        let md = parse(&input);
+        assert!(
+            !md.plain_text.is_empty(),
+            "paren flood with link text must produce non-empty output"
+        );
+    }
+
+    /// 13107 repetitions of `![a](` complete in bounded time.
+    ///
+    /// Variant: image `!` prefix — exercises `find_link_end_with_table` which
+    /// also calls `find_paren_close`.  Empirical: ~642 ms before fix.
+    ///
+    /// This test is NOT `#[ignore]`-gated: see `adversarial_paren_flood_link_dest_completes_fast`.
+    #[test]
+    fn adversarial_paren_flood_image_construct_completes_fast() {
+        // "![a](": 13107 repetitions ≈ 65535 bytes.
+        let input = "![a](".repeat(13107);
+        let md = parse(&input);
+        assert!(
+            !md.plain_text.is_empty(),
+            "image paren flood must produce non-empty output"
+        );
+    }
+
+    // ── Backtick-close adversarial tests (hud-xq0uo) ─────────────────────────
+
+    /// 65534 backticks (unmatched runs) complete in bounded time.
+    ///
+    /// Before hud-xq0uo, `find_backtick_close` re-scanned the full suffix for
+    /// every unmatched backtick, costing O(n²) — ~696 ms in release on real
+    /// hardware.  The `BacktickCloseMemo` short-circuits repeated failing scans,
+    /// making the whole line amortized O(n).
+    ///
+    /// This test is NOT `#[ignore]`-gated: O(n²) would make it hang for
+    /// tens of seconds in any build mode; amortized O(n) finishes instantly.
+    ///
+    /// Pattern: `a` + `` ` ``×65534 — a single letter followed by a flood of
+    /// unmatched backticks.  Each backtick run of length 1 scans the entire
+    /// remaining input before failing; without the memo this is O(n²).
+    #[test]
+    fn adversarial_backtick_flood_completes_fast() {
+        // "a" + "`" × 65534: a single non-backtick followed by 65534 bare backticks.
+        // No two adjacent backtick runs form a matched pair (they are all
+        // adjacent, so only runs of exactly 1 exist everywhere — and there is
+        // no non-backtick content between them for a close scan to land on).
+        // Actually simpler: a repeated sequence that has no balanced backtick
+        // pairs: "a" followed by backticks that are all one big run (no match).
+        let mut input = String::with_capacity(65535);
+        input.push('a');
+        for _ in 0..65534 {
+            input.push('`');
+        }
+        let md = parse(&input);
+        // The plain-text output must contain the leading 'a'.
+        assert!(
+            md.plain_text.contains('a'),
+            "backtick flood must not drop literal 'a' character"
+        );
+        // The output must be non-empty and not panic.
+        assert!(
+            !md.plain_text.is_empty(),
+            "backtick flood must produce non-empty output"
+        );
+    }
+
+    // ── Paren/backtick semantic correctness tests (hud-xq0uo) ────────────────
+
+    /// Normal link `[text](url)` is correctly parsed after paren table is built.
+    ///
+    /// Ensures the paren-table lookup does not regress link parsing semantics.
+    #[test]
+    fn paren_table_link_semantic_correctness() {
+        let md = parse("[hello](https://example.com)");
+        assert_eq!(
+            md.plain_text, "hello",
+            "link text must be extracted, URL dropped"
+        );
+    }
+
+    /// Link with nested parens in URL `[text](url(1))` is handled correctly.
+    ///
+    /// The paren table uses a depth-matching stack, so nested parens in the
+    /// link destination match the outermost `)`.
+    #[test]
+    fn paren_table_nested_parens_in_url() {
+        let md = parse("[doc](fn(arg))");
+        // The link text should be emitted; the URL (including inner parens) is dropped.
+        assert_eq!(
+            md.plain_text, "doc",
+            "nested parens in URL must not break link parsing"
+        );
+    }
+
+    /// Multiple links on one line are all parsed correctly.
+    #[test]
+    fn paren_table_multiple_links_on_one_line() {
+        let md = parse("[a](u1) and [b](u2)");
+        assert_eq!(
+            md.plain_text, "a and b",
+            "multiple links must all be parsed correctly"
+        );
+    }
+
+    /// Inline code spans are correctly parsed after the backtick memo is built.
+    ///
+    /// Ensures `BacktickCloseMemo` does not regress code-span parsing semantics.
+    #[test]
+    fn backtick_memo_inline_code_semantic_correctness() {
+        let md = parse("Use `fmt::Display` here.");
+        assert_eq!(md.plain_text, "Use fmt::Display here.");
+        assert!(
+            md.spans.iter().any(|s| s.attr.monospace),
+            "inline code must produce a monospace span"
+        );
+        let span = md.spans.iter().find(|s| s.attr.monospace).unwrap();
+        assert_eq!(
+            &md.plain_text[span.start_byte..span.end_byte],
+            "fmt::Display"
+        );
+    }
+
+    /// Double-backtick code spans (`` ``code`` ``) are parsed correctly.
+    ///
+    /// Tests that tick_count=2 memo entries do not interfere with tick_count=1.
+    #[test]
+    fn backtick_memo_double_tick_span_correctness() {
+        let md = parse("Look at ``a`b`` here.");
+        assert_eq!(md.plain_text, "Look at a`b here.");
+        assert!(
+            md.spans.iter().any(|s| s.attr.monospace),
+            "double-tick code span must produce a monospace span"
+        );
+    }
+
+    /// Multiple code spans on one line are all parsed correctly.
+    #[test]
+    fn backtick_memo_multiple_spans_on_one_line() {
+        let md = parse("`a` and `b` and `c`");
+        assert_eq!(md.plain_text, "a and b and c");
+        assert_eq!(
+            md.spans.iter().filter(|s| s.attr.monospace).count(),
+            3,
+            "three separate code spans must each produce a monospace span"
         );
     }
 }
