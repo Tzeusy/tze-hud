@@ -122,6 +122,114 @@ pub struct ScrollOffsetChangedEvent {
     pub offset_y: f32,
 }
 
+// ─── FollowTailAnchor ─────────────────────────────────────────────────────────
+
+/// The scroll-anchor state for a streaming transcript tile.
+///
+/// This type encodes the spec task 3.2 / 3.3 contract for the follow-tail
+/// scroll model:
+///
+/// - **`AtTail`** — the viewport is currently at the tail of the content.
+///   When new content is appended, the scroll offset advances by exactly N
+///   whole lines (spec task 3.2: "follow-tail advances by whole lines").
+///
+/// - **`ScrolledBack`** — the user has scrolled back from the tail.  When new
+///   content is appended, the scroll offset is **not changed** (spec task 3.3:
+///   "append does not disturb a scrolled-back viewport").
+///
+/// # Transition rules
+///
+/// | Event | Before | After |
+/// |---|---|---|
+/// | User scrolls down to tail | any | `AtTail` |
+/// | User scrolls back (up) | `AtTail` | `ScrolledBack` |
+/// | Content appended at tail | `AtTail` | `AtTail` (offset updated) |
+/// | Content appended at tail | `ScrolledBack` | `ScrolledBack` (offset unchanged) |
+/// | Tile registered / reset | — | `AtTail` (default: new tiles start at tail) |
+///
+/// # Usage
+///
+/// `FollowTailAnchor` is stored in [`ScrollTileState`] alongside the existing
+/// offset fields.  It is updated by [`ScrollTileState::queue_user_scroll`] and
+/// consumed by [`ScrollTileState::notify_content_appended`].
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Default)]
+pub enum FollowTailAnchor {
+    /// The viewport is at the tail of the content (default for new tiles).
+    #[default]
+    AtTail,
+    /// The user has scrolled back from the tail.
+    ScrolledBack,
+}
+
+/// Compute the follow-tail scroll offset for a tile when content is appended.
+///
+/// Given the previous and new `content_height`, `viewport_height`, and
+/// `line_height`, returns the offset that keeps the viewport at the tail after
+/// the append, advancing by **whole lines only**.
+///
+/// If the new content height does not add at least one full line, no change is
+/// made (returns the current offset unchanged).  This ensures the "whole-line
+/// advancement" invariant from spec task 3.2.
+///
+/// # Parameters
+///
+/// - `current_offset_y` — the current scroll offset (pixels from content origin).
+/// - `old_content_height` — content height before the append (pixels).
+/// - `new_content_height` — content height after the append (pixels).
+/// - `viewport_height` — visible tile height (pixels).
+/// - `line_height` — line height (pixels); used to quantise the advancement.
+///
+/// # Returns
+///
+/// The new `offset_y` value (may equal `current_offset_y` if no whole line was
+/// added, or be clamped to `new_content_height - viewport_height` at the tail).
+pub fn follow_tail_offset(
+    current_offset_y: f32,
+    old_content_height: f32,
+    new_content_height: f32,
+    viewport_height: f32,
+    line_height: f32,
+) -> f32 {
+    // Guard against NaN / infinite inputs: NaN comparisons return false and
+    // would bypass the safety guards below; infinite values propagate through
+    // arithmetic and cause floor()-to-usize casts to panic.
+    if !current_offset_y.is_finite()
+        || !old_content_height.is_finite()
+        || !new_content_height.is_finite()
+        || !viewport_height.is_finite()
+        || !line_height.is_finite()
+        || line_height <= 0.0
+        || viewport_height <= 0.0
+    {
+        return current_offset_y;
+    }
+
+    // New lines added (as a count of whole lines).
+    // Use a small tolerance (1/32 of a line) when rounding to defend against
+    // floating-point representation errors: e.g. `5.0_f32 * 22.4_f32 = 112.0`
+    // and `6.0_f32 * 22.4_f32 = 134.39999...`, so `delta = 22.39999...` which
+    // would floor-divide to 0 without the tolerance bump.
+    let delta_px = new_content_height - old_content_height;
+    if delta_px < line_height * 0.5 {
+        // Less than half a line was added — not yet a whole line, no advancement.
+        return current_offset_y;
+    }
+    let tolerance = line_height / 32.0;
+    let new_lines = ((delta_px + tolerance) / line_height).floor() as u32;
+    if new_lines == 0 {
+        return current_offset_y;
+    }
+
+    // Advance by exactly `new_lines` whole lines.
+    let advanced = current_offset_y + new_lines as f32 * line_height;
+
+    // Clamp to the tail (new_content_height − viewport_height).
+    // A tile whose content is shorter than the viewport has no scrollable range;
+    // the max meaningful offset is 0.
+    let tail_offset = (new_content_height - viewport_height).max(0.0);
+    advanced.min(tail_offset)
+}
+
 // ─── ScrollTileState ──────────────────────────────────────────────────────────
 
 /// Current scroll state for a single tile.
@@ -140,6 +248,17 @@ pub struct ScrollTileState {
     user_scroll_this_frame: bool,
     /// Whether the offset changed this frame (set by queue_user_scroll or commit_frame).
     dirty: bool,
+    /// Follow-tail anchor state for streaming transcript tiles.
+    ///
+    /// Defaults to `AtTail` for all new tiles: a freshly created tile starts
+    /// with the viewport at the tail of the content.  Transitions to
+    /// `ScrolledBack` when the user scrolls up, and back to `AtTail` when the
+    /// user scrolls to the tail again.
+    ///
+    /// Private: external callers must use `ScrollState::follow_tail_anchor()`
+    /// for read access.  Mutations must go through `queue_user_scroll` and
+    /// `notify_content_appended` to preserve invariants.
+    follow_tail: FollowTailAnchor,
 }
 
 impl ScrollTileState {
@@ -151,10 +270,15 @@ impl ScrollTileState {
             pending_agent_request: None,
             user_scroll_this_frame: false,
             dirty: false,
+            follow_tail: FollowTailAnchor::AtTail,
         }
     }
 
     /// Queue a user scroll delta for this frame.
+    ///
+    /// Updates the follow-tail anchor: a positive y-delta (scroll down) that
+    /// brings the viewport to the tail transitions the anchor back to `AtTail`;
+    /// any upward scroll transitions it to `ScrolledBack`.
     pub fn queue_user_scroll(&mut self, delta_x: f32, delta_y: f32) {
         if let Some(config) = &self.config {
             if config.scrollable_x {
@@ -166,6 +290,99 @@ impl ScrollTileState {
             self.user_scroll_this_frame = true;
             self.dirty = true;
             self.clamp_offsets();
+            // Update follow-tail anchor after clamping so we can compare against
+            // the tail boundary.
+            self.update_follow_tail_anchor_after_user_scroll(delta_y);
+        }
+    }
+
+    /// Update the follow-tail anchor after a user scroll gesture.
+    ///
+    /// If the user scrolled backward (negative delta_y = up), transition to
+    /// `ScrolledBack`.  If they scrolled forward (positive delta_y = down) and
+    /// are now at the tail, transition back to `AtTail`.
+    fn update_follow_tail_anchor_after_user_scroll(&mut self, delta_y: f32) {
+        if let Some(config) = &self.config {
+            if delta_y < 0.0 {
+                // Scrolled up — user moved away from tail.
+                self.follow_tail = FollowTailAnchor::ScrolledBack;
+            } else if delta_y > 0.0 {
+                // Scrolled down — check if we reached the tail.
+                let tail_offset = config.content_height.map(|ch| ch.max(0.0)).unwrap_or(0.0);
+                // If there is no content_height bound (free scroll), or we are at
+                // or beyond the tail offset, mark as AtTail.
+                if config.content_height.is_none() || self.offset_y >= tail_offset {
+                    self.follow_tail = FollowTailAnchor::AtTail;
+                }
+            }
+        }
+    }
+
+    /// Notify this tile that new content has been appended (e.g. a streaming
+    /// transcript received new lines).
+    ///
+    /// Implements spec task 3.2 ("follow-tail advances by whole lines") and
+    /// task 3.3 ("append does not disturb a scrolled-back viewport"):
+    ///
+    /// - When `self.follow_tail == AtTail`, the scroll offset advances by
+    ///   whole lines to track the new tail.
+    /// - When `self.follow_tail == ScrolledBack`, the scroll offset is
+    ///   unchanged; only `content_height` is updated.
+    ///
+    /// Also updates `config.content_height` to the new value so that future
+    /// scroll clamping reflects the extended content.
+    ///
+    /// # Parameters
+    ///
+    /// - `new_content_height` — total content height (pixels) after the append.
+    /// - `viewport_height` — visible tile height (pixels); needed for the
+    ///   whole-line advancement calculation.
+    /// - `line_height` — line height (pixels); used to quantise advancement.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the scroll offset changed (dirty), `false` if the anchor was
+    /// `ScrolledBack` and the offset was left unchanged.
+    pub fn notify_content_appended(
+        &mut self,
+        new_content_height: f32,
+        viewport_height: f32,
+        line_height: f32,
+    ) -> bool {
+        let old_content_height = self
+            .config
+            .as_ref()
+            .and_then(|c| c.content_height)
+            .unwrap_or(0.0);
+
+        // Update content_height in config regardless of anchor state so that
+        // future scroll clamping uses the correct boundary.
+        if let Some(config) = &mut self.config {
+            config.content_height = Some(new_content_height);
+        }
+
+        match self.follow_tail {
+            FollowTailAnchor::ScrolledBack => {
+                // Task 3.3: do NOT disturb the scrolled-back viewport.
+                false
+            }
+            FollowTailAnchor::AtTail => {
+                // Task 3.2: advance by whole lines.
+                let new_offset = follow_tail_offset(
+                    self.offset_y,
+                    old_content_height,
+                    new_content_height,
+                    viewport_height,
+                    line_height,
+                );
+                if (new_offset - self.offset_y).abs() > f32::EPSILON {
+                    self.offset_y = new_offset;
+                    self.dirty = true;
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -341,6 +558,37 @@ impl ScrollState {
     /// Get a `ScrollOffsetChangedEvent` for a tile (for agent notification).
     pub fn changed_event(&self, tile_id: SceneId) -> Option<ScrollOffsetChangedEvent> {
         self.tiles.get(&tile_id).map(|s| s.changed_event(tile_id))
+    }
+
+    /// Notify a tile that content has been appended (e.g. new streaming lines).
+    ///
+    /// Implements spec task 3.2 / 3.3 at the registry level:
+    /// - `AtTail` tiles advance their scroll offset by whole lines.
+    /// - `ScrolledBack` tiles have their offset left unchanged.
+    ///
+    /// Returns `true` if the offset actually changed, `false` otherwise.
+    /// No-op if the tile is not registered.
+    pub fn notify_content_appended(
+        &mut self,
+        tile_id: SceneId,
+        new_content_height: f32,
+        viewport_height: f32,
+        line_height: f32,
+    ) -> bool {
+        self.tiles
+            .get_mut(&tile_id)
+            .map(|s| s.notify_content_appended(new_content_height, viewport_height, line_height))
+            .unwrap_or(false)
+    }
+
+    /// Return the current follow-tail anchor state for a tile.
+    ///
+    /// Returns `AtTail` (the default) if the tile is not registered.
+    pub fn follow_tail_anchor(&self, tile_id: SceneId) -> FollowTailAnchor {
+        self.tiles
+            .get(&tile_id)
+            .map(|s| s.follow_tail)
+            .unwrap_or(FollowTailAnchor::AtTail)
     }
 }
 
@@ -583,5 +831,240 @@ mod tests {
             elapsed_us < budget,
             "scroll local_ack_us={elapsed_us}us exceeded calibrated budget {budget}us",
         );
+    }
+
+    // ── Spec task 3.2 — follow-tail advances by whole lines ──────────────────
+
+    /// A tile starting at the tail should advance its offset by exactly N whole
+    /// lines when content is appended, never by a fractional line.
+    ///
+    /// Spec task 3.2: "follow-tail advances by whole lines"
+    #[test]
+    fn follow_tail_advances_by_whole_lines_on_append() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32; // 5 visible lines
+        let mut scroll = ScrollState::new();
+
+        // Register with content_height = 5 lines initially (viewport is full).
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: Some(5.0 * line_h), // 100px
+        };
+        scroll.register_tile(tile_id, config);
+
+        // Tile starts at AtTail with offset_y = 0 (content fits in viewport).
+        assert_eq!(scroll.follow_tail_anchor(tile_id), FollowTailAnchor::AtTail);
+
+        // Append 3 more lines: content grows from 100px to 160px.
+        let new_content_height = 8.0 * line_h; // 160px
+        let changed =
+            scroll.notify_content_appended(tile_id, new_content_height, viewport_h, line_h);
+
+        assert!(
+            changed,
+            "offset should have changed when at tail and content grew"
+        );
+
+        let (_, offset_y) = scroll.offset(tile_id);
+        // Expected new offset: 160 - 100 = 60px (exactly 3 line-heights).
+        // The viewport shows lines 3-7 (0-indexed), bottom-aligned to content end.
+        assert!(
+            (offset_y - 60.0).abs() < f32::EPSILON,
+            "follow-tail should advance to offset 60.0 (3 new lines × 20px); got {offset_y}"
+        );
+
+        // Advancement is always a whole multiple of line_height.
+        assert_eq!(
+            (offset_y / line_h).fract(),
+            0.0,
+            "offset_y must be a whole multiple of line_height; got {offset_y}"
+        );
+
+        // Tile remains at tail anchor after content append.
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::AtTail,
+            "anchor must remain AtTail after follow-tail advancement"
+        );
+    }
+
+    /// Single-line append from a follow-tail position advances by exactly one
+    /// whole line.
+    #[test]
+    fn follow_tail_single_line_append_advances_exactly_one_line() {
+        let tile_id = SceneId::new();
+        let line_h = 22.4_f32;
+        let viewport_h = 5.0 * line_h;
+        let mut scroll = ScrollState::new();
+
+        // Start: content exactly fills 5 lines; offset = 0 (no scrollable range).
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: Some(5.0 * line_h),
+        };
+        scroll.register_tile(tile_id, config);
+
+        // Append exactly 1 line.
+        let new_content = 6.0 * line_h;
+        scroll.notify_content_appended(tile_id, new_content, viewport_h, line_h);
+
+        let (_, offset_y) = scroll.offset(tile_id);
+        // offset_y should be 1 × line_h to keep the 6th line visible.
+        let expected = line_h; // one line height = 22.4px
+        assert!(
+            (offset_y - expected).abs() < 0.01,
+            "single-line append must advance by exactly 1 × line_height ({expected:.2}px); \
+             got {offset_y:.2}"
+        );
+    }
+
+    // ── Spec task 3.3 — append does not disturb a scrolled-back viewport ─────
+
+    /// When the user has scrolled back from the tail, appending new content
+    /// must NOT change the scroll offset.
+    ///
+    /// Spec task 3.3: "append stability for scrolled-back viewports"
+    #[test]
+    fn scrolled_back_append_does_not_disturb_viewport() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32; // 5 visible lines
+        let mut scroll = ScrollState::new();
+
+        // Content: 20 lines = 400px.
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: Some(20.0 * line_h),
+        };
+        scroll.register_tile(tile_id, config);
+
+        // Move viewport to the tail first (scroll down to end).
+        scroll.apply_user_scroll(tile_id, 0.0, 300.0); // scroll to offset 300 (lines 15–20)
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::AtTail,
+            "after scrolling to tail offset should be AtTail"
+        );
+
+        // Now scroll back up.
+        scroll.apply_user_scroll(tile_id, 0.0, -120.0); // back up 6 lines to offset 180
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::ScrolledBack,
+            "after scrolling up the anchor must be ScrolledBack"
+        );
+        let (_, offset_before) = scroll.offset(tile_id);
+
+        // Append 5 more lines.
+        let new_content = 25.0 * line_h;
+        let changed = scroll.notify_content_appended(tile_id, new_content, viewport_h, line_h);
+
+        assert!(
+            !changed,
+            "append must not dirty the offset when ScrolledBack"
+        );
+
+        let (_, offset_after) = scroll.offset(tile_id);
+        assert!(
+            (offset_before - offset_after).abs() < f32::EPSILON,
+            "scrolled-back append must not change offset_y; before={offset_before} after={offset_after}"
+        );
+
+        // Anchor remains ScrolledBack.
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::ScrolledBack,
+            "anchor must remain ScrolledBack after content append"
+        );
+    }
+
+    /// After scrolling back and then scrolling back to the tail, the anchor
+    /// transitions back to AtTail and follow-tail behaviour resumes.
+    #[test]
+    fn scrolled_back_then_scroll_to_tail_resumes_follow_tail() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let content_h = 20.0 * line_h; // 400px
+        let mut scroll = ScrollState::new();
+
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: Some(content_h),
+        };
+        scroll.register_tile(tile_id, config);
+
+        // Scroll to tail.
+        scroll.apply_user_scroll(tile_id, 0.0, content_h);
+        assert_eq!(scroll.follow_tail_anchor(tile_id), FollowTailAnchor::AtTail);
+
+        // Scroll back.
+        scroll.apply_user_scroll(tile_id, 0.0, -60.0);
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::ScrolledBack
+        );
+
+        // Scroll back to tail.
+        scroll.apply_user_scroll(tile_id, 0.0, 300.0); // forward past the tail
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::AtTail,
+            "scrolling back to tail must restore AtTail anchor"
+        );
+    }
+
+    // ── follow_tail_offset unit tests ─────────────────────────────────────────
+
+    #[test]
+    fn follow_tail_offset_zero_delta_returns_unchanged() {
+        // No new content: no advancement.
+        let result = follow_tail_offset(50.0, 200.0, 200.0, 100.0, 20.0);
+        assert!((result - 50.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn follow_tail_offset_one_line_advance() {
+        // 1 new line (20px) added; advance by exactly 20px.
+        let result = follow_tail_offset(0.0, 100.0, 120.0, 100.0, 20.0);
+        assert!(
+            (result - 20.0).abs() < f32::EPSILON,
+            "expected 20.0 got {result}"
+        );
+    }
+
+    #[test]
+    fn follow_tail_offset_clamped_to_tail() {
+        // Many lines added but we clamp to (new_content - viewport).
+        let result = follow_tail_offset(0.0, 100.0, 500.0, 100.0, 20.0);
+        // tail = 500 - 100 = 400; advanced = 0 + (500-100)/20*20 = 400; min(400, 400) = 400.
+        assert!(
+            (result - 400.0).abs() < f32::EPSILON,
+            "expected 400.0 got {result}"
+        );
+    }
+
+    #[test]
+    fn follow_tail_offset_fractional_line_below_threshold_unchanged() {
+        // 9px added; line_height = 20px; 9 < 10 (0.5 * 20) => no advancement.
+        let result = follow_tail_offset(0.0, 100.0, 109.0, 100.0, 20.0);
+        assert!(
+            (result - 0.0).abs() < f32::EPSILON,
+            "expected 0.0 got {result}"
+        );
+    }
+
+    #[test]
+    fn follow_tail_offset_zero_line_height_returns_unchanged() {
+        let result = follow_tail_offset(50.0, 100.0, 200.0, 100.0, 0.0);
+        assert!((result - 50.0).abs() < f32::EPSILON);
     }
 }
