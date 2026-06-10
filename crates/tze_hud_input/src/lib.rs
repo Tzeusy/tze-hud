@@ -315,6 +315,16 @@ pub struct InputProcessor {
     pub capture: capture::PointerCaptureManager,
     /// Local-first tile scroll state.
     scroll_state: ScrollState,
+    /// Runtime-owned composer draft manager.
+    ///
+    /// Owns the active `ComposerDraft` when a region with
+    /// `accepts_composer_input = true` is focused.  Wired into the focus
+    /// transition path in [`Self::process_with_focus`] and driven by
+    /// [`Self::route_key_down_to_composer`] / [`Self::route_character_to_composer`]
+    /// on every keystroke while a composer region is focused.
+    ///
+    /// Spec: §4.1 — runtime-owned draft attached to focused composer regions.
+    pub composer_draft_manager: ComposerDraftManager,
 }
 
 impl InputProcessor {
@@ -329,6 +339,7 @@ impl InputProcessor {
             rollback_tracker: RollbackTracker::new(),
             capture: capture::PointerCaptureManager::new(),
             scroll_state: ScrollState::new(),
+            composer_draft_manager: ComposerDraftManager::new(),
         }
     }
 
@@ -591,12 +602,24 @@ impl InputProcessor {
                         if let Some(state) = scene.hit_region_states.get_mut(&lost_node_id) {
                             state.focused = false;
                         }
+                        // If the node that lost focus was a composer region, notify the manager.
+                        // `on_focus_lost` flushes any pending draft state (blur is a settle point).
+                        if self.composer_draft_manager.focused_node() == Some(lost_node_id) {
+                            let _ = self.composer_draft_manager.on_focus_lost();
+                        }
                     }
                 }
                 if let Some((gained_ev, _)) = &transition.gained {
                     if let Some(gained_node_id) = gained_ev.node_id {
                         if let Some(state) = scene.hit_region_states.get_mut(&gained_node_id) {
                             state.focused = true;
+                        }
+                        // If the newly focused node accepts composer input, activate the manager.
+                        // `suspended = false` initially; safe-mode governance is applied
+                        // separately via `composer_draft_manager.set_suspended()`.
+                        if node_accepts_composer_input(scene, gained_node_id) {
+                            self.composer_draft_manager
+                                .on_focus_gained(gained_node_id, false);
                         }
                     }
                 }
@@ -614,6 +637,72 @@ impl InputProcessor {
 
         let result = self.process(event, scene);
         (result, focus_transition)
+    }
+
+    /// Route a raw key-down event to the composer draft manager if a composer
+    /// region is focused.
+    ///
+    /// Returns `(consumed, Option<DraftNotificationBatch>)`.
+    /// - `consumed = true` means the keystroke was handled by the draft buffer
+    ///   and MUST NOT be forwarded to the agent as a raw `KeyDownEvent`.
+    /// - The returned `DraftNotificationBatch` is `Some` only on transactional
+    ///   events (submit / cancel); the normal coalesced delivery path is driven
+    ///   by [`Self::try_flush_composer_draft`] at the frame settle point.
+    ///
+    /// If no composer region is focused, returns `(false, None)` and the caller
+    /// SHOULD forward the event to the agent via the normal keyboard path.
+    ///
+    /// Spec: §4.2, §4.4 (editing keystrokes are never forwarded as raw key events).
+    pub fn route_key_down_to_composer(
+        &mut self,
+        key_code: &str,
+        key: &str,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+    ) -> (bool, Option<DraftNotificationBatch>) {
+        self.composer_draft_manager
+            .route_key_down(key_code, key, shift, ctrl, alt)
+    }
+
+    /// Route a post-IME character event to the composer draft manager if a
+    /// composer region is focused.
+    ///
+    /// Returns `(EditOutcome, Option<DraftNotificationBatch>)`.
+    /// When the manager is active (`accepts_composer_input` region focused),
+    /// the character is inserted into the draft buffer and MUST NOT be forwarded
+    /// to the agent as a raw `CharacterEvent`.
+    ///
+    /// If no composer region is focused, returns `(EditOutcome::Unchanged, None)`
+    /// and the caller SHOULD forward the character to the agent.
+    ///
+    /// Spec: §4.1 — keystroke routing into the runtime-owned draft buffer.
+    pub fn route_character_to_composer(
+        &mut self,
+        character: &str,
+    ) -> (EditOutcome, Option<DraftNotificationBatch>) {
+        self.composer_draft_manager.route_character(character)
+    }
+
+    /// Flush pending coalesced draft notifications at a frame settle point.
+    ///
+    /// Must be called once per frame (or per settle window) to guarantee the
+    /// terminal draft state is delivered to downstream consumers.  The
+    /// `DraftScheduler` inside `ComposerDraftManager` coalesces rapid keystrokes
+    /// into a single latest-snapshot; this call forces delivery of any pending
+    /// coalesced state.
+    ///
+    /// Returns `Some(batch)` when there is pending state to deliver, `None` when
+    /// the draft has been idle since the last flush (no-op coalescing window).
+    ///
+    /// Spec: §4.3 — flush guarantee for the coalesced state-stream delivery.
+    pub fn try_flush_composer_draft(&mut self) -> Option<DraftNotificationBatch> {
+        self.composer_draft_manager.try_flush()
+    }
+
+    /// Returns `true` when a composer region is currently focused (draft active).
+    pub fn is_composer_active(&self) -> bool {
+        self.composer_draft_manager.is_active()
     }
 
     /// Process a pointer event against the scene graph.
@@ -1479,6 +1568,21 @@ fn display_to_local(scene: &SceneGraph, tile_id: SceneId, x: f32, y: f32) -> (f3
     } else {
         (x, y)
     }
+}
+
+/// Return `true` when the given node is a `HitRegionNode` with
+/// `accepts_composer_input = true`.
+///
+/// Used by `process_with_focus` to determine whether a focus-gained event
+/// should activate the `ComposerDraftManager`.
+fn node_accepts_composer_input(scene: &SceneGraph, node_id: SceneId) -> bool {
+    scene.nodes.get(&node_id).is_some_and(|n| {
+        if let NodeData::HitRegion(hr) = &n.data {
+            hr.accepts_composer_input
+        } else {
+            false
+        }
+    })
 }
 
 /// Resolve the namespace and interaction_id for a tile/node pair.
@@ -3057,5 +3161,361 @@ mod tests {
             (offset_2 - 6.0 * line_h).abs() < 1.0,
             "second append: expected offset 120px (6 lines × 20px); got {offset_2}px"
         );
+    }
+
+    // ─── Composer draft wiring ────────────────────────────────────────────
+    //
+    // Spec: §4.1 — runtime-owned draft attached to focused composer regions.
+    // Spec: §4.3 — coalesced state-stream notifications.
+    // Spec: §4.4 — editing keystrokes are NOT forwarded to agent.
+    //
+    // These tests validate the end-to-end wiring of `ComposerDraftManager` into
+    // `InputProcessor::process_with_focus` and the keyboard routing methods.
+
+    /// Build a scene with two hit regions: one with `accepts_composer_input = true`
+    /// and one with `accepts_composer_input = false`.  Returns
+    /// `(scene, tab_id, tile_id, composer_node_id, plain_node_id)`.
+    fn setup_composer_scene() -> (SceneGraph, SceneId, SceneId, SceneId, SceneId) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                1,
+            )
+            .unwrap();
+
+        // Composer node (top half of tile)
+        let composer_id = SceneId::new();
+        let plain_id = SceneId::new();
+        let composer_node = Node {
+            id: composer_id,
+            children: vec![plain_id],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, 0.0, 800.0, 60.0),
+                interaction_id: "composer-input".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                accepts_composer_input: true,
+                ..Default::default()
+            }),
+        };
+        // Plain focusable node (bottom half of tile)
+        let plain_node = Node {
+            id: plain_id,
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, 100.0, 800.0, 100.0),
+                interaction_id: "plain-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                accepts_composer_input: false,
+                ..Default::default()
+            }),
+        };
+        scene.nodes.insert(composer_id, composer_node);
+        scene.nodes.insert(plain_id, plain_node);
+        scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(composer_id);
+
+        (scene, tab_id, tile_id, composer_id, plain_id)
+    }
+
+    /// Focus a composer region via `process_with_focus` pointer-down and verify
+    /// the `ComposerDraftManager` is activated.
+    #[test]
+    fn composer_focus_gained_activates_manager() {
+        let (mut scene, tab_id, _tile_id, composer_id, _plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        assert!(
+            !processor.is_composer_active(),
+            "manager must be idle before focus"
+        );
+
+        // Pointer-down inside the composer region (bounds: 0,0 → 800,60)
+        let event = PointerEvent {
+            x: 100.0,
+            y: 10.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&event, &mut scene, &mut fm, tab_id);
+
+        assert!(
+            processor.is_composer_active(),
+            "manager must be active after focusing composer region"
+        );
+        assert_eq!(
+            processor.composer_draft_manager.focused_node(),
+            Some(composer_id),
+            "focused_node must be the composer node_id"
+        );
+    }
+
+    /// Focus a plain (non-composer) region: manager must remain idle.
+    #[test]
+    fn non_composer_focus_does_not_activate_manager() {
+        let (mut scene, tab_id, tile_id, _composer_id, plain_id) = setup_composer_scene();
+
+        // Move the plain node to the root so it can be hit-tested directly.
+        // Re-root the tile to the plain node so the pointer-down in its bounds hits it.
+        let plain_node_for_root = Node {
+            id: plain_id,
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, 0.0, 800.0, 600.0),
+                interaction_id: "plain-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                accepts_composer_input: false,
+                ..Default::default()
+            }),
+        };
+        scene.nodes.insert(plain_id, plain_node_for_root);
+        scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(plain_id);
+
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        let event = PointerEvent {
+            x: 100.0,
+            y: 200.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&event, &mut scene, &mut fm, tab_id);
+
+        assert!(
+            !processor.is_composer_active(),
+            "manager must NOT be active for a non-composer region"
+        );
+    }
+
+    /// Focus composer → feed characters → verify draft buffer and coalesced batch.
+    ///
+    /// Spec §4.1, §4.3: characters routed into draft buffer; adapter receives a
+    /// coalesced state-stream notification (not per-keystroke events).
+    #[test]
+    fn composer_character_routing_fills_draft_and_flushes_notification() {
+        let (mut scene, tab_id, _tile_id, _composer_id, _plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // Focus the composer region.
+        let down = PointerEvent {
+            x: 50.0,
+            y: 10.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&down, &mut scene, &mut fm, tab_id);
+        assert!(processor.is_composer_active());
+
+        // Route three characters — no flush yet.
+        let (outcome_h, _) = processor.route_character_to_composer("h");
+        let (outcome_i, _) = processor.route_character_to_composer("i");
+        let (outcome_excl, _) = processor.route_character_to_composer("!");
+
+        assert_eq!(outcome_h, EditOutcome::Mutated);
+        assert_eq!(outcome_i, EditOutcome::Mutated);
+        assert_eq!(outcome_excl, EditOutcome::Mutated);
+
+        // Before flush: no batch has been delivered.
+        // Draft text is buffered locally.
+        assert_eq!(
+            processor.composer_draft_manager.draft().map(|d| d.text()),
+            Some("hi!"),
+            "draft buffer must contain all inserted characters"
+        );
+
+        // Flush at settle point — must deliver the coalesced notification.
+        let batch = processor
+            .try_flush_composer_draft()
+            .expect("flush at settle must produce a batch when edits are pending");
+
+        let notif = batch
+            .latest
+            .expect("batch must contain a state notification");
+        assert_eq!(
+            notif.text, "hi!",
+            "notification text must match draft buffer"
+        );
+        assert_eq!(notif.cursor, 3, "cursor at end of text");
+        assert!(!notif.at_capacity, "draft not at capacity");
+        assert_eq!(batch.submission, None, "no submission yet");
+        assert_eq!(batch.cancel, None, "no cancel yet");
+    }
+
+    /// Feed characters to a non-composer region: characters must NOT go into the
+    /// draft buffer.  `route_character_to_composer` returns Unchanged when no
+    /// composer is active.
+    ///
+    /// Spec §4.4: editing keystrokes are never terminal/provider input; conversely,
+    /// the manager must not intercept characters when no composer is focused.
+    #[test]
+    fn no_composer_focus_route_character_returns_unchanged() {
+        let mut processor = InputProcessor::new();
+
+        // No focus at all — manager is idle.
+        let (outcome, batch) = processor.route_character_to_composer("a");
+        assert_eq!(
+            outcome,
+            EditOutcome::Unchanged,
+            "no-op when manager is idle"
+        );
+        assert!(batch.is_none(), "no batch when manager is idle");
+        assert!(processor.composer_draft_manager.draft().is_none());
+    }
+
+    /// Focus composer → submit via Enter → verify transactional batch with submission.
+    ///
+    /// Spec §4.3: submission is transactional; post-submit clear notification is
+    /// emitted in the same batch.
+    #[test]
+    fn composer_submit_via_enter_produces_transactional_batch() {
+        let (mut scene, tab_id, _tile_id, _composer_id, _plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // Focus.
+        let down = PointerEvent {
+            x: 50.0,
+            y: 10.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&down, &mut scene, &mut fm, tab_id);
+
+        // Type "send".
+        processor.route_character_to_composer("s");
+        processor.route_character_to_composer("e");
+        processor.route_character_to_composer("n");
+        processor.route_character_to_composer("d");
+
+        // Submit via Enter.
+        let (consumed, batch_opt) =
+            processor.route_key_down_to_composer("Enter", "Enter", false, false, false);
+
+        assert!(consumed, "Enter must be consumed by the composer");
+        let batch = batch_opt.expect("Enter must produce an immediate transactional batch");
+        let sub = batch
+            .submission
+            .as_ref()
+            .expect("batch must contain a DraftSubmission");
+        assert_eq!(sub.text, "send", "submission text must match typed content");
+        // Post-submit clear: latest notification should show empty text.
+        let clear = batch
+            .latest
+            .as_ref()
+            .expect("post-submit clear notification must be present");
+        assert!(
+            clear.text.is_empty(),
+            "post-submit clear must have empty text"
+        );
+        assert!(
+            clear.sequence > sub.sequence,
+            "clear sequence must be > submission sequence"
+        );
+    }
+
+    /// Focus composer → blur → verify on_focus_lost is called and the pending
+    /// notification is flushed.
+    ///
+    /// Spec §4.3: blur is a settle point; the terminal draft state is delivered.
+    #[test]
+    fn composer_focus_lost_on_blur_flushes_pending_state() {
+        let (mut scene, tab_id, tile_id, _composer_id, plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // Focus composer.
+        let down_composer = PointerEvent {
+            x: 50.0,
+            y: 10.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&down_composer, &mut scene, &mut fm, tab_id);
+        assert!(processor.is_composer_active());
+
+        // Type a character without flushing.
+        processor.route_character_to_composer("z");
+
+        // Now click the plain node — focus moves to it, triggering on_focus_lost
+        // internally in process_with_focus.
+        let plain_node_for_root = Node {
+            id: plain_id,
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, 100.0, 800.0, 100.0),
+                interaction_id: "plain-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                accepts_composer_input: false,
+                ..Default::default()
+            }),
+        };
+        // Temporarily add the plain node at the top level so hit_test can find it.
+        // Set it as root (replaces composer as root for the test hit).
+        scene.nodes.insert(plain_id, plain_node_for_root);
+        scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(plain_id);
+
+        let down_plain = PointerEvent {
+            x: 400.0,
+            y: 150.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&down_plain, &mut scene, &mut fm, tab_id);
+
+        // After blur, the manager must be deactivated.
+        assert!(
+            !processor.is_composer_active(),
+            "manager must be deactivated after blurring the composer region"
+        );
+    }
+
+    /// Verify that `route_key_down_to_composer` does not consume unknown keys
+    /// (e.g. F5) when a composer is active.
+    ///
+    /// Non-composer keys must fall through to the normal agent dispatch path.
+    #[test]
+    fn composer_does_not_consume_unknown_keys() {
+        let (mut scene, tab_id, _tile_id, _composer_id, _plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        let down = PointerEvent {
+            x: 50.0,
+            y: 10.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&down, &mut scene, &mut fm, tab_id);
+        assert!(processor.is_composer_active());
+
+        let (consumed, batch) =
+            processor.route_key_down_to_composer("F5", "F5", false, false, false);
+
+        assert!(!consumed, "F5 must NOT be consumed by the composer manager");
+        assert!(batch.is_none(), "no batch for an unconsumed key");
     }
 }
