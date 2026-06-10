@@ -27,8 +27,9 @@
 //! search, where W is the number of word (or grapheme) boundaries.  Each
 //! individual shape call is O(k) in the prefix length k, giving a total of
 //! O(n + k·log W) ≈ O(n log n) — sub-quadratic in text length.  The old
-//! linear scan over candidates was O(W²) because it issued one full reshape
-//! per candidate in worst-case order.  Results must be cached by the caller
+//! linear scan over candidates was O(W·k) — one full reshape per candidate,
+//! each costing O(k) in its prefix length — which is O(n²) in the worst case
+//! when W and k are both O(n).  Results must be cached by the caller
 //! keyed on `(content_hash, bounds_width, bounds_height, font_size_px)`.
 
 use glyphon::{Attrs, Buffer, FontSystem, Metrics, Shaping, Wrap};
@@ -370,9 +371,10 @@ fn run_start_slice(paragraph_text: &str, run_start_byte: usize) -> &str {
 ///
 /// # Algorithm (sub-quadratic — O(n log n))
 ///
-/// The old O(n²) implementation issued one full `measure_single_line` reshape
-/// per candidate in a right-to-left linear scan.  This version uses binary
-/// search to reduce shape calls from O(W) to O(log W):
+/// The old O(W·k) implementation issued one full `measure_single_line` reshape
+/// per candidate in a right-to-left linear scan (O(k) per candidate, O(W·k) =
+/// O(n²) total in the worst case).  This version uses binary search to reduce
+/// shape calls from O(W) to O(log W):
 ///
 /// 1. Collect word-boundary byte offsets into a sorted slice.
 /// 2. Binary-search for the largest boundary whose prefix width + ellipsis_w ≤
@@ -496,7 +498,7 @@ fn binary_search_largest_fitting(
     budget: f32,
     measure: &mut impl FnMut(usize) -> f32,
 ) -> Option<usize> {
-    if boundaries.is_empty() {
+    if !budget.is_finite() || boundaries.is_empty() {
         return None;
     }
 
