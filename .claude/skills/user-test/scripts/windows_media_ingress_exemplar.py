@@ -47,6 +47,9 @@ YOUTUBE_BRIDGE_SOURCE_LABEL = "youtube-official-player-frame-bridge"
 YOUTUBE_BRIDGE_PATH = "operator-visible-official-player-window-capture-to-media-ingress-open"
 YOUTUBE_FRAME_CAPTURE_ADAPTER = "windows-visible-player-copyfromscreen-frame-capture"
 RAW_YOUTUBE_BRIDGE_DECISION = "approved_operator_visible_player_frame_bridge"
+WINDOWS_REMOTE_TMP_PATH_RE = re.compile(
+    r"^C:\\tze_hud\\tmp\\[A-Za-z0-9_]+_[a-f0-9]{32}(?:\\[A-Za-z0-9_.-]+)?$"
+)
 BANNED_SOURCE_MARKERS = (
     "yt-dlp",
     "youtube-dl",
@@ -82,6 +85,18 @@ def validate_approved_media_zone(zone_name: str) -> str:
             f"media ingress exemplar only supports approved zone {APPROVED_MEDIA_ZONE!r}"
         )
     return zone_name
+
+
+def validate_windows_remote_tmp_path(name: str, value: str) -> str:
+    """Return a generated Windows temp path safe to embed in PowerShell."""
+    if not WINDOWS_REMOTE_TMP_PATH_RE.fullmatch(value):
+        raise ValueError(f"{name} is not an approved remote temp path")
+    return value
+
+
+def powershell_encoded_command(script: str) -> str:
+    """Encode a PowerShell script for -EncodedCommand."""
+    return base64.b64encode(script.encode("utf-16le")).decode("ascii")
 
 
 def build_video_only_sdp_offer(
@@ -335,7 +350,9 @@ def _run_remote_powershell_script_file(
     """Run a large PowerShell script through an interactive Windows task."""
     run_id = uuid.uuid4().hex
     remote_dir = f"C:/tze_hud/tmp/{prefix}_{run_id}"
-    remote_dir_arg = remote_dir.replace("/", "\\")
+    remote_dir_arg = validate_windows_remote_tmp_path(
+        "remote_dir", remote_dir.replace("/", "\\")
+    )
     remote_script_path = f"{remote_dir}/script.ps1"
     remote_runner_path = f"{remote_dir}/runner.ps1"
     remote_stdout_path = f"{remote_dir}/stdout.txt"
@@ -345,11 +362,13 @@ def _run_remote_powershell_script_file(
 
     mkdir_script = (
         "$ErrorActionPreference='Stop';"
-        f"New-Item -ItemType Directory -Force -Path '{remote_dir_arg}' | Out-Null"
+        f"New-Item -ItemType Directory -Force -LiteralPath '{remote_dir_arg}' | Out-Null"
     )
-    mkdir_encoded = base64.b64encode(mkdir_script.encode("utf-16le")).decode("ascii")
+    mkdir_encoded = powershell_encoded_command(mkdir_script)
     mkdir_cmd = _ssh_base_command(args)
-    mkdir_cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", mkdir_encoded])
+    mkdir_cmd.extend(
+        ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", mkdir_encoded]
+    )
 
     local_script_path: Path | None = None
     local_runner_path: Path | None = None
@@ -374,11 +393,21 @@ def _run_remote_powershell_script_file(
             handle.write(script)
             local_script_path = Path(handle.name)
 
-        remote_script_arg = remote_script_path.replace("/", "\\")
-        remote_runner_arg = remote_runner_path.replace("/", "\\")
-        remote_stdout_arg = remote_stdout_path.replace("/", "\\")
-        remote_stderr_arg = remote_stderr_path.replace("/", "\\")
-        remote_rc_arg = remote_rc_path.replace("/", "\\")
+        remote_script_arg = validate_windows_remote_tmp_path(
+            "remote_script_path", remote_script_path.replace("/", "\\")
+        )
+        remote_runner_arg = validate_windows_remote_tmp_path(
+            "remote_runner_path", remote_runner_path.replace("/", "\\")
+        )
+        remote_stdout_arg = validate_windows_remote_tmp_path(
+            "remote_stdout_path", remote_stdout_path.replace("/", "\\")
+        )
+        remote_stderr_arg = validate_windows_remote_tmp_path(
+            "remote_stderr_path", remote_stderr_path.replace("/", "\\")
+        )
+        remote_rc_arg = validate_windows_remote_tmp_path(
+            "remote_rc_path", remote_rc_path.replace("/", "\\")
+        )
         runner = f"""$ErrorActionPreference = 'Stop'
 $out = '{remote_stdout_arg}'
 $err = '{remote_stderr_arg}'
@@ -418,9 +447,10 @@ try {{
                 text=True,
             )
 
+        task_script = f"& '{remote_runner_arg}'"
         task_command = (
-            "powershell.exe -NoProfile -ExecutionPolicy Bypass "
-            f"-File {remote_runner_arg}"
+            "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+            f"-EncodedCommand {powershell_encoded_command(task_script)}"
         )
         delete_cmd = _ssh_base_command(args)
         delete_cmd.extend(["schtasks", "/Delete", "/F", "/TN", task_name])
@@ -472,11 +502,17 @@ try {{
                 f"$p='{remote_rc_arg}';"
                 "if (Test-Path -LiteralPath $p) { Get-Content -Raw -LiteralPath $p }"
             )
-            poll_encoded = base64.b64encode(poll_script.encode("utf-16le")).decode(
-                "ascii"
-            )
+            poll_encoded = powershell_encoded_command(poll_script)
             poll_cmd = _ssh_base_command(args)
-            poll_cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", poll_encoded])
+            poll_cmd.extend(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand",
+                    poll_encoded,
+                ]
+            )
             poll = subprocess.run(
                 poll_cmd,
                 check=False,
@@ -554,11 +590,17 @@ try {{
             "$ErrorActionPreference='SilentlyContinue';"
             f"Remove-Item -LiteralPath '{remote_dir_arg}' -Recurse -Force"
         )
-        cleanup_encoded = base64.b64encode(cleanup_script.encode("utf-16le")).decode(
-            "ascii"
-        )
+        cleanup_encoded = powershell_encoded_command(cleanup_script)
         cleanup_cmd = _ssh_base_command(args)
-        cleanup_cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", cleanup_encoded])
+        cleanup_cmd.extend(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                cleanup_encoded,
+            ]
+        )
         subprocess.run(
             cleanup_cmd,
             check=False,
@@ -570,7 +612,11 @@ try {{
 
 def _read_text_with_windows_fallback(path: Path) -> str:
     data = path.read_bytes()
-    for encoding in ("utf-8-sig", "utf-16"):
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    if len(data) >= 2 and data[1::2].count(0) > max(1, len(data) // 4):
+        return data.decode("utf-16-le")
+    for encoding in ("utf-8-sig", "utf-16", "utf-16-le"):
         try:
             return data.decode(encoding)
         except UnicodeDecodeError:
@@ -931,7 +977,7 @@ def run_windows_frame_capture(args: argparse.Namespace) -> dict[str, Any]:
         sample_interval_s=args.capture_frame_interval_s,
         settle_s=args.capture_settle_s,
     )
-    encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    encoded_script = powershell_encoded_command(script)
     if args.windows_host:
         proc = _run_remote_powershell_script_file(
             args,
@@ -942,7 +988,13 @@ def run_windows_frame_capture(args: argparse.Namespace) -> dict[str, Any]:
         powershell = shutil.which("powershell") or shutil.which("powershell.exe")
         if not powershell:
             raise RuntimeError("Windows frame-capture adapter requires PowerShell")
-        cmd = [powershell, "-NoProfile", "-EncodedCommand", encoded_script]
+        cmd = [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            encoded_script,
+        ]
         proc = subprocess.run(
             cmd,
             check=True,

@@ -1,5 +1,6 @@
 import unittest
 import asyncio
+import base64
 import json
 import subprocess
 import tempfile
@@ -303,15 +304,40 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertIn("/IT", create_command)
         self.assertIn("/TR", create_command)
         task_index = create_command.index("/TR") + 1
-        self.assertIn(
-            "-File C:\\tze_hud\\tmp\\tze_hud_frame_capture_",
-            create_command[task_index],
-        )
-        self.assertNotIn("-EncodedCommand", create_command[task_index])
+        task_command = create_command[task_index]
+        self.assertIn("-NonInteractive", task_command)
+        self.assertIn("-EncodedCommand", task_command)
+        encoded = task_command.rsplit(" ", 1)[1]
+        decoded = base64.b64decode(encoded).decode("utf-16le")
+        self.assertIn("& 'C:\\tze_hud\\tmp\\tze_hud_frame_capture_", decoded)
         self.assertTrue(
             any(cmd[0] == "scp" and cmd[-2].endswith("/stdout.txt") for cmd in commands)
         )
         self.assertTrue(evidence["capture_validated"])
+
+        encoded_commands = [
+            cmd for cmd in commands if cmd[:1] == ["ssh"] and "-EncodedCommand" in cmd
+        ]
+        self.assertTrue(encoded_commands)
+        for cmd in encoded_commands:
+            self.assertIn("-NonInteractive", cmd)
+
+    def test_windows_text_fallback_accepts_bomless_utf16le(self):
+        with tempfile.TemporaryDirectory(dir=".") as tmpdir:
+            output_path = Path(tmpdir) / "stdout.txt"
+            output_path.write_bytes("tze_hud\n".encode("utf-16-le"))
+
+            self.assertEqual(
+                exemplar._read_text_with_windows_fallback(output_path),
+                "tze_hud\n",
+            )
+
+    def test_generated_remote_paths_are_strictly_validated(self):
+        with self.assertRaisesRegex(ValueError, "approved remote temp path"):
+            exemplar.validate_windows_remote_tmp_path(
+                "remote_dir",
+                "C:\\tze_hud\\tmp\\bad;Remove-Item",
+            )
 
     def test_youtube_bridge_parser_defaults_to_bridge_agent(self):
         args = exemplar.build_parser().parse_args(

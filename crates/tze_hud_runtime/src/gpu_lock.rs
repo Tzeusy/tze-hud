@@ -298,12 +298,20 @@ mod windows_impl {
     }
 
     fn exe_name_is_tze_hud(raw_name: &[u16]) -> bool {
+        const TARGET: [u16; 11] = [
+            't' as u16, 'z' as u16, 'e' as u16, '_' as u16, 'h' as u16, 'u' as u16, 'd' as u16,
+            '.' as u16, 'e' as u16, 'x' as u16, 'e' as u16,
+        ];
+
         let nul = raw_name
             .iter()
             .position(|ch| *ch == 0)
             .unwrap_or(raw_name.len());
-        let name = String::from_utf16_lossy(&raw_name[..nul]);
-        name.eq_ignore_ascii_case("tze_hud.exe")
+        let name = &raw_name[..nul];
+        name.len() == TARGET.len()
+            && name.iter().zip(TARGET).all(|(&actual, expected)| {
+                actual <= 0x7f && (actual as u8).to_ascii_lowercase() == expected as u8
+            })
     }
 
     // ── Lock release helper (shared by Drop and panic hook) ───────────────────
