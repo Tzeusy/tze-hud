@@ -328,8 +328,9 @@ pub fn truncate_for_ellipsis<'a>(
 ///
 /// A [`TruncationResult`].  When the full text fits in `max_lines`, returns
 /// the original text unchanged (identical to head-anchored behaviour).  When
-/// the content exceeds `max_lines`, returns the last `max_lines` runs with
-/// `ELLIPSIS` prepended and `was_truncated = true`.
+/// the content exceeds `max_lines`, returns the last `max_lines - 1` content
+/// runs preceded by a single `ELLIPSIS` line, so the total visible line count
+/// is exactly `max_lines` (not `max_lines + 1`).  Sets `was_truncated = true`.
 ///
 /// # Spec scenarios
 ///
@@ -454,13 +455,26 @@ pub fn truncate_tail_anchored<'a>(
         };
     }
 
-    // ── Step 6: more runs than fit — show LAST max_lines runs ─────────────────
+    // ── Step 6: more runs than fit — show LAST (max_lines - 1) content runs ──
     //
-    // The first visible run is runs[total_runs - max_lines].
+    // The ellipsis is emitted on its own line (ELLIPSIS + "\n"), which consumes
+    // one of the max_lines slots.  Therefore only (max_lines - 1) content runs
+    // can be shown, or the result would have max_lines + 1 visible lines.
+    //
+    // The first visible run is runs[total_runs - (max_lines - 1)].
     // The last  visible run is runs[total_runs - 1].
     //
+    // Guard: if max_lines == 1 we can only show the ellipsis itself (no content
+    // runs fit alongside it).  Return early with just the ellipsis line.
+    if max_lines == 1 {
+        return TruncationResult {
+            text: ELLIPSIS.to_owned(),
+            was_truncated: true,
+        };
+    }
+    let content_run_count = max_lines - 1;
     // We reconstruct the text slice starting at the first visible run.
-    let first_visible_idx = total_runs - max_lines;
+    let first_visible_idx = total_runs - content_run_count;
     let first_visible_run = &runs[first_visible_idx];
 
     // Find the byte offset within the full text that corresponds to the start
@@ -1821,6 +1835,29 @@ mod tests {
              got: {:?}",
             result.text
         );
+
+        // ── LINE COUNT ASSERTION (defect #1 regression guard) ────────────────
+        //
+        // The total number of output lines (after shaping the result) must be
+        // <= max_lines (3 in this test: bounds_h = line_h * 3.0 + 1.0).
+        //
+        // Before the fix, the ellipsis was prepended on top of max_lines content
+        // runs, producing max_lines + 1 = 4 layout lines in a 3-line box.
+        //
+        // We count '\n'-separated logical lines in the result string as an
+        // inexpensive proxy.  Word-wrapping can split a single logical line
+        // into multiple shaped runs, so the actual rendered line count can
+        // exceed this logical count.  Keeping `max_lines` small in this test
+        // (3 lines) avoids wrapping in practice; the proptest below covers
+        // the general case.
+        let max_lines_in_box = (bounds_h / line_h).floor() as usize;
+        let logical_line_count = result.text.split('\n').count();
+        assert!(
+            logical_line_count <= max_lines_in_box,
+            "tail-anchored result has {logical_line_count} logical lines but box fits \
+             only {max_lines_in_box}; result: {:?}",
+            result.text
+        );
     }
 
     /// When content fits entirely (fewer runs than max_lines), both anchoring
@@ -2075,6 +2112,45 @@ mod tests {
             }
         }
 
+        /// Invariant 3b — Line count fits within max_lines (defect #1 regression guard).
+        ///
+        /// When truncation occurs the result must have at most `max_lines` logical
+        /// lines.  Before the fix, the ellipsis was prepended as an extra line on
+        /// top of `max_lines` content runs, yielding `max_lines + 1` lines.  This
+        /// property asserts the invariant across a range of inputs and box heights.
+        #[test]
+        fn proptest_tail_anchored_line_count_fits_within_max_lines(
+            n_lines in 3usize..8usize,
+            max_lines in 2usize..5usize,
+            width_px in 200.0_f32..600.0_f32,
+        ) {
+            let mut fs = make_font_system();
+            let font_size = 14.0_f32;
+            let line_h = font_size * 1.4;
+            let lines: Vec<String> = (0..n_lines)
+                .map(|i| format!("Proptest line {i} for line-count invariant"))
+                .collect();
+            let text = lines.join("\n");
+
+            // Box height: exactly `max_lines` lines, plus a tiny fractional
+            // surplus to avoid height rounding edge cases.
+            let bounds_h = line_h * (max_lines as f32) + 0.5;
+
+            let result = truncate_tail_anchored(
+                &text, base_attrs(), width_px, bounds_h, font_size, line_h, &mut fs,
+            );
+
+            // Logical-line count must never exceed max_lines.
+            let logical_line_count = result.text.split('\n').count();
+            prop_assert!(
+                logical_line_count <= max_lines,
+                "tail-anchored result has {logical_line_count} logical lines but \
+                 max_lines={max_lines} (bounds_h={bounds_h} line_h={line_h}); \
+                 n_lines={n_lines} width={width_px} result={:?}",
+                result.text,
+            );
+        }
+
         /// Invariant 4 — Grapheme-cluster integrity.
         ///
         /// The result must be valid UTF-8 and every grapheme cluster in the result
@@ -2174,8 +2250,11 @@ mod tests {
             // Three lines so vertical truncation forces tail-anchored selection.
             let arabic_text = format!("{arabic_line}\n{arabic_line}\n{arabic_line}");
 
-            // Height for only 1 line — ensures truncation.
-            let bounds_h = line_h * 1.5;
+            // Height for exactly 2 lines — ensures vertical truncation while still
+            // leaving room for one ellipsis line + one content line.
+            // (With max_lines=1 the box can only show the ellipsis itself; using
+            // max_lines=2 exercises the tail-selection path and content visibility.)
+            let bounds_h = line_h * 2.5;
 
             let result = truncate_tail_anchored(
                 &arabic_text, base_attrs(), bounds_w, bounds_h, font_size, line_h, &mut fs,
@@ -2199,6 +2278,7 @@ mod tests {
 
                 // (c) Non-empty visible content after the ellipsis line.
                 // Strip the leading "…\n" and verify something remains.
+                // (When max_lines >= 2 there is always room for at least 1 content run.)
                 let after_ellipsis = result.text
                     .strip_prefix(ELLIPSIS)
                     .map(|s| s.trim_start_matches('\n'))

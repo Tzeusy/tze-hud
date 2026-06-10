@@ -435,6 +435,79 @@ impl ScrollTileState {
         }
     }
 
+    /// Notify this tile that leading (head) content has been removed.
+    ///
+    /// Head-trim operations (e.g. `PortalCadenceCoalescer` byte-cap or
+    /// `visible_transcript_window` capping) remove the oldest content from the
+    /// **start** of the buffer.  Without this notification, a `ScrolledBack`
+    /// viewport holds a raw pixel offset that now points into empty space —
+    /// silently jumping the viewport (scenario 3.3 violation).
+    ///
+    /// This method adjusts `offset_y` downward by `removed_height_px` so that a
+    /// `ScrolledBack` viewport stays on the same logical content position after
+    /// the trim.  The adjusted offset is clamped to `[0, max_scroll_offset]`.
+    ///
+    /// When the tile is `AtTail` no adjustment is needed: `follow_tail_offset`
+    /// already positions the viewport correctly on the next `notify_content_appended`.
+    ///
+    /// # Parameters
+    ///
+    /// - `removed_height_px` — height (physical pixels) of the content dropped
+    ///   from the head.  Must be non-negative.  Non-finite values are ignored.
+    ///
+    /// # Returns
+    ///
+    /// `true` if `offset_y` changed (i.e. the tile was `ScrolledBack` and the
+    /// offset moved — including when it clamps to zero), `false` otherwise.
+    pub fn notify_head_content_removed(&mut self, removed_height_px: f32) -> bool {
+        if !removed_height_px.is_finite() || removed_height_px <= 0.0 {
+            return false;
+        }
+
+        // Always update the content-size fields so that the next call to
+        // `notify_content_appended` sees a correct `old_total` and so that
+        // `clamp_offsets` / `update_follow_tail_anchor_after_user_scroll` use
+        // the right max-scroll-offset bound.
+        //
+        // Invariant maintained:
+        //   config.content_height = (total_content_height_px - viewport_height).max(0)
+        //
+        // We update `total_content_height_px` here.  `config.content_height` is
+        // the max-scroll-offset and equals (total − viewport); we reduce it by
+        // the same `removed_height_px` (clamped to 0) so the invariant holds.
+        self.total_content_height_px = (self.total_content_height_px - removed_height_px).max(0.0);
+        if let Some(config) = &mut self.config {
+            if let Some(ch) = config.content_height {
+                config.content_height = Some((ch - removed_height_px).max(0.0));
+            }
+        }
+
+        match self.follow_tail {
+            FollowTailAnchor::AtTail => {
+                // AtTail viewports are re-positioned by the next
+                // notify_content_appended call — no offset adjustment needed here.
+                false
+            }
+            FollowTailAnchor::ScrolledBack => {
+                let before = self.offset_y;
+                // Shift offset down by the removed height, clamp to [0, max].
+                self.offset_y = (self.offset_y - removed_height_px).max(0.0);
+                // Re-apply the updated upper bound from config (max scroll offset).
+                if let Some(config) = &self.config {
+                    if let Some(ch) = config.content_height {
+                        self.offset_y = self.offset_y.min(ch.max(0.0));
+                    }
+                }
+                if (self.offset_y - before).abs() > f32::EPSILON {
+                    self.dirty = true;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Queue an agent `SetScrollOffsetRequest`.
     ///
     /// Will be applied only if no user scroll event arrives this frame.
@@ -627,6 +700,24 @@ impl ScrollState {
         self.tiles
             .get_mut(&tile_id)
             .map(|s| s.notify_content_appended(new_content_height, viewport_height, line_height))
+            .unwrap_or(false)
+    }
+
+    /// Notify a tile that leading (head) content has been removed.
+    ///
+    /// Delegates to [`ScrollTileState::notify_head_content_removed`].  See that
+    /// method for the full contract.
+    ///
+    /// Returns `true` if the scroll offset changed, `false` otherwise.
+    /// No-op if the tile is not registered.
+    pub fn notify_head_content_removed(
+        &mut self,
+        tile_id: SceneId,
+        removed_height_px: f32,
+    ) -> bool {
+        self.tiles
+            .get_mut(&tile_id)
+            .map(|s| s.notify_head_content_removed(removed_height_px))
             .unwrap_or(false)
     }
 
@@ -1068,6 +1159,212 @@ mod tests {
             scroll.follow_tail_anchor(tile_id),
             FollowTailAnchor::AtTail,
             "scrolling back to tail must restore AtTail anchor"
+        );
+    }
+
+    // ── Spec task 3.3 — head-trim does not disturb a scrolled-back viewport ─────
+    //
+    // Defect #4 regression test: when head content is removed (byte-cap / window
+    // trim), a ScrolledBack viewport must shift downward by the removed height so
+    // it continues showing the same logical content.  Without the fix the raw pixel
+    // offset stays unchanged, pointing into a gap left by the removed head content.
+
+    /// Removing head content while ScrolledBack must shift the scroll offset
+    /// downward by the removed height (keeping the viewport on the same logical
+    /// content position).
+    ///
+    /// Scenario 3.3: "append does not disturb a scrolled-back viewport" — the
+    /// head-trim variant.
+    #[test]
+    fn head_trim_scrolled_back_adjusts_offset_by_removed_height() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32; // 5 visible lines
+        let mut scroll = ScrollState::new();
+
+        // Content: 20 lines = 400px total; max scroll offset = 300px.
+        let total_content = 20.0 * line_h; // 400px
+        let max_scroll = total_content - viewport_h; // 300px
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: Some(max_scroll),
+        };
+        scroll.register_tile(tile_id, config);
+
+        // Scroll to tail, then scroll back to line 10 (offset = 10 * line_h = 200px).
+        scroll.apply_user_scroll(tile_id, 0.0, max_scroll); // → AtTail at 300px
+        scroll.apply_user_scroll(tile_id, 0.0, -100.0); // → ScrolledBack at 200px
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::ScrolledBack,
+            "must be ScrolledBack after scrolling up"
+        );
+        let (_, offset_before) = scroll.offset(tile_id);
+        assert!(
+            (offset_before - 200.0).abs() < f32::EPSILON,
+            "expected offset_y 200.0 before head-trim; got {offset_before}"
+        );
+
+        // Head-trim: remove 5 lines (100px) from the start.
+        let removed_height = 5.0 * line_h; // 100px
+        let changed = scroll.notify_head_content_removed(tile_id, removed_height);
+
+        assert!(
+            changed,
+            "head-trim with non-zero offset must report changed=true"
+        );
+
+        // After trim, offset must decrease by the removed height.
+        let (_, offset_after) = scroll.offset(tile_id);
+        let expected_offset = offset_before - removed_height; // 200 - 100 = 100px
+        assert!(
+            (offset_after - expected_offset).abs() < f32::EPSILON,
+            "head-trim must shift offset by removed_height ({removed_height}px); \
+             before={offset_before} expected={expected_offset} got={offset_after}"
+        );
+
+        // Anchor stays ScrolledBack.
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::ScrolledBack,
+            "head-trim must not change the follow-tail anchor"
+        );
+    }
+
+    /// Head-trim of an AtTail tile must NOT change the scroll offset.
+    ///
+    /// For AtTail tiles, `notify_content_appended` repositions the offset; a
+    /// separate head-trim adjustment would double-count the removal.
+    #[test]
+    fn head_trim_at_tail_does_not_change_offset() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32;
+        let mut scroll = ScrollState::new();
+
+        let total_content = 20.0 * line_h;
+        let max_scroll = total_content - viewport_h;
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: Some(max_scroll),
+        };
+        scroll.register_tile(tile_id, config);
+
+        // Start at tail (AtTail is the default).
+        scroll.apply_user_scroll(tile_id, 0.0, max_scroll);
+        assert_eq!(scroll.follow_tail_anchor(tile_id), FollowTailAnchor::AtTail);
+        let (_, offset_before) = scroll.offset(tile_id);
+
+        // Head-trim: remove 3 lines (60px).
+        let changed = scroll.notify_head_content_removed(tile_id, 3.0 * line_h);
+
+        assert!(
+            !changed,
+            "head-trim on an AtTail tile must return changed=false"
+        );
+        let (_, offset_after) = scroll.offset(tile_id);
+        assert!(
+            (offset_after - offset_before).abs() < f32::EPSILON,
+            "AtTail offset must be unchanged after head-trim; \
+             before={offset_before} after={offset_after}"
+        );
+    }
+
+    /// When offset_y is smaller than removed_height, the offset is clamped to 0
+    /// rather than going negative.
+    #[test]
+    fn head_trim_clamps_offset_to_zero_when_removal_exceeds_offset() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32;
+        let mut scroll = ScrollState::new();
+
+        let total_content = 20.0 * line_h;
+        let max_scroll = total_content - viewport_h;
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: Some(max_scroll),
+        };
+        scroll.register_tile(tile_id, config);
+
+        // Scroll back just 1 line.
+        scroll.apply_user_scroll(tile_id, 0.0, max_scroll);
+        scroll.apply_user_scroll(tile_id, 0.0, -line_h); // offset = max_scroll - line_h
+        let (_, offset_before) = scroll.offset(tile_id);
+        assert!(offset_before > 0.0);
+
+        // Head-trim removes MORE than the current offset.
+        let removed_height = offset_before + 50.0;
+        let changed = scroll.notify_head_content_removed(tile_id, removed_height);
+
+        assert!(changed, "offset changed from non-zero to 0");
+        let (_, offset_after) = scroll.offset(tile_id);
+        assert_eq!(
+            offset_after, 0.0,
+            "offset must clamp to 0 when removal exceeds current offset; got {offset_after}"
+        );
+    }
+
+    /// Head-trim must update `total_content_height_px` and `config.content_height`
+    /// so that a subsequent `notify_content_appended` receives correct old/new
+    /// totals and the follow-tail offset advances by the right number of lines.
+    ///
+    /// Regression guard for the Gemini-raised defect: without updating both
+    /// fields, the next `notify_content_appended` uses a stale `old_total`,
+    /// making `delta_px` negative and preventing follow-tail advancement.
+    #[test]
+    fn head_trim_updates_content_height_fields_for_correct_append_delta() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32; // 5 visible lines
+        let mut scroll = ScrollState::new();
+
+        // Content: 10 lines = 200px total; max scroll offset = 100px.
+        let total_content = 10.0 * line_h; // 200px
+        let max_scroll = total_content - viewport_h; // 100px
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: Some(max_scroll),
+        };
+        scroll.register_tile(tile_id, config);
+
+        // Drive total_content_height_px to the known 200px value.
+        scroll.notify_content_appended(tile_id, total_content, viewport_h, line_h);
+        // Scroll to tail.
+        scroll.apply_user_scroll(tile_id, 0.0, max_scroll);
+        assert_eq!(scroll.follow_tail_anchor(tile_id), FollowTailAnchor::AtTail);
+
+        // Head-trim: remove 3 lines (60px).
+        let removed = 3.0 * line_h; // 60px
+        scroll.notify_head_content_removed(tile_id, removed);
+        // total_content_height_px should now be 200 - 60 = 140px.
+        // config.content_height should now be 100 - 60 = 40px.
+
+        // Append 2 new lines (40px): new total = 140 + 40 = 180px.
+        // new max_scroll = 180 - 100 = 80px.
+        // Expected delta = 180 - 140 = 40px = 2 lines → follow-tail advances.
+        let new_total = 180.0_f32;
+        let changed = scroll.notify_content_appended(tile_id, new_total, viewport_h, line_h);
+        assert!(
+            changed,
+            "notify_content_appended must advance AtTail offset after head-trim+append; \
+             changed=false suggests stale old_total causing negative delta"
+        );
+        let (_, offset_after) = scroll.offset(tile_id);
+        // New max_scroll = 180 - 100 = 80px.  Offset should advance to 80px (tail).
+        let expected_max_scroll = (new_total - viewport_h).max(0.0);
+        assert!(
+            (offset_after - expected_max_scroll).abs() < line_h,
+            "offset should be near the new tail ({expected_max_scroll}px) after \
+             head-trim+append; got {offset_after}"
         );
     }
 
