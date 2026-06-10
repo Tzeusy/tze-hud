@@ -139,6 +139,15 @@ path = "text_stream_portal_composer.rs"
 name = "text_stream_portal_cadence"
 path = "text_stream_portal_cadence.rs"
 
+# hud-5jbra.6: Phase-1 portal component profile styling verification (tasks.md §6.1–6.4).
+# Covers: portal part inventory token mapping, exemplar adapter consuming resolved tokens
+# (no literal visual values), collapsed/expanded transitions redaction-safe, profile-swap
+# reskin test, token-propagation on republish. Live profile-swap phase (§6.5) is deferred
+# to the TzeHouse reference host (discovered follow-up).
+[[test]]
+name = "text_stream_portal_styling"
+path = "text_stream_portal_styling.rs"
+
 # hud-bs2q.5: Long-press drag-to-reposition interaction.
 # Tests: long-press recognizer activation/cancellation, multi-touch independence,
 # snap quantisation, boundary clamping at all 4 edges, full drag lifecycle
@@ -174,6 +183,7 @@ tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["headless", "dev-mode"] }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
 tze_hud_projection = { path = "../../crates/tze_hud_projection", features = ["resident-grpc"] }
+tze_hud_config = { path = "../../crates/tze_hud_config" }
 tze_hud_resource = { path = "../../crates/tze_hud_resource" }
 tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
 tze_hud_validation = { path = "../../crates/tze_hud_validation" }
