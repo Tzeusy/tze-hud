@@ -305,6 +305,9 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertIn("/TR", create_command)
         task_index = create_command.index("/TR") + 1
         task_command = create_command[task_index]
+        self.assertTrue(task_command.startswith('"'))
+        self.assertTrue(task_command.endswith('"'))
+        task_command = task_command.strip('"')
         self.assertIn("-NonInteractive", task_command)
         self.assertIn("-EncodedCommand", task_command)
         encoded = task_command.rsplit(" ", 1)[1]

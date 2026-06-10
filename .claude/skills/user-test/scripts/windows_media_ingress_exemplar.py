@@ -477,7 +477,7 @@ try {{
                 "/RL",
                 "HIGHEST",
                 "/TR",
-                task_command,
+                f'"{task_command}"',
             ]
         )
         subprocess.run(
