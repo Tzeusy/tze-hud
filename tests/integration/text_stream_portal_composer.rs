@@ -130,7 +130,11 @@ fn draft_insert_completes_within_local_ack_budget_headroom() {
          per-keystroke {}µs (budget {}µs, {} build)",
         per_keystroke_us,
         budget_us,
-        if cfg!(debug_assertions) { "debug" } else { "release" },
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
     );
 }
 
@@ -219,7 +223,10 @@ fn draft_notification_batch_coalesces_to_latest_snapshot() {
     }
 
     // The batch holds exactly one (latest) snapshot
-    let latest = batch.latest.as_ref().expect("batch must have latest snapshot");
+    let latest = batch
+        .latest
+        .as_ref()
+        .expect("batch must have latest snapshot");
     assert_eq!(latest.text, "rapid typing simulation");
     assert_eq!(latest.sequence, draft.sequence());
 }
@@ -246,7 +253,10 @@ fn adapter_draft_batch_ignores_stale_notification() {
     batch.coalesce_state(make_adapter_draft_notification("stale", 3, 3)); // out of order
 
     let latest = batch.latest.as_ref().expect("batch has latest");
-    assert_eq!(latest.text, "newer", "stale notification must not replace newer");
+    assert_eq!(
+        latest.text, "newer",
+        "stale notification must not replace newer"
+    );
 }
 
 /// The adapter `consume_draft_batch` produces one UpdateComposerDisplay command
@@ -386,11 +396,7 @@ fn submit_content_exactly_matches_local_buffer() {
         submission.text, expected,
         "submitted text must equal local buffer at submit time"
     );
-    assert_eq!(
-        draft.text(),
-        "",
-        "draft must be cleared after submit"
-    );
+    assert_eq!(draft.text(), "", "draft must be cleared after submit");
 }
 
 #[test]
@@ -415,7 +421,10 @@ fn adapter_submission_command_carries_exact_draft_text() {
 
     let commands = adapter.consume_draft_batch(&batch);
     assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].kind, ResidentGrpcDraftCommandKind::ProcessSubmission);
+    assert_eq!(
+        commands[0].kind,
+        ResidentGrpcDraftCommandKind::ProcessSubmission
+    );
     assert_eq!(commands[0].draft_text, "submit this exact content");
     assert_eq!(commands[0].sequence, 42);
 }
@@ -429,7 +438,10 @@ fn adapter_cancel_command_carries_empty_text() {
 
     let commands = adapter.consume_draft_batch(&batch);
     assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].kind, ResidentGrpcDraftCommandKind::ProcessCancel);
+    assert_eq!(
+        commands[0].kind,
+        ResidentGrpcDraftCommandKind::ProcessCancel
+    );
     assert_eq!(commands[0].draft_text, "");
 }
 
@@ -512,7 +524,10 @@ fn safe_mode_gate_applies_to_both_adapter_families() {
         _ => {} // Suspended/Unchanged → no coalescing
     }
     // The batch must remain empty because the caller correctly skipped coalescing
-    assert!(batch.latest.is_none(), "no notification produced on suspended insert");
+    assert!(
+        batch.latest.is_none(),
+        "no notification produced on suspended insert"
+    );
 }
 
 // ─── Task 4.7: Keystroke non-passthrough ─────────────────────────────────────
@@ -571,13 +586,16 @@ fn navigation_and_delete_keystrokes_visible_only_as_draft_state_changes() {
     let seq_before = draft.sequence();
 
     // Simulate editing keystrokes
-    draft.word_backspace();   // Ctrl+Backspace → removes "world"
-    draft.move_to_start();    // Home key
-    draft.delete_forward();   // Delete key removes "h"
-    draft.insert("H");        // Character replaces "h"
+    draft.word_backspace(); // Ctrl+Backspace → removes "world"
+    draft.move_to_start(); // Home key
+    draft.delete_forward(); // Delete key removes "h"
+    draft.insert("H"); // Character replaces "h"
 
     let seq_after = draft.sequence();
-    assert!(seq_after > seq_before + 3, "each editing operation increments sequence");
+    assert!(
+        seq_after > seq_before + 3,
+        "each editing operation increments sequence"
+    );
     assert_eq!(draft.text(), "Hello ");
 
     // The adapter observes only the final draft state (coalesced)
@@ -678,7 +696,11 @@ fn draft_never_exceeds_max_bytes_on_direct_cap() {
     // Fill to capacity with ASCII
     let full_text = "a".repeat(MAX_DRAFT_BYTES);
     let outcome = draft.paste(&full_text);
-    assert_eq!(outcome, EditOutcome::Mutated, "exact capacity is not over-cap");
+    assert_eq!(
+        outcome,
+        EditOutcome::Mutated,
+        "exact capacity is not over-cap"
+    );
     assert_eq!(draft.text().len(), MAX_DRAFT_BYTES);
 
     // One more byte must be rejected
