@@ -45,6 +45,7 @@ No implementation begins until this change is reviewed and accepted. Acceptance 
 - [ ] 5.4 Verify: dual-portal fairness test under equal sustained rates; retained-window coherence under burst per the existing coalescing requirement
 - [ ] 5.5 Verify: 60-minute streaming soak within the ≤ 5 MiB memory-drift budget, recorded with the reference hardware tag
 - [ ] 5.6 Verify: live exemplar `cadence` phase on the reference Windows host with reference-tagged artifacts
+- [ ] 5.7 *(amendment)* Verify: live cadence phase records a transport RTT baseline and per-append publish-to-present timestamps; evidence artifact reports runtime-added overhead separately from RTT, within the `high_mutation` input-to-next-present budget for presented appends
 
 ## 6. Portal component profile styling
 
@@ -54,11 +55,22 @@ No implementation begins until this change is reviewed and accepted. Acceptance 
 - [ ] 6.4 Verify: integration tests for profile-swap reskin without adapter logic changes, token-propagation on republish, and no-redacted-flash during transitions under a restricted viewer
 - [ ] 6.5 Verify: live exemplar `profile-swap` phase demonstrating an operator-visible reskin on the reference Windows host
 
+## 6b. Window management (amendment 2026-06-10)
+
+- [ ] 6b.1 Implement pointer-driven resize affordances on the portal frame (corner/edge capture regions, content layer) with local-first geometry feedback during the gesture
+- [ ] 6b.2 Implement focus-scoped resize hotkeys (Ctrl+`+`/Ctrl+`=` grow, Ctrl+`-` shrink) with token-defined step; unfocused portals never consume them; chrome/shell-reserved shortcuts and safe-mode capture take precedence
+- [ ] 6b.3 Implement min/max clamping (token-defined legible minimum; lease-bounds and scene-budget maximum) and pane re-layout under the overflow contract at every intermediate geometry
+- [ ] 6b.4 Deliver geometry changes to the owning adapter as coalescible state-stream snapshots; gesture remains authoritative over adapter publishes until gesture end
+- [ ] 6b.5 Implement token-styled, geometry-only scroll-position indicators for overflowing transcript/composer panes, redaction-safe
+- [ ] 6b.6 Verify: integration tests for local-first resize, focus-scoped hotkey routing (focused/unfocused), bounds clamping without clipped glyphs, mid-gesture adapter-override rejection, and indicator presence under redaction
+- [ ] 6b.7 Verify: live exemplar `window-mgmt` phase (pointer resize + hotkey resize via OS input injection, following the `diagnostic-input` pattern) on the reference Windows host
+
 ## 7. Promotion evidence gate and promotion
 
-- [ ] 7.1 Extend `text_stream_portal_exemplar.py` with `markdown`, `overflow`, `composer-edit`, `cadence`, and `profile-swap` phases alongside the existing phases
+- [ ] 7.1 Extend `text_stream_portal_exemplar.py` with `markdown`, `overflow`, `composer-edit`, `window-mgmt`, `cadence` (with RTT-overhead reporting), and `profile-swap` phases alongside the existing phases
 - [ ] 7.2 Run the full extended exemplar live against the exemplar script adapter and the cooperative projection adapter on the reference Windows host; record reference-tagged artifacts under `docs/evidence/text-stream-portals/`
 - [ ] 7.3 Record raw-tile complexity observations (tile counts, mutation batch shapes, workaround inventory) and governance confirmation (redaction, safe mode, freeze, orphan path) in the evidence package
+- [ ] 7.3b *(amendment)* Run the agent-ergonomics demonstration: an LLM session drives attach → stream output → poll/acknowledge input → detach exclusively through the vendored skill surface (cooperative projection contract), zero scene-graph mutations authored in the LLM's context; record ceremony metrics (operation count, glue outside the skill) alongside the complexity observations
 - [ ] 7.4 Assess the package against every RFC 0013 §7.2 criterion; record the pass/fail decision and rationale in `docs/reports/`
 - [ ] 7.5 If the gate passes: author the follow-up component-shape-language delta (`text-portal` component type, canonical token keys) and the first-class portal surface design as separate reviewed work items under this change's promotion approval
 - [ ] 7.6 If the gate fails: file beads for the gaps, keep the raw-tile pilot authoritative, and leave Phase-1 behavioral requirements in force on raw tiles
