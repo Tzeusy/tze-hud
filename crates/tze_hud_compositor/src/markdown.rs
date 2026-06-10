@@ -424,7 +424,8 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                 let start = plain.len();
                 // Process inline markup inside the heading text.
                 // base_override propagates heading weight into nested spans.
-                process_inline(heading_text, &mut plain, &mut spans, tokens, Some(&attr));
+                let heading_chars: Vec<char> = heading_text.chars().collect();
+                process_inline(&heading_chars, &mut plain, &mut spans, tokens, Some(&attr));
                 let end = plain.len();
                 // Fill only the unstyled *gaps* within [start, end) with the
                 // heading base style.  This avoids inserting a wide overlapping
@@ -448,7 +449,8 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                 let indent = "  ".repeat((indent_spaces / 2).min(4));
                 plain.push_str(&indent);
                 plain.push_str("• ");
-                process_inline(item_text, &mut plain, &mut spans, tokens, None);
+                let item_chars: Vec<char> = item_text.chars().collect();
+                process_inline(&item_chars, &mut plain, &mut spans, tokens, None);
                 prev_was_empty = false;
                 i += 1;
                 continue;
@@ -469,7 +471,8 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
         if !prev_was_empty && !plain.is_empty() {
             plain.push('\n');
         }
-        process_inline(raw, &mut plain, &mut spans, tokens, None);
+        let line_chars: Vec<char> = raw.chars().collect();
+        process_inline(&line_chars, &mut plain, &mut spans, tokens, None);
         prev_was_empty = false;
         i += 1;
 
@@ -495,20 +498,21 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
 ///
 /// `base_override` is a style that has already been applied to the containing
 /// block (e.g. heading weight); inline markup *adds* to it.
+///
+/// Callers that start from a `&str` should convert once with
+/// [`str::chars`]`.collect::<Vec<char>>()` and pass the resulting slice.
+/// Recursive calls pass sub-slices of the already-collected `Vec<char>`,
+/// eliminating the per-call allocation that the original `text: &str`
+/// approach incurred.
 fn process_inline(
-    text: &str,
+    chars: &[char],
     out: &mut String,
     spans: &mut Vec<StyledSpan>,
     tokens: &MarkdownTokens,
     base_override: Option<&StyleAttr>,
 ) {
-    let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let mut i = 0;
-    let mut _byte_pos = 0usize;
-
-    // Byte offsets for each char index (needed to map char→byte in `out` offset).
-    // We emit into `out` and track byte positions there (not in `text`).
 
     while i < n {
         let ch = chars[i];
@@ -518,32 +522,36 @@ fn process_inline(
         // transformed — emit the verbatim source substring so agents can
         // see exactly what was in the input.
         if ch == '!' && i + 1 < n && chars[i + 1] == '[' {
-            if let Some(end) = find_link_end(&chars, i + 1) {
+            if let Some(end) = find_link_end(chars, i + 1) {
                 // Emit the full `![alt](url)` construct verbatim.
-                let literal: String = chars[i..=end].iter().collect();
-                out.push_str(&literal);
-                _byte_pos += literal.len();
+                for &c in &chars[i..=end] {
+                    out.push(c);
+                }
                 i = end + 1;
                 continue;
             }
             // No matching `](...)` — emit the `!` literally and let the `[`
             // branch handle the rest on the next iteration.
             out.push(ch);
-            _byte_pos += ch.len_utf8();
             i += 1;
             continue;
         }
 
         // ── Links: `[text](url)` → styled text, no navigation ────────────
         if ch == '[' {
-            if let Some(bracket_close) = find_bracket_close(&chars, i) {
+            if let Some(bracket_close) = find_bracket_close(chars, i) {
                 if bracket_close + 1 < n && chars[bracket_close + 1] == '(' {
-                    if let Some(paren_close) = find_paren_close(&chars, bracket_close + 1) {
-                        // Extract link text only.
-                        let link_text: String = chars[i + 1..bracket_close].iter().collect();
+                    if let Some(paren_close) = find_paren_close(chars, bracket_close + 1) {
                         let start = out.len();
-                        // Recursively process inline markup inside link text.
-                        process_inline(&link_text, out, spans, tokens, base_override);
+                        // Recursively process inline markup inside link text,
+                        // passing the sub-slice directly — no intermediate String.
+                        process_inline(
+                            &chars[i + 1..bracket_close],
+                            out,
+                            spans,
+                            tokens,
+                            base_override,
+                        );
                         let end = out.len();
                         if start < end {
                             let mut link_attr =
@@ -566,7 +574,6 @@ fn process_inline(
             }
             // No match → emit literally.
             out.push(ch);
-            _byte_pos += ch.len_utf8();
             i += 1;
             continue;
         }
@@ -581,12 +588,12 @@ fn process_inline(
             }
             // Find matching closing run.
             if let Some(close_start) =
-                find_backtick_close(&chars, tick_start + tick_count, tick_count)
+                find_backtick_close(chars, tick_start + tick_count, tick_count)
             {
-                let code_text: String =
-                    chars[tick_start + tick_count..close_start].iter().collect();
                 let start = out.len();
-                out.push_str(&code_text);
+                for &c in &chars[tick_start + tick_count..close_start] {
+                    out.push(c);
+                }
                 let end = out.len();
                 if start < end {
                     spans.push(StyledSpan {
@@ -607,7 +614,6 @@ fn process_inline(
             }
             // No closing backtick — emit the leading backtick literally.
             out.push(ch);
-            _byte_pos += ch.len_utf8();
             i += 1;
             continue;
         }
@@ -616,8 +622,7 @@ fn process_inline(
         if (ch == '*' || ch == '_') && i + 2 < n && chars[i + 1] == ch && chars[i + 2] == ch {
             let marker = ch;
             let open_end = i + 3;
-            if let Some(close_start) = find_emphasis_close(&chars, open_end, marker, 3) {
-                let inner: String = chars[open_end..close_start].iter().collect();
+            if let Some(close_start) = find_emphasis_close(chars, open_end, marker, 3) {
                 let start = out.len();
                 let inner_attr = StyleAttr {
                     weight: Some(700),
@@ -625,7 +630,13 @@ fn process_inline(
                     monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                     color: base_override.and_then(|b| b.color),
                 };
-                process_inline(&inner, out, spans, tokens, Some(&inner_attr));
+                process_inline(
+                    &chars[open_end..close_start],
+                    out,
+                    spans,
+                    tokens,
+                    Some(&inner_attr),
+                );
                 let end = out.len();
                 // Fill only unstyled gaps to avoid overlapping spans.
                 if start < end {
@@ -640,8 +651,7 @@ fn process_inline(
         if (ch == '*' || ch == '_') && i + 1 < n && chars[i + 1] == ch {
             let marker = ch;
             let open_end = i + 2;
-            if let Some(close_start) = find_emphasis_close(&chars, open_end, marker, 2) {
-                let inner: String = chars[open_end..close_start].iter().collect();
+            if let Some(close_start) = find_emphasis_close(chars, open_end, marker, 2) {
                 let start = out.len();
                 let base_weight = base_override.and_then(|b| b.weight).unwrap_or(400);
                 let bold_attr = StyleAttr {
@@ -650,7 +660,13 @@ fn process_inline(
                     monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                     color: base_override.and_then(|b| b.color),
                 };
-                process_inline(&inner, out, spans, tokens, Some(&bold_attr));
+                process_inline(
+                    &chars[open_end..close_start],
+                    out,
+                    spans,
+                    tokens,
+                    Some(&bold_attr),
+                );
                 let end = out.len();
                 // Fill only unstyled gaps to avoid overlapping spans.
                 if start < end {
@@ -673,8 +689,7 @@ fn process_inline(
                 true
             };
             if is_word_boundary {
-                if let Some(close_start) = find_emphasis_close(&chars, open_end, marker, 1) {
-                    let inner: String = chars[open_end..close_start].iter().collect();
+                if let Some(close_start) = find_emphasis_close(chars, open_end, marker, 1) {
                     let start = out.len();
                     let italic_attr = StyleAttr {
                         weight: base_override.and_then(|b| b.weight),
@@ -682,7 +697,13 @@ fn process_inline(
                         monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                         color: base_override.and_then(|b| b.color),
                     };
-                    process_inline(&inner, out, spans, tokens, Some(&italic_attr));
+                    process_inline(
+                        &chars[open_end..close_start],
+                        out,
+                        spans,
+                        tokens,
+                        Some(&italic_attr),
+                    );
                     let end = out.len();
                     // Fill only unstyled gaps to avoid overlapping spans.
                     if start < end {
@@ -696,7 +717,6 @@ fn process_inline(
 
         // ── Everything else — emit literally ─────────────────────────────
         out.push(ch);
-        _byte_pos += ch.len_utf8();
         i += 1;
     }
 }
