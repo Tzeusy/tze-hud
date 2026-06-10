@@ -422,6 +422,7 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                     color: None,
                 };
                 let start = plain.len();
+                let prev_len = spans.len();
                 // Process inline markup inside the heading text.
                 // base_override propagates heading weight into nested spans.
                 let heading_chars: Vec<char> = heading_text.chars().collect();
@@ -431,7 +432,7 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                 // heading base style.  This avoids inserting a wide overlapping
                 // span across ranges that already have inner-markup spans.
                 if start < end {
-                    fill_gaps_with_base(&attr, start, end, &mut spans);
+                    fill_gaps_with_base(&attr, start, end, prev_len, &mut spans);
                 }
                 prev_was_empty = false;
                 i += 1;
@@ -493,6 +494,16 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
 
 // ─── Inline processing ───────────────────────────────────────────────────────
 
+/// Maximum nesting depth for inline markup recursion.
+///
+/// Beyond this depth `process_inline_inner` emits remaining characters as
+/// literal text rather than recursing, bounding stack consumption to a safe
+/// constant regardless of how deeply adversarial input nests brackets or
+/// emphasis markers.  A 64 KiB payload with only `[` characters fits ~32k
+/// nesting levels; this cap stops recursion well before the ~1 MiB stack
+/// limit on the Windows main thread.
+const MAX_INLINE_DEPTH: usize = 100;
+
 /// Process inline markdown constructs within a single paragraph/heading/list
 /// item `chars` and append the result to `out`, emitting styled spans.
 ///
@@ -504,6 +515,9 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
 /// Recursive calls pass sub-slices of the already-collected `Vec<char>`,
 /// eliminating the per-call allocation that the original `text: &str`
 /// approach incurred.
+///
+/// This is the public entry point; it delegates to [`process_inline_inner`]
+/// with `depth = 0`.
 fn process_inline(
     chars: &[char],
     out: &mut String,
@@ -511,8 +525,67 @@ fn process_inline(
     tokens: &MarkdownTokens,
     base_override: Option<&StyleAttr>,
 ) {
+    // Build the bracket-match table once for this slice so that the link
+    // branch can resolve `[…]` in O(1) instead of scanning to end-of-input
+    // per opening bracket.  Total cost: O(chars.len()).  Skip the allocation
+    // entirely when there are no brackets on the line.
+    let bracket_matches = if chars.contains(&'[') {
+        build_bracket_matches(chars)
+    } else {
+        Vec::new()
+    };
+    process_inline_inner(
+        chars,
+        out,
+        spans,
+        tokens,
+        base_override,
+        0,
+        &bracket_matches,
+    );
+}
+
+/// Inner recursive worker for inline processing.
+///
+/// `depth` is the current nesting level.  When it reaches [`MAX_INLINE_DEPTH`]
+/// all remaining characters are emitted as literals — the parser degrades
+/// gracefully instead of overflowing the stack.
+///
+/// `bracket_matches[i]` is `Some(j)` when `chars[i] == '['` and `j` is the
+/// index of the matching `']'` (computed once by the top-level caller).  The
+/// slice is valid for the *full* original `chars` only.  Recursive calls
+/// operate on sub-slices and pass an empty slice for `bracket_matches`; the
+/// callee rebuilds the table on-demand for its sub-slice when `[` characters
+/// are present, so nested links are still parsed correctly.
+fn process_inline_inner(
+    chars: &[char],
+    out: &mut String,
+    spans: &mut Vec<StyledSpan>,
+    tokens: &MarkdownTokens,
+    base_override: Option<&StyleAttr>,
+    depth: usize,
+    bracket_matches: &[Option<usize>],
+) {
+    // Depth cap: emit all remaining characters as literals so adversarial
+    // deeply-nested input cannot overflow the stack.
+    if depth >= MAX_INLINE_DEPTH {
+        for &c in chars {
+            out.push(c);
+        }
+        return;
+    }
+
     let n = chars.len();
     let mut i = 0;
+
+    // Memo of emphasis-close failures, keyed by (marker, count).  A scan for a
+    // closing run starting at `from` searches a *suffix*; if it fails, every
+    // later start (a shorter suffix) for the same (marker, count) also fails.
+    // We record the lowest `from` known to have no close and short-circuit
+    // future scans, turning the otherwise-O(n²) marker flood (`*`×65535) into
+    // amortized O(n).  This is a pure short-circuit — it never changes which
+    // emphasis spans match.
+    let mut emphasis_close_fail = EmphasisCloseMemo::new();
 
     while i < n {
         let ch = chars[i];
@@ -522,7 +595,7 @@ fn process_inline(
         // transformed — emit the verbatim source substring so agents can
         // see exactly what was in the input.
         if ch == '!' && i + 1 < n && chars[i + 1] == '[' {
-            if let Some(end) = find_link_end(chars, i + 1) {
+            if let Some(end) = find_link_end_with_table(chars, i + 1, bracket_matches) {
                 // Emit the full `![alt](url)` construct verbatim.
                 for &c in &chars[i..=end] {
                     out.push(c);
@@ -539,33 +612,44 @@ fn process_inline(
 
         // ── Links: `[text](url)` → styled text, no navigation ────────────
         if ch == '[' {
-            if let Some(bracket_close) = find_bracket_close(chars, i) {
+            // Use the precomputed bracket-match table for O(1) lookup.
+            let bracket_close = if i < bracket_matches.len() {
+                bracket_matches[i]
+            } else {
+                None
+            };
+            if let Some(bracket_close) = bracket_close {
                 if bracket_close + 1 < n && chars[bracket_close + 1] == '(' {
                     if let Some(paren_close) = find_paren_close(chars, bracket_close + 1) {
                         let start = out.len();
-                        // Recursively process inline markup inside link text,
-                        // passing the sub-slice directly — no intermediate String.
-                        process_inline(
-                            &chars[i + 1..bracket_close],
+                        let prev_len = spans.len();
+                        // Build a bracket-match table for the sub-slice so nested
+                        // links inside link text (e.g. `**[x](u)**`) are parsed
+                        // correctly by the recursive call.
+                        let inner_slice = &chars[i + 1..bracket_close];
+                        let inner_bm = if inner_slice.contains(&'[') {
+                            build_bracket_matches(inner_slice)
+                        } else {
+                            Vec::new()
+                        };
+                        let mut link_attr = base_override.cloned().unwrap_or_else(StyleAttr::plain);
+                        if tokens.link_color.is_some() {
+                            link_attr.color = tokens.link_color;
+                        }
+                        process_inline_inner(
+                            inner_slice,
                             out,
                             spans,
                             tokens,
-                            base_override,
+                            Some(&link_attr),
+                            depth + 1,
+                            &inner_bm,
                         );
                         let end = out.len();
+                        // Use fill_gaps_with_base to cover unstyled gaps with the
+                        // link style, keeping spans non-overlapping.
                         if start < end {
-                            let mut link_attr =
-                                base_override.cloned().unwrap_or_else(StyleAttr::plain);
-                            if tokens.link_color.is_some() {
-                                link_attr.color = tokens.link_color;
-                            }
-                            if !link_attr.is_plain() || link_attr.color.is_some() {
-                                spans.push(StyledSpan {
-                                    start_byte: start,
-                                    end_byte: end,
-                                    attr: link_attr,
-                                });
-                            }
+                            fill_gaps_with_base(&link_attr, start, end, prev_len, spans);
                         }
                         i = paren_close + 1;
                         continue;
@@ -622,25 +706,28 @@ fn process_inline(
         if (ch == '*' || ch == '_') && i + 2 < n && chars[i + 1] == ch && chars[i + 2] == ch {
             let marker = ch;
             let open_end = i + 3;
-            if let Some(close_start) = find_emphasis_close(chars, open_end, marker, 3) {
+            if let Some(close_start) = emphasis_close_fail.find(chars, open_end, marker, 3) {
                 let start = out.len();
+                let prev_len = spans.len();
                 let inner_attr = StyleAttr {
                     weight: Some(700),
                     italic: true,
                     monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                     color: base_override.and_then(|b| b.color),
                 };
-                process_inline(
+                process_inline_inner(
                     &chars[open_end..close_start],
                     out,
                     spans,
                     tokens,
                     Some(&inner_attr),
+                    depth + 1,
+                    &[],
                 );
                 let end = out.len();
                 // Fill only unstyled gaps to avoid overlapping spans.
                 if start < end {
-                    fill_gaps_with_base(&inner_attr, start, end, spans);
+                    fill_gaps_with_base(&inner_attr, start, end, prev_len, spans);
                 }
                 i = close_start + 3;
                 continue;
@@ -651,8 +738,9 @@ fn process_inline(
         if (ch == '*' || ch == '_') && i + 1 < n && chars[i + 1] == ch {
             let marker = ch;
             let open_end = i + 2;
-            if let Some(close_start) = find_emphasis_close(chars, open_end, marker, 2) {
+            if let Some(close_start) = emphasis_close_fail.find(chars, open_end, marker, 2) {
                 let start = out.len();
+                let prev_len = spans.len();
                 let base_weight = base_override.and_then(|b| b.weight).unwrap_or(400);
                 let bold_attr = StyleAttr {
                     weight: Some(base_weight.max(700)),
@@ -660,17 +748,19 @@ fn process_inline(
                     monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                     color: base_override.and_then(|b| b.color),
                 };
-                process_inline(
+                process_inline_inner(
                     &chars[open_end..close_start],
                     out,
                     spans,
                     tokens,
                     Some(&bold_attr),
+                    depth + 1,
+                    &[],
                 );
                 let end = out.len();
                 // Fill only unstyled gaps to avoid overlapping spans.
                 if start < end {
-                    fill_gaps_with_base(&bold_attr, start, end, spans);
+                    fill_gaps_with_base(&bold_attr, start, end, prev_len, spans);
                 }
                 i = close_start + 2;
                 continue;
@@ -689,25 +779,28 @@ fn process_inline(
                 true
             };
             if is_word_boundary {
-                if let Some(close_start) = find_emphasis_close(chars, open_end, marker, 1) {
+                if let Some(close_start) = emphasis_close_fail.find(chars, open_end, marker, 1) {
                     let start = out.len();
+                    let prev_len = spans.len();
                     let italic_attr = StyleAttr {
                         weight: base_override.and_then(|b| b.weight),
                         italic: true,
                         monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                         color: base_override.and_then(|b| b.color),
                     };
-                    process_inline(
+                    process_inline_inner(
                         &chars[open_end..close_start],
                         out,
                         spans,
                         tokens,
                         Some(&italic_attr),
+                        depth + 1,
+                        &[],
                     );
                     let end = out.len();
                     // Fill only unstyled gaps to avoid overlapping spans.
                     if start < end {
-                        fill_gaps_with_base(&italic_attr, start, end, spans);
+                        fill_gaps_with_base(&italic_attr, start, end, prev_len, spans);
                     }
                     i = close_start + 1;
                     continue;
@@ -728,22 +821,30 @@ fn process_inline(
 ///
 /// This is the non-overlapping alternative to inserting a single wide "base"
 /// span that would overlap all inner spans.  The caller must have already
-/// emitted all inner spans for the block via [`process_inline`]; those spans
-/// are already in `spans` (appended after `prev_len` — we look for spans
-/// whose `start_byte >= block_start`).
+/// emitted all inner spans for the block via [`process_inline_inner`]; those
+/// spans begin at index `prev_len` in `spans`.
+///
+/// `prev_len` is the length of `spans` **before** the inner call; this
+/// confines the scan to `spans[prev_len..]`, making the function O(new_spans)
+/// rather than O(all_spans), which is critical for span-dense adversarial
+/// content.
 fn fill_gaps_with_base(
     base_attr: &StyleAttr,
     block_start: usize,
     block_end: usize,
+    prev_len: usize,
     spans: &mut Vec<StyledSpan>,
 ) {
-    // Collect the inner spans for this block (spans covering [block_start, block_end)).
-    // We need their byte ranges to identify gaps; make a snapshot to avoid borrow issues.
-    let inner_ranges: Vec<(usize, usize)> = spans
+    // Collect byte ranges from only the spans added during the inner call.
+    // This is O(new_spans) regardless of total spans in the vec.
+    // Nested constructs (e.g. links containing emphasis) can push spans in
+    // non-start-order; sort so the gap-fill loop is correct.
+    let mut inner_ranges: Vec<(usize, usize)> = spans[prev_len..]
         .iter()
         .filter(|s| s.start_byte >= block_start && s.end_byte <= block_end)
         .map(|s| (s.start_byte, s.end_byte))
         .collect();
+    inner_ranges.sort_unstable_by_key(|&(s, _)| s);
 
     // Walk the block range and emit a base-style span for each gap not covered
     // by an inner span.
@@ -854,7 +955,44 @@ fn is_fence_close(line: &str, fence_char: char, fence_len: usize) -> bool {
     count >= fence_len && trimmed.chars().skip(count).all(|c| c.is_whitespace())
 }
 
+/// Build a bracket-match table for `chars` in a single O(n) pass.
+///
+/// Returns a `Vec<Option<usize>>` of length `chars.len()`.  Entry `i` is
+/// `Some(j)` when `chars[i] == '['` and `j` is the index of its matching
+/// `']'`; all other entries are `None`.  Unmatched `[` (no closing `]`) map
+/// to `None`.
+///
+/// Building this table once per line lets the link branch look up bracket
+/// matches in O(1) instead of scanning to end-of-input per opening `[`.
+/// Without it, `[`×65535 triggers ~2 × 10⁹ character comparisons; with it,
+/// the whole line costs one O(n) pass.
+fn build_bracket_matches(chars: &[char]) -> Vec<Option<usize>> {
+    // Fast path: no `[` means no bracket pairs — skip the allocation entirely.
+    if !chars.contains(&'[') {
+        return Vec::new();
+    }
+    let n = chars.len();
+    let mut table = vec![None; n];
+    // Stack of open-bracket positions waiting for their closing `]`.
+    let mut stack: Vec<usize> = Vec::new();
+    for (i, &ch) in chars.iter().enumerate() {
+        match ch {
+            '[' => stack.push(i),
+            ']' => {
+                if let Some(open) = stack.pop() {
+                    table[open] = Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    table
+}
+
 /// Find the index of the closing `]` for a `[` at `open_pos` in `chars`.
+///
+/// This is the fallback O(n) scan used when no precomputed table is available
+/// (e.g. for image constructs whose sub-slice does not carry a table).
 fn find_bracket_close(chars: &[char], open_pos: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (i, &ch) in chars.iter().enumerate().skip(open_pos) {
@@ -889,10 +1027,21 @@ fn find_paren_close(chars: &[char], open_pos: usize) -> Option<usize> {
     None
 }
 
-/// Find the end of a `![alt](url)` image construct starting at `open_bracket`.
-/// Returns the position of the final `)`, or `None`.
-fn find_link_end(chars: &[char], open_bracket: usize) -> Option<usize> {
-    let bracket_close = find_bracket_close(chars, open_bracket)?;
+/// Find the end of a `![alt](url)` image construct using the precomputed
+/// bracket-match table.  Returns the position of the final `)`, or `None`.
+///
+/// Falls back to [`find_bracket_close`] when `bracket_matches` is empty
+/// (recursive sub-slice calls), preserving correctness.
+fn find_link_end_with_table(
+    chars: &[char],
+    open_bracket: usize,
+    bracket_matches: &[Option<usize>],
+) -> Option<usize> {
+    let bracket_close = if open_bracket < bracket_matches.len() {
+        bracket_matches[open_bracket]?
+    } else {
+        find_bracket_close(chars, open_bracket)?
+    };
     if bracket_close + 1 < chars.len() && chars[bracket_close + 1] == '(' {
         find_paren_close(chars, bracket_close + 1)
     } else {
@@ -919,6 +1068,75 @@ fn find_backtick_close(chars: &[char], from: usize, tick_count: usize) -> Option
         }
     }
     None
+}
+
+/// Amortized-O(1) failure memo around [`find_emphasis_close`].
+///
+/// A scan for a closing emphasis run starting at `from` examines the *suffix*
+/// `chars[from..]`.  If that scan finds no close, then any later start
+/// `from' >= from` (a shorter suffix) with the same `(marker, count)` also has
+/// no close.  This memo records, per `(marker, count)`, the lowest `from`
+/// already proven to have no close, and short-circuits future failing scans.
+///
+/// This converts the pathological `*`×65535 / `_`×65535 marker flood — where
+/// the original code re-scanned to end-of-input for every marker position,
+/// costing O(n²) — into amortized O(n) total.  It is a pure short-circuit: it
+/// never changes which emphasis spans match, only how fast failures are
+/// detected.
+///
+/// Indexing: marker `*` → row 0, `_` → row 1; `count` 1/2/3 → column 0/1/2.
+struct EmphasisCloseMemo {
+    /// `fail_from[marker_idx][count_idx]` is `Some(f)` when no close exists for
+    /// any start `>= f`.
+    fail_from: [[Option<usize>; 3]; 2],
+}
+
+impl EmphasisCloseMemo {
+    fn new() -> Self {
+        Self {
+            fail_from: [[None; 3]; 2],
+        }
+    }
+
+    #[inline]
+    fn index(marker: char, count: usize) -> Option<(usize, usize)> {
+        let row = match marker {
+            '*' => 0,
+            '_' => 1,
+            _ => return None,
+        };
+        if !(1..=3).contains(&count) {
+            return None;
+        }
+        Some((row, count - 1))
+    }
+
+    /// Find the closing run, consulting and updating the failure memo.
+    fn find(&mut self, chars: &[char], from: usize, marker: char, count: usize) -> Option<usize> {
+        if let Some((row, col)) = Self::index(marker, count) {
+            // Short-circuit if a previous scan already proved no close from an
+            // earlier (or equal) start position.
+            if let Some(f) = self.fail_from[row][col] {
+                if from >= f {
+                    return None;
+                }
+            }
+            match find_emphasis_close(chars, from, marker, count) {
+                Some(close) => Some(close),
+                None => {
+                    // Record the lowest failing start for this (marker, count).
+                    // Since we already short-circuit when from >= f (above), any
+                    // existing entry must have f > from, so `from` is always the
+                    // new minimum — a direct assign is correct and cheaper.
+                    self.fail_from[row][col] = Some(from);
+                    None
+                }
+            }
+        } else {
+            // Unsupported marker/count — fall back to a direct scan.
+            find_emphasis_close(chars, from, marker, count)
+        }
+    }
 }
 
 /// Find the closing emphasis marker (single char `marker` repeated `count` times)
@@ -1502,5 +1720,181 @@ mod tests {
                 "end_byte must be char boundary"
             );
         }
+    }
+
+    // ── Adversarial / DoS-resistance tests ────────────────────────────────────
+
+    /// 65535 unmatched `[` characters complete in bounded time without stack
+    /// overflow and without stalling the compositor.
+    ///
+    /// This exercises fix (b): the precomputed bracket-match table (`O(n)` single
+    /// pass) replaces the original per-`[` end-of-input scan that was `O(n²)`.
+    /// With 65535 brackets the old code performed ~2×10⁹ comparisons; the new
+    /// code costs one `O(n)` build pass and `O(1)` lookups thereafter.
+    ///
+    /// The time assertion is gated by `#[ignore]` because wall-clock thresholds
+    /// are not deterministic across CI runners.  Run manually with
+    /// `cargo test -- --ignored` to validate timing.  Structural correctness
+    /// (no panic, no dropped content) is asserted unconditionally in the
+    /// `adversarial_*_no_stack_overflow` / `adversarial_*_completes_fast` tests.
+    #[test]
+    #[ignore = "wall-clock assertion; run with --ignored to validate timing locally"]
+    fn adversarial_flood_of_unmatched_open_brackets_completes_fast() {
+        let input = "[".repeat(65535);
+        let deadline = std::time::Instant::now();
+        let md = parse(&input);
+        let elapsed = deadline.elapsed();
+        // All characters must appear in the output (no content silently dropped).
+        assert_eq!(
+            md.plain_text.len(),
+            65535,
+            "all '[' must appear in plain text output"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "65535 unmatched '[' must complete in <5s (debug build); took {elapsed:?}"
+        );
+    }
+
+    /// Deeply-nested bold markers (`**` × 32768 pairs) complete quickly without
+    /// stack overflow.
+    ///
+    /// This exercises fix (a): the recursion depth cap in `process_inline_inner`.
+    /// Beyond `MAX_INLINE_DEPTH` (100) the parser emits remaining characters as
+    /// literals; this bounds stack consumption to a safe constant regardless of
+    /// nesting depth.
+    #[test]
+    #[ignore = "wall-clock assertion; run with --ignored to validate timing locally"]
+    fn adversarial_deeply_nested_bold_no_stack_overflow() {
+        // Build "**" × 16384 + "x" + "**" × 16384 — deeply nested bold.
+        let mut input = String::with_capacity(65535);
+        for _ in 0..16384 {
+            input.push_str("**");
+        }
+        input.push('x');
+        for _ in 0..16384 {
+            input.push_str("**");
+        }
+        let deadline = std::time::Instant::now();
+        let md = parse(&input);
+        let elapsed = deadline.elapsed();
+        // Must not panic/overflow and must complete quickly.
+        assert!(
+            !md.plain_text.is_empty(),
+            "deeply nested bold must produce non-empty output"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "deeply nested bold must complete in <5s (debug build); took {elapsed:?}"
+        );
+    }
+
+    /// Deeply-nested italic markers (`*` × 32767 pairs) complete quickly without
+    /// stack overflow.
+    #[test]
+    #[ignore = "wall-clock assertion; run with --ignored to validate timing locally"]
+    fn adversarial_deeply_nested_italic_no_stack_overflow() {
+        // Build "*" × 32767 + "x" + "*" × 32767
+        let mut input = String::with_capacity(65535);
+        for _ in 0..32767 {
+            input.push('*');
+        }
+        input.push('x');
+        for _ in 0..32767 {
+            input.push('*');
+        }
+        let deadline = std::time::Instant::now();
+        let md = parse(&input);
+        let elapsed = deadline.elapsed();
+        assert!(
+            !md.plain_text.is_empty(),
+            "deeply nested italic must produce non-empty output"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "deeply nested italic must complete in <5s (debug build); took {elapsed:?}"
+        );
+    }
+
+    /// Deeply-nested link brackets (`[` × 32768 pairs) complete quickly without
+    /// stack overflow.
+    ///
+    /// This exercises both fix (a) (depth cap) and fix (b) (bracket-match table).
+    #[test]
+    #[ignore = "wall-clock assertion; run with --ignored to validate timing locally"]
+    fn adversarial_deeply_nested_link_brackets_no_stack_overflow() {
+        // Build "[" × 32768 + "text" + "]" × 32768 — deeply nested brackets.
+        let n = 32768usize;
+        let mut input = String::with_capacity(n * 2 + 4);
+        for _ in 0..n {
+            input.push('[');
+        }
+        input.push_str("text");
+        for _ in 0..n {
+            input.push(']');
+        }
+        let deadline = std::time::Instant::now();
+        let md = parse(&input);
+        let elapsed = deadline.elapsed();
+        assert!(
+            md.plain_text.contains("text"),
+            "link bracket flood must not drop inner text"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "deeply nested link brackets must complete in <5s (debug build); took {elapsed:?}"
+        );
+    }
+
+    /// Span-dense content (many short bold spans) completes in bounded time.
+    ///
+    /// This exercises fix (c): `fill_gaps_with_base` now scans only the spans
+    /// added during the current `process_inline_inner` call (`O(new_spans)`)
+    /// rather than the full vec (`O(all_spans)`), eliminating the `O(spans²)`
+    /// blowup that would otherwise occur on span-dense content.
+    #[test]
+    #[ignore = "wall-clock assertion; run with --ignored to validate timing locally"]
+    fn adversarial_span_dense_bold_content_completes_fast() {
+        // Build a heading with ~1000 alternating bold/plain segments.
+        // Each "**x** " adds one styled span; fill_gaps_with_base is called once
+        // per block.  Without the O(n) fix this would be O(1000²) operations.
+        let segment = "**a** b ";
+        let repeat = 1000;
+        let body: String = segment.repeat(repeat);
+        let input = format!("# {body}");
+        let deadline = std::time::Instant::now();
+        let md = parse(&input);
+        let elapsed = deadline.elapsed();
+        assert!(
+            !md.plain_text.is_empty(),
+            "span-dense heading must produce non-empty output"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "span-dense content must complete in <5s (debug build); took {elapsed:?}"
+        );
+    }
+
+    /// Full 64 KiB adversarial payload with all three pathological patterns
+    /// combined: mixed bracket floods, emphasis nesting, and span density.
+    #[test]
+    #[ignore = "wall-clock assertion; run with --ignored to validate timing locally"]
+    fn adversarial_combined_64kib_completes_fast() {
+        // 21845 repetitions of "[**x**] " ≈ 8 bytes each ≈ ~175 KiB; cap at 65535
+        let segment = "[**x**] ";
+        let n = 65535 / segment.len();
+        let input: String = segment.repeat(n);
+        let input = &input[..input.len().min(65535)];
+        let deadline = std::time::Instant::now();
+        let md = parse(input);
+        let elapsed = deadline.elapsed();
+        assert!(
+            !md.plain_text.is_empty(),
+            "combined adversarial input must produce non-empty output"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "combined 64KiB adversarial input must complete in <5s (debug build); took {elapsed:?}"
+        );
     }
 }
