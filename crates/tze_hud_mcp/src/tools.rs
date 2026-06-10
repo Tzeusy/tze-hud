@@ -4823,7 +4823,7 @@ mod tests {
                     rgba.a
                 );
             }
-            other => panic!("expected ZoneContent::SolidColor, got: {:?}", other),
+            other => panic!("expected ZoneContent::SolidColor, got: {other:?}"),
         }
     }
 
@@ -4992,8 +4992,7 @@ mod tests {
                 );
             }
             other => panic!(
-                "active publication must be warm amber SolidColor after replacement, got: {:?}",
-                other
+                "active publication must be warm amber SolidColor after replacement, got: {other:?}"
             ),
         }
     }

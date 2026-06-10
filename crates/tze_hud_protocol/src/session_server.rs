@@ -8496,7 +8496,6 @@ mod tests {
                                 y: 0.0,
                                 width: 200.0,
                                 height: 150.0,
-                                ..Default::default()
                             }),
                             z_order: 1,
                         },
@@ -8585,7 +8584,6 @@ mod tests {
                                 y: 8.0,
                                 width: 200.0,
                                 height: 100.0,
-                                ..Default::default()
                             }),
                             z_order: 1,
                         },
@@ -8680,7 +8678,6 @@ mod tests {
                                 y: 8.0,
                                 width: 200.0,
                                 height: 100.0,
-                                ..Default::default()
                             }),
                             z_order: 1,
                         },
@@ -9080,7 +9077,6 @@ mod tests {
                                 y: 5.0,
                                 width: 20.0,
                                 height: 10.0,
-                                ..Default::default()
                             }),
                             node: Some(crate::convert::scene_node_to_proto(&node)),
                         },
@@ -9232,7 +9228,6 @@ mod tests {
                                 y: 10.0,
                                 width: 60.0,
                                 height: 40.0,
-                                ..Default::default()
                             }),
                             node: Some(invalid_node),
                         },
@@ -9317,7 +9312,6 @@ mod tests {
                                 y: 10.0,
                                 width: 80.0,
                                 height: 40.0,
-                                ..Default::default()
                             }),
                             node: None,
                         },
@@ -9400,7 +9394,6 @@ mod tests {
                                 y: 0.0,
                                 width: 100.0,
                                 height: 100.0,
-                                ..Default::default()
                             }),
                             z_order: 0,
                         },
@@ -9500,7 +9493,6 @@ mod tests {
                                 y: 0.0,
                                 width: 100.0,
                                 height: 100.0,
-                                ..Default::default()
                             }),
                             z_order: 0,
                         },
@@ -10510,7 +10502,6 @@ mod tests {
                     tab_id: vec![], // empty = server infers active tab
                     bounds: None,
                     z_order: 0,
-                    ..Default::default()
                 })),
             }],
             ..Default::default()
@@ -16392,7 +16383,6 @@ mod tests {
                                 y: 0.0,
                                 width: 120.0,
                                 height: 120.0,
-                                ..Default::default()
                             }),
                             z_order: 1,
                         },

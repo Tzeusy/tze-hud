@@ -7410,6 +7410,9 @@ mod tests {
     /// adapter-selection code.  We cannot assert the adapter backend in a unit
     /// test (it's opaque), so we just verify that creating a compositor with
     /// the env var set does not crash.
+    // await_holding_lock: intentional — the guard must stay held across the
+    // await so no parallel test mutates HEADLESS_FORCE_SOFTWARE mid-construction.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_new_headless_with_force_software_env_var() {
         if should_skip_gpu_tests() {
@@ -7454,7 +7457,9 @@ mod tests {
     /// Dimension clamping must apply both the device max and a minimum of 1.
     /// wgpu panics on `surface.configure()` with zero-width or zero-height.
     #[test]
-    #[allow(clippy::min_max)]
+    // min_max / unnecessary_min_or_max: the test deliberately evaluates the
+    // exact clamp expression used in production against literal inputs.
+    #[allow(clippy::min_max, clippy::unnecessary_min_or_max)]
     fn surface_dim_clamp_zero_becomes_one() {
         let max_dim = 16384u32;
         assert_eq!(0u32.min(max_dim).max(1), 1);
@@ -9201,7 +9206,7 @@ mod tests {
         // Very shortly after creation, opacity should be close to 0.
         let opacity = state.current_opacity();
         assert!(
-            opacity >= 0.0 && opacity <= 0.1,
+            (0.0..=0.1).contains(&opacity),
             "fade-in opacity shortly after start should be near 0, got {opacity}"
         );
         assert!(
@@ -11660,8 +11665,7 @@ mod tests {
         assert_eq!(
             ys.len(),
             4,
-            "all 4 TextItems must have distinct pixel_y values, got: {:?}",
-            ys
+            "all 4 TextItems must have distinct pixel_y values, got: {ys:?}"
         );
     }
 
@@ -12407,13 +12411,11 @@ mod tests {
         let first_color = bg_only[0].color;
         assert!(
             first_color[0] < 0.1,
-            "Background zone vertex R must be near 0.0 (blue); got {:?}",
-            first_color
+            "Background zone vertex R must be near 0.0 (blue); got {first_color:?}"
         );
         assert!(
             first_color[2] > 0.9,
-            "Background zone vertex B must be near 1.0 (blue); got {:?}",
-            first_color
+            "Background zone vertex B must be near 1.0 (blue); got {first_color:?}"
         );
 
         // Filter: Content only — should emit content-zone quads, not bg-zone quads.
@@ -12435,13 +12437,11 @@ mod tests {
         let content_color = content_only[0].color;
         assert!(
             content_color[0] > 0.9,
-            "Content zone vertex R must be near 1.0 (red); got {:?}",
-            content_color
+            "Content zone vertex R must be near 1.0 (red); got {content_color:?}"
         );
         assert!(
             content_color[2] < 0.1,
-            "Content zone vertex B must be near 0.0 (red); got {:?}",
-            content_color
+            "Content zone vertex B must be near 0.0 (red); got {content_color:?}"
         );
     }
 
@@ -12534,18 +12534,15 @@ mod tests {
         let chrome_color = chrome_only[0].color;
         assert!(
             chrome_color[0] > 0.9,
-            "Chrome zone vertex R must be near 1.0 (yellow); got {:?}",
-            chrome_color
+            "Chrome zone vertex R must be near 1.0 (yellow); got {chrome_color:?}"
         );
         assert!(
             chrome_color[1] > 0.9,
-            "Chrome zone vertex G must be near 1.0 (yellow); got {:?}",
-            chrome_color
+            "Chrome zone vertex G must be near 1.0 (yellow); got {chrome_color:?}"
         );
         assert!(
             chrome_color[2] < 0.1,
-            "Chrome zone vertex B must be near 0.0 (yellow); got {:?}",
-            chrome_color
+            "Chrome zone vertex B must be near 0.0 (yellow); got {chrome_color:?}"
         );
 
         // Content filter: must emit only content-zone vertices.
@@ -14117,9 +14114,7 @@ mod tests {
         assert!(
             (drag_opacity - expected).abs() < 1e-5,
             "drag active: effective opacity must be tile.opacity * DRAG_OPACITY_BOOST clamped \
-             ({:.4} != {:.4})",
-            drag_opacity,
-            expected
+             ({drag_opacity:.4} != {expected:.4})"
         );
         assert!(
             drag_opacity <= 1.0,

@@ -1175,8 +1175,10 @@ mod tests {
     /// from_zone_policy propagates Ellipsis overflow from policy.
     #[test]
     fn from_zone_policy_overflow_ellipsis_propagated() {
-        let mut policy = RenderingPolicy::default();
-        policy.overflow = Some(TextOverflow::Ellipsis);
+        let policy = RenderingPolicy {
+            overflow: Some(TextOverflow::Ellipsis),
+            ..RenderingPolicy::default()
+        };
         let item = TextItem::from_zone_policy("text", 0.0, 0.0, 200.0, 40.0, &policy, 1.0);
         assert_eq!(
             item.overflow,
@@ -1188,8 +1190,10 @@ mod tests {
     /// from_zone_policy propagates explicit Clip overflow from policy.
     #[test]
     fn from_zone_policy_overflow_clip_explicit_propagated() {
-        let mut policy = RenderingPolicy::default();
-        policy.overflow = Some(TextOverflow::Clip);
+        let policy = RenderingPolicy {
+            overflow: Some(TextOverflow::Clip),
+            ..RenderingPolicy::default()
+        };
         let item = TextItem::from_zone_policy("text", 0.0, 0.0, 200.0, 40.0, &policy, 1.0);
         assert_eq!(
             item.overflow,

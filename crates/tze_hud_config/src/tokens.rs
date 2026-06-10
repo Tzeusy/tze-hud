@@ -704,8 +704,10 @@ mod tests {
         let mut tokens = HashMap::new();
         tokens.insert("color.text.primary".to_string(), "#FFFFFF".to_string());
         tokens.insert("spacing.unit".to_string(), "8".to_string());
-        let mut raw = RawConfig::default();
-        raw.design_tokens = Some(RawDesignTokens(tokens));
+        let raw = RawConfig {
+            design_tokens: Some(RawDesignTokens(tokens)),
+            ..RawConfig::default()
+        };
         let mut errors = Vec::new();
         validate_design_tokens(&raw, &mut errors);
         assert!(errors.is_empty());
@@ -716,8 +718,10 @@ mod tests {
         use crate::raw::RawDesignTokens;
         let mut tokens = HashMap::new();
         tokens.insert("Color.Text.Primary".to_string(), "#FFFFFF".to_string()); // uppercase
-        let mut raw = RawConfig::default();
-        raw.design_tokens = Some(RawDesignTokens(tokens));
+        let raw = RawConfig {
+            design_tokens: Some(RawDesignTokens(tokens)),
+            ..RawConfig::default()
+        };
         let mut errors = Vec::new();
         validate_design_tokens(&raw, &mut errors);
         assert_eq!(errors.len(), 1);
@@ -731,8 +735,10 @@ mod tests {
         tokens.insert("1bad.key".to_string(), "value".to_string());
         tokens.insert("also-bad".to_string(), "value".to_string());
         tokens.insert("color.text.primary".to_string(), "#FFF".to_string()); // valid
-        let mut raw = RawConfig::default();
-        raw.design_tokens = Some(RawDesignTokens(tokens));
+        let raw = RawConfig {
+            design_tokens: Some(RawDesignTokens(tokens)),
+            ..RawConfig::default()
+        };
         let mut errors = Vec::new();
         validate_design_tokens(&raw, &mut errors);
         // Exactly 2 errors (the 2 invalid keys)

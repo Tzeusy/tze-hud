@@ -518,6 +518,10 @@ pub mod tests {
     #[test]
     #[ignore = "no implementation yet"]
     fn test_resource_store_generic_compile_check() {
+        // dead_code: never called by design — compiling this fn is the check;
+        // concrete stores live downstream (tze_hud_resource) and cannot be
+        // named here without a dependency cycle.
+        #[allow(dead_code)]
         fn use_store<S: ResourceStore<TestClock>>() {
             let clock = TestClock::new(0);
             let _store = S::new(clock);

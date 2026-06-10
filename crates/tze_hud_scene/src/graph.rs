@@ -8873,12 +8873,12 @@ mod spec_scenarios {
 
         // Replace must NOT include defaults for missing keys.
         assert!(
-            occ.effective_params.get("label").is_none(),
+            !occ.effective_params.contains_key("label"),
             "Replace: absent keys must NOT be filled from defaults (label), got: {:?}",
             occ.effective_params.get("label")
         );
         assert!(
-            occ.effective_params.get("severity").is_none(),
+            !occ.effective_params.contains_key("severity"),
             "Replace: absent keys must NOT be filled from defaults (severity), got: {:?}",
             occ.effective_params.get("severity")
         );
@@ -8926,7 +8926,7 @@ mod spec_scenarios {
         // Second publish only set "label"; "level" must NOT appear (not in params,
         // and Replace does not fall back to defaults).
         assert!(
-            occ.effective_params.get("level").is_none(),
+            !occ.effective_params.contains_key("level"),
             "Replace: prior 'level' must be gone after Replace by second publish, got: {:?}",
             occ.effective_params.get("level")
         );

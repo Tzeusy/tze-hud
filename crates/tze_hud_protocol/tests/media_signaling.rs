@@ -111,7 +111,7 @@ fn widget_publish_result_in_server_message_envelope_field_47() {
                 "field 47 must carry WidgetPublishResult"
             );
         }
-        other => panic!("expected WidgetPublishResult at field 47, got {:?}", other),
+        other => panic!("expected WidgetPublishResult at field 47, got {other:?}"),
     }
 }
 
@@ -160,7 +160,7 @@ fn zone_content_video_surface_ref_roundtrip() {
                 "classification MUST survive"
             );
         }
-        other => panic!("expected VideoSurfaceRef, got {:?}", other),
+        other => panic!("expected VideoSurfaceRef, got {other:?}"),
     }
 }
 
@@ -181,7 +181,7 @@ fn zone_content_static_image_ref_roundtrip() {
                 "resource_id MUST survive round-trip"
             );
         }
-        other => panic!("expected StaticImageRef, got {:?}", other),
+        other => panic!("expected StaticImageRef, got {other:?}"),
     }
 }
 
@@ -203,7 +203,7 @@ fn zone_content_video_surface_ref_zero_expiry() {
                 "0 expiry must survive (proto3 zero default)"
             );
         }
-        other => panic!("expected VideoSurfaceRef, got {:?}", other),
+        other => panic!("expected VideoSurfaceRef, got {other:?}"),
     }
 }
 
@@ -320,10 +320,7 @@ fn media_ingress_open_roundtrip_in_client_message() {
             assert_eq!(open.codec_preference, vec![1]);
             assert_eq!(open.content_classification, "public");
         }
-        other => panic!(
-            "expected MediaIngressOpen at ClientMessage field 60, got {:?}",
-            other
-        ),
+        other => panic!("expected MediaIngressOpen at ClientMessage field 60, got {other:?}"),
     }
 }
 
@@ -346,7 +343,7 @@ fn media_ingress_close_roundtrip_client_field_61() {
             );
             assert_eq!(close.reason, "agent-initiated close");
         }
-        other => panic!("expected MediaIngressClose at field 61, got {:?}", other),
+        other => panic!("expected MediaIngressClose at field 61, got {other:?}"),
     }
 }
 
@@ -370,7 +367,7 @@ fn media_sdp_answer_roundtrip_client_field_62() {
             );
             assert_eq!(answer.sdp_bytes, sdp_bytes, "SDP bytes MUST survive");
         }
-        other => panic!("expected MediaSdpAnswer at field 62, got {:?}", other),
+        other => panic!("expected MediaSdpAnswer at field 62, got {other:?}"),
     }
 }
 
@@ -396,7 +393,7 @@ fn media_ice_candidate_roundtrip_client_field_63() {
             );
             assert_eq!(cand.sdp_mid, "audio");
         }
-        other => panic!("expected MediaIceCandidate at field 63, got {:?}", other),
+        other => panic!("expected MediaIceCandidate at field 63, got {other:?}"),
     }
 }
 
@@ -436,7 +433,7 @@ fn media_pause_request_roundtrip_client_field_65() {
         Some(ClientPayload::MediaPauseRequest(req)) => {
             assert_eq!(req.stream_epoch, 99, "stream_epoch MUST survive (field 65)");
         }
-        other => panic!("expected MediaPauseRequest at field 65, got {:?}", other),
+        other => panic!("expected MediaPauseRequest at field 65, got {other:?}"),
     }
 }
 
@@ -454,7 +451,7 @@ fn media_resume_request_roundtrip_client_field_66() {
         Some(ClientPayload::MediaResumeRequest(req)) => {
             assert_eq!(req.stream_epoch, 99, "stream_epoch MUST survive (field 66)");
         }
-        other => panic!("expected MediaResumeRequest at field 66, got {:?}", other),
+        other => panic!("expected MediaResumeRequest at field 66, got {other:?}"),
     }
 }
 
@@ -495,10 +492,7 @@ fn media_ingress_open_result_roundtrip_server_field_60() {
                 "surface_id MUST survive"
             );
         }
-        other => panic!(
-            "expected MediaIngressOpenResult at field 60, got {:?}",
-            other
-        ),
+        other => panic!("expected MediaIngressOpenResult at field 60, got {other:?}"),
     }
 }
 
@@ -557,7 +551,7 @@ fn media_ingress_state_roundtrip_server_field_61() {
             assert_eq!(state.effective_bitrate_kbps, 1500, "bitrate MUST survive");
             assert_eq!(state.effective_fps, 30, "fps MUST survive");
         }
-        other => panic!("expected MediaIngressState at field 61, got {:?}", other),
+        other => panic!("expected MediaIngressState at field 61, got {other:?}"),
     }
 }
 
@@ -590,10 +584,7 @@ fn media_ingress_close_notice_roundtrip_server_field_62() {
                 "absent retry_after_us MUST decode as None"
             );
         }
-        other => panic!(
-            "expected MediaIngressCloseNotice at field 62, got {:?}",
-            other
-        ),
+        other => panic!("expected MediaIngressCloseNotice at field 62, got {other:?}"),
     }
 }
 
@@ -624,7 +615,7 @@ fn media_ingress_close_notice_retry_after_us_roundtrip() {
                 "retry_after_us MUST survive proto round-trip (RFC 0014 §6.3 A1)"
             );
         }
-        other => panic!("expected MediaIngressCloseNotice, got {:?}", other),
+        other => panic!("expected MediaIngressCloseNotice, got {other:?}"),
     }
 }
 
@@ -648,7 +639,7 @@ fn media_sdp_offer_roundtrip_server_field_63() {
             );
             assert_eq!(offer.sdp_bytes, sdp, "SDP bytes MUST survive");
         }
-        other => panic!("expected MediaSdpOffer at field 63, got {:?}", other),
+        other => panic!("expected MediaSdpOffer at field 63, got {other:?}"),
     }
 }
 
@@ -679,10 +670,7 @@ fn media_degradation_notice_roundtrip_server_field_65() {
                 "RUNTIME_LADDER_ADVANCE trigger MUST survive"
             );
         }
-        other => panic!(
-            "expected MediaDegradationNotice at field 65, got {:?}",
-            other
-        ),
+        other => panic!("expected MediaDegradationNotice at field 65, got {other:?}"),
     }
 }
 
@@ -727,7 +715,7 @@ fn media_pause_notice_roundtrip_server_field_67() {
             );
             assert_eq!(notice.trigger, 3, "SAFE_MODE trigger MUST survive");
         }
-        other => panic!("expected MediaPauseNotice at field 67, got {:?}", other),
+        other => panic!("expected MediaPauseNotice at field 67, got {other:?}"),
     }
 }
 
@@ -750,7 +738,7 @@ fn media_resume_notice_roundtrip_server_field_68() {
             );
             assert_eq!(notice.last_trigger, 3, "last_trigger MUST survive");
         }
-        other => panic!("expected MediaResumeNotice at field 68, got {:?}", other),
+        other => panic!("expected MediaResumeNotice at field 68, got {other:?}"),
     }
 }
 
@@ -775,10 +763,7 @@ fn cloud_relay_open_roundtrip_client_field_80() {
             );
             assert_eq!(open.relay_path_hint, 1, "NEAREST_REGION hint MUST survive");
         }
-        other => panic!(
-            "expected CloudRelayOpen at ClientMessage field 80, got {:?}",
-            other
-        ),
+        other => panic!("expected CloudRelayOpen at ClientMessage field 80, got {other:?}"),
     }
 }
 
@@ -800,10 +785,7 @@ fn cloud_relay_close_roundtrip_client_field_81() {
                 "stream_epoch MUST survive (field 81)"
             );
         }
-        other => panic!(
-            "expected CloudRelayClose at ClientMessage field 81, got {:?}",
-            other
-        ),
+        other => panic!("expected CloudRelayClose at ClientMessage field 81, got {other:?}"),
     }
 }
 
@@ -834,7 +816,7 @@ fn cloud_relay_open_result_roundtrip_server_field_80() {
             assert_eq!(result.sdp_answer, sdp_answer, "SDP answer MUST survive");
             assert_eq!(result.relay_epoch, 1, "relay_epoch MUST survive");
         }
-        other => panic!("expected CloudRelayOpenResult at field 80, got {:?}", other),
+        other => panic!("expected CloudRelayOpenResult at field 80, got {other:?}"),
     }
 }
 
@@ -864,10 +846,7 @@ fn cloud_relay_close_notice_roundtrip_server_field_81() {
             assert_eq!(notice.reason, 7, "E25_STEP_5 reason MUST survive");
             assert!(notice.stream_survives, "stream_survives MUST survive");
         }
-        other => panic!(
-            "expected CloudRelayCloseNotice at field 81, got {:?}",
-            other
-        ),
+        other => panic!("expected CloudRelayCloseNotice at field 81, got {other:?}"),
     }
 }
 
@@ -897,10 +876,7 @@ fn cloud_relay_state_update_roundtrip_server_field_82() {
             assert_eq!(update.relay_rtt_ms, 45, "relay_rtt_ms MUST survive");
             assert_eq!(update.packet_loss_ppm, 100, "packet_loss_ppm MUST survive");
         }
-        other => panic!(
-            "expected CloudRelayStateUpdate at field 82, got {:?}",
-            other
-        ),
+        other => panic!("expected CloudRelayStateUpdate at field 82, got {other:?}"),
     }
 }
 
@@ -941,8 +917,7 @@ fn client_field_60_produces_media_ingress_open_not_list_elements_request() {
             assert_eq!(open.client_stream_id, vec![0xFF_u8; 16]);
         }
         other => panic!(
-            "ClientMessage field 60 MUST be MediaIngressOpen (RFC 0014 erratum), got {:?}",
-            other
+            "ClientMessage field 60 MUST be MediaIngressOpen (RFC 0014 erratum), got {other:?}"
         ),
     }
 }
@@ -977,8 +952,7 @@ fn server_field_60_produces_media_ingress_open_result_not_list_elements_response
             assert_eq!(result.stream_epoch, 1);
         }
         other => panic!(
-            "ServerMessage field 60 MUST be MediaIngressOpenResult (RFC 0014 erratum), got {:?}",
-            other
+            "ServerMessage field 60 MUST be MediaIngressOpenResult (RFC 0014 erratum), got {other:?}"
         ),
     }
 }
@@ -1011,10 +985,7 @@ fn media_ice_candidate_server_field_64_distinct_from_client_field_63() {
                 "candidate_str MUST survive"
             );
         }
-        other => panic!(
-            "expected MediaIceCandidate at ServerMessage field 64, got {:?}",
-            other
-        ),
+        other => panic!("expected MediaIceCandidate at ServerMessage field 64, got {other:?}"),
     }
 }
 
@@ -1242,8 +1213,7 @@ fn video_surface_ref_snapshot_parity_fields_zeroed_in_zone_content() {
             );
         }
         other => panic!(
-            "scene_zone_content_to_proto MUST produce VideoSurfaceRef variant, got {:?}",
-            other
+            "scene_zone_content_to_proto MUST produce VideoSurfaceRef variant, got {other:?}"
         ),
     }
 }

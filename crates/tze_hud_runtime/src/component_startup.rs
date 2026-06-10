@@ -759,10 +759,7 @@ default_tab = true
 
         let exemplar_dir = profiles_root.join("notification-stack-exemplar");
         if !exemplar_dir.exists() {
-            eprintln!(
-                "SKIP: notification-stack-exemplar profile not found at {:?}",
-                exemplar_dir
-            );
+            eprintln!("SKIP: notification-stack-exemplar profile not found at {exemplar_dir:?}");
             return;
         }
 
@@ -839,10 +836,7 @@ notification = "notification-stack-exemplar"
 
         let exemplar_dir = profiles_root.join("notification-stack-exemplar");
         if !exemplar_dir.exists() {
-            eprintln!(
-                "SKIP: notification-stack-exemplar profile not found at {:?}",
-                exemplar_dir
-            );
+            eprintln!("SKIP: notification-stack-exemplar profile not found at {exemplar_dir:?}");
             return;
         }
 

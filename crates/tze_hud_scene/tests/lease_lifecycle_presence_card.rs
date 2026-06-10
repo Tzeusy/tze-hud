@@ -896,8 +896,7 @@ fn test_auto_renew_ttl_reset_reflects_new_window() {
     let remaining_after_renewal = ttl.remaining_ms().unwrap();
     assert!(
         remaining_after_renewal > 119_000,
-        "remaining must be ≈ 120s after reset_renewal_window, got {}ms",
-        remaining_after_renewal
+        "remaining must be ≈ 120s after reset_renewal_window, got {remaining_after_renewal}ms",
     );
 
     // Next AutoRenewDue fires at 75% of new window.

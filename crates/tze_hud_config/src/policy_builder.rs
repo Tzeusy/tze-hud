@@ -578,9 +578,11 @@ mod tests {
     #[test]
     fn test_subtitle_overflow_not_overwritten_when_explicit() {
         let tokens = default_tokens();
-        let mut policy = RenderingPolicy::default();
         // Pre-set overflow to Clip (explicit config override)
-        policy.overflow = Some(TextOverflow::Clip);
+        let mut policy = RenderingPolicy {
+            overflow: Some(TextOverflow::Clip),
+            ..RenderingPolicy::default()
+        };
         apply_token_defaults_for_zone("subtitle", &mut policy, &tokens);
         // overflow should remain Clip — token default must not overwrite explicit values
         assert_eq!(
@@ -605,10 +607,11 @@ mod tests {
     #[test]
     fn test_token_defaults_do_not_overwrite_existing_values() {
         let tokens = default_tokens();
-        let mut policy = RenderingPolicy::default();
-
         // Pre-set font_size_px to 32.0 (explicit config value)
-        policy.font_size_px = Some(32.0);
+        let mut policy = RenderingPolicy {
+            font_size_px: Some(32.0),
+            ..RenderingPolicy::default()
+        };
 
         apply_token_defaults_for_zone("subtitle", &mut policy, &tokens);
 
@@ -669,9 +672,11 @@ mod tests {
     #[test]
     fn test_notification_area_backdrop_radius_not_overwritten_when_explicit() {
         let tokens = default_tokens();
-        let mut policy = RenderingPolicy::default();
         // Pre-set backdrop_radius to 4.0 (explicit override)
-        policy.backdrop_radius = Some(4.0);
+        let mut policy = RenderingPolicy {
+            backdrop_radius: Some(4.0),
+            ..RenderingPolicy::default()
+        };
         apply_token_defaults_for_zone("notification-area", &mut policy, &tokens);
         // Must remain 4.0 — token default must not overwrite explicit values
         assert_eq!(
@@ -824,8 +829,10 @@ mod tests {
     fn test_merge_zone_override_font_weight_none_leaves_policy_unchanged() {
         use crate::component_profiles::ZoneRenderingOverride;
 
-        let mut policy = RenderingPolicy::default();
-        policy.font_weight = Some(400_u16);
+        let mut policy = RenderingPolicy {
+            font_weight: Some(400_u16),
+            ..RenderingPolicy::default()
+        };
         let override_ = ZoneRenderingOverride {
             font_weight: None,
             ..ZoneRenderingOverride::default()

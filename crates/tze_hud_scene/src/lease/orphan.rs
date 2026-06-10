@@ -332,14 +332,12 @@ mod tests {
 
     // ── GracePeriodTimer precision boundary ────────────────────────────────
 
-    /// Checks the GRACE_PRECISION_MS constant satisfies the +/- 100ms spec.
-    #[test]
-    fn grace_precision_constant_within_spec() {
-        assert!(
-            GRACE_PRECISION_MS <= 100,
-            "GRACE_PRECISION_MS must be ≤ 100 per spec line 148"
-        );
-    }
+    /// Checks the GRACE_PRECISION_MS constant satisfies the +/- 100ms spec —
+    /// enforced at compile time.
+    const _GRACE_PRECISION_WITHIN_SPEC: () = assert!(
+        GRACE_PRECISION_MS <= 100,
+        "GRACE_PRECISION_MS must be ≤ 100 per spec line 148"
+    );
 
     /// Reconnect at exactly grace_ms - 1 ms must still be allowed.
     #[test]

@@ -2107,13 +2107,12 @@ mod tests {
         ];
 
         for r in &revocation_reasons {
-            assert!(r.is_revocation(), "{:?} should be a revocation reason", r);
+            assert!(r.is_revocation(), "{r:?} should be a revocation reason");
         }
         for r in &non_revocation_reasons {
             assert!(
                 !r.is_revocation(),
-                "{:?} should NOT be a revocation reason",
-                r
+                "{r:?} should NOT be a revocation reason"
             );
         }
     }

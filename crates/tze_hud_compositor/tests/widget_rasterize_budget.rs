@@ -182,22 +182,18 @@ fn gauge_512x512_rasterize_within_ci_budget() {
 
     // Emit timing for CI log visibility.
     eprintln!(
-        "[widget_rasterize] gauge 512×512: {}µs ({} ms) — CI threshold: {}ms, spec target (ref hw): {}ms",
-        elapsed_us, elapsed_ms, CI_THRESHOLD_MS, SPEC_TARGET_MS,
+        "[widget_rasterize] gauge 512×512: {elapsed_us}µs ({elapsed_ms} ms) — CI threshold: {CI_THRESHOLD_MS}ms, spec target (ref hw): {SPEC_TARGET_MS}ms",
     );
 
     // Budget assertion with lenient CI threshold (catches catastrophic regressions only).
     // For the strict 2ms spec target, run: cargo bench --bench widget_rasterize
     assert!(
         elapsed_ms < CI_THRESHOLD_MS,
-        "SVG re-rasterization took {}ms, exceeds lenient CI threshold of {}ms \
-         (spec target for reference hardware is {}ms). \
+        "SVG re-rasterization took {elapsed_ms}ms, exceeds lenient CI threshold of {CI_THRESHOLD_MS}ms \
+         (spec target for reference hardware is {SPEC_TARGET_MS}ms). \
          This likely indicates a catastrophic regression — check for O(n²) paths. \
          Run `cargo bench --bench widget_rasterize` on optimised reference hardware \
          to verify the 2ms spec requirement.",
-        elapsed_ms,
-        CI_THRESHOLD_MS,
-        SPEC_TARGET_MS,
     );
 }
 

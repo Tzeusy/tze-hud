@@ -642,6 +642,10 @@ capabilities = ["emit_scene_event:system.shutdown"]
     #[test]
     #[ignore = "no implementation yet"]
     fn test_config_loader_generic_compile_check() {
+        // dead_code: never called by design — compiling this fn is the check;
+        // the concrete impl lives downstream (tze_hud_config) and cannot be
+        // named here without a dependency cycle.
+        #[allow(dead_code)]
         fn use_loader<L: ConfigLoader>() {
             let result =
                 L::parse("[runtime]\nprofile = \"full-display\"\n[[tabs]]\nname = \"T\"\n");

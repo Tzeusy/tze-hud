@@ -5553,13 +5553,11 @@ redaction_style = "blank"
             ref zone_name,
             published_at_wall_us,
             ref publisher_namespace,
-            ref kind,
+            kind: ZoneInteractionKind::Dismiss,
             ..
         } = result_up.hit
         {
-            if let ZoneInteractionKind::Dismiss = kind {
-                scene.dismiss_notification(zone_name, published_at_wall_us, publisher_namespace);
-            }
+            scene.dismiss_notification(zone_name, published_at_wall_us, publisher_namespace);
         }
 
         // The notification must now be gone.

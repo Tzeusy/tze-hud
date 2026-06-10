@@ -104,7 +104,9 @@ pub fn pixel_differs_from_bg(pixels: &[u8], width: u32, x: u32, y: u32, min_diff
 ///
 /// Used for scenes where we know tiles should cover a region but cannot
 /// predict exact colours (e.g. text rendering, alpha blending output).
-#[allow(dead_code)]
+// too_many_arguments: flat (buffer, geometry, tolerance, label) signature keeps
+// call sites in pixel tests readable; a params struct would add noise here.
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn assert_region_has_content(
     pixels: &[u8],
     width: u32,

@@ -746,8 +746,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_all_budget_constants_are_positive() {
+    /// All budget constants must be positive — enforced at compile time.
+    const _ALL_BUDGET_CONSTANTS_ARE_POSITIVE: () = {
         assert!(budgets::FRAME_BUDGET_US > 0);
         assert!(budgets::INPUT_ACK_BUDGET_US > 0);
         assert!(budgets::HIT_TEST_BUDGET_US > 0);
@@ -759,7 +759,7 @@ mod tests {
         assert!(budgets::EVENT_CLASSIFICATION_US > 0);
         assert!(budgets::EVENT_DELIVERY_US > 0);
         assert!(budgets::EVENT_DISPATCH_BUDGET_US > 0);
-    }
+    };
 
     #[test]
     fn test_cache_serialization_roundtrip() {
