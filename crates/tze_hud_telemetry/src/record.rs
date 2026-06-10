@@ -54,6 +54,21 @@ pub struct FrameTelemetry {
     /// Build wgpu CommandEncoder; issue draw calls. MUST NOT submit to GPU queue.
     pub stage6_render_encode_us: u64,
 
+    /// Markdown cache prime cost (microseconds) for this frame.
+    ///
+    /// Records the wall-clock time spent in `prime_markdown_cache` during Stage 3/4
+    /// (before the scene is considered stable).  On frames where the scene has not
+    /// changed since the last prime this is 0 — the gate fires early and no parsing
+    /// occurs.  On a commit frame that introduces new or changed content this
+    /// captures the actual parse cost so latency regressions are visible in
+    /// telemetry rather than silently inflating the overall frame time.
+    ///
+    /// This field is serialized so LLM consumers and the benchmark harness can
+    /// assert that unchanged-content frames carry 0 parse cost and that commit-frame
+    /// parse cost stays within the Stage-3/4 combined budget.
+    #[serde(default)]
+    pub markdown_prime_us: u64,
+
     /// Stage 7 — GPU Submit + Present (compositor+main thread). p99 budget: 8ms.
     /// Submit CommandBuffer; signal main thread; main thread calls surface.present().
     pub stage7_gpu_submit_us: u64,
@@ -171,6 +186,7 @@ impl FrameTelemetry {
             stage6_render_encode_us: 0,
             stage7_gpu_submit_us: 0,
             stage8_telemetry_emit_us: 0,
+            markdown_prime_us: 0,
             // Split input latency measurements
             input_to_local_ack_us: 0,
             input_to_scene_commit_us: 0,
@@ -921,5 +937,70 @@ mod tests {
         let json = serde_json::to_string(&frame).unwrap();
         assert!(json.contains("\"invariant_violations_this_frame\":0"));
         assert!(json.contains("\"layer0_checks_failed_this_frame\":0"));
+    }
+
+    // ── hud-gpqde: markdown_prime_us telemetry field ─────────────────────────
+
+    /// FrameTelemetry.markdown_prime_us is zero-initialized by FrameTelemetry::new.
+    ///
+    /// This field records the wall-clock cost of `prime_markdown_cache` for
+    /// each frame, making markdown parse cost visible in stage telemetry.
+    #[test]
+    fn test_frame_telemetry_markdown_prime_us_zero_initialized() {
+        let frame = FrameTelemetry::new(1);
+        assert_eq!(
+            frame.markdown_prime_us, 0,
+            "markdown_prime_us must be zero-initialized"
+        );
+    }
+
+    /// markdown_prime_us serializes to its canonical JSON field name and
+    /// round-trips through serde correctly.
+    #[test]
+    fn test_frame_telemetry_markdown_prime_us_serializes() {
+        let mut frame = FrameTelemetry::new(1);
+        frame.markdown_prime_us = 350; // 350 µs — a realistic commit-frame value
+
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("markdown_prime_us"),
+            "serialized JSON must contain markdown_prime_us field: {json}"
+        );
+        assert!(
+            json.contains("\"markdown_prime_us\":350"),
+            "serialized value must match: {json}"
+        );
+
+        // Round-trip through serde_json.
+        let decoded: FrameTelemetry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.markdown_prime_us, 350,
+            "markdown_prime_us must survive JSON round-trip"
+        );
+    }
+
+    /// markdown_prime_us defaults to 0 when absent from JSON (serde(default)).
+    ///
+    /// This ensures backward-compat: telemetry records written before this
+    /// field was added still deserialize without error.
+    #[test]
+    fn test_frame_telemetry_markdown_prime_us_defaults_on_missing_json() {
+        // JSON without the markdown_prime_us field — simulates an older record.
+        let json = r#"{"frame_number":1,"timestamp_us":0,"frame_time_us":0,
+            "stage1_input_drain_us":0,"stage2_local_feedback_us":0,
+            "stage3_mutation_intake_us":0,"stage4_scene_commit_us":0,
+            "stage5_layout_resolve_us":0,"stage6_render_encode_us":0,
+            "stage7_gpu_submit_us":0,"stage8_telemetry_emit_us":0,
+            "input_to_local_ack_us":0,"input_to_scene_commit_us":0,
+            "input_to_next_present_us":0,"tile_count":0,"node_count":0,
+            "active_leases":0,"mutations_applied":0,"hit_region_updates":0,
+            "tiles_layout_recomputed":0,"telemetry_overflow_count":0,
+            "invariant_violations_this_frame":0,"layer0_checks_failed_this_frame":0}"#;
+
+        let decoded: FrameTelemetry = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            decoded.markdown_prime_us, 0,
+            "markdown_prime_us must default to 0 when absent from JSON"
+        );
     }
 }

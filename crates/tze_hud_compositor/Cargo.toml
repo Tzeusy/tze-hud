@@ -40,3 +40,7 @@ harness = false
 [[bench]]
 name = "overflow_truncate"
 harness = false
+
+[[bench]]
+name = "markdown_cache"
+harness = false
