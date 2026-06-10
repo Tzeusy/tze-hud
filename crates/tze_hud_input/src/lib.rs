@@ -107,6 +107,8 @@ pub mod drag;
 pub mod focus;
 pub mod focus_tree;
 pub mod keyboard;
+pub mod portal_resize;
+pub mod scroll_indicator;
 
 pub use command::{
     CommandAction, CommandDispatch, CommandInputEvent, CommandProcessor, CommandSource,
@@ -124,6 +126,14 @@ pub use focus_tree::{FocusOwner, FocusTree};
 pub use keyboard::{
     KeyboardDispatch, KeyboardDispatchKind, KeyboardModifiers, KeyboardProcessor,
     RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
+};
+pub use portal_resize::{
+    DeviceResizeState, GeometrySnapshot, HotkeyResizeDir, HotkeyResizeOutcome, PortalRect,
+    PortalResizeState, PortalWindowTokens, ResizeBounds, ResizeEdge, ResizeOutcome, ResizePhase,
+    apply_hotkey_resize, hit_affordance,
+};
+pub use scroll_indicator::{
+    ScrollIndicatorGeometry, ScrollIndicatorTokens, compute_scroll_indicator,
 };
 
 use serde::{Deserialize, Serialize};

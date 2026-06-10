@@ -6,6 +6,10 @@
 //! - Token mapping each part consumes
 //! - `PortalPartTokens`: resolved visual values extracted from a `DesignTokenMap`
 //!
+//! Also implements §6b window management tokens (amendment 2026-06-10):
+//! - Window geometry bounds (min size, resize step, affordance size)
+//! - Scroll-position indicator styling
+//!
 //! **Pre-promotion rule:** the exemplar adapter MUST source every published visual
 //! value from the runtime's resolved token set (via `PortalPartTokens`) rather than
 //! literal values. A profile/token change MUST reskin the portal end-to-end without
@@ -39,6 +43,18 @@
 //! | `portal.collapsed_card.font_size` | collapsed card | compact text font size in px |
 //! | `portal.transition.in_ms` | transitions | collapsed→expanded duration (ms) |
 //! | `portal.transition.out_ms` | transitions | expanded→collapsed duration (ms) |
+//!
+//! ### §6b Window management tokens (amendment 2026-06-10)
+//!
+//! | Key | Part | Property |
+//! |-----|------|----------|
+//! | `portal.window.min_width_px` | window bounds | legible minimum width in px |
+//! | `portal.window.min_height_px` | window bounds | legible minimum height in px |
+//! | `portal.window.resize_step_px` | hotkey resize | pixels per Ctrl+`+`/`-` step |
+//! | `portal.window.resize_affordance_px` | resize affordance | capture region size on frame edges |
+//! | `portal.scroll_indicator.color` | scroll indicator | thumb color (RGBA hex) |
+//! | `portal.scroll_indicator.width_px` | scroll indicator | track width in px |
+//! | `portal.scroll_indicator.min_height_px` | scroll indicator | minimum thumb height in px |
 
 use crate::tokens::{DesignTokenMap, Rgba, parse_color_hex, parse_numeric};
 
@@ -72,6 +88,27 @@ pub const PORTAL_TOKEN_COLLAPSED_FONT_SIZE: &str = "portal.collapsed_card.font_s
 
 pub const PORTAL_TOKEN_TRANSITION_IN_MS: &str = "portal.transition.in_ms";
 pub const PORTAL_TOKEN_TRANSITION_OUT_MS: &str = "portal.transition.out_ms";
+
+// ── §6b Window management tokens (amendment 2026-06-10) ──────────────────────
+
+/// Minimum portal width in pixels (legibility bound per §6b.3).
+pub const PORTAL_TOKEN_WINDOW_MIN_WIDTH_PX: &str = "portal.window.min_width_px";
+/// Minimum portal height in pixels (legibility bound per §6b.3).
+pub const PORTAL_TOKEN_WINDOW_MIN_HEIGHT_PX: &str = "portal.window.min_height_px";
+/// Pixels per focus-scoped Ctrl+`+`/`=`/`-` resize step (§6b.2).
+pub const PORTAL_TOKEN_WINDOW_RESIZE_STEP_PX: &str = "portal.window.resize_step_px";
+/// Width/height of the pointer capture region on frame edges/corners (§6b.1).
+pub const PORTAL_TOKEN_WINDOW_RESIZE_AFFORDANCE_PX: &str = "portal.window.resize_affordance_px";
+
+// ── §6b Scroll-position indicator tokens ─────────────────────────────────────
+
+/// Thumb color for scroll-position indicator (RGBA hex); redaction-safe (§6b.5).
+pub const PORTAL_TOKEN_SCROLL_INDICATOR_COLOR: &str = "portal.scroll_indicator.color";
+/// Track width of the scroll-position indicator in px (§6b.5).
+pub const PORTAL_TOKEN_SCROLL_INDICATOR_WIDTH_PX: &str = "portal.scroll_indicator.width_px";
+/// Minimum thumb height in px — prevents thumb from vanishing on deep content (§6b.5).
+pub const PORTAL_TOKEN_SCROLL_INDICATOR_MIN_HEIGHT_PX: &str =
+    "portal.scroll_indicator.min_height_px";
 
 // ── Portal token fallback defaults ───────────────────────────────────────────
 
@@ -110,6 +147,25 @@ mod defaults {
 
     pub const TRANSITION_IN_MS: &str = "120";
     pub const TRANSITION_OUT_MS: &str = "80";
+
+    // §6b window management defaults
+    /// Legible minimum portal width (px). Chosen to fit at least two columns of
+    /// readable text at default font size.
+    pub const WINDOW_MIN_WIDTH_PX: &str = "240";
+    /// Legible minimum portal height (px). Chosen to fit at least three lines of
+    /// text plus header and composer.
+    pub const WINDOW_MIN_HEIGHT_PX: &str = "160";
+    /// Pixels per Ctrl+`+`/`-` resize step. Large enough to feel meaningful,
+    /// small enough for fine control.
+    pub const WINDOW_RESIZE_STEP_PX: &str = "32";
+    /// Width of the pointer capture region on frame edges/corners (px).
+    /// 8px balances discoverability with accidental activation avoidance.
+    pub const WINDOW_RESIZE_AFFORDANCE_PX: &str = "8";
+
+    // §6b scroll-indicator defaults
+    pub const SCROLL_INDICATOR_COLOR: &str = "#4A5568";
+    pub const SCROLL_INDICATOR_WIDTH_PX: &str = "4";
+    pub const SCROLL_INDICATOR_MIN_HEIGHT_PX: &str = "24";
 }
 
 // ── PortalPartTokens ──────────────────────────────────────────────────────────
@@ -155,6 +211,24 @@ pub struct PortalPartTokens {
     // Transitions (zone-transition duration)
     pub transition_in_ms: u32,
     pub transition_out_ms: u32,
+
+    // §6b Window management (amendment 2026-06-10)
+    /// Legible minimum portal width in pixels (§6b.3 legibility bound).
+    pub window_min_width_px: f32,
+    /// Legible minimum portal height in pixels (§6b.3 legibility bound).
+    pub window_min_height_px: f32,
+    /// Pixels per Ctrl+`+`/`=`/`-` resize step (§6b.2 token-defined step).
+    pub window_resize_step_px: f32,
+    /// Width/height of pointer capture region on frame edges/corners (§6b.1).
+    pub window_resize_affordance_px: f32,
+
+    // §6b Scroll-position indicators (amendment 2026-06-10)
+    /// Scroll indicator thumb color — geometry-only, carries no content (§6b.5).
+    pub scroll_indicator_color: Rgba,
+    /// Scroll indicator track width in px (§6b.5).
+    pub scroll_indicator_width_px: f32,
+    /// Minimum scroll indicator thumb height in px (§6b.5).
+    pub scroll_indicator_min_height_px: f32,
 }
 
 impl Default for PortalPartTokens {
@@ -202,6 +276,24 @@ impl Default for PortalPartTokens {
             transition_out_ms: parse_numeric(defaults::TRANSITION_OUT_MS)
                 .expect("transition out default is valid numeric")
                 as u32,
+
+            // §6b window management defaults
+            window_min_width_px: parse_numeric(defaults::WINDOW_MIN_WIDTH_PX)
+                .expect("window min width default is valid numeric"),
+            window_min_height_px: parse_numeric(defaults::WINDOW_MIN_HEIGHT_PX)
+                .expect("window min height default is valid numeric"),
+            window_resize_step_px: parse_numeric(defaults::WINDOW_RESIZE_STEP_PX)
+                .expect("window resize step default is valid numeric"),
+            window_resize_affordance_px: parse_numeric(defaults::WINDOW_RESIZE_AFFORDANCE_PX)
+                .expect("window resize affordance default is valid numeric"),
+
+            // §6b scroll indicator defaults
+            scroll_indicator_color: parse_color_hex(defaults::SCROLL_INDICATOR_COLOR)
+                .expect("scroll indicator color default is valid hex"),
+            scroll_indicator_width_px: parse_numeric(defaults::SCROLL_INDICATOR_WIDTH_PX)
+                .expect("scroll indicator width default is valid numeric"),
+            scroll_indicator_min_height_px: parse_numeric(defaults::SCROLL_INDICATOR_MIN_HEIGHT_PX)
+                .expect("scroll indicator min height default is valid numeric"),
         }
     }
 }
@@ -317,6 +409,38 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
 
         transition_in_ms: resolve_u32!(PORTAL_TOKEN_TRANSITION_IN_MS, defaults.transition_in_ms),
         transition_out_ms: resolve_u32!(PORTAL_TOKEN_TRANSITION_OUT_MS, defaults.transition_out_ms),
+
+        // §6b window management
+        window_min_width_px: resolve_f32!(
+            PORTAL_TOKEN_WINDOW_MIN_WIDTH_PX,
+            defaults.window_min_width_px
+        ),
+        window_min_height_px: resolve_f32!(
+            PORTAL_TOKEN_WINDOW_MIN_HEIGHT_PX,
+            defaults.window_min_height_px
+        ),
+        window_resize_step_px: resolve_f32!(
+            PORTAL_TOKEN_WINDOW_RESIZE_STEP_PX,
+            defaults.window_resize_step_px
+        ),
+        window_resize_affordance_px: resolve_f32!(
+            PORTAL_TOKEN_WINDOW_RESIZE_AFFORDANCE_PX,
+            defaults.window_resize_affordance_px
+        ),
+
+        // §6b scroll indicators
+        scroll_indicator_color: resolve_color!(
+            PORTAL_TOKEN_SCROLL_INDICATOR_COLOR,
+            defaults.scroll_indicator_color
+        ),
+        scroll_indicator_width_px: resolve_f32!(
+            PORTAL_TOKEN_SCROLL_INDICATOR_WIDTH_PX,
+            defaults.scroll_indicator_width_px
+        ),
+        scroll_indicator_min_height_px: resolve_f32!(
+            PORTAL_TOKEN_SCROLL_INDICATOR_MIN_HEIGHT_PX,
+            defaults.scroll_indicator_min_height_px
+        ),
     }
 }
 
@@ -355,6 +479,14 @@ mod tests {
         assert!(tokens.collapsed_font_size_px > 0.0);
         assert!(tokens.transition_in_ms > 0);
         assert!(tokens.transition_out_ms > 0);
+        // §6b window management fields
+        assert!(tokens.window_min_width_px > 0.0);
+        assert!(tokens.window_min_height_px > 0.0);
+        assert!(tokens.window_resize_step_px > 0.0);
+        assert!(tokens.window_resize_affordance_px > 0.0);
+        // §6b scroll indicator fields
+        assert!(tokens.scroll_indicator_width_px > 0.0);
+        assert!(tokens.scroll_indicator_min_height_px > 0.0);
     }
 
     // ── Profile-scoped override propagation ──────────────────────────────
@@ -603,6 +735,107 @@ mod tests {
         assert_eq!(
             tokens3.transition_in_ms, defaults.transition_in_ms,
             "zero transition_in_ms must fall back to default"
+        );
+    }
+
+    // ── §6b window management token tests ────────────────────────────────
+
+    #[test]
+    fn window_management_tokens_default_values_are_valid() {
+        let tokens = resolve_portal_tokens(&empty_map());
+        // Defaults must be positive
+        assert!(
+            tokens.window_min_width_px > 0.0,
+            "window_min_width_px must be positive"
+        );
+        assert!(
+            tokens.window_min_height_px > 0.0,
+            "window_min_height_px must be positive"
+        );
+        assert!(
+            tokens.window_resize_step_px > 0.0,
+            "window_resize_step_px must be positive"
+        );
+        assert!(
+            tokens.window_resize_affordance_px > 0.0,
+            "window_resize_affordance_px must be positive"
+        );
+        // Defaults must satisfy basic legibility invariant: min size > affordance
+        assert!(
+            tokens.window_min_width_px > tokens.window_resize_affordance_px,
+            "min width must be larger than the affordance region"
+        );
+        assert!(
+            tokens.window_min_height_px > tokens.window_resize_affordance_px,
+            "min height must be larger than the affordance region"
+        );
+    }
+
+    #[test]
+    fn window_management_tokens_override_propagates() {
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_WINDOW_MIN_WIDTH_PX.to_string(),
+            "320".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_WINDOW_RESIZE_STEP_PX.to_string(),
+            "16".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_WINDOW_RESIZE_AFFORDANCE_PX.to_string(),
+            "12".to_string(),
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+
+        assert!(
+            (tokens.window_min_width_px - 320.0).abs() < 1e-4,
+            "window_min_width_px override must propagate"
+        );
+        assert!(
+            (tokens.window_resize_step_px - 16.0).abs() < 1e-4,
+            "window_resize_step_px override must propagate"
+        );
+        assert!(
+            (tokens.window_resize_affordance_px - 12.0).abs() < 1e-4,
+            "window_resize_affordance_px override must propagate"
+        );
+    }
+
+    // ── §6b scroll indicator token tests ─────────────────────────────────
+
+    #[test]
+    fn scroll_indicator_tokens_default_values_are_valid() {
+        let tokens = resolve_portal_tokens(&empty_map());
+        assert!(
+            tokens.scroll_indicator_width_px > 0.0,
+            "scroll_indicator_width_px must be positive"
+        );
+        assert!(
+            tokens.scroll_indicator_min_height_px > 0.0,
+            "scroll_indicator_min_height_px must be positive"
+        );
+    }
+
+    #[test]
+    fn scroll_indicator_color_override_propagates() {
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_SCROLL_INDICATOR_COLOR.to_string(),
+            "#FF8800".to_string(), // orange sentinel
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+
+        // r=1.0, g=0x88/0xFF≈0.533, b=0.0
+        assert!(
+            (tokens.scroll_indicator_color.r - 1.0).abs() < 1e-2,
+            "scroll indicator color red channel must match override"
+        );
+        assert!(
+            tokens.scroll_indicator_color.b.abs() < 1e-2,
+            "scroll indicator color blue channel must be 0"
         );
     }
 }
