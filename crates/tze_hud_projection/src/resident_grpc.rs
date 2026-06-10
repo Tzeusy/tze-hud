@@ -35,6 +35,161 @@ const DEFAULT_COMPACT_H: f32 = 96.0;
 const DEFAULT_Z_ORDER: u32 = 160;
 const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 
+// ── PortalVisualTokens ────────────────────────────────────────────────────────
+
+/// Resolved visual values for all portal surface parts, sourced from the
+/// runtime's resolved design token set.
+///
+/// **Pre-promotion rule (§6.1):** the exemplar adapter MUST source every
+/// published visual value from this struct. No literal colors or font sizes
+/// are permitted in the adapter publish path. A profile/token change must
+/// reskin the portal end-to-end with zero adapter logic changes.
+///
+/// Build from the runtime's resolved `DesignTokenMap` using the companion
+/// `tze_hud_config::resolve_portal_tokens` function, then pass to
+/// `ResidentGrpcPortalAdapter::with_tokens`.
+///
+/// ## Collapse/expand transition safety (§6.3)
+///
+/// This struct also carries `transition_in_ms` and `transition_out_ms` for
+/// the collapsed↔expanded zone-transition mechanics. Transitions derive their
+/// durations from these token values.
+///
+/// Redaction is **structural**, not time-based: the `redacted` flag on
+/// `ProjectedPortalState` is computed from viewer clearance vs. content
+/// classification by the `ProjectionAuthority`, independently of any transition
+/// animation position. A restricted viewer therefore sees `redacted = true` in
+/// every frame — expanded, collapsed, and any intermediate transition state —
+/// regardless of `transition_in_ms` / `transition_out_ms` values. There is no
+/// `redaction_safe` field in the protocol; the safety guarantee comes from the
+/// structural model, not from the adapter.
+///
+/// ## Part inventory
+///
+/// | Part | Fields |
+/// |------|--------|
+/// | frame | `frame_background`, `frame_opacity` |
+/// | header | `header_text_color`, `header_font_size_px` |
+/// | composer | `composer_background`, `composer_text_color`, `composer_font_size_px` |
+/// | transcript body | `transcript_background`, `transcript_text_color`, `transcript_font_size_px` |
+/// | divider | `divider_color` |
+/// | collapsed card | `collapsed_background`, `collapsed_text_color`, `collapsed_font_size_px` |
+/// | transitions | `transition_in_ms`, `transition_out_ms` |
+#[derive(Clone, Debug, PartialEq)]
+pub struct PortalVisualTokens {
+    // Frame
+    pub frame_background: proto::Rgba,
+    pub frame_opacity: f32,
+
+    // Header
+    pub header_text_color: proto::Rgba,
+    pub header_font_size_px: f32,
+
+    // Composer
+    pub composer_background: proto::Rgba,
+    pub composer_text_color: proto::Rgba,
+    pub composer_font_size_px: f32,
+
+    // Transcript body
+    pub transcript_background: proto::Rgba,
+    pub transcript_text_color: proto::Rgba,
+    pub transcript_font_size_px: f32,
+
+    // Divider
+    pub divider_color: proto::Rgba,
+
+    // Collapsed card
+    pub collapsed_background: proto::Rgba,
+    pub collapsed_text_color: proto::Rgba,
+    pub collapsed_font_size_px: f32,
+
+    // Zone-transition durations (token-derived, used by collapsed/expanded
+    // transition mechanics)
+    pub transition_in_ms: u32,
+    pub transition_out_ms: u32,
+}
+
+impl Default for PortalVisualTokens {
+    /// Default visual tokens — same palette as the Phase-0 exemplar literals,
+    /// expressed as resolved token defaults.
+    ///
+    /// In production these values are superseded by `with_tokens()` which
+    /// accepts the runtime's resolved token set. This default is used only
+    /// in tests that do not exercise the token path, and as a fallback when
+    /// no tokens are supplied to the adapter.
+    ///
+    /// NOTE: The numeric defaults here (colors as linear floats, font sizes,
+    /// transition durations) must match the string defaults in
+    /// `tze_hud_config::portal_tokens::defaults`. If you change either side,
+    /// update both — there is no compile-time link because `tze_hud_projection`
+    /// does not depend on `tze_hud_config`.
+    fn default() -> Self {
+        Self {
+            frame_background: proto::Rgba {
+                r: 0.067,
+                g: 0.094,
+                b: 0.129,
+                a: 0.90,
+            },
+            frame_opacity: 0.90,
+            header_text_color: proto::Rgba {
+                r: 0.96,
+                g: 0.97,
+                b: 1.0,
+                a: 1.0,
+            },
+            header_font_size_px: 14.0,
+            composer_background: proto::Rgba {
+                r: 0.059,
+                g: 0.078,
+                b: 0.094,
+                a: 0.90,
+            },
+            composer_text_color: proto::Rgba {
+                r: 0.878,
+                g: 0.910,
+                b: 0.953,
+                a: 1.0,
+            },
+            composer_font_size_px: 13.0,
+            transcript_background: proto::Rgba {
+                r: 0.039,
+                g: 0.051,
+                b: 0.067,
+                a: 0.90,
+            },
+            transcript_text_color: proto::Rgba {
+                r: 0.90,
+                g: 0.933,
+                b: 0.980,
+                a: 1.0,
+            },
+            transcript_font_size_px: 13.0,
+            divider_color: proto::Rgba {
+                r: 0.165,
+                g: 0.200,
+                b: 0.267,
+                a: 1.0,
+            },
+            collapsed_background: proto::Rgba {
+                r: 0.102,
+                g: 0.122,
+                b: 0.157,
+                a: 0.88,
+            },
+            collapsed_text_color: proto::Rgba {
+                r: 0.784,
+                g: 0.839,
+                b: 0.910,
+                a: 1.0,
+            },
+            collapsed_font_size_px: 12.0,
+            transition_in_ms: 120,
+            transition_out_ms: 80,
+        }
+    }
+}
+
 /// Result timing for adapter-local resident-path work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResidentGrpcBudgetSample {
@@ -141,6 +296,16 @@ pub struct ResidentGrpcDraftCommand {
 }
 
 /// Stateful daemon-side adapter for one projected session's resident portal.
+///
+/// ## Token-driven styling (§6.1 — no literal visual values)
+///
+/// Construct with `ResidentGrpcPortalAdapter::new` for default tokens, or
+/// `ResidentGrpcPortalAdapter::with_tokens` to supply resolved design tokens.
+///
+/// Every color, font size, and transition duration in the rendered portal tile
+/// comes from `visual_tokens`, never from inline literals. To reskin the portal,
+/// call `set_visual_tokens` with a freshly-resolved `PortalVisualTokens` built
+/// from the updated token map — no adapter logic changes required.
 #[derive(Clone, Debug)]
 pub struct ResidentGrpcPortalAdapter {
     config: ResidentGrpcPortalConfig,
@@ -149,16 +314,59 @@ pub struct ResidentGrpcPortalAdapter {
     /// Latest draft sequence seen by this adapter — used to skip stale
     /// state-stream notifications that arrive out of order.
     last_draft_sequence: u64,
+    /// Resolved visual tokens for portal part styling.
+    ///
+    /// All visual properties (colors, font sizes, transition durations) in the
+    /// rendered portal tile MUST originate here. A profile swap updates this
+    /// field; no other code in the adapter must change.
+    visual_tokens: PortalVisualTokens,
 }
 
 impl ResidentGrpcPortalAdapter {
+    /// Create a new adapter with default visual tokens.
+    ///
+    /// In production, call `with_tokens` or `set_visual_tokens` immediately
+    /// after construction to supply the runtime's resolved design token set.
+    /// Using default tokens is acceptable only in tests that do not exercise
+    /// the profile-swap path.
     pub fn new(config: ResidentGrpcPortalConfig) -> Self {
         Self {
             config,
             tile_id: None,
             next_input_sequence: 0,
             last_draft_sequence: 0,
+            visual_tokens: PortalVisualTokens::default(),
         }
+    }
+
+    /// Create a new adapter with the given resolved visual tokens.
+    ///
+    /// This is the preferred constructor for production use. Build
+    /// `tokens` from the runtime's resolved `DesignTokenMap` using
+    /// `tze_hud_config::resolve_portal_tokens` followed by conversion
+    /// to `PortalVisualTokens`.
+    pub fn with_tokens(config: ResidentGrpcPortalConfig, tokens: PortalVisualTokens) -> Self {
+        Self {
+            config,
+            tile_id: None,
+            next_input_sequence: 0,
+            last_draft_sequence: 0,
+            visual_tokens: tokens,
+        }
+    }
+
+    /// Update visual tokens (e.g., after a profile hot-reload).
+    ///
+    /// The next `render_portal_message` call after this returns will use the
+    /// new token values. No other adapter state changes — this is the
+    /// "profile swap without adapter logic change" contract from §6.1.
+    pub fn set_visual_tokens(&mut self, tokens: PortalVisualTokens) {
+        self.visual_tokens = tokens;
+    }
+
+    /// Returns the current visual tokens (for inspection / test assertions).
+    pub fn visual_tokens(&self) -> &PortalVisualTokens {
+        &self.visual_tokens
     }
 
     pub fn tile_id(&self) -> Option<&[u8]> {
@@ -428,30 +636,30 @@ impl ResidentGrpcPortalAdapter {
     }
 
     fn portal_node(&self, state: &ProjectedPortalState) -> proto::NodeProto {
+        // §6.1 enforcement: every visual value sourced from self.visual_tokens —
+        // no literal colors, font sizes, or opacities permitted here.
         let bounds = self.local_bounds_for_state(state);
+        let (text_color, background_color, font_size_px) = match state.presentation {
+            ProjectedPortalPresentation::Expanded => (
+                self.visual_tokens.transcript_text_color,
+                self.visual_tokens.transcript_background,
+                self.visual_tokens.transcript_font_size_px,
+            ),
+            ProjectedPortalPresentation::Collapsed => (
+                self.visual_tokens.collapsed_text_color,
+                self.visual_tokens.collapsed_background,
+                self.visual_tokens.collapsed_font_size_px,
+            ),
+        };
         proto::NodeProto {
             id: Vec::new(),
             data: Some(proto::node_proto::Data::TextMarkdown(
                 proto::TextMarkdownNodeProto {
                     content: portal_markdown(state),
                     bounds: Some(bounds),
-                    font_size_px: if state.presentation == ProjectedPortalPresentation::Expanded {
-                        14.0
-                    } else {
-                        12.0
-                    },
-                    color: Some(proto::Rgba {
-                        r: 0.94,
-                        g: 0.97,
-                        b: 1.0,
-                        a: 1.0,
-                    }),
-                    background: Some(proto::Rgba {
-                        r: 0.06,
-                        g: 0.08,
-                        b: 0.11,
-                        a: 0.90,
-                    }),
+                    font_size_px,
+                    color: Some(text_color),
+                    background: Some(background_color),
                     color_runs: Vec::new(),
                 },
             )),
