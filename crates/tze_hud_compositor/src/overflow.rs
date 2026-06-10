@@ -113,9 +113,10 @@ pub fn truncate_for_ellipsis<'a>(
         font_system,
     );
 
-    // ── Step 3: shape the full text in a wide-enough buffer ──────────────────
-    // We use an unbounded width to get natural line breaks from `\n` only,
-    // so we can measure each paragraph line independently.
+    // ── Step 3: shape the full text with word-wrap enabled ───────────────────
+    // We shape with Wrap::Word and bounds_width so that layout_runs() reflects
+    // the actual word-wrapped line structure.  Multiple LayoutRuns can share the
+    // same line_i when a paragraph soft-wraps.
     let mut full_buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
     full_buf.set_size(font_system, Some(bounds_width), None);
     full_buf.set_wrap(font_system, Wrap::Word);
@@ -174,10 +175,17 @@ pub fn truncate_for_ellipsis<'a>(
         };
 
         // Reconstruct the prefix of `text` that corresponds to all runs before
-        // the last run, then truncate the last line.
+        // the last run, then truncate only the slice of the paragraph that
+        // belongs to the last run (avoiding duplication for word-wrapped paragraphs).
         let prefix = text_prefix_up_to_run(&runs, total_runs - 1, text, &full_buf);
+        let run_start = runs[total_runs - 1]
+            .2
+            .first()
+            .map(|(s, _, _)| *s)
+            .unwrap_or(0);
+        let run_slice = run_start_slice(&last_line_text, run_start);
         let truncated_last = truncate_line_to_ellipsis(
-            &last_line_text,
+            run_slice,
             base_attrs,
             bounds_width,
             font_size_px,
@@ -206,8 +214,10 @@ pub fn truncate_for_ellipsis<'a>(
     };
 
     let prefix = text_prefix_up_to_run(&runs, max_lines - 1, text, &full_buf);
+    let run_start = last_visible_run.2.first().map(|(s, _, _)| *s).unwrap_or(0);
+    let run_slice = run_start_slice(&last_line_text, run_start);
     let truncated_last = truncate_line_to_ellipsis(
-        &last_line_text,
+        run_slice,
         base_attrs,
         bounds_width,
         font_size_px,
@@ -259,74 +269,78 @@ fn measure_single_line<'a>(
 
 /// Reconstruct the text prefix that corresponds to runs `[0, run_idx)`.
 ///
-/// We build this by finding the byte offset in the original `text` that
-/// corresponds to the start of `runs[run_idx]`.  The approach:
+/// We build this by finding the absolute byte offset in `original_text` that
+/// corresponds to the start of `runs[run_idx]`.  The algorithm:
 ///
-/// 1. We know the `line_i` of the target run.
-/// 2. We accumulate the byte lengths of each paragraph line (hard-wrap unit)
-///    before `line_i`, plus any word-wrapped sub-lines within paragraph lines
-///    before `line_i` that appear in `runs[0..run_idx]`.
-///
-/// For simplicity (and correctness under word-wrap), we use the raw paragraph
-/// structure from `buffer.lines` to compute the byte offset.
+/// 1. Walk `original_text` scanning for `\n` characters to find the byte
+///    offset of the start of paragraph `target_line_i`.  (Scanning for `\n`
+///    handles both `\n` and `\r\n` line endings correctly.)
+/// 2. Add the intra-paragraph offset from the first glyph of `runs[run_idx]`
+///    to account for word-wrapped sub-lines within the same paragraph.
+/// 3. Clamp to a valid UTF-8 boundary.
 fn text_prefix_up_to_run(
     runs: &[LayoutRunEntry],
     run_idx: usize,
     original_text: &str,
-    buf: &Buffer,
+    _buf: &Buffer,
 ) -> String {
     if run_idx == 0 {
         return String::new();
     }
 
-    // Find how many complete *paragraph* lines precede `runs[run_idx].line_i`.
     let target_line_i = runs[run_idx].0;
-    // Build the prefix from the original text: sum of all paragraph lines
-    // before `target_line_i`, plus '\n' separators.
+
+    // Step 1: find the byte offset of the start of paragraph `target_line_i`
+    // by scanning for '\n' separators.  This handles both '\n' and '\r\n'.
     let mut byte_offset = 0usize;
-    let mut found = false;
-    for (i, raw_line) in original_text.lines().enumerate() {
-        if i == target_line_i {
-            found = true;
+    let mut current_line = 0usize;
+    for (idx, ch) in original_text.char_indices() {
+        if current_line == target_line_i {
+            byte_offset = idx;
             break;
         }
-        byte_offset += raw_line.len() + 1; // +1 for '\n'
+        if ch == '\n' {
+            current_line += 1;
+            // byte_offset will be updated on the next iteration
+        }
     }
+    // If the loop exhausted all characters without reaching target_line_i,
+    // byte_offset remains at whatever it was (safe: clamped below).
 
-    // If we are in the middle of a word-wrapped paragraph (target_line_i is the
-    // same paragraph as previous runs), we need to find the byte offset of the
-    // first glyph in runs[run_idx] within its paragraph line.
-    //
-    // The glyph info for runs[run_idx] gives us (start_byte_in_line, ...).
-    // `buf.lines[target_line_i].text()` is the full paragraph text.
-    if !found {
-        // All runs are in the same paragraph line (target_line_i == 0 for all).
-        // Use glyph start from runs[run_idx].
-    }
-
-    // For word-wrapped runs within the same paragraph: find the start glyph of
-    // runs[run_idx] to get the byte offset within the paragraph.
-    let intra_para_offset = if found {
-        // `target_line_i > 0`: runs[run_idx] is in a later paragraph.
-        0usize
-    } else {
-        // runs[run_idx] is in paragraph 0 (same as earlier runs).
-        runs[run_idx].2.first().map(|(s, _, _)| *s).unwrap_or(0)
-    };
+    // Step 2: add the intra-paragraph glyph start offset.  This is the byte
+    // offset of the first glyph in `runs[run_idx]` within its paragraph line,
+    // which accounts for word-wrapped sub-lines starting mid-paragraph.
+    let intra_para_offset = runs[run_idx].2.first().map(|(s, _, _)| *s).unwrap_or(0);
 
     let total_offset = byte_offset + intra_para_offset;
-    let _ = buf; // buf not needed further
 
     if total_offset > original_text.len() {
         original_text.to_owned()
     } else {
-        // Find the nearest valid UTF-8 boundary.
+        // Step 3: walk back to the nearest valid UTF-8 boundary.
         let safe_offset = (0..=total_offset)
             .rev()
             .find(|&o| original_text.is_char_boundary(o))
             .unwrap_or(0);
         original_text[..safe_offset].to_owned()
     }
+}
+
+/// Slice `paragraph_text` from `run_start_byte` to the end, clamping to a
+/// valid UTF-8 boundary.  Used to extract the text visible in a word-wrapped
+/// run from its parent paragraph string.
+fn run_start_slice(paragraph_text: &str, run_start_byte: usize) -> &str {
+    if run_start_byte == 0 {
+        return paragraph_text;
+    }
+    if run_start_byte >= paragraph_text.len() {
+        return "";
+    }
+    // Walk forward from run_start_byte to find a valid UTF-8 boundary.
+    let safe = (run_start_byte..=paragraph_text.len())
+        .find(|&o| paragraph_text.is_char_boundary(o))
+        .unwrap_or(paragraph_text.len());
+    &paragraph_text[safe..]
 }
 
 /// Truncate a single line of text so that the result (with `"…"` appended)
