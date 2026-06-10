@@ -347,10 +347,15 @@ fn run_start_slice(paragraph_text: &str, run_start_byte: usize) -> &str {
 /// fits within `bounds_width`.
 ///
 /// Algorithm (per spec):
-/// 1. Try each word boundary (from the end) — use the last one whose
-///    measured width + ellipsis_w ≤ bounds_width.
-/// 2. If no word boundary fits, try each grapheme-cluster boundary (from the end).
+/// 1. Try each *non-empty* word boundary (from the end) — use the last one
+///    whose measured width + ellipsis_w ≤ bounds_width.
+/// 2. If no non-empty word boundary prefix fits, fall back to grapheme-cluster
+///    boundaries (from the end) so that at least one visible cluster is shown.
 /// 3. If even a single grapheme + ellipsis does not fit, return just `"…"`.
+///
+/// The empty-prefix boundary (byte offset 0) is intentionally excluded from
+/// the word-boundary pass so that the grapheme-cluster fallback runs for long
+/// unbroken tokens instead of returning a bare `"…"` with zero visible clusters.
 fn truncate_line_to_ellipsis<'a>(
     line: &str,
     base_attrs: Attrs<'a>,
@@ -369,17 +374,15 @@ fn truncate_line_to_ellipsis<'a>(
 
     // Try word boundaries first (unicode word segmentation).
     // We iterate word boundaries right-to-left and take the first that fits.
-    let word_boundaries: Vec<usize> = {
-        let mut boundaries: Vec<usize> = line
-            .unicode_word_indices()
-            .map(|(i, word)| i + word.len())
-            .collect();
-        // Also include 0 so we can always check the empty prefix.
-        if boundaries.first().copied() != Some(0) {
-            boundaries.insert(0, 0);
-        }
-        boundaries
-    };
+    //
+    // `unicode_word_indices()` yields `(start, word)` pairs where every word
+    // has length >= 1, so `i + word.len() >= 1` — the mapped boundary values
+    // are always > 0.  No empty-prefix guard is needed here; if no word-boundary
+    // prefix fits the budget, we fall through to the grapheme-cluster loop.
+    let word_boundaries: Vec<usize> = line
+        .unicode_word_indices()
+        .map(|(i, word)| i + word.len())
+        .collect();
 
     for &boundary in word_boundaries.iter().rev() {
         if !line.is_char_boundary(boundary) {
@@ -626,6 +629,10 @@ mod tests {
 
     /// Grapheme fallback: single long word without spaces is truncated at a
     /// grapheme boundary.
+    ///
+    /// Regression guard for the "dead-code grapheme fallback" bug: previously
+    /// the word-boundary loop claimed boundary 0 (empty prefix) which always
+    /// fitted the budget, producing bare `"…"` with zero visible clusters.
     #[test]
     fn single_long_word_truncated_at_grapheme_boundary() {
         let mut fs = make_font_system();
@@ -633,19 +640,180 @@ mod tests {
         let long_word = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40 'A's
         let result =
             truncate_for_ellipsis(long_word, base_attrs(), 60.0, 100.0, 16.0, 22.4, &mut fs);
+        assert!(
+            result.was_truncated,
+            "40 'A's in a 60px box must be truncated; got: {:?}",
+            result.text
+        );
+        assert!(
+            result.text.ends_with(ELLIPSIS),
+            "grapheme-fallback result must end with '…'; got: {:?}",
+            result.text
+        );
+        // The prefix before the ellipsis must be non-empty: at least one visible
+        // grapheme cluster must precede the ellipsis character.
+        let prefix_before_ellipsis = result.text.strip_suffix(ELLIPSIS).unwrap_or("");
+        assert!(
+            !prefix_before_ellipsis.is_empty(),
+            "grapheme-fallback must include at least one visible cluster before '…'; \
+             got bare '…' — long unbroken token regression; result: {:?}",
+            result.text
+        );
+        assert!(
+            result.text.len() < long_word.len() + ELLIPSIS.len(),
+            "grapheme-fallback result must be shorter than original + ellipsis"
+        );
+    }
+
+    /// Canonical repro from the bug report: `'W'×30` in a `200px` box must yield
+    /// at least one visible `W` cluster before the ellipsis, not bare `"…"`.
+    ///
+    /// Source: issue hud-wq6qp — "Ellipsis grapheme fallback is dead code".
+    ///
+    /// Preconditions are measured at runtime so the test remains correct across
+    /// environments with different default font metrics:
+    ///   1. A single `"W"` + ellipsis must fit within 200px (otherwise there is
+    ///      no room to show even one cluster and a bare `"…"` would be correct).
+    ///   2. The full 30-`"W"` token must overflow 200px (otherwise truncation
+    ///      would not occur and there is nothing to test).
+    #[test]
+    fn long_unbroken_token_w30_in_200px_has_visible_prefix() {
+        let mut fs = make_font_system();
+        let font_size = 16.0_f32;
+        let line_h = 22.4_f32;
+        let bounds_w = 200.0_f32;
+
+        // Measure preconditions using the same font system and parameters.
+        let ellipsis_w = measure_single_line(
+            ELLIPSIS,
+            base_attrs(),
+            bounds_w * 2.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        let single_w_w = measure_single_line(
+            "W",
+            base_attrs(),
+            bounds_w * 2.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        let text = "W".repeat(30);
+        let full_w = measure_single_line(
+            &text,
+            base_attrs(),
+            bounds_w * 2.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+
+        // Pre-condition 1: at least one cluster + ellipsis must fit.
+        // If this fails the font is so wide that a bare "…" is the correct answer.
+        if single_w_w + ellipsis_w > bounds_w {
+            // Cannot run the non-empty-prefix assertion — skip gracefully.
+            return;
+        }
+        // Pre-condition 2: the full token must overflow.
+        if full_w <= bounds_w {
+            // Cannot run the was_truncated assertion — skip gracefully.
+            return;
+        }
+
+        let result = truncate_for_ellipsis(
+            &text,
+            base_attrs(),
+            bounds_w,
+            100.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        assert!(
+            result.was_truncated,
+            "30 'W's ({full_w:.1}px) in a {bounds_w}px box must be truncated; got was_truncated=false"
+        );
+        assert!(
+            result.text.ends_with(ELLIPSIS),
+            "truncated long-token result must end with '…'; got: {:?}",
+            result.text
+        );
+        let prefix = result
+            .text
+            .strip_suffix(ELLIPSIS)
+            .expect("ends_with ELLIPSIS already asserted");
+        assert!(
+            !prefix.is_empty(),
+            "long unbroken token must produce at least one visible cluster before '…'; \
+             got bare '…' — grapheme fallback regression; result: {:?}",
+            result.text
+        );
+        // Verify all characters in the prefix are 'W' (no corruption / mid-codepoint split).
+        assert!(
+            prefix.chars().all(|c| c == 'W'),
+            "prefix before ellipsis must consist only of source characters; got: {prefix:?}",
+        );
+    }
+
+    /// Multi-codepoint grapheme cluster boundary: combining characters must not
+    /// be split.  Uses a base letter + combining acute accent (U+0301) as the
+    /// cluster unit.  The fallback must only cut at cluster boundaries.
+    #[test]
+    fn grapheme_cluster_boundary_not_split_mid_cluster() {
+        let mut fs = make_font_system();
+        // Build a string of 20 "é" (e + combining acute, 2 bytes each → 20 clusters).
+        // Using the decomposed form to guarantee a multi-codepoint cluster.
+        let cluster = "e\u{0301}"; // 'e' + combining acute accent (NFD)
+        let text: String = cluster.repeat(20);
+        // Verify our test input is actually multi-byte-per-cluster
+        let cluster_count = text.graphemes(true).count();
+        assert_eq!(
+            cluster_count, 20,
+            "expected 20 grapheme clusters in test input"
+        );
+
+        let result = truncate_for_ellipsis(&text, base_attrs(), 80.0, 100.0, 16.0, 22.4, &mut fs);
         if result.was_truncated {
-            // Result must end with ellipsis.
             assert!(
                 result.text.ends_with(ELLIPSIS),
-                "grapheme-fallback result must end with '…'; got: {:?}",
+                "multi-codepoint-cluster truncation must end with '…'; got: {:?}",
                 result.text
             );
-            // Result must not contain a space (confirming it was NOT split at a word boundary).
-            // (A single-word input has no spaces, so the result prefix shouldn't either.)
-            // Actually, it's fine to just verify it ends with ellipsis and is shorter.
+            // The prefix before the ellipsis must be valid UTF-8 and consist of
+            // whole grapheme clusters only.
+            let prefix = result.text.strip_suffix(ELLIPSIS).unwrap_or("");
+            // Every grapheme in the prefix must equal the original cluster unit.
+            // If the fallback split a cluster mid-codepoint we'd get partial
+            // graphemes (e.g. "e" without the accent).
+            for g in prefix.graphemes(true) {
+                // Accept either the precomposed form or NFD form — the font system
+                // may normalise; what matters is no lone combining codepoints.
+                let has_lone_combining = g
+                    .chars()
+                    .next()
+                    .map(|c| {
+                        // Unicode "combining character" range: 0x0300..=0x036F and beyond.
+                        // A lone combining as the *first* codepoint of a grapheme cluster
+                        // means we split before the base.
+                        (c as u32) >= 0x0300 && (c as u32) <= 0x036F
+                    })
+                    .unwrap_or(false);
+                assert!(
+                    !has_lone_combining,
+                    "grapheme cluster boundary violated: prefix grapheme {g:?} starts with \
+                     a combining codepoint — the fallback split a multi-codepoint cluster; \
+                     full result: {:?}",
+                    result.text
+                );
+            }
+            // At least one whole cluster must be visible before the ellipsis.
             assert!(
-                result.text.len() < long_word.len() + ELLIPSIS.len(),
-                "grapheme-fallback result must be shorter than original + ellipsis"
+                !prefix.is_empty(),
+                "at least one grapheme cluster must precede '…' in the truncated result; \
+                 got bare '…'; result: {:?}",
+                result.text
             );
         }
     }
@@ -753,16 +921,31 @@ mod tests {
 
         /// Invariant: grapheme fallback — unbroken tokens (no spaces) are truncated
         /// at a grapheme boundary with ellipsis appended, never at mid-codepoint.
+        ///
+        /// Strengthened: when the box is measurably wide enough to fit at least
+        /// one `"A"` cluster + ellipsis, the prefix before `"…"` must be non-empty
+        /// (not bare `"…"`).  The threshold is derived by measuring "A" + ELLIPSIS
+        /// with the same font system rather than relying on a fixed pixel constant.
         #[test]
         fn proptest_grapheme_fallback_valid_utf8_boundary(
             repeat in 10usize..50usize,
-            width_px in 20.0_f32..80.0_f32,
+            width_px in 40.0_f32..80.0_f32,
         ) {
             let mut fs = make_font_system();
+            let font_size = 16.0_f32;
+            let line_h = 22.4_f32;
+
+            // Measure the minimum width needed to show one "A" cluster + ellipsis.
+            // If `width_px` is narrower than this, a bare "…" is the correct answer
+            // and we must not assert a non-empty prefix.
+            let single_a_w = measure_single_line("A", base_attrs(), width_px * 4.0, font_size, line_h, &mut fs);
+            let ellipsis_w = measure_single_line(ELLIPSIS, base_attrs(), width_px * 4.0, font_size, line_h, &mut fs);
+            let min_width_for_prefix = single_a_w + ellipsis_w;
+
             // Single unbroken token — no word boundaries.
             let text = "A".repeat(repeat);
             let result = truncate_for_ellipsis(
-                &text, base_attrs(), width_px, 200.0, 16.0, 22.4, &mut fs,
+                &text, base_attrs(), width_px, 200.0, font_size, line_h, &mut fs,
             );
             // Result must be valid UTF-8 and never split at a non-char-boundary.
             prop_assert!(
@@ -776,6 +959,20 @@ mod tests {
                     "grapheme fallback result must end with '…'; text={text:?} result={:?}",
                     result.text,
                 );
+                // Only assert a non-empty prefix when the box is measurably wide
+                // enough to fit at least one cluster + ellipsis.  When the box is
+                // too narrow even for that, a bare "…" is correct behavior.
+                if width_px >= min_width_for_prefix {
+                    let prefix = result.text.strip_suffix(ELLIPSIS).unwrap_or("");
+                    prop_assert!(
+                        !prefix.is_empty(),
+                        "unbroken token must have at least one visible cluster before '…' \
+                         when width ({width_px}px) >= min_width_for_prefix ({min_width_for_prefix:.1}px); \
+                         got bare '…' — grapheme fallback regression; \
+                         text={text:?} result={:?}",
+                        result.text,
+                    );
+                }
             }
         }
     }
