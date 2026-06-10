@@ -379,9 +379,7 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
         }
 
         // ── Indented code block (4-space or tab) ─────────────────────────
-        if !in_fenced_block
-            && (raw.starts_with("    ") || raw.starts_with('\t'))
-        {
+        if !in_fenced_block && (raw.starts_with("    ") || raw.starts_with('\t')) {
             let body = if let Some(stripped) = raw.strip_prefix("    ") {
                 stripped
             } else {
@@ -542,14 +540,14 @@ fn process_inline(
                 if bracket_close + 1 < n && chars[bracket_close + 1] == '(' {
                     if let Some(paren_close) = find_paren_close(&chars, bracket_close + 1) {
                         // Extract link text only.
-                        let link_text: String =
-                            chars[i + 1..bracket_close].iter().collect();
+                        let link_text: String = chars[i + 1..bracket_close].iter().collect();
                         let start = out.len();
                         // Recursively process inline markup inside link text.
                         process_inline(&link_text, out, spans, tokens, base_override);
                         let end = out.len();
                         if start < end {
-                            let mut link_attr = base_override.cloned().unwrap_or_else(StyleAttr::plain);
+                            let mut link_attr =
+                                base_override.cloned().unwrap_or_else(StyleAttr::plain);
                             if tokens.link_color.is_some() {
                                 link_attr.color = tokens.link_color;
                             }
@@ -582,10 +580,11 @@ fn process_inline(
                 tick_count += 1;
             }
             // Find matching closing run.
-            if let Some(close_start) = find_backtick_close(&chars, tick_start + tick_count, tick_count) {
-                let code_text: String = chars[tick_start + tick_count..close_start]
-                    .iter()
-                    .collect();
+            if let Some(close_start) =
+                find_backtick_close(&chars, tick_start + tick_count, tick_count)
+            {
+                let code_text: String =
+                    chars[tick_start + tick_count..close_start].iter().collect();
                 let start = out.len();
                 out.push_str(&code_text);
                 let end = out.len();
@@ -597,7 +596,9 @@ fn process_inline(
                             weight: base_override.and_then(|b| b.weight),
                             italic: false,
                             monospace: tokens.code_monospace,
-                            color: tokens.code_color.or_else(|| base_override.and_then(|b| b.color)),
+                            color: tokens
+                                .code_color
+                                .or_else(|| base_override.and_then(|b| b.color)),
                         },
                     });
                 }
@@ -1022,9 +1023,8 @@ mod tests {
             "H1 heading must strip # prefix"
         );
         assert!(
-            md.spans
-                .iter()
-                .any(|s| s.attr.weight == Some(700) && md.plain_text[s.start_byte..s.end_byte].contains("Hello")),
+            md.spans.iter().any(|s| s.attr.weight == Some(700)
+                && md.plain_text[s.start_byte..s.end_byte].contains("Hello")),
             "H1 must have weight=700 span"
         );
     }
@@ -1088,7 +1088,10 @@ mod tests {
         let md = parse("Use `fmt::Display` here.");
         assert_eq!(md.plain_text, "Use fmt::Display here.");
         let code_span = md.spans.iter().find(|s| s.attr.monospace);
-        assert!(code_span.is_some(), "inline code must produce monospace span");
+        assert!(
+            code_span.is_some(),
+            "inline code must produce monospace span"
+        );
         let span = code_span.unwrap();
         assert_eq!(
             &md.plain_text[span.start_byte..span.end_byte],
@@ -1174,11 +1177,11 @@ mod tests {
         t.link_color = Some(Rgba::new(0.0, 0.5, 1.0, 1.0));
         let md = parse_markdown_subset("[click here](https://x.com)", &t);
         assert_eq!(md.plain_text, "click here");
-        let link_span = md
-            .spans
-            .iter()
-            .find(|s| s.attr.color.is_some());
-        assert!(link_span.is_some(), "link must carry color override when token set");
+        let link_span = md.spans.iter().find(|s| s.attr.color.is_some());
+        assert!(
+            link_span.is_some(),
+            "link must carry color override when token set"
+        );
     }
 
     // ── Task 2.4 — Excluded construct tests ───────────────────────────────────
@@ -1298,7 +1301,10 @@ mod tests {
         // Second call must hit the cache (no re-parse — same result).
         let second = cache.prime(content, &t).clone();
 
-        assert_eq!(first, second, "cached result must be identical to parsed result");
+        assert_eq!(
+            first, second,
+            "cached result must be identical to parsed result"
+        );
         assert_eq!(cache.len(), 1, "only one cache entry for the same content");
     }
 
@@ -1353,10 +1359,7 @@ mod tests {
             cache.get(content_a).is_some(),
             "kept entry must remain after eviction"
         );
-        assert!(
-            cache.get(content_b).is_none(),
-            "evicted entry must be gone"
-        );
+        assert!(cache.get(content_b).is_none(), "evicted entry must be gone");
     }
 
     // ── MarkdownTokens tests ───────────────────────────────────────────────────
@@ -1383,7 +1386,10 @@ mod tests {
         assert_eq!(t.heading_weight[0], 900, "H1 weight should be overridden");
         assert_eq!(t.heading_weight[2], 500, "H3 weight should be overridden");
         // Unset levels use defaults.
-        assert_eq!(t.heading_weight[1], MarkdownTokens::default().heading_weight[1]);
+        assert_eq!(
+            t.heading_weight[1],
+            MarkdownTokens::default().heading_weight[1]
+        );
     }
 
     /// Token map with link color override.
@@ -1419,7 +1425,10 @@ mod tests {
     fn plain_text_passes_through() {
         let md = parse("Hello, world!");
         assert_eq!(md.plain_text, "Hello, world!");
-        assert!(md.spans.is_empty(), "plain text must produce no styled spans");
+        assert!(
+            md.spans.is_empty(),
+            "plain text must produce no styled spans"
+        );
     }
 
     /// Empty input produces empty output.

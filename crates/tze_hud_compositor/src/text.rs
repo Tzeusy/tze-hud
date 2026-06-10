@@ -217,8 +217,12 @@ impl TextRasterizer {
                     // `styled_runs` carry per-span weight, italic, monospace, and
                     // optional color from the parse cache.  We build `(text_slice,
                     // Attrs)` pairs and call `set_rich_text` once — zero re-parse cost.
-                    let spans =
-                        styled_run_spans(&item.text, &item.styled_runs, base_attrs, item.font_family);
+                    let spans = styled_run_spans(
+                        &item.text,
+                        &item.styled_runs,
+                        base_attrs,
+                        item.font_family,
+                    );
                     buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
                 } else if item.color_runs.is_empty() {
                     // Fast path: no inline runs — use uniform base color.
@@ -1004,12 +1008,23 @@ pub(crate) fn styled_run_spans<'t, 'a>(
         }
 
         // Build attrs for this run.
-        let run_weight = run.weight.map(|w| Weight(w.clamp(100, 900))).unwrap_or_else(|| {
-            // Inherit base weight (already applied to base_attrs).
-            base_attrs.weight
-        });
-        let run_style = if run.italic { Style::Italic } else { Style::Normal };
-        let run_family = if run.monospace { mono_family } else { sans_family };
+        let run_weight = run
+            .weight
+            .map(|w| Weight(w.clamp(100, 900)))
+            .unwrap_or_else(|| {
+                // Inherit base weight (already applied to base_attrs).
+                base_attrs.weight
+            });
+        let run_style = if run.italic {
+            Style::Italic
+        } else {
+            Style::Normal
+        };
+        let run_family = if run.monospace {
+            mono_family
+        } else {
+            sans_family
+        };
 
         let mut run_attrs = base_attrs
             .weight(run_weight)

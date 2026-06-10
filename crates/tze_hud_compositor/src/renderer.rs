@@ -1809,7 +1809,8 @@ impl Compositor {
                 let key = crate::markdown::MarkdownCache::compute_key(&tm.content);
                 live_keys.push(key);
                 // Parse if not already cached — zero cost on hit.
-                self.markdown_cache.prime(&tm.content, &self.markdown_tokens);
+                self.markdown_cache
+                    .prime(&tm.content, &self.markdown_tokens);
             }
         }
 

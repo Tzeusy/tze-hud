@@ -30,7 +30,7 @@ pub mod video_surface;
 pub mod widget;
 
 pub use adapter::{AdapterSelectionError, PlatformBackends, select_gpu_adapter};
-pub use markdown::{MarkdownCache, MarkdownTokens, ParsedMarkdown, StyledSpan, StyleAttr};
+pub use markdown::{MarkdownCache, MarkdownTokens, ParsedMarkdown, StyleAttr, StyledSpan};
 pub use pipeline::{ChromeDrawCmd, RoundedRectDrawCmd, TexturedRectVertex};
 pub use renderer::{Compositor, CompositorError, ImageTextureEntry};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};

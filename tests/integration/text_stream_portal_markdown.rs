@@ -43,10 +43,16 @@ fn heading_h1_has_styled_span() {
         "plain text must contain heading text: {:?}",
         md.plain_text
     );
-    assert!(!md.spans.is_empty(), "H1 must have at least one styled span");
+    assert!(
+        !md.spans.is_empty(),
+        "H1 must have at least one styled span"
+    );
     let h1_span = &md.spans[0];
     let weight = h1_span.attr.weight.unwrap_or(400);
-    assert!(weight >= 600, "H1 must have bold weight (>=600), got {weight}");
+    assert!(
+        weight >= 600,
+        "H1 must have bold weight (>=600), got {weight}"
+    );
 }
 
 #[test]
@@ -56,15 +62,24 @@ fn heading_h6_has_styled_span() {
         md.plain_text.contains("Small Heading"),
         "plain text must contain H6 text"
     );
-    assert!(!md.spans.is_empty(), "H6 must have at least one styled span");
+    assert!(
+        !md.spans.is_empty(),
+        "H6 must have at least one styled span"
+    );
 }
 
 /// Bold (**text**) must produce a span with weight >= 600.
 #[test]
 fn bold_text_has_weight_span() {
     let md = parse("This is **bold** text");
-    assert!(md.plain_text.contains("bold"), "plain text must contain bold content");
-    let bold_span = md.spans.iter().find(|s| s.attr.weight.is_some_and(|w| w >= 600));
+    assert!(
+        md.plain_text.contains("bold"),
+        "plain text must contain bold content"
+    );
+    let bold_span = md
+        .spans
+        .iter()
+        .find(|s| s.attr.weight.is_some_and(|w| w >= 600));
     assert!(
         bold_span.is_some(),
         "bold must produce a high-weight span; spans={:?}",
@@ -76,7 +91,10 @@ fn bold_text_has_weight_span() {
 #[test]
 fn italic_text_has_italic_span() {
     let md = parse("This is *italic* text");
-    assert!(md.plain_text.contains("italic"), "plain text must contain italic content");
+    assert!(
+        md.plain_text.contains("italic"),
+        "plain text must contain italic content"
+    );
     let italic_span = md.spans.iter().find(|s| s.attr.italic);
     assert!(
         italic_span.is_some(),
@@ -89,7 +107,10 @@ fn italic_text_has_italic_span() {
 #[test]
 fn bold_italic_has_both_attributes() {
     let md = parse("This is ***bold-italic*** text");
-    assert!(md.plain_text.contains("bold-italic"), "plain text must contain bold-italic content");
+    assert!(
+        md.plain_text.contains("bold-italic"),
+        "plain text must contain bold-italic content"
+    );
     let bi_span = md
         .spans
         .iter()
@@ -105,7 +126,10 @@ fn bold_italic_has_both_attributes() {
 #[test]
 fn inline_code_has_monospace_span() {
     let md = parse("Use `Option<T>` here");
-    assert!(md.plain_text.contains("Option<T>"), "plain text must contain code content");
+    assert!(
+        md.plain_text.contains("Option<T>"),
+        "plain text must contain code content"
+    );
     let code_span = md.spans.iter().find(|s| s.attr.monospace);
     assert!(
         code_span.is_some(),
@@ -118,7 +142,10 @@ fn inline_code_has_monospace_span() {
 #[test]
 fn fenced_code_block_has_monospace_span() {
     let md = parse("```rust\nlet x = 42;\n```");
-    assert!(md.plain_text.contains("let x = 42"), "plain text must contain code body");
+    assert!(
+        md.plain_text.contains("let x = 42"),
+        "plain text must contain code body"
+    );
     let code_span = md.spans.iter().find(|s| s.attr.monospace);
     assert!(
         code_span.is_some(),
@@ -131,7 +158,10 @@ fn fenced_code_block_has_monospace_span() {
 #[test]
 fn indented_code_block_has_monospace_span() {
     let md = parse("    fn hello() {}");
-    assert!(md.plain_text.contains("fn hello()"), "plain text must contain code content");
+    assert!(
+        md.plain_text.contains("fn hello()"),
+        "plain text must contain code content"
+    );
     let code_span = md.spans.iter().find(|s| s.attr.monospace);
     assert!(
         code_span.is_some(),
@@ -150,16 +180,26 @@ fn unordered_list_items_appear_in_plain_text() {
     // Bullet characters must be present.
     let bullet_chars = ['•', '-', '*', '+'];
     let has_bullet = bullet_chars.iter().any(|c| md.plain_text.contains(*c));
-    assert!(has_bullet, "list must have bullet character in plain text; got {:?}", md.plain_text);
+    assert!(
+        has_bullet,
+        "list must have bullet character in plain text; got {:?}",
+        md.plain_text
+    );
 }
 
 /// Ordered list items must appear in plain text with numbering.
 #[test]
 fn ordered_list_items_appear_in_plain_text() {
     let md = parse("1. Alpha\n2. Beta\n3. Gamma");
-    assert!(md.plain_text.contains("Alpha"), "ordered item 1 must appear");
+    assert!(
+        md.plain_text.contains("Alpha"),
+        "ordered item 1 must appear"
+    );
     assert!(md.plain_text.contains("Beta"), "ordered item 2 must appear");
-    assert!(md.plain_text.contains("Gamma"), "ordered item 3 must appear");
+    assert!(
+        md.plain_text.contains("Gamma"),
+        "ordered item 3 must appear"
+    );
 }
 
 /// Links must render the link text, not the URL (non-navigable styled text).
@@ -281,7 +321,10 @@ fn max_payload_node_budget_parses_without_panic() {
     // Must not panic.
     cache.prime(&payload, &tokens);
     let md = cache.get(&payload).expect("entry must exist after prime");
-    assert!(!md.plain_text.is_empty(), "65535-byte payload must produce non-empty plain text");
+    assert!(
+        !md.plain_text.is_empty(),
+        "65535-byte payload must produce non-empty plain text"
+    );
 }
 
 // ── Task 2.5: zero per-frame parse cost ──────────────────────────────────────
@@ -293,9 +336,15 @@ fn cache_hit_after_prime_is_zero_cost() {
     let tokens = default_tokens();
     let mut cache = MarkdownCache::new();
     let content = "## Section\n\nSome **bold** text with `code`.";
-    assert!(cache.get(content).is_none(), "must be a cache miss before prime");
+    assert!(
+        cache.get(content).is_none(),
+        "must be a cache miss before prime"
+    );
     cache.prime(content, &tokens);
-    assert!(cache.get(content).is_some(), "must be a cache hit after prime");
+    assert!(
+        cache.get(content).is_some(),
+        "must be a cache hit after prime"
+    );
 }
 
 /// Multiple calls to `get` for the same content must all be cache hits,
@@ -384,8 +433,16 @@ fn different_token_maps_produce_different_styled_runs() {
     let md_b = cache_b.get(content).unwrap().clone();
 
     // Weights must differ because tokens differ.
-    let weight_a = md_a.spans.first().and_then(|s| s.attr.weight).unwrap_or(400);
-    let weight_b = md_b.spans.first().and_then(|s| s.attr.weight).unwrap_or(400);
+    let weight_a = md_a
+        .spans
+        .first()
+        .and_then(|s| s.attr.weight)
+        .unwrap_or(400);
+    let weight_b = md_b
+        .spans
+        .first()
+        .and_then(|s| s.attr.weight)
+        .unwrap_or(400);
     assert_ne!(
         weight_a, weight_b,
         "different token weights must produce different styled spans; a={weight_a} b={weight_b}"
