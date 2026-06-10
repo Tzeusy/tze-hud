@@ -111,6 +111,15 @@ path = "text_stream_portal_coalescing.rs"
 name = "text_stream_portal_governance"
 path = "text_stream_portal_governance.rs"
 
+# hud-5jbra.2: Phase-1 markdown rendering subset — parse-on-commit tests.
+# Covers: each subset construct (headings, bold, italic, bold-italic, inline
+# code, fenced/indented code blocks, lists, links), each excluded construct
+# degrading to literal text, link non-navigability, node-budget compliance
+# (65535-byte payload), and zero-per-frame parse cost (task 2.4 + 2.5).
+[[test]]
+name = "text_stream_portal_markdown"
+path = "text_stream_portal_markdown.rs"
+
 # hud-bs2q.5: Long-press drag-to-reposition interaction.
 # Tests: long-press recognizer activation/cancellation, multi-touch independence,
 # snap quantisation, boundary clamping at all 4 edges, full drag lifecycle
