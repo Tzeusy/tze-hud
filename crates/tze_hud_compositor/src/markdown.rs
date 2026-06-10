@@ -564,9 +564,10 @@ fn process_inline(
 /// `bracket_matches[i]` is `Some(j)` when `chars[i] == '['` and `j` is the
 /// index of the matching `']'` (computed once by the top-level caller).  The
 /// slice is valid for the *full* original `chars` only.  Recursive calls
-/// operate on sub-slices and pass an empty slice for `bracket_matches`; the
-/// callee rebuilds the table on-demand for its sub-slice when `[` characters
-/// are present, so nested links are still parsed correctly.
+/// operate on sub-slices and pass an empty slice for `bracket_matches`;
+/// link-text sub-slice calls rebuild the bracket table for the sub-slice
+/// immediately before the recursive call; emphasis sub-slice calls pass `&[]`
+/// directly (no nested link detection inside emphasis spans is needed).
 ///
 /// `paren_matches[i]` is `Some(j)` when `chars[i] == '('` and `j` is the
 /// index of the matching `')'` (computed once by the top-level caller).  Same
@@ -2068,12 +2069,13 @@ mod tests {
     #[test]
     fn adversarial_paren_flood_link_dest_completes_fast() {
         // "[](": 21845 repetitions ≈ 65535 bytes, all parens unmatched.
+        // Since no `)(` closes any `(`, every character is emitted literally.
         let input = "[](".repeat(21845);
         let md = parse(&input);
-        // All content must appear in the output (no silent drops).
-        assert!(
-            !md.plain_text.is_empty(),
-            "paren flood must produce non-empty output"
+        // Every source character must be preserved verbatim — no silent drops.
+        assert_eq!(
+            md.plain_text, input,
+            "paren flood must emit all source characters verbatim"
         );
     }
 
@@ -2085,12 +2087,14 @@ mod tests {
     /// This test is NOT `#[ignore]`-gated: see `adversarial_paren_flood_link_dest_completes_fast`.
     #[test]
     fn adversarial_paren_flood_with_link_text_completes_fast() {
-        // "[a](": 16383 repetitions ≈ 65532 bytes.
+        // "[a](": 16383 repetitions ≈ 65532 bytes, no closing `)`.
+        // With no matching `)`, every character is emitted literally.
         let input = "[a](".repeat(16383);
         let md = parse(&input);
-        assert!(
-            !md.plain_text.is_empty(),
-            "paren flood with link text must produce non-empty output"
+        // Every source character must be preserved verbatim — no silent drops.
+        assert_eq!(
+            md.plain_text, input,
+            "paren flood with link text must emit all source characters verbatim"
         );
     }
 
@@ -2102,12 +2106,15 @@ mod tests {
     /// This test is NOT `#[ignore]`-gated: see `adversarial_paren_flood_link_dest_completes_fast`.
     #[test]
     fn adversarial_paren_flood_image_construct_completes_fast() {
-        // "![a](": 13107 repetitions ≈ 65535 bytes.
+        // "![a](": 13107 repetitions ≈ 65535 bytes, no closing `)`.
+        // With no matching `)`, the image construct is never completed and
+        // every character is emitted literally.
         let input = "![a](".repeat(13107);
         let md = parse(&input);
-        assert!(
-            !md.plain_text.is_empty(),
-            "image paren flood must produce non-empty output"
+        // Every source character must be preserved verbatim — no silent drops.
+        assert_eq!(
+            md.plain_text, input,
+            "image paren flood must emit all source characters verbatim"
         );
     }
 
@@ -2128,27 +2135,20 @@ mod tests {
     /// remaining input before failing; without the memo this is O(n²).
     #[test]
     fn adversarial_backtick_flood_completes_fast() {
-        // "a" + "`" × 65534: a single non-backtick followed by 65534 bare backticks.
-        // No two adjacent backtick runs form a matched pair (they are all
-        // adjacent, so only runs of exactly 1 exist everywhere — and there is
-        // no non-backtick content between them for a close scan to land on).
-        // Actually simpler: a repeated sequence that has no balanced backtick
-        // pairs: "a" followed by backticks that are all one big run (no match).
+        // "a" + "`" × 65534: a single non-backtick followed by one large run of
+        // 65534 adjacent backticks.  The 65534-backtick run has no matching
+        // closing run anywhere, so no code span is formed and every character is
+        // emitted literally.
         let mut input = String::with_capacity(65535);
         input.push('a');
         for _ in 0..65534 {
             input.push('`');
         }
         let md = parse(&input);
-        // The plain-text output must contain the leading 'a'.
-        assert!(
-            md.plain_text.contains('a'),
-            "backtick flood must not drop literal 'a' character"
-        );
-        // The output must be non-empty and not panic.
-        assert!(
-            !md.plain_text.is_empty(),
-            "backtick flood must produce non-empty output"
+        // Every source character must be preserved verbatim — no silent drops.
+        assert_eq!(
+            md.plain_text, input,
+            "backtick flood must emit all source characters verbatim"
         );
     }
 
