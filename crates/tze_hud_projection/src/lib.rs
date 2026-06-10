@@ -982,6 +982,15 @@ pub struct ProjectedPortalState {
     /// per-keystroke republish.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_batch: Option<AdapterDraftBatch>,
+    /// Latest batched portal geometry snapshot. Present only when geometry has
+    /// changed since the last adapter delivery (pointer resize gesture or hotkey
+    /// resize). The adapter MUST drop its own `publish_geometry` while
+    /// `geometry_batch.latest.gesture_active == true`.
+    ///
+    /// Spec §6b.4: "gesture remains authoritative over adapter publishes until
+    /// gesture end."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_batch: Option<AdapterGeometryBatch>,
 }
 
 // ─── Composer draft notification types (hud-5jbra.4) ─────────────────────────
@@ -1088,6 +1097,101 @@ impl AdapterDraftBatch {
     /// True if the batch contains anything to deliver.
     pub fn is_empty(&self) -> bool {
         self.latest.is_none() && self.submission.is_none() && self.cancel.is_none()
+    }
+}
+
+// ─── Portal geometry update types (hud-5jbra.9) ──────────────────────────────
+
+/// Adapter-facing portal bounding rectangle (sub-pixel exact in i32 pixels).
+///
+/// Coordinates are stored as integer pixels (rounded from display-space f32) so
+/// that this type derives `Eq` and plays well with `ProjectedPortalState`'s
+/// existing `Eq` bound. The rendering layer converts back to f32 before issuing
+/// draw commands.
+///
+/// ## Coalescible (state-stream)
+///
+/// `AdapterGeometrySnapshot` is a state-stream payload. The transport MUST
+/// deliver only the latest snapshot per delivery window (latest-wins), not
+/// every intermediate geometry during a gesture.
+///
+/// Spec §6b.4: "geometry changes [are delivered] to the owning adapter as
+/// coalescible state-stream snapshots."
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterPortalRect {
+    /// Left edge of the portal in display pixels (rounded from f32).
+    pub x_px: i32,
+    /// Top edge of the portal in display pixels (rounded from f32).
+    pub y_px: i32,
+    /// Width of the portal in display pixels (rounded from f32, ≥ 0).
+    pub width_px: i32,
+    /// Height of the portal in display pixels (rounded from f32, ≥ 0).
+    pub height_px: i32,
+}
+
+impl AdapterPortalRect {
+    /// Construct from float display-space coordinates.
+    ///
+    /// Width and height are clamped to 0 before rounding to avoid negative
+    /// values from rounding artefacts at the minimum-clamped boundary.
+    pub fn from_f32(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x_px: x.round() as i32,
+            y_px: y.round() as i32,
+            width_px: width.max(0.0).round() as i32,
+            height_px: height.max(0.0).round() as i32,
+        }
+    }
+}
+
+/// Coalescible adapter-facing geometry snapshot (§6b.4).
+///
+/// Delivered to the owning adapter when portal geometry changes due to a
+/// pointer gesture or hotkey resize. The adapter MUST NOT apply `publish_geometry`
+/// while `gesture_active == true` — gesture snapshots are authoritative.
+///
+/// Message class: **state-stream**. Older snapshots for the same portal MUST be
+/// discarded when a newer one arrives within the same adapter delivery window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterGeometrySnapshot {
+    /// Final clamped portal bounds at this gesture step.
+    pub rect: AdapterPortalRect,
+    /// True while a pointer gesture is active (gesture is authoritative).
+    /// False on hotkey resize or gesture end (adapter may resume publishing).
+    pub gesture_active: bool,
+    /// Monotonic sequence counter — allows the adapter to detect skipped
+    /// snapshots when the transport does not deliver every event.
+    pub sequence: u64,
+}
+
+/// Batched adapter geometry notification for state-stream coalescing (§6b.4).
+///
+/// Replaces the `latest` field on each new snapshot (latest-wins). The adapter
+/// always reads `latest` if present to update portal geometry.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AdapterGeometryBatch {
+    /// Latest geometry snapshot (coalescible — newer replaces older).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<AdapterGeometrySnapshot>,
+}
+
+impl AdapterGeometryBatch {
+    /// Coalesce a geometry snapshot (latest-wins by sequence number).
+    pub fn coalesce(&mut self, snapshot: AdapterGeometrySnapshot) {
+        match &self.latest {
+            Some(existing) if snapshot.sequence > existing.sequence => {
+                self.latest = Some(snapshot);
+            }
+            None => {
+                self.latest = Some(snapshot);
+            }
+            _ => {}
+        }
+    }
+
+    /// True if there is a snapshot to deliver.
+    pub fn is_empty(&self) -> bool {
+        self.latest.is_none()
     }
 }
 
@@ -3106,6 +3210,11 @@ fn projected_portal_state(
         // the runtime delivers draft notifications. The authority does not own the
         // draft buffer state — the runtime's ComposerDraft does.
         draft_batch: None,
+        // geometry_batch is populated externally by the window management layer
+        // when a pointer resize gesture or hotkey resize produces a new snapshot.
+        // The authority does not own portal geometry — the runtime's
+        // PortalResizeState does.
+        geometry_batch: None,
     }
 }
 
