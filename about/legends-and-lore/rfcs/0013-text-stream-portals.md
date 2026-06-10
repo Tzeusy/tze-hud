@@ -31,6 +31,22 @@ the existing event stream, and the adapter re-publishes `TextMarkdownNode` plus
 a separate caret node through ordinary mutation batches. No portal-specific RPC,
 terminal node, or PTY semantics were added.
 
+**Amendment (2026-06-10, Phase-1 contract):** the accepted OpenSpec change
+`text-stream-portal-phase1` (owner-approved, PR #662) defines the Phase-1
+contract for this surface: a normative CommonMark rendering subset parsed
+outside the frame loop, a measured overflow/ellipsis contract, sustained
+streaming cadence bounded by the engineering-bar budgets, component-profile
+styling, and the §7.2 promotion evidence gate. It resolves §8 open question 1
+in favor of a **bounded in-surface editable draft model**: composer draft state
+moves from adapter-owned (the 2026-04-27 note above) to **runtime-owned with
+local-first echo**, because adapter-echoed keystrokes cannot meet the
+input-to-local-ack budget. The draft buffer is a deliberate, bounded extension
+of the v1 interactive-primitive scope: plain text only, 65535-byte ceiling,
+capped paste, no IME composition, no undo/redo, no rich text, and never
+terminal passthrough. Adapters observe drafts as coalescible state-stream
+snapshots; submission stays transactional. All §4.4 non-goals survive Phase 1
+and any later promotion.
+
 ---
 
 ## Motivation
@@ -313,7 +329,7 @@ Without that evidence, the raw-tile pilot remains the correct scope.
 
 ## 8. Open Questions
 
-1. Should expanded portal input be modeled as bounded one-shot reply submission only, or does the product need an in-surface editable draft model?
+1. ~~Should expanded portal input be modeled as bounded one-shot reply submission only, or does the product need an in-surface editable draft model?~~ **Resolved 2026-06-10:** a bounded in-surface editable draft model, runtime-owned with local-first echo — see the Phase-1 amendment note above and `openspec/changes/text-stream-portal-phase1/`.
 2. Should transcript virtualization/windowing remain purely adapter-side in the pilot, or should the runtime own transcript history policies?
 3. Which portal states deserve dedicated runtime badges versus ordinary tile-local affordances?
 4. If multiple portal sources coexist for the same agent, is that one portal with multiple streams or multiple portals?
