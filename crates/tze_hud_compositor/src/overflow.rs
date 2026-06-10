@@ -1112,14 +1112,14 @@ mod tests {
 
     /// Arabic canonical repro from the issue description.
     ///
-    /// "السلام عليكم" in a 150×25 box must not silently drop the first three
-    /// letters of the first word.  The truncated prefix, stripped of the trailing
-    /// "…", must:
-    ///   - be valid UTF-8,
-    ///   - begin with the first character of the Arabic source string (ا, U+0627),
-    ///   - not start mid-word (i.e. not begin with any codepoint that is not a
-    ///     valid standalone Arabic letter or the full first word).
+    /// "السلام عليكم" repeated to guarantee overflow in a 150×25 box must not
+    /// silently drop the first letter of the source string (ا, U+0627).  The
+    /// truncated prefix, stripped of the trailing "…", must begin with exactly
+    /// U+0627 — not merely some Arabic-block character — confirming that
+    /// truncation started from the logical beginning of the run, not mid-word.
     ///
+    /// Overflow is guaranteed by repetition; the precondition is an `assert!`
+    /// rather than an early `return` so this test cannot be silently skipped.
     /// Because font metrics vary across environments the exact truncation point
     /// is not asserted; we verify structural correctness only.
     #[test]
@@ -1128,42 +1128,37 @@ mod tests {
         // Arabic greeting: "السلام عليكم" (Peace be upon you).
         // U+0627 U+0644 U+0633 U+0644 U+0627 U+0645 SPACE
         // U+0639 U+0644 U+064A U+0643 U+0645
-        let arabic = "السلام عليكم";
+        // Repeated to guarantee overflow at any reasonable font metrics.
+        let arabic_unit = "السلام عليكم";
+        let arabic: String = format!("{arabic_unit} {arabic_unit} {arabic_unit}");
         let bounds_w = 150.0_f32;
         let font_size = 14.0_f32;
         let line_h = font_size * 1.4;
 
-        // Pre-condition: the full text must overflow the box so that truncation
-        // actually fires.  If the default font happens to make it fit, skip.
+        // Verify overflow is guaranteed. Assert rather than return so the test
+        // cannot be silently skipped on unusual font configurations.
         let full_w = measure_single_line(
-            arabic,
+            &arabic,
             base_attrs(),
             bounds_w * 4.0,
             font_size,
             line_h,
             &mut fs,
         );
-        if full_w <= bounds_w {
-            // Text fits — truncation does not apply; nothing to assert.
-            return;
-        }
+        assert!(
+            full_w > bounds_w,
+            "repeated Arabic string ({full_w:.1}px) must exceed {bounds_w}px; \
+             font metrics are unexpectedly narrow — adjust the repetition count"
+        );
 
         let result = truncate_for_ellipsis(
-            arabic,
+            &arabic,
             base_attrs(),
             bounds_w,
             25.0, // single-line height
             font_size,
             line_h,
             &mut fs,
-        );
-
-        // Must be valid UTF-8 — any byte-offset misalignment causes a panic or
-        // produces replacement characters; catching via from_utf8 is defensive.
-        assert!(
-            std::str::from_utf8(result.text.as_bytes()).is_ok(),
-            "RTL truncation produced invalid UTF-8; result bytes: {:?}",
-            result.text.as_bytes(),
         );
 
         assert!(
@@ -1177,9 +1172,10 @@ mod tests {
         );
 
         // The prefix before the ellipsis must begin with the first Arabic
-        // codepoint of the source — U+0627 (ARABIC LETTER ALEF).
-        // If the old bug were present the prefix would begin mid-word (e.g.
-        // U+0633 or U+0644) because leading bytes were silently dropped.
+        // codepoint of the source — U+0627 (ARABIC LETTER ALEF) — exactly.
+        // Checking only "some Arabic-block character" is insufficient: the old
+        // bug dropped leading bytes and could still produce an Arabic codepoint
+        // that is not the logical start (e.g. U+0633 or U+0644).
         let prefix = result
             .text
             .strip_suffix(ELLIPSIS)
@@ -1191,53 +1187,55 @@ mod tests {
             result.text
         );
 
-        // The first codepoint of the prefix must be a valid Arabic letter
-        // (i.e. falls in the Arabic Unicode block 0x0600–0x06FF), confirming
-        // that the truncation started from the logical beginning of the run.
         let first_cp = prefix.chars().next().unwrap();
-        assert!(
-            (0x0600u32..=0x06FFu32).contains(&(first_cp as u32)),
-            "RTL prefix must start with an Arabic codepoint (U+0600–U+06FF); \
-             got U+{:04X} ({first_cp:?}); full prefix: {prefix:?}; result: {:?}",
-            first_cp as u32,
-            result.text,
+        assert_eq!(
+            first_cp, '\u{0627}',
+            "RTL prefix must start with U+0627 (ARABIC LETTER ALEF, ا) — the logical \
+             first character of the source string; got U+{:04X} ({first_cp:?}); \
+             this indicates the old leading-byte-drop bug is still present; \
+             prefix: {prefix:?}; result: {:?}",
+            first_cp as u32, result.text,
         );
     }
 
     /// Mixed bidi: LTR prefix + RTL suffix in one string.
     ///
-    /// "Hello السلام" — the LTR word "Hello" should appear in the truncated
-    /// result, followed by (optionally) some Arabic characters or the ellipsis.
-    /// The key invariant is that the LTR content is not corrupted:
-    ///   - the prefix (before "…") must start with "H",
+    /// "Hello السلام عليكم" repeated to guarantee overflow in a 120px box.
+    /// The LTR word "Hello" is at the logical start and must appear in the
+    /// truncated result:
+    ///   - the prefix (before "…") must start with 'H',
     ///   - no mid-codepoint split may occur.
     ///
+    /// Overflow is guaranteed by repetition; the precondition is an `assert!`
+    /// rather than an early `return` so this test cannot be silently skipped.
     /// We intentionally do not assert the exact truncation boundary because
     /// bidi rendering and ellipsis placement on mixed lines is font-dependent.
     #[test]
     fn mixed_bidi_ltr_rtl_no_corruption() {
         let mut fs = make_font_system();
-        // Mixed-direction string: Latin greeting + Arabic greeting.
-        let mixed = "Hello السلام عليكم";
+        // Mixed-direction string: Latin greeting + Arabic greeting, repeated.
+        let mixed_unit = "Hello السلام عليكم";
+        let mixed: String = format!("{mixed_unit} {mixed_unit} {mixed_unit}");
         let bounds_w = 120.0_f32;
         let font_size = 14.0_f32;
         let line_h = font_size * 1.4;
 
         let full_w = measure_single_line(
-            mixed,
+            &mixed,
             base_attrs(),
             bounds_w * 4.0,
             font_size,
             line_h,
             &mut fs,
         );
-        if full_w <= bounds_w {
-            // Text fits — nothing to test.
-            return;
-        }
+        assert!(
+            full_w > bounds_w,
+            "repeated mixed-bidi string ({full_w:.1}px) must exceed {bounds_w}px; \
+             adjust the repetition count"
+        );
 
         let result = truncate_for_ellipsis(
-            mixed,
+            &mixed,
             base_attrs(),
             bounds_w,
             30.0,
@@ -1246,11 +1244,6 @@ mod tests {
             &mut fs,
         );
 
-        assert!(
-            std::str::from_utf8(result.text.as_bytes()).is_ok(),
-            "mixed-bidi truncation produced invalid UTF-8; result: {:?}",
-            result.text
-        );
         assert!(
             result.was_truncated,
             "mixed-bidi text ({full_w:.1}px) in {bounds_w}px must be truncated"
@@ -1283,32 +1276,37 @@ mod tests {
         );
     }
 
-    /// Pure RTL: LTR behavior must remain correct (regression guard).
+    /// Pure LTR regression guard: the RTL fix must not break the existing LTR path.
     ///
-    /// The fix must not break the existing LTR path.  Verifies that a simple
-    /// LTR string still produces a prefix starting with the first character.
+    /// Verifies that a simple LTR string still produces a truncated prefix
+    /// starting with the first character ('A') when repeated to guarantee
+    /// overflow.  Overflow is assured by assertion, not by an early `return`,
+    /// so this test cannot be silently skipped on any font configuration.
     #[test]
     fn ltr_truncation_unaffected_by_rtl_fix() {
         let mut fs = make_font_system();
-        let text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        // Repeat the alphabet to guarantee overflow at any reasonable font size.
+        let text: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".repeat(3);
         let bounds_w = 100.0_f32;
         let font_size = 14.0_f32;
         let line_h = font_size * 1.4;
 
         let full_w = measure_single_line(
-            text,
+            &text,
             base_attrs(),
             bounds_w * 4.0,
             font_size,
             line_h,
             &mut fs,
         );
-        if full_w <= bounds_w {
-            return; // Fits — nothing to test.
-        }
+        assert!(
+            full_w > bounds_w,
+            "repeated LTR string ({full_w:.1}px) must exceed {bounds_w}px; \
+             adjust the repetition count"
+        );
 
         let result = truncate_for_ellipsis(
-            text,
+            &text,
             base_attrs(),
             bounds_w,
             30.0,
