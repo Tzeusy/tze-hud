@@ -129,6 +129,16 @@ path = "text_stream_portal_markdown.rs"
 name = "text_stream_portal_composer"
 path = "text_stream_portal_composer.rs"
 
+# hud-5jbra.5: Phase-1 sustained streaming cadence verification (tasks.md §5.1–5.4).
+# Covers: work-conserving coalescing with cross-portal fairness, cadence harness
+# (≥200 scalars/s sustained, 4KiB/250ms bursts), frame/stage budget verification,
+# dual-portal fairness under equal sustained rates, retained-window coherence under
+# burst. Live soak (5.5), live cadence (5.6), and RTT evidence (5.7) are deferred
+# to the TzeHouse reference host.
+[[test]]
+name = "text_stream_portal_cadence"
+path = "text_stream_portal_cadence.rs"
+
 # hud-bs2q.5: Long-press drag-to-reposition interaction.
 # Tests: long-press recognizer activation/cancellation, multi-touch independence,
 # snap quantisation, boundary clamping at all 4 edges, full drag lifecycle
