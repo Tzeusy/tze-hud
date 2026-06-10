@@ -1102,12 +1102,13 @@ impl AdapterDraftBatch {
 
 // ─── Portal geometry update types (hud-5jbra.9) ──────────────────────────────
 
-/// Adapter-facing portal bounding rectangle (sub-pixel exact in i32 pixels).
+/// Adapter-facing portal bounding rectangle in integer display pixels.
 ///
-/// Coordinates are stored as integer pixels (rounded from display-space f32) so
+/// Coordinates are rounded from display-space f32 values (nearest integer) so
 /// that this type derives `Eq` and plays well with `ProjectedPortalState`'s
 /// existing `Eq` bound. The rendering layer converts back to f32 before issuing
-/// draw commands.
+/// draw commands. Sub-pixel precision is intentionally dropped at the adapter
+/// boundary; only the compositor's internal f32 geometry is sub-pixel exact.
 ///
 /// ## Coalescible (state-stream)
 ///

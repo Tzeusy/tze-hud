@@ -15,8 +15,10 @@
 //!
 //! The indicator is fully token-driven. Every visual property (color, width,
 //! minimum thumb height) comes from `ScrollIndicatorTokens`, which the caller
-//! resolves from `PortalPartTokens`. No literal values are permitted in this
-//! module.
+//! resolves from `PortalPartTokens`. No literal values are permitted in the
+//! geometry computation itself; `ScrollIndicatorTokens::default()` exists only
+//! as a fallback/test helper and its values must mirror the canonical defaults
+//! in `tze_hud_config::portal_tokens`.
 //!
 //! ## Terminology
 //!
@@ -143,6 +145,12 @@ pub fn compute_scroll_indicator(
     scroll_offset_px: f32,
     tokens: &ScrollIndicatorTokens,
 ) -> Option<ScrollIndicatorGeometry> {
+    // Reject non-finite inputs (NaN, ±inf) before any comparison: NaN
+    // comparisons always return false, so `viewport_px <= 0.0` would silently
+    // pass for NaN and produce a NaN geometry result.
+    if !viewport_px.is_finite() || !content_px.is_finite() || !scroll_offset_px.is_finite() {
+        return None;
+    }
     if viewport_px <= 0.0 || content_px <= 0.0 {
         return None;
     }
@@ -163,7 +171,11 @@ pub fn compute_scroll_indicator(
 
     // Thumb y: maps scroll fraction to position in track.
     let travel = viewport_px - thumb_h; // available travel in the track
-    let scroll_frac = if overflow > 0.0 { offset / overflow } else { 0.0 };
+    let scroll_frac = if overflow > 0.0 {
+        offset / overflow
+    } else {
+        0.0
+    };
     let thumb_y = (scroll_frac * travel).clamp(0.0, travel);
 
     Some(ScrollIndicatorGeometry {

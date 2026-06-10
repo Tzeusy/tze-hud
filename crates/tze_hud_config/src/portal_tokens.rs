@@ -98,8 +98,7 @@ pub const PORTAL_TOKEN_WINDOW_MIN_HEIGHT_PX: &str = "portal.window.min_height_px
 /// Pixels per focus-scoped Ctrl+`+`/`=`/`-` resize step (§6b.2).
 pub const PORTAL_TOKEN_WINDOW_RESIZE_STEP_PX: &str = "portal.window.resize_step_px";
 /// Width/height of the pointer capture region on frame edges/corners (§6b.1).
-pub const PORTAL_TOKEN_WINDOW_RESIZE_AFFORDANCE_PX: &str =
-    "portal.window.resize_affordance_px";
+pub const PORTAL_TOKEN_WINDOW_RESIZE_AFFORDANCE_PX: &str = "portal.window.resize_affordance_px";
 
 // ── §6b Scroll-position indicator tokens ─────────────────────────────────────
 
@@ -293,10 +292,8 @@ impl Default for PortalPartTokens {
                 .expect("scroll indicator color default is valid hex"),
             scroll_indicator_width_px: parse_numeric(defaults::SCROLL_INDICATOR_WIDTH_PX)
                 .expect("scroll indicator width default is valid numeric"),
-            scroll_indicator_min_height_px: parse_numeric(
-                defaults::SCROLL_INDICATOR_MIN_HEIGHT_PX,
-            )
-            .expect("scroll indicator min height default is valid numeric"),
+            scroll_indicator_min_height_px: parse_numeric(defaults::SCROLL_INDICATOR_MIN_HEIGHT_PX)
+                .expect("scroll indicator min height default is valid numeric"),
         }
     }
 }

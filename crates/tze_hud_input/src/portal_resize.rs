@@ -138,12 +138,16 @@ impl PortalRect {
     /// the origin is clamped and the size is adjusted to keep the portal
     /// against the boundary.
     pub fn clamped(self, bounds: &ResizeBounds) -> Self {
-        let w = self
-            .width
-            .clamp(bounds.tokens.min_width_px, bounds.max_width_px);
-        let h = self
-            .height
-            .clamp(bounds.tokens.min_height_px, bounds.max_height_px);
+        // Sanitize bounds: if the lease/scene-budget max is smaller than the
+        // token-defined minimum (e.g. a pathological lease), clamp max up to
+        // min so f32::clamp never receives min > max (which panics).
+        let min_w = bounds.tokens.min_width_px;
+        let max_w = bounds.max_width_px.max(min_w);
+        let min_h = bounds.tokens.min_height_px;
+        let max_h = bounds.max_height_px.max(min_h);
+
+        let w = self.width.clamp(min_w, max_w);
+        let h = self.height.clamp(min_h, max_h);
 
         // Clamp origin so the portal stays fully on-screen.
         let x = self.x.clamp(0.0, (bounds.display_w - w).max(0.0));
@@ -251,32 +255,57 @@ impl DeviceResizeState {
     ///
     /// Uses the initial rect and the total delta from the press origin so that
     /// floating-point error does not accumulate frame-by-frame.
-    pub fn compute_rect(&self, pointer_x: f32, pointer_y: f32, bounds: &ResizeBounds) -> PortalRect {
+    pub fn compute_rect(
+        &self,
+        pointer_x: f32,
+        pointer_y: f32,
+        bounds: &ResizeBounds,
+    ) -> PortalRect {
         let dx = pointer_x - self.press_x;
         let dy = pointer_y - self.press_y;
 
-        let mut x = self.initial_rect.x;
-        let mut y = self.initial_rect.y;
         let mut w = self.initial_rect.width;
         let mut h = self.initial_rect.height;
 
-        // Apply delta to the affected edges.
+        // Apply delta to the affected dimension.
         if self.edge.affects_right() {
             w += dx;
-        }
-        if self.edge.affects_left() {
-            x += dx;
+        } else if self.edge.affects_left() {
             w -= dx;
         }
         if self.edge.affects_bottom() {
             h += dy;
-        }
-        if self.edge.affects_top() {
-            y += dy;
+        } else if self.edge.affects_top() {
             h -= dy;
         }
 
-        PortalRect { x, y, width: w, height: h }.clamped(bounds)
+        // Clamp dimensions first so origin computation below uses the final
+        // (clamped) size — this keeps the opposite edge stationary when the
+        // minimum size is hit while dragging a left or top edge.
+        let min_w = bounds.tokens.min_width_px;
+        let max_w = bounds.max_width_px.max(min_w);
+        let min_h = bounds.tokens.min_height_px;
+        let max_h = bounds.max_height_px.max(min_h);
+        let w_clamped = w.clamp(min_w, max_w);
+        let h_clamped = h.clamp(min_h, max_h);
+
+        // For left/top edges the origin shifts to maintain the opposite edge.
+        let mut x = self.initial_rect.x;
+        let mut y = self.initial_rect.y;
+        if self.edge.affects_left() {
+            x = (self.initial_rect.x + self.initial_rect.width) - w_clamped;
+        }
+        if self.edge.affects_top() {
+            y = (self.initial_rect.y + self.initial_rect.height) - h_clamped;
+        }
+
+        PortalRect {
+            x,
+            y,
+            width: w_clamped,
+            height: h_clamped,
+        }
+        .clamped(bounds)
     }
 }
 
@@ -305,7 +334,10 @@ pub enum ResizeOutcome {
 ///
 /// One instance per portal. Callers should hold this alongside the portal's
 /// current geometry and call the appropriate handler on each input event.
-#[derive(Debug, Default)]
+///
+/// Use [`PortalResizeState::new`] to construct — `Default` is intentionally
+/// not derived to enforce explicit initialization with a valid `portal_id_hash`.
+#[derive(Debug)]
 pub struct PortalResizeState {
     /// Per-device resize gestures (usually only one device at a time).
     device_states: std::collections::HashMap<u32, DeviceResizeState>,
@@ -323,7 +355,10 @@ impl PortalResizeState {
     /// hot path.
     pub fn new(portal_id_hash: u64) -> Self {
         Self {
-            device_states: std::collections::HashMap::new(),
+            // Pre-allocate for the common case of one active device so the
+            // first on_pointer_down does not trigger a re-allocation.
+            // (The module performance contract: no allocations on the hot path.)
+            device_states: std::collections::HashMap::with_capacity(1),
             sequence: 0,
             portal_id_hash,
         }
@@ -483,11 +518,19 @@ pub fn apply_hotkey_resize(
         HotkeyResizeDir::Shrink => -step,
     };
 
-    // Grow/shrink symmetrically: shift origin by half-step in each direction.
-    let new_w = current_rect.width + delta;
-    let new_h = current_rect.height + delta;
-    let new_x = current_rect.x - delta / 2.0;
-    let new_y = current_rect.y - delta / 2.0;
+    // Clamp new dimensions first so origin shift is based on the actual size
+    // change — this keeps the center stationary even when clamping applies.
+    let min_w = bounds.tokens.min_width_px;
+    let max_w = bounds.max_width_px.max(min_w);
+    let min_h = bounds.tokens.min_height_px;
+    let max_h = bounds.max_height_px.max(min_h);
+    let new_w = (current_rect.width + delta).clamp(min_w, max_w);
+    let new_h = (current_rect.height + delta).clamp(min_h, max_h);
+
+    // Shift origin by half of the *actual* dimension change so the center
+    // of the portal remains fixed regardless of clamping.
+    let new_x = current_rect.x + (current_rect.width - new_w) / 2.0;
+    let new_y = current_rect.y + (current_rect.height - new_h) / 2.0;
 
     let new_rect = PortalRect {
         x: new_x,
@@ -497,19 +540,16 @@ pub fn apply_hotkey_resize(
     }
     .clamped(bounds);
 
-    // Advance sequence only if clamping actually changed geometry.
-    // (e.g., already at min when shrinking — still emit a snapshot so the
-    // adapter can detect the attempt, but do not advance the sequence.)
-    let changed = (new_rect.x - current_rect.x).abs() > f32::EPSILON
-        || (new_rect.y - current_rect.y).abs() > f32::EPSILON
-        || (new_rect.width - current_rect.width).abs() > f32::EPSILON
-        || (new_rect.height - current_rect.height).abs() > f32::EPSILON;
-
+    // Always advance the sequence so the state-stream coalescer (latest-wins
+    // by sequence number) never drops this snapshot. Keeping the sequence
+    // stale would cause `AdapterGeometryBatch::coalesce` to silently discard
+    // the snapshot when an earlier one with the same sequence is already
+    // present — the adapter would then miss a clamped-at-boundary attempt.
     let snap = GeometrySnapshot {
         portal_id_hash: state.portal_id_hash,
         rect: new_rect,
         gesture_active: false,
-        sequence: if changed { state.next_sequence() } else { state.sequence },
+        sequence: state.next_sequence(),
     };
     HotkeyResizeOutcome::Applied { snapshot: snap }
 }
@@ -532,11 +572,14 @@ pub fn hit_affordance(
     affordance_px: f32,
 ) -> Option<ResizeEdge> {
     let in_left = pointer_x >= rect.x && pointer_x < rect.x + affordance_px;
+    // Use >= for the start of right/bottom bands (matching left/top) to avoid
+    // a 1-px dead zone at exactly `edge - affordance_px` where the pointer
+    // would be inside the rect but hit no affordance.
     let in_right =
-        pointer_x > rect.x + rect.width - affordance_px && pointer_x <= rect.x + rect.width;
+        pointer_x >= rect.x + rect.width - affordance_px && pointer_x <= rect.x + rect.width;
     let in_top = pointer_y >= rect.y && pointer_y < rect.y + affordance_px;
     let in_bottom =
-        pointer_y > rect.y + rect.height - affordance_px && pointer_y <= rect.y + rect.height;
+        pointer_y >= rect.y + rect.height - affordance_px && pointer_y <= rect.y + rect.height;
 
     // Must be within the portal rect at all
     let in_rect = pointer_x >= rect.x
@@ -588,7 +631,12 @@ mod tests {
     #[test]
     fn clamped_rect_within_bounds_unchanged() {
         let bounds = default_bounds();
-        let r = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let r = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let c = r.clamped(&bounds);
         assert_eq!(c, r, "rect within bounds must be unchanged by clamping");
     }
@@ -596,7 +644,12 @@ mod tests {
     #[test]
     fn clamped_rect_enforces_min_width() {
         let bounds = default_bounds(); // min_width = 240
-        let r = PortalRect { x: 0.0, y: 0.0, width: 50.0, height: 300.0 };
+        let r = PortalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 50.0,
+            height: 300.0,
+        };
         let c = r.clamped(&bounds);
         assert!(
             c.width >= bounds.tokens.min_width_px,
@@ -607,7 +660,12 @@ mod tests {
     #[test]
     fn clamped_rect_enforces_min_height() {
         let bounds = default_bounds(); // min_height = 160
-        let r = PortalRect { x: 0.0, y: 0.0, width: 400.0, height: 50.0 };
+        let r = PortalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 50.0,
+        };
         let c = r.clamped(&bounds);
         assert!(
             c.height >= bounds.tokens.min_height_px,
@@ -619,7 +677,12 @@ mod tests {
     fn clamped_rect_stays_on_screen() {
         let bounds = default_bounds();
         // rect extends beyond right and bottom edges
-        let r = PortalRect { x: 3700.0, y: 2000.0, width: 400.0, height: 300.0 };
+        let r = PortalRect {
+            x: 3700.0,
+            y: 2000.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let c = r.clamped(&bounds);
         assert!(
             c.x + c.width <= bounds.display_w + f32::EPSILON,
@@ -641,7 +704,12 @@ mod tests {
             display_w: 3840.0,
             display_h: 2160.0,
         };
-        let r = PortalRect { x: 0.0, y: 0.0, width: 900.0, height: 700.0 };
+        let r = PortalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 900.0,
+            height: 700.0,
+        };
         let c = r.clamped(&bounds);
         assert!(
             c.width <= bounds.max_width_px,
@@ -674,7 +742,12 @@ mod tests {
     #[test]
     fn right_edge_resize_grows_width_rightward() {
         let bounds = default_bounds();
-        let initial = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let initial = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let state = DeviceResizeState::new(ResizeEdge::Right, 500.0, 250.0, initial);
         // drag 50px to the right
         let result = state.compute_rect(550.0, 250.0, &bounds);
@@ -691,7 +764,12 @@ mod tests {
     #[test]
     fn left_edge_resize_grows_width_leftward() {
         let bounds = default_bounds();
-        let initial = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let initial = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let state = DeviceResizeState::new(ResizeEdge::Left, 100.0, 250.0, initial);
         // drag 50px to the left
         let result = state.compute_rect(50.0, 250.0, &bounds);
@@ -708,7 +786,12 @@ mod tests {
     #[test]
     fn resize_clamps_to_min_width_when_dragging_too_far() {
         let bounds = default_bounds(); // min_width = 240
-        let initial = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let initial = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let state = DeviceResizeState::new(ResizeEdge::Right, 500.0, 250.0, initial);
         // drag 400px to the left (would make width=-100)
         let result = state.compute_rect(100.0, 250.0, &bounds);
@@ -723,7 +806,12 @@ mod tests {
         // Verifies that compute_rect always uses the initial rect + total delta,
         // not the accumulated delta — preventing floating-point drift.
         let bounds = default_bounds();
-        let initial = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let initial = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let state = DeviceResizeState::new(ResizeEdge::Right, 500.0, 250.0, initial);
 
         let result_a = state.compute_rect(550.0, 250.0, &bounds);
@@ -751,9 +839,17 @@ mod tests {
     fn gesture_active_after_pointer_down() {
         let mut state = PortalResizeState::new(0xdeadbeef);
         let bounds = default_bounds();
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let outcome = state.on_pointer_down(1, ResizeEdge::Right, 500.0, 250.0, rect, &bounds);
-        assert!(state.gesture_active(), "gesture must be active after pointer-down");
+        assert!(
+            state.gesture_active(),
+            "gesture must be active after pointer-down"
+        );
         matches!(outcome, ResizeOutcome::GestureStarted { .. });
     }
 
@@ -761,7 +857,12 @@ mod tests {
     fn gesture_inactive_after_pointer_up() {
         let mut state = PortalResizeState::new(0xdeadbeef);
         let bounds = default_bounds();
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         state.on_pointer_down(1, ResizeEdge::Right, 500.0, 250.0, rect, &bounds);
         let outcome = state.on_pointer_up(1, 550.0, 250.0, &bounds);
         assert!(
@@ -775,7 +876,12 @@ mod tests {
     fn snapshot_sequence_is_monotonically_increasing() {
         let mut state = PortalResizeState::new(0xdeadbeef);
         let bounds = default_bounds();
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
 
         let start = state.on_pointer_down(1, ResizeEdge::Right, 500.0, 250.0, rect, &bounds);
         let mid = state.on_pointer_move(1, 520.0, 250.0, &bounds);
@@ -808,7 +914,12 @@ mod tests {
     fn gesture_snapshot_has_gesture_active_false_on_end() {
         let mut state = PortalResizeState::new(0xdeadbeef);
         let bounds = default_bounds();
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
 
         state.on_pointer_down(1, ResizeEdge::Right, 500.0, 250.0, rect, &bounds);
         let end = state.on_pointer_up(1, 550.0, 250.0, &bounds);
@@ -840,7 +951,12 @@ mod tests {
     #[test]
     fn hotkey_grow_increases_size() {
         let bounds = default_bounds(); // step = 32px
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let mut state = PortalResizeState::new(0xdeadbeef);
 
         let result = apply_hotkey_resize(true, HotkeyResizeDir::Grow, rect, &bounds, &mut state);
@@ -860,28 +976,39 @@ mod tests {
     #[test]
     fn hotkey_shrink_decreases_size() {
         let bounds = default_bounds();
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 600.0, height: 400.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 600.0,
+            height: 400.0,
+        };
         let mut state = PortalResizeState::new(0xdeadbeef);
 
-        let result =
-            apply_hotkey_resize(true, HotkeyResizeDir::Shrink, rect, &bounds, &mut state);
+        let result = apply_hotkey_resize(true, HotkeyResizeDir::Shrink, rect, &bounds, &mut state);
 
         let snap = match result {
             HotkeyResizeOutcome::Applied { snapshot } => snapshot,
             _ => panic!("expected Applied"),
         };
         assert!(snap.rect.width < rect.width, "shrink must decrease width");
-        assert!(snap.rect.height < rect.height, "shrink must decrease height");
+        assert!(
+            snap.rect.height < rect.height,
+            "shrink must decrease height"
+        );
     }
 
     #[test]
     fn hotkey_not_consumed_when_portal_not_focused() {
         let bounds = default_bounds();
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let mut state = PortalResizeState::new(0xdeadbeef);
 
-        let result =
-            apply_hotkey_resize(false, HotkeyResizeDir::Grow, rect, &bounds, &mut state);
+        let result = apply_hotkey_resize(false, HotkeyResizeDir::Grow, rect, &bounds, &mut state);
         assert_eq!(
             result,
             HotkeyResizeOutcome::NotFocused,
@@ -901,8 +1028,7 @@ mod tests {
         };
         let mut state = PortalResizeState::new(0xdeadbeef);
 
-        let result =
-            apply_hotkey_resize(true, HotkeyResizeDir::Shrink, rect, &bounds, &mut state);
+        let result = apply_hotkey_resize(true, HotkeyResizeDir::Shrink, rect, &bounds, &mut state);
 
         let snap = match result {
             HotkeyResizeOutcome::Applied { snapshot } => snapshot,
@@ -922,7 +1048,10 @@ mod tests {
     fn hotkey_key_parser_from_key() {
         assert_eq!(HotkeyResizeDir::from_key("+"), Some(HotkeyResizeDir::Grow));
         assert_eq!(HotkeyResizeDir::from_key("="), Some(HotkeyResizeDir::Grow));
-        assert_eq!(HotkeyResizeDir::from_key("-"), Some(HotkeyResizeDir::Shrink));
+        assert_eq!(
+            HotkeyResizeDir::from_key("-"),
+            Some(HotkeyResizeDir::Shrink)
+        );
         assert_eq!(HotkeyResizeDir::from_key("a"), None);
         assert_eq!(HotkeyResizeDir::from_key("Enter"), None);
     }
@@ -931,7 +1060,12 @@ mod tests {
 
     #[test]
     fn hit_affordance_right_edge() {
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let affordance = 8.0;
         // right edge: x=492..500
         let edge = hit_affordance(496.0, 250.0, &rect, affordance);
@@ -940,7 +1074,12 @@ mod tests {
 
     #[test]
     fn hit_affordance_left_edge() {
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let affordance = 8.0;
         // left edge: x=100..108
         let edge = hit_affordance(104.0, 250.0, &rect, affordance);
@@ -949,7 +1088,12 @@ mod tests {
 
     #[test]
     fn hit_affordance_top_edge() {
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let affordance = 8.0;
         let edge = hit_affordance(300.0, 104.0, &rect, affordance);
         assert_eq!(edge, Some(ResizeEdge::Top));
@@ -957,7 +1101,12 @@ mod tests {
 
     #[test]
     fn hit_affordance_bottom_edge() {
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let affordance = 8.0;
         // bottom edge: y=392..400
         let edge = hit_affordance(300.0, 396.0, &rect, affordance);
@@ -966,7 +1115,12 @@ mod tests {
 
     #[test]
     fn hit_affordance_top_left_corner() {
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let affordance = 8.0;
         let edge = hit_affordance(104.0, 104.0, &rect, affordance);
         assert_eq!(edge, Some(ResizeEdge::TopLeft));
@@ -974,7 +1128,12 @@ mod tests {
 
     #[test]
     fn hit_affordance_bottom_right_corner() {
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let affordance = 8.0;
         let edge = hit_affordance(496.0, 396.0, &rect, affordance);
         assert_eq!(edge, Some(ResizeEdge::BottomRight));
@@ -982,7 +1141,12 @@ mod tests {
 
     #[test]
     fn hit_affordance_content_area_returns_none() {
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let affordance = 8.0;
         // centre of the content area
         let edge = hit_affordance(300.0, 250.0, &rect, affordance);
@@ -991,10 +1155,18 @@ mod tests {
 
     #[test]
     fn hit_affordance_outside_rect_returns_none() {
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
         let affordance = 8.0;
         let edge = hit_affordance(50.0, 250.0, &rect, affordance);
-        assert_eq!(edge, None, "pointer outside rect must not hit any affordance");
+        assert_eq!(
+            edge, None,
+            "pointer outside rect must not hit any affordance"
+        );
     }
 
     // ─── Adapter authority (§6b.4) ────────────────────────────────────────
@@ -1005,7 +1177,12 @@ mod tests {
     fn adapter_publishes_must_be_rejected_during_gesture() {
         let mut state = PortalResizeState::new(0xdeadbeef);
         let bounds = default_bounds();
-        let rect = PortalRect { x: 100.0, y: 100.0, width: 400.0, height: 300.0 };
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
 
         // Before gesture: adapter may publish
         assert!(
