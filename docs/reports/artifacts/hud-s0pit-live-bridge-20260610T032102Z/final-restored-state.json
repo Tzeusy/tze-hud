@@ -1,0 +1,23 @@
+{
+    "processes":  [
+                      {
+                          "ProcessId":  50300,
+                          "ExecutablePath":  "C:\\tze_hud\\tze_hud.exe",
+                          "CommandLine":  "\"C:\\tze_hud\\tze_hud.exe\" --config C:\\tze_hud\\tze_hud.toml --window-mode overlay --grpc-port 50051 --mcp-port 9090 --psk \u003credacted\u003e"
+                      }
+                  ],
+    "ports":  [
+                  {
+                      "LocalAddress":  "0.0.0.0",
+                      "LocalPort":  50051,
+                      "State":  2,
+                      "OwningProcess":  50300
+                  },
+                  {
+                      "LocalAddress":  "0.0.0.0",
+                      "LocalPort":  9090,
+                      "State":  2,
+                      "OwningProcess":  50300
+                  }
+              ]
+}
