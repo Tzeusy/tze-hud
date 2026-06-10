@@ -222,7 +222,7 @@ impl PortalCadenceCoalescer {
                 // New snapshot for this key. Add to service order only if the
                 // key is not already present (it may have been drained via
                 // take_snapshot but remains in service_order for round-robin).
-                if !self.service_order.contains(&portal_key.to_string()) {
+                if !self.service_order.iter().any(|k| k == portal_key) {
                     self.service_order.push_back(portal_key.to_string());
                 }
                 self.pending.insert(
@@ -252,16 +252,14 @@ impl PortalCadenceCoalescer {
     pub fn next_ready_portal(&mut self) -> Option<String> {
         let n = self.service_order.len();
         for _ in 0..n {
-            let key = self.service_order.front()?.clone();
+            let key = self.service_order.pop_front()?;
             if self.pending.contains_key(&key) {
                 // Found a ready portal. Rotate the key to the back so the next
                 // call services a different portal (round-robin fairness).
-                self.service_order.pop_front();
                 self.service_order.push_back(key.clone());
                 return Some(key);
             } else {
                 // Portal has no pending snapshot; move to back and continue.
-                self.service_order.pop_front();
                 self.service_order.push_back(key);
             }
         }
@@ -280,14 +278,16 @@ impl PortalCadenceCoalescer {
     pub fn take_snapshot(&mut self, portal_key: &str) -> Option<(Vec<u8>, u64)> {
         if let Some(snap) = self.pending.remove(portal_key) {
             // Record the drained sequence for the post-drain stale guard.
-            self.last_drained_sequence
-                .entry(portal_key.to_string())
-                .and_modify(|v| {
-                    if snap.sequence > *v {
-                        *v = snap.sequence;
-                    }
-                })
-                .or_insert(snap.sequence);
+            // Use get_mut to avoid allocating a String for the key on the hot
+            // path when an entry already exists.
+            if let Some(v) = self.last_drained_sequence.get_mut(portal_key) {
+                if snap.sequence > *v {
+                    *v = snap.sequence;
+                }
+            } else {
+                self.last_drained_sequence
+                    .insert(portal_key.to_string(), snap.sequence);
+            }
             self.total_taken += 1;
             Some((snap.payload, snap.sequence))
         } else {
