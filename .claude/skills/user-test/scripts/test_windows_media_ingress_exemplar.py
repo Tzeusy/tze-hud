@@ -319,6 +319,11 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
             cmd for cmd in commands if cmd[:1] == ["ssh"] and "-EncodedCommand" in cmd
         ]
         self.assertTrue(encoded_commands)
+        mkdir_command = encoded_commands[0]
+        mkdir_encoded = mkdir_command[mkdir_command.index("-EncodedCommand") + 1]
+        mkdir_decoded = base64.b64decode(mkdir_encoded).decode("utf-16le")
+        self.assertIn("New-Item -ItemType Directory -Force -Path", mkdir_decoded)
+        self.assertNotIn("-LiteralPath", mkdir_decoded)
         for cmd in encoded_commands:
             self.assertIn("-NonInteractive", cmd)
 

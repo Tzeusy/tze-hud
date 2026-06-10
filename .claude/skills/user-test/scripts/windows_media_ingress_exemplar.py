@@ -362,7 +362,7 @@ def _run_remote_powershell_script_file(
 
     mkdir_script = (
         "$ErrorActionPreference='Stop';"
-        f"New-Item -ItemType Directory -Force -LiteralPath '{remote_dir_arg}' | Out-Null"
+        f"New-Item -ItemType Directory -Force -Path '{remote_dir_arg}' | Out-Null"
     )
     mkdir_encoded = powershell_encoded_command(mkdir_script)
     mkdir_cmd = _ssh_base_command(args)
