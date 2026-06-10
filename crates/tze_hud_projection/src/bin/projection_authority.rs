@@ -1138,16 +1138,19 @@ fn drain_and_emit_portal_updates(
                 break;
             }
             Err(_) => {
-                // Projection not found or expired — adapter will be cleaned up
-                // on Detach/Cleanup. Skip.
-                break;
+                // Projection not found or expired — clean up the adapter to
+                // prevent leaks and continue draining other portals.
+                portal_drive.detach_adapter(&proj_id);
+                continue;
             }
         };
 
         // Build the full projected portal state for rendering.
         let Some(state) = authority.projected_portal_state(&proj_id, &policy) else {
             // Session was removed between take_due and state query (race).
-            break;
+            // Clean up the adapter and continue draining other portals.
+            portal_drive.detach_adapter(&proj_id);
+            continue;
         };
 
         // Drive the adapter: determine command kind and render portal content.
@@ -1179,8 +1182,15 @@ fn drain_and_emit_portal_updates(
             .map(|id| id.iter().map(|b| format!("{b:02x}")).collect());
 
         // Build a budget sample for the render work done above.
+        // Dispatch to the correct path: if no tile has been created yet, use
+        // ensure_portal_tile_message (which handles CreatePortalTile without
+        // requiring a tile_id); otherwise use render_portal_message.
         let seq = server_timestamp_wall_us;
-        let budget_result = adapter.render_portal_message(&state, seq, server_timestamp_wall_us);
+        let budget_result = if adapter.tile_id().is_none() {
+            adapter.ensure_portal_tile_message(&state, seq, server_timestamp_wall_us)
+        } else {
+            adapter.render_portal_message(&state, seq, server_timestamp_wall_us)
+        };
         let (elapsed_us, budget_us, within_budget) = match &budget_result {
             Ok(cmd) => (
                 cmd.budget.elapsed_us,
