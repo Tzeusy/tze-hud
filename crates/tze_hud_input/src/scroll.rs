@@ -190,7 +190,17 @@ pub fn follow_tail_offset(
     viewport_height: f32,
     line_height: f32,
 ) -> f32 {
-    if line_height <= 0.0 || viewport_height <= 0.0 {
+    // Guard against NaN / infinite inputs: NaN comparisons return false and
+    // would bypass the safety guards below; infinite values propagate through
+    // arithmetic and cause floor()-to-usize casts to panic.
+    if !current_offset_y.is_finite()
+        || !old_content_height.is_finite()
+        || !new_content_height.is_finite()
+        || !viewport_height.is_finite()
+        || !line_height.is_finite()
+        || line_height <= 0.0
+        || viewport_height <= 0.0
+    {
         return current_offset_y;
     }
 
@@ -244,7 +254,11 @@ pub struct ScrollTileState {
     /// with the viewport at the tail of the content.  Transitions to
     /// `ScrolledBack` when the user scrolls up, and back to `AtTail` when the
     /// user scrolls to the tail again.
-    pub follow_tail: FollowTailAnchor,
+    ///
+    /// Private: external callers must use `ScrollState::follow_tail_anchor()`
+    /// for read access.  Mutations must go through `queue_user_scroll` and
+    /// `notify_content_appended` to preserve invariants.
+    follow_tail: FollowTailAnchor,
 }
 
 impl ScrollTileState {

@@ -41,7 +41,8 @@
 //! Appending new lines beyond the viewport does not change the truncation output
 //! because the first `max_lines` are determined solely by the current text, not
 //! future appends.  This is verified by the structural test
-//! `append_stability_truncation_prefix_unchanged`.
+//! `append_stability_truncation_prefix_unchanged` (original) and the more
+//! descriptive `head_anchored_append_stability_matches_prefix_truncation` (added in hud-pvoc1).
 //!
 //! **Scenario: follow-tail advances by whole lines (task 3.2)**
 //!
@@ -347,8 +348,17 @@ pub fn truncate_tail_anchored<'a>(
     line_height: f32,
     font_system: &mut FontSystem,
 ) -> TruncationResult {
-    // Guard: degenerate geometry produces an empty result.
-    if bounds_width <= 0.0 || bounds_height <= 0.0 || font_size_px <= 0.0 {
+    // Guard: degenerate or non-finite geometry produces an empty result.
+    // NaN comparisons always return false, so we must check is_finite() before
+    // arithmetic that feeds into floor() / usize casts.
+    if !bounds_width.is_finite()
+        || !bounds_height.is_finite()
+        || !font_size_px.is_finite()
+        || !line_height.is_finite()
+        || bounds_width <= 0.0
+        || bounds_height <= 0.0
+        || font_size_px <= 0.0
+    {
         return TruncationResult {
             text: String::new(),
             was_truncated: !text.is_empty(),
@@ -459,20 +469,25 @@ pub fn truncate_tail_anchored<'a>(
     let first_visible_run_start = run_logical_start(&first_visible_run.2);
 
     // Walk original_text to find the byte offset of paragraph first_visible_line_i.
+    //
+    // Strategy: count '\n' separators.  Paragraph 0 starts at byte 0; paragraph N
+    // starts at the byte immediately after the N-th '\n'.  If the text has fewer
+    // than first_visible_line_i newlines, clamp to text.len().
     let mut para_byte_offset = 0usize;
-    let mut current_para = 0usize;
-    for (idx, ch) in text.char_indices() {
-        if current_para == first_visible_line_i {
-            para_byte_offset = idx;
-            break;
+    if first_visible_line_i > 0 {
+        let mut current_para = 0usize;
+        for (idx, ch) in text.char_indices() {
+            if ch == '\n' {
+                current_para += 1;
+                if current_para == first_visible_line_i {
+                    para_byte_offset = idx + 1; // byte after the '\n'
+                    break;
+                }
+            }
         }
-        if ch == '\n' {
-            current_para += 1;
+        if current_para < first_visible_line_i {
+            para_byte_offset = text.len();
         }
-    }
-    // If the loop exhausted without finding the paragraph, clamp to text end.
-    if current_para < first_visible_line_i {
-        para_byte_offset = text.len();
     }
 
     let total_offset = para_byte_offset + first_visible_run_start;
@@ -513,15 +528,19 @@ pub fn truncate_tail_anchored<'a>(
             font_system,
         );
         // Reconstruct: truncated first line + the remaining tail lines.
-        // Remaining lines start after the first visible run within tail_text.
-        let remaining = tail_text
-            .lines()
-            .skip(if first_visible_run_start == 0 { 1 } else { 0 })
-            .fold(String::new(), |mut acc, l| {
-                acc.push('\n');
-                acc.push_str(l);
-                acc
-            });
+        //
+        // `truncated_first` already contains the (truncated) first visible run.
+        // We must append everything in `tail_text` that comes *after* the first
+        // line, i.e. from the first '\n' onwards.  Using `.lines()` + `.skip()`
+        // was buggy when `first_visible_run_start != 0` (word-wrapped paragraph):
+        // `skip(0)` would keep the first line in `remaining`, duplicating it.
+        // Slicing from the first '\n' is correct in all cases and avoids
+        // allocating an intermediate Vec.
+        let remaining = if let Some(pos) = tail_text.find('\n') {
+            &tail_text[pos..]
+        } else {
+            ""
+        };
         format!("{truncated_first}{remaining}")
     } else {
         tail_text.to_owned()
@@ -1751,7 +1770,7 @@ mod tests {
         let font_size = 14.0_f32;
         let line_h = font_size * 1.4;
         // 5 lines of content, but only space for 3.
-        let lines = vec![
+        let lines = [
             "Line one",
             "Line two",
             "Line three",
