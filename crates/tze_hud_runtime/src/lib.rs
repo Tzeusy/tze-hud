@@ -98,6 +98,7 @@ pub mod mcp;
 pub mod media_admission;
 pub mod media_ingress;
 pub mod pipeline;
+pub mod portal_cadence;
 pub mod quiet_hours;
 pub mod reload_triggers;
 pub mod runtime_context;
@@ -286,3 +287,10 @@ pub use widget_startup::{collect_tab_name_to_id, init_widget_registry};
 // ── GPU lock (Windows GPU scheduling policy, hud-940e4) ───────────────────────
 // Cross-platform: GpuLock::acquire() is a no-op on non-Windows targets.
 pub use gpu_lock::{GpuLock, GpuLockConflict, GpuLockGuard};
+
+// ── Portal cadence coalescing (hud-5jbra.5, tasks.md §5.1–5.4) ───────────────
+pub use portal_cadence::{
+    CADENCE_BURST_BYTES, CADENCE_BURST_WINDOW_MS, CADENCE_MIN_INCREMENTS_PER_SEC,
+    CADENCE_MIN_SCALARS_PER_SEC, CADENCE_SUSTAINED_SECS, CadenceWorkload, FairnessProbe,
+    MAX_PORTAL_SNAPSHOT_BYTES, PortalCadenceCoalescer,
+};
