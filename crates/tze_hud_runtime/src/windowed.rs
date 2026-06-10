@@ -1131,6 +1131,12 @@ impl ApplicationHandler for WinitApp {
         self.synthesize_left_release_if_physically_up();
         self.refresh_widget_hover_tracking();
         self.update_overlay_cursor_hittest();
+        // Flush any coalesced composer draft notifications accumulated during
+        // the current event batch.  This is the normal settle point: all key
+        // events for this winit iteration have been drained above; flushing here
+        // guarantees the terminal draft state is delivered within the same batch
+        // window (spec §4.3 flush guarantee).
+        self.flush_composer_draft_at_settle();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -2389,9 +2395,40 @@ impl WinitApp {
     /// silently ignored, consistent with the transactional keyboard-event
     /// contract where dropped delivery is an infrastructure gap, not a
     /// data-loss policy.
+    ///
+    /// # Composer interception (§4.4)
+    ///
+    /// When a composer region is focused (`accepts_composer_input = true`), the
+    /// event is first offered to the `ComposerDraftManager` via
+    /// `route_key_down_to_composer`.  If the manager consumes the event
+    /// (`consumed = true`), it is NOT forwarded to the agent as a raw
+    /// `KeyDownEvent`.  Any transactional batch returned (submit / cancel) is
+    /// handed to `deliver_composer_batch` for future downstream delivery.
     fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
         let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
+
+        // ── Composer draft intercept (§4.4) ──────────────────────────────
+        if self.state.input_processor.is_composer_active() {
+            let (consumed, batch) = self.state.input_processor.route_key_down_to_composer(
+                &raw.key_code,
+                &raw.key,
+                raw.modifiers.shift,
+                raw.modifiers.ctrl,
+                raw.modifiers.alt,
+            );
+            if let Some(b) = batch {
+                deliver_composer_batch(b);
+            }
+            if consumed {
+                tracing::debug!(
+                    key_code = %raw.key_code,
+                    "composer: KeyDown consumed by draft manager"
+                );
+                return;
+            }
+        }
+
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
         // Build a namespace-resolver closure: given a tile_id, return its
@@ -2450,9 +2487,38 @@ impl WinitApp {
     /// `Key::Character` in `WindowEvent::KeyboardInput` (direct input path).
     ///
     /// Events are dropped silently when `current_owner` is `FocusOwner::None`.
+    ///
+    /// # Composer interception (§4.1)
+    ///
+    /// When a composer region is focused, the character is routed into the
+    /// `ComposerDraftManager` draft buffer instead of being forwarded to the
+    /// agent as a raw `CharacterEvent`.  Only `EditOutcome::Unchanged` (no
+    /// active composer) allows the normal dispatch path.
     fn dispatch_character_event(&mut self, raw: &RawCharacterEvent) {
         let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
+
+        // ── Composer draft intercept (§4.1) ──────────────────────────────
+        if self.state.input_processor.is_composer_active() {
+            let (outcome, batch) = self
+                .state
+                .input_processor
+                .route_character_to_composer(&raw.character);
+            if let Some(b) = batch {
+                deliver_composer_batch(b);
+            }
+            // Any outcome other than Unchanged means the manager handled it;
+            // do not forward to the agent as a raw CharacterEvent.
+            if outcome != tze_hud_input::EditOutcome::Unchanged {
+                tracing::debug!(
+                    character = %raw.character,
+                    outcome = ?outcome,
+                    "composer: Character consumed by draft manager"
+                );
+                return;
+            }
+        }
+
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
         let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
@@ -2471,6 +2537,21 @@ impl WinitApp {
                 "keyboard: Character dispatched to agent"
             );
             dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
+        }
+    }
+
+    /// Flush coalesced composer draft notifications at the frame settle point.
+    ///
+    /// Should be called once per frame / per settle window after all key events
+    /// for the current batch have been drained.  Guarantees the terminal draft
+    /// state is delivered even when keystrokes arrived in a burst (spec §4.3
+    /// flush guarantee).
+    ///
+    /// The returned `DraftNotificationBatch` is forwarded to `deliver_composer_batch`;
+    /// the full downstream protocol bridge (adapter notify) is a follow-up.
+    fn flush_composer_draft_at_settle(&mut self) {
+        if let Some(batch) = self.state.input_processor.try_flush_composer_draft() {
+            deliver_composer_batch(batch);
         }
     }
 
@@ -3703,6 +3784,43 @@ fn dispatch_keyboard_event(
     // namespace matches and INPUT_EVENTS is subscribed. Errors (no receivers,
     // channel lagged) are silently ignored.
     let _ = tx.send((dispatch.namespace, batch));
+}
+
+/// Deliver a [`tze_hud_input::DraftNotificationBatch`] to downstream consumers.
+///
+/// # Current status (hud-odxjl)
+///
+/// The full downstream protocol bridge (proto encoding + adapter notify) is a
+/// follow-up task.  This function currently logs the batch at debug level so
+/// the wiring is exercised and observable in integration logs without blocking
+/// the present wiring milestone.
+///
+/// Future: encode the batch as `DraftStateNotification` / `DraftSubmission`
+/// proto envelopes and broadcast on the `INPUT_EVENTS` channel to the owning
+/// adapter namespace.
+fn deliver_composer_batch(batch: tze_hud_input::DraftNotificationBatch) {
+    if let Some(ref notif) = batch.latest {
+        tracing::debug!(
+            text_len = notif.text.len(),
+            cursor = notif.cursor,
+            at_capacity = notif.at_capacity,
+            sequence = notif.sequence,
+            "composer: draft state notification (state-stream)"
+        );
+    }
+    if let Some(ref sub) = batch.submission {
+        tracing::debug!(
+            text_len = sub.text.len(),
+            sequence = sub.sequence,
+            "composer: draft submission (transactional)"
+        );
+    }
+    if let Some(ref cancel) = batch.cancel {
+        tracing::debug!(
+            sequence = cancel.sequence,
+            "composer: draft cancel (transactional)"
+        );
+    }
 }
 
 /// Broadcast `FocusGainedEvent` and/or `FocusLostEvent` to the owning agents
