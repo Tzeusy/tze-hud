@@ -447,10 +447,9 @@ try {{
                 text=True,
             )
 
-        task_script = f"& '{remote_runner_arg}'"
         task_command = (
             "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass "
-            f"-EncodedCommand {powershell_encoded_command(task_script)}"
+            f"-File {remote_runner_arg}"
         )
         delete_cmd = _ssh_base_command(args)
         delete_cmd.extend(["schtasks", "/Delete", "/F", "/TN", task_name])

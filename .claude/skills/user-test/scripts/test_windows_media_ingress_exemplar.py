@@ -309,10 +309,8 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertTrue(task_command.endswith('"'))
         task_command = task_command.strip('"')
         self.assertIn("-NonInteractive", task_command)
-        self.assertIn("-EncodedCommand", task_command)
-        encoded = task_command.rsplit(" ", 1)[1]
-        decoded = base64.b64decode(encoded).decode("utf-16le")
-        self.assertIn("& 'C:\\tze_hud\\tmp\\tze_hud_frame_capture_", decoded)
+        self.assertIn("-File", task_command)
+        self.assertIn("C:\\tze_hud\\tmp\\tze_hud_frame_capture_", task_command)
         self.assertTrue(
             any(cmd[0] == "scp" and cmd[-2].endswith("/stdout.txt") for cmd in commands)
         )
