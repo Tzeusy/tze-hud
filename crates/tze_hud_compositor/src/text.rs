@@ -34,8 +34,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use tze_hud_scene::types::{
     FontFamily, RenderingPolicy, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
@@ -211,7 +211,16 @@ impl TextRasterizer {
                 let weight = Weight(item.font_weight.clamp(100, 900));
                 let base_attrs = Attrs::new().family(family).weight(weight);
 
-                if item.color_runs.is_empty() {
+                if !item.styled_runs.is_empty() {
+                    // Phase-1 markdown styled-run path (hud-5jbra.2).
+                    //
+                    // `styled_runs` carry per-span weight, italic, monospace, and
+                    // optional color from the parse cache.  We build `(text_slice,
+                    // Attrs)` pairs and call `set_rich_text` once — zero re-parse cost.
+                    let spans =
+                        styled_run_spans(&item.text, &item.styled_runs, base_attrs, item.font_family);
+                    buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
+                } else if item.color_runs.is_empty() {
                     // Fast path: no inline runs — use uniform base color.
                     buf.set_text(
                         &mut self.font_system,
@@ -385,6 +394,39 @@ pub struct TextItem {
     /// `TextItem::from_text_markdown_node` when `color_runs` are present.
     /// Zone-derived `TextItem`s always carry an empty slice (no run support yet).
     pub color_runs: Box<[ColorRunItem]>,
+    /// Markdown-derived styled runs from the Phase-1 parse cache
+    /// (hud-5jbra.2).
+    ///
+    /// When non-empty these runs take precedence over `color_runs` for
+    /// determining per-span font weight, italic style, and font family.
+    /// Color overrides in `styled_runs` also override `color_runs` for the
+    /// same byte range.
+    ///
+    /// Populated by [`TextItem::from_text_markdown_cached`]; empty for all
+    /// other constructors.
+    pub styled_runs: Box<[StyledRunItem]>,
+}
+
+/// A single styled run for Phase-1 markdown rendering, with byte offsets into
+/// the **plain-text** `TextItem::text`.
+///
+/// Carries full per-span style attributes — weight, italic, monospace, and
+/// optional color override — resolved from design tokens at parse-commit time.
+/// The frame pipeline consumes these without re-parsing.
+#[derive(Debug, Clone)]
+pub struct StyledRunItem {
+    /// Inclusive byte offset into `TextItem::text`.
+    pub start_byte: usize,
+    /// Exclusive byte offset into `TextItem::text`.
+    pub end_byte: usize,
+    /// CSS font weight override (100–900); `None` = use `TextItem::font_weight`.
+    pub weight: Option<u16>,
+    /// When `true`, request the italic style variant.
+    pub italic: bool,
+    /// When `true`, use the monospace font family instead of the item default.
+    pub monospace: bool,
+    /// Optional color override (linear sRGB); `None` = use `TextItem::color`.
+    pub color: Option<[u8; 4]>,
 }
 
 /// A single resolved color run for `TextItem` rendering, with byte offsets
@@ -483,6 +525,97 @@ impl TextItem {
             outline_width: None,
             opacity: 1.0,
             color_runs,
+            styled_runs: Box::default(),
+        }
+    }
+
+    /// Build a `TextItem` from a `TextMarkdownNode` using a pre-parsed
+    /// [`ParsedMarkdown`] from the [`MarkdownCache`] (Phase-1 hud-5jbra.2).
+    ///
+    /// This is the replacement for `from_text_markdown_node` in the Phase-1
+    /// markdown path.  The `plain_text` and `styled_runs` from the cache are
+    /// used directly — **no markdown parsing happens here**, satisfying the
+    /// zero-per-frame-parse-cost requirement.
+    ///
+    /// `tile_x` / `tile_y` are the pixel-space position of the tile origin.
+    ///
+    /// [`ParsedMarkdown`]: crate::markdown::ParsedMarkdown
+    /// [`MarkdownCache`]: crate::markdown::MarkdownCache
+    pub fn from_text_markdown_cached(
+        node: &TextMarkdownNode,
+        tile_x: f32,
+        tile_y: f32,
+        parsed: &crate::markdown::ParsedMarkdown,
+    ) -> Self {
+        use crate::markdown::StyledSpan;
+
+        let text = parsed.plain_text.clone();
+
+        // Convert linear f32 color [0..1] to sRGB u8 [0..255].
+        let r = linear_to_srgb_u8(node.color.r);
+        let g = linear_to_srgb_u8(node.color.g);
+        let b = linear_to_srgb_u8(node.color.b);
+        let a = (node.color.a * 255.0).clamp(0.0, 255.0) as u8;
+
+        // Geometry: same inset margin logic as `from_text_markdown_node`.
+        let font_size_px = node.font_size_px.clamp(6.0, 200.0);
+        let line_height = font_size_px * 1.4;
+        let margin_x = (node.bounds.width * 0.08).clamp(1.0, 6.0);
+        let target_margin_y = (node.bounds.height * 0.20).clamp(1.0, 6.0);
+        let max_margin_y = ((node.bounds.height - line_height).max(0.0) / 2.0).min(6.0);
+        let margin_y = target_margin_y.min(max_margin_y);
+        let x = tile_x + node.bounds.x + margin_x;
+        let y = tile_y + node.bounds.y + margin_y;
+        let w = (node.bounds.width - margin_x * 2.0).max(1.0);
+        let h = (node.bounds.height - margin_y * 2.0).max(1.0);
+
+        // Convert ParsedMarkdown spans to StyledRunItems.
+        let styled_runs: Box<[StyledRunItem]> = parsed
+            .spans
+            .iter()
+            .filter_map(|span: &StyledSpan| {
+                let start = span.start_byte.min(text.len());
+                let end = span.end_byte.min(text.len());
+                if start >= end {
+                    return None;
+                }
+                if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                    return None;
+                }
+                let color = span.attr.color.map(rgba_to_srgb_u8);
+                Some(StyledRunItem {
+                    start_byte: start,
+                    end_byte: end,
+                    weight: span.attr.weight,
+                    italic: span.attr.italic,
+                    monospace: span.attr.monospace,
+                    color,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        TextItem {
+            text,
+            pixel_x: x,
+            pixel_y: y,
+            bounds_width: w,
+            bounds_height: h,
+            clip_pixel_x: x,
+            clip_pixel_y: y,
+            clip_bounds_width: w,
+            clip_bounds_height: h,
+            font_size_px,
+            font_family: node.font_family,
+            font_weight: 400,
+            color: [r, g, b, a],
+            alignment: node.alignment,
+            overflow: node.overflow,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
+            color_runs: Box::default(),
+            styled_runs,
         }
     }
 
@@ -556,6 +689,7 @@ impl TextItem {
             outline_width,
             opacity,
             color_runs: Box::default(),
+            styled_runs: Box::default(),
         }
     }
 
@@ -598,6 +732,7 @@ impl TextItem {
             outline_width: None,
             opacity: 1.0,
             color_runs: Box::default(),
+            styled_runs: Box::default(),
         }
     }
 
@@ -639,6 +774,7 @@ impl TextItem {
             outline_width: None,
             opacity: 1.0,
             color_runs: Box::default(),
+            styled_runs: Box::default(),
         }
     }
 }
@@ -809,6 +945,82 @@ pub(crate) fn color_run_spans<'t, 'a>(
 
     // If no spans were emitted (all runs were empty/invalid), fall back to
     // the full text with base_attrs so the buffer is never left empty.
+    if spans.is_empty() {
+        spans.push((text, base_attrs));
+    }
+
+    spans
+}
+
+/// Build `(text_slice, Attrs)` pairs for [`Buffer::set_rich_text`] from a set of
+/// [`StyledRunItem`]s produced by the Phase-1 markdown parse cache.
+///
+/// Each run carries weight, italic, monospace, and optional color.  Gaps
+/// between runs receive `base_attrs` with no overrides.
+///
+/// `base_family` is the node-level font family (e.g. `SansSerif`) used for
+/// non-monospace runs.  Monospace runs use `Family::Monospace` regardless.
+pub(crate) fn styled_run_spans<'t, 'a>(
+    text: &'t str,
+    runs: &[StyledRunItem],
+    base_attrs: Attrs<'a>,
+    base_family: FontFamily,
+) -> Vec<(&'t str, Attrs<'a>)> {
+    if runs.is_empty() {
+        return vec![(text, base_attrs)];
+    }
+
+    let mono_family = Family::Monospace;
+    let sans_family = match base_family {
+        FontFamily::SystemSansSerif => Family::SansSerif,
+        FontFamily::SystemMonospace => Family::Monospace,
+        FontFamily::SystemSerif => Family::Serif,
+    };
+
+    let mut spans: Vec<(&'t str, Attrs<'a>)> = Vec::with_capacity(runs.len() * 2 + 1);
+    let mut cursor = 0usize;
+
+    for run in runs {
+        let start = run.start_byte.min(text.len());
+        let end = run.end_byte.min(text.len());
+        if start >= end {
+            continue;
+        }
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            continue;
+        }
+
+        // Emit unstyled gap before this run.
+        if cursor < start && text.is_char_boundary(cursor) {
+            spans.push((&text[cursor..start], base_attrs));
+        }
+
+        // Build attrs for this run.
+        let run_weight = run.weight.map(|w| Weight(w.clamp(100, 900))).unwrap_or_else(|| {
+            // Inherit base weight (already applied to base_attrs).
+            base_attrs.weight
+        });
+        let run_style = if run.italic { Style::Italic } else { Style::Normal };
+        let run_family = if run.monospace { mono_family } else { sans_family };
+
+        let mut run_attrs = base_attrs
+            .weight(run_weight)
+            .style(run_style)
+            .family(run_family);
+
+        if let Some(c) = run.color {
+            run_attrs = run_attrs.color(Color::rgba(c[0], c[1], c[2], c[3]));
+        }
+
+        spans.push((&text[start..end], run_attrs));
+        cursor = end;
+    }
+
+    // Trailing unstyled text.
+    if cursor < text.len() && text.is_char_boundary(cursor) {
+        spans.push((&text[cursor..], base_attrs));
+    }
+
     if spans.is_empty() {
         spans.push((text, base_attrs));
     }

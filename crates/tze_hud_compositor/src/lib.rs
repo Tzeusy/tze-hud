@@ -21,6 +21,7 @@
 //! call `select_gpu_adapter` to enforce the platform constraint.
 
 pub mod adapter;
+pub mod markdown;
 pub mod pipeline;
 pub mod renderer;
 pub mod surface;
@@ -29,10 +30,11 @@ pub mod video_surface;
 pub mod widget;
 
 pub use adapter::{AdapterSelectionError, PlatformBackends, select_gpu_adapter};
+pub use markdown::{MarkdownCache, MarkdownTokens, ParsedMarkdown, StyledSpan, StyleAttr};
 pub use pipeline::{ChromeDrawCmd, RoundedRectDrawCmd, TexturedRectVertex};
 pub use renderer::{Compositor, CompositorError, ImageTextureEntry};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
-pub use text::{TextItem, TextRasterizer};
+pub use text::{StyledRunItem, TextItem, TextRasterizer};
 #[cfg(feature = "v2_preview")]
 pub use video_surface::{MediaDecodePipeline, SyntheticTestPipeline, VideoFrame};
 pub use video_surface::{VideoRenderState, VideoSurfaceMap};

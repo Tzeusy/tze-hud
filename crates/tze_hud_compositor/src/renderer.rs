@@ -25,6 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use blake3;
 use crate::pipeline::{
     ChromeDrawCmd, ROUNDED_RECT_OVERLAY_SHADER, ROUNDED_RECT_SHADER, RectVertex,
     RoundedRectDrawCmd, RoundedRectVertex, create_texture_rect_bind_group_layout,
@@ -1081,6 +1082,20 @@ pub struct Compositor {
     /// lifetime of the compositor (SVG paths are static config; runtime reload
     /// of icon paths is not currently supported).
     failed_icon_paths: HashSet<ResourceId>,
+    /// Phase-1 markdown parse cache (hud-5jbra.2).
+    ///
+    /// Maps BLAKE3(content) → [`ParsedMarkdown`].  Populated at content-commit
+    /// time by [`Compositor::prime_markdown_cache`]; consumed at render time by
+    /// [`Compositor::collect_text_items_from_node`] with zero parse cost on
+    /// cache hits.  The cache is evicted in sync with node removal.
+    ///
+    /// [`ParsedMarkdown`]: crate::markdown::ParsedMarkdown
+    pub(crate) markdown_cache: crate::markdown::MarkdownCache,
+    /// Design-token–resolved markdown styling (hud-5jbra.2).
+    ///
+    /// Rebuilt from `token_map` whenever `set_token_map` is called.
+    /// Consumed by `prime_markdown_cache` when new content is parsed.
+    pub(crate) markdown_tokens: crate::markdown::MarkdownTokens,
     /// Per-surface video state machines (v2 media plane, E26 / B11).
     ///
     /// Keyed by the `SceneId` carried in `ZoneContent::VideoSurfaceRef`.
@@ -1203,6 +1218,8 @@ impl Compositor {
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
+            markdown_cache: crate::markdown::MarkdownCache::new(),
+            markdown_tokens: crate::markdown::MarkdownTokens::default(),
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -1464,6 +1481,8 @@ impl Compositor {
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
+            markdown_cache: crate::markdown::MarkdownCache::new(),
+            markdown_tokens: crate::markdown::MarkdownTokens::default(),
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -1733,12 +1752,53 @@ impl Compositor {
     /// to derive alert-banner backdrop colors, falling back to hardcoded constants
     /// when a key is absent or unparseable.
     pub fn set_token_map(&mut self, map: HashMap<String, String>) {
+        // Rebuild markdown tokens from the new map so heading weights, link
+        // colors, and code family are in sync with the current theme.
+        // Clear the markdown cache so existing entries are re-parsed with the
+        // new token values on the next prime() call.
+        self.markdown_tokens = crate::markdown::MarkdownTokens::from_token_map(&map);
+        self.markdown_cache = crate::markdown::MarkdownCache::new();
+
         self.token_map = map;
         // Token-substitution failures in ensure_icon_texture are tied to the
         // token map state, not to the SVG file on disk.  Clearing the negative
         // cache here lets icons that previously failed due to a missing token
         // be retried with the updated map (e.g. on hot-reload or late init).
         self.failed_icon_paths.clear();
+    }
+
+    /// Prime the markdown parse cache for all [`TextMarkdownNode`] nodes in the scene.
+    ///
+    /// Must be called **before** [`Compositor::render_frame`] (i.e. at Stage 4 /
+    /// early Stage 5, outside the render-encode path) so that the frame pipeline
+    /// consumes only cached results — satisfying the zero-per-frame-parse-cost
+    /// requirement from the Phase-1 spec (hud-5jbra.2).
+    ///
+    /// For content already in the cache this is a cheap O(nodes × 32-byte hash)
+    /// scan.  Only new or changed content is parsed; unchanged content costs zero
+    /// parse work.
+    ///
+    /// The method also evicts cache entries for content no longer referenced by
+    /// any scene node, keeping the cache bounded to the live node set.
+    ///
+    /// [`TextMarkdownNode`]: tze_hud_scene::types::TextMarkdownNode
+    pub fn prime_markdown_cache(&mut self, scene: &SceneGraph) {
+        use tze_hud_scene::types::NodeData;
+
+        // Collect BLAKE3 keys for all live TextMarkdownNode content.
+        let mut live_keys: Vec<[u8; 32]> = Vec::new();
+
+        for node in scene.nodes.values() {
+            if let NodeData::TextMarkdown(tm) = &node.data {
+                let key = *blake3::hash(tm.content.as_bytes()).as_bytes();
+                live_keys.push(key);
+                // Parse if not already cached — zero cost on hit.
+                self.markdown_cache.prime(&tm.content, &self.markdown_tokens);
+            }
+        }
+
+        // Evict stale entries so the cache does not grow unboundedly.
+        self.markdown_cache.evict_except(&live_keys);
     }
 
     /// Initialize (or re-initialize) the text rasterizer for a given surface format.
@@ -3127,6 +3187,7 @@ impl Compositor {
                                         outline_width: ow,
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
+                                        styled_runs: Box::default(),
                                     });
                                 } else {
                                     // ── Two-line rendering: bold title + regular body ──
@@ -3159,6 +3220,7 @@ impl Compositor {
                                         outline_width: ow,
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
+                                        styled_runs: Box::default(),
                                     });
                                     // Body line (regular weight, 0.85× size)
                                     let body_top =
@@ -3186,6 +3248,7 @@ impl Compositor {
                                         outline_width: ow,
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
+                                        styled_runs: Box::default(),
                                     });
                                 }
 
@@ -3222,6 +3285,7 @@ impl Compositor {
                                         outline_width: None,
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
+                                        styled_runs: Box::default(),
                                     });
                                 }
                             }
@@ -3380,6 +3444,7 @@ impl Compositor {
                                             outline_width: ow,
                                             opacity: anim_opacity,
                                             color_runs: Box::default(),
+                                            styled_runs: Box::default(),
                                         });
                                     } else {
                                         items.push(TextItem::from_zone_policy(
@@ -3521,6 +3586,7 @@ impl Compositor {
                                         outline_width: ow,
                                         opacity: anim_opacity,
                                         color_runs: Box::default(),
+                                        styled_runs: Box::default(),
                                     });
                                 } else {
                                     items.push(TextItem::from_zone_policy(
@@ -3949,11 +4015,27 @@ impl Compositor {
             // Subtract scroll offset so text glyphs move with the scrolled
             // content — matches the geometry pass in `render_node` which already
             // applies `tile.bounds.x - scroll_x` / `tile.bounds.y - scroll_y`.
-            let mut item = TextItem::from_text_markdown_node(
-                tm,
-                tile.bounds.x - scroll_x,
-                tile.bounds.y - scroll_y,
-            );
+            //
+            // Phase-1 (hud-5jbra.2): try the markdown cache first.  If a cached
+            // ParsedMarkdown is available we use `from_text_markdown_cached` which
+            // produces styled runs with zero parse cost.  The cache is primed at
+            // Stage 4 by `prime_markdown_cache`; a miss here (e.g. first frame
+            // before prime runs) falls back to the legacy `strip_markdown_v1` path
+            // so rendering is never blocked.
+            let mut item = if let Some(parsed) = self.markdown_cache.get(&tm.content) {
+                TextItem::from_text_markdown_cached(
+                    tm,
+                    tile.bounds.x - scroll_x,
+                    tile.bounds.y - scroll_y,
+                    parsed,
+                )
+            } else {
+                TextItem::from_text_markdown_node(
+                    tm,
+                    tile.bounds.x - scroll_x,
+                    tile.bounds.y - scroll_y,
+                )
+            };
             let unscrolled_x = item.pixel_x + scroll_x;
             let unscrolled_y = item.pixel_y + scroll_y;
             let clip_left = unscrolled_x.max(tile.bounds.x);
@@ -4209,6 +4291,12 @@ impl Compositor {
         let frame_start = std::time::Instant::now();
         self.frame_number += 1;
 
+        // ── Phase-1 markdown cache prime (hud-5jbra.2) ───────────────────────
+        // Must run before the render-encode stages (Stage 6) so the frame
+        // pipeline consumes only cached styled runs.  New/changed content is
+        // parsed exactly once here; unchanged content hits the cache at O(1).
+        self.prime_markdown_cache(scene);
+
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
         // Collect visible tiles, re-sorted with drag-z-order boost applied.
@@ -4397,6 +4485,9 @@ impl Compositor {
     ) -> FrameTelemetry {
         let frame_start = std::time::Instant::now();
         self.frame_number += 1;
+
+        // ── Phase-1 markdown cache prime (hud-5jbra.2) ───────────────────────
+        self.prime_markdown_cache(scene);
 
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
