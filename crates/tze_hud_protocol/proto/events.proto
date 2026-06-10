@@ -301,6 +301,49 @@ message CommandInputEvent {
   CommandSource source          = 7;
 }
 
+// ─── Composer draft events (hud-ygbcy) ───────────────────────────────────────
+//
+// These three messages carry the coalesced draft buffer state from the
+// runtime's ComposerDraftManager to the owning adapter. They replace the
+// per-keystroke composer-text republish pattern (spec §4.6).
+//
+// Message classes:
+//   ComposerDraftStateEvent  — state-stream (coalescible; latest-wins)
+//   ComposerDraftSubmitEvent — transactional (never coalesced or dropped)
+//   ComposerDraftCancelEvent — transactional (never coalesced or dropped)
+//
+// All three are delivered on the INPUT_EVENTS subscription category. The
+// sequence field provides monotonic ordering within a session so the adapter
+// can discard stale state-stream notifications (sequence ≤ last seen).
+
+// Coalesced draft-state notification. Carries the current draft buffer
+// snapshot: text, cursor byte offset, and at-capacity flag.
+// State-stream class: the adapter SHOULD discard older notifications and
+// apply only the latest (highest sequence) snapshot.
+message ComposerDraftStateEvent {
+  bytes  node_id      = 1;  // 16-byte UUIDv7 of the focused composer node
+  string text         = 2;  // Current draft text (never exceeds draft byte cap)
+  uint64 cursor       = 3;  // Cursor byte offset into text
+  bool   at_capacity  = 4;  // True when draft is at or over its byte cap
+  uint64 sequence     = 5;  // Monotonic sequence; adapter skips if ≤ last seen
+}
+
+// Transactional draft submission. Carries the exact local buffer at submit
+// time. The adapter MUST forward this to the semantic inbox.
+// Transactional class: never coalesced or dropped.
+message ComposerDraftSubmitEvent {
+  bytes  node_id   = 1;  // 16-byte UUIDv7 of the focused composer node
+  string text      = 2;  // Submitted text (exact local buffer at submit time)
+  uint64 sequence  = 3;  // Monotonic sequence (always > any prior state event)
+}
+
+// Transactional cancel event. Draft cleared without submission.
+// Transactional class: never coalesced or dropped.
+message ComposerDraftCancelEvent {
+  bytes  node_id   = 1;  // 16-byte UUIDv7 of the focused composer node
+  uint64 sequence  = 2;  // Monotonic sequence
+}
+
 // ─── Input Envelope and Event Batch (RFC 0004 §8.3, §8.4, §9.1) ───────────────
 //
 // InputEnvelope is a 19-variant oneof covering all V1-mandatory input event types.
@@ -353,6 +396,11 @@ message InputEnvelope {
 
     // Command input (abstract navigation/activation)
     CommandInputEvent       command_input        = 22;  // transactional
+
+    // Composer draft events (hud-ygbcy; INPUT_EVENTS subscription category)
+    ComposerDraftStateEvent   composer_draft_state  = 23;  // state-stream (coalescible)
+    ComposerDraftSubmitEvent  composer_draft_submit = 24;  // transactional
+    ComposerDraftCancelEvent  composer_draft_cancel = 25;  // transactional
   }
 }
 
