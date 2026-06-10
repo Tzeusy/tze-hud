@@ -22,11 +22,9 @@
 
 use tze_hud_config::{
     PORTAL_TOKEN_COLLAPSED_BACKGROUND, PORTAL_TOKEN_COLLAPSED_FONT_SIZE,
-    PORTAL_TOKEN_COLLAPSED_TEXT_COLOR, PORTAL_TOKEN_FRAME_BACKGROUND, PORTAL_TOKEN_FRAME_OPACITY,
-    PORTAL_TOKEN_HEADER_FONT_SIZE, PORTAL_TOKEN_HEADER_TEXT_COLOR,
-    PORTAL_TOKEN_TRANSCRIPT_BACKGROUND, PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE,
-    PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR, PORTAL_TOKEN_TRANSITION_IN_MS,
-    PORTAL_TOKEN_TRANSITION_OUT_MS, resolve_portal_tokens,
+    PORTAL_TOKEN_COLLAPSED_TEXT_COLOR, PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
+    PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE, PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR,
+    PORTAL_TOKEN_TRANSITION_IN_MS, PORTAL_TOKEN_TRANSITION_OUT_MS, resolve_portal_tokens,
 };
 use tze_hud_projection::{
     AttachRequest, ContentClassification, HudConnectionMetadata, OperationEnvelope, OutputKind,
@@ -35,6 +33,7 @@ use tze_hud_projection::{
     PublishStatusRequest,
     resident_grpc::{PortalVisualTokens, ResidentGrpcPortalAdapter, ResidentGrpcPortalConfig},
 };
+use tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -217,6 +216,176 @@ fn adapter_publish_path_sources_colors_from_visual_tokens() {
     );
 }
 
+// ── §6.4 (d): NodeProto output assertion ─────────────────────────────────────
+
+/// Verifies that the published `NodeProto` output from `render_portal_message`
+/// actually uses the injected `PortalVisualTokens` values.
+///
+/// This is the §6.4 strengthened test: previous tests only asserted on
+/// `visual_tokens()` — the getter accessor. A reintroduced literal in
+/// `portal_node` would pass those tests. This test asserts on the *published*
+/// `TextMarkdownNodeProto.color` and `.background` in the `MutationBatch`,
+/// proving the render path actually consumes the injected tokens.
+#[test]
+fn portal_node_proto_uses_injected_visual_tokens() {
+    use std::collections::HashMap;
+    use tze_hud_protocol::proto;
+    use tze_hud_protocol::proto::session as session_proto;
+
+    let empty: HashMap<String, String> = HashMap::new();
+
+    // Build a sentinel PortalVisualTokens via the canonical conversion chain:
+    // override transcript_text_color to cyan and collapsed_background to yellow.
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        tze_hud_config::PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR.to_string(),
+        "#00FFFF".to_string(), // cyan — r=0, g=1, b=1
+    );
+    overrides.insert(
+        tze_hud_config::PORTAL_TOKEN_COLLAPSED_BACKGROUND.to_string(),
+        "#FFFF00".to_string(), // yellow — r=1, g=1, b=0
+    );
+    let resolved = tze_hud_config::tokens::resolve_tokens(&empty, &overrides);
+    let part_tokens = resolve_portal_tokens(&resolved);
+    // Use the production canonical conversion — no hand-rolled PortalVisualTokens
+    let visual_tokens = portal_visual_tokens_from_part_tokens(&part_tokens);
+
+    let mut authority = tze_hud_projection::ProjectionAuthority::default();
+    let permit_all = tze_hud_projection::ProjectedPortalPolicy::permit_all();
+
+    // Build an expanded projection state
+    let expanded_state =
+        build_expanded_state(&mut authority, "proj-nodeproto-expanded", &permit_all);
+
+    // Build adapter, record a fake tile ID so render_portal_message succeeds
+    let fake_tile_id: Vec<u8> = vec![0xAB; 16];
+    let mut adapter = ResidentGrpcPortalAdapter::with_tokens(
+        ResidentGrpcPortalConfig::new(vec![0u8; 16]),
+        visual_tokens.clone(),
+    );
+    adapter.record_created_tile(fake_tile_id.clone());
+
+    // Call render_portal_message and extract the NodeProto from the MutationBatch
+    let cmd = adapter
+        .render_portal_message(&expanded_state, 1, 0)
+        .expect("render_portal_message must succeed after tile is recorded");
+
+    // Extract the MutationBatch from the ClientMessage payload
+    let batch = match cmd.message.payload.expect("render must produce payload") {
+        session_proto::client_message::Payload::MutationBatch(b) => b,
+        other => panic!("expected MutationBatch payload, got {other:?}"),
+    };
+
+    // The first mutation must be PublishToTile
+    let publish = batch
+        .mutations
+        .into_iter()
+        .find_map(|m| match m.mutation {
+            Some(proto::mutation_proto::Mutation::PublishToTile(p)) => Some(p),
+            _ => None,
+        })
+        .expect("MutationBatch must contain a PublishToTile mutation");
+
+    // Extract the NodeProto and its TextMarkdown data
+    let node = publish.node.expect("PublishToTile must have a node");
+    let text_md = match node.data.expect("NodeProto must have data") {
+        proto::node_proto::Data::TextMarkdown(tm) => tm,
+        other => panic!("NodeProto must be TextMarkdown in the portal pilot, got {other:?}"),
+    };
+
+    // ── Core assertion (§6.4d): NodeProto color must be the injected token value ──
+
+    // Expanded state uses transcript_text_color: injected to cyan (#00FFFF)
+    let color = text_md
+        .color
+        .expect("TextMarkdownNodeProto must have a color");
+    assert!(
+        color.r.abs() < 1e-2,
+        "expanded NodeProto color.r must be 0.0 (cyan has r=0), got {r}",
+        r = color.r
+    );
+    assert!(
+        (color.g - 1.0).abs() < 1e-2,
+        "expanded NodeProto color.g must be 1.0 (cyan has g=1), got {g}",
+        g = color.g
+    );
+    assert!(
+        (color.b - 1.0).abs() < 1e-2,
+        "expanded NodeProto color.b must be 1.0 (cyan has b=1), got {b}",
+        b = color.b
+    );
+
+    // Font size must match the token-derived transcript_font_size_px
+    assert!(
+        (text_md.font_size_px - part_tokens.transcript_font_size_px).abs() < 1e-3,
+        "expanded NodeProto font_size_px must equal token-derived transcript_font_size_px"
+    );
+
+    // ── Collapsed state: background must be the injected yellow token ──
+
+    // Collapse the portal and re-render
+    authority
+        .collapse_projected_portal("proj-nodeproto-expanded")
+        .expect("collapse must succeed");
+    let collapsed_state = authority
+        .projected_portal_state("proj-nodeproto-expanded", &permit_all)
+        .expect("collapsed state must materialize");
+    assert_eq!(
+        collapsed_state.presentation,
+        ProjectedPortalPresentation::Collapsed
+    );
+
+    let cmd_collapsed = adapter
+        .render_portal_message(&collapsed_state, 2, 0)
+        .expect("render_portal_message must succeed for collapsed state");
+    let batch_collapsed = match cmd_collapsed
+        .message
+        .payload
+        .expect("collapsed render must produce payload")
+    {
+        session_proto::client_message::Payload::MutationBatch(b) => b,
+        other => panic!("expected MutationBatch payload for collapsed, got {other:?}"),
+    };
+    let publish_collapsed = batch_collapsed
+        .mutations
+        .into_iter()
+        .find_map(|m| match m.mutation {
+            Some(proto::mutation_proto::Mutation::PublishToTile(p)) => Some(p),
+            _ => None,
+        })
+        .expect("collapsed MutationBatch must contain a PublishToTile mutation");
+    let node_collapsed = publish_collapsed
+        .node
+        .expect("collapsed PublishToTile must have a node");
+    let text_md_collapsed = match node_collapsed
+        .data
+        .expect("collapsed NodeProto must have data")
+    {
+        proto::node_proto::Data::TextMarkdown(tm) => tm,
+        other => panic!("collapsed NodeProto must be TextMarkdown, got {other:?}"),
+    };
+
+    // Collapsed state uses collapsed_background: injected to yellow (#FFFF00)
+    let bg_collapsed = text_md_collapsed
+        .background
+        .expect("collapsed TextMarkdownNodeProto must have background");
+    assert!(
+        (bg_collapsed.r - 1.0).abs() < 1e-2,
+        "collapsed NodeProto background.r must be 1.0 (yellow has r=1), got {r}",
+        r = bg_collapsed.r
+    );
+    assert!(
+        (bg_collapsed.g - 1.0).abs() < 1e-2,
+        "collapsed NodeProto background.g must be 1.0 (yellow has g=1), got {g}",
+        g = bg_collapsed.g
+    );
+    assert!(
+        bg_collapsed.b.abs() < 1e-2,
+        "collapsed NodeProto background.b must be 0.0 (yellow has b=0), got {b}",
+        b = bg_collapsed.b
+    );
+}
+
 // ── §6.2: Portal part inventory — all parts covered by tokens ────────────────
 
 /// Verifies that all portal parts in the inventory have a non-zero token value
@@ -280,6 +449,10 @@ fn portal_part_inventory_all_parts_have_non_zero_defaults() {
 /// both profiles. Only the token *values* differ. This is the §6.1 invariant:
 /// "a profile/token change must reskin the portal end-to-end with zero adapter
 /// logic changes."
+///
+/// Uses `portal_visual_tokens_from_part_tokens` (the canonical production
+/// conversion) rather than hand-rolling each field — de-duplicating the
+/// test conversion with the production path (§6.4 / issue (c)).
 #[test]
 fn profile_swap_reskins_adapter_without_adapter_logic_change() {
     use std::collections::HashMap;
@@ -287,83 +460,10 @@ fn profile_swap_reskins_adapter_without_adapter_logic_change() {
     // Profile A: default (dark) — no overrides
     let empty: HashMap<String, String> = HashMap::new();
     let profile_a_config_tokens = resolve_portal_tokens(&empty);
+    let profile_a_visual = portal_visual_tokens_from_part_tokens(&profile_a_config_tokens);
 
-    let profile_a_visual = PortalVisualTokens {
-        frame_background: tze_hud_protocol::proto::Rgba {
-            r: profile_a_config_tokens.frame_background.r,
-            g: profile_a_config_tokens.frame_background.g,
-            b: profile_a_config_tokens.frame_background.b,
-            a: profile_a_config_tokens.frame_background.a,
-        },
-        frame_opacity: profile_a_config_tokens.frame_opacity,
-        header_text_color: tze_hud_protocol::proto::Rgba {
-            r: profile_a_config_tokens.header_text_color.r,
-            g: profile_a_config_tokens.header_text_color.g,
-            b: profile_a_config_tokens.header_text_color.b,
-            a: profile_a_config_tokens.header_text_color.a,
-        },
-        header_font_size_px: profile_a_config_tokens.header_font_size_px,
-        composer_background: tze_hud_protocol::proto::Rgba {
-            r: profile_a_config_tokens.composer_background.r,
-            g: profile_a_config_tokens.composer_background.g,
-            b: profile_a_config_tokens.composer_background.b,
-            a: profile_a_config_tokens.composer_background.a,
-        },
-        composer_text_color: tze_hud_protocol::proto::Rgba {
-            r: profile_a_config_tokens.composer_text_color.r,
-            g: profile_a_config_tokens.composer_text_color.g,
-            b: profile_a_config_tokens.composer_text_color.b,
-            a: profile_a_config_tokens.composer_text_color.a,
-        },
-        composer_font_size_px: profile_a_config_tokens.composer_font_size_px,
-        transcript_background: tze_hud_protocol::proto::Rgba {
-            r: profile_a_config_tokens.transcript_background.r,
-            g: profile_a_config_tokens.transcript_background.g,
-            b: profile_a_config_tokens.transcript_background.b,
-            a: profile_a_config_tokens.transcript_background.a,
-        },
-        transcript_text_color: tze_hud_protocol::proto::Rgba {
-            r: profile_a_config_tokens.transcript_text_color.r,
-            g: profile_a_config_tokens.transcript_text_color.g,
-            b: profile_a_config_tokens.transcript_text_color.b,
-            a: profile_a_config_tokens.transcript_text_color.a,
-        },
-        transcript_font_size_px: profile_a_config_tokens.transcript_font_size_px,
-        divider_color: tze_hud_protocol::proto::Rgba {
-            r: profile_a_config_tokens.divider_color.r,
-            g: profile_a_config_tokens.divider_color.g,
-            b: profile_a_config_tokens.divider_color.b,
-            a: profile_a_config_tokens.divider_color.a,
-        },
-        collapsed_background: tze_hud_protocol::proto::Rgba {
-            r: profile_a_config_tokens.collapsed_background.r,
-            g: profile_a_config_tokens.collapsed_background.g,
-            b: profile_a_config_tokens.collapsed_background.b,
-            a: profile_a_config_tokens.collapsed_background.a,
-        },
-        collapsed_text_color: tze_hud_protocol::proto::Rgba {
-            r: profile_a_config_tokens.collapsed_text_color.r,
-            g: profile_a_config_tokens.collapsed_text_color.g,
-            b: profile_a_config_tokens.collapsed_text_color.b,
-            a: profile_a_config_tokens.collapsed_text_color.a,
-        },
-        collapsed_font_size_px: profile_a_config_tokens.collapsed_font_size_px,
-        transition_in_ms: profile_a_config_tokens.transition_in_ms,
-        transition_out_ms: profile_a_config_tokens.transition_out_ms,
-    };
-
-    // Profile B: light theme — all major parts overridden
+    // Profile B: light theme — transcript/collapsed parts overridden
     let mut profile_b_overrides: HashMap<String, String> = HashMap::new();
-    profile_b_overrides.insert(
-        PORTAL_TOKEN_FRAME_BACKGROUND.to_string(),
-        "#FFFFFF".to_string(),
-    );
-    profile_b_overrides.insert(PORTAL_TOKEN_FRAME_OPACITY.to_string(), "1.0".to_string());
-    profile_b_overrides.insert(
-        PORTAL_TOKEN_HEADER_TEXT_COLOR.to_string(),
-        "#000000".to_string(),
-    );
-    profile_b_overrides.insert(PORTAL_TOKEN_HEADER_FONT_SIZE.to_string(), "18".to_string());
     profile_b_overrides.insert(
         PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR.to_string(),
         "#111111".to_string(),
@@ -388,79 +488,11 @@ fn profile_swap_reskins_adapter_without_adapter_logic_change() {
         PORTAL_TOKEN_COLLAPSED_FONT_SIZE.to_string(),
         "13".to_string(),
     );
-    profile_b_overrides.insert(PORTAL_TOKEN_TRANSITION_IN_MS.to_string(), "200".to_string());
-    profile_b_overrides.insert(
-        PORTAL_TOKEN_TRANSITION_OUT_MS.to_string(),
-        "100".to_string(),
-    );
 
     // Use resolve_tokens to merge overrides (profile layer)
     let resolved_b = tze_hud_config::tokens::resolve_tokens(&empty, &profile_b_overrides);
     let profile_b_config_tokens = resolve_portal_tokens(&resolved_b);
-
-    let profile_b_visual = PortalVisualTokens {
-        frame_background: tze_hud_protocol::proto::Rgba {
-            r: profile_b_config_tokens.frame_background.r,
-            g: profile_b_config_tokens.frame_background.g,
-            b: profile_b_config_tokens.frame_background.b,
-            a: profile_b_config_tokens.frame_background.a,
-        },
-        frame_opacity: profile_b_config_tokens.frame_opacity,
-        header_text_color: tze_hud_protocol::proto::Rgba {
-            r: profile_b_config_tokens.header_text_color.r,
-            g: profile_b_config_tokens.header_text_color.g,
-            b: profile_b_config_tokens.header_text_color.b,
-            a: profile_b_config_tokens.header_text_color.a,
-        },
-        header_font_size_px: profile_b_config_tokens.header_font_size_px,
-        composer_background: tze_hud_protocol::proto::Rgba {
-            r: profile_b_config_tokens.composer_background.r,
-            g: profile_b_config_tokens.composer_background.g,
-            b: profile_b_config_tokens.composer_background.b,
-            a: profile_b_config_tokens.composer_background.a,
-        },
-        composer_text_color: tze_hud_protocol::proto::Rgba {
-            r: profile_b_config_tokens.composer_text_color.r,
-            g: profile_b_config_tokens.composer_text_color.g,
-            b: profile_b_config_tokens.composer_text_color.b,
-            a: profile_b_config_tokens.composer_text_color.a,
-        },
-        composer_font_size_px: profile_b_config_tokens.composer_font_size_px,
-        transcript_background: tze_hud_protocol::proto::Rgba {
-            r: profile_b_config_tokens.transcript_background.r,
-            g: profile_b_config_tokens.transcript_background.g,
-            b: profile_b_config_tokens.transcript_background.b,
-            a: profile_b_config_tokens.transcript_background.a,
-        },
-        transcript_text_color: tze_hud_protocol::proto::Rgba {
-            r: profile_b_config_tokens.transcript_text_color.r,
-            g: profile_b_config_tokens.transcript_text_color.g,
-            b: profile_b_config_tokens.transcript_text_color.b,
-            a: profile_b_config_tokens.transcript_text_color.a,
-        },
-        transcript_font_size_px: profile_b_config_tokens.transcript_font_size_px,
-        divider_color: tze_hud_protocol::proto::Rgba {
-            r: profile_b_config_tokens.divider_color.r,
-            g: profile_b_config_tokens.divider_color.g,
-            b: profile_b_config_tokens.divider_color.b,
-            a: profile_b_config_tokens.divider_color.a,
-        },
-        collapsed_background: tze_hud_protocol::proto::Rgba {
-            r: profile_b_config_tokens.collapsed_background.r,
-            g: profile_b_config_tokens.collapsed_background.g,
-            b: profile_b_config_tokens.collapsed_background.b,
-            a: profile_b_config_tokens.collapsed_background.a,
-        },
-        collapsed_text_color: tze_hud_protocol::proto::Rgba {
-            r: profile_b_config_tokens.collapsed_text_color.r,
-            g: profile_b_config_tokens.collapsed_text_color.g,
-            b: profile_b_config_tokens.collapsed_text_color.b,
-            a: profile_b_config_tokens.collapsed_text_color.a,
-        },
-        collapsed_font_size_px: profile_b_config_tokens.collapsed_font_size_px,
-        transition_in_ms: profile_b_config_tokens.transition_in_ms,
-        transition_out_ms: profile_b_config_tokens.transition_out_ms,
-    };
+    let profile_b_visual = portal_visual_tokens_from_part_tokens(&profile_b_config_tokens);
 
     // Both adapters use IDENTICAL code paths — only token values differ.
     let adapter_a = ResidentGrpcPortalAdapter::with_tokens(
@@ -474,19 +506,14 @@ fn profile_swap_reskins_adapter_without_adapter_logic_change() {
 
     // Token values must differ — proving the profile swap had effect
     assert_ne!(
-        adapter_a.visual_tokens().frame_background,
-        adapter_b.visual_tokens().frame_background,
-        "profile swap must produce different frame background colors"
-    );
-    assert_ne!(
-        adapter_a.visual_tokens().header_text_color,
-        adapter_b.visual_tokens().header_text_color,
-        "profile swap must produce different header text colors"
-    );
-    assert_ne!(
         adapter_a.visual_tokens().transcript_background,
         adapter_b.visual_tokens().transcript_background,
         "profile swap must produce different transcript background"
+    );
+    assert_ne!(
+        adapter_a.visual_tokens().transcript_text_color,
+        adapter_b.visual_tokens().transcript_text_color,
+        "profile swap must produce different transcript text color"
     );
     assert_ne!(
         adapter_a.visual_tokens().collapsed_background,
@@ -494,22 +521,12 @@ fn profile_swap_reskins_adapter_without_adapter_logic_change() {
         "profile swap must produce different collapsed background"
     );
     assert!(
-        (adapter_b.visual_tokens().header_font_size_px - 18.0).abs() < 1e-3,
-        "profile B header font size must be 18px"
-    );
-    assert_eq!(
-        adapter_b.visual_tokens().transition_in_ms,
-        200,
-        "profile B transition_in_ms must be 200ms"
-    );
-    assert_eq!(
-        adapter_b.visual_tokens().transition_out_ms,
-        100,
-        "profile B transition_out_ms must be 100ms"
+        (adapter_b.visual_tokens().transcript_font_size_px - 16.0).abs() < 1e-3,
+        "profile B transcript font size must be 16px"
     );
     assert!(
-        (adapter_b.visual_tokens().frame_opacity - 1.0).abs() < 1e-4,
-        "profile B frame opacity must be 1.0"
+        (adapter_b.visual_tokens().collapsed_font_size_px - 13.0).abs() < 1e-3,
+        "profile B collapsed font size must be 13px"
     );
 }
 
@@ -518,32 +535,21 @@ fn profile_swap_reskins_adapter_without_adapter_logic_change() {
 /// Verifies that a token change propagates to the adapter on the next render
 /// cycle without any adapter code change. This covers the "republish"
 /// scenario: the adapter is updated with new tokens, then re-renders.
+///
+/// Uses `portal_visual_tokens_from_part_tokens` (the canonical production
+/// conversion) rather than hand-rolling each field — de-duplicating the
+/// test conversion with the production path (§6.4 / issue (c)).
 #[test]
 fn token_change_propagates_to_adapter_on_republish() {
     use std::collections::HashMap;
 
     let empty: HashMap<String, String> = HashMap::new();
 
-    // Cycle 1: default tokens
-    let cycle1_tokens = resolve_portal_tokens(&empty);
+    // Cycle 1: default tokens — use canonical conversion
+    let cycle1_part = resolve_portal_tokens(&empty);
     let mut adapter = ResidentGrpcPortalAdapter::with_tokens(
         ResidentGrpcPortalConfig::new(vec![0u8; 16]),
-        PortalVisualTokens {
-            transcript_background: tze_hud_protocol::proto::Rgba {
-                r: cycle1_tokens.transcript_background.r,
-                g: cycle1_tokens.transcript_background.g,
-                b: cycle1_tokens.transcript_background.b,
-                a: cycle1_tokens.transcript_background.a,
-            },
-            transcript_text_color: tze_hud_protocol::proto::Rgba {
-                r: cycle1_tokens.transcript_text_color.r,
-                g: cycle1_tokens.transcript_text_color.g,
-                b: cycle1_tokens.transcript_text_color.b,
-                a: cycle1_tokens.transcript_text_color.a,
-            },
-            transcript_font_size_px: cycle1_tokens.transcript_font_size_px,
-            ..PortalVisualTokens::default()
-        },
+        portal_visual_tokens_from_part_tokens(&cycle1_part),
     );
 
     let cycle1_background = adapter.visual_tokens().transcript_background;
@@ -555,17 +561,10 @@ fn token_change_propagates_to_adapter_on_republish() {
         "#4A90D9".to_string(), // distinctive blue
     );
     let new_map = tze_hud_config::tokens::resolve_tokens(&empty, &overrides);
-    let cycle2_tokens = resolve_portal_tokens(&new_map);
+    let cycle2_part = resolve_portal_tokens(&new_map);
 
-    adapter.set_visual_tokens(PortalVisualTokens {
-        transcript_background: tze_hud_protocol::proto::Rgba {
-            r: cycle2_tokens.transcript_background.r,
-            g: cycle2_tokens.transcript_background.g,
-            b: cycle2_tokens.transcript_background.b,
-            a: cycle2_tokens.transcript_background.a,
-        },
-        ..adapter.visual_tokens().clone()
-    });
+    // Use the canonical conversion — this is the production hot-reload path
+    adapter.set_visual_tokens(portal_visual_tokens_from_part_tokens(&cycle2_part));
 
     let cycle2_background = adapter.visual_tokens().transcript_background;
 

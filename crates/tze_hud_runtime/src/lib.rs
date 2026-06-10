@@ -99,6 +99,7 @@ pub mod media_admission;
 pub mod media_ingress;
 pub mod pipeline;
 pub mod portal_cadence;
+pub mod portal_tokens;
 pub mod quiet_hours;
 pub mod reload_triggers;
 pub mod runtime_context;
