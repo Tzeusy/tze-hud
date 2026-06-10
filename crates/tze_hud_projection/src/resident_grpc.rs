@@ -13,8 +13,9 @@ use tze_hud_protocol::proto::session as session_proto;
 use thiserror::Error;
 
 use crate::{
-    ContentClassification, PortalInputFeedback, PortalInputSubmission, ProjectedPortalPresentation,
-    ProjectedPortalState, ProjectionAuthority, TranscriptUnit,
+    AdapterDraftBatch, AdapterDraftNotification, ContentClassification, PortalInputFeedback,
+    PortalInputSubmission, ProjectedPortalPresentation, ProjectedPortalState, ProjectionAuthority,
+    TranscriptUnit,
 };
 
 /// Client-side materialization budget for one resident portal update.
@@ -108,12 +109,46 @@ pub enum ResidentGrpcAdapterError {
     MissingPortalTile,
 }
 
+/// Kind of draft-aware command produced by the adapter.
+///
+/// Used to distinguish draft-state update renders from full portal renders so
+/// callers can route them to the correct tile mutation path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidentGrpcDraftCommandKind {
+    /// Update the composer text/caret display to reflect a state-stream draft
+    /// notification. This is a coalesced update; the adapter discards older
+    /// notifications and renders only the latest snapshot.
+    UpdateComposerDisplay,
+    /// Process a transactional draft submission (forward to semantic inbox).
+    ProcessSubmission,
+    /// Process a transactional cancel (clear composer display).
+    ProcessCancel,
+}
+
+/// One outbound command produced by the draft notification path.
+#[derive(Debug)]
+pub struct ResidentGrpcDraftCommand {
+    pub kind: ResidentGrpcDraftCommandKind,
+    pub budget: ResidentGrpcBudgetSample,
+    /// Draft text at the time of the command (empty on cancel).
+    pub draft_text: String,
+    /// Cursor byte offset (for composer display).
+    pub cursor: usize,
+    /// Whether the draft is at capacity.
+    pub at_capacity: bool,
+    /// Sequence from the runtime draft buffer.
+    pub sequence: u64,
+}
+
 /// Stateful daemon-side adapter for one projected session's resident portal.
 #[derive(Clone, Debug)]
 pub struct ResidentGrpcPortalAdapter {
     config: ResidentGrpcPortalConfig,
     tile_id: Option<Vec<u8>>,
     next_input_sequence: u64,
+    /// Latest draft sequence seen by this adapter — used to skip stale
+    /// state-stream notifications that arrive out of order.
+    last_draft_sequence: u64,
 }
 
 impl ResidentGrpcPortalAdapter {
@@ -122,6 +157,7 @@ impl ResidentGrpcPortalAdapter {
             config,
             tile_id: None,
             next_input_sequence: 0,
+            last_draft_sequence: 0,
         }
     }
 
@@ -218,6 +254,108 @@ impl ResidentGrpcPortalAdapter {
             }),
             started,
         )
+    }
+
+    // ── Draft notification methods (hud-5jbra.4) ─────────────────────────
+    //
+    // These replace the per-keystroke composer-text republish pattern. Instead
+    // of publishing a new TextMarkdownNode on every CharacterEvent, the adapter
+    // now:
+    //   1. Calls `consume_draft_batch` with the AdapterDraftBatch it receives
+    //      from the runtime's ComposerDraft notification path.
+    //   2. For state-stream notifications: renders a `UpdateComposerDisplay`
+    //      command containing the latest draft text (for compositor display).
+    //   3. For transactional submissions: calls `submit_composer_text`.
+    //
+    // This satisfies spec §4.6: "update the cooperative projection adapter …
+    // to consume draft-state notifications instead of per-keystroke republish."
+
+    /// Consume a `AdapterDraftBatch` and produce draft commands for the adapter
+    /// to process.
+    ///
+    /// The batch may contain a coalesced state-stream notification, a
+    /// transactional submission, or a cancel. The adapter processes them in
+    /// order: state-stream notification first (for display), then
+    /// submission/cancel.
+    ///
+    /// Returns the set of commands to dispatch. State-stream commands carry
+    /// only display data (draft text, cursor); the adapter applies them locally
+    /// without a semantic inbox enqueue.
+    pub fn consume_draft_batch(
+        &mut self,
+        batch: &AdapterDraftBatch,
+    ) -> Vec<ResidentGrpcDraftCommand> {
+        let mut commands = Vec::new();
+        let started = Instant::now();
+
+        // State-stream notification: only process if sequence is newer
+        if let Some(notification) = &batch.latest {
+            if notification.sequence > self.last_draft_sequence {
+                self.last_draft_sequence = notification.sequence;
+                commands.push(ResidentGrpcDraftCommand {
+                    kind: ResidentGrpcDraftCommandKind::UpdateComposerDisplay,
+                    budget: sample_budget(started, RESIDENT_PORTAL_UPDATE_BUILD_BUDGET_US),
+                    draft_text: notification.text.clone(),
+                    cursor: notification.cursor,
+                    at_capacity: notification.at_capacity,
+                    sequence: notification.sequence,
+                });
+            }
+        }
+
+        // Transactional cancel
+        if let Some(cancel) = &batch.cancel {
+            commands.push(ResidentGrpcDraftCommand {
+                kind: ResidentGrpcDraftCommandKind::ProcessCancel,
+                budget: sample_budget(started, RESIDENT_PORTAL_INPUT_FEEDBACK_BUDGET_US),
+                draft_text: String::new(),
+                cursor: 0,
+                at_capacity: false,
+                sequence: cancel.sequence,
+            });
+        }
+
+        // Transactional submission (handled separately; caller should also
+        // call `submit_composer_text` with the submission text)
+        if let Some(submission) = &batch.submission {
+            commands.push(ResidentGrpcDraftCommand {
+                kind: ResidentGrpcDraftCommandKind::ProcessSubmission,
+                budget: sample_budget(started, RESIDENT_PORTAL_INPUT_FEEDBACK_BUDGET_US),
+                draft_text: submission.text.clone(),
+                cursor: submission.text.len(),
+                at_capacity: false,
+                sequence: submission.sequence,
+            });
+        }
+
+        commands
+    }
+
+    /// Build a draft-state notification from an `AdapterDraftNotification`
+    /// without consuming a full batch (useful for direct notification delivery).
+    ///
+    /// Returns `None` if the notification is stale (sequence ≤ last seen).
+    pub fn apply_draft_notification(
+        &mut self,
+        notification: &AdapterDraftNotification,
+    ) -> Option<ResidentGrpcDraftCommand> {
+        if notification.sequence <= self.last_draft_sequence {
+            return None;
+        }
+        self.last_draft_sequence = notification.sequence;
+        Some(ResidentGrpcDraftCommand {
+            kind: ResidentGrpcDraftCommandKind::UpdateComposerDisplay,
+            budget: sample_budget(Instant::now(), RESIDENT_PORTAL_UPDATE_BUILD_BUDGET_US),
+            draft_text: notification.text.clone(),
+            cursor: notification.cursor,
+            at_capacity: notification.at_capacity,
+            sequence: notification.sequence,
+        })
+    }
+
+    /// Last draft sequence seen by this adapter.
+    pub fn last_draft_sequence(&self) -> u64 {
+        self.last_draft_sequence
     }
 
     /// Map submitted HUD composer text to the cooperative semantic inbox. This

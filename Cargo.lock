@@ -4002,10 +4002,12 @@ dependencies = [
 name = "tze_hud_input"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
  "tze_hud_scene",
  "tze_hud_telemetry",
+ "unicode-segmentation",
 ]
 
 [[package]]

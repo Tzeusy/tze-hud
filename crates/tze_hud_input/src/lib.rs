@@ -13,6 +13,10 @@
 //!   CharacterEvent) per RFC 0004 §7.4
 //! - `command`    — abstract command input model (NAVIGATE_NEXT … SCROLL_DOWN)
 //!   per RFC 0004 §10
+//! - [`composer_draft`] — runtime-owned bounded plain-text draft buffer for
+//!   portal composer regions with local echo, caret/selection/word-delete/capped
+//!   paste, coalescible state-stream notifications, and transactional submit
+//!   (hud-5jbra.4)
 //! - [`pointer`] — rich pointer event types (PointerDownEvent, ClickEvent, etc.)
 //! - [`events`] — HitTestResult, RouteTarget, SceneLocalPatch, InputEnvelope, EventBatch
 //! - [`hit_test`] — headless-testable hit-test pipeline
@@ -98,6 +102,7 @@ pub use scroll::{
 };
 
 pub mod command;
+pub mod composer_draft;
 pub mod drag;
 pub mod focus;
 pub mod focus_tree;
@@ -106,6 +111,11 @@ pub mod keyboard;
 pub use command::{
     CommandAction, CommandDispatch, CommandInputEvent, CommandProcessor, CommandSource,
     RawCommandEvent,
+};
+pub use composer_draft::{
+    ComposerDraft, DEFAULT_DRAFT_CAP, DraftCancel, DraftNotificationBatch, DraftStateNotification,
+    DraftSubmission, EditOutcome, MAX_DRAFT_BYTES, Selection, truncate_at_utf8_boundary,
+    word_delete_end, word_delete_start,
 };
 pub use focus::{
     FocusGainedEvent, FocusLostEvent, FocusLostReason, FocusManager, FocusRequest, FocusResult,

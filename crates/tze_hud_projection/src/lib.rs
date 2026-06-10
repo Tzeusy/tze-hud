@@ -973,6 +973,118 @@ pub struct ProjectedPortalState {
     pub pending_input_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_input_feedback: Option<PortalInputFeedback>,
+    /// Latest batched adapter draft notification. Present only when the
+    /// composer is focused and a draft change has occurred since the last
+    /// adapter delivery. The adapter consumes this batch instead of
+    /// republishing the composer text on every keystroke.
+    ///
+    /// Spec §4.6: adapter consumes draft-state notifications rather than
+    /// per-keystroke republish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_batch: Option<AdapterDraftBatch>,
+}
+
+// ─── Composer draft notification types (hud-5jbra.4) ─────────────────────────
+
+/// Adapter-facing coalescible draft-state notification (state-stream class).
+///
+/// Delivered to the owning adapter to replace per-keystroke composer-text
+/// republish. The adapter MAY receive a single latest-snapshot rather than
+/// per-keystroke events; coalescing is the caller's responsibility.
+///
+/// Spec: §4.3 — "state-stream traffic, coalescible to the latest draft snapshot."
+/// Spec: §4.6 — "update the cooperative projection adapter … to consume
+/// draft-state notifications instead of per-keystroke republish."
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterDraftNotification {
+    /// Current draft text (never exceeds the configured draft byte cap).
+    pub text: String,
+    /// Cursor byte offset into `text`.
+    pub cursor: usize,
+    /// Selection anchor byte offset. Equal to `cursor` when no selection.
+    pub selection_anchor: usize,
+    /// True when the draft is at or over its byte cap.
+    pub at_capacity: bool,
+    /// Monotonic sequence from the runtime draft buffer.
+    pub sequence: u64,
+}
+
+/// Adapter-facing transactional draft submission.
+///
+/// Delivered exactly once when the viewer submits the draft. The submitted
+/// text equals the local buffer at the moment of submission; it is the
+/// authoritative content to forward to the owning adapter's semantic inbox.
+///
+/// Spec: §4.3 — "submission and cancel SHALL remain transactional."
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterDraftSubmission {
+    /// Submitted text (equals local buffer at submit time).
+    pub text: String,
+    /// Sequence at submit time.
+    pub sequence: u64,
+}
+
+/// Adapter-facing transactional draft cancel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterDraftCancel {
+    pub sequence: u64,
+}
+
+/// Batched adapter notification for state-stream coalescing.
+///
+/// The adapter consumes `latest` (latest-wins) for real-time display of draft
+/// state, and `submission` / `cancel` for transactional handling. Older
+/// state-stream entries within the same batch window are discarded.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AdapterDraftBatch {
+    /// Latest draft snapshot (coalescible — newer replaces older).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<AdapterDraftNotification>,
+    /// Pending transactional submission (first wins; not coalescible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission: Option<AdapterDraftSubmission>,
+    /// Pending transactional cancel (first wins; not coalescible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<AdapterDraftCancel>,
+}
+
+impl AdapterDraftBatch {
+    /// Create an empty batch.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Coalesce a state-stream notification (latest-wins).
+    pub fn coalesce_state(&mut self, notification: AdapterDraftNotification) {
+        match &self.latest {
+            Some(existing) if notification.sequence > existing.sequence => {
+                self.latest = Some(notification);
+            }
+            None => {
+                self.latest = Some(notification);
+            }
+            _ => {}
+        }
+    }
+
+    /// Record a transactional submission (first wins).
+    pub fn record_submission(&mut self, sub: AdapterDraftSubmission) {
+        if self.submission.is_none() {
+            self.submission = Some(sub);
+        }
+    }
+
+    /// Record a transactional cancel (first wins).
+    pub fn record_cancel(&mut self, cancel: AdapterDraftCancel) {
+        if self.cancel.is_none() {
+            self.cancel = Some(cancel);
+        }
+    }
+
+    /// True if the batch contains anything to deliver.
+    pub fn is_empty(&self) -> bool {
+        self.latest.is_none() && self.submission.is_none() && self.cancel.is_none()
+    }
 }
 
 /// How a provider-neutral LLM session entered projection authority.
@@ -2986,6 +3098,10 @@ fn projected_portal_state(
                 }
             })
         }),
+        // draft_batch is populated externally by the adapter (daemon side) when
+        // the runtime delivers draft notifications. The authority does not own the
+        // draft buffer state — the runtime's ComposerDraft does.
+        draft_batch: None,
     }
 }
 
