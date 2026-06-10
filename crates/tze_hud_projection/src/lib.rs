@@ -762,9 +762,15 @@ pub struct PortalTranscriptUpdate {
     pub visible_transcript_bytes: usize,
     pub coalesced_output_count: usize,
     pub unread_output_count: usize,
-    /// Wall-clock timestamp (µs) when the first pending append was submitted via
-    /// `handle_publish_output`. Populated from `PortalCadenceCoalescer::peek_submitted_at`
-    /// for arrival→present latency measurement (tasks.md §5.7, hud-zmt1a).
+    /// Wall-clock timestamp (µs) when the most-recently-coalesced pending append
+    /// was submitted via `handle_publish_output`. Populated from
+    /// `PortalCadenceCoalescer::peek_submitted_at` for arrival→present latency
+    /// measurement (tasks.md §5.7, hud-zmt1a).
+    ///
+    /// Because the coalescer uses latest-wins semantics, this reflects the timestamp
+    /// of the most recent accepted append, not the first one. If multiple appends
+    /// are coalesced before the next portal update, this advances on each accepted
+    /// append.
     ///
     /// Zero when no coalescer entry is found (e.g., direct `take_due_portal_update`
     /// call without going through `handle_publish_output`).
@@ -1969,7 +1975,9 @@ pub struct ProjectionAuthority {
     /// so that `handle_publish_output` → `take_due_portal_update` respects
     /// round-robin cross-portal fairness (tasks.md §5.1).
     ///
-    /// Portal keys in the coalescer mirror `portal_id` from `ProjectionSession`.
+    /// Coalescer keys are `projection_id` values from the request envelope
+    /// (i.e. `request.envelope.projection_id`), not the internal `portal_id`
+    /// field on `ProjectionSession`.
     cadence_coalescer: PortalCadenceCoalescer,
 }
 
@@ -2535,8 +2543,16 @@ impl ProjectionAuthority {
                             max_visible_transcript_bytes,
                             max_portal_updates_per_second,
                         );
-                        // Capture for cadence coalescer: sequence is next-1 after
-                        // append_transcript_unit increments next_transcript_sequence.
+                        // Capture for cadence coalescer. When append_transcript_unit
+                        // inserts a new TranscriptUnit it increments
+                        // next_transcript_sequence, so `saturating_sub(1)` gives the
+                        // newly assigned sequence. When it returns early via the
+                        // coalesce-key in-place update path, next_transcript_sequence is
+                        // NOT incremented — the sequence captured here equals the last
+                        // drained or pending sequence, which the coalescer will drop as
+                        // stale. This is intentional: the portal is already registered in
+                        // service_order from the prior append; no new scheduling entry is
+                        // needed for a rate-limited in-place update.
                         cadence_append = Some((
                             request.envelope.projection_id.clone(),
                             session.next_transcript_sequence.saturating_sub(1),
@@ -2564,7 +2580,8 @@ impl ProjectionAuthority {
                         max_visible_transcript_bytes,
                         max_portal_updates_per_second,
                     );
-                    // Capture for cadence coalescer.
+                    // Capture for cadence coalescer. See note above re: coalesce-key
+                    // early-return path and stale-sequence drop semantics.
                     cadence_append = Some((
                         request.envelope.projection_id.clone(),
                         session.next_transcript_sequence.saturating_sub(1),
