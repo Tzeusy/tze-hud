@@ -117,34 +117,6 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
                 str(output_dir / "youtube_source_evidence.html"),
             )
 
-    def test_remote_sidecar_launch_uses_interactive_script_transport(self):
-        args = exemplar.build_parser().parse_args(
-            [
-                "youtube-sidecar",
-                "--windows-host",
-                "tzehouse-windows.parrot-hen.ts.net",
-                "--windows-user",
-                "tzeus",
-                "--ssh-key",
-                "~/.ssh/ecdsa_home",
-            ]
-        )
-
-        with mock.patch.object(
-            exemplar,
-            "_run_remote_powershell_script_file",
-            return_value=subprocess.CompletedProcess(args=[], returncode=0),
-        ) as run_remote:
-            evidence = exemplar.launch_youtube_sidecar(args)
-
-        run_remote.assert_called_once()
-        _call_args, call_kwargs = run_remote.call_args
-        self.assertEqual(call_kwargs["prefix"], "tze_hud_youtube_sidecar")
-        self.assertEqual(
-            evidence["launched_by"],
-            "ssh:tzeus@tzehouse-windows.parrot-hen.ts.net",
-        )
-
     def test_bridge_dry_run_evidence_does_not_claim_live_frames(self):
         sidecar = {
             "video_id": exemplar.YOUTUBE_VIDEO_ID,
@@ -327,6 +299,55 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertNotIn("-LiteralPath", mkdir_decoded)
         for cmd in encoded_commands:
             self.assertIn("-NonInteractive", cmd)
+
+    def test_remote_youtube_sidecar_uses_short_visible_task_action(self):
+        args = exemplar.build_parser().parse_args(
+            [
+                "youtube-sidecar",
+                "--windows-host",
+                "tzehouse-windows.parrot-hen.ts.net",
+                "--windows-user",
+                "tzeus",
+                "--ssh-key",
+                "~/.ssh/ecdsa_home",
+            ]
+        )
+
+        commands = []
+
+        def fake_run(cmd, **_kwargs):
+            commands.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory(dir=".") as tmpdir, mock.patch.object(
+            exemplar.subprocess,
+            "run",
+            side_effect=fake_run,
+        ):
+            args.output_dir = tmpdir
+            evidence = exemplar.launch_youtube_sidecar(args)
+
+        create_commands = [
+            cmd for cmd in commands if cmd[:1] == ["ssh"] and "/Create" in cmd
+        ]
+        self.assertTrue(create_commands)
+        create_command = create_commands[0]
+        task_command = create_command[create_command.index("/TR") + 1]
+        self.assertTrue(task_command.startswith('"'))
+        self.assertTrue(task_command.endswith('"'))
+        task_command = task_command.strip('"')
+        self.assertIn("-Command Start-Process", task_command)
+        self.assertIn("C:\\tze_hud\\tmp\\tze_hud_youtube_sidecar_", task_command)
+        self.assertLess(len(task_command), 261)
+        self.assertEqual(
+            evidence["launched_by"],
+            "ssh:tzeus@tzehouse-windows.parrot-hen.ts.net",
+        )
 
     def test_windows_text_fallback_accepts_bomless_utf16le(self):
         with tempfile.TemporaryDirectory(dir=".") as tmpdir:

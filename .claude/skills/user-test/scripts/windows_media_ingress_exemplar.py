@@ -274,18 +274,95 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
     launched_by = "dry-run"
     if not args.dry_run:
         if args.windows_host:
+            run_id = uuid.uuid4().hex
+            remote_dir = f"C:/tze_hud/tmp/tze_hud_youtube_sidecar_{run_id}"
+            remote_dir_arg = validate_windows_remote_tmp_path(
+                "remote_dir", remote_dir.replace("/", "\\")
+            )
+            remote_html_path = f"{remote_dir}/source.html"
+            remote_html_arg = validate_windows_remote_tmp_path(
+                "remote_html_path", remote_html_path.replace("/", "\\")
+            )
             remote_html_b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
-            remote_script = (
+            write_script = (
+                "$ErrorActionPreference='Stop';"
+                f"New-Item -ItemType Directory -Force -Path '{remote_dir_arg}' | Out-Null;"
                 f"$htmlBytes=[Convert]::FromBase64String('{remote_html_b64}');"
                 "$html=[Text.Encoding]::UTF8.GetString($htmlBytes);"
-                "$path=Join-Path $env:TEMP 'tze_hud_youtube_source_evidence.html';"
-                "Set-Content -LiteralPath $path -Value $html -Encoding UTF8;"
-                "Start-Process -FilePath $path"
+                f"Set-Content -LiteralPath '{remote_html_arg}' -Value $html -Encoding UTF8"
             )
-            _run_remote_powershell_script_file(
-                args,
-                remote_script,
-                prefix="tze_hud_youtube_sidecar",
+            write_cmd = _ssh_base_command(args)
+            write_cmd.extend(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand",
+                    powershell_encoded_command(write_script),
+                ]
+            )
+            subprocess.run(
+                write_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            task_name = f"TzeHudYoutubeSidecar{run_id[:12]}"
+            task_command = (
+                "powershell.exe -NoProfile -ExecutionPolicy Bypass "
+                f"-Command Start-Process {remote_html_arg}"
+            )
+            delete_cmd = _ssh_base_command(args)
+            delete_cmd.extend(["schtasks", "/Delete", "/F", "/TN", task_name])
+            subprocess.run(
+                delete_cmd,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            create_cmd = _ssh_base_command(args)
+            create_cmd.extend(
+                [
+                    "schtasks",
+                    "/Create",
+                    "/F",
+                    "/TN",
+                    task_name,
+                    "/SC",
+                    "ONCE",
+                    "/ST",
+                    "23:59",
+                    "/IT",
+                    "/RL",
+                    "HIGHEST",
+                    "/TR",
+                    f'"{task_command}"',
+                ]
+            )
+            subprocess.run(
+                create_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            run_cmd = _ssh_base_command(args)
+            run_cmd.extend(["schtasks", "/Run", "/TN", task_name])
+            subprocess.run(
+                run_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            subprocess.run(
+                delete_cmd,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
             launched_by = f"ssh:{args.windows_user}@{args.windows_host}"
         else:
