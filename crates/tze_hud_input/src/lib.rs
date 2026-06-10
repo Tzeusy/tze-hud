@@ -486,12 +486,15 @@ impl InputProcessor {
             let _ = scene.set_tile_scroll_offset_local(tile_id, offset_x, offset_y);
         }
 
-        // Sync follow-tail anchor to the scene unconditionally — even a no-change
-        // append might be the first call that establishes the at-tail state in the
-        // scene (which defaults `true` but is not yet stored explicitly).
-        let at_tail = self.scroll_state.follow_tail_anchor(tile_id)
-            == crate::scroll::FollowTailAnchor::AtTail;
-        scene.set_tile_follow_tail_at_tail(tile_id, at_tail);
+        // Sync follow-tail anchor to the scene, but only if the tile is actually
+        // registered as scrollable.  Calling this for a non-scrollable tile would
+        // wrongly force tile_follow_tail_at_tail = true (the default for unregistered
+        // ScrollState entries) and switch its ellipsis truncation to TailAnchored.
+        if self.scroll_state.is_scrollable(tile_id) {
+            let at_tail = self.scroll_state.follow_tail_anchor(tile_id)
+                == crate::scroll::FollowTailAnchor::AtTail;
+            scene.set_tile_follow_tail_at_tail(tile_id, at_tail);
+        }
 
         changed
     }
