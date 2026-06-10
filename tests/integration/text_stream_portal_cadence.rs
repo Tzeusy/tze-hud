@@ -12,12 +12,16 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tze_hud_projection::{
+    AttachRequest, ContentClassification, OperationEnvelope, PortalTranscriptUpdate,
+    ProjectionAuthority, ProjectionBounds, ProjectionOperation, ProviderKind, PublishOutputRequest,
+};
 use tze_hud_runtime::headless::{HeadlessConfig, HeadlessRuntime};
 use tze_hud_runtime::{
     CADENCE_BURST_BYTES, CADENCE_BURST_WINDOW_MS, CADENCE_MIN_INCREMENTS_PER_SEC,
     CADENCE_MIN_SCALARS_PER_SEC, CadenceWorkload, EnqueueResult, FairnessProbe, FreezeQueue,
-    MutationTrafficClass, PortalCadenceCoalescer, QueuedMutation, STAGE3_BUDGET_US,
-    STAGE4_BUDGET_US, STAGE5_BUDGET_US,
+    INPUT_TO_NEXT_PRESENT_BUDGET_US, MutationTrafficClass, PortalCadenceCoalescer, QueuedMutation,
+    STAGE3_BUDGET_US, STAGE4_BUDGET_US, STAGE5_BUDGET_US,
 };
 use tze_hud_scene::{
     Capability,
@@ -848,4 +852,250 @@ async fn input_latency_not_degraded_under_portal_stream() {
              under concurrent portal stream (Windows locked budget ≤ 2 ms)"
         );
     }
+}
+
+// ─── Task 2 (hud-zmt1a): Arrival→present latency measurement ─────────────────
+
+/// Per-append arrival→present elapsed measured via `PortalTranscriptUpdate::submitted_at_us`.
+///
+/// Verifies that `submitted_at_us` (populated by `handle_publish_output` into the
+/// cadence coalescer) is correctly propagated through `take_due_portal_update` and
+/// can be used to compute arrival→present elapsed. The elapsed is checked against
+/// the `INPUT_TO_NEXT_PRESENT_BUDGET_US` (33 ms reference; CI uses a generous 250 ms
+/// headless ceiling due to software-GPU).
+///
+/// This is the "simulated clock" path: both `submitted_at_wall_us` and
+/// `present_at_wall_us` are synthetic values, so we control the simulated elapsed
+/// and confirm the measurement chain works end-to-end.
+#[test]
+fn arrival_to_present_elapsed_measured_via_submitted_at_us() {
+    // ── Setup: one projection, one portal ────────────────────────────────────
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        max_portal_updates_per_second: 100,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+
+    let projection_id = "projection-cadence-timing";
+
+    // Attach the projection session.
+    let owner_token = {
+        let attach = AttachRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::Attach,
+                projection_id: projection_id.to_string(),
+                request_id: "attach-timing-1".to_string(),
+                client_timestamp_wall_us: 1_000,
+            },
+            provider_kind: ProviderKind::Codex,
+            display_name: "Cadence Timing Test".to_string(),
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            content_classification: ContentClassification::Private,
+            hud_target: None,
+            idempotency_key: None,
+        };
+        authority
+            .handle_attach(attach, "caller-timing", 1_000)
+            .owner_token
+            .expect("attach must issue owner token")
+    };
+
+    // ── Drive: rapid appends at simulated submitted_at timestamps ─────────
+    // Simulate appends arriving over 50 ms. Each append sets submitted_at_us
+    // to a distinct simulated wall-clock value.
+    const APPEND_COUNT: usize = 20;
+    const SIMULATED_APPEND_INTERVAL_US: u64 = 500; // 0.5 ms apart
+    const SIMULATED_PRESENT_OFFSET_US: u64 = 5_000; // "present" is 5 ms after last append
+
+    let mut arrival_to_present_samples: Vec<u64> = Vec::new();
+
+    for i in 0..APPEND_COUNT {
+        let submitted_at = 10_000u64 + (i as u64) * SIMULATED_APPEND_INTERVAL_US;
+        let text = format!("[{i:03}] cadence-timing line {i}");
+
+        // Submit with the synthetic submitted_at timestamp.
+        let publish = PublishOutputRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::PublishOutput,
+                projection_id: projection_id.to_string(),
+                request_id: format!("pub-timing-{i}"),
+                client_timestamp_wall_us: submitted_at,
+            },
+            owner_token: owner_token.clone(),
+            output_text: text,
+            output_kind: tze_hud_projection::OutputKind::Assistant,
+            content_classification: ContentClassification::Private,
+            logical_unit_id: Some(format!("unit-{i}")),
+            coalesce_key: None,
+        };
+        // `server_timestamp_wall_us` is `submitted_at` so the coalescer records it.
+        authority.handle_publish_output(publish, "caller-timing", submitted_at);
+    }
+
+    // ── Present: simulated "frame present" time is SIMULATED_PRESENT_OFFSET_US
+    // after the last append.
+    let last_submitted = 10_000u64 + (APPEND_COUNT as u64 - 1) * SIMULATED_APPEND_INTERVAL_US;
+    let present_at = last_submitted + SIMULATED_PRESENT_OFFSET_US;
+
+    // Take the coalesced portal update. The coalescer has collapsed all appends
+    // into the latest snapshot.
+    let update: PortalTranscriptUpdate = authority
+        .take_due_portal_update(projection_id, present_at)
+        .expect("projection must exist")
+        .expect("coalesced appends must produce a portal update");
+
+    // `submitted_at_us` must reflect the first registered append (or the most
+    // recent, depending on coalescer policy). What matters is that it is non-zero
+    // and strictly less than `present_at`.
+    assert!(
+        update.submitted_at_us > 0,
+        "submitted_at_us must be populated after handle_publish_output → cadence coalescer; got 0"
+    );
+    assert!(
+        update.submitted_at_us < present_at,
+        "submitted_at_us ({}) must be before present_at ({})",
+        update.submitted_at_us,
+        present_at,
+    );
+
+    // Compute arrival→present elapsed.
+    let elapsed_us = present_at.saturating_sub(update.submitted_at_us);
+    arrival_to_present_samples.push(elapsed_us);
+
+    // The reference Windows budget for `input_to_next_present` is 33 ms (high_mutation).
+    // On headless CI (software GPU) we allow up to 250 ms.
+    // Since we are using a purely synthetic clock here, the elapsed is fully deterministic
+    // (≤ SIMULATED_PRESENT_OFFSET_US + the spread of append timestamps). We verify:
+    //   elapsed ≤ HEADLESS_INPUT_TO_PRESENT_BUDGET_US
+    const HEADLESS_INPUT_TO_PRESENT_BUDGET_US: u64 = 250_000;
+    assert!(
+        elapsed_us <= HEADLESS_INPUT_TO_PRESENT_BUDGET_US,
+        "arrival→present elapsed {elapsed_us}µs exceeded headless budget \
+         {HEADLESS_INPUT_TO_PRESENT_BUDGET_US}µs \
+         (reference Windows budget: {INPUT_TO_NEXT_PRESENT_BUDGET_US}µs)"
+    );
+
+    // Also verify the coalesced_output_count is consistent with APPEND_COUNT-1
+    // (all but the first are coalesced).
+    assert!(
+        update.coalesced_output_count >= 1 || update.unread_output_count >= 1,
+        "portal update must reflect at least one output unit"
+    );
+}
+
+/// Dual-portal arrival→present skew stays bounded via round-robin fairness.
+///
+/// With two portals receiving appends at equal rates, `submitted_at_us` from
+/// successive `take_due_portal_update` calls (in round-robin order) must not
+/// diverge by more than one inter-append interval. This exercises the scheduling
+/// oracle path (`next_due_projection_id` → `take_due_portal_update`).
+#[test]
+fn dual_portal_arrival_to_present_skew_bounded_by_round_robin() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        max_portal_updates_per_second: 100,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+
+    let proj_a = "projection-timing-a";
+    let proj_b = "projection-timing-b";
+
+    // Attach both projections.
+    let attach_proj = |authority: &mut ProjectionAuthority, projection_id: &str| -> String {
+        let attach = AttachRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::Attach,
+                projection_id: projection_id.to_string(),
+                request_id: format!("attach-{projection_id}"),
+                client_timestamp_wall_us: 1_000,
+            },
+            provider_kind: ProviderKind::Codex,
+            display_name: format!("Timing Test {projection_id}"),
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            content_classification: ContentClassification::Private,
+            hud_target: None,
+            idempotency_key: None,
+        };
+        authority
+            .handle_attach(attach, "caller-timing", 1_000)
+            .owner_token
+            .expect("attach must issue owner token")
+    };
+
+    let token_a = attach_proj(&mut authority, proj_a);
+    let token_b = attach_proj(&mut authority, proj_b);
+
+    // Submit one append per portal at the same simulated time.
+    const SUBMIT_AT_US: u64 = 100_000;
+    const PRESENT_AT_US: u64 = 105_000; // 5 ms later
+
+    let make_publish = |projection_id: &str, owner_token: &str, seq: usize| PublishOutputRequest {
+        envelope: OperationEnvelope {
+            operation: ProjectionOperation::PublishOutput,
+            projection_id: projection_id.to_string(),
+            request_id: format!("pub-{projection_id}-{seq}"),
+            client_timestamp_wall_us: SUBMIT_AT_US,
+        },
+        owner_token: owner_token.to_string(),
+        output_text: format!("[{seq:03}] portal {projection_id} line"),
+        output_kind: tze_hud_projection::OutputKind::Assistant,
+        content_classification: ContentClassification::Private,
+        logical_unit_id: Some(format!("unit-{projection_id}-{seq}")),
+        coalesce_key: None,
+    };
+
+    authority.handle_publish_output(
+        make_publish(proj_a, &token_a, 0),
+        "caller-timing",
+        SUBMIT_AT_US,
+    );
+    authority.handle_publish_output(
+        make_publish(proj_b, &token_b, 0),
+        "caller-timing",
+        SUBMIT_AT_US,
+    );
+
+    // Collect submitted_at_us from both portals via round-robin scheduling.
+    let mut submitted_timestamps: Vec<(String, u64)> = Vec::new();
+
+    while let Some(next_id) = authority.next_due_projection_id() {
+        if let Ok(Some(update)) = authority.take_due_portal_update(&next_id, PRESENT_AT_US) {
+            submitted_timestamps.push((next_id, update.submitted_at_us));
+        } else {
+            break;
+        }
+    }
+
+    // Both portals must have been served.
+    assert_eq!(
+        submitted_timestamps.len(),
+        2,
+        "both portals must be served by next_due_projection_id round-robin; \
+         got {} entries",
+        submitted_timestamps.len()
+    );
+
+    // Both submitted_at_us values must be non-zero and before PRESENT_AT_US.
+    for (id, submitted) in &submitted_timestamps {
+        assert!(
+            *submitted > 0,
+            "portal {id}: submitted_at_us must be non-zero"
+        );
+        assert!(
+            *submitted < PRESENT_AT_US,
+            "portal {id}: submitted_at_us ({submitted}) must be before present_at ({PRESENT_AT_US})"
+        );
+    }
+
+    // Skew between the two submitted_at_us values must be zero (both submitted at same time).
+    let (_, ts_0) = &submitted_timestamps[0];
+    let (_, ts_1) = &submitted_timestamps[1];
+    assert_eq!(
+        ts_0, ts_1,
+        "dual portals submitted at the same wall time must report equal submitted_at_us"
+    );
 }

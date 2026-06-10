@@ -10,6 +10,14 @@
 #[cfg(feature = "resident-grpc")]
 pub mod resident_grpc;
 
+/// Portal cadence coalescing with cross-portal fairness.
+///
+/// Lives here (rather than in `tze_hud_runtime`) so `ProjectionAuthority` can
+/// hold a `PortalCadenceCoalescer` without a circular crate dependency.
+/// `tze_hud_runtime` re-exports all public items from this module.
+pub mod portal_cadence;
+
+use crate::portal_cadence::PortalCadenceCoalescer;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::{Child, Command, Stdio};
@@ -754,6 +762,13 @@ pub struct PortalTranscriptUpdate {
     pub visible_transcript_bytes: usize,
     pub coalesced_output_count: usize,
     pub unread_output_count: usize,
+    /// Wall-clock timestamp (µs) when the first pending append was submitted via
+    /// `handle_publish_output`. Populated from `PortalCadenceCoalescer::peek_submitted_at`
+    /// for arrival→present latency measurement (tasks.md §5.7, hud-zmt1a).
+    ///
+    /// Zero when no coalescer entry is found (e.g., direct `take_due_portal_update`
+    /// call without going through `handle_publish_output`).
+    pub submitted_at_us: u64,
 }
 
 /// Compact memory-only state summary that excludes transcript text, pending
@@ -1948,6 +1963,14 @@ pub struct ProjectionAuthority {
     sessions: HashMap<String, ProjectionSession>,
     operator_authority_verifier: Option<String>,
     audit_log: Vec<ProjectionAuditRecord>,
+    /// Cross-portal cadence coalescer (hud-zmt1a).
+    ///
+    /// Wires `PortalCadenceCoalescer` into the live streaming presentation path
+    /// so that `handle_publish_output` → `take_due_portal_update` respects
+    /// round-robin cross-portal fairness (tasks.md §5.1).
+    ///
+    /// Portal keys in the coalescer mirror `portal_id` from `ProjectionSession`.
+    cadence_coalescer: PortalCadenceCoalescer,
 }
 
 impl ProjectionAuthority {
@@ -1958,6 +1981,7 @@ impl ProjectionAuthority {
             sessions: HashMap::new(),
             operator_authority_verifier: None,
             audit_log: Vec::new(),
+            cadence_coalescer: PortalCadenceCoalescer::new(),
         })
     }
 
@@ -2215,6 +2239,15 @@ impl ProjectionAuthority {
     ) -> Result<Option<PortalTranscriptUpdate>, ProjectionErrorCode> {
         let max_updates = self.bounds.max_portal_updates_per_second;
         let max_visible = self.bounds.max_visible_transcript_bytes;
+
+        // Peek the submission timestamp from the cadence coalescer before
+        // consuming the session borrow. This captures the arrival time of the
+        // append for arrival→present latency measurement (hud-zmt1a, tasks.md §5.7).
+        let submitted_at_us = self
+            .cadence_coalescer
+            .peek_submitted_at(projection_id)
+            .unwrap_or(0);
+
         let session = self
             .sessions
             .get_mut(projection_id)
@@ -2239,21 +2272,63 @@ impl ProjectionAuthority {
         session.unread_output_count = 0;
         session.portal_update_pending = false;
         session.last_publish_portal_update_ready = false;
+
+        // Drain the coalescer entry for this portal (marks it as served).
+        // The coalescer snapshot payload is unused here; transcript content
+        // comes from the session. The drain records the sequence for the
+        // post-drain stale-sequence guard.
+        let _ = self.cadence_coalescer.take_snapshot(projection_id);
+
         Ok(Some(PortalTranscriptUpdate {
             projection_id: projection_id.to_string(),
             visible_transcript,
             visible_transcript_bytes,
             coalesced_output_count,
             unread_output_count,
+            submitted_at_us,
         }))
     }
 
+    /// Return the next projection ID that has a pending portal update, in
+    /// round-robin fairness order (cross-portal fairness, tasks.md §5.1).
+    ///
+    /// Returns `None` if no portal has a pending update in the coalescer.
+    ///
+    /// Use this when driving multiple concurrent portals to ensure no portal
+    /// is starved: call `next_due_projection_id()` to pick the portal, then
+    /// `take_due_portal_update(id, ...)` to materialize the update.
+    pub fn next_due_projection_id(&mut self) -> Option<String> {
+        self.cadence_coalescer.next_ready_portal()
+    }
+
+    /// Peek the submission timestamp (µs) of the pending coalescer entry for
+    /// `projection_id`. Returns `None` if no pending entry exists.
+    ///
+    /// Used by the cadence harness to measure per-append arrival→present elapsed
+    /// before consuming the entry with `take_due_portal_update`.
+    pub fn peek_portal_submitted_at(&self, projection_id: &str) -> Option<u64> {
+        self.cadence_coalescer.peek_submitted_at(projection_id)
+    }
+
     pub fn expire_projection(&mut self, projection_id: &str) -> bool {
+        self.cadence_coalescer.remove_portal(projection_id);
         self.sessions.remove(projection_id).is_some()
     }
 
     pub fn expire_token_expired_projections(&mut self, server_timestamp_wall_us: u64) -> usize {
         let before = self.sessions.len();
+        // Collect expired IDs first so we can clean up the coalescer.
+        let expired: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                server_timestamp_wall_us >= session.owner_token_expires_at_wall_us
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            self.cadence_coalescer.remove_portal(id);
+        }
         self.sessions
             .retain(|_, session| server_timestamp_wall_us < session.owner_token_expires_at_wall_us);
         before - self.sessions.len()
@@ -2430,6 +2505,12 @@ impl ProjectionAuthority {
         let max_seen_logical_units = self.bounds.max_seen_logical_units;
         let max_visible_transcript_bytes = self.bounds.max_visible_transcript_bytes;
         let max_portal_updates_per_second = self.bounds.max_portal_updates_per_second;
+
+        // Collect (projection_id, sequence) for cadence coalescer wiring after the
+        // session borrow is released. Set to `Some(...)` only when an append is
+        // actually stored (not on idempotent duplicate or auth failure).
+        let mut cadence_append: Option<(String, u64)> = None;
+
         let response = match self.authorize_owner(
             &request.envelope,
             &request.owner_token,
@@ -2454,6 +2535,12 @@ impl ProjectionAuthority {
                             max_visible_transcript_bytes,
                             max_portal_updates_per_second,
                         );
+                        // Capture for cadence coalescer: sequence is next-1 after
+                        // append_transcript_unit increments next_transcript_sequence.
+                        cadence_append = Some((
+                            request.envelope.projection_id.clone(),
+                            session.next_transcript_sequence.saturating_sub(1),
+                        ));
                         let mut response = ProjectionResponse::accepted(
                             &request.envelope.request_id,
                             &request.envelope.projection_id,
@@ -2477,6 +2564,11 @@ impl ProjectionAuthority {
                         max_visible_transcript_bytes,
                         max_portal_updates_per_second,
                     );
+                    // Capture for cadence coalescer.
+                    cadence_append = Some((
+                        request.envelope.projection_id.clone(),
+                        session.next_transcript_sequence.saturating_sub(1),
+                    ));
                     let mut response = ProjectionResponse::accepted(
                         &request.envelope.request_id,
                         &request.envelope.projection_id,
@@ -2500,6 +2592,20 @@ impl ProjectionAuthority {
                 "owner authorization failed",
             ),
         };
+
+        // Wire cadence coalescer: register the append for cross-portal fairness
+        // scheduling. The payload is empty — the coalescer is used as a scheduling
+        // oracle only; transcript content is fetched from the session on drain.
+        // submitted_at_us is recorded for arrival→present latency measurement.
+        if let Some((projection_id, sequence)) = cadence_append {
+            self.cadence_coalescer.record_append(
+                &projection_id,
+                Vec::new(),
+                sequence,
+                server_timestamp_wall_us,
+            );
+        }
+
         self.audit_from_response(
             &request.envelope,
             caller_identity,
@@ -2846,6 +2952,8 @@ impl ProjectionAuthority {
             ProjectionAuditCategory::OwnerDetach,
         ) {
             Ok(_) => {
+                self.cadence_coalescer
+                    .remove_portal(&request.envelope.projection_id);
                 self.sessions.remove(&request.envelope.projection_id);
                 ProjectionResponse::accepted(
                     &request.envelope.request_id,
@@ -2902,6 +3010,8 @@ impl ProjectionAuthority {
                     ProjectionAuditCategory::OwnerCleanup,
                 ) {
                     Ok(_) => {
+                        self.cadence_coalescer
+                            .remove_portal(&request.envelope.projection_id);
                         self.sessions.remove(&request.envelope.projection_id);
                         ProjectionResponse::accepted(
                             &request.envelope.request_id,
@@ -2987,6 +3097,8 @@ impl ProjectionAuthority {
                 server_timestamp_wall_us >= session.owner_token_expires_at_wall_us
             })
         {
+            self.cadence_coalescer
+                .remove_portal(&envelope.projection_id);
             self.sessions.remove(&envelope.projection_id);
             return Err(ProjectionErrorCode::ProjectionTokenExpired);
         }

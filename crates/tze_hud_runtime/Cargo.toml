@@ -33,6 +33,7 @@ tze_hud_config = { path = "../tze_hud_config" }
 tze_hud_widget = { path = "../tze_hud_widget" }
 tze_hud_mcp = { path = "../tze_hud_mcp", features = ["http"] }
 tze_hud_resource = { path = "../tze_hud_resource" }
+tze_hud_projection = { path = "../tze_hud_projection" }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
