@@ -375,18 +375,17 @@ fn truncate_line_to_ellipsis<'a>(
     // Try word boundaries first (unicode word segmentation).
     // We iterate word boundaries right-to-left and take the first that fits.
     //
-    // NOTE: boundary == 0 produces an empty candidate ("…" bare).  We skip it
-    // here so that when no *non-empty* word-boundary prefix fits the budget we
-    // fall through to the grapheme-cluster loop rather than returning a bare
-    // ellipsis with zero visible clusters.  The grapheme loop handles the
-    // same degenerate outcome (candidate "" → bare "…") at its own tail.
+    // `unicode_word_indices()` yields `(start, word)` pairs where every word
+    // has length >= 1, so `i + word.len() >= 1` — the mapped boundary values
+    // are always > 0.  No empty-prefix guard is needed here; if no word-boundary
+    // prefix fits the budget, we fall through to the grapheme-cluster loop.
     let word_boundaries: Vec<usize> = line
         .unicode_word_indices()
         .map(|(i, word)| i + word.len())
         .collect();
 
     for &boundary in word_boundaries.iter().rev() {
-        if boundary == 0 || !line.is_char_boundary(boundary) {
+        if !line.is_char_boundary(boundary) {
             continue;
         }
         let candidate = &line[..boundary];
@@ -670,14 +669,71 @@ mod tests {
     /// at least one visible `W` cluster before the ellipsis, not bare `"…"`.
     ///
     /// Source: issue hud-wq6qp — "Ellipsis grapheme fallback is dead code".
+    ///
+    /// Preconditions are measured at runtime so the test remains correct across
+    /// environments with different default font metrics:
+    ///   1. A single `"W"` + ellipsis must fit within 200px (otherwise there is
+    ///      no room to show even one cluster and a bare `"…"` would be correct).
+    ///   2. The full 30-`"W"` token must overflow 200px (otherwise truncation
+    ///      would not occur and there is nothing to test).
     #[test]
     fn long_unbroken_token_w30_in_200px_has_visible_prefix() {
         let mut fs = make_font_system();
+        let font_size = 16.0_f32;
+        let line_h = 22.4_f32;
+        let bounds_w = 200.0_f32;
+
+        // Measure preconditions using the same font system and parameters.
+        let ellipsis_w = measure_single_line(
+            ELLIPSIS,
+            base_attrs(),
+            bounds_w * 2.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        let single_w_w = measure_single_line(
+            "W",
+            base_attrs(),
+            bounds_w * 2.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
         let text = "W".repeat(30);
-        let result = truncate_for_ellipsis(&text, base_attrs(), 200.0, 100.0, 16.0, 22.4, &mut fs);
+        let full_w = measure_single_line(
+            &text,
+            base_attrs(),
+            bounds_w * 2.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+
+        // Pre-condition 1: at least one cluster + ellipsis must fit.
+        // If this fails the font is so wide that a bare "…" is the correct answer.
+        if single_w_w + ellipsis_w > bounds_w {
+            // Cannot run the non-empty-prefix assertion — skip gracefully.
+            return;
+        }
+        // Pre-condition 2: the full token must overflow.
+        if full_w <= bounds_w {
+            // Cannot run the was_truncated assertion — skip gracefully.
+            return;
+        }
+
+        let result = truncate_for_ellipsis(
+            &text,
+            base_attrs(),
+            bounds_w,
+            100.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
         assert!(
             result.was_truncated,
-            "30 'W's in a 200px box must be truncated; got was_truncated=false"
+            "30 'W's ({full_w:.1}px) in a {bounds_w}px box must be truncated; got was_truncated=false"
         );
         assert!(
             result.text.ends_with(ELLIPSIS),
@@ -867,18 +923,30 @@ mod tests {
         /// Invariant: grapheme fallback — unbroken tokens (no spaces) are truncated
         /// at a grapheme boundary with ellipsis appended, never at mid-codepoint.
         ///
-        /// Strengthened: when the box is wide enough to fit at least one grapheme
-        /// + ellipsis, the prefix before `"…"` must be non-empty (not bare `"…"`).
+        /// Strengthened: when the box is measurably wide enough to fit at least
+        /// one `"A"` cluster + ellipsis, the prefix before `"…"` must be non-empty
+        /// (not bare `"…"`).  The threshold is derived by measuring "A" + ELLIPSIS
+        /// with the same font system rather than relying on a fixed pixel constant.
         #[test]
         fn proptest_grapheme_fallback_valid_utf8_boundary(
             repeat in 10usize..50usize,
             width_px in 40.0_f32..80.0_f32,
         ) {
             let mut fs = make_font_system();
+            let font_size = 16.0_f32;
+            let line_h = 22.4_f32;
+
+            // Measure the minimum width needed to show one "A" cluster + ellipsis.
+            // If `width_px` is narrower than this, a bare "…" is the correct answer
+            // and we must not assert a non-empty prefix.
+            let single_a_w = measure_single_line("A", base_attrs(), width_px * 4.0, font_size, line_h, &mut fs);
+            let ellipsis_w = measure_single_line(ELLIPSIS, base_attrs(), width_px * 4.0, font_size, line_h, &mut fs);
+            let min_width_for_prefix = single_a_w + ellipsis_w;
+
             // Single unbroken token — no word boundaries.
             let text = "A".repeat(repeat);
             let result = truncate_for_ellipsis(
-                &text, base_attrs(), width_px, 200.0, 16.0, 22.4, &mut fs,
+                &text, base_attrs(), width_px, 200.0, font_size, line_h, &mut fs,
             );
             // Result must be valid UTF-8 and never split at a non-char-boundary.
             prop_assert!(
@@ -892,18 +960,20 @@ mod tests {
                     "grapheme fallback result must end with '…'; text={text:?} result={:?}",
                     result.text,
                 );
-                // When the box is at least 40px wide (enough for one 'A' + ellipsis
-                // in a 16px font), the prefix before the ellipsis must be non-empty.
-                // A bare "…" means the grapheme fallback did not run — regression guard
-                // for the dead-code fallback bug (hud-wq6qp).
-                let prefix = result.text.strip_suffix(ELLIPSIS).unwrap_or("");
-                prop_assert!(
-                    !prefix.is_empty(),
-                    "unbroken token must have at least one visible cluster before '…'; \
-                     got bare '…' — grapheme fallback regression; \
-                     text={text:?} width={width_px} result={:?}",
-                    result.text,
-                );
+                // Only assert a non-empty prefix when the box is measurably wide
+                // enough to fit at least one cluster + ellipsis.  When the box is
+                // too narrow even for that, a bare "…" is correct behavior.
+                if width_px >= min_width_for_prefix {
+                    let prefix = result.text.strip_suffix(ELLIPSIS).unwrap_or("");
+                    prop_assert!(
+                        !prefix.is_empty(),
+                        "unbroken token must have at least one visible cluster before '…' \
+                         when width ({width_px}px) >= min_width_for_prefix ({min_width_for_prefix:.1}px); \
+                         got bare '…' — grapheme fallback regression; \
+                         text={text:?} result={:?}",
+                        result.text,
+                    );
+                }
             }
         }
     }
