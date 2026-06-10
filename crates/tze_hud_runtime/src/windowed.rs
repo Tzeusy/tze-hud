@@ -2418,7 +2418,15 @@ impl WinitApp {
                 raw.modifiers.alt,
             );
             if let Some(b) = batch {
-                deliver_composer_batch(b);
+                // Resolve delivery context before the batch is consumed.
+                if let Some((namespace, node_id_bytes)) = self.composer_delivery_context() {
+                    deliver_composer_batch(
+                        &self.state.input_event_tx,
+                        &namespace,
+                        &node_id_bytes,
+                        b,
+                    );
+                }
             }
             if consumed {
                 tracing::debug!(
@@ -2505,7 +2513,14 @@ impl WinitApp {
                 .input_processor
                 .route_character_to_composer(&raw.character);
             if let Some(b) = batch {
-                deliver_composer_batch(b);
+                if let Some((namespace, node_id_bytes)) = self.composer_delivery_context() {
+                    deliver_composer_batch(
+                        &self.state.input_event_tx,
+                        &namespace,
+                        &node_id_bytes,
+                        b,
+                    );
+                }
             }
             // Any outcome other than Unchanged means the manager handled it;
             // do not forward to the agent as a raw CharacterEvent.
@@ -2547,11 +2562,22 @@ impl WinitApp {
     /// state is delivered even when keystrokes arrived in a burst (spec §4.3
     /// flush guarantee).
     ///
-    /// The returned `DraftNotificationBatch` is forwarded to `deliver_composer_batch`;
-    /// the full downstream protocol bridge (adapter notify) is a follow-up.
+    /// The `DraftNotificationBatch` returned by the input processor is encoded
+    /// as proto messages and broadcast on the `INPUT_EVENTS` channel to the
+    /// owning adapter namespace.
     fn flush_composer_draft_at_settle(&mut self) {
+        // Snapshot the delivery context before flushing so that if the flush
+        // triggers a focus-lost clear the node_id is still valid.
+        let ctx = self.composer_delivery_context();
         if let Some(batch) = self.state.input_processor.try_flush_composer_draft() {
-            deliver_composer_batch(batch);
+            if let Some((namespace, node_id_bytes)) = ctx {
+                deliver_composer_batch(
+                    &self.state.input_event_tx,
+                    &namespace,
+                    &node_id_bytes,
+                    batch,
+                );
+            }
         }
     }
 
@@ -2565,6 +2591,28 @@ impl WinitApp {
         let state = self.state.shared_state.blocking_lock();
         let scene = state.scene.blocking_lock();
         scene.tiles.get(&tile_id).map(|tile| tile.namespace.clone())
+    }
+
+    /// Resolve the (namespace, node_id_bytes) pair for the currently focused
+    /// composer region.
+    ///
+    /// Returns `None` when no composer region is focused or the owning tile
+    /// cannot be located in the scene (e.g. gRPC disabled, scene not ready).
+    ///
+    /// Used by `dispatch_key_down_event`, `dispatch_character_event`, and
+    /// `flush_composer_draft_at_settle` to supply the delivery context to
+    /// `deliver_composer_batch`.
+    fn composer_delivery_context(&self) -> Option<(String, Vec<u8>)> {
+        let node_id = self.state.input_processor.composer_focused_node()?;
+        let node_id_bytes = node_id.as_uuid().as_bytes().to_vec();
+
+        // The focus manager's active tab holds the authoritative FocusOwner.
+        // For a composer region the owner is FocusOwner::Node { tile_id, .. };
+        // from the tile_id we can look up the agent namespace.
+        let tab_id = self.active_tab_for_keyboard_dispatch()?;
+        let tile_id = self.state.focus_manager.current_owner(tab_id).tile_id()?;
+        let namespace = self.namespace_for_keyboard_tile(tile_id)?;
+        Some((namespace, node_id_bytes))
     }
 
     /// Update the active hit-regions for overlay input passthrough.
@@ -3786,41 +3834,140 @@ fn dispatch_keyboard_event(
     let _ = tx.send((dispatch.namespace, batch));
 }
 
-/// Deliver a [`tze_hud_input::DraftNotificationBatch`] to downstream consumers.
+/// Deliver a [`tze_hud_input::DraftNotificationBatch`] to the owning adapter
+/// via the `INPUT_EVENTS` gRPC broadcast channel (hud-ygbcy).
 ///
-/// # Current status (hud-odxjl)
+/// # Proto mapping
 ///
-/// The full downstream protocol bridge (proto encoding + adapter notify) is a
-/// follow-up task.  This function currently logs the batch at debug level so
-/// the wiring is exercised and observable in integration logs without blocking
-/// the present wiring milestone.
+/// Each component of the batch maps to one outbound proto message in
+/// `InputEnvelope`:
 ///
-/// Future: encode the batch as `DraftStateNotification` / `DraftSubmission`
-/// proto envelopes and broadcast on the `INPUT_EVENTS` channel to the owning
-/// adapter namespace.
-fn deliver_composer_batch(batch: tze_hud_input::DraftNotificationBatch) {
+/// | Batch field      | Class       | Proto variant              |
+/// |------------------|-------------|----------------------------|
+/// | `latest`         | state-stream | `ComposerDraftStateEvent`  |
+/// | `submission`     | transactional | `ComposerDraftSubmitEvent` |
+/// | `cancel`         | transactional | `ComposerDraftCancelEvent` |
+///
+/// # Ordering
+///
+/// Messages are emitted in the order required by the delivery contract
+/// (spec §4.3):
+///
+/// 1. State-stream notification (`latest`) — if present.
+/// 2. Submission (`submission`) — if present; sequence > any `latest`.
+///    The post-submit clear (`text=""`, sequence = submission + 1) is the
+///    `latest` field produced by `DraftScheduler::flush_submit`; it arrives
+///    in the *next* batch after submission.  No special handling needed here.
+/// 3. Cancel (`cancel`) — if present (submit and cancel are mutually exclusive).
+///
+/// # Delivery semantics
+///
+/// Broadcast on the `INPUT_EVENTS` channel addressed to `namespace`.  The
+/// session handler delivers each `EventBatch` only when the agent is
+/// subscribed to `INPUT_EVENTS` — the subscription gate is enforced in
+/// `subscriptions::filter_event_batch`, not here.  Errors (no receivers,
+/// channel lagged) are silently ignored, matching the keyboard-event
+/// broadcast pattern.
+///
+/// # Parameters
+///
+/// - `tx`: the shared broadcast sender; `None` when gRPC is disabled.
+/// - `namespace`: the agent namespace that owns the composer node.
+/// - `node_id_bytes`: 16-byte UUIDv7 of the focused composer node.
+/// - `batch`: the coalesced draft batch to deliver.
+fn deliver_composer_batch(
+    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    namespace: &str,
+    node_id_bytes: &[u8],
+    batch: tze_hud_input::DraftNotificationBatch,
+) {
+    let Some(tx) = tx else { return };
+
+    use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    // Collect events in the canonical delivery order (state-stream first, then
+    // transactional), each wrapped in an InputEnvelope.
+    let mut events: Vec<InputEnvelope> = Vec::new();
+
+    // 1. State-stream notification (UpdateComposerDisplay).
     if let Some(ref notif) = batch.latest {
         tracing::debug!(
+            namespace = %namespace,
             text_len = notif.text.len(),
             cursor = notif.cursor,
             at_capacity = notif.at_capacity,
             sequence = notif.sequence,
-            "composer: draft state notification (state-stream)"
+            "composer: delivering draft state notification (state-stream)"
         );
+        events.push(InputEnvelope {
+            event: Some(InputEvent::ComposerDraftState(
+                tze_hud_protocol::proto::ComposerDraftStateEvent {
+                    node_id: node_id_bytes.to_vec(),
+                    text: notif.text.clone(),
+                    cursor: notif.cursor as u64,
+                    at_capacity: notif.at_capacity,
+                    sequence: notif.sequence,
+                },
+            )),
+        });
     }
+
+    // 2. Transactional submission.
     if let Some(ref sub) = batch.submission {
         tracing::debug!(
+            namespace = %namespace,
             text_len = sub.text.len(),
             sequence = sub.sequence,
-            "composer: draft submission (transactional)"
+            "composer: delivering draft submission (transactional)"
         );
+        events.push(InputEnvelope {
+            event: Some(InputEvent::ComposerDraftSubmit(
+                tze_hud_protocol::proto::ComposerDraftSubmitEvent {
+                    node_id: node_id_bytes.to_vec(),
+                    text: sub.text.clone(),
+                    sequence: sub.sequence,
+                },
+            )),
+        });
     }
+
+    // 3. Transactional cancel (mutually exclusive with submission per batch
+    //    XOR semantics enforced by DraftScheduler).
     if let Some(ref cancel) = batch.cancel {
         tracing::debug!(
+            namespace = %namespace,
             sequence = cancel.sequence,
-            "composer: draft cancel (transactional)"
+            "composer: delivering draft cancel (transactional)"
         );
+        events.push(InputEnvelope {
+            event: Some(InputEvent::ComposerDraftCancel(
+                tze_hud_protocol::proto::ComposerDraftCancelEvent {
+                    node_id: node_id_bytes.to_vec(),
+                    sequence: cancel.sequence,
+                },
+            )),
+        });
     }
+
+    if events.is_empty() {
+        return;
+    }
+
+    let event_batch = EventBatch {
+        frame_number: 0, // synthetic — not tied to a compositor frame
+        batch_ts_us: now_us,
+        events,
+    };
+
+    // Broadcast to all session handler tasks; each one delivers only if the
+    // namespace matches and INPUT_EVENTS is active. Errors (no receivers,
+    // channel lagged) are silently ignored.
+    let _ = tx.send((namespace.to_string(), event_batch));
 }
 
 /// Broadcast `FocusGainedEvent` and/or `FocusLostEvent` to the owning agents
@@ -6248,6 +6395,305 @@ redaction_style = "blank"
             ts2 > ts1,
             "timestamp_mono_us must be strictly increasing across consecutive dispatches \
              (ts1={ts1}, ts2={ts2})"
+        );
+    }
+
+    // ── deliver_composer_batch: proto wiring (hud-ygbcy) ─────────────────────
+
+    /// Extract proto variant from an `InputEnvelope`.
+    fn envelope_variant(
+        env: &tze_hud_protocol::proto::InputEnvelope,
+    ) -> &tze_hud_protocol::proto::input_envelope::Event {
+        env.event
+            .as_ref()
+            .expect("InputEnvelope must have an event")
+    }
+
+    /// Build a `DraftNotificationBatch` with only a state-stream notification.
+    fn make_latest_batch(
+        text: &str,
+        cursor: usize,
+        sequence: u64,
+    ) -> tze_hud_input::DraftNotificationBatch {
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.coalesce_state(tze_hud_input::DraftStateNotification {
+            text: text.to_string(),
+            cursor,
+            selection_anchor: cursor,
+            at_capacity: false,
+            sequence,
+        });
+        batch
+    }
+
+    /// Build a `DraftNotificationBatch` with a submission (the post-submit
+    /// clear is emitted by the scheduler as a follow-on `latest` in the
+    /// next batch; here we test the submission-only path first).
+    fn make_submit_batch(text: &str, sequence: u64) -> tze_hud_input::DraftNotificationBatch {
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.record_submission(tze_hud_input::DraftSubmission {
+            text: text.to_string(),
+            sequence,
+        });
+        batch
+    }
+
+    /// Build a cancel batch.
+    fn make_cancel_batch(sequence: u64) -> tze_hud_input::DraftNotificationBatch {
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.record_cancel(tze_hud_input::DraftCancel { sequence });
+        batch
+    }
+
+    /// Spec §4.3: a state-stream notification produces a single
+    /// `ComposerDraftStateEvent` in the outbound EventBatch.
+    #[test]
+    fn deliver_composer_batch_latest_emits_draft_state_event() {
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+        let (tx, mut rx) =
+            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let tx_opt = Some(tx);
+        let node_id_bytes = vec![0u8; 16];
+
+        let batch = make_latest_batch("hello", 5, 1);
+        deliver_composer_batch(&tx_opt, "test-agent", &node_id_bytes, batch);
+
+        let (ns, ev_batch) = rx.try_recv().expect("event must be sent");
+        assert_eq!(ns, "test-agent");
+        assert_eq!(ev_batch.events.len(), 1);
+
+        let ev = envelope_variant(&ev_batch.events[0]);
+        let InputEvent::ComposerDraftState(state) = ev else {
+            panic!("expected ComposerDraftState, got {ev:?}");
+        };
+        assert_eq!(state.text, "hello");
+        assert_eq!(state.cursor, 5);
+        assert_eq!(state.sequence, 1);
+        assert!(!state.at_capacity);
+        assert_eq!(state.node_id, node_id_bytes);
+    }
+
+    /// Spec §4.3: a transactional submission produces a single
+    /// `ComposerDraftSubmitEvent`.
+    #[test]
+    fn deliver_composer_batch_submit_emits_draft_submit_event() {
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+        let (tx, mut rx) =
+            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let tx_opt = Some(tx);
+        let node_id_bytes = vec![1u8; 16];
+
+        let batch = make_submit_batch("send this", 42);
+        deliver_composer_batch(&tx_opt, "portal-agent", &node_id_bytes, batch);
+
+        let (ns, ev_batch) = rx.try_recv().expect("event must be sent");
+        assert_eq!(ns, "portal-agent");
+        assert_eq!(ev_batch.events.len(), 1);
+
+        let ev = envelope_variant(&ev_batch.events[0]);
+        let InputEvent::ComposerDraftSubmit(sub) = ev else {
+            panic!("expected ComposerDraftSubmit, got {ev:?}");
+        };
+        assert_eq!(sub.text, "send this");
+        assert_eq!(sub.sequence, 42);
+        assert_eq!(sub.node_id, node_id_bytes);
+    }
+
+    /// Spec §4.3: a cancel produces a single `ComposerDraftCancelEvent`.
+    #[test]
+    fn deliver_composer_batch_cancel_emits_draft_cancel_event() {
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+        let (tx, mut rx) =
+            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let tx_opt = Some(tx);
+        let node_id_bytes = vec![2u8; 16];
+
+        let batch = make_cancel_batch(7);
+        deliver_composer_batch(&tx_opt, "test-agent", &node_id_bytes, batch);
+
+        let (ns, ev_batch) = rx.try_recv().expect("event must be sent");
+        assert_eq!(ns, "test-agent");
+        assert_eq!(ev_batch.events.len(), 1);
+
+        let ev = envelope_variant(&ev_batch.events[0]);
+        let InputEvent::ComposerDraftCancel(cancel) = ev else {
+            panic!("expected ComposerDraftCancel, got {ev:?}");
+        };
+        assert_eq!(cancel.sequence, 7);
+        assert_eq!(cancel.node_id, node_id_bytes);
+    }
+
+    /// Spec §4.3 / hud-qwqxy: a full submit cycle produces events in the
+    /// correct order and with correct sequences:
+    ///
+    ///   Batch 1: latest (text="hello", seq=3) + submission (text="hello", seq=4)
+    ///     → [ComposerDraftState(seq=3), ComposerDraftSubmit(seq=4)]
+    ///
+    ///   Batch 2 (post-submit clear from DraftScheduler::flush_submit):
+    ///     latest (text="", seq=5)
+    ///     → [ComposerDraftState(seq=5, text="")]
+    ///
+    /// This verifies ordering and that the post-submit clear (seq > submission)
+    /// flows through correctly.
+    #[test]
+    fn deliver_composer_batch_submit_cycle_correct_order_and_sequences() {
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+        let (tx, mut rx) =
+            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let tx_opt = Some(tx);
+        let node_id_bytes = vec![3u8; 16];
+
+        // Batch 1: latest(seq=3) + submission(seq=4)
+        let mut batch1 = tze_hud_input::DraftNotificationBatch::new();
+        batch1.coalesce_state(tze_hud_input::DraftStateNotification {
+            text: "hello".to_string(),
+            cursor: 5,
+            selection_anchor: 5,
+            at_capacity: false,
+            sequence: 3,
+        });
+        batch1.record_submission(tze_hud_input::DraftSubmission {
+            text: "hello".to_string(),
+            sequence: 4,
+        });
+
+        deliver_composer_batch(&tx_opt, "test-agent", &node_id_bytes, batch1);
+
+        let (_ns, batch_out1) = rx.try_recv().expect("batch 1 must be sent");
+        assert_eq!(
+            batch_out1.events.len(),
+            2,
+            "batch 1 must contain exactly 2 events (state + submit)"
+        );
+
+        // State event comes first (state-stream before transactional per delivery order)
+        let ev0 = envelope_variant(&batch_out1.events[0]);
+        let InputEvent::ComposerDraftState(state) = ev0 else {
+            panic!("expected ComposerDraftState first, got {ev0:?}");
+        };
+        assert_eq!(state.sequence, 3, "state event sequence must be 3");
+        assert_eq!(state.text, "hello");
+
+        // Submission event second
+        let ev1 = envelope_variant(&batch_out1.events[1]);
+        let InputEvent::ComposerDraftSubmit(sub) = ev1 else {
+            panic!("expected ComposerDraftSubmit second, got {ev1:?}");
+        };
+        assert_eq!(sub.sequence, 4, "submit sequence must be 4 (> state seq)");
+        assert_eq!(sub.text, "hello");
+
+        // Batch 2: post-submit clear (text="", seq=5 > submission seq=4)
+        let mut batch2 = tze_hud_input::DraftNotificationBatch::new();
+        batch2.coalesce_state(tze_hud_input::DraftStateNotification {
+            text: String::new(),
+            cursor: 0,
+            selection_anchor: 0,
+            at_capacity: false,
+            sequence: 5,
+        });
+
+        deliver_composer_batch(&tx_opt, "test-agent", &node_id_bytes, batch2);
+
+        let (_ns, batch_out2) = rx
+            .try_recv()
+            .expect("batch 2 (post-submit clear) must be sent");
+        assert_eq!(
+            batch_out2.events.len(),
+            1,
+            "post-submit clear batch must contain exactly 1 event"
+        );
+
+        let ev2 = envelope_variant(&batch_out2.events[0]);
+        let InputEvent::ComposerDraftState(clear) = ev2 else {
+            panic!("expected ComposerDraftState for post-submit clear, got {ev2:?}");
+        };
+        assert_eq!(clear.text, "", "post-submit clear must have empty text");
+        assert_eq!(
+            clear.sequence, 5,
+            "post-submit clear sequence must be 5 (> submission seq=4)"
+        );
+    }
+
+    /// `deliver_composer_batch` is silent when `tx` is `None` (gRPC disabled).
+    #[test]
+    fn deliver_composer_batch_no_op_when_tx_is_none() {
+        let batch = make_latest_batch("text", 4, 1);
+        // Should not panic
+        deliver_composer_batch(&None, "test-agent", &[0u8; 16], batch);
+    }
+
+    /// An empty batch produces no broadcast.
+    #[test]
+    fn deliver_composer_batch_empty_batch_sends_nothing() {
+        let (tx, mut rx) =
+            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let tx_opt = Some(tx);
+
+        deliver_composer_batch(
+            &tx_opt,
+            "test-agent",
+            &[0u8; 16],
+            tze_hud_input::DraftNotificationBatch::new(),
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "empty batch must not produce a broadcast"
+        );
+    }
+
+    /// Sequence ordering: the post-submit clear's sequence is strictly greater
+    /// than the submission sequence, ensuring the adapter can safely skip
+    /// state-stream notifications with sequence ≤ last seen.
+    #[test]
+    fn deliver_composer_batch_post_submit_clear_sequence_exceeds_submission() {
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+        let (tx, mut rx) =
+            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let tx_opt = Some(tx);
+        let node_id_bytes = vec![0u8; 16];
+
+        // Simulate the DraftScheduler::flush_submit output:
+        // submission at seq=10, post-submit clear at seq=11.
+        let mut submit_batch = tze_hud_input::DraftNotificationBatch::new();
+        submit_batch.record_submission(tze_hud_input::DraftSubmission {
+            text: "msg".to_string(),
+            sequence: 10,
+        });
+        deliver_composer_batch(&tx_opt, "agent", &node_id_bytes, submit_batch);
+
+        let mut clear_batch = tze_hud_input::DraftNotificationBatch::new();
+        clear_batch.coalesce_state(tze_hud_input::DraftStateNotification {
+            text: String::new(),
+            cursor: 0,
+            selection_anchor: 0,
+            at_capacity: false,
+            sequence: 11,
+        });
+        deliver_composer_batch(&tx_opt, "agent", &node_id_bytes, clear_batch);
+
+        let (_ns, sub_out) = rx.try_recv().expect("submission event");
+        let (_ns, clear_out) = rx.try_recv().expect("clear event");
+
+        let sub_ev = envelope_variant(&sub_out.events[0]);
+        let InputEvent::ComposerDraftSubmit(sub) = sub_ev else {
+            panic!("expected ComposerDraftSubmit");
+        };
+        let clear_ev = envelope_variant(&clear_out.events[0]);
+        let InputEvent::ComposerDraftState(clr) = clear_ev else {
+            panic!("expected ComposerDraftState for clear");
+        };
+
+        assert!(
+            clr.sequence > sub.sequence,
+            "post-submit clear seq={} must exceed submission seq={}",
+            clr.sequence,
+            sub.sequence
         );
     }
 }

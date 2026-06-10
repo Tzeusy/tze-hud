@@ -747,6 +747,14 @@ impl InputProcessor {
         self.composer_draft_manager.is_active()
     }
 
+    /// Returns the `SceneId` of the currently focused composer node, if any.
+    ///
+    /// `None` when no composer region is focused.  Use this to resolve the
+    /// owning tile/namespace for outbound proto delivery.
+    pub fn composer_focused_node(&self) -> Option<tze_hud_scene::SceneId> {
+        self.composer_draft_manager.focused_node()
+    }
+
     /// Process a pointer event against the scene graph.
     ///
     /// Updates hit-region local state for immediate visual feedback.
