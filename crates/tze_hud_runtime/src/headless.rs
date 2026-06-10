@@ -1229,17 +1229,11 @@ default_tab = true
                 ref zone_name,
                 published_at_wall_us,
                 ref publisher_namespace,
-                ref kind,
+                kind: ZoneInteractionKind::Dismiss,
                 ..
             } = result.hit
             {
-                if let ZoneInteractionKind::Dismiss = kind {
-                    scene.dismiss_notification(
-                        zone_name,
-                        published_at_wall_us,
-                        publisher_namespace,
-                    );
-                }
+                scene.dismiss_notification(zone_name, published_at_wall_us, publisher_namespace);
             }
         }
 

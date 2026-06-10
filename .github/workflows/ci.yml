@@ -3,8 +3,9 @@
 # Job map:
 #   check          — cargo check: fast compilation gate (no codegen)
 #   fmt            — cargo fmt --check: formatting gate
-#   clippy         — cargo clippy -D warnings: lint gate
+#   clippy         — cargo clippy --all-targets -D warnings: lint gate (incl. tests/examples/benches)
 #   test-unit      — cargo test --workspace --all-targets --exclude integration
+#   test-integration — cargo test -p integration (headless suites; excl. trace_regression, v1_thesis, soak)
 #   test-trace     — cargo test -p integration --test trace_regression
 #   test-v1-thesis — cargo test -p integration --test v1_thesis
 #   production-boot — cargo test -p vertical_slice --test production_boot
@@ -115,20 +116,17 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends protobuf-compiler
-      - name: cargo clippy (workspace, deny warnings)
-        run: cargo clippy --workspace -- -D warnings
+      - name: cargo clippy (workspace, all targets, deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ── Unit and crate-level tests ───────────────────────────────────────────────
   #
   # Runs all unit and crate tests across the workspace, excluding the
-  # `integration` package (which requires more setup and lives in test-trace).
+  # `integration` package, whose test targets run in their own jobs
+  # (test-integration, test-trace, test-v1-thesis below) so failures are
+  # attributable per-suite and the long soak target stays opt-in.
   # The vertical_slice tests require a software GPU (llvmpipe) — HEADLESS_FORCE_SOFTWARE=1
   # is set globally in env above.
-  #
-  # The `integration` package is excluded because:
-  # - multi_agent.rs has known pre-existing compile failures (missing fields)
-  #   unrelated to our work (see AGENTS.md notes).
-  # - trace_regression and v1_thesis run in dedicated jobs below.
 
   test-unit:
     name: cargo test (unit)
@@ -160,6 +158,63 @@ jobs:
             --workspace \
             --all-targets \
             --exclude integration
+
+  # ── Integration: headless multi-crate suites ───────────────────────────────
+  #
+  # Runs the `integration` package's test targets that are fast and headless
+  # (HeadlessRuntime + software GPU via HEADLESS_FORCE_SOFTWARE=1; no display
+  # server required).
+  #
+  # Excluded targets (each with its own coverage):
+  # - trace_regression — runs in the dedicated test-trace job below.
+  # - v1_thesis        — runs in the dedicated test-v1-thesis job below.
+  # - soak             — wall-clock-bound soak/leak suite. Even the default
+  #   TZE_HUD_SOAK_SECS=10 run drives real-time multi-agent churn and is
+  #   designed for 1h/6h dedicated runs; timing-sensitive on shared runners,
+  #   so it stays opt-in (see tests/integration/Cargo.toml header).
+
+  test-integration:
+    name: cargo test (integration)
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
+      - name: Install Mesa / llvmpipe + protobuf compiler
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            mesa-utils \
+            libegl-mesa0 \
+            libgl1-mesa-dri \
+            protobuf-compiler
+      - name: cargo test -p integration (headless suites)
+        run: |
+          cargo test \
+            -p integration \
+            --test multi_agent \
+            --test presence_card_tile \
+            --test disconnect_orphan \
+            --test presence_card_coexistence \
+            --test dashboard_tile_creation \
+            --test dashboard_tile_input \
+            --test dashboard_tile_lifecycle \
+            --test subtitle_streaming \
+            --test text_stream_portal_surface \
+            --test text_stream_portal_adapter \
+            --test text_stream_portal_coalescing \
+            --test text_stream_portal_governance \
+            --test drag_reposition \
+            --test movable_elements_e2e
 
   windows-performance-budget:
     name: Windows performance budget
@@ -208,8 +263,7 @@ jobs:
   #
   # Runs the trace capture + replay integration tests.
   # These tests do NOT require a GPU (scene graph only; no compositor).
-  # multi_agent.rs is excluded from this run because it has pre-existing
-  # compile failures unrelated to this CI gate (see AGENTS.md).
+  # Other integration targets run in test-integration above.
 
   test-trace:
     name: cargo test (trace regression)

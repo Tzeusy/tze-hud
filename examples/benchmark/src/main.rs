@@ -92,97 +92,6 @@ pub struct BenchmarkOutput {
     pub validation: ValidationReport,
 }
 
-// ─── Unit tests (always compiled) ────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_benchmark_output_serializes_round_trip() {
-        let cpu = CalibrationResult {
-            speed_factor: 1.0,
-            scene_ops_per_sec: 550_000.0,
-            hash_throughput_mbps: 800.0,
-            gpu_fill_factor: None,
-            texture_upload_factor: None,
-            timestamp: 1_700_000_000,
-            calibration_duration_us: 100_000,
-        };
-
-        let factors = HardwareFactors::new(1.0, 1.0, 1.0);
-        let summary = SessionSummary::new();
-        let validation = ValidationReport::run(&summary, &factors);
-
-        let output = BenchmarkOutput {
-            calibration: CalibrationOutput {
-                cpu,
-                gpu: None,
-                upload: None,
-                factors: factors.clone(),
-            },
-            sessions: vec![ScenarioResult {
-                name: "test".to_string(),
-                summary,
-            }],
-            validation,
-        };
-
-        let json = serde_json::to_string_pretty(&output).unwrap();
-        assert!(json.contains("calibration"));
-        assert!(json.contains("sessions"));
-        assert!(json.contains("validation"));
-
-        // Round-trip
-        let deserialized: BenchmarkOutput = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.sessions.len(), 1);
-        assert_eq!(deserialized.sessions[0].name, "test");
-    }
-
-    #[test]
-    fn test_gpu_calibration_result_serializes() {
-        let r = GpuCalibrationResult {
-            fps: 350.0,
-            gpu_factor: 1.43,
-            calibration_duration_us: 500_000,
-        };
-        let json = serde_json::to_string(&r).unwrap();
-        assert!(json.contains("fps"));
-        assert!(json.contains("gpu_factor"));
-    }
-
-    #[test]
-    fn test_upload_calibration_result_serializes() {
-        let r = UploadCalibrationResult {
-            tile_ops_per_sec: 3_500.0,
-            upload_factor: 1.43,
-            calibration_duration_us: 200_000,
-        };
-        let json = serde_json::to_string(&r).unwrap();
-        assert!(json.contains("tile_ops_per_sec"));
-        assert!(json.contains("upload_factor"));
-    }
-
-    #[test]
-    fn test_scenario_result_contains_session_summary() {
-        let mut summary = SessionSummary::new();
-        // record_frame increments total_frames internally
-        for _ in 0..120 {
-            summary.record_frame(12_000, 10);
-        }
-        summary.elapsed_us = 2_000_000;
-        summary.finalize();
-
-        let result = ScenarioResult {
-            name: "steady_state_render".to_string(),
-            summary,
-        };
-        assert_eq!(result.name, "steady_state_render");
-        assert_eq!(result.summary.total_frames, 120);
-        assert!((result.summary.fps - 60.0).abs() < 0.001);
-    }
-}
-
 // ─── Headless implementation ──────────────────────────────────────────────────
 // Everything below requires the `headless` feature.
 
@@ -1000,4 +909,95 @@ fn main() {
          \n  cargo run --bin benchmark --features headless -- --emit telemetry.json\n"
     );
     std::process::exit(1);
+}
+
+// ─── Unit tests (always compiled) ────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_benchmark_output_serializes_round_trip() {
+        let cpu = CalibrationResult {
+            speed_factor: 1.0,
+            scene_ops_per_sec: 550_000.0,
+            hash_throughput_mbps: 800.0,
+            gpu_fill_factor: None,
+            texture_upload_factor: None,
+            timestamp: 1_700_000_000,
+            calibration_duration_us: 100_000,
+        };
+
+        let factors = HardwareFactors::new(1.0, 1.0, 1.0);
+        let summary = SessionSummary::new();
+        let validation = ValidationReport::run(&summary, &factors);
+
+        let output = BenchmarkOutput {
+            calibration: CalibrationOutput {
+                cpu,
+                gpu: None,
+                upload: None,
+                factors: factors.clone(),
+            },
+            sessions: vec![ScenarioResult {
+                name: "test".to_string(),
+                summary,
+            }],
+            validation,
+        };
+
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        assert!(json.contains("calibration"));
+        assert!(json.contains("sessions"));
+        assert!(json.contains("validation"));
+
+        // Round-trip
+        let deserialized: BenchmarkOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.sessions.len(), 1);
+        assert_eq!(deserialized.sessions[0].name, "test");
+    }
+
+    #[test]
+    fn test_gpu_calibration_result_serializes() {
+        let r = GpuCalibrationResult {
+            fps: 350.0,
+            gpu_factor: 1.43,
+            calibration_duration_us: 500_000,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("fps"));
+        assert!(json.contains("gpu_factor"));
+    }
+
+    #[test]
+    fn test_upload_calibration_result_serializes() {
+        let r = UploadCalibrationResult {
+            tile_ops_per_sec: 3_500.0,
+            upload_factor: 1.43,
+            calibration_duration_us: 200_000,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("tile_ops_per_sec"));
+        assert!(json.contains("upload_factor"));
+    }
+
+    #[test]
+    fn test_scenario_result_contains_session_summary() {
+        let mut summary = SessionSummary::new();
+        // record_frame increments total_frames internally
+        for _ in 0..120 {
+            summary.record_frame(12_000, 10);
+        }
+        summary.elapsed_us = 2_000_000;
+        summary.finalize();
+
+        let result = ScenarioResult {
+            name: "steady_state_render".to_string(),
+            summary,
+        };
+        assert_eq!(result.name, "steady_state_render");
+        assert_eq!(result.summary.total_frames, 120);
+        assert!((result.summary.fps - 60.0).abs() < 0.001);
+    }
 }

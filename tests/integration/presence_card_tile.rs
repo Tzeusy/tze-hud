@@ -1073,11 +1073,12 @@ async fn full_presence_card_batch_visible_in_snapshot() {
         "snapshot tile must have root_node set"
     );
 
-    // Full glass-card node stack must be in snapshot
+    // Full glass-card node stack must be in snapshot (1 bg + 12 children,
+    // matching node_tree_builder_glass_card_nodes).
     assert_eq!(
         snap.nodes.len(),
-        10,
-        "SceneSnapshot must contain exactly 10 nodes (bg + layered glass children)"
+        13,
+        "SceneSnapshot must contain exactly 13 nodes (bg + layered glass children)"
     );
 
     // Verify node types in snapshot

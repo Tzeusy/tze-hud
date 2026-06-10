@@ -123,6 +123,10 @@ fn missed_heartbeat_counter_triggers_at_threshold() {
 fn heartbeat_received_resets_missed_counter() {
     let cfg = SessionConfig::default();
     let mut missed = 2u64;
+    assert!(
+        missed > 0,
+        "precondition: misses accumulated before heartbeat"
+    );
 
     // Heartbeat arrives — reset counter
     missed = 0;

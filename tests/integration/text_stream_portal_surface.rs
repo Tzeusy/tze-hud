@@ -626,7 +626,7 @@ async fn collapsed_and_expanded_portal_surface_use_only_v1_node_types() {
     ));
     assert!(create.applied, "collapsed portal tile must be creatable");
     let tile_id = create.created_ids[0];
-    assert!(
+    const _PORTAL_BELOW_ZONE_BAND: () = assert!(
         PORTAL_Z_ORDER < ZONE_TILE_Z_MIN,
         "portal pilot tile must stay below runtime-managed zone band"
     );
@@ -1659,7 +1659,7 @@ fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
             character: ch.to_string(),
             timestamp_mono_us: ts,
         };
-        if let Some(dispatch) = kb.process_character(&raw, &focus_owner, &ns_fn) {
+        if let Some(dispatch) = kb.process_character(&raw, &focus_owner, ns_fn) {
             assert_eq!(dispatch.tile_id, tile_id);
             assert_eq!(dispatch.node_id, Some(composer_node_id));
             buffer.apply_dispatch(&dispatch);
@@ -1678,7 +1678,7 @@ fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
         repeat: false,
         timestamp_mono_us: ts,
     };
-    if let Some(dispatch) = kb.process_key_down(&backspace, &focus_owner, &ns_fn) {
+    if let Some(dispatch) = kb.process_key_down(&backspace, &focus_owner, ns_fn) {
         buffer.apply_dispatch(&dispatch);
     }
     assert_eq!(buffer.draft, "hell", "backspace must remove last character");
@@ -1689,7 +1689,7 @@ fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
             character: ch.to_string(),
             timestamp_mono_us: ts,
         };
-        if let Some(dispatch) = kb.process_character(&raw, &focus_owner, &ns_fn) {
+        if let Some(dispatch) = kb.process_character(&raw, &focus_owner, ns_fn) {
             buffer.apply_dispatch(&dispatch);
         }
     }
@@ -1703,7 +1703,7 @@ fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
         repeat: false,
         timestamp_mono_us: ts,
     };
-    let submitted = if let Some(dispatch) = kb.process_key_down(&enter, &focus_owner, &ns_fn) {
+    let submitted = if let Some(dispatch) = kb.process_key_down(&enter, &focus_owner, ns_fn) {
         buffer.apply_dispatch(&dispatch)
     } else {
         None
@@ -1737,7 +1737,7 @@ fn keyboard_processor_no_dispatch_without_focus() {
         repeat: false,
         timestamp_mono_us: MonoUs(0),
     };
-    let dispatch = kb.process_key_down(&raw, &focus, &ns_fn);
+    let dispatch = kb.process_key_down(&raw, &focus, ns_fn);
     assert!(
         dispatch.is_none(),
         "no focus → KeyboardProcessor must not produce a dispatch"

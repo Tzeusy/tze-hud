@@ -1641,8 +1641,8 @@ mod tests {
             // Invariant: exactly one current focus owner per tab.
             let owners: HashSet<String> = fm
                 .trees
-                .iter()
-                .map(|(_, tree)| format!("{:?}", tree.current()))
+                .values()
+                .map(|tree| format!("{:?}", tree.current()))
                 .collect();
             // We only have one tab, so there's exactly one tree.
             assert_eq!(owners.len(), 1);

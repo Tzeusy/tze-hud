@@ -252,7 +252,7 @@ mod tests {
     /// Ord: keys sort ascending by (lease_priority ASC, z_order DESC).
     #[test]
     fn sort_key_ord_ascending() {
-        let mut keys = vec![
+        let mut keys = [
             TileSortKey::new(3, 1),  // least important
             TileSortKey::new(1, 10), // most important
             TileSortKey::new(2, 5),  // middle

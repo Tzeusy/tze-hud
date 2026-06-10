@@ -333,7 +333,6 @@ fn roundtrip_node_proto_text_markdown_with_color_runs() {
 fn convert_roundtrip_color_runs() {
     use tze_hud_protocol::convert::{proto_color_runs_to_scene, scene_color_runs_to_proto};
     use tze_hud_protocol::proto::TextColorRunProto;
-    use tze_hud_scene::types::Rgba;
 
     let proto_runs = vec![
         TextColorRunProto {

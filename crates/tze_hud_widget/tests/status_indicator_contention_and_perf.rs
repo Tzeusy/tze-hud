@@ -466,9 +466,8 @@ fn indicator_48x48_rasterize_within_ci_budget() {
     }
 
     eprintln!(
-        "[status_indicator_perf] 48×48 re-rasterize: {}µs ({} ms) \
-         — CI threshold: {}ms, spec target (ref hw): {}ms",
-        elapsed_us, elapsed_ms, CI_THRESHOLD_MS, SPEC_TARGET_MS,
+        "[status_indicator_perf] 48×48 re-rasterize: {elapsed_us}µs ({elapsed_ms} ms) \
+         — CI threshold: {CI_THRESHOLD_MS}ms, spec target (ref hw): {SPEC_TARGET_MS}ms",
     );
 
     // Budget assertion: lenient CI threshold catches catastrophic regressions.
@@ -476,13 +475,10 @@ fn indicator_48x48_rasterize_within_ci_budget() {
     //   cargo bench -p tze_hud_compositor --bench widget_rasterize
     assert!(
         elapsed_ms < CI_THRESHOLD_MS,
-        "48×48 indicator SVG re-rasterization took {}ms, exceeds lenient CI threshold of {}ms \
-         (spec target for reference hardware is {}ms). \
+        "48×48 indicator SVG re-rasterization took {elapsed_ms}ms, exceeds lenient CI threshold of {CI_THRESHOLD_MS}ms \
+         (spec target for reference hardware is {SPEC_TARGET_MS}ms). \
          This likely indicates a catastrophic regression. \
          Run `cargo bench -p tze_hud_compositor --bench widget_rasterize` on optimised reference \
          hardware to verify the 2ms spec requirement.",
-        elapsed_ms,
-        CI_THRESHOLD_MS,
-        SPEC_TARGET_MS,
     );
 }

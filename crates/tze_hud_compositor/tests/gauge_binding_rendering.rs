@@ -251,7 +251,7 @@ fn gauge_bar_fills_upward_at_level_full() {
 #[test]
 fn gauge_bar_upward_at_level_zero_stays_at_bottom() {
     let height_str = "0";
-    let expected_y = 210 - 0_i64;
+    let expected_y = 210;
 
     let modified = apply_svg_attribute(PRODUCTION_FILL_SVG, "bar", "height", height_str);
     let modified = apply_svg_attribute(&modified, "bar", "y", &expected_y.to_string());

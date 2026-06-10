@@ -910,13 +910,10 @@ fn partial_failure_rejects_entire_batch_atomically() {
 /// spec.md §Requirement: Z-Order Compositing at Content Layer
 /// Scenario: Agent tile in content band
 /// tasks.md §5.2
-#[test]
-fn z_order_100_is_in_agent_owned_band_below_zone_tile_z_min() {
-    assert!(
-        TILE_Z_ORDER < ZONE_TILE_Z_MIN,
-        "z_order={TILE_Z_ORDER} must be below ZONE_TILE_Z_MIN=0x{ZONE_TILE_Z_MIN:08x}"
-    );
-}
+const _Z_ORDER_100_IS_IN_AGENT_OWNED_BAND: () = assert!(
+    TILE_Z_ORDER < ZONE_TILE_Z_MIN,
+    "TILE_Z_ORDER must be below ZONE_TILE_Z_MIN (agent-owned band)"
+);
 
 /// WHEN the chrome layer uses a z_order >= ZONE_TILE_Z_MIN and the dashboard tile
 ///      uses z_order=100

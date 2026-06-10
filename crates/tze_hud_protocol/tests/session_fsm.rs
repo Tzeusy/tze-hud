@@ -32,6 +32,10 @@ fn initial_state_is_connecting() {
 #[test]
 fn connecting_to_handshaking_on_session_init() {
     let mut state = SessionState::Connecting;
+    assert!(
+        !state.allows_mutations(),
+        "Connecting must not allow mutations"
+    );
     // Simulate: SessionInit received => move to Handshaking
     state = SessionState::Handshaking;
     assert_eq!(state, SessionState::Handshaking);
@@ -42,6 +46,10 @@ fn connecting_to_handshaking_on_session_init() {
 #[test]
 fn handshaking_to_active_on_established() {
     let mut state = SessionState::Handshaking;
+    assert!(
+        !state.allows_mutations(),
+        "Handshaking must not allow mutations"
+    );
     state = SessionState::Active;
     assert_eq!(state, SessionState::Active);
     assert!(
@@ -54,6 +62,7 @@ fn handshaking_to_active_on_established() {
 #[test]
 fn active_to_disconnecting_on_session_close() {
     let mut state = SessionState::Active;
+    assert!(state.allows_mutations(), "Active must allow mutations");
     state = SessionState::Disconnecting;
     assert_eq!(state, SessionState::Disconnecting);
     assert!(
@@ -66,6 +75,10 @@ fn active_to_disconnecting_on_session_close() {
 #[test]
 fn disconnecting_to_closed_on_stream_termination() {
     let mut state = SessionState::Disconnecting;
+    assert!(
+        !state.allows_mutations(),
+        "Disconnecting must not allow mutations"
+    );
     state = SessionState::Closed;
     assert_eq!(state, SessionState::Closed);
 }
@@ -74,6 +87,7 @@ fn disconnecting_to_closed_on_stream_termination() {
 #[test]
 fn active_to_closed_on_heartbeat_timeout() {
     let mut state = SessionState::Active;
+    assert!(state.allows_mutations(), "Active must allow mutations");
     // Ungraceful disconnect: heartbeat timeout
     state = SessionState::Closed;
     assert_eq!(state, SessionState::Closed);
@@ -83,6 +97,7 @@ fn active_to_closed_on_heartbeat_timeout() {
 #[test]
 fn closed_to_resuming_on_valid_resume() {
     let mut state = SessionState::Closed;
+    assert!(!state.allows_mutations(), "Closed must not allow mutations");
     state = SessionState::Resuming;
     assert_eq!(state, SessionState::Resuming);
 }
@@ -91,6 +106,10 @@ fn closed_to_resuming_on_valid_resume() {
 #[test]
 fn resuming_to_active_on_valid_token() {
     let mut state = SessionState::Resuming;
+    assert!(
+        !state.allows_mutations(),
+        "Resuming must not allow mutations"
+    );
     state = SessionState::Active;
     assert_eq!(state, SessionState::Active);
     assert!(state.allows_mutations());
@@ -100,6 +119,10 @@ fn resuming_to_active_on_valid_token() {
 #[test]
 fn resuming_to_closed_on_expired_token() {
     let mut state = SessionState::Resuming;
+    assert!(
+        !state.allows_mutations(),
+        "Resuming must not allow mutations"
+    );
     state = SessionState::Closed;
     assert_eq!(state, SessionState::Closed);
 }

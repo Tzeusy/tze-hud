@@ -867,7 +867,7 @@ fn stage1_batch_lease_id_nonexistent_is_rejected() {
 #[test]
 fn stage1_batch_lease_id_expired_is_rejected_before_budget() {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
-    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let _tab_id = scene.create_tab("Main", 0).unwrap();
     let lease_id = scene.grant_lease("agent", 1, vec![Capability::CreateTile]);
 
     // Force into Expired state and also shrink budget to 0 — Stage 1 must fire first.

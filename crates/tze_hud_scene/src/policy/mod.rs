@@ -442,6 +442,10 @@ pub mod tests {
     fn test_policy_evaluator_generic_compile_check() {
         // This test's sole purpose is to confirm the trait can be instantiated
         // generically in a test context.  Replace with a real impl to pass.
+        // dead_code: never called by design — compiling this fn is the check;
+        // concrete evaluators live downstream and cannot be named here
+        // without a dependency cycle.
+        #[allow(dead_code)]
         fn use_evaluator<E: PolicyEvaluator<TestClock>>() {
             let clock = TestClock::new(0);
             let mut ev = E::new(clock);

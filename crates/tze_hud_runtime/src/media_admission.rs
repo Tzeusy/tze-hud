@@ -1544,7 +1544,7 @@ mod tests {
 
         // Verify session cache is cleared.
         let cache = gate.session_caches.get("sess-1");
-        let has_grant = cache.map_or(false, |c| c.has_grant("agent-a", CAPABILITY_MEDIA_INGRESS));
+        let has_grant = cache.is_some_and(|c| c.has_grant("agent-a", CAPABILITY_MEDIA_INGRESS));
         assert!(!has_grant, "session cache should be cleared after revoke");
 
         // Verify remember record is marked revoked.

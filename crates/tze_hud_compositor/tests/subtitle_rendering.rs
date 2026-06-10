@@ -472,8 +472,7 @@ async fn test_subtitle_text_color_white_from_policy() {
     assert!(
         found_bright,
         "subtitle zone must contain bright pixels (white text rendered from text_color=WHITE policy); \
-         zone area rows {}..{}, cols {}..{} had no pixel with R,G,B > 180",
-        zone_y_start, zone_y_end, zone_x_start, zone_x_end
+         zone area rows {zone_y_start}..{zone_y_end}, cols {zone_x_start}..{zone_x_end} had no pixel with R,G,B > 180"
     );
 }
 
@@ -681,8 +680,7 @@ async fn test_subtitle_font_size_28px_from_policy() {
     assert!(
         found_bright,
         "subtitle zone must contain bright pixels (white 28px glyphs from typography.subtitle.size token); \
-         zone area rows {}..{}, cols {}..{} had no pixel with R,G,B > 180",
-        zone_y_start, zone_y_end, zone_x_start, zone_x_end
+         zone area rows {zone_y_start}..{zone_y_end}, cols {zone_x_start}..{zone_x_end} had no pixel with R,G,B > 180"
     );
 }
 

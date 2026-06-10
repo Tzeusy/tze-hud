@@ -5,7 +5,7 @@
 //!
 //! **Task 8 — Agent Callbacks on Button Activation:**
 //! - §8.1  Agent-side event handler: receive EventBatch, extract ClickEvent /
-//!         CommandInputEvent(ACTIVATE), match on interaction_id
+//!   CommandInputEvent(ACTIVATE), match on interaction_id
 //! - §8.2  refresh-button → MutationBatch with SetTileRoot
 //! - §8.3  dismiss-button → LeaseRelease + tile removed from scene
 //! - §8.4  Click on Refresh dispatches ClickEvent with correct fields

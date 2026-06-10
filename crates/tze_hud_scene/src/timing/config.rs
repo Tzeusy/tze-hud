@@ -284,8 +284,10 @@ mod tests {
     /// WHEN target_fps = 0, THEN reject (spec lines 396-398).
     #[test]
     fn target_fps_zero_rejected() {
-        let mut cfg = TimingConfig::default();
-        cfg.target_fps = 0;
+        let cfg = TimingConfig {
+            target_fps: 0,
+            ..TimingConfig::default()
+        };
         let errors = cfg.validate();
         assert!(
             errors.iter().any(|e| e.field == "target_fps"),
@@ -295,15 +297,19 @@ mod tests {
 
     #[test]
     fn target_fps_241_rejected() {
-        let mut cfg = TimingConfig::default();
-        cfg.target_fps = 241;
+        let cfg = TimingConfig {
+            target_fps: 241,
+            ..TimingConfig::default()
+        };
         assert!(cfg.validate().iter().any(|e| e.field == "target_fps"));
     }
 
     #[test]
     fn target_fps_boundary_values_accepted() {
-        let mut cfg = TimingConfig::default();
-        cfg.target_fps = 1;
+        let mut cfg = TimingConfig {
+            target_fps: 1,
+            ..TimingConfig::default()
+        };
         assert!(cfg.is_valid());
         cfg.target_fps = 240;
         assert!(cfg.is_valid());
@@ -311,15 +317,19 @@ mod tests {
 
     #[test]
     fn max_vsync_jitter_zero_is_valid() {
-        let mut cfg = TimingConfig::default();
-        cfg.max_vsync_jitter_ms = 0;
+        let cfg = TimingConfig {
+            max_vsync_jitter_ms: 0,
+            ..TimingConfig::default()
+        };
         assert!(cfg.is_valid(), "0 is valid for max_vsync_jitter_ms");
     }
 
     #[test]
     fn max_vsync_jitter_101_rejected() {
-        let mut cfg = TimingConfig::default();
-        cfg.max_vsync_jitter_ms = 101;
+        let cfg = TimingConfig {
+            max_vsync_jitter_ms: 101,
+            ..TimingConfig::default()
+        };
         assert!(
             cfg.validate()
                 .iter()
@@ -329,8 +339,10 @@ mod tests {
 
     #[test]
     fn max_future_schedule_too_small_rejected() {
-        let mut cfg = TimingConfig::default();
-        cfg.max_future_schedule_us = 999_999;
+        let cfg = TimingConfig {
+            max_future_schedule_us: 999_999,
+            ..TimingConfig::default()
+        };
         assert!(
             cfg.validate()
                 .iter()
@@ -340,8 +352,10 @@ mod tests {
 
     #[test]
     fn max_future_schedule_too_large_rejected() {
-        let mut cfg = TimingConfig::default();
-        cfg.max_future_schedule_us = 3_600_000_001;
+        let cfg = TimingConfig {
+            max_future_schedule_us: 3_600_000_001,
+            ..TimingConfig::default()
+        };
         assert!(
             cfg.validate()
                 .iter()
@@ -351,8 +365,10 @@ mod tests {
 
     #[test]
     fn pending_queue_depth_too_small_rejected() {
-        let mut cfg = TimingConfig::default();
-        cfg.pending_queue_depth_per_agent = 15;
+        let cfg = TimingConfig {
+            pending_queue_depth_per_agent: 15,
+            ..TimingConfig::default()
+        };
         assert!(
             cfg.validate()
                 .iter()
@@ -362,8 +378,10 @@ mod tests {
 
     #[test]
     fn pending_queue_depth_too_large_rejected() {
-        let mut cfg = TimingConfig::default();
-        cfg.pending_queue_depth_per_agent = 4097;
+        let cfg = TimingConfig {
+            pending_queue_depth_per_agent: 4097,
+            ..TimingConfig::default()
+        };
         assert!(
             cfg.validate()
                 .iter()
@@ -396,8 +414,10 @@ mod tests {
 
     #[test]
     fn frame_period_us_at_120fps() {
-        let mut cfg = TimingConfig::default();
-        cfg.target_fps = 120;
+        let cfg = TimingConfig {
+            target_fps: 120,
+            ..TimingConfig::default()
+        };
         assert_eq!(cfg.frame_period_us(), 8_333);
     }
 }

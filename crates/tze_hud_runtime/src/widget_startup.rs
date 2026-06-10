@@ -304,8 +304,10 @@ mod tests {
     #[test]
     fn empty_paths_list_empty_registry() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
-        let mut raw = RawConfig::default();
-        raw.widget_bundles = Some(RawWidgetBundles { paths: vec![] });
+        let raw = RawConfig {
+            widget_bundles: Some(RawWidgetBundles { paths: vec![] }),
+            ..RawConfig::default()
+        };
         let tab_map = HashMap::new();
         let token_map = HashMap::new();
         init_widget_registry(&mut scene, &raw, None, &tab_map, &token_map);
@@ -317,10 +319,12 @@ mod tests {
     #[test]
     fn nonexistent_path_does_not_panic() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
-        let mut raw = RawConfig::default();
-        raw.widget_bundles = Some(RawWidgetBundles {
-            paths: vec!["/tmp/tze_hud_nonexistent_widget_dir_99999_a1b2c3".into()],
-        });
+        let raw = RawConfig {
+            widget_bundles: Some(RawWidgetBundles {
+                paths: vec!["/tmp/tze_hud_nonexistent_widget_dir_99999_a1b2c3".into()],
+            }),
+            ..RawConfig::default()
+        };
         let tab_map = HashMap::new();
         let token_map = HashMap::new();
         // Should not panic; the bundle scanner handles missing dirs gracefully.
@@ -332,8 +336,10 @@ mod tests {
     #[test]
     fn missing_tab_in_scene_skips_instance_creation() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
-        let mut raw = RawConfig::default();
-        raw.widget_bundles = Some(RawWidgetBundles { paths: vec![] });
+        let mut raw = RawConfig {
+            widget_bundles: Some(RawWidgetBundles { paths: vec![] }),
+            ..RawConfig::default()
+        };
         raw.tabs.push(RawTab {
             name: Some("Main".into()),
             widgets: vec![tze_hud_config::raw::RawTabWidget {

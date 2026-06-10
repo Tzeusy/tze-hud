@@ -514,11 +514,7 @@ async fn test_notification_urgency_distinct_colors() {
             assert!(
                 max_diff > TOLERANCE as u16,
                 "urgency={i} and urgency={j} are indistinguishable: \
-                 pixels {:?} vs {:?} max_diff={} must exceed TOLERANCE={}",
-                a,
-                b,
-                max_diff,
-                TOLERANCE
+                 pixels {a:?} vs {b:?} max_diff={max_diff} must exceed TOLERANCE={TOLERANCE}"
             );
         }
     }

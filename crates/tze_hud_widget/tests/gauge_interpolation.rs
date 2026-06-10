@@ -648,6 +648,7 @@ fn enum_severity_snap_indicator_fill_is_ff4444() {
 /// Both transitions run concurrently with transition_ms=500.  At t≈0.5:
 /// - severity indicator snaps to error (#FF4444) immediately at t=0
 /// - fill_color bar still interpolating (not yet at final red)
+///
 /// [hud-w17j]
 #[test]
 fn direct_color_interpolates_while_enum_snaps_in_same_transition() {
@@ -827,6 +828,7 @@ fn zero_transition_produces_single_publication_record() {
 ///   - Publish B: level=0.4 with transition_ms=300
 ///   - Interpolation restarts from 0.267 toward 0.4
 ///   - The restart should not overshoot or jump
+///
 /// [hud-w17j]
 #[test]
 fn transition_interruption_restarts_from_current_effective_value() {
@@ -968,6 +970,7 @@ fn transition_interruption_new_record_has_new_transition_ms() {
 /// - severity = "warning" (snapped, not "info")
 /// - level = old_level (still at start)
 /// - fill_color = old_fill_color (still at start)
+///
 /// [hud-w17j]
 #[test]
 fn mixed_snap_and_interpolate_label_severity_snap_at_t0() {
@@ -1017,6 +1020,7 @@ fn mixed_snap_and_interpolate_label_severity_snap_at_t0() {
 /// - severity = "warning" (still snapped)
 /// - level = midpoint between 0.0 and 0.8 (≈0.4)
 /// - fill_color = midpoint between cyan-blue and orange
+///
 /// [hud-w17j]
 #[test]
 fn mixed_snap_and_interpolate_at_t05_level_and_color_still_interpolating() {

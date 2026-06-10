@@ -270,21 +270,17 @@ fn single_param_level_change_rasterize_within_ci_budget() {
     assert_eq!(pixmap.height(), 512, "pixmap height must be 512");
 
     eprintln!(
-        "[gauge_perf] single-param (level) re-rasterize 512×512: {}µs ({} ms) \
-         — CI threshold: {}ms, spec target (ref hw): {}ms",
-        elapsed_us, elapsed_ms, CI_THRESHOLD_MS, SPEC_TARGET_MS,
+        "[gauge_perf] single-param (level) re-rasterize 512×512: {elapsed_us}µs ({elapsed_ms} ms) \
+         — CI threshold: {CI_THRESHOLD_MS}ms, spec target (ref hw): {SPEC_TARGET_MS}ms",
     );
 
     assert!(
         elapsed_ms < CI_THRESHOLD_MS,
-        "gauge 512×512 single-param re-rasterization took {}ms, exceeds CI threshold of {}ms \
-         (spec target for reference hardware is {}ms). \
+        "gauge 512×512 single-param re-rasterization took {elapsed_ms}ms, exceeds CI threshold of {CI_THRESHOLD_MS}ms \
+         (spec target for reference hardware is {SPEC_TARGET_MS}ms). \
          Likely a catastrophic regression. \
          Run `cargo bench -p tze_hud_compositor --bench widget_rasterize` on optimised \
          reference hardware to verify the 2ms spec requirement.",
-        elapsed_ms,
-        CI_THRESHOLD_MS,
-        SPEC_TARGET_MS,
     );
 }
 
@@ -405,19 +401,15 @@ fn multi_param_change_rasterize_within_ci_budget() {
 
     eprintln!(
         "[gauge_perf] multi-param (level+fill_color+label+severity) re-rasterize 512×512: \
-         {}µs ({} ms) — CI threshold: {}ms, spec target (ref hw): {}ms",
-        elapsed_us, elapsed_ms, CI_THRESHOLD_MS, SPEC_TARGET_MS,
+         {elapsed_us}µs ({elapsed_ms} ms) — CI threshold: {CI_THRESHOLD_MS}ms, spec target (ref hw): {SPEC_TARGET_MS}ms",
     );
 
     assert!(
         elapsed_ms < CI_THRESHOLD_MS,
-        "gauge 512×512 multi-param re-rasterization took {}ms, exceeds CI threshold of {}ms \
-         (spec target for reference hardware is {}ms). \
+        "gauge 512×512 multi-param re-rasterization took {elapsed_ms}ms, exceeds CI threshold of {CI_THRESHOLD_MS}ms \
+         (spec target for reference hardware is {SPEC_TARGET_MS}ms). \
          Run `cargo bench -p tze_hud_compositor --bench widget_rasterize` on optimised \
          reference hardware to verify the 2ms spec requirement.",
-        elapsed_ms,
-        CI_THRESHOLD_MS,
-        SPEC_TARGET_MS,
     );
 }
 
@@ -583,7 +575,6 @@ fn interpolation_frames_all_within_ci_budget() {
     }
     eprintln!(
         "[gauge_perf] interpolation frames (10 steps, 300ms transition): \
-         max={}ms — CI threshold: {}ms, spec target (ref hw): {}ms",
-        max_elapsed_ms, CI_THRESHOLD_MS, SPEC_TARGET_MS,
+         max={max_elapsed_ms}ms — CI threshold: {CI_THRESHOLD_MS}ms, spec target (ref hw): {SPEC_TARGET_MS}ms",
     );
 }

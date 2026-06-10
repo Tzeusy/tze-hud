@@ -4,14 +4,14 @@
 //! — Requirements:
 //!   - "Ambient Background Zone Visual Contract"
 //!     Scenarios: "Solid color background fills the display",
-//!                "No publication yields transparent/clear background",
-//!                "StaticImage renders placeholder in v1"
+//!     "No publication yields transparent/clear background",
+//!     "StaticImage renders placeholder in v1"
 //!   - "Ambient Background Latest-Wins Contention"
 //!     Scenarios: "New solid color replaces previous solid color",
-//!                "Rapid replacement under contention"
+//!     "Rapid replacement under contention"
 //!   - "Background Layer Z-Order"
 //!     Scenarios: "Content tile renders on top of background",
-//!                "Background layer uses LayerAttachment::Background"
+//!     "Background layer uses LayerAttachment::Background"
 //!
 //! ## Test list
 //!
@@ -785,8 +785,7 @@ async fn test_ambient_background_static_image_renders_texture_when_bytes_registe
     let centre_pixel = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
     assert!(
         centre_pixel[0] > 200 && centre_pixel[1] < 30 && centre_pixel[2] < 30,
-        "centre pixel should be red (from texture) not warm-gray placeholder; got {:?}",
-        centre_pixel
+        "centre pixel should be red (from texture) not warm-gray placeholder; got {centre_pixel:?}"
     );
 }
 
@@ -845,8 +844,7 @@ async fn test_ambient_background_static_image_non_square_renders_texture() {
     let centre_pixel = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
     assert!(
         centre_pixel[2] > 200 && centre_pixel[0] < 30 && centre_pixel[1] < 30,
-        "non-square zone image: centre pixel should be blue (texture), not warm-gray; got {:?}",
-        centre_pixel
+        "non-square zone image: centre pixel should be blue (texture), not warm-gray; got {centre_pixel:?}"
     );
 }
 
@@ -975,8 +973,7 @@ async fn test_tile_static_image_fill_mode_renders_texture() {
     let centre = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
     assert!(
         centre[0] < 30 && centre[1] > 200 && centre[2] < 30,
-        "Fill mode: centre pixel should be green; got {:?}",
-        centre
+        "Fill mode: centre pixel should be green; got {centre:?}"
     );
 }
 
@@ -1020,8 +1017,7 @@ async fn test_tile_static_image_contain_mode_letterboxes() {
     let centre = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
     assert!(
         centre[2] > 200 && centre[0] < 30 && centre[1] < 30,
-        "Contain mode: centre pixel (in image region) should be blue; got {:?}",
-        centre
+        "Contain mode: centre pixel (in image region) should be blue; got {centre:?}"
     );
 
     // Letterbox bar (y=30, below the chrome drag handle at y=0..8) should be
@@ -1030,8 +1026,7 @@ async fn test_tile_static_image_contain_mode_letterboxes() {
     let top = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 30);
     assert!(
         top[2] < 100,
-        "Contain mode: top letterbox pixel should not be blue; got {:?}",
-        top
+        "Contain mode: top letterbox pixel should not be blue; got {top:?}"
     );
 }
 
@@ -1072,16 +1067,14 @@ async fn test_tile_static_image_cover_mode_fills_completely() {
     let centre = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
     assert!(
         centre[0] > 200 && centre[1] < 30 && centre[2] > 200,
-        "Cover mode: centre pixel should be magenta; got {:?}",
-        centre
+        "Cover mode: centre pixel should be magenta; got {centre:?}"
     );
 
     // Corner should also be magenta (Cover fills everything).
     let corner = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 2, 2);
     assert!(
         corner[0] > 200 && corner[1] < 30 && corner[2] > 200,
-        "Cover mode: corner pixel should also be magenta; got {:?}",
-        corner
+        "Cover mode: corner pixel should also be magenta; got {corner:?}"
     );
 }
 
@@ -1123,15 +1116,13 @@ async fn test_tile_static_image_scale_down_mode_native_size() {
     let centre = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
     assert!(
         centre[0] > 200 && centre[1] > 200 && centre[2] < 30,
-        "ScaleDown mode: centre pixel should be yellow (image at native size); got {:?}",
-        centre
+        "ScaleDown mode: centre pixel should be yellow (image at native size); got {centre:?}"
     );
 
     // Far corner (0,0) should be tile background (dark), not yellow.
     let corner = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 0, 0);
     assert!(
         corner[0] < 100 && corner[1] < 100,
-        "ScaleDown mode: far corner should be tile background, not yellow; got {:?}",
-        corner
+        "ScaleDown mode: far corner should be tile background, not yellow; got {corner:?}"
     );
 }

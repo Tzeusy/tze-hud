@@ -2429,7 +2429,6 @@ mod tests {
                                         y: 50.0,
                                         width: 400.0,
                                         height: 300.0,
-                                        ..Default::default()
                                     }),
                                     z_order: 100,
                                 },
@@ -2480,7 +2479,6 @@ mod tests {
                                             y: 200.0,
                                             width: 200.0,
                                             height: 100.0,
-                                            ..Default::default()
                                         }),
                                         z_order: 101,
                                     },
@@ -2498,7 +2496,6 @@ mod tests {
                                             y: 0.0,
                                             width: 0.0, // INVALID: width must be > 0
                                             height: 50.0,
-                                            ..Default::default()
                                         }),
                                         z_order: 102,
                                     },
@@ -2687,7 +2684,6 @@ mod tests {
                                         y: 50.0,
                                         width: 400.0,
                                         height: 300.0,
-                                        ..Default::default()
                                     }),
                                     z_order: 100,
                                 },
@@ -2736,7 +2732,6 @@ mod tests {
                         y: 0.0,
                         width: 400.0,
                         height: 300.0,
-                        ..Default::default()
                     }),
                     radius: -1.0,
                 },
@@ -2757,7 +2752,6 @@ mod tests {
                         y: 16.0,
                         width: 48.0,
                         height: 48.0,
-                        ..Default::default()
                     }),
                 },
             )),
@@ -2862,15 +2856,10 @@ mod tests {
     /// Spec §Requirement: Z-Order Compositing at Content Layer
     /// Scenario: Agent tile in content band
     /// tasks.md §5.2: verify z_order=100 places the tile below ZONE_TILE_Z_MIN (0x8000_0000).
-    #[test]
-    fn test_z_order_100_is_in_agent_owned_band_below_zone_tile_z_min() {
-        assert!(
-            crate::TILE_Z_ORDER < tze_hud_scene::types::ZONE_TILE_Z_MIN,
-            "TILE_Z_ORDER={} must be below ZONE_TILE_Z_MIN=0x{:08x} — tasks.md §5.2",
-            crate::TILE_Z_ORDER,
-            tze_hud_scene::types::ZONE_TILE_Z_MIN,
-        );
-    }
+    const _Z_ORDER_100_IS_IN_AGENT_OWNED_BAND: () = assert!(
+        crate::TILE_Z_ORDER < tze_hud_scene::types::ZONE_TILE_Z_MIN,
+        "TILE_Z_ORDER must be below ZONE_TILE_Z_MIN — tasks.md §5.2"
+    );
 
     /// Task 5.3 — chrome layer z_order renders above the dashboard tile.
     ///
@@ -2889,9 +2878,7 @@ mod tests {
         let dashboard_z = crate::TILE_Z_ORDER;
         assert!(
             chrome_z > dashboard_z,
-            "chrome z (0x{:08x}) must exceed dashboard z ({}) — tasks.md §5.3",
-            chrome_z,
-            dashboard_z
+            "chrome z (0x{chrome_z:08x}) must exceed dashboard z ({dashboard_z}) — tasks.md §5.3"
         );
     }
 
@@ -2946,8 +2933,7 @@ mod tests {
         assert!(
             update_result.is_ok(),
             "content update must succeed with active lease — tasks.md §6.2; \
-             got: {:?}",
-            update_result
+             got: {update_result:?}"
         );
 
         // tasks.md §6.2: verify body TextMarkdownNode reflects new content.
@@ -3378,9 +3364,7 @@ mod tests {
         // Also assert wall-clock elapsed time is within calibrated budget.
         assert!(
             elapsed_us < ack_budget,
-            "wall-clock elapsed must be < {}µs (calibrated) — tasks.md §7.2; got {}µs",
-            ack_budget,
-            elapsed_us
+            "wall-clock elapsed must be < {ack_budget}µs (calibrated) — tasks.md §7.2; got {elapsed_us}µs"
         );
 
         // Verify pressed state is set in the scene graph.
@@ -3588,7 +3572,7 @@ mod tests {
     fn test_focus_ring_rendered_on_click_to_focus() {
         use tze_hud_input::{FocusManager, InputProcessor, PointerEvent, PointerEventKind};
 
-        let (mut scene, tile_id) = build_dashboard_scene();
+        let (mut scene, _tile_id) = build_dashboard_scene();
         let tab_id = scene.active_tab.expect("active_tab must be set");
         let mut processor = InputProcessor::new();
         let mut focus_manager = FocusManager::new();
@@ -4554,7 +4538,7 @@ mod tests {
         );
 
         // At exactly 75% (45 000 ms elapsed): poll must return AutoRenewDue.
-        clock.advance_us(1 * 1_000); // advance 1 ms → total 45 000 ms
+        clock.advance_us(1_000); // advance 1 ms → total 45 000 ms
         assert_eq!(
             ttl.poll(),
             TtlCheck::AutoRenewDue,
@@ -5165,8 +5149,8 @@ mod tests {
     /// Layer 0 test:
     ///   - Build the dashboard scene (tile owned by "test-agent").
     ///   - A second agent ("intruder-agent") attempts:
-    ///       a. `set_tile_root_checked` → must fail with NamespaceMismatch.
-    ///       b. `delete_tile`            → must fail with NamespaceMismatch.
+    ///     a. `set_tile_root_checked` → must fail with NamespaceMismatch.
+    ///     b. `delete_tile`            → must fail with NamespaceMismatch.
     #[test]
     fn test_second_agent_cannot_mutate_or_delete_dashboard_tile() {
         use tze_hud_scene::types::{Node, NodeData, Rect, SolidColorNode};
@@ -5225,9 +5209,9 @@ mod tests {
     /// Layer 0 test:
     ///   - Build a scene with a tile owned by "other-agent" (separate lease).
     ///   - The dashboard agent ("test-agent") attempts:
-    ///       a. `set_tile_root_checked` on other-agent's tile → NamespaceMismatch.
-    ///       b. `add_node_to_tile_checked` on other-agent's tile → NamespaceMismatch.
-    ///       c. `delete_tile` on other-agent's tile → NamespaceMismatch.
+    ///     a. `set_tile_root_checked` on other-agent's tile → NamespaceMismatch.
+    ///     b. `add_node_to_tile_checked` on other-agent's tile → NamespaceMismatch.
+    ///     c. `delete_tile` on other-agent's tile → NamespaceMismatch.
     #[test]
     fn test_dashboard_agent_cannot_mutate_other_agent_tile() {
         use tze_hud_scene::types::{HitRegionNode, Node, NodeData, Rect, SolidColorNode};

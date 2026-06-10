@@ -381,8 +381,10 @@ mod tests {
     /// Spec scenario: "Tile count at 100%" (spec lines 183-185).
     #[test]
     fn test_hard_limit_scenario_tile_count_at_100pct() {
-        let mut budget = ResourceBudget::default();
-        budget.max_tiles = 8;
+        let budget = ResourceBudget {
+            max_tiles: 8,
+            ..ResourceBudget::default()
+        };
         let usage = BudgetUsage {
             tile_count: 8,
             ..BudgetUsage::default()
@@ -407,8 +409,10 @@ mod tests {
     /// WHEN nodes-per-tile exceeds max_nodes_per_tile THEN NodesPerTileExceeded.
     #[test]
     fn test_hard_limit_nodes_per_tile_exceeded() {
-        let mut budget = ResourceBudget::default();
-        budget.max_nodes_per_tile = 32;
+        let budget = ResourceBudget {
+            max_nodes_per_tile: 32,
+            ..ResourceBudget::default()
+        };
         let usage = zero_usage();
         let delta = BudgetDelta {
             max_nodes_in_batch: 33, // exceeds 32
@@ -430,8 +434,10 @@ mod tests {
     /// WHEN texture bytes would exceed texture_bytes_total THEN TextureBytesExceeded.
     #[test]
     fn test_hard_limit_texture_bytes_exceeded() {
-        let mut budget = ResourceBudget::default();
-        budget.texture_bytes_total = 1000;
+        let budget = ResourceBudget {
+            texture_bytes_total: 1000,
+            ..ResourceBudget::default()
+        };
         let usage = BudgetUsage {
             texture_bytes_used: 900,
             ..BudgetUsage::default()
@@ -479,9 +485,11 @@ mod tests {
     /// THEN can create up to 8 tiles, each with up to 32 nodes.
     #[test]
     fn test_spec_scenario_budget_dimensions_enforced() {
-        let mut budget = ResourceBudget::default();
-        budget.max_tiles = 8;
-        budget.max_nodes_per_tile = 32;
+        let budget = ResourceBudget {
+            max_tiles: 8,
+            max_nodes_per_tile: 32,
+            ..ResourceBudget::default()
+        };
 
         // Creating the 8th tile is allowed
         let usage7 = BudgetUsage {

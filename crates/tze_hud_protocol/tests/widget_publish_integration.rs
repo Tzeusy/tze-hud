@@ -87,7 +87,7 @@ fn widget_parameter_value_f32_roundtrip() {
         Some(tze_hud_protocol::proto::widget_parameter_value_proto::Value::F32Value(v)) => {
             assert!((v - 0.75).abs() < 1e-6);
         }
-        other => panic!("Expected f32 value, got: {:?}", other),
+        other => panic!("Expected f32 value, got: {other:?}"),
     }
 }
 
@@ -110,7 +110,7 @@ fn widget_parameter_value_string_roundtrip() {
         Some(tze_hud_protocol::proto::widget_parameter_value_proto::Value::StringValue(v)) => {
             assert_eq!(v, "test");
         }
-        other => panic!("Expected string value, got: {:?}", other),
+        other => panic!("Expected string value, got: {other:?}"),
     }
 }
 
@@ -139,7 +139,7 @@ fn widget_parameter_value_color_roundtrip() {
             assert!((rgba.b - 0.0).abs() < 1e-6);
             assert!((rgba.a - 1.0).abs() < 1e-6);
         }
-        other => panic!("Expected color value, got: {:?}", other),
+        other => panic!("Expected color value, got: {other:?}"),
     }
 }
 
@@ -157,7 +157,7 @@ fn widget_publish_result_accepted_roundtrip() {
     let decoded = round_trip(&result);
 
     assert_eq!(decoded.request_sequence, 42);
-    assert_eq!(decoded.accepted, true);
+    assert!(decoded.accepted);
     assert_eq!(decoded.widget_name, "gauge_01");
     assert!(decoded.error_code.is_empty());
     assert!(decoded.error_message.is_empty());
@@ -177,7 +177,7 @@ fn widget_publish_result_rejected_roundtrip() {
     let decoded = round_trip(&result);
 
     assert_eq!(decoded.request_sequence, 84);
-    assert_eq!(decoded.accepted, false);
+    assert!(!decoded.accepted);
     assert_eq!(decoded.widget_name, "gauge_01");
     assert_eq!(decoded.error_code, "WIDGET_NOT_FOUND");
     assert_eq!(decoded.error_message, "Widget not found: gauge_01");
@@ -200,14 +200,14 @@ fn widget_publish_result_error_codes_preserved() {
             accepted: false,
             widget_name: "test_widget".to_string(),
             error_code: error_code.to_string(),
-            error_message: format!("Error: {}", error_code),
+            error_message: format!("Error: {error_code}"),
         };
 
         let decoded = round_trip(&result);
 
         assert_eq!(decoded.request_sequence, 7);
         assert_eq!(decoded.error_code, error_code);
-        assert_eq!(decoded.error_message, format!("Error: {}", error_code));
+        assert_eq!(decoded.error_message, format!("Error: {error_code}"));
     }
 }
 
@@ -243,7 +243,7 @@ fn client_message_widget_publish_envelope_roundtrip() {
             assert_eq!(publish.transition_ms, 100);
             assert_eq!(publish.ttl_us, 10_000);
         }
-        other => panic!("Expected WidgetPublish in ClientMessage, got: {:?}", other),
+        other => panic!("Expected WidgetPublish in ClientMessage, got: {other:?}"),
     }
 }
 
@@ -271,13 +271,10 @@ fn server_message_widget_publish_result_envelope_roundtrip() {
     match decoded.payload {
         Some(ServerPayload::WidgetPublishResult(result)) => {
             assert_eq!(result.request_sequence, 42);
-            assert_eq!(result.accepted, true);
+            assert!(result.accepted);
             assert_eq!(result.widget_name, "test_widget");
         }
-        other => panic!(
-            "Expected WidgetPublishResult in ServerMessage, got: {:?}",
-            other
-        ),
+        other => panic!("Expected WidgetPublishResult in ServerMessage, got: {other:?}"),
     }
 }
 
@@ -303,15 +300,12 @@ fn server_message_widget_publish_result_error_roundtrip() {
     match decoded.payload {
         Some(ServerPayload::WidgetPublishResult(result)) => {
             assert_eq!(result.request_sequence, 50);
-            assert_eq!(result.accepted, false);
+            assert!(!result.accepted);
             assert_eq!(result.widget_name, "missing_widget");
             assert_eq!(result.error_code, "WIDGET_NOT_FOUND");
             assert_eq!(result.error_message, "Widget not found: missing_widget");
         }
-        other => panic!(
-            "Expected WidgetPublishResult in ServerMessage, got: {:?}",
-            other
-        ),
+        other => panic!("Expected WidgetPublishResult in ServerMessage, got: {other:?}"),
     }
 }
 
@@ -379,6 +373,6 @@ fn client_message_sequence_roundtrip_boundary_values() {
         };
 
         let decoded = round_trip(&msg);
-        assert_eq!(decoded.sequence, seq, "Sequence {} not preserved", seq);
+        assert_eq!(decoded.sequence, seq, "Sequence {seq} not preserved");
     }
 }

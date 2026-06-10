@@ -140,7 +140,7 @@ fn long_press_cancelled_if_pointer_moves_beyond_tolerance() {
 
     assert_eq!(outcome, DragEventOutcome::Cancelled);
     assert!(
-        ip.drag_states.get(&0).is_none(),
+        !ip.drag_states.contains_key(&0),
         "drag state must be cleared after cancellation"
     );
 }
@@ -437,7 +437,7 @@ fn full_drag_flow_persists_geometry_on_release() {
 
     // Drag state must be cleared
     assert!(
-        ip.drag_states.get(&0).is_none(),
+        !ip.drag_states.contains_key(&0),
         "drag state must be cleared after release"
     );
 
