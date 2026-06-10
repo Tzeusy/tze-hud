@@ -48,7 +48,7 @@ jobs:
 
     steps:
       # ── Checkout ────────────────────────────────────────────────────────────
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # ── Rust toolchain ──────────────────────────────────────────────────────
       - uses: dtolnay/rust-toolchain@stable
@@ -84,13 +84,14 @@ jobs:
       # ── Node.js + Playwright setup ──────────────────────────────────────────
       # Playwright is used as an external subprocess (Approach A).
       # See docs/ci/safari-simulcast-interop-runner.md §4.3.1 and hud-mc3ka.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
+          package-manager-cache: false
 
       - name: Cache Playwright browsers
         id: cache-playwright
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: playwright-webkit-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}

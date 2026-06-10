@@ -49,7 +49,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain (MSRV 1.88)
         uses: dtolnay/rust-toolchain@1.88
@@ -75,7 +75,7 @@ jobs:
       # Gate 2 — Clone libvpx at the pinned version.
       - name: Cache libvpx source
         id: cache-libvpx-src
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/libvpx-src
           key: libvpx-src-${{ env.LIBVPX_VERSION }}
@@ -97,7 +97,7 @@ jobs:
       # Gate 3 — Configure libvpx for aarch64-apple-ios (real device).
       - name: Cache libvpx built library
         id: cache-libvpx-lib
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/libvpx-install
           key: libvpx-lib-aarch64-apple-ios-${{ env.LIBVPX_VERSION }}
