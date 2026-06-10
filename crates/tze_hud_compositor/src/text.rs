@@ -840,6 +840,17 @@ impl TextItem {
     /// used directly — **no markdown parsing happens here**, satisfying the
     /// zero-per-frame-parse-cost requirement.
     ///
+    /// # color_runs incompatibility
+    ///
+    /// This constructor uses `parsed.plain_text` as the text base (the
+    /// Markdown-stripped version), which makes `node.color_runs` byte offsets
+    /// invalid.  Consequently, `color_runs` is **not** preserved: the returned
+    /// `TextItem` always has `color_runs: Box::default()`.
+    ///
+    /// Callers **must not** invoke this constructor when `node.color_runs` is
+    /// non-empty.  Use [`TextItem::from_text_markdown_node`] instead; it
+    /// preserves the raw content and maps `color_runs` correctly.
+    ///
     /// `tile_x` / `tile_y` are the pixel-space position of the tile origin.
     ///
     /// [`ParsedMarkdown`]: crate::markdown::ParsedMarkdown
@@ -850,6 +861,14 @@ impl TextItem {
         tile_y: f32,
         parsed: &crate::markdown::ParsedMarkdown,
     ) -> Self {
+        // Callers must not invoke this constructor when color_runs is non-empty
+        // (see the # color_runs incompatibility doc comment above).  Assert in
+        // debug builds so misuse is caught early without any release overhead.
+        debug_assert!(
+            node.color_runs.is_empty(),
+            "from_text_markdown_cached called with non-empty color_runs; \
+             use from_text_markdown_node instead"
+        );
         use crate::markdown::StyledSpan;
 
         let text = parsed.plain_text.clone();

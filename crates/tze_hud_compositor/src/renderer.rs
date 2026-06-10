@@ -4128,15 +4128,36 @@ impl Compositor {
             // every scene-version change; a miss (e.g. very first frame before
             // any commit) falls back to the legacy `strip_markdown_v1` path so
             // rendering is never blocked.
-            let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
-            let mut item = if let Some(parsed) = self.markdown_cache.get_by_key(&content_key) {
-                TextItem::from_text_markdown_cached(
-                    tm,
-                    tile.bounds.x - scroll_x,
-                    tile.bounds.y - scroll_y,
-                    parsed,
-                )
+            //
+            // color_runs bypass: `from_text_markdown_cached` uses markdown
+            // plain_text as the text base and discards `node.color_runs`.
+            // `color_runs` byte offsets are against the *raw* content (not the
+            // stripped plain_text), so the cache path is incompatible.  Skip
+            // it when the node carries inline color_runs and fall through to
+            // `from_text_markdown_node` which preserves them correctly.
+            //
+            // `compute_key` is deferred into the `is_empty()` branch so we
+            // avoid the BLAKE3 hash entirely on the color_runs bypass path.
+            let mut item = if tm.color_runs.is_empty() {
+                let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
+                if let Some(parsed) = self.markdown_cache.get_by_key(&content_key) {
+                    TextItem::from_text_markdown_cached(
+                        tm,
+                        tile.bounds.x - scroll_x,
+                        tile.bounds.y - scroll_y,
+                        parsed,
+                    )
+                } else {
+                    TextItem::from_text_markdown_node(
+                        tm,
+                        tile.bounds.x - scroll_x,
+                        tile.bounds.y - scroll_y,
+                    )
+                }
             } else {
+                // color_runs present: use the legacy path that preserves raw
+                // content byte offsets.  The markdown cache is intentionally
+                // bypassed here.
                 TextItem::from_text_markdown_node(
                     tm,
                     tile.bounds.x - scroll_x,
@@ -7188,9 +7209,19 @@ fn collect_ellipsis_text_items_from_node(
 
     if let NodeData::TextMarkdown(tm) = &node.data {
         if tm.overflow == tze_hud_scene::types::TextOverflow::Ellipsis {
-            let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
-            let item = if let Some(parsed) = markdown_cache.get_by_key(&content_key) {
-                TextItem::from_text_markdown_cached(tm, tile_x, tile_y, parsed)
+            // color_runs bypass: same as in collect_text_items_from_node —
+            // the markdown cache path drops color_runs, so skip it when the
+            // node carries inline color_runs.
+            //
+            // `compute_key` is deferred into the `is_empty()` branch so we
+            // avoid the BLAKE3 hash entirely on the color_runs bypass path.
+            let item = if tm.color_runs.is_empty() {
+                let content_key = crate::markdown::MarkdownCache::compute_key(&tm.content);
+                if let Some(parsed) = markdown_cache.get_by_key(&content_key) {
+                    TextItem::from_text_markdown_cached(tm, tile_x, tile_y, parsed)
+                } else {
+                    TextItem::from_text_markdown_node(tm, tile_x, tile_y)
+                }
             } else {
                 TextItem::from_text_markdown_node(tm, tile_x, tile_y)
             };
