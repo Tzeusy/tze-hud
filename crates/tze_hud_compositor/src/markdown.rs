@@ -1058,10 +1058,8 @@ fn find_bracket_close(chars: &[char], open_pos: usize) -> Option<usize> {
 /// Without it, `[](`×21845 triggers ~10⁹ character comparisons; with it,
 /// the whole line costs one O(n) pass.
 fn build_paren_matches(chars: &[char]) -> Vec<Option<usize>> {
-    // Fast path: no `(` means no paren pairs — skip the allocation entirely.
-    if !chars.contains(&'(') {
-        return Vec::new();
-    }
+    // Caller (`process_inline`) has already checked `chars.contains(&'(')`;
+    // we only run here when at least one `(` is present.
     let n = chars.len();
     let mut table = vec![None; n];
     // Stack of open-paren positions waiting for their closing `)`.
@@ -1174,9 +1172,10 @@ fn find_backtick_close(chars: &[char], from: usize, tick_count: usize) -> Option
 /// into amortized O(n) total.  It is a pure short-circuit: it never changes
 /// which code spans match, only how fast failures are detected.
 ///
-/// Backtick runs of length > `MAX_TICK` are handled by a direct scan (no memo
-/// entry).  In practice, CommonMark uses at most a handful of backticks, so
-/// this cap is never reached on valid input.
+/// Backtick runs of length > `MAX_TICK` (32) are handled by a direct scan (no
+/// memo entry).  CommonMark spec uses at most 3 backticks; adversarial runs up
+/// to 32 are now memoized, closing the residual O(n²) gap for any realistic
+/// crafted input.
 struct BacktickCloseMemo {
     /// `fail_from[tick_count - 1]` is `Some(f)` when no close run of that
     /// length exists for any start `>= f`.  Indexed by `tick_count - 1`.
@@ -1186,7 +1185,12 @@ struct BacktickCloseMemo {
 impl BacktickCloseMemo {
     /// Maximum tick-count tracked by the memo.  Runs longer than this fall
     /// back to a direct scan.
-    const MAX_TICK: usize = 8;
+    ///
+    /// 32 covers all realistic CommonMark inputs (CommonMark spec examples use
+    /// at most 3 backticks) and eliminates the O(n²) fallback for adversarial
+    /// runs up to 32 backticks long, while remaining stack-allocated (32 ×
+    /// 16 bytes = 512 bytes).
+    const MAX_TICK: usize = 32;
 
     fn new() -> Self {
         Self {
