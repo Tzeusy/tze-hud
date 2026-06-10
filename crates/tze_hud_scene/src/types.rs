@@ -748,6 +748,16 @@ pub struct HitRegionNode {
     /// Per-event-type delivery filter.  All events enabled by default.
     #[serde(default)]
     pub event_mask: EventMask,
+    /// When `true`, keystroke events targeting this focused node are intercepted
+    /// by the runtime's `ComposerDraftManager` and routed into a `ComposerDraft`
+    /// buffer instead of being forwarded to the owning agent as raw key events.
+    ///
+    /// The owning adapter receives coalesced `DraftStateNotification` state-stream
+    /// messages and a final transactional `DraftSubmission` on Enter/submit.
+    ///
+    /// Source: spec §4.1 (hud-5jbra.4 / hud-qwqxy).
+    #[serde(default)]
+    pub accepts_composer_input: bool,
     /// ARIA-compatible accessibility metadata.
     ///
     /// Boxed to keep `HitRegionNode` (and therefore `Node`) within the
@@ -838,6 +848,7 @@ impl Default for HitRegionNode {
             accepts_pointer: false,
             auto_capture: false,
             release_on_up: false,
+            accepts_composer_input: false,
             cursor_style: CursorStyle::Default,
             tooltip: None,
             event_mask: EventMask::default(),

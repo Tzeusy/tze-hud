@@ -46,6 +46,7 @@
 //! boundary; `EditOutcome::AtCapacity` is returned and no notification leaves
 //! the runtime with content exceeding the cap.
 
+use tze_hud_scene::SceneId;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Hard ceiling matching the TextMarkdownNode content limit (spec §4.3, §4.5).
@@ -672,17 +673,33 @@ impl Default for ComposerDraft {
 
 // ─── Unicode helpers ──────────────────────────────────────────────────────────
 
-/// Truncate `s` to at most `max_bytes`, cutting on a UTF-8 char boundary.
+/// Truncate `s` to at most `max_bytes`, cutting on a **grapheme-cluster boundary**.
 ///
-/// Spec: §4.5 — paste truncated at a UTF-8 character boundary at the cap.
+/// # Why grapheme clusters and not char boundaries
+///
+/// Truncating at a bare char boundary can split multi-codepoint grapheme clusters
+/// (e.g. NFD `"e\u{0301}"`, emoji ZWJ sequences, or skin-tone modifiers). The
+/// result is a string that is valid UTF-8 but visually incomplete / semantically
+/// wrong. Since the composer cap guards *visible* content, we must truncate so that
+/// the last retained grapheme is whole.
+///
+/// Algorithm: iterate grapheme clusters from the front, accumulate byte lengths,
+/// stop when the next cluster would push us past `max_bytes`. Returns the largest
+/// grapheme-aligned prefix that fits within `max_bytes`.
+///
+/// Spec: §4.5 — paste truncated at a UTF-8 grapheme-cluster boundary at the cap.
 pub fn truncate_at_utf8_boundary(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
-    // Walk back from max_bytes until we land on a valid char boundary
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
+    // Walk grapheme clusters and collect the largest prefix ≤ max_bytes.
+    let mut end = 0usize;
+    for cluster in s.graphemes(true) {
+        let next = end + cluster.len();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
     }
     &s[..end]
 }
@@ -821,6 +838,447 @@ impl DraftNotificationBatch {
 impl Default for DraftNotificationBatch {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ─── DraftScheduler ──────────────────────────────────────────────────────────
+
+/// Coalesced-delivery scheduler with a **flush guarantee**.
+///
+/// # Spec (§4.3)
+///
+/// Draft-state notifications are **state-stream** (coalescible). However,
+/// the spec requires that the settled/terminal draft state is *always*
+/// delivered to the adapter regardless of coalescing. This struct enforces
+/// that contract:
+///
+/// - `push_notification` coalesces rapid state-stream notifications into a
+///   single latest-snapshot pending slot.
+/// - `flush` must be called on idle/settle, on blur, on submit, or on cancel
+///   to guarantee the terminal state reaches the adapter.
+/// - `take_batch` drains everything accumulated since the last call.
+///
+/// # Flush guarantee for submit (§4.3 / §4.e)
+///
+/// On `flush_submit`, the scheduler additionally enqueues a **post-submit
+/// clear notification** (`text=""`, `cursor=0`) with an incremented sequence
+/// number after the submission. This ensures the adapter view resets after
+/// submit without relying on the next keystroke to update the display.
+///
+/// # Usage
+///
+/// ```ignore
+/// // Per-keystroke (Stage 1):
+/// scheduler.push_notification(draft.snapshot());
+///
+/// // On idle, blur, or any settle point:
+/// scheduler.flush();
+///
+/// // On submit (produces DraftSubmission + clear notification):
+/// if let Some(sub) = draft.submit() {
+///     scheduler.flush_submit(sub);
+/// }
+///
+/// // Per-frame delivery loop:
+/// if let Some(batch) = scheduler.take_batch() {
+///     deliver_to_adapter(batch);
+/// }
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct DraftScheduler {
+    /// Coalesced latest-snapshot slot (state-stream).
+    pending_notification: Option<DraftStateNotification>,
+    /// Pending transactional submission.
+    pending_submission: Option<DraftSubmission>,
+    /// Pending transactional cancel.
+    pending_cancel: Option<DraftCancel>,
+    /// True when `flush` has been requested and the pending notification (if any)
+    /// should be delivered immediately on the next `take_batch` call.
+    flush_pending: bool,
+}
+
+impl DraftScheduler {
+    /// Create a new scheduler with no pending state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Coalesce a new draft-state notification into the pending slot.
+    ///
+    /// Later snapshots replace earlier ones (latest-wins, state-stream semantics).
+    /// The notification is NOT delivered until `flush` is called or a transactional
+    /// event forces delivery.
+    pub fn push_notification(&mut self, notification: DraftStateNotification) {
+        match &self.pending_notification {
+            Some(existing) if notification.sequence <= existing.sequence => {}
+            _ => {
+                self.pending_notification = Some(notification);
+            }
+        }
+    }
+
+    /// Request a flush: the pending notification will be included in the next
+    /// `take_batch` even if it was coalesced.
+    ///
+    /// Call this on idle/settle, on blur, and on any natural batch boundary.
+    /// The scheduler guarantees the terminal draft state is delivered whenever
+    /// `flush` is called — even if it was the only notification in the window.
+    pub fn flush(&mut self) {
+        self.flush_pending = true;
+    }
+
+    /// Record a transactional submit and schedule the post-submit display clear.
+    ///
+    /// This sets `flush_pending = true` so the clear notification is picked up
+    /// by the next `take_batch`. The clear uses `sequence + 1` to ensure adapters
+    /// that check sequence ordering treat it as newer than the submission.
+    ///
+    /// # Post-submit clear (spec §4.e / hud-qwqxy)
+    ///
+    /// `submit()` on `ComposerDraft` clears the buffer locally, but no
+    /// `DraftStateNotification` with `text=""` is emitted automatically.
+    /// Without this clear, adapters retain the submitted text in their display
+    /// until the next keystroke. `flush_submit` emits that clear.
+    pub fn flush_submit(&mut self, submission: DraftSubmission) {
+        // Post-submit display clear: empty text, cursor at 0, sequence after submission.
+        let clear_sequence = submission.sequence.wrapping_add(1);
+        let clear = DraftStateNotification {
+            text: String::new(),
+            cursor: 0,
+            selection_anchor: 0,
+            at_capacity: false,
+            sequence: clear_sequence,
+        };
+        // Record the transactional submission first.
+        if self.pending_submission.is_none() {
+            self.pending_cancel = None;
+            self.pending_submission = Some(submission);
+        }
+        // Install the clear as the pending notification so it is delivered after
+        // the submission in the same batch.
+        self.pending_notification = Some(clear);
+        self.flush_pending = true;
+    }
+
+    /// Record a transactional cancel.
+    ///
+    /// Forces a flush so the cancel and any pending notification are delivered.
+    pub fn flush_cancel(&mut self, cancel: DraftCancel) {
+        if self.pending_cancel.is_none() {
+            self.pending_submission = None;
+            self.pending_cancel = Some(cancel);
+        }
+        self.flush_pending = true;
+    }
+
+    /// Drain the pending batch if there is anything to deliver.
+    ///
+    /// Returns `Some(batch)` when:
+    /// - A transactional event (submission / cancel) is pending, OR
+    /// - `flush` has been called and a notification is pending.
+    ///
+    /// Returns `None` when there is nothing to deliver (rapid mid-typing coalescing).
+    ///
+    /// Callers should call this once per frame (or once per settle point) and
+    /// forward the batch to the owning adapter.
+    pub fn take_batch(&mut self) -> Option<DraftNotificationBatch> {
+        let has_transactional = self.pending_submission.is_some() || self.pending_cancel.is_some();
+        let has_deliverable_notification =
+            self.pending_notification.is_some() && self.flush_pending;
+
+        if !has_transactional && !has_deliverable_notification {
+            return None;
+        }
+
+        let mut batch = DraftNotificationBatch::new();
+
+        // State-stream notification (only on flush or when forced by transactional).
+        if self.flush_pending {
+            if let Some(n) = self.pending_notification.take() {
+                batch.coalesce_state(n);
+            }
+            self.flush_pending = false;
+        }
+
+        // Transactional cancel.
+        if let Some(cancel) = self.pending_cancel.take() {
+            batch.record_cancel(cancel);
+        }
+
+        // Transactional submission.
+        if let Some(sub) = self.pending_submission.take() {
+            batch.record_submission(sub);
+        }
+
+        if batch.is_empty() { None } else { Some(batch) }
+    }
+
+    /// True when there is any pending state that has not been drained.
+    pub fn has_pending(&self) -> bool {
+        self.pending_notification.is_some()
+            || self.pending_submission.is_some()
+            || self.pending_cancel.is_some()
+    }
+}
+
+// ─── ComposerDraftManager ─────────────────────────────────────────────────────
+
+/// Per-tab runtime manager for `ComposerDraft` buffers.
+///
+/// One `ComposerDraftManager` per tab (or per runtime). Owns the `ComposerDraft`
+/// for the currently focused composer region (at most one per tab at a time).
+///
+/// # Keystroke routing
+///
+/// When a focused node has `accepts_composer_input = true`, the runtime passes
+/// keystroke events through `route_key_down` and `route_character` instead of
+/// forwarding them to the agent as raw `KeyDownEvent` / `CharacterEvent`. The
+/// draft buffer is mutated locally; the adapter receives coalesced
+/// `DraftStateNotification` state-stream events (not per-keystroke events).
+///
+/// # Focus lifecycle
+///
+/// - `on_focus_gained` — creates or reuses a draft buffer for the focused node.
+/// - `on_focus_lost` — flushes pending state and destroys the buffer.
+/// - `on_submit` — submits the draft, schedules post-submit clear.
+/// - `on_cancel` — cancels the draft, schedules cancel event.
+///
+/// # Safe-mode governance (§4.5)
+///
+/// Call `set_suspended(true)` when safe mode activates. The draft rejects all
+/// mutating operations while suspended but preserves its content.
+///
+/// # Spec refs
+///
+/// - §4.1: runtime-owned draft attached to focused composer regions.
+/// - §4.3: coalesced state-stream notifications + transactional submit/cancel.
+/// - §4.5: governance — draft suspends under safe mode.
+#[derive(Debug, Default)]
+pub struct ComposerDraftManager {
+    /// Active draft buffer, present while a composer region is focused.
+    draft: Option<ComposerDraft>,
+    /// Coalesced delivery scheduler.
+    scheduler: DraftScheduler,
+    /// The node_id of the currently focused composer region, if any.
+    focused_node: Option<SceneId>,
+}
+
+impl ComposerDraftManager {
+    /// Create a new manager with no active draft.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Called when a node with `accepts_composer_input = true` gains focus.
+    ///
+    /// Creates a new `ComposerDraft` (with `DEFAULT_DRAFT_CAP`) for the region.
+    /// Any previous draft from a stale focus is discarded (focus is exclusive).
+    pub fn on_focus_gained(&mut self, node_id: SceneId, suspended: bool) {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        draft.set_suspended(suspended);
+        self.draft = Some(draft);
+        self.focused_node = Some(node_id);
+    }
+
+    /// Called when the focused composer region loses focus.
+    ///
+    /// Flushes any pending notification (blur is a settle point per §4.3 flush
+    /// guarantee) then discards the draft buffer.
+    ///
+    /// Returns the drained batch, if any (caller delivers to adapter).
+    pub fn on_focus_lost(&mut self) -> Option<DraftNotificationBatch> {
+        self.scheduler.flush();
+        let batch = self.scheduler.take_batch();
+        self.draft = None;
+        self.focused_node = None;
+        batch
+    }
+
+    /// Route a character event into the active draft buffer.
+    ///
+    /// Returns `(EditOutcome, Option<DraftNotificationBatch>)` where the batch is
+    /// `Some` only when a flush point is reached (transactional event or explicit
+    /// settle — callers should call `try_flush` at frame end for the normal
+    /// coalesced delivery path).
+    ///
+    /// If no composer is focused, returns `(EditOutcome::Unchanged, None)`.
+    pub fn route_character(
+        &mut self,
+        character: &str,
+    ) -> (EditOutcome, Option<DraftNotificationBatch>) {
+        let Some(draft) = self.draft.as_mut() else {
+            return (EditOutcome::Unchanged, None);
+        };
+        let outcome = draft.insert(character);
+        if matches!(outcome, EditOutcome::Mutated | EditOutcome::AtCapacity) {
+            self.scheduler.push_notification(draft.snapshot());
+        }
+        (outcome, None)
+    }
+
+    /// Route a key-down event into the active draft buffer.
+    ///
+    /// Interprets:
+    /// - `Backspace` → `draft.backspace()`
+    /// - `Delete` → `draft.delete_forward()`
+    /// - `Ctrl+Backspace` / `Alt+Backspace` → `draft.word_backspace()`
+    /// - `Ctrl+Delete` / `Alt+Delete` → `draft.word_delete_forward()`
+    /// - `ArrowLeft` → `draft.move_left()` (or `select_left` with Shift)
+    /// - `ArrowRight` → `draft.move_right()` (or `select_right` with Shift)
+    /// - `Home` → `draft.move_to_start()` (or `select_to_start` with Shift)
+    /// - `End` → `draft.move_to_end()` (or `select_to_end` with Shift)
+    /// - `Ctrl+ArrowLeft` → `draft.move_word_left()`
+    /// - `Ctrl+ArrowRight` → `draft.move_word_right()`
+    /// - `Enter` / `NumpadEnter` → submit (returns batch with submission + clear)
+    /// - `Escape` → cancel (returns batch with cancel)
+    ///
+    /// Returns `(consumed, Option<DraftNotificationBatch>)`.
+    /// `consumed = true` means the keystroke was handled by the draft (do NOT
+    /// forward to the agent as a raw `KeyDownEvent`).
+    pub fn route_key_down(
+        &mut self,
+        key_code: &str,
+        _key: &str,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+    ) -> (bool, Option<DraftNotificationBatch>) {
+        let Some(draft) = self.draft.as_mut() else {
+            return (false, None);
+        };
+
+        match key_code {
+            "Backspace" => {
+                let o = if ctrl || alt {
+                    draft.word_backspace()
+                } else {
+                    draft.backspace()
+                };
+                if matches!(o, EditOutcome::Mutated | EditOutcome::AtCapacity) {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
+                (true, None)
+            }
+            "Delete" => {
+                let o = if ctrl || alt {
+                    draft.word_delete_forward()
+                } else {
+                    draft.delete_forward()
+                };
+                if matches!(o, EditOutcome::Mutated | EditOutcome::AtCapacity) {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
+                (true, None)
+            }
+            "ArrowLeft" => {
+                let o = if shift {
+                    draft.select_left()
+                } else if ctrl || alt {
+                    draft.move_word_left()
+                } else {
+                    draft.move_left()
+                };
+                if o == EditOutcome::Mutated {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
+                (true, None)
+            }
+            "ArrowRight" => {
+                let o = if shift {
+                    draft.select_right()
+                } else if ctrl || alt {
+                    draft.move_word_right()
+                } else {
+                    draft.move_right()
+                };
+                if o == EditOutcome::Mutated {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
+                (true, None)
+            }
+            "Home" => {
+                let o = if shift {
+                    draft.select_to_start()
+                } else {
+                    draft.move_to_start()
+                };
+                if o == EditOutcome::Mutated {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
+                (true, None)
+            }
+            "End" => {
+                let o = if shift {
+                    draft.select_to_end()
+                } else {
+                    draft.move_to_end()
+                };
+                if o == EditOutcome::Mutated {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
+                (true, None)
+            }
+            "Enter" | "NumpadEnter" => {
+                if let Some(sub) = draft.submit() {
+                    self.scheduler.flush_submit(sub);
+                    let b = self.scheduler.take_batch();
+                    (true, b)
+                } else {
+                    // Empty draft — consume but nothing to deliver.
+                    (true, None)
+                }
+            }
+            "Escape" => {
+                if let Some(cancel) = draft.cancel() {
+                    self.scheduler.flush_cancel(cancel);
+                    let b = self.scheduler.take_batch();
+                    (true, b)
+                } else {
+                    (true, None)
+                }
+            }
+            _ => {
+                // Not a handled editing key; do not consume (let caller forward
+                // to agent if needed).
+                (false, None)
+            }
+        }
+    }
+
+    /// Flush pending coalesced notifications at a settle point (e.g. frame end).
+    ///
+    /// Must be called periodically to guarantee the terminal draft state is
+    /// delivered. The `DraftScheduler` guarantees that at least one notification
+    /// is delivered after any sequence of `push_notification` + `flush` calls.
+    ///
+    /// Callers should call this once per frame or once after a burst of keystrokes.
+    pub fn try_flush(&mut self) -> Option<DraftNotificationBatch> {
+        self.scheduler.flush();
+        self.scheduler.take_batch()
+    }
+
+    /// Called when safe mode activates or deactivates.
+    ///
+    /// Propagates the suspension state to the active draft buffer.
+    pub fn set_suspended(&mut self, suspended: bool) {
+        if let Some(draft) = self.draft.as_mut() {
+            draft.set_suspended(suspended);
+        }
+    }
+
+    /// Returns a reference to the active draft buffer, if any.
+    pub fn draft(&self) -> Option<&ComposerDraft> {
+        self.draft.as_ref()
+    }
+
+    /// Returns the node_id of the currently focused composer region, if any.
+    pub fn focused_node(&self) -> Option<SceneId> {
+        self.focused_node
+    }
+
+    /// True when a composer region is currently focused (draft buffer present).
+    pub fn is_active(&self) -> bool {
+        self.draft.is_some()
     }
 }
 
@@ -1297,5 +1755,364 @@ mod tests {
                     "submitted text must equal buffer before submit");
             }
         }
+    }
+
+    // ─── DraftScheduler: coalesced delivery + flush guarantee ────────────────
+
+    /// Spec §4.c: rapid coalesced edits must still deliver the final state.
+    ///
+    /// If 100 keystrokes arrive in one scheduler window, the adapter sees one
+    /// batch containing the terminal snapshot (not 100 batches). The flush call
+    /// on idle/settle guarantees the terminal state is delivered.
+    #[test]
+    fn scheduler_coalesces_rapid_edits_but_guarantees_final_delivery() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        let mut sched = DraftScheduler::new();
+
+        // Simulate 10 rapid keystrokes coalesced into one scheduler window.
+        for ch in ["h", "e", "l", "l", "o", " ", "w", "o", "r", "l"] {
+            let _ = draft.insert(ch);
+            sched.push_notification(draft.snapshot());
+        }
+
+        // No flush yet — mid-window, nothing should be delivered.
+        // (take_batch returns None when flush has not been requested)
+        assert!(sched.take_batch().is_none(), "no delivery before flush");
+
+        // Flush (settle/idle point) — terminal state must be delivered.
+        sched.flush();
+        let batch = sched
+            .take_batch()
+            .expect("terminal state must be delivered after flush");
+
+        let snap = batch
+            .latest
+            .as_ref()
+            .expect("batch must have a state notification");
+        assert_eq!(
+            snap.text, "hello worl",
+            "delivered snapshot must equal the terminal draft state"
+        );
+        // Verify coalescing: the delivered sequence matches the draft's current sequence.
+        assert_eq!(
+            snap.sequence,
+            draft.sequence(),
+            "sequence must match draft sequence"
+        );
+    }
+
+    /// After `flush` + `take_batch`, subsequent `take_batch` returns None (no double-delivery).
+    #[test]
+    fn scheduler_does_not_double_deliver_after_flush() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        let mut sched = DraftScheduler::new();
+
+        draft.insert("hello");
+        sched.push_notification(draft.snapshot());
+        sched.flush();
+
+        let first = sched.take_batch();
+        assert!(first.is_some(), "first take_batch returns the batch");
+
+        let second = sched.take_batch();
+        assert!(
+            second.is_none(),
+            "second take_batch after drain returns None"
+        );
+    }
+
+    /// Rapid edit → flush → more edits: each settle point gets exactly the
+    /// state at that point, not stale state from a previous window.
+    #[test]
+    fn scheduler_delivers_correct_state_across_multiple_flush_windows() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        let mut sched = DraftScheduler::new();
+
+        draft.insert("hello");
+        sched.push_notification(draft.snapshot());
+        sched.flush();
+        let batch1 = sched.take_batch().expect("first flush delivers");
+        assert_eq!(batch1.latest.as_ref().unwrap().text, "hello");
+
+        draft.insert(" world");
+        sched.push_notification(draft.snapshot());
+        sched.flush();
+        let batch2 = sched.take_batch().expect("second flush delivers");
+        assert_eq!(batch2.latest.as_ref().unwrap().text, "hello world");
+    }
+
+    // ─── Post-submit display clear (spec §4.e) ───────────────────────────────
+
+    /// Spec §4.e: `flush_submit` emits an `UpdateComposerDisplay('')` clear so
+    /// the adapter view resets after submit without relying on the next keystroke.
+    ///
+    /// The clear notification must have `text=""`, `cursor=0`, and a sequence
+    /// number strictly greater than the submission sequence so adapters that
+    /// check ordering treat it as newer.
+    #[test]
+    fn flush_submit_emits_post_submit_display_clear() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        let mut sched = DraftScheduler::new();
+
+        draft.insert("send this");
+        let sub = draft.submit().expect("submit should succeed");
+        let sub_sequence = sub.sequence;
+
+        sched.flush_submit(sub);
+        let batch = sched
+            .take_batch()
+            .expect("batch must be non-empty after flush_submit");
+
+        // The batch must contain the transactional submission.
+        let submission = batch
+            .submission
+            .as_ref()
+            .expect("submission must be in batch");
+        assert_eq!(
+            submission.text, "send this",
+            "submission text must be exact buffer"
+        );
+
+        // The batch must also contain the post-submit clear notification.
+        let clear = batch
+            .latest
+            .as_ref()
+            .expect("clear notification must be in batch");
+        assert!(
+            clear.text.is_empty(),
+            "post-submit clear notification must have empty text"
+        );
+        assert_eq!(clear.cursor, 0, "post-submit clear cursor must be 0");
+        assert!(
+            clear.sequence > sub_sequence,
+            "clear sequence ({}) must be > submission sequence ({})",
+            clear.sequence,
+            sub_sequence,
+        );
+    }
+
+    /// Submit with no prior draft-state notification also produces the clear.
+    #[test]
+    fn flush_submit_produces_clear_even_with_no_prior_notifications() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        let mut sched = DraftScheduler::new();
+
+        draft.insert("x");
+        let sub = draft.submit().expect("submit");
+
+        // No push_notification before flush_submit.
+        sched.flush_submit(sub);
+        let batch = sched.take_batch().expect("batch after flush_submit");
+        assert!(batch.submission.is_some(), "submission present");
+        let clear = batch.latest.as_ref().expect("clear notification present");
+        assert!(clear.text.is_empty(), "post-submit clear is empty");
+    }
+
+    // ─── Grapheme-cluster cap boundary fix ──────────────────────────────────
+
+    /// Truncation at the byte cap must preserve whole grapheme clusters.
+    ///
+    /// NFD `"e\u{0301}"` (LATIN SMALL LETTER E + COMBINING ACUTE ACCENT) is a
+    /// 2-codepoint grapheme cluster (3 bytes: `0x65` + `0xcc` `0x81`). If the cap
+    /// falls in the middle of the combining accent, a naive char-boundary
+    /// truncation would produce `"e"` (dropping only the accent half) while a
+    /// grapheme-boundary truncation correctly drops the entire cluster.
+    ///
+    /// This test places the cap at exactly 2 bytes — the `e` (1 byte) and the
+    /// first byte of the combining accent — to verify the cluster is not split.
+    #[test]
+    fn truncate_at_grapheme_boundary_nfd_combining_accent() {
+        // "e\u{0301}" is U+0065 (1 byte) + U+0301 (2 bytes) = 3 bytes total.
+        // The grapheme cluster boundary falls at 0 or 3; 2 is in the middle.
+        let s = "e\u{0301}"; // NFD: e + combining acute accent
+        assert_eq!(s.len(), 3);
+
+        // Cap = 2: cannot fit the full cluster (3 bytes). Must return "".
+        let truncated = truncate_at_utf8_boundary(s, 2);
+        assert!(
+            truncated.is_empty(),
+            "a 3-byte grapheme cluster must not be split at byte 2; got {truncated:?}",
+        );
+
+        // Cap = 3: fits exactly.
+        let full = truncate_at_utf8_boundary(s, 3);
+        assert_eq!(full, s);
+
+        // Cap = 0: always empty.
+        let empty = truncate_at_utf8_boundary(s, 0);
+        assert_eq!(empty, "");
+    }
+
+    /// Insert with a cap that falls inside a multi-codepoint grapheme cluster
+    /// does not split the cluster (uses `truncate_at_utf8_boundary` internally).
+    #[test]
+    fn insert_does_not_split_grapheme_cluster_at_cap() {
+        // NFD "e\u{0301}" = 3 bytes. Cap = 2 → the cluster does not fit.
+        let mut draft = ComposerDraft::new(2);
+        let outcome = draft.insert("e\u{0301}");
+        assert_eq!(
+            outcome,
+            EditOutcome::AtCapacity,
+            "inserting a cluster that exceeds the cap must return AtCapacity"
+        );
+        assert_eq!(
+            draft.text(),
+            "",
+            "the cluster must not be partially inserted"
+        );
+    }
+
+    /// Paste with a ZWJ emoji sequence at the cap boundary must not split it.
+    ///
+    /// A ZWJ sequence like "👨\u{200D}👩" is a 3-element grapheme cluster
+    /// (4 + 3 + 4 = 11 bytes).  Prepend 10 'a's (cap=15 → 5 bytes remaining for
+    /// the cluster) to verify the whole cluster is either kept or dropped, never
+    /// split.
+    #[test]
+    fn paste_does_not_split_zwj_emoji_at_cap() {
+        // ZWJ sequence: 👨 (U+1F468, 4 bytes) + ZWJ (U+200D, 3 bytes) + 👩 (U+1F469, 4 bytes)
+        // = 11 bytes as one grapheme cluster.
+        let zwj = "\u{1F468}\u{200D}\u{1F469}";
+        assert_eq!(zwj.len(), 11);
+
+        // Cap = 14 bytes: 10 'a's (10 bytes) + 4 remaining → not enough for the cluster (11 bytes).
+        let cap = 14;
+        let mut draft = ComposerDraft::new(cap);
+        draft.paste(&"a".repeat(10));
+        assert_eq!(draft.text().len(), 10);
+
+        // Paste the ZWJ sequence. Only 4 bytes remain; cluster needs 11.
+        // The cluster must be dropped entirely (not split).
+        let outcome = draft.paste(zwj);
+        assert_eq!(
+            outcome,
+            EditOutcome::AtCapacity,
+            "ZWJ cluster exceeding cap must return AtCapacity"
+        );
+        // Text must contain only the 10 'a's — no partial emoji bytes.
+        assert_eq!(
+            draft.text(),
+            "aaaaaaaaaa",
+            "draft must not contain a partial ZWJ cluster; got {:?}",
+            draft.text()
+        );
+    }
+
+    // ─── ComposerDraftManager: keystroke routing ─────────────────────────────
+
+    /// When a composer is focused, character events are routed into the draft.
+    #[test]
+    fn manager_routes_character_to_draft() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        let (outcome, batch) = mgr.route_character("h");
+        assert_eq!(outcome, EditOutcome::Mutated);
+        assert!(
+            batch.is_none(),
+            "character routes to coalesced path, not immediate batch"
+        );
+
+        let (_, _) = mgr.route_character("i");
+        let flush_batch = mgr.try_flush().expect("flush delivers accumulated state");
+        let snap = flush_batch.latest.as_ref().unwrap();
+        assert_eq!(snap.text, "hi", "draft must contain routed characters");
+    }
+
+    /// Enter key submits the draft and emits a clear notification.
+    #[test]
+    fn manager_enter_submits_and_clears() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        mgr.route_character("h");
+        mgr.route_character("i");
+
+        let (consumed, batch) = mgr.route_key_down("Enter", "", false, false, false);
+        assert!(consumed, "Enter must be consumed by the draft manager");
+        let batch = batch.expect("Enter must emit a batch");
+
+        let sub = batch
+            .submission
+            .as_ref()
+            .expect("submission must be present");
+        assert_eq!(sub.text, "hi");
+
+        let clear = batch
+            .latest
+            .as_ref()
+            .expect("post-submit clear must be present");
+        assert!(
+            clear.text.is_empty(),
+            "clear notification must have empty text"
+        );
+        assert!(
+            clear.sequence > sub.sequence,
+            "clear must have higher sequence than submission"
+        );
+    }
+
+    /// Backspace is consumed and routed to word_backspace when Ctrl is held.
+    #[test]
+    fn manager_ctrl_backspace_word_delete() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        // Insert "hello world"
+        for ch in "hello world".chars() {
+            mgr.route_character(&ch.to_string());
+        }
+
+        // Ctrl+Backspace should delete "world"
+        let (consumed, _) = mgr.route_key_down("Backspace", "", false, true, false);
+        assert!(consumed, "Ctrl+Backspace must be consumed");
+
+        let batch = mgr.try_flush().expect("flush after delete");
+        let snap = batch.latest.as_ref().unwrap();
+        assert_eq!(snap.text, "hello ", "word backspace must delete 'world'");
+    }
+
+    /// on_focus_lost flushes pending state.
+    #[test]
+    fn manager_focus_lost_flushes_pending_state() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        mgr.route_character("x");
+        // Do NOT call try_flush — simulate mid-window blur.
+        let batch = mgr.on_focus_lost().expect("blur must flush pending state");
+        let snap = batch.latest.as_ref().unwrap();
+        assert_eq!(
+            snap.text, "x",
+            "blur flush must deliver pending draft state"
+        );
+        assert!(!mgr.is_active(), "draft must be cleared after focus lost");
+    }
+
+    /// Unknown key codes are not consumed (caller forwards to agent).
+    #[test]
+    fn manager_unknown_key_not_consumed() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        let (consumed, batch) = mgr.route_key_down("F5", "", false, false, false);
+        assert!(!consumed, "unknown key must not be consumed");
+        assert!(batch.is_none());
+    }
+
+    /// Suspended draft rejects character routing but allows key navigation.
+    #[test]
+    fn manager_suspended_rejects_character() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, true); // suspended = true
+
+        let (outcome, _) = mgr.route_character("x");
+        assert_eq!(outcome, EditOutcome::Suspended);
     }
 }
