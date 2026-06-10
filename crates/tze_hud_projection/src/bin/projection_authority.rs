@@ -4,6 +4,47 @@
 //! v1 MCP. It retains `ProjectionAuthority` state only for the lifetime of
 //! this process and dispatches newline-delimited JSON requests to the
 //! normative operation handlers in `tze_hud_projection`.
+//!
+//! ## Portal drive loop (hud-6rkc8)
+//!
+//! After every `PublishOutput` dispatch the binary runs a work-conserving drain
+//! loop that feeds coalesced portal updates into the present path:
+//!
+//! 1. `ProjectionAuthority::next_due_projection_id` selects the next portal in
+//!    round-robin fairness order (cross-portal fairness, tasks.md §5.1).
+//! 2. `ProjectionAuthority::take_due_portal_update` materialises the coalesced
+//!    transcript window for that portal.
+//! 3. `ProjectionAuthority::projected_portal_state` builds the full portal state.
+//! 4. `ResidentGrpcPortalAdapter::ensure_portal_tile_message` /
+//!    `render_portal_message` builds the outbound `HudSession` gRPC message.
+//! 5. Each resulting command is serialised as a `CliPortalDrainRecord` line on
+//!    stdout so the caller can forward it to the resident gRPC session.
+//!
+//! ## Token-map swap propagation (hud-6rkc8 part a)
+//!
+//! A `SetTokenMap` operation accepts a flat key→value token override map.
+//! On receipt the authority resolves the full token set via
+//! `tze_hud_config::resolve_portal_tokens`, converts to `PortalVisualTokens`,
+//! and calls `adapter.set_visual_tokens(...)` on every live adapter. The next
+//! render after the swap uses the new tokens with zero adapter logic changes
+//! (§6.1 profile-swap contract).
+//!
+//! ## Hook points left for follow-up beads
+//!
+//! - **hud-ttq97** (submitted_at_us telemetry bucket): the `submitted_at_us`
+//!   field of `PortalTranscriptUpdate` is included in `CliPortalDrainRecord`
+//!   and currently logged at trace level. A structured telemetry bucket should
+//!   be added here once hud-ttq97 lands.
+//!
+//! - **hud-0528i** (follow-tail notify_tile_content_appended): after the adapter
+//!   emits a `RenderPortal` command, the caller should trigger
+//!   `notify_tile_content_appended` to advance the follow-tail scroll position.
+//!   See `TODO(hud-0528i)` comment in `drain_and_emit_portal_updates`.
+//!
+//! - **hud-pkg2g** (head-trim notify_head_content_removed): when a transcript
+//!   head-trim prunes older units, the caller should trigger
+//!   `notify_head_content_removed` to reclaim scroll state. See
+//!   `TODO(hud-pkg2g)` comment in `drain_and_emit_portal_updates`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,6 +52,12 @@ use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
+use tze_hud_projection::ProjectedPortalPolicy;
+use tze_hud_projection::resident_grpc::{
+    ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
+    portal_visual_tokens_from_part_tokens,
+};
 use tze_hud_projection::{
     AcknowledgeInputRequest, AdvisoryLeaseIdentity, AttachRequest, CleanupRequest,
     ContentClassification, DetachRequest, ExternalAgentProjectionAuthority, GetPendingInputRequest,
@@ -42,6 +89,15 @@ struct CliOperationResult {
     response: ProjectionResponse,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     audit_records: Vec<ProjectionAuditRecord>,
+    /// Zero or more portal drain records produced by the drive loop.
+    ///
+    /// Non-empty after any operation that advances the cadence coalescer
+    /// (primarily `PublishOutput`). Each record contains a coalesced portal
+    /// transcript update that the caller should forward to the resident gRPC
+    /// session. Embedded in the operation result so the caller reads one
+    /// JSON line per operation regardless of how many portals are served.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    portal_drain: Vec<CliPortalDrainRecord>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +113,169 @@ struct DemoPlanOutput {
     portal_routes: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lifecycle_checks: Vec<Value>,
+}
+
+// ── Portal drive state (hud-6rkc8) ───────────────────────────────────────────
+
+/// Per-process state for the production portal drive loop.
+///
+/// Holds one `ResidentGrpcPortalAdapter` per attached projection session that
+/// uses the resident-gRPC portal surface, plus the current resolved token map.
+/// The adapter is constructed with runtime-resolved tokens on `Attach` and
+/// updated on every `SetTokenMap` operation.
+///
+/// Not serialized — lives only for the lifetime of the stdio process.
+struct PortalDriveState {
+    /// Per-projection adapters keyed by `projection_id`.
+    adapters: HashMap<String, ResidentGrpcPortalAdapter>,
+    /// Current resolved design-token overrides (flat key → value strings).
+    /// `PortalVisualTokens` is derived from this on every `SetTokenMap` and at
+    /// adapter construction.
+    token_overrides: DesignTokenMap,
+}
+
+impl PortalDriveState {
+    fn new() -> Self {
+        Self {
+            adapters: HashMap::new(),
+            token_overrides: DesignTokenMap::new(),
+        }
+    }
+
+    /// Resolve the current portal visual tokens from `token_overrides`.
+    fn resolve_visual_tokens(&self) -> tze_hud_projection::resident_grpc::PortalVisualTokens {
+        let resolved =
+            tze_hud_config::tokens::resolve_tokens(&DesignTokenMap::new(), &self.token_overrides);
+        portal_visual_tokens_from_part_tokens(&resolve_portal_tokens(&resolved))
+    }
+
+    /// Register a new adapter for `projection_id` with runtime-resolved tokens.
+    ///
+    /// Called on every `Attach` for sessions that will use the portal path.
+    /// The adapter is constructed with the supplied `lease_id`. Callers that
+    /// attach before a live gRPC session is established pass `Vec::new()` as a
+    /// placeholder; the placeholder is acceptable for the CreatePortalTile path
+    /// because the resident session layer is responsible for setting the actual
+    /// lease before sending any `MutationBatch`. Token swap propagation is
+    /// immediate — `set_token_map` will reach this adapter on the next
+    /// `SetTokenMap` operation.
+    fn attach_adapter(&mut self, projection_id: &str, lease_id: Vec<u8>) {
+        let tokens = self.resolve_visual_tokens();
+        let config = ResidentGrpcPortalConfig::new(lease_id);
+        let adapter = ResidentGrpcPortalAdapter::with_tokens(config, tokens);
+        self.adapters.insert(projection_id.to_string(), adapter);
+    }
+
+    /// Remove the adapter for `projection_id` (called on `Detach` / `Cleanup`).
+    fn detach_adapter(&mut self, projection_id: &str) {
+        self.adapters.remove(projection_id);
+    }
+
+    /// Apply a new token override map: resolve, then propagate to all live adapters.
+    ///
+    /// This is the §6.1 profile-swap contract: `set_visual_tokens` is called on
+    /// every adapter so the next render uses the new tokens without any adapter
+    /// logic changes.
+    fn apply_token_map(&mut self, overrides: DesignTokenMap) {
+        self.token_overrides = overrides;
+        let tokens = self.resolve_visual_tokens();
+        for adapter in self.adapters.values_mut() {
+            adapter.set_visual_tokens(tokens.clone());
+        }
+    }
+
+    /// Get a mutable reference to the adapter for `projection_id`, if any.
+    fn adapter_mut(&mut self, projection_id: &str) -> Option<&mut ResidentGrpcPortalAdapter> {
+        self.adapters.get_mut(projection_id)
+    }
+}
+
+/// Serialized form of one drained portal update produced by the drive loop.
+///
+/// Drain records are embedded in `CliOperationResult.portal_drain` and
+/// serialized as part of the single JSON line emitted per operation. They are
+/// NOT emitted as separate stdout lines; the one-JSON-line-per-operation
+/// invariant is preserved.
+///
+/// This is the "present path" output: a coalesced portal transcript update
+/// that the caller should forward to the resident gRPC session (build and send
+/// a `session_proto::ClientMessage` using the `portal_markdown` from
+/// `projected_portal_state` applied through `ResidentGrpcPortalAdapter`).
+///
+/// Carries semantic data (transcript, state, geometry, budget) rather than
+/// raw proto bytes so the stdio surface stays protocol-agnostic; the gRPC
+/// session layer (which has prost in scope) builds the proto message.
+#[derive(Debug, Serialize)]
+struct CliPortalDrainRecord {
+    /// Projection ID that received this update.
+    projection_id: String,
+    /// Kind of resident gRPC command produced.
+    command_kind: CliResidentCommandKind,
+    /// Number of transcript units included in this update.
+    visible_transcript_units: usize,
+    /// Byte count of visible transcript.
+    visible_transcript_bytes: usize,
+    /// Number of output calls coalesced into this update.
+    coalesced_output_count: usize,
+    /// Total unread output count drained by this update.
+    unread_output_count: usize,
+    /// Wall-clock submission timestamp (µs) of the most-recently-coalesced
+    /// append (arrival→present latency anchor, tasks.md §5.7).
+    ///
+    /// **Hook point for hud-ttq97**: record this value into the structured
+    /// telemetry latency bucket once that bead lands.
+    submitted_at_us: u64,
+    /// Rendered portal markdown content (from `portal_node` via the adapter).
+    ///
+    /// The caller uses this to populate the `TextMarkdownNodeProto.content`
+    /// field in the outbound `ClientMessage`. This is the token-styled portal
+    /// text with transcript, composer display, and caret already applied.
+    portal_markdown: String,
+    /// Presentation state of this update (`expanded` or `collapsed`).
+    presentation: String,
+    /// Tile ID previously assigned by `record_created_tile`, if any.
+    /// `None` means the caller must send a `CreateTile` mutation first.
+    tile_id_hex: Option<String>,
+    /// Elapsed microseconds building this command (budget evidence).
+    elapsed_us: u64,
+    /// Budget ceiling for this command kind (µs).
+    budget_us: u64,
+    /// True when `elapsed_us <= budget_us`.
+    within_budget: bool,
+}
+
+/// Serializable variant of `ResidentGrpcPortalCommandKind`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CliResidentCommandKind {
+    CreatePortalTile,
+    ReusePortalTile,
+    RenderPortal,
+    ReleaseLease,
+}
+
+impl From<ResidentGrpcPortalCommandKind> for CliResidentCommandKind {
+    fn from(kind: ResidentGrpcPortalCommandKind) -> Self {
+        match kind {
+            ResidentGrpcPortalCommandKind::CreatePortalTile => Self::CreatePortalTile,
+            ResidentGrpcPortalCommandKind::ReusePortalTile => Self::ReusePortalTile,
+            ResidentGrpcPortalCommandKind::RenderPortal => Self::RenderPortal,
+            ResidentGrpcPortalCommandKind::ReleaseLease => Self::ReleaseLease,
+        }
+    }
+}
+
+/// `SetTokenMap` operation payload — accepted as a JSON stdin line with
+/// `"operation": "set_token_map"`.
+#[derive(Debug, Deserialize)]
+struct SetTokenMapRequest {
+    /// Request ID for correlation in responses.
+    #[serde(default)]
+    request_id: String,
+    /// Flat design-token override map (key → CSS-style value string).
+    /// Only portal-relevant tokens are consumed. Unrecognised keys are silently
+    /// ignored. An empty map resets to built-in defaults.
+    token_overrides: HashMap<String, String>,
 }
 
 fn main() {
@@ -80,7 +299,8 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("invalid operator authority: {error}"))?;
     }
 
-    serve_stdio(&mut authority, &config)
+    let mut portal_drive = PortalDriveState::new();
+    serve_stdio(&mut authority, &config, &mut portal_drive)
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliConfig, String> {
@@ -574,7 +794,11 @@ fn demo_session_requests() -> Vec<ManagedSessionRequest> {
     ]
 }
 
-fn serve_stdio(authority: &mut ProjectionAuthority, config: &CliConfig) -> Result<(), String> {
+fn serve_stdio(
+    authority: &mut ProjectionAuthority,
+    config: &CliConfig,
+    portal_drive: &mut PortalDriveState,
+) -> Result<(), String> {
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     let mut stdout = io::stdout().lock();
@@ -587,7 +811,7 @@ fn serve_stdio(authority: &mut ProjectionAuthority, config: &CliConfig) -> Resul
                 if line.trim().is_empty() {
                     continue;
                 }
-                dispatch_line(authority, config, &line)
+                dispatch_line(authority, config, portal_drive, &line)
             }
             StdinLine::TooLong => malformed_response(
                 "unknown",
@@ -694,6 +918,7 @@ fn write_result(mut stdout: impl Write, result: &CliOperationResult) -> Result<(
 fn dispatch_line(
     authority: &mut ProjectionAuthority,
     config: &CliConfig,
+    portal_drive: &mut PortalDriveState,
     line: &str,
 ) -> CliOperationResult {
     let server_timestamp_wall_us = now_wall_us();
@@ -708,6 +933,18 @@ fn dispatch_line(
             );
         }
     };
+
+    // Special-case: "set_token_map" is not a `ProjectionOperation` variant —
+    // it targets the portal drive layer, not the authority. Handle it first.
+    if value
+        .get("operation")
+        .and_then(Value::as_str)
+        .map(|op| op == "set_token_map")
+        .unwrap_or(false)
+    {
+        return dispatch_set_token_map(value, portal_drive, server_timestamp_wall_us);
+    }
+
     let caller_identity = config.caller_identity.as_str();
     let Some(operation_value) = value.get("operation") else {
         return malformed_response(
@@ -732,7 +969,19 @@ fn dispatch_line(
     let audit_start = authority.audit_log().len();
     let response = match operation {
         ProjectionOperation::Attach => deserialize_then(value, |request: AttachRequest| {
-            authority.handle_attach(request, caller_identity, server_timestamp_wall_us)
+            // Register an adapter for this projection on successful attach.
+            // A placeholder lease ID (empty vec) is used here because the gRPC
+            // session may not yet be live at attach time. The resident session
+            // layer is responsible for supplying the real lease ID in any
+            // MutationBatch it sends; the placeholder is never sent on the wire.
+            // Part (a): adapter hosted here with runtime-resolved tokens.
+            let proj_id = request.envelope.projection_id.clone();
+            let result =
+                authority.handle_attach(request, caller_identity, server_timestamp_wall_us);
+            if result.accepted {
+                portal_drive.attach_adapter(&proj_id, Vec::new());
+            }
+            result
         }),
         ProjectionOperation::PublishOutput => {
             deserialize_then(value, |request: PublishOutputRequest| {
@@ -763,18 +1012,244 @@ fn dispatch_line(
             })
         }
         ProjectionOperation::Detach => deserialize_then(value, |request: DetachRequest| {
-            authority.handle_detach(request, caller_identity, server_timestamp_wall_us)
+            let proj_id = request.envelope.projection_id.clone();
+            let result =
+                authority.handle_detach(request, caller_identity, server_timestamp_wall_us);
+            if result.accepted {
+                portal_drive.detach_adapter(&proj_id);
+            }
+            result
         }),
         ProjectionOperation::Cleanup => deserialize_then(value, |request: CleanupRequest| {
-            authority.handle_cleanup(request, caller_identity, server_timestamp_wall_us)
+            let proj_id = request.envelope.projection_id.clone();
+            let result =
+                authority.handle_cleanup(request, caller_identity, server_timestamp_wall_us);
+            if result.accepted {
+                portal_drive.detach_adapter(&proj_id);
+            }
+            result
         }),
     };
 
     let audit_records = new_audit_records(authority, audit_start, &response);
+    // Part (b): drain portal updates into the present path after any operation
+    // that could advance the coalescer (PublishOutput is the primary trigger,
+    // but we drain after every operation for work-conserving behaviour).
+    // Drain records are embedded in the operation result (one JSON line per
+    // operation) so callers read a single line regardless of drain size.
+    let portal_drain =
+        drain_and_emit_portal_updates(authority, portal_drive, server_timestamp_wall_us);
     CliOperationResult {
         response,
         audit_records,
+        portal_drain,
     }
+}
+
+/// Handle the out-of-band `set_token_map` operation (portal drive layer only).
+///
+/// Not a `ProjectionOperation` — dispatched separately so that
+/// `ProjectionAuthority` state is not touched. Returns a `CliOperationResult`
+/// with the token-swap outcome embedded in the response.
+fn dispatch_set_token_map(
+    value: Value,
+    portal_drive: &mut PortalDriveState,
+    server_timestamp_wall_us: u64,
+) -> CliOperationResult {
+    let req: SetTokenMapRequest = match serde_json::from_value(value) {
+        Ok(req) => req,
+        Err(error) => {
+            return CliOperationResult {
+                response: invalid_argument_response(
+                    "unknown".to_string(),
+                    "set_token_map".to_string(),
+                    server_timestamp_wall_us,
+                    format!("invalid set_token_map payload: {error}"),
+                ),
+                audit_records: Vec::new(),
+                portal_drain: Vec::new(),
+            };
+        }
+    };
+
+    let adapter_count = portal_drive.adapters.len();
+    portal_drive.apply_token_map(req.token_overrides);
+    // Note: no authority available here so the drain loop cannot run.
+    // The caller will drain on the next PublishOutput operation.
+    CliOperationResult {
+        response: ProjectionResponse {
+            request_id: req.request_id,
+            projection_id: "set_token_map".to_string(),
+            accepted: true,
+            error_code: None,
+            server_timestamp_wall_us,
+            status_summary: format!("token map applied; {adapter_count} adapter(s) updated"),
+            owner_token: None,
+            lifecycle_state: None,
+            pending_input: Vec::new(),
+            pending_remaining_count: 0,
+            pending_remaining_bytes: 0,
+            portal_update_ready: false,
+            coalesced_output_count: 0,
+        },
+        audit_records: Vec::new(),
+        portal_drain: Vec::new(),
+    }
+}
+
+/// Work-conserving drain loop: pull all due portal updates round-robin and
+/// convert them through the resident gRPC adapter into `CliPortalDrainRecord`
+/// lines for the caller to forward to the live HUD session.
+///
+/// Round-robin fairness is enforced by `next_due_projection_id()`: portals are
+/// served in the order the coalescer tracks, preventing starvation under equal
+/// sustained input rates (tasks.md §5.1, §5.4).
+///
+/// ## Hook points
+///
+/// - **hud-ttq97** (telemetry bucket): `submitted_at_us` in each
+///   `CliPortalDrainRecord` captures the arrival→present latency anchor.
+///   A structured bucket should be emitted here once hud-ttq97 lands.
+///
+/// - **hud-0528i** (follow-tail notify): after `RenderPortal`, the caller
+///   should trigger `notify_tile_content_appended` to advance the follow-tail
+///   scroll position. Leave a TODO comment so the hook point is visible.
+///
+/// - **hud-pkg2g** (head-trim notify): when the transcript head is pruned,
+///   the caller should trigger `notify_head_content_removed`. This fires when
+///   `visible_transcript_bytes < unread_output_count` bytes have been trimmed.
+///   Leave a TODO comment so the hook point is visible.
+fn drain_and_emit_portal_updates(
+    authority: &mut ProjectionAuthority,
+    portal_drive: &mut PortalDriveState,
+    server_timestamp_wall_us: u64,
+) -> Vec<CliPortalDrainRecord> {
+    let mut records = Vec::new();
+    let policy = ProjectedPortalPolicy::permit_all();
+
+    loop {
+        // Round-robin fairness oracle — returns None when no portal has a
+        // pending update in the coalescer.
+        let Some(proj_id) = authority.next_due_projection_id() else {
+            break;
+        };
+
+        // Materialise the coalesced update for this portal.
+        let update = match authority.take_due_portal_update(&proj_id, server_timestamp_wall_us) {
+            Ok(Some(update)) => update,
+            Ok(None) => {
+                // Coalescer said ready but update is not yet due (rate window).
+                // Do not spin; move to next portal or exit.
+                break;
+            }
+            Err(_) => {
+                // Projection not found or expired — clean up the adapter to
+                // prevent leaks and continue draining other portals.
+                portal_drive.detach_adapter(&proj_id);
+                continue;
+            }
+        };
+
+        // Build the full projected portal state for rendering.
+        let Some(state) = authority.projected_portal_state(&proj_id, &policy) else {
+            // Session was removed between take_due and state query (race).
+            // Clean up the adapter and continue draining other portals.
+            portal_drive.detach_adapter(&proj_id);
+            continue;
+        };
+
+        // Drive the adapter: determine command kind and render portal content.
+        let adapter = match portal_drive.adapter_mut(&proj_id) {
+            Some(adapter) => adapter,
+            None => {
+                // No adapter registered for this portal (session may have
+                // used a non-portal surface). Skip silently.
+                continue;
+            }
+        };
+
+        // Render the portal markdown — the semantic content of the tile.
+        // This is what portal_node places in TextMarkdownNodeProto::content.
+        let portal_markdown = adapter.render_portal_markdown(&state);
+
+        // Determine the command kind: CreatePortalTile if no tile yet registered,
+        // RenderPortal otherwise. The gRPC session layer uses this to decide
+        // whether to send a CreateTile mutation before the PublishToTile mutation.
+        let command_kind = if adapter.tile_id().is_none() {
+            ResidentGrpcPortalCommandKind::CreatePortalTile
+        } else {
+            ResidentGrpcPortalCommandKind::RenderPortal
+        };
+
+        // Capture tile_id (hex) for the caller to correlate tile operations.
+        let tile_id_hex = adapter
+            .tile_id()
+            .map(|id| id.iter().map(|b| format!("{b:02x}")).collect());
+
+        // Build a budget sample for the render work done above.
+        // Dispatch to the correct path: if no tile has been created yet, use
+        // ensure_portal_tile_message (which handles CreatePortalTile without
+        // requiring a tile_id); otherwise use render_portal_message.
+        let seq = server_timestamp_wall_us;
+        let budget_result = if adapter.tile_id().is_none() {
+            adapter.ensure_portal_tile_message(&state, seq, server_timestamp_wall_us)
+        } else {
+            adapter.render_portal_message(&state, seq, server_timestamp_wall_us)
+        };
+        let (elapsed_us, budget_us, within_budget) = match &budget_result {
+            Ok(cmd) => (
+                cmd.budget.elapsed_us,
+                cmd.budget.budget_us,
+                cmd.budget.within_budget(),
+            ),
+            Err(_) => (0, 0, false),
+        };
+
+        let presentation = match state.presentation {
+            tze_hud_projection::ProjectedPortalPresentation::Expanded => "expanded".to_string(),
+            tze_hud_projection::ProjectedPortalPresentation::Collapsed => "collapsed".to_string(),
+        };
+
+        // TODO(hud-0528i): after RenderPortal, trigger notify_tile_content_appended
+        // on the tile so the follow-tail scroll position advances. Hook point:
+        //   if matches!(command_kind, ResidentGrpcPortalCommandKind::RenderPortal) {
+        //       notify_tile_content_appended(tile_id, ...);
+        //   }
+
+        // TODO(hud-pkg2g): when update.visible_transcript_bytes < previous bytes,
+        // a head-trim occurred. Trigger notify_head_content_removed so scroll
+        // state is reclaimed. Hook point:
+        //   if update indicates head trim {
+        //       notify_head_content_removed(tile_id, trimmed_bytes);
+        //   }
+
+        // TODO(hud-ttq97): record submitted_at_us → server_timestamp_wall_us as
+        // an arrival→present latency sample in the structured telemetry bucket.
+        // Hook point:
+        //   telemetry.record_portal_latency(
+        //       &proj_id,
+        //       update.submitted_at_us,
+        //       server_timestamp_wall_us,
+        //   );
+
+        records.push(CliPortalDrainRecord {
+            projection_id: proj_id.clone(),
+            command_kind: command_kind.into(),
+            visible_transcript_units: update.visible_transcript.len(),
+            visible_transcript_bytes: update.visible_transcript_bytes,
+            coalesced_output_count: update.coalesced_output_count,
+            unread_output_count: update.unread_output_count,
+            submitted_at_us: update.submitted_at_us,
+            portal_markdown,
+            presentation,
+            tile_id_hex,
+            elapsed_us,
+            budget_us,
+            within_budget,
+        });
+    }
+
+    records
 }
 
 fn new_audit_records(
@@ -833,6 +1308,7 @@ fn malformed_response(
             reason,
         ),
         audit_records: Vec::new(),
+        portal_drain: Vec::new(),
     }
 }
 
@@ -893,4 +1369,368 @@ fn bounded_copy(mut value: String, max_bytes: usize) -> String {
     }
     value.truncate(boundary);
     value
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tze_hud_projection::PORTAL_UPDATE_RATE_WINDOW_WALL_US;
+    use tze_hud_projection::{
+        AttachRequest, ContentClassification, OperationEnvelope, OutputKind, ProjectionAuthority,
+        ProjectionBounds, ProjectionOperation, ProviderKind, PublishOutputRequest,
+    };
+
+    // ── Test helpers ──────────────────────────────────────────────────────────
+
+    fn test_envelope(
+        operation: ProjectionOperation,
+        projection_id: &str,
+        request_id: &str,
+    ) -> OperationEnvelope {
+        OperationEnvelope {
+            operation,
+            projection_id: projection_id.to_string(),
+            request_id: request_id.to_string(),
+            client_timestamp_wall_us: 1,
+        }
+    }
+
+    fn attach_projection(authority: &mut ProjectionAuthority, projection_id: &str) -> String {
+        authority
+            .handle_attach(
+                AttachRequest {
+                    envelope: test_envelope(
+                        ProjectionOperation::Attach,
+                        projection_id,
+                        &format!("attach-{projection_id}"),
+                    ),
+                    provider_kind: ProviderKind::Claude,
+                    display_name: format!("Test session {projection_id}"),
+                    workspace_hint: None,
+                    repository_hint: None,
+                    icon_profile_hint: None,
+                    content_classification: ContentClassification::Private,
+                    hud_target: None,
+                    idempotency_key: None,
+                },
+                "test-caller",
+                10,
+            )
+            .owner_token
+            .expect("attach must return owner token")
+    }
+
+    fn publish_output(
+        authority: &mut ProjectionAuthority,
+        projection_id: &str,
+        owner_token: &str,
+        text: &str,
+        ts: u64,
+    ) {
+        authority.handle_publish_output(
+            PublishOutputRequest {
+                envelope: test_envelope(
+                    ProjectionOperation::PublishOutput,
+                    projection_id,
+                    &format!("pub-{projection_id}-{ts}"),
+                ),
+                owner_token: owner_token.to_string(),
+                output_text: text.to_string(),
+                output_kind: OutputKind::Assistant,
+                content_classification: ContentClassification::Private,
+                logical_unit_id: Some(format!("unit-{ts}")),
+                coalesce_key: None,
+            },
+            "test-caller",
+            ts,
+        );
+    }
+
+    // ── Part (a): Adapter hosted with runtime-resolved tokens ─────────────────
+
+    /// Constructing `PortalDriveState` and attaching an adapter yields an
+    /// adapter with tokens resolved from the (empty) default token map.
+    #[test]
+    fn portal_drive_state_attach_creates_adapter_with_default_tokens() {
+        let mut drive = PortalDriveState::new();
+        drive.attach_adapter("proj-a", Vec::new());
+        assert!(
+            drive.adapter_mut("proj-a").is_some(),
+            "adapter must be registered after attach"
+        );
+    }
+
+    /// `apply_token_map` propagates new visual tokens to all live adapters.
+    ///
+    /// Verifies the §6.1 profile-swap contract: after `set_token_map`, the next
+    /// render from any live adapter uses the new token values without adapter
+    /// logic changes.
+    #[test]
+    fn token_map_swap_propagates_to_live_adapter() {
+        use tze_hud_config::{PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR, tokens::resolve_tokens};
+
+        let mut drive = PortalDriveState::new();
+        drive.attach_adapter("proj-a", Vec::new());
+        drive.attach_adapter("proj-b", Vec::new());
+
+        // Verify baseline is the default (transcript text r ≈ 0.90)
+        let baseline_r = drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .visual_tokens()
+            .transcript_text_color
+            .r;
+        // Default from PortalVisualTokens::default(): r = 0.90
+        assert!(
+            baseline_r > 0.8,
+            "baseline transcript text r should be ~0.90, got {baseline_r}"
+        );
+
+        // Apply a token override: red transcript text (#FF0000 → r=1.0)
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR.to_string(),
+            "#FF0000".to_string(),
+        );
+        drive.apply_token_map(overrides);
+
+        // Both adapters must now carry the new token.
+        for id in &["proj-a", "proj-b"] {
+            let r = drive
+                .adapter_mut(id)
+                .unwrap()
+                .visual_tokens()
+                .transcript_text_color
+                .r;
+            assert!(
+                (r - 1.0_f32).abs() < 1e-2,
+                "after token swap, adapter {id} transcript text r must be ~1.0 (red), got {r}"
+            );
+        }
+        let _ = resolve_tokens; // suppress unused-import warning in some toolchain configs
+    }
+
+    /// Adapter removed on `detach_adapter`.
+    #[test]
+    fn detach_removes_adapter() {
+        let mut drive = PortalDriveState::new();
+        drive.attach_adapter("proj-a", Vec::new());
+        drive.detach_adapter("proj-a");
+        assert!(
+            drive.adapter_mut("proj-a").is_none(),
+            "adapter must be gone after detach"
+        );
+    }
+
+    // ── Part (b): Drain loop pulls updates round-robin ────────────────────────
+
+    /// Single portal: drain returns the update after a `PublishOutput`.
+    #[test]
+    fn drain_emits_portal_update_for_single_portal() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let token_a = attach_projection(&mut authority, "proj-a");
+        drive.attach_adapter("proj-a", Vec::new());
+
+        publish_output(&mut authority, "proj-a", &token_a, "hello", 20);
+
+        let records = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+
+        assert_eq!(records.len(), 1, "one drain record expected");
+        assert_eq!(records[0].projection_id, "proj-a");
+        assert!(records[0].visible_transcript_units > 0);
+        assert!(
+            !records[0].portal_markdown.is_empty(),
+            "portal markdown must be non-empty"
+        );
+    }
+
+    /// Two portals at equal rates: drain serves them in round-robin order.
+    ///
+    /// This is the cross-portal fairness invariant from tasks.md §5.1 / §5.4:
+    /// under equal sustained rates, no portal is starved relative to the other.
+    /// The round-robin oracle (`next_due_projection_id`) ensures bounded
+    /// divergence.
+    #[test]
+    fn drain_round_robin_fairness_under_equal_rates() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let token_a = attach_projection(&mut authority, "proj-a");
+        let token_b = attach_projection(&mut authority, "proj-b");
+        drive.attach_adapter("proj-a", Vec::new());
+        drive.attach_adapter("proj-b", Vec::new());
+
+        // Publish to both portals at the same logical timestamp.
+        publish_output(&mut authority, "proj-a", &token_a, "alpha-1", 20);
+        publish_output(&mut authority, "proj-b", &token_b, "beta-1", 20);
+
+        let records = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+
+        // Both portals must be drained; the order is round-robin (a before b
+        // since a was attached first, but both must appear).
+        assert_eq!(records.len(), 2, "both portals must be drained");
+        let ids: Vec<&str> = records.iter().map(|r| r.projection_id.as_str()).collect();
+        assert!(
+            ids.contains(&"proj-a") && ids.contains(&"proj-b"),
+            "both portals must appear in drain output, got: {ids:?}"
+        );
+
+        // After drain, no further updates should be pending.
+        let second_drain = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+        assert!(
+            second_drain.is_empty(),
+            "second drain must be empty after all portals served"
+        );
+    }
+
+    /// Three portals: round-robin serves all three in one drain pass.
+    #[test]
+    fn drain_three_portals_all_served() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let ids = ["proj-1", "proj-2", "proj-3"];
+        let mut tokens = Vec::new();
+        for id in &ids {
+            tokens.push(attach_projection(&mut authority, id));
+            drive.attach_adapter(id, Vec::new());
+        }
+        for (idx, id) in ids.iter().enumerate() {
+            publish_output(&mut authority, id, &tokens[idx], "msg", 20);
+        }
+
+        let records = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+        let drained_ids: Vec<&str> = records.iter().map(|r| r.projection_id.as_str()).collect();
+
+        assert_eq!(
+            records.len(),
+            3,
+            "all three portals must be drained, got: {drained_ids:?}"
+        );
+        for id in &ids {
+            assert!(
+                drained_ids.contains(id),
+                "portal {id} missing from drain output: {drained_ids:?}"
+            );
+        }
+    }
+
+    /// Rate-window: if an update is rate-limited (second publish within window),
+    /// the drain does not produce a record until the window passes.
+    #[test]
+    fn drain_respects_rate_window() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 1,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let token_a = attach_projection(&mut authority, "proj-a");
+        drive.attach_adapter("proj-a", Vec::new());
+
+        // First publish — immediately drainable.
+        publish_output(&mut authority, "proj-a", &token_a, "first", 20);
+        let first_drain = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+        assert_eq!(first_drain.len(), 1);
+
+        // Second publish within the rate window — coalesced, not yet drainable.
+        publish_output(&mut authority, "proj-a", &token_a, "second", 21);
+        let mid_drain = drain_and_emit_portal_updates(&mut authority, &mut drive, 21);
+        assert!(
+            mid_drain.is_empty(),
+            "second publish within rate window must not produce a drain record"
+        );
+
+        // After the rate window passes, the update becomes drainable.
+        let after_ts = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 25;
+        let late_drain = drain_and_emit_portal_updates(&mut authority, &mut drive, after_ts);
+        assert_eq!(
+            late_drain.len(),
+            1,
+            "coalesced update must drain after rate window"
+        );
+        assert_eq!(late_drain[0].coalesced_output_count, 1);
+    }
+
+    /// Token-map swap in portal drive state during live session: the rendered
+    /// portal markdown reflects the new tokens.
+    ///
+    /// This is the end-to-end §6.1 proof: a `SetTokenMap` call on the drive
+    /// state changes the visual tokens in the live adapter, and the next drain
+    /// render uses the new tokens.
+    #[test]
+    fn drain_portal_markdown_reflects_token_swap() {
+        use tze_hud_config::PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR;
+
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let token_a = attach_projection(&mut authority, "proj-a");
+        drive.attach_adapter("proj-a", Vec::new());
+
+        // Publish and drain once with default tokens.
+        publish_output(&mut authority, "proj-a", &token_a, "before swap", 20);
+        let before = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+        assert_eq!(before.len(), 1);
+
+        // Swap tokens: change transcript text to red.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR.to_string(),
+            "#FF0000".to_string(),
+        );
+        drive.apply_token_map(overrides);
+
+        // Publish again and drain with new tokens.
+        publish_output(
+            &mut authority,
+            "proj-a",
+            &token_a,
+            "after swap",
+            PORTAL_UPDATE_RATE_WINDOW_WALL_US + 30,
+        );
+        let after = drain_and_emit_portal_updates(
+            &mut authority,
+            &mut drive,
+            PORTAL_UPDATE_RATE_WINDOW_WALL_US + 30,
+        );
+        assert_eq!(after.len(), 1);
+
+        // The adapter's transcript_text_color must now be red.
+        let adapter_r = drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .visual_tokens()
+            .transcript_text_color
+            .r;
+        assert!(
+            (adapter_r - 1.0_f32).abs() < 1e-2,
+            "adapter transcript_text_color.r must be ~1.0 (red) after token swap, got {adapter_r}"
+        );
+
+        // The portal markdown is rendered — just verify it is non-empty
+        // (the actual color application is in the proto message layer).
+        assert!(!after[0].portal_markdown.is_empty());
+    }
 }

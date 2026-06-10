@@ -428,6 +428,17 @@ impl ResidentGrpcPortalAdapter {
         self.tile_id = Some(tile_id);
     }
 
+    /// Render the portal markdown content for the given state without building
+    /// a full gRPC proto message.
+    ///
+    /// Useful for stdio surfaces that need the semantic content to include in
+    /// a JSON drain record, without taking a prost dependency on the binary.
+    /// The output is the same string that `portal_node` places in
+    /// `TextMarkdownNodeProto::content`.
+    pub fn render_portal_markdown(&self, state: &ProjectedPortalState) -> String {
+        portal_markdown(state, self.composer_display.as_ref())
+    }
+
     /// Move the compact affordance. The next collapsed render publishes this
     /// geometry through `PublishToTile`, reusing the existing content-layer tile.
     pub fn move_compact_to(&mut self, x: f32, y: f32) {
@@ -999,6 +1010,92 @@ fn sample_budget(started: Instant, budget_us: u64) -> ResidentGrpcBudgetSample {
 
 fn new_scene_id_bytes() -> Vec<u8> {
     uuid::Uuid::now_v7().as_bytes().to_vec()
+}
+
+// ── Token bridge (tze_hud_config feature) ─────────────────────────────────────
+
+/// Convert a fully-resolved `PortalPartTokens` (from `tze_hud_config`) into
+/// the Phase-1 pilot's `PortalVisualTokens`.
+///
+/// This is the **canonical production-path conversion**. Any code that constructs
+/// a `ResidentGrpcPortalAdapter` MUST use this function instead of
+/// hand-constructing `PortalVisualTokens`. When a token-map swap occurs (e.g.
+/// profile hot-reload), call `tze_hud_config::resolve_portal_tokens` on the new
+/// `DesignTokenMap` to get `PortalPartTokens`, pass the result here, and forward
+/// the `PortalVisualTokens` to `adapter.set_visual_tokens(...)`.
+///
+/// Maps transcript, collapsed, and composer parts. The remaining parts of
+/// `PortalPartTokens` (frame, header, divider, transitions) require a structured
+/// multi-node layout deferred to promotion-era work.
+///
+/// ## Usage
+///
+/// ```rust,ignore
+/// use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
+/// use tze_hud_projection::resident_grpc::{
+///     ResidentGrpcPortalAdapter, ResidentGrpcPortalConfig,
+///     portal_visual_tokens_from_part_tokens,
+/// };
+///
+/// // At adapter construction:
+/// let part_tokens = resolve_portal_tokens(&resolved_token_map);
+/// let visual_tokens = portal_visual_tokens_from_part_tokens(&part_tokens);
+/// let adapter = ResidentGrpcPortalAdapter::with_tokens(config, visual_tokens);
+///
+/// // On profile hot-reload / token-map swap:
+/// let new_part_tokens = resolve_portal_tokens(&new_token_map);
+/// adapter.set_visual_tokens(portal_visual_tokens_from_part_tokens(&new_part_tokens));
+/// ```
+pub fn portal_visual_tokens_from_part_tokens(
+    part: &tze_hud_config::PortalPartTokens,
+) -> PortalVisualTokens {
+    PortalVisualTokens {
+        transcript_background: proto::Rgba {
+            r: part.transcript_background.r,
+            g: part.transcript_background.g,
+            b: part.transcript_background.b,
+            a: part.transcript_background.a,
+        },
+        transcript_text_color: proto::Rgba {
+            r: part.transcript_text_color.r,
+            g: part.transcript_text_color.g,
+            b: part.transcript_text_color.b,
+            a: part.transcript_text_color.a,
+        },
+        transcript_font_size_px: part.transcript_font_size_px,
+        collapsed_background: proto::Rgba {
+            r: part.collapsed_background.r,
+            g: part.collapsed_background.g,
+            b: part.collapsed_background.b,
+            a: part.collapsed_background.a,
+        },
+        collapsed_text_color: proto::Rgba {
+            r: part.collapsed_text_color.r,
+            g: part.collapsed_text_color.g,
+            b: part.collapsed_text_color.b,
+            a: part.collapsed_text_color.a,
+        },
+        collapsed_font_size_px: part.collapsed_font_size_px,
+        composer_background: proto::Rgba {
+            r: part.composer_background.r,
+            g: part.composer_background.g,
+            b: part.composer_background.b,
+            a: part.composer_background.a,
+        },
+        composer_text_color: proto::Rgba {
+            r: part.composer_text_color.r,
+            g: part.composer_text_color.g,
+            b: part.composer_text_color.b,
+            a: part.composer_text_color.a,
+        },
+        composer_font_size_px: part.composer_font_size_px,
+        composer_at_capacity_color: proto::Rgba {
+            r: part.composer_at_capacity_color.r,
+            g: part.composer_at_capacity_color.g,
+            b: part.composer_at_capacity_color.b,
+            a: part.composer_at_capacity_color.a,
+        },
+    }
 }
 
 #[cfg(test)]
