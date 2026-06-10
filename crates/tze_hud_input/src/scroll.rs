@@ -457,23 +457,42 @@ impl ScrollTileState {
     ///
     /// # Returns
     ///
-    /// `true` if `offset_y` changed (tile was `ScrolledBack` and the offset was
-    /// non-zero after adjustment), `false` otherwise.
+    /// `true` if `offset_y` changed (i.e. the tile was `ScrolledBack` and the
+    /// offset moved — including when it clamps to zero), `false` otherwise.
     pub fn notify_head_content_removed(&mut self, removed_height_px: f32) -> bool {
         if !removed_height_px.is_finite() || removed_height_px <= 0.0 {
             return false;
         }
+
+        // Always update the content-size fields so that the next call to
+        // `notify_content_appended` sees a correct `old_total` and so that
+        // `clamp_offsets` / `update_follow_tail_anchor_after_user_scroll` use
+        // the right max-scroll-offset bound.
+        //
+        // Invariant maintained:
+        //   config.content_height = (total_content_height_px - viewport_height).max(0)
+        //
+        // We update `total_content_height_px` here.  `config.content_height` is
+        // the max-scroll-offset and equals (total − viewport); we reduce it by
+        // the same `removed_height_px` (clamped to 0) so the invariant holds.
+        self.total_content_height_px = (self.total_content_height_px - removed_height_px).max(0.0);
+        if let Some(config) = &mut self.config {
+            if let Some(ch) = config.content_height {
+                config.content_height = Some((ch - removed_height_px).max(0.0));
+            }
+        }
+
         match self.follow_tail {
             FollowTailAnchor::AtTail => {
                 // AtTail viewports are re-positioned by the next
-                // notify_content_appended call — no adjustment needed here.
+                // notify_content_appended call — no offset adjustment needed here.
                 false
             }
             FollowTailAnchor::ScrolledBack => {
                 let before = self.offset_y;
                 // Shift offset down by the removed height, clamp to [0, max].
                 self.offset_y = (self.offset_y - removed_height_px).max(0.0);
-                // Re-apply the upper bound from config (max scroll offset).
+                // Re-apply the updated upper bound from config (max scroll offset).
                 if let Some(config) = &self.config {
                     if let Some(ch) = config.content_height {
                         self.offset_y = self.offset_y.min(ch.max(0.0));
@@ -1289,6 +1308,63 @@ mod tests {
         assert_eq!(
             offset_after, 0.0,
             "offset must clamp to 0 when removal exceeds current offset; got {offset_after}"
+        );
+    }
+
+    /// Head-trim must update `total_content_height_px` and `config.content_height`
+    /// so that a subsequent `notify_content_appended` receives correct old/new
+    /// totals and the follow-tail offset advances by the right number of lines.
+    ///
+    /// Regression guard for the Gemini-raised defect: without updating both
+    /// fields, the next `notify_content_appended` uses a stale `old_total`,
+    /// making `delta_px` negative and preventing follow-tail advancement.
+    #[test]
+    fn head_trim_updates_content_height_fields_for_correct_append_delta() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32; // 5 visible lines
+        let mut scroll = ScrollState::new();
+
+        // Content: 10 lines = 200px total; max scroll offset = 100px.
+        let total_content = 10.0 * line_h; // 200px
+        let max_scroll = total_content - viewport_h; // 100px
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: Some(max_scroll),
+        };
+        scroll.register_tile(tile_id, config);
+
+        // Drive total_content_height_px to the known 200px value.
+        scroll.notify_content_appended(tile_id, total_content, viewport_h, line_h);
+        // Scroll to tail.
+        scroll.apply_user_scroll(tile_id, 0.0, max_scroll);
+        assert_eq!(scroll.follow_tail_anchor(tile_id), FollowTailAnchor::AtTail);
+
+        // Head-trim: remove 3 lines (60px).
+        let removed = 3.0 * line_h; // 60px
+        scroll.notify_head_content_removed(tile_id, removed);
+        // total_content_height_px should now be 200 - 60 = 140px.
+        // config.content_height should now be 100 - 60 = 40px.
+
+        // Append 2 new lines (40px): new total = 140 + 40 = 180px.
+        // new max_scroll = 180 - 100 = 80px.
+        // Expected delta = 180 - 140 = 40px = 2 lines → follow-tail advances.
+        let new_total = 180.0_f32;
+        let changed = scroll.notify_content_appended(tile_id, new_total, viewport_h, line_h);
+        assert!(
+            changed,
+            "notify_content_appended must advance AtTail offset after head-trim+append; \
+             changed=false suggests stale old_total causing negative delta"
+        );
+        let (_, offset_after) = scroll.offset(tile_id);
+        // New max_scroll = 180 - 100 = 80px.  Offset should advance to 80px (tail).
+        let expected_max_scroll = (new_total - viewport_h).max(0.0);
+        assert!(
+            (offset_after - expected_max_scroll).abs() < line_h,
+            "offset should be near the new tail ({expected_max_scroll}px) after \
+             head-trim+append; got {offset_after}"
         );
     }
 

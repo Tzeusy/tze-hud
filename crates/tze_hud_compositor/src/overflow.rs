@@ -1845,9 +1845,11 @@ mod tests {
         // runs, producing max_lines + 1 = 4 layout lines in a 3-line box.
         //
         // We count '\n'-separated logical lines in the result string as an
-        // inexpensive proxy.  The shaped run count may be <= this (word-wrap
-        // can split a logical line into multiple runs) but it can never exceed
-        // the logical line count + 1 for a leading newline from ELLIPSIS.
+        // inexpensive proxy.  Word-wrapping can split a single logical line
+        // into multiple shaped runs, so the actual rendered line count can
+        // exceed this logical count.  Keeping `max_lines` small in this test
+        // (3 lines) avoids wrapping in practice; the proptest below covers
+        // the general case.
         let max_lines_in_box = (bounds_h / line_h).floor() as usize;
         let logical_line_count = result.text.split('\n').count();
         assert!(
