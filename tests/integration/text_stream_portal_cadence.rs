@@ -100,9 +100,7 @@ fn cadence_harness_sustained_workload_meets_spec() {
     let total_scalars: u64 = stream.iter().map(|(_, _, n)| *n).sum();
     assert!(
         total_scalars >= CADENCE_MIN_SCALARS_PER_SEC,
-        "sustained stream must carry ≥{} scalars/s; got {}",
-        CADENCE_MIN_SCALARS_PER_SEC,
-        total_scalars
+        "sustained stream must carry ≥{CADENCE_MIN_SCALARS_PER_SEC} scalars/s; got {total_scalars}"
     );
 }
 
@@ -388,7 +386,7 @@ async fn frame_budgets_hold_under_sustained_portal_stream() {
     // At 10 appends/s (1 per 6 frames at 60Hz) over BENCH_FRAME_COUNT frames, the
     // maximum append count is ceil(BENCH_FRAME_COUNT / 6). At 10 events/s this is
     // far below the 1000 events/s ceiling — the assertion is structural.
-    let max_appends = (BENCH_FRAME_COUNT + 5) / 6; // ceil division
+    let max_appends = BENCH_FRAME_COUNT.div_ceil(6);
     assert!(
         append_idx as u64 <= max_appends,
         "cadence harness submitted {append_idx} appends (max allowed {max_appends}) — \
