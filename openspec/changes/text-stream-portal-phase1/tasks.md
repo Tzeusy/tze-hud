@@ -21,8 +21,8 @@ No implementation begins until this change is reviewed and accepted. Acceptance 
 ## 3. Overflow and ellipsis correctness
 
 - [ ] 3.1 Implement measured word-boundary ellipsis truncation with the ellipsis glyph included in shaped-width measurement, with grapheme-cluster fallback for unbroken tokens
-- [ ] 3.2 Enforce whole-line vertical visibility (no partially clipped glyph rows) and whole-line follow-tail advancement
-- [ ] 3.3 Implement append stability for scrolled-back viewports: appends beyond the viewport cause no reflow or truncation-point change in visible lines
+- [x] 3.2 Enforce whole-line vertical visibility (no partially clipped glyph rows) and whole-line follow-tail advancement
+- [x] 3.3 Implement append stability for scrolled-back viewports: appends beyond the viewport cause no reflow or truncation-point change in visible lines
 - [ ] 3.4 Verify: integration tests for word-boundary truncation, grapheme fallback, no-clipped-glyph invariants (property-based across random content/widths), and scrolled-back append stability
 - [ ] 3.5 Verify: layout-resolve stage stays < 1 ms with styled-run caching under transcript-sized content
 

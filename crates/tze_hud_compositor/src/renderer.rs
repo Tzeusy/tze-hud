@@ -1903,12 +1903,19 @@ impl Compositor {
         for tile in scene.visible_tiles() {
             let tile_x = tile.bounds.x;
             let tile_y = tile.bounds.y;
+            // Determine whether this tile is currently following its tail.
+            // Tiles in follow-tail/at-tail mode use TailAnchored truncation so that
+            // the most-recently-appended lines are always visible (spec §3.2).
+            // Tiles that the user has scrolled back (or that have no follow-tail
+            // configured) use HeadAnchored (spec §3.3 — viewport stability).
+            let at_tail = scene.tile_follow_tail_at_tail(tile.id);
             if let Some(root_id) = tile.root_node {
                 collect_ellipsis_text_items_from_node(
                     root_id,
                     scene,
                     tile_x,
                     tile_y,
+                    at_tail,
                     &self.markdown_cache,
                     &self.node_key_cache,
                     &mut live_items,
@@ -3319,6 +3326,7 @@ impl Compositor {
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
                                         styled_runs: Box::default(),
+                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
                                     });
                                 } else {
                                     // ── Two-line rendering: bold title + regular body ──
@@ -3352,6 +3360,7 @@ impl Compositor {
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
                                         styled_runs: Box::default(),
+                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
                                     });
                                     // Body line (regular weight, 0.85× size)
                                     let body_top =
@@ -3380,6 +3389,7 @@ impl Compositor {
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
                                         styled_runs: Box::default(),
+                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
                                     });
                                 }
 
@@ -3417,6 +3427,7 @@ impl Compositor {
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
                                         styled_runs: Box::default(),
+                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
                                     });
                                 }
                             }
@@ -3576,6 +3587,8 @@ impl Compositor {
                                             opacity: anim_opacity,
                                             color_runs: Box::default(),
                                             styled_runs: Box::default(),
+                                            viewport:
+                                                crate::overflow::TruncationViewport::HeadAnchored,
                                         });
                                     } else {
                                         items.push(TextItem::from_zone_policy(
@@ -3718,6 +3731,7 @@ impl Compositor {
                                         opacity: anim_opacity,
                                         color_runs: Box::default(),
                                         styled_runs: Box::default(),
+                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
                                     });
                                 } else {
                                     items.push(TextItem::from_zone_policy(
@@ -7249,11 +7263,16 @@ impl Compositor {
 /// The geometry produced here is identical to what `collect_text_items_from_node`
 /// produces at scroll_x=0, scroll_y=0 (valid because truncation is geometry-
 /// dependent only on `bounds_width` / `bounds_height`, which are scroll-invariant).
+/// `at_tail`: whether the tile owning these nodes is currently in follow-tail/at-tail
+/// mode.  `true` → `TailAnchored` truncation (spec §3.2 — newest lines visible);
+/// `false` → `HeadAnchored` (spec §3.3 — viewport stability after user scroll-back).
+#[allow(clippy::too_many_arguments)]
 fn collect_ellipsis_text_items_from_node(
     node_id: SceneId,
     scene: &SceneGraph,
     tile_x: f32,
     tile_y: f32,
+    at_tail: bool,
     markdown_cache: &crate::markdown::MarkdownCache,
     node_key_cache: &HashMap<SceneId, [u8; 32]>,
     items: &mut Vec<TextItem>,
@@ -7273,7 +7292,7 @@ fn collect_ellipsis_text_items_from_node(
             // to avoid re-hashing content on the frame path.  Falls back to
             // compute_key only if the entry is absent (pre-prime first frame).
             // (hud-gpqde)
-            let item = if tm.color_runs.is_empty() {
+            let mut item = if tm.color_runs.is_empty() {
                 let content_key = node_key_cache
                     .get(&node_id)
                     .copied()
@@ -7286,6 +7305,10 @@ fn collect_ellipsis_text_items_from_node(
             } else {
                 TextItem::from_text_markdown_node(tm, tile_x, tile_y)
             };
+            // Override viewport based on the tile's follow-tail state.
+            if at_tail {
+                item.viewport = crate::overflow::TruncationViewport::TailAnchored;
+            }
             items.push(item);
         }
     }
@@ -7296,6 +7319,7 @@ fn collect_ellipsis_text_items_from_node(
             scene,
             tile_x,
             tile_y,
+            at_tail,
             markdown_cache,
             node_key_cache,
             items,

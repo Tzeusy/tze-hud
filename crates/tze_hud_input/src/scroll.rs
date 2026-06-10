@@ -259,10 +259,34 @@ pub struct ScrollTileState {
     /// for read access.  Mutations must go through `queue_user_scroll` and
     /// `notify_content_appended` to preserve invariants.
     follow_tail: FollowTailAnchor,
+    /// Total content height in **physical pixels** (not clamped to viewport).
+    ///
+    /// # Coordinate-system note
+    ///
+    /// `ScrollConfig::content_height` is the **maximum scroll offset** —
+    /// i.e. `total_content_height_px - viewport_height` — because
+    /// `clamp_offsets` uses it as an upper bound for `offset_y`.
+    ///
+    /// `total_content_height_px` stores the **total content size** (full height
+    /// of all rendered lines) so that `follow_tail_offset` receives consistent
+    /// TOTAL-PIXELS values for both old and new content.  The two fields must
+    /// stay in sync:
+    ///
+    /// ```text
+    /// config.content_height = (total_content_height_px - viewport_height).max(0)
+    /// ```
+    ///
+    /// `notify_content_appended` is the sole mutator of both fields and
+    /// maintains this invariant.
+    total_content_height_px: f32,
 }
 
 impl ScrollTileState {
     pub fn new(config: ScrollConfig) -> Self {
+        // When content_height is supplied on creation it is treated as
+        // MAX-SCROLL-OFFSET (the external contract).  total_content_height_px
+        // is not yet known (no content), so we leave it at 0.0.  The first
+        // call to notify_content_appended will set both fields consistently.
         Self {
             offset_x: 0.0,
             offset_y: 0.0,
@@ -271,6 +295,7 @@ impl ScrollTileState {
             user_scroll_this_frame: false,
             dirty: false,
             follow_tail: FollowTailAnchor::AtTail,
+            total_content_height_px: 0.0,
         }
     }
 
@@ -329,14 +354,31 @@ impl ScrollTileState {
     /// - When `self.follow_tail == ScrolledBack`, the scroll offset is
     ///   unchanged; only `content_height` is updated.
     ///
-    /// Also updates `config.content_height` to the new value so that future
-    /// scroll clamping reflects the extended content.
+    /// # Coordinate-system contract
+    ///
+    /// `new_content_height` is the **total content height in physical pixels**
+    /// (all rendered lines, including those above the viewport).
+    ///
+    /// Internally this updates two values that use different coordinate systems:
+    ///
+    /// * `self.total_content_height_px` ← `new_content_height` (total pixels)
+    ///   Used by `follow_tail_offset` to compute whole-line advancement.
+    ///
+    /// * `config.content_height` ← `(new_content_height − viewport_height).max(0)`
+    ///   (max scroll offset)  Used by `clamp_offsets` and
+    ///   `update_follow_tail_anchor_after_user_scroll` to clamp `offset_y`.
+    ///
+    /// The invariant is:
+    /// ```text
+    /// config.content_height = (total_content_height_px - viewport_height).max(0)
+    /// ```
     ///
     /// # Parameters
     ///
-    /// - `new_content_height` — total content height (pixels) after the append.
-    /// - `viewport_height` — visible tile height (pixels); needed for the
-    ///   whole-line advancement calculation.
+    /// - `new_content_height` — **total** content height (physical pixels) after
+    ///   the append.  This is the full height of all rendered lines, not the
+    ///   scrollable range.
+    /// - `viewport_height` — visible tile height (pixels).
     /// - `line_height` — line height (pixels); used to quantise advancement.
     ///
     /// # Returns
@@ -349,16 +391,22 @@ impl ScrollTileState {
         viewport_height: f32,
         line_height: f32,
     ) -> bool {
-        let old_content_height = self
-            .config
-            .as_ref()
-            .and_then(|c| c.content_height)
-            .unwrap_or(0.0);
+        // `old_total` is in TOTAL CONTENT PIXELS for follow_tail_offset.
+        // We stored the previous total in self.total_content_height_px; on the
+        // very first call (initial state = 0.0) that is correct: there was no
+        // prior content.
+        let old_total = self.total_content_height_px;
 
-        // Update content_height in config regardless of anchor state so that
-        // future scroll clamping uses the correct boundary.
+        // Update the total-pixels field (used by follow_tail_offset).
+        self.total_content_height_px = new_content_height;
+
+        // Update config.content_height as MAX-SCROLL-OFFSET so that clamp_offsets
+        // and update_follow_tail_anchor_after_user_scroll use the correct bound.
+        //
+        // max_scroll_offset = total_content − viewport  (clamped to 0 when content ≤ viewport)
+        let max_scroll_offset = (new_content_height - viewport_height).max(0.0);
         if let Some(config) = &mut self.config {
-            config.content_height = Some(new_content_height);
+            config.content_height = Some(max_scroll_offset);
         }
 
         match self.follow_tail {
@@ -368,9 +416,10 @@ impl ScrollTileState {
             }
             FollowTailAnchor::AtTail => {
                 // Task 3.2: advance by whole lines.
+                // follow_tail_offset receives TOTAL CONTENT PIXELS for both old and new.
                 let new_offset = follow_tail_offset(
                     self.offset_y,
-                    old_content_height,
+                    old_total,
                     new_content_height,
                     viewport_height,
                     line_height,

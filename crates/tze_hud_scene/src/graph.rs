@@ -141,6 +141,19 @@ pub struct SceneGraph {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub tile_scroll_offsets: HashMap<SceneId, (f32, f32)>,
+    /// Follow-tail anchor state per tile (used by truncation-mode selection).
+    ///
+    /// `true` = tile viewport is at the tail of its content stream (use
+    /// tail-anchored truncation); `false` = scrolled-back (use head-anchored
+    /// truncation, spec task 3.3 append-stability guarantee).
+    ///
+    /// Defaults to `true` for newly registered tiles (new tiles start at tail).
+    /// Set by the runtime layer when `FollowTailAnchor` transitions; read by
+    /// the compositor's truncation-mode selection in `prime_truncation_cache`.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_follow_tail_at_tail: HashMap<SceneId, bool>,
 }
 
 /// Maximum number of tabs in a scene. RFC 0001 §2.1.
@@ -301,6 +314,7 @@ impl SceneGraph {
             pending_widget_svg_assets: Vec::new(),
             tile_scroll_configs: HashMap::new(),
             tile_scroll_offsets: HashMap::new(),
+            tile_follow_tail_at_tail: HashMap::new(),
         }
     }
 
@@ -371,6 +385,42 @@ impl SceneGraph {
             .get(&tile_id)
             .copied()
             .unwrap_or((0.0, 0.0))
+    }
+
+    // ─── Follow-tail anchor ───────────────────────────────────────────────
+
+    /// Record whether a tile's viewport is at the tail of its content stream.
+    ///
+    /// Called by the runtime input layer whenever `FollowTailAnchor` transitions
+    /// (typically after `ScrollState::notify_content_appended` or
+    /// `ScrollState::apply_user_scroll`).
+    ///
+    /// `at_tail = true` means the tile uses tail-anchored truncation (newest
+    /// content always visible).  `at_tail = false` means the tile uses
+    /// head-anchored truncation (scrolled-back viewport, spec task 3.3
+    /// append-stability guarantee).
+    ///
+    /// No-op if the tile does not exist (tiles without scroll state always
+    /// behave as head-anchored by default).
+    pub fn set_tile_follow_tail_at_tail(&mut self, tile_id: SceneId, at_tail: bool) {
+        if self.tiles.contains_key(&tile_id) {
+            self.tile_follow_tail_at_tail.insert(tile_id, at_tail);
+        }
+    }
+
+    /// Return whether a tile's viewport is currently at the tail.
+    ///
+    /// Returns `true` (at-tail, tail-anchored mode) when:
+    /// - the tile has been explicitly registered via [`set_tile_follow_tail_at_tail`], or
+    /// - the tile has no scroll state (non-scrolling tiles always show from the head,
+    ///   but we default to `true` so that simple text tiles don't lose content).
+    ///
+    /// Returns `false` when the tile has been scrolled back.
+    pub fn tile_follow_tail_at_tail(&self, tile_id: SceneId) -> bool {
+        self.tile_follow_tail_at_tail
+            .get(&tile_id)
+            .copied()
+            .unwrap_or(true)
     }
 
     // ─── Resource registry ────────────────────────────────────────────────
