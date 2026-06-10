@@ -22,7 +22,9 @@
 
 use tze_hud_config::{
     PORTAL_TOKEN_COLLAPSED_BACKGROUND, PORTAL_TOKEN_COLLAPSED_FONT_SIZE,
-    PORTAL_TOKEN_COLLAPSED_TEXT_COLOR, PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
+    PORTAL_TOKEN_COLLAPSED_TEXT_COLOR, PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR,
+    PORTAL_TOKEN_COMPOSER_BACKGROUND, PORTAL_TOKEN_COMPOSER_FONT_SIZE,
+    PORTAL_TOKEN_COMPOSER_TEXT_COLOR, PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
     PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE, PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR,
     PORTAL_TOKEN_TRANSITION_IN_MS, PORTAL_TOKEN_TRANSITION_OUT_MS, resolve_portal_tokens,
 };
@@ -750,4 +752,425 @@ fn transition_duration_tokens_do_not_affect_redaction_safety() {
         restricted_a.redacted, restricted_b.redacted,
         "transition duration tokens must not affect redaction outcome"
     );
+}
+
+// ── §4.1 / §4.8: Composer token NodeProto output assertions (hud-2zyt9) ────────
+
+/// Verifies that the composer token fields propagate through the canonical
+/// conversion chain (`resolve_portal_tokens` → `portal_visual_tokens_from_part_tokens`)
+/// and are accessible via `visual_tokens()` on the adapter.
+///
+/// This is the §6.1 composer-side proof: the adapter's published composer
+/// visual values always come from the resolved token set, never from literals.
+#[test]
+fn composer_tokens_propagate_through_canonical_conversion() {
+    use std::collections::HashMap;
+
+    let empty: HashMap<String, String> = HashMap::new();
+
+    // Override all composer tokens to sentinel values
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        PORTAL_TOKEN_COMPOSER_TEXT_COLOR.to_string(),
+        "#FF00FF".to_string(), // magenta
+    );
+    overrides.insert(
+        PORTAL_TOKEN_COMPOSER_BACKGROUND.to_string(),
+        "#FFFF00".to_string(), // yellow
+    );
+    overrides.insert(
+        PORTAL_TOKEN_COMPOSER_FONT_SIZE.to_string(),
+        "18".to_string(),
+    );
+    overrides.insert(
+        PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR.to_string(),
+        "#00FFFF".to_string(), // cyan
+    );
+
+    let resolved = tze_hud_config::tokens::resolve_tokens(&empty, &overrides);
+    let part_tokens = resolve_portal_tokens(&resolved);
+    let visual_tokens = portal_visual_tokens_from_part_tokens(&part_tokens);
+
+    let adapter = ResidentGrpcPortalAdapter::with_tokens(
+        ResidentGrpcPortalConfig::new(vec![0u8; 16]),
+        visual_tokens,
+    );
+
+    let vt = adapter.visual_tokens();
+
+    // composer_text_color must be magenta (r=1, g=0, b=1)
+    assert!(
+        (vt.composer_text_color.r - 1.0).abs() < 1e-2,
+        "composer_text_color.r must be 1.0 (magenta)"
+    );
+    assert!(
+        vt.composer_text_color.g.abs() < 1e-2,
+        "composer_text_color.g must be 0.0 (magenta)"
+    );
+    assert!(
+        (vt.composer_text_color.b - 1.0).abs() < 1e-2,
+        "composer_text_color.b must be 1.0 (magenta)"
+    );
+
+    // composer_background must be yellow (r=1, g=1, b=0)
+    assert!(
+        (vt.composer_background.r - 1.0).abs() < 1e-2,
+        "composer_background.r must be 1.0 (yellow)"
+    );
+    assert!(
+        (vt.composer_background.g - 1.0).abs() < 1e-2,
+        "composer_background.g must be 1.0 (yellow)"
+    );
+    assert!(
+        vt.composer_background.b.abs() < 1e-2,
+        "composer_background.b must be 0.0 (yellow)"
+    );
+
+    // composer_font_size_px must be 18
+    assert!(
+        (vt.composer_font_size_px - 18.0).abs() < 1e-3,
+        "composer_font_size_px must be 18.0"
+    );
+
+    // composer_at_capacity_color must be cyan (r=0, g=1, b=1)
+    assert!(
+        vt.composer_at_capacity_color.r.abs() < 1e-2,
+        "composer_at_capacity_color.r must be 0.0 (cyan)"
+    );
+    assert!(
+        (vt.composer_at_capacity_color.g - 1.0).abs() < 1e-2,
+        "composer_at_capacity_color.g must be 1.0 (cyan)"
+    );
+    assert!(
+        (vt.composer_at_capacity_color.b - 1.0).abs() < 1e-2,
+        "composer_at_capacity_color.b must be 1.0 (cyan)"
+    );
+}
+
+/// Verifies that the published `NodeProto` output from `render_portal_message`
+/// contains the draft text with a `▌` caret marker when a draft is active.
+///
+/// This is the §4.1 local-first test: after `apply_draft_notification` delivers
+/// a state-stream update, the next `render_portal_message` reflects the draft
+/// immediately without any remote roundtrip.
+///
+/// Also verifies the caret is present at the correct position and the content
+/// differs from the no-draft baseline.
+#[test]
+fn portal_node_proto_includes_draft_text_and_caret_after_notification() {
+    use std::collections::HashMap;
+    use tze_hud_projection::{
+        AdapterDraftNotification, resident_grpc::ResidentGrpcDraftCommandKind,
+    };
+
+    let empty: HashMap<String, String> = HashMap::new();
+    let part_tokens = resolve_portal_tokens(&empty);
+    let visual_tokens = portal_visual_tokens_from_part_tokens(&part_tokens);
+
+    let mut authority = tze_hud_projection::ProjectionAuthority::default();
+    let permit_all = tze_hud_projection::ProjectedPortalPolicy::permit_all();
+    let expanded_state = build_expanded_state(&mut authority, "proj-draft-caret", &permit_all);
+
+    let fake_tile_id: Vec<u8> = vec![0xCE; 16];
+    let mut adapter = ResidentGrpcPortalAdapter::with_tokens(
+        ResidentGrpcPortalConfig::new(vec![0u8; 16]),
+        visual_tokens,
+    );
+    adapter.record_created_tile(fake_tile_id);
+
+    // ── Baseline: no draft active → composer line shows "composer: ready" ──
+
+    let baseline_cmd = adapter
+        .render_portal_message(&expanded_state, 1, 0)
+        .expect("baseline render must succeed");
+    let baseline_content = extract_text_markdown_content(baseline_cmd);
+    assert!(
+        baseline_content.contains("composer: ready"),
+        "baseline (no draft) must show 'composer: ready'; got:\n{baseline_content}"
+    );
+    assert!(
+        !baseline_content.contains("▌"),
+        "baseline must not contain caret marker before any draft notification"
+    );
+
+    // ── Deliver a draft notification ──
+
+    let notification = AdapterDraftNotification {
+        text: "hello".to_string(),
+        cursor: 5, // cursor at end
+        selection_anchor: 5,
+        at_capacity: false,
+        sequence: 1,
+    };
+    let cmd = adapter
+        .apply_draft_notification(&notification)
+        .expect("notification must be accepted");
+    assert_eq!(
+        cmd.kind,
+        ResidentGrpcDraftCommandKind::UpdateComposerDisplay
+    );
+
+    // ── After notification: NodeProto content must include draft text + caret ──
+
+    let draft_cmd = adapter
+        .render_portal_message(&expanded_state, 2, 0)
+        .expect("draft render must succeed");
+    let draft_content = extract_text_markdown_content(draft_cmd);
+
+    // Caret marker must be present
+    assert!(
+        draft_content.contains("▌"),
+        "draft render must contain caret marker ▌; got:\n{draft_content}"
+    );
+    // Draft text must appear before the caret
+    assert!(
+        draft_content.contains("hello▌"),
+        "draft text 'hello' must appear before caret at end; got:\n{draft_content}"
+    );
+    // Must not show the generic "composer: ready" placeholder
+    assert!(
+        !draft_content.contains("composer: ready"),
+        "active draft must replace 'composer: ready' placeholder"
+    );
+
+    // ── Verify caret is at mid-string cursor position ──
+
+    let mid_notification = AdapterDraftNotification {
+        text: "hello world".to_string(),
+        cursor: 5, // cursor after "hello"
+        selection_anchor: 5,
+        at_capacity: false,
+        sequence: 2,
+    };
+    adapter.apply_draft_notification(&mid_notification);
+
+    let mid_cmd = adapter
+        .render_portal_message(&expanded_state, 3, 0)
+        .expect("mid-cursor render must succeed");
+    let mid_content = extract_text_markdown_content(mid_cmd);
+
+    assert!(
+        mid_content.contains("hello▌ world"),
+        "caret must appear between 'hello' and ' world' at byte offset 5; got:\n{mid_content}"
+    );
+}
+
+/// Verifies that the at-capacity indicator appears in the NodeProto when the
+/// composer draft is at its byte cap.
+///
+/// Checks both the text-visible `[!]` prefix in the content string and the
+/// `color_runs` sentinel carrying `composer_at_capacity_color` from the token set.
+/// Together these prove the at-capacity visual is fully token-driven (§6.1, §4.1).
+#[test]
+fn portal_node_proto_at_capacity_indicator_uses_composer_token() {
+    use std::collections::HashMap;
+    use tze_hud_projection::AdapterDraftNotification;
+
+    let empty: HashMap<String, String> = HashMap::new();
+
+    // Override at-capacity color to a distinctive value (pure blue)
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR.to_string(),
+        "#0000FF".to_string(), // pure blue sentinel
+    );
+    let resolved = tze_hud_config::tokens::resolve_tokens(&empty, &overrides);
+    let part_tokens = resolve_portal_tokens(&resolved);
+    let visual_tokens = portal_visual_tokens_from_part_tokens(&part_tokens);
+
+    // Verify the token propagated to PortalVisualTokens
+    assert!(
+        visual_tokens.composer_at_capacity_color.b > 0.9,
+        "at_capacity_color blue channel must be high (pure blue sentinel)"
+    );
+    assert!(
+        visual_tokens.composer_at_capacity_color.r < 0.1,
+        "at_capacity_color red channel must be ~0 (pure blue sentinel)"
+    );
+
+    let mut authority = tze_hud_projection::ProjectionAuthority::default();
+    let permit_all = tze_hud_projection::ProjectedPortalPolicy::permit_all();
+    let expanded_state = build_expanded_state(&mut authority, "proj-at-cap", &permit_all);
+
+    let fake_tile_id: Vec<u8> = vec![0xAC; 16];
+    let mut adapter = ResidentGrpcPortalAdapter::with_tokens(
+        ResidentGrpcPortalConfig::new(vec![0u8; 16]),
+        visual_tokens,
+    );
+    adapter.record_created_tile(fake_tile_id);
+
+    // Deliver an at-capacity draft notification
+    let at_cap_notification = AdapterDraftNotification {
+        text: "x".repeat(50), // some text at cap
+        cursor: 50,
+        selection_anchor: 50,
+        at_capacity: true,
+        sequence: 1,
+    };
+    adapter.apply_draft_notification(&at_cap_notification);
+
+    // Render and extract the published NodeProto
+    let cmd = adapter
+        .render_portal_message(&expanded_state, 1, 0)
+        .expect("at-capacity render must succeed");
+    let (text_md_content, color_runs) = extract_text_markdown_with_runs(cmd);
+
+    // Text-visible indicator: content must contain "[!]"
+    assert!(
+        text_md_content.contains("[!]"),
+        "at-capacity content must contain text-visible '[!]' prefix; got:\n{text_md_content}"
+    );
+
+    // Token-driven color run: must have a color_run with the injected blue sentinel
+    assert!(
+        !color_runs.is_empty(),
+        "at-capacity NodeProto must have at least one color_run carrying the token color"
+    );
+    let cap_run = &color_runs[0];
+    let run_color = cap_run
+        .color
+        .as_ref()
+        .expect("at-capacity color_run must have a color");
+    assert!(
+        run_color.b > 0.9,
+        "at-capacity color_run color.b must be ~1.0 (pure blue token sentinel); got {b}",
+        b = run_color.b
+    );
+    assert!(
+        run_color.r < 0.1,
+        "at-capacity color_run color.r must be ~0.0 (pure blue token sentinel); got {r}",
+        r = run_color.r
+    );
+
+    // ── Verify that a non-at-capacity draft produces no color_runs ──
+    let normal_notification = AdapterDraftNotification {
+        text: "normal text".to_string(),
+        cursor: 11,
+        selection_anchor: 11,
+        at_capacity: false,
+        sequence: 2,
+    };
+    adapter.apply_draft_notification(&normal_notification);
+
+    let cmd_normal = adapter
+        .render_portal_message(&expanded_state, 2, 0)
+        .expect("normal render must succeed");
+    let (_, runs_normal) = extract_text_markdown_with_runs(cmd_normal);
+    assert!(
+        runs_normal.is_empty(),
+        "non-at-capacity draft must produce no color_runs; got {} runs",
+        runs_normal.len()
+    );
+}
+
+/// Verifies that after a ProcessCancel command, the composer display resets to
+/// "composer: ready" (no draft active) in the next render.
+#[test]
+fn portal_node_proto_clears_composer_on_cancel() {
+    use std::collections::HashMap;
+    use tze_hud_projection::{AdapterDraftBatch, AdapterDraftCancel, AdapterDraftNotification};
+
+    let empty: HashMap<String, String> = HashMap::new();
+    let part_tokens = resolve_portal_tokens(&empty);
+    let visual_tokens = portal_visual_tokens_from_part_tokens(&part_tokens);
+
+    let mut authority = tze_hud_projection::ProjectionAuthority::default();
+    let permit_all = tze_hud_projection::ProjectedPortalPolicy::permit_all();
+    let expanded_state = build_expanded_state(&mut authority, "proj-cancel-clear", &permit_all);
+
+    let fake_tile_id: Vec<u8> = vec![0xCC; 16];
+    let mut adapter = ResidentGrpcPortalAdapter::with_tokens(
+        ResidentGrpcPortalConfig::new(vec![0u8; 16]),
+        visual_tokens,
+    );
+    adapter.record_created_tile(fake_tile_id);
+
+    // Deliver a draft notification — composer shows draft text
+    let notification = AdapterDraftNotification {
+        text: "typed so far".to_string(),
+        cursor: 12,
+        selection_anchor: 12,
+        at_capacity: false,
+        sequence: 1,
+    };
+    adapter.apply_draft_notification(&notification);
+    assert!(
+        adapter.composer_display().is_some(),
+        "composer_display must be Some after notification"
+    );
+
+    // Send a cancel batch — composer display must clear
+    let mut batch = AdapterDraftBatch::new();
+    batch.record_cancel(AdapterDraftCancel { sequence: 2 });
+    adapter.consume_draft_batch(&batch);
+
+    assert!(
+        adapter.composer_display().is_none(),
+        "composer_display must be None after ProcessCancel"
+    );
+
+    // NodeProto after cancel must show "composer: ready"
+    let cmd = adapter
+        .render_portal_message(&expanded_state, 3, 0)
+        .expect("post-cancel render must succeed");
+    let content = extract_text_markdown_content(cmd);
+    assert!(
+        content.contains("composer: ready"),
+        "post-cancel render must show 'composer: ready'; got:\n{content}"
+    );
+}
+
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+/// Extract the `content` string from a `TextMarkdownNodeProto` inside a
+/// `ResidentGrpcPortalCommand`'s `ClientMessage` payload.
+fn extract_text_markdown_content(
+    cmd: tze_hud_projection::resident_grpc::ResidentGrpcPortalCommand,
+) -> String {
+    use tze_hud_protocol::proto;
+    use tze_hud_protocol::proto::session as session_proto;
+
+    let batch = match cmd.message.payload.expect("render must produce payload") {
+        session_proto::client_message::Payload::MutationBatch(b) => b,
+        other => panic!("expected MutationBatch payload, got {other:?}"),
+    };
+    let publish = batch
+        .mutations
+        .into_iter()
+        .find_map(|m| match m.mutation {
+            Some(proto::mutation_proto::Mutation::PublishToTile(p)) => Some(p),
+            _ => None,
+        })
+        .expect("MutationBatch must contain a PublishToTile mutation");
+    let node = publish.node.expect("PublishToTile must have a node");
+    match node.data.expect("NodeProto must have data") {
+        proto::node_proto::Data::TextMarkdown(tm) => tm.content,
+        other => panic!("NodeProto must be TextMarkdown, got {other:?}"),
+    }
+}
+
+/// Extract both the content string and color_runs from a published NodeProto.
+fn extract_text_markdown_with_runs(
+    cmd: tze_hud_projection::resident_grpc::ResidentGrpcPortalCommand,
+) -> (String, Vec<tze_hud_protocol::proto::TextColorRunProto>) {
+    use tze_hud_protocol::proto;
+    use tze_hud_protocol::proto::session as session_proto;
+
+    let batch = match cmd.message.payload.expect("render must produce payload") {
+        session_proto::client_message::Payload::MutationBatch(b) => b,
+        other => panic!("expected MutationBatch payload, got {other:?}"),
+    };
+    let publish = batch
+        .mutations
+        .into_iter()
+        .find_map(|m| match m.mutation {
+            Some(proto::mutation_proto::Mutation::PublishToTile(p)) => Some(p),
+            _ => None,
+        })
+        .expect("MutationBatch must contain a PublishToTile mutation");
+    let node = publish.node.expect("PublishToTile must have a node");
+    match node.data.expect("NodeProto must have data") {
+        proto::node_proto::Data::TextMarkdown(tm) => (tm.content, tm.color_runs),
+        other => panic!("NodeProto must be TextMarkdown, got {other:?}"),
+    }
 }
