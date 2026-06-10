@@ -410,17 +410,21 @@ impl SceneGraph {
 
     /// Return whether a tile's viewport is currently at the tail.
     ///
-    /// Returns `true` (at-tail, tail-anchored mode) when:
-    /// - the tile has been explicitly registered via [`set_tile_follow_tail_at_tail`], or
-    /// - the tile has no scroll state (non-scrolling tiles always show from the head,
-    ///   but we default to `true` so that simple text tiles don't lose content).
+    /// Returns `true` (at-tail, tail-anchored mode) when the tile has been
+    /// explicitly registered via [`set_tile_follow_tail_at_tail`] with `true`.
     ///
-    /// Returns `false` when the tile has been scrolled back.
+    /// Returns `false` (head-anchored mode) when:
+    /// - the tile has been scrolled back, or
+    /// - the tile has never been registered (non-scrollable or newly created
+    ///   tiles that have not yet received a content-append or scroll event).
+    ///
+    /// Non-scrollable static-text tiles must default to `false` so that
+    /// `TextOverflow::Ellipsis` shows the beginning of the text, not the end.
     pub fn tile_follow_tail_at_tail(&self, tile_id: SceneId) -> bool {
         self.tile_follow_tail_at_tail
             .get(&tile_id)
             .copied()
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
     // ─── Resource registry ────────────────────────────────────────────────
@@ -2557,6 +2561,7 @@ impl SceneGraph {
         }
         self.tile_scroll_configs.remove(&tile_id);
         self.tile_scroll_offsets.remove(&tile_id);
+        self.tile_follow_tail_at_tail.remove(&tile_id);
     }
 
     // ─── Queries ─────────────────────────────────────────────────────────
