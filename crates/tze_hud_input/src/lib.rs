@@ -324,7 +324,18 @@ pub struct InputProcessor {
     /// on every keystroke while a composer region is focused.
     ///
     /// Spec: §4.1 — runtime-owned draft attached to focused composer regions.
-    pub composer_draft_manager: ComposerDraftManager,
+    composer_draft_manager: ComposerDraftManager,
+    /// Holds the batch flushed during a focus-lost transition (blur) so it can
+    /// be drained on the next [`Self::try_flush_composer_draft`] call at the
+    /// frame settle point.
+    ///
+    /// This bridge is necessary because `on_focus_lost` drains the scheduler
+    /// immediately (blur is a settle point), but the caller's settle loop runs
+    /// after `process_with_focus` returns.  Without this field the terminal
+    /// draft state at blur would be permanently lost.
+    ///
+    /// Cleared on focus-gained so stale state never leaks across boundaries.
+    pending_flushed_batch: Option<DraftNotificationBatch>,
 }
 
 impl InputProcessor {
@@ -340,6 +351,7 @@ impl InputProcessor {
             capture: capture::PointerCaptureManager::new(),
             scroll_state: ScrollState::new(),
             composer_draft_manager: ComposerDraftManager::new(),
+            pending_flushed_batch: None,
         }
     }
 
@@ -603,9 +615,12 @@ impl InputProcessor {
                             state.focused = false;
                         }
                         // If the node that lost focus was a composer region, notify the manager.
-                        // `on_focus_lost` flushes any pending draft state (blur is a settle point).
+                        // `on_focus_lost` flushes any pending draft state (blur is a settle point)
+                        // and returns that batch.  Store it in `pending_flushed_batch` so the
+                        // next `try_flush_composer_draft` call can deliver the terminal state.
                         if self.composer_draft_manager.focused_node() == Some(lost_node_id) {
-                            let _ = self.composer_draft_manager.on_focus_lost();
+                            self.pending_flushed_batch =
+                                self.composer_draft_manager.on_focus_lost();
                         }
                     }
                 }
@@ -692,12 +707,39 @@ impl InputProcessor {
     /// into a single latest-snapshot; this call forces delivery of any pending
     /// coalesced state.
     ///
+    /// Also drains the `pending_flushed_batch` produced by a blur transition
+    /// (stored by `process_with_focus` when focus leaves a composer region).
+    /// The two batches are merged: if the manager's batch contains a cancel, any
+    /// `latest`/`submission` in the pending batch are cleared to avoid delivering
+    /// contradictory state alongside a cancel event.
+    ///
     /// Returns `Some(batch)` when there is pending state to deliver, `None` when
     /// the draft has been idle since the last flush (no-op coalescing window).
     ///
     /// Spec: §4.3 — flush guarantee for the coalesced state-stream delivery.
     pub fn try_flush_composer_draft(&mut self) -> Option<DraftNotificationBatch> {
-        self.composer_draft_manager.try_flush()
+        let manager_batch = self.composer_draft_manager.try_flush();
+        match (self.pending_flushed_batch.take(), manager_batch) {
+            (Some(mut pending), Some(manager)) => {
+                // A cancel from the manager supersedes any accumulated latest/submission
+                // in the pending (blur) batch; discard those to avoid contradictory state.
+                if let Some(cancel) = manager.cancel {
+                    pending.latest = None;
+                    pending.submission = None;
+                    pending.cancel = Some(cancel);
+                } else {
+                    if let Some(latest) = manager.latest {
+                        pending.latest = Some(latest);
+                    }
+                    if let Some(sub) = manager.submission {
+                        pending.submission = Some(sub);
+                    }
+                }
+                Some(pending)
+            }
+            (Some(pending), None) => Some(pending),
+            (None, manager_batch) => manager_batch,
+        }
     }
 
     /// Returns `true` when a composer region is currently focused (draft active).
@@ -3488,6 +3530,21 @@ mod tests {
         assert!(
             !processor.is_composer_active(),
             "manager must be deactivated after blurring the composer region"
+        );
+
+        // Spec §4.3: blur is a settle point.  The terminal draft state ("z")
+        // typed before the blur must be delivered via the next flush call —
+        // this is the core guarantee that process_with_focus stores the
+        // on_focus_lost() batch in pending_flushed_batch.
+        let flush_batch = processor
+            .try_flush_composer_draft()
+            .expect("flush at settle must deliver the batch from the blur transition");
+        let notif = flush_batch
+            .latest
+            .expect("batch must contain a state notification for the typed text");
+        assert_eq!(
+            notif.text, "z",
+            "flushed notification must carry the draft text that was pending at blur"
         );
     }
 
