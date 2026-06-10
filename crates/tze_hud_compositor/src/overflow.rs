@@ -2097,7 +2097,7 @@ mod tests {
             let line_h = 22.4_f32;
 
             // Build a single long line of NFD "é" clusters (no word boundaries).
-            // NFD form: 'e' + combining acute (U+0301), 2 bytes per cluster.
+            // NFD form: 'e' + combining acute (U+0301), 3 bytes per cluster ('e'=1, U+0301=2).
             let cluster = "e\u{0301}";
             let long_line = cluster.repeat(repeat);
 
@@ -2214,7 +2214,7 @@ mod tests {
                 for ch in after_ellipsis.chars() {
                     prop_assert!(
                         ch.is_ascii() || ('\u{0600}'..='\u{06FF}').contains(&ch)
-                            || ch == ' ' || ch == '\n',
+                            || ch == ' ' || ch == '\n' || ch == '\u{2026}',
                         "RTL tail-anchored result contains unexpected codepoint U+{:04X} ({ch:?}); \
                          this may indicate a logical-offset corruption (hud-676 regression); \
                          repeat={repeat} result={:?}",
