@@ -990,6 +990,17 @@ struct WindowedRuntimeState {
     fallback_unrestricted: bool,
     /// Shared scene + session state.
     shared_state: Arc<Mutex<SharedState>>,
+    /// Lock-free mirror of `SharedState.safe_mode_active` for the winit event thread.
+    ///
+    /// Cloned from `SharedState.safe_mode_atomic` at construction.  The event-thread
+    /// dispatch path (`dispatch_key_down_event`, `dispatch_key_up_event`,
+    /// `dispatch_character_event`) reads this flag with `Ordering::Acquire` to check
+    /// safe-mode capture without ever acquiring the async Tokio `SharedState` mutex.
+    ///
+    /// Writers (`SafeModeController::enter_safe_mode` / `exit_safe_mode`) update
+    /// both `SharedState.safe_mode_active` (under the mutex) and this AtomicBool
+    /// (also under the mutex, with `Ordering::Release`).
+    safe_mode_atomic: Arc<std::sync::atomic::AtomicBool>,
     /// Input channel (ring buffer) — main thread writes, compositor thread reads.
     input_ring: Arc<std::sync::Mutex<std::collections::VecDeque<InputEvent>>>,
     /// Pending Stage 1/2 input latency samples for the next compositor frame.
@@ -2501,14 +2512,25 @@ impl WinitApp {
         // Only Ctrl+Shift+Escape (the safe-mode toggle itself) must still be
         // processed — but that is handled before this function is called (in
         // the OS event path, Stage 1) and never reaches here.
-        if let Ok(st) = self.state.shared_state.try_lock() {
-            if st.safe_mode_active {
-                tracing::debug!(
-                    key = %raw.key,
-                    "safe-mode capture: key dropped (safe mode active — chrome layer owns input)"
-                );
-                return;
-            }
+        //
+        // Lock-free read: `safe_mode_atomic` is an AtomicBool cloned from
+        // `SharedState.safe_mode_atomic` at construction.  Writers
+        // (`SafeModeController::enter_safe_mode` / `exit_safe_mode`) store with
+        // `Ordering::Release`; we load with `Ordering::Acquire` so the
+        // Release-Acquire pair guarantees visibility.  Unlike the former
+        // `try_lock` approach, this read NEVER fails under contention — if the
+        // async Tokio runtime holds the SharedState lock during a mutation batch,
+        // the safe-mode flag is still correctly observed.
+        if self
+            .state
+            .safe_mode_atomic
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tracing::debug!(
+                key = %raw.key,
+                "safe-mode capture: key dropped (safe mode active — chrome layer owns input)"
+            );
+            return;
         }
 
         // ── Priority 2: Shell/chrome-reserved shortcuts ───────────────────
@@ -2632,14 +2654,18 @@ impl WinitApp {
         // ── Safe-mode capture ──────────────────────────────────────────────
         // Mirror the key-down safe-mode guard: if safe mode is active, chrome
         // owns ALL input including key-release events.
-        if let Ok(st) = self.state.shared_state.try_lock() {
-            if st.safe_mode_active {
-                tracing::debug!(
-                    key = %raw.key,
-                    "safe-mode capture: KeyUp dropped (safe mode active — chrome layer owns input)"
-                );
-                return;
-            }
+        // Lock-free read via the AtomicBool mirror — see `dispatch_key_down_event`
+        // Priority 1 comment for the memory-ordering rationale.
+        if self
+            .state
+            .safe_mode_atomic
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tracing::debug!(
+                key = %raw.key,
+                "safe-mode capture: KeyUp dropped (safe mode active — chrome layer owns input)"
+            );
+            return;
         }
 
         let active_tab = self.active_tab_for_keyboard_dispatch();
@@ -2689,13 +2715,17 @@ impl WinitApp {
         // ── Safe-mode capture ──────────────────────────────────────────────
         // All character input (Key::Character, paste shortcut, IME commits) is
         // captured by the chrome layer when safe mode is active.
-        if let Ok(st) = self.state.shared_state.try_lock() {
-            if st.safe_mode_active {
-                tracing::debug!(
-                    "safe-mode capture: CharacterEvent dropped (safe mode active — chrome layer owns input)"
-                );
-                return;
-            }
+        // Lock-free read via the AtomicBool mirror — see `dispatch_key_down_event`
+        // Priority 1 comment for the memory-ordering rationale.
+        if self
+            .state
+            .safe_mode_atomic
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tracing::debug!(
+                "safe-mode capture: CharacterEvent dropped (safe mode active — chrome layer owns input)"
+            );
+            return;
         }
 
         let active_tab = self.active_tab_for_keyboard_dispatch();
@@ -3635,6 +3665,7 @@ impl WindowedRuntime {
         };
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&cfg.psk);
         let (input_capture_tx, input_capture_rx) = tokio::sync::mpsc::unbounded_channel();
+        let safe_mode_atomic = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let shared_state = Arc::new(Mutex::new(SharedState {
             scene: Arc::clone(&shared_scene),
             sessions,
@@ -3646,6 +3677,7 @@ impl WindowedRuntime {
             element_store: startup_element_store,
             element_store_path: Some(startup_element_store_path),
             safe_mode_active: false,
+            safe_mode_atomic: Arc::clone(&safe_mode_atomic),
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
@@ -3758,6 +3790,7 @@ impl WindowedRuntime {
             _runtime_widget_store: runtime_widget_store,
             fallback_unrestricted,
             shared_state,
+            safe_mode_atomic,
             input_ring,
             pending_input_latency,
             frame_ready_rx,
@@ -5608,6 +5641,7 @@ mod tests {
             element_store: tze_hud_scene::element_store::ElementStore::default(),
             element_store_path: None,
             safe_mode_active: false,
+            safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: RuntimeDegradationLevel::Normal,

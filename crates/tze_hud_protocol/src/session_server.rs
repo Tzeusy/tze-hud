@@ -1613,6 +1613,7 @@ impl HudSessionImpl {
                 element_store: tze_hud_scene::element_store::ElementStore::default(),
                 element_store_path: None,
                 safe_mode_active: false,
+                safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 token_store: TokenStore::new(),
                 freeze_active: false,
                 degradation_level: crate::session::RuntimeDegradationLevel::Normal,
