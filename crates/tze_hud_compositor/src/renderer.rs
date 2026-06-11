@@ -4329,9 +4329,9 @@ impl Compositor {
             // inline on the spot and use from_text_markdown_cached so markdown
             // structure and styling are preserved.  This honors the 'never
             // dropped' contract (spec task 2.2).  A tracing::warn! fires so the
-            // regression is observable in production logs; a debug_assert! fires
-            // in test/dev builds.  In steady-state (commit-time-primed) frames
-            // this branch is never taken.
+            // miss is observable in production logs.  No debug_assert: the
+            // first-frame miss is normal operation, not a bug. [hud-rbf91]
+            // In steady-state (commit-time-primed) frames this branch is never taken.
             let mut item = if tm.color_runs.is_empty() {
                 let content_key = self
                     .node_key_cache
@@ -4346,21 +4346,18 @@ impl Compositor {
                         parsed,
                     )
                 } else {
-                    // Cache miss: prime the markdown inline (non-lossy parse) so
-                    // styling is preserved.  This path fires only on the first
-                    // frame before any commit-time prime, or if a node slips
-                    // through mid-frame.  Both cases are contract violations of
-                    // the commit-time-prime invariant.
+                    // Cache miss: parse inline (non-lossy) so styling is
+                    // preserved.  This is the expected path on the first frame
+                    // before any commit-time prime and for nodes added mid-frame
+                    // after prime_markdown_cache ran — both are normal operation.
+                    // In steady-state (commit-time-primed) frames this branch is
+                    // never taken.  The warn! makes the miss observable in
+                    // production logs without panicking. [hud-rbf91]
                     tracing::warn!(
                         node_id = ?node_id,
                         content_len = tm.content.len(),
                         "markdown cache miss on render path — expected commit-time prime \
                          (hud-xcp9b); parsing inline to preserve styling [hud-380dl]"
-                    );
-                    debug_assert!(
-                        false,
-                        "markdown cache miss on render path for node {node_id:?}: \
-                         prime_markdown_cache must be called before render_frame [hud-xcp9b]"
                     );
                     let parsed =
                         crate::markdown::parse_markdown_subset(&tm.content, &self.markdown_tokens);
@@ -7642,16 +7639,14 @@ fn collect_ellipsis_text_items_from_node(
                 if let Some(parsed) = markdown_cache.get_by_key(&content_key) {
                     TextItem::from_text_markdown_cached(tm, tile_x, tile_y, parsed)
                 } else {
+                    // Cache miss: same non-lossy inline-parse strategy as
+                    // collect_text_items_from_node — normal on first frame /
+                    // mid-frame node add.  warn! provides observability. [hud-rbf91]
                     tracing::warn!(
                         node_id = ?node_id,
                         content_len = tm.content.len(),
                         "markdown cache miss on ellipsis render path — expected commit-time prime \
                          (hud-xcp9b); parsing inline to preserve styling [hud-380dl]"
-                    );
-                    debug_assert!(
-                        false,
-                        "markdown cache miss on ellipsis render path for node {node_id:?}: \
-                         prime_markdown_cache must be called before render [hud-xcp9b]"
                     );
                     let parsed =
                         crate::markdown::parse_markdown_subset(&tm.content, markdown_tokens);
@@ -15940,7 +15935,7 @@ mod tests {
     ///
     /// Specifically, `render_frame_headless` MUST NOT increment
     /// `markdown_cache_scene_version` relative to the version set by the
-    /// commit-time prime — meaning the debug_assert fallback in render_frame_headless
+    /// commit-time prime — meaning the cache-miss fallback in render_frame_headless
     /// must not fire, and the scene version sentinel must remain equal to
     /// `scene.version` after the prime.
     ///
@@ -15994,7 +15989,7 @@ mod tests {
 
         // ── Render frame — must be parse-free ────────────────────────────────
         // render_frame_headless checks `scene.version != markdown_cache_scene_version`
-        // and finds them equal → no parse occurs → the debug_assert fallback is NOT
+        // and finds them equal → no parse occurs → the cache-miss fallback is NOT
         // triggered.  The scene version sentinel is not modified by render_frame_headless.
         let _telemetry = compositor.render_frame_headless(&mut scene, &surface);
 
