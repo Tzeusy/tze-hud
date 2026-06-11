@@ -187,6 +187,7 @@ async fn test_ambient_background_solid_color_renders() {
         )
         .expect("publish_to_zone must succeed for SolidColor on ambient-background zone");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -249,6 +250,7 @@ async fn test_ambient_background_no_publication_empty() {
         "ambient-background active_publishes must be empty when no content has been published"
     );
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -333,6 +335,7 @@ async fn test_ambient_background_replacement_contention() {
     );
 
     // Render and verify only blue appears (not red).
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -458,6 +461,7 @@ async fn test_ambient_background_rapid_replacement() {
 
     // Render a single frame and verify only the last color (bright green) is visible.
     // linear (0,1,0) → sRGB green ≈ 255.
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -582,6 +586,7 @@ async fn test_ambient_background_zorder_below_content_zones() {
         )
         .expect("publish red to test-content-zone must succeed");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -670,6 +675,7 @@ async fn test_ambient_background_static_image_renders_placeholder() {
         "active publication must preserve the published resource_id"
     );
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -772,6 +778,7 @@ async fn test_ambient_background_static_image_renders_texture_when_bytes_registe
         )
         .expect("publish StaticImage must succeed");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -836,6 +843,7 @@ async fn test_ambient_background_static_image_non_square_renders_texture() {
         )
         .expect("publish non-square StaticImage must succeed");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -871,6 +879,7 @@ async fn test_ambient_background_static_image_falls_back_to_placeholder_without_
         )
         .expect("publish StaticImage must succeed");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -966,6 +975,7 @@ async fn test_tile_static_image_fill_mode_renders_texture() {
         ImageFitMode::Fill,
     );
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -1006,6 +1016,7 @@ async fn test_tile_static_image_contain_mode_letterboxes() {
         ImageFitMode::Contain,
     );
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -1059,6 +1070,7 @@ async fn test_tile_static_image_cover_mode_fills_completely() {
         ImageFitMode::Cover,
     );
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -1107,6 +1119,7 @@ async fn test_tile_static_image_scale_down_mode_native_size() {
         ImageFitMode::ScaleDown,
     );
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 

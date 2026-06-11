@@ -157,6 +157,7 @@ async fn test_rounded_rect_backdrop_interior_pixel() {
     let name = register_rounded_zone(&mut scene, Some(16.0));
     publish_text(&mut scene, name);
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -201,6 +202,7 @@ async fn test_rounded_rect_corners_are_transparent() {
     let name = register_rounded_zone(&mut scene, Some(40.0));
     publish_text(&mut scene, name);
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -234,6 +236,7 @@ async fn test_flat_rect_unaffected_by_rounded_rect_pipeline() {
     let name = register_rounded_zone(&mut scene, None);
     publish_text(&mut scene, name);
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -300,6 +303,7 @@ async fn test_no_backdrop_no_rounded_rect() {
         )
         .expect("publish_to_zone must succeed");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -376,6 +380,7 @@ async fn test_background_layer_rounded_rect_renders_backdrop() {
         )
         .expect("publish_to_zone must succeed");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -442,6 +447,7 @@ async fn test_tile_solid_color_radius_rounds_corners() {
         )
         .expect("set_tile_root");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
     HeadlessSurface::assert_pixel_color(

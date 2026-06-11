@@ -419,6 +419,17 @@ impl HeadlessRuntime {
         let s4_start = Instant::now();
         let new_snap = HitTestSnapshot::from_scene(&scene_guard);
         self.pipeline.hit_test_snapshot.store(Arc::new(new_snap));
+
+        // ── Commit-time markdown cache prime (hud-380dl) ──────────────────────
+        // Prime the markdown parse cache here, at the end of Stage 4 (scene
+        // commit), before any render stage executes.  This moves parsing off the
+        // render thread entirely: render_frame_headless finds the cache already
+        // populated and does no parse work.  The prime is gated internally on
+        // scene.version so it is a no-op when the scene has not changed.
+        let markdown_prime_start = Instant::now();
+        self.compositor.prime_markdown_cache(&scene_guard);
+        let markdown_prime_us = markdown_prime_start.elapsed().as_micros() as u64;
+
         let stage4_us = s4_start.elapsed().as_micros() as u64;
         // input_to_scene_commit: wall time from frame_start to end of Stage 4.
         // Measured as elapsed since frame_start (not a sum of stage durations)
@@ -487,6 +498,10 @@ impl HeadlessRuntime {
         telemetry.mutations_applied = compositor_telemetry.mutations_applied;
         telemetry.hit_region_updates = compositor_telemetry.hit_region_updates;
         telemetry.telemetry_overflow_count = self.pipeline.telemetry_overflow_count();
+        // Propagate commit-time markdown prime cost (hud-380dl).
+        // Non-zero only when scene.version changed this frame (new/changed content
+        // required a parse pass); zero on steady-state frames (cache hit, no work).
+        telemetry.markdown_prime_us = markdown_prime_us;
         telemetry.sync_legacy_aliases();
 
         // Stage 8: Telemetry Emit — non-blocking record into collector.

@@ -1893,13 +1893,18 @@ impl Compositor {
 
     /// Prime the markdown parse cache for all [`TextMarkdownNode`] nodes in the scene.
     ///
-    /// Must be called **at content-commit time** (when `scene.version` changes),
-    /// never on the per-frame render path.  The method is gated internally on
-    /// `scene.version` so repeated calls on unchanged scenes are no-ops.
+    /// **Call site**: this must be called by the **runtime at Stage 4 (scene
+    /// commit time)**, before `render_frame` or `render_frame_headless` is
+    /// invoked.  Callers are responsible for measuring the cost and recording it
+    /// as `FrameTelemetry::markdown_prime_us` (hud-380dl, Option A).
     ///
-    /// The frame pipeline consumes only cached results via
-    /// [`MarkdownCache::get_by_key`] — satisfying the zero-per-frame-parse-cost
-    /// requirement from the Phase-1 spec (hud-5jbra.2).
+    /// The method is gated internally on `scene.version` so repeated calls on
+    /// unchanged scenes are no-ops (constant-time, no allocation).
+    ///
+    /// After this call returns, the frame pipeline can consume cached results via
+    /// [`MarkdownCache::get_by_key`] with zero parse cost — satisfying the
+    /// "parse-on-commit, zero per-frame parse cost" contract (hud-5jbra.2,
+    /// hud-380dl).
     ///
     /// The method also evicts cache entries for content no longer referenced by
     /// any scene node, keeping the cache bounded to the live node set.
@@ -4604,22 +4609,33 @@ impl Compositor {
 
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
-        // ── Phase-1 markdown cache prime (hud-5jbra.2 / hud-gpqde) ──────────
-        // Must run before the render-encode stages (Stage 6) so the frame
-        // pipeline consumes only cached styled runs.  New/changed content is
-        // parsed exactly once here; unchanged content hits the cache at O(1).
+        // ── Phase-1 markdown cache prime (hud-380dl: commit-time prime) ─────
+        // The markdown cache MUST be primed at commit time (before render_frame
+        // is called) by an explicit `prime_markdown_cache` call at the scene-commit
+        // site (Stage 3/4 of the pipeline).  By the time render_frame executes,
+        // the cache is already populated and this block is a no-op.
         //
-        // Timing is gated on scene version so that unchanged-content frames
-        // emit exactly 0 for markdown_prime_us — matching the documented
-        // contract in FrameTelemetry.  Only frames that actually perform parse
-        // work incur the timer overhead.
+        // Safety fallback: if the render path somehow reaches a frame where the
+        // cache has not been primed for the current scene version (e.g., the first
+        // frame after compositor creation before any commit-time prime has run),
+        // we prime here to preserve correctness.  In steady state this path is
+        // never taken.  `markdown_prime_us` stays 0 on all normal (commit-primed)
+        // frames, matching the "zero per-frame parse cost" contract.
+        //
+        // A debug assertion fires in test/dev builds if we ever reach this path
+        // in steady state, catching regressions where a call site forgot to call
+        // prime_markdown_cache before render_frame.
         if scene.version != self.markdown_cache_scene_version {
-            let prime_start = std::time::Instant::now();
+            debug_assert!(
+                false,
+                "render_frame: markdown cache was not commit-primed for scene version {} \
+                 (cache version {}); falling back to in-render prime [hud-380dl]",
+                scene.version, self.markdown_cache_scene_version,
+            );
             self.prime_markdown_cache(scene);
-            telemetry.markdown_prime_us = prime_start.elapsed().as_micros() as u64;
+            // Note: markdown_prime_us stays 0 here (the cost is absorbed into Stage 6
+            // as a correctness fallback, not the normal commit-time path).
         }
-        // On unchanged scenes: prime_markdown_cache is skipped entirely and
-        // markdown_prime_us stays 0 (zero-initialized by FrameTelemetry::new).
 
         // ── Phase-1 truncation cache prime (hud-wgq7j) ────────────────────────
         // Must run after prime_markdown_cache (so markdown plain-text is cached
@@ -4865,18 +4881,25 @@ impl Compositor {
 
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
-        // ── Phase-1 markdown cache prime (hud-5jbra.2 / hud-gpqde) ──────────
-        // Timing is gated on scene version so that unchanged-content frames
-        // emit exactly 0 for markdown_prime_us — matching the documented
-        // contract in FrameTelemetry.  Only frames that actually perform parse
-        // work incur the timer overhead.
+        // ── Phase-1 markdown cache prime (hud-380dl: commit-time prime) ─────
+        // The markdown cache MUST be primed at commit time (before
+        // render_frame_headless is called) by an explicit `prime_markdown_cache`
+        // call at the scene-commit site (Stage 3/4).  By the time this path
+        // executes, the cache is already populated and this block is a no-op.
+        //
+        // Safety fallback: identical to render_frame — see that method for the
+        // full correctness rationale.  In steady state this path is never taken.
+        // `markdown_prime_us` stays 0 on all commit-primed frames.
         if scene.version != self.markdown_cache_scene_version {
-            let prime_start = std::time::Instant::now();
+            debug_assert!(
+                false,
+                "render_frame_headless: markdown cache was not commit-primed for scene \
+                 version {} (cache version {}); falling back to in-render prime [hud-380dl]",
+                scene.version, self.markdown_cache_scene_version,
+            );
             self.prime_markdown_cache(scene);
-            telemetry.markdown_prime_us = prime_start.elapsed().as_micros() as u64;
+            // Note: markdown_prime_us stays 0 (correctness fallback, not normal path).
         }
-        // On unchanged scenes: prime_markdown_cache is skipped entirely and
-        // markdown_prime_us stays 0 (zero-initialized by FrameTelemetry::new).
 
         // ── Phase-1 truncation cache prime (hud-wgq7j) ────────────────────────
         self.prime_truncation_cache(scene);
@@ -7779,6 +7802,7 @@ mod tests {
             )
             .unwrap();
         scene.set_tile_root(tile_id, node).unwrap();
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -7861,6 +7885,7 @@ mod tests {
             )
             .unwrap();
 
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8052,6 +8077,8 @@ mod tests {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
         let scene = SceneGraph::new(256.0, 256.0);
 
+        // Prime before render per the Stage-4 commit-time prime contract (hud-380dl).
+        compositor.prime_markdown_cache(&scene);
         // render_frame takes &dyn CompositorSurface — no special headless branch.
         let telemetry =
             compositor.render_frame(&scene, &surface as &dyn crate::surface::CompositorSurface);
@@ -8192,6 +8219,7 @@ mod tests {
             }),
         };
         let mut scene = scene_with_node(node);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8232,6 +8260,7 @@ mod tests {
             }),
         };
         let mut scene = scene_with_node(node);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8282,6 +8311,7 @@ mod tests {
             }),
         };
         let mut scene = scene_with_node(node);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8338,6 +8368,7 @@ mod tests {
             }),
         };
         let mut scene = scene_with_node(node);
+        compositor.prime_markdown_cache(&scene);
         // Must not panic.
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
@@ -8398,6 +8429,7 @@ mod tests {
             )
             .unwrap();
 
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -8487,6 +8519,7 @@ mod tests {
             )
             .unwrap();
 
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -8594,6 +8627,7 @@ mod tests {
         );
 
         // Render to pixels and verify bright text appears in the top zone area.
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -8627,6 +8661,7 @@ mod tests {
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut scene = SceneGraph::new(64.0, 64.0);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         // No panic = pass.
     }
@@ -8637,6 +8672,7 @@ mod tests {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut scene = SceneGraph::new(64.0, 64.0);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
     }
 
@@ -8752,6 +8788,9 @@ mod tests {
         // the timed measurement window.  Shader compilation is a one-time cost
         // that does not reflect steady-state Stage 6 performance; excluding it
         // mirrors production behaviour where shaders are pre-compiled.
+        // Prime once before the loop — scene does not change in this benchmark,
+        // so subsequent frames are all cache-hit no-ops (hud-380dl).
+        compositor.prime_markdown_cache(&scene);
         for _ in 0..5 {
             compositor.render_frame_headless(&mut scene, &surface);
         }
@@ -15835,6 +15874,101 @@ mod tests {
         assert_eq!(
             cached_key, expected_key,
             "cached key must equal MarkdownCache::compute_key(content)"
+        );
+    }
+
+    /// Verify the commit-time prime contract (hud-380dl, Option A):
+    ///
+    /// When `prime_markdown_cache` is called BEFORE `render_frame_headless`
+    /// (as the runtime now does at Stage 4 commit time), the render-frame path
+    /// finds the cache already populated and contributes 0 parse cost.
+    ///
+    /// Specifically, `render_frame_headless` MUST NOT increment
+    /// `markdown_cache_scene_version` relative to the version set by the
+    /// commit-time prime — meaning the debug_assert fallback in render_frame_headless
+    /// must not fire, and the scene version sentinel must remain equal to
+    /// `scene.version` after the prime.
+    ///
+    /// This is the canonical Layer 0 assertion for the commit-time prime contract.
+    #[tokio::test]
+    async fn render_frame_headless_is_parse_free_after_commit_time_prime() {
+        use tze_hud_scene::types::{
+            FontFamily, NodeData, Rect, TextAlign, TextMarkdownNode, TextOverflow,
+        };
+
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let content = "# Commit-time prime test\n\n**bold** and *italic*.";
+
+        let node_id = SceneId::new();
+        let node = Node {
+            id: node_id,
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.to_string(),
+                bounds: Rect::new(0.0, 0.0, 64.0, 64.0),
+                font_size_px: 12.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: tze_hud_scene::types::Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
+            }),
+        };
+
+        let mut scene = scene_with_node(node);
+
+        // ── Commit-time prime (mimics Stage 4 runtime behavior) ───────────────
+        // Before render_frame_headless runs, the runtime primes the cache.
+        compositor.prime_markdown_cache(&scene);
+
+        // After commit-time prime: the cache scene version sentinel must equal
+        // scene.version.  This is the invariant that render_frame_headless checks
+        // to confirm it is parse-free.
+        assert_eq!(
+            compositor.markdown_cache_scene_version, scene.version,
+            "after commit-time prime, markdown_cache_scene_version must match scene.version"
+        );
+
+        // ── Render frame — must be parse-free ────────────────────────────────
+        // render_frame_headless checks `scene.version != markdown_cache_scene_version`
+        // and finds them equal → no parse occurs → the debug_assert fallback is NOT
+        // triggered.  The scene version sentinel is not modified by render_frame_headless.
+        let _telemetry = compositor.render_frame_headless(&mut scene, &surface);
+
+        // After render: the sentinel must still equal scene.version (render_frame_headless
+        // must NOT have re-primed or changed the sentinel as a side-effect of rendering).
+        assert_eq!(
+            compositor.markdown_cache_scene_version, scene.version,
+            "render_frame_headless must not alter markdown_cache_scene_version \
+             when cache was already commit-primed"
+        );
+
+        // The node_key_cache populated at commit-time must still be intact after render.
+        assert_eq!(
+            compositor.node_key_cache.len(),
+            1,
+            "node_key_cache populated by commit-time prime must survive render_frame_headless"
+        );
+        assert!(
+            compositor.node_key_cache.contains_key(&node_id),
+            "node_key_cache must contain the primed node after render_frame_headless"
+        );
+
+        // ── Second frame — unchanged scene, still parse-free ─────────────────
+        // Rendering the same scene a second time must also be parse-free.
+        let scene_version_before = scene.version;
+        let _telemetry2 = compositor.render_frame_headless(&mut scene, &surface);
+        assert_eq!(
+            compositor.markdown_cache_scene_version, scene_version_before,
+            "second render of unchanged scene must not change markdown_cache_scene_version"
         );
     }
 

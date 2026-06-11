@@ -1570,6 +1570,21 @@ impl ApplicationHandler for WinitApp {
                         let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
                         hit_test_snapshot.store(Arc::new(new_snap));
 
+                        // ── Commit-time markdown cache prime (hud-380dl) ──
+                        // Prime the markdown parse cache here — at scene-commit
+                        // time, before the render path executes — so that
+                        // render_frame never performs parsing in the frame loop.
+                        // This satisfies the "parse-on-commit, zero per-frame
+                        // parse cost" contract (Option A, hud-380dl).
+                        //
+                        // The prime is gated internally on scene.version so it
+                        // is a no-op when the scene has not changed.  The measured
+                        // cost is attached to the stage4 window so it is visible in
+                        // telemetry without inflating the Stage 6 render budget.
+                        let markdown_prime_start = Instant::now();
+                        compositor.prime_markdown_cache(&scene);
+                        let markdown_prime_us = markdown_prime_start.elapsed().as_micros() as u64;
+
                         // ── Stage 5–7: Render Encode + GPU Submit ─────────
                         let scene_commit_at = Instant::now();
                         let compositor_telemetry =
@@ -1596,6 +1611,10 @@ impl ApplicationHandler for WinitApp {
                         telem.stage6_render_encode_us = compositor_telemetry.render_encode_us;
                         telem.stage7_gpu_submit_us = compositor_telemetry.gpu_submit_us;
                         telem.tile_count = compositor_telemetry.tile_count;
+                        // Propagate commit-time markdown prime cost (hud-380dl).
+                        // Non-zero only on frames where scene.version changed;
+                        // zero on steady-state frames (cache hit, no parse work).
+                        telem.markdown_prime_us = markdown_prime_us;
                         if let Some((local_ack_us, scene_commit_us, next_present_us)) =
                             drain_pending_input_latency(
                                 &pending_input_latency,

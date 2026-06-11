@@ -252,6 +252,7 @@ async fn test_subtitle_backdrop_black_at_0_6_opacity() {
         )
         .expect("publish_to_zone must succeed for StreamText on subtitle zone");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -297,6 +298,7 @@ async fn test_subtitle_backdrop_at_zone_bottom() {
         )
         .expect("publish_to_zone must succeed for StreamText on subtitle zone");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -353,6 +355,7 @@ async fn test_subtitle_no_backdrop_when_policy_is_default() {
         )
         .expect("publish_to_zone must succeed for StreamText on default subtitle zone");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -444,6 +447,7 @@ async fn test_subtitle_text_color_white_from_policy() {
         )
         .expect("publish_to_zone must succeed for StreamText on subtitle zone");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -537,6 +541,7 @@ async fn test_subtitle_custom_token_override_backdrop_color() {
         )
         .expect("publish_to_zone must succeed for StreamText on custom subtitle zone");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -652,6 +657,7 @@ async fn test_subtitle_font_size_28px_from_policy() {
         )
         .expect("publish_to_zone must succeed for StreamText on subtitle zone");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -712,6 +718,7 @@ async fn debug_probe_pixel_values() {
                 None,
             )
             .unwrap();
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         let p = HeadlessSurface::pixel_at(&pixels, SURFACE_W, SAMPLE_X, SUBTITLE_ZONE_Y);
@@ -734,6 +741,7 @@ async fn debug_probe_pixel_values() {
                 None,
             )
             .unwrap();
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         let p_zone = HeadlessSurface::pixel_at(&pixels, SURFACE_W, SAMPLE_X, SUBTITLE_ZONE_Y);
