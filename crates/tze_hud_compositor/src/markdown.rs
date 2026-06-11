@@ -45,6 +45,7 @@
 //! [`MarkdownCache::prime`]: MarkdownCache::prime
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tze_hud_scene::types::Rgba;
 
@@ -206,7 +207,11 @@ pub struct StyledSpan {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedMarkdown {
     /// Plain text output, suitable for glyph layout.
-    pub plain_text: String,
+    ///
+    /// Stored as `Arc<str>` so the per-frame path in
+    /// `TextItem::from_text_markdown_cached` can clone it with a cheap
+    /// reference-count bump instead of a deep string copy.
+    pub plain_text: Arc<str>,
     /// Styled spans, sorted by `start_byte`, non-overlapping.
     pub spans: Vec<StyledSpan>,
 }
@@ -487,7 +492,7 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
     spans.retain(|s| s.start_byte < s.end_byte && s.end_byte <= plain.len());
 
     ParsedMarkdown {
-        plain_text: plain,
+        plain_text: Arc::from(plain),
         spans,
     }
 }
@@ -1414,7 +1419,7 @@ mod tests {
     fn heading_h1_stripped_and_styled() {
         let md = parse("# Hello World");
         assert_eq!(
-            md.plain_text, "Hello World",
+            &*md.plain_text, "Hello World",
             "H1 heading must strip # prefix"
         );
         assert!(
@@ -1431,7 +1436,7 @@ mod tests {
             let marker = "#".repeat(level as usize);
             let input = format!("{marker} Text");
             let md = parse(&input);
-            assert_eq!(md.plain_text, "Text", "level {level}: expected 'Text'");
+            assert_eq!(&*md.plain_text, "Text", "level {level}: expected 'Text'");
             let expected_weight = MarkdownTokens::default().heading_weight[(level - 1) as usize];
             assert!(
                 md.spans
@@ -1446,7 +1451,7 @@ mod tests {
     #[test]
     fn strong_renders_bold() {
         let md = parse("Hello **world**!");
-        assert_eq!(md.plain_text, "Hello world!");
+        assert_eq!(&*md.plain_text, "Hello world!");
         let bold_span = md.spans.iter().find(|s| s.attr.weight == Some(700));
         assert!(bold_span.is_some(), "strong must produce weight=700 span");
         let span = bold_span.unwrap();
@@ -1457,7 +1462,7 @@ mod tests {
     #[test]
     fn emphasis_renders_italic() {
         let md = parse("Hello *world*!");
-        assert_eq!(md.plain_text, "Hello world!");
+        assert_eq!(&*md.plain_text, "Hello world!");
         let italic_span = md.spans.iter().find(|s| s.attr.italic);
         assert!(italic_span.is_some(), "emphasis must produce italic span");
         let span = italic_span.unwrap();
@@ -1468,7 +1473,7 @@ mod tests {
     #[test]
     fn bold_italic_renders_both() {
         let md = parse("***bold-italic***");
-        assert_eq!(md.plain_text, "bold-italic");
+        assert_eq!(&*md.plain_text, "bold-italic");
         assert!(
             md.spans
                 .iter()
@@ -1481,7 +1486,7 @@ mod tests {
     #[test]
     fn inline_code_uses_monospace() {
         let md = parse("Use `fmt::Display` here.");
-        assert_eq!(md.plain_text, "Use fmt::Display here.");
+        assert_eq!(&*md.plain_text, "Use fmt::Display here.");
         let code_span = md.spans.iter().find(|s| s.attr.monospace);
         assert!(
             code_span.is_some(),
@@ -1518,7 +1523,7 @@ mod tests {
     fn indented_code_block_is_monospace() {
         let input = "    fn hello() {}";
         let md = parse(input);
-        assert_eq!(md.plain_text, "fn hello() {}");
+        assert_eq!(&*md.plain_text, "fn hello() {}");
         assert!(
             md.spans.iter().any(|s| s.attr.monospace),
             "indented block must produce monospace span"
@@ -1556,7 +1561,7 @@ mod tests {
     fn link_renders_text_not_url() {
         let md = parse("[release notes](https://example.com)");
         assert_eq!(
-            md.plain_text, "release notes",
+            &*md.plain_text, "release notes",
             "link must render only link text"
         );
         assert!(
@@ -1573,7 +1578,7 @@ mod tests {
             ..MarkdownTokens::default()
         };
         let md = parse_markdown_subset("[click here](https://x.com)", &t);
-        assert_eq!(md.plain_text, "click here");
+        assert_eq!(&*md.plain_text, "click here");
         let link_span = md.spans.iter().find(|s| s.attr.color.is_some());
         assert!(
             link_span.is_some(),
@@ -1612,7 +1617,7 @@ mod tests {
             "image construct must not be silently dropped"
         );
         assert_eq!(
-            md.plain_text, "![diagram](img.png)",
+            &*md.plain_text, "![diagram](img.png)",
             "image must render as verbatim source; got: {:?}",
             md.plain_text
         );
@@ -1679,7 +1684,7 @@ mod tests {
     #[test]
     fn link_not_navigable_no_url_in_output() {
         let md = parse("[RFC 0001](https://internal.example/rfc/0001)");
-        assert_eq!(md.plain_text, "RFC 0001");
+        assert_eq!(&*md.plain_text, "RFC 0001");
         assert!(!md.plain_text.contains("http"), "URL must not appear");
         // No span should carry a URL (StyledSpan has no href field — this is structural).
     }
@@ -1821,7 +1826,7 @@ mod tests {
     #[test]
     fn plain_text_passes_through() {
         let md = parse("Hello, world!");
-        assert_eq!(md.plain_text, "Hello, world!");
+        assert_eq!(&*md.plain_text, "Hello, world!");
         assert!(
             md.spans.is_empty(),
             "plain text must produce no styled spans"
@@ -1832,7 +1837,7 @@ mod tests {
     #[test]
     fn empty_input_produces_empty_output() {
         let md = parse("");
-        assert_eq!(md.plain_text, "");
+        assert_eq!(&*md.plain_text, "");
         assert!(md.spans.is_empty());
     }
 
@@ -2074,7 +2079,7 @@ mod tests {
         let md = parse(&input);
         // Every source character must be preserved verbatim — no silent drops.
         assert_eq!(
-            md.plain_text, input,
+            &*md.plain_text, input,
             "paren flood must emit all source characters verbatim"
         );
     }
@@ -2093,7 +2098,7 @@ mod tests {
         let md = parse(&input);
         // Every source character must be preserved verbatim — no silent drops.
         assert_eq!(
-            md.plain_text, input,
+            &*md.plain_text, input,
             "paren flood with link text must emit all source characters verbatim"
         );
     }
@@ -2113,7 +2118,7 @@ mod tests {
         let md = parse(&input);
         // Every source character must be preserved verbatim — no silent drops.
         assert_eq!(
-            md.plain_text, input,
+            &*md.plain_text, input,
             "image paren flood must emit all source characters verbatim"
         );
     }
@@ -2147,7 +2152,7 @@ mod tests {
         let md = parse(&input);
         // Every source character must be preserved verbatim — no silent drops.
         assert_eq!(
-            md.plain_text, input,
+            &*md.plain_text, input,
             "backtick flood must emit all source characters verbatim"
         );
     }
@@ -2161,7 +2166,7 @@ mod tests {
     fn paren_table_link_semantic_correctness() {
         let md = parse("[hello](https://example.com)");
         assert_eq!(
-            md.plain_text, "hello",
+            &*md.plain_text, "hello",
             "link text must be extracted, URL dropped"
         );
     }
@@ -2175,7 +2180,7 @@ mod tests {
         let md = parse("[doc](fn(arg))");
         // The link text should be emitted; the URL (including inner parens) is dropped.
         assert_eq!(
-            md.plain_text, "doc",
+            &*md.plain_text, "doc",
             "nested parens in URL must not break link parsing"
         );
     }
@@ -2185,7 +2190,7 @@ mod tests {
     fn paren_table_multiple_links_on_one_line() {
         let md = parse("[a](u1) and [b](u2)");
         assert_eq!(
-            md.plain_text, "a and b",
+            &*md.plain_text, "a and b",
             "multiple links must all be parsed correctly"
         );
     }
@@ -2196,7 +2201,7 @@ mod tests {
     #[test]
     fn backtick_memo_inline_code_semantic_correctness() {
         let md = parse("Use `fmt::Display` here.");
-        assert_eq!(md.plain_text, "Use fmt::Display here.");
+        assert_eq!(&*md.plain_text, "Use fmt::Display here.");
         assert!(
             md.spans.iter().any(|s| s.attr.monospace),
             "inline code must produce a monospace span"
@@ -2214,7 +2219,7 @@ mod tests {
     #[test]
     fn backtick_memo_double_tick_span_correctness() {
         let md = parse("Look at ``a`b`` here.");
-        assert_eq!(md.plain_text, "Look at a`b here.");
+        assert_eq!(&*md.plain_text, "Look at a`b here.");
         assert!(
             md.spans.iter().any(|s| s.attr.monospace),
             "double-tick code span must produce a monospace span"
@@ -2225,7 +2230,7 @@ mod tests {
     #[test]
     fn backtick_memo_multiple_spans_on_one_line() {
         let md = parse("`a` and `b` and `c`");
-        assert_eq!(md.plain_text, "a and b and c");
+        assert_eq!(&*md.plain_text, "a and b and c");
         assert_eq!(
             md.spans.iter().filter(|s| s.attr.monospace).count(),
             3,
