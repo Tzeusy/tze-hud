@@ -185,6 +185,16 @@ pub fn classify_safe_mode_input(
 /// or the public convenience methods (`is_safe_mode_active`, `is_freeze_active`).
 /// Tests that need to set up initial state (e.g., `freeze_active = true`) must
 /// use `set_freeze_active_for_test` (cfg(test) only).
+///
+/// ## Composer draft suspension hook
+///
+/// Callers that own an [`tze_hud_input::InputProcessor`] should register a
+/// suspension hook via [`SafeModeController::set_composer_suspension_hook`].
+/// The hook is called with `true` immediately after `SharedState.safe_mode_active`
+/// is set (safe-mode ENTER) and with `false` immediately after it is cleared
+/// (safe-mode EXIT), matching the protocol order in the spec.
+///
+/// Spec §4.5 — draft suspends under safe mode.
 pub struct SafeModeController {
     /// Shared protocol state (scene graph + sessions).
     pub shared_state: Arc<Mutex<SharedState>>,
@@ -195,6 +205,14 @@ pub struct SafeModeController {
     override_state: ShellOverrideState,
     /// Audit sink for shell events (never routed to agents).
     audit_sink: Arc<dyn ShellAuditSink>,
+    /// Optional hook invoked on safe-mode enter (`true`) and exit (`false`).
+    ///
+    /// The windowed runtime registers this to call
+    /// `InputProcessor::set_composer_suspended` so the composer draft manager
+    /// suspends / resumes in lock-step with the safe-mode state machine.
+    ///
+    /// `None` in headless mode and in tests that do not need the hook.
+    composer_suspension_hook: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 }
 
 impl SafeModeController {
@@ -209,6 +227,7 @@ impl SafeModeController {
             chrome_state,
             override_state: ShellOverrideState::default(),
             audit_sink,
+            composer_suspension_hook: None,
         }
     }
 
@@ -218,6 +237,34 @@ impl SafeModeController {
         chrome_state: Arc<RwLock<ChromeState>>,
     ) -> Self {
         Self::new(shared_state, chrome_state, Arc::new(NoopAuditSink))
+    }
+
+    /// Register a hook that is called when safe mode enters or exits.
+    ///
+    /// The hook receives `true` on safe-mode ENTER and `false` on safe-mode EXIT.
+    /// This is the canonical wiring point for
+    /// `InputProcessor::set_composer_suspended` (§4.5).
+    ///
+    /// Calling this a second time replaces the previous hook.  Use
+    /// [`Self::clear_composer_suspension_hook`] to remove an existing hook
+    /// (e.g., when the `InputProcessor` is torn down).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let input = Arc::new(Mutex::new(InputProcessor::new()));
+    /// let input_clone = Arc::clone(&input);
+    /// ctrl.set_composer_suspension_hook(Arc::new(move |suspended| {
+    ///     input_clone.lock().unwrap().set_composer_suspended(suspended);
+    /// }));
+    /// ```
+    pub fn set_composer_suspension_hook(&mut self, hook: Arc<dyn Fn(bool) + Send + Sync>) {
+        self.composer_suspension_hook = Some(hook);
+    }
+
+    /// Remove the composer suspension hook (e.g., when the input processor is torn down).
+    pub fn clear_composer_suspension_hook(&mut self) {
+        self.composer_suspension_hook = None;
     }
 
     /// Whether safe mode is currently active.
@@ -337,6 +384,13 @@ impl SafeModeController {
         self.override_state.safe_mode_entered_at_ms = now_ms;
         self.override_state.safe_mode_entry_reason = Some(reason);
         self.override_state.assert_invariant();
+
+        // Suspend the composer draft manager (§4.5).
+        // Called after `SharedState.safe_mode_active = true` to match the protocol
+        // order: dispatch-level capture is live before the manager-state suspension.
+        if let Some(ref hook) = self.composer_suspension_hook {
+            hook(true);
+        }
 
         // Emit audit event (telemetry thread only — never routed to agents).
         // Note: `timestamp_mono_us` is populated with a wall-clock value here.
@@ -490,6 +544,13 @@ impl SafeModeController {
         // Spec §Safe Mode Exit: after exit, freeze is inactive.
         // freeze_active was cleared on entry; do not re-enable.
         self.override_state.assert_invariant();
+
+        // Resume the composer draft manager (§4.5).
+        // Called after `SharedState.safe_mode_active = false` so that any keystroke
+        // that arrives immediately after exit is not blocked by the manager-state.
+        if let Some(ref hook) = self.composer_suspension_hook {
+            hook(false);
+        }
 
         // Emit audit event.
         self.audit_sink.emit(ShellAuditEvent {
@@ -1223,5 +1284,222 @@ mod tests {
             matches!(msg.payload, Some(ServerPayload::SessionResumed(_))),
             "payload must be SessionResumed"
         );
+    }
+
+    // ── 11. Composer draft suspension hook (§4.5 / hud-8k2ah) ────────────────
+
+    /// Safe-mode ENTER calls the composer suspension hook with `true`.
+    ///
+    /// Spec §4.5: the draft suspends under safe mode. The controller calls
+    /// the registered hook so `InputProcessor::set_composer_suspended(true)`
+    /// is invoked in lock-step with safe-mode activation.
+    #[tokio::test]
+    async fn test_composer_suspension_hook_called_on_enter() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut ctrl = make_controller();
+        let suspended_flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&suspended_flag);
+
+        ctrl.set_composer_suspension_hook(Arc::new(move |suspended| {
+            flag_clone.store(suspended, Ordering::SeqCst);
+        }));
+
+        ctrl.enter_safe_mode_viewer_action().await;
+
+        assert!(
+            suspended_flag.load(Ordering::SeqCst),
+            "composer suspension hook must be called with true on safe-mode ENTER"
+        );
+    }
+
+    /// Safe-mode EXIT calls the composer suspension hook with `false`.
+    ///
+    /// Spec §4.5: the draft resumes when safe mode exits. The controller calls
+    /// the registered hook so `InputProcessor::set_composer_suspended(false)`
+    /// is invoked in lock-step with safe-mode deactivation.
+    #[tokio::test]
+    async fn test_composer_suspension_hook_called_on_exit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut ctrl = make_controller();
+        let suspended_flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&suspended_flag);
+
+        ctrl.set_composer_suspension_hook(Arc::new(move |suspended| {
+            flag_clone.store(suspended, Ordering::SeqCst);
+        }));
+
+        ctrl.enter_safe_mode_viewer_action().await;
+        assert!(
+            suspended_flag.load(Ordering::SeqCst),
+            "flag must be true after enter"
+        );
+
+        ctrl.exit_safe_mode().await;
+        assert!(
+            !suspended_flag.load(Ordering::SeqCst),
+            "composer suspension hook must be called with false on safe-mode EXIT"
+        );
+    }
+
+    /// Idempotent entry must not call the hook a second time when safe mode is
+    /// already active.
+    #[tokio::test]
+    async fn test_composer_suspension_hook_not_called_on_idempotent_entry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut ctrl = make_controller();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&call_count);
+
+        ctrl.set_composer_suspension_hook(Arc::new(move |_suspended| {
+            count_clone.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        ctrl.enter_safe_mode_viewer_action().await;
+        ctrl.enter_safe_mode_viewer_action().await; // idempotent — no-op
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "hook must be called exactly once for the first entry; idempotent re-entry is a no-op"
+        );
+    }
+
+    /// No-hook path: controller without a registered hook must not panic on
+    /// safe-mode enter/exit.
+    #[tokio::test]
+    async fn test_no_hook_does_not_panic() {
+        let mut ctrl = make_controller();
+        // No hook registered.
+        ctrl.enter_safe_mode_viewer_action().await;
+        ctrl.exit_safe_mode().await;
+        // If we reach here without panicking, the test passes.
+    }
+
+    /// End-to-end: hook wired to a ComposerDraftManager suspends and resumes the
+    /// draft correctly.
+    ///
+    /// Verifies that:
+    /// 1. `set_suspended(true)` is invoked on safe-mode ENTER via the hook.
+    /// 2. A suspended draft rejects insert operations.
+    /// 3. `set_suspended(false)` is invoked on safe-mode EXIT via the hook.
+    /// 4. After exit, the draft accepts input again.
+    ///
+    /// This test exercises the full wiring via `ComposerDraftManager`, which is
+    /// the ultimate target of `InputProcessor::set_composer_suspended`.  That
+    /// method is a thin wrapper; the real behaviour under test is that the hook
+    /// is called with the correct value and that the manager responds correctly.
+    #[tokio::test]
+    async fn test_hook_wired_to_composer_draft_manager_suspends_and_resumes() {
+        use std::sync::Mutex as StdMutex;
+        use tze_hud_input::composer_draft::{ComposerDraftManager, EditOutcome};
+        use tze_hud_scene::SceneId;
+
+        let mut ctrl = make_controller();
+
+        // Use ComposerDraftManager directly — InputProcessor::set_composer_suspended
+        // is a thin wrapper over this; the semantics are identical.
+        let mgr = Arc::new(StdMutex::new(ComposerDraftManager::new()));
+        let mgr_for_hook = Arc::clone(&mgr);
+
+        ctrl.set_composer_suspension_hook(Arc::new(move |suspended| {
+            mgr_for_hook
+                .lock()
+                .expect("ComposerDraftManager lock must not be poisoned")
+                .set_suspended(suspended);
+        }));
+
+        // Focus a composer region so the manager is active (draft is live).
+        let node_id = SceneId::new();
+        {
+            let mut m = mgr.lock().unwrap();
+            m.on_focus_gained(node_id, false /* not suspended yet */);
+        }
+
+        // Enter safe mode — hook fires with true → manager suspends.
+        ctrl.enter_safe_mode_viewer_action().await;
+
+        // Draft must now reject input.
+        {
+            let mut m = mgr.lock().unwrap();
+            let (outcome, _) = m.route_character("x");
+            assert_eq!(
+                outcome,
+                EditOutcome::Suspended,
+                "composer must reject input while safe mode is active"
+            );
+        }
+
+        // Exit safe mode — hook fires with false → manager resumes.
+        ctrl.exit_safe_mode().await;
+
+        // Draft must accept input again.
+        {
+            let mut m = mgr.lock().unwrap();
+            let (outcome, _) = m.route_character("y");
+            assert_eq!(
+                outcome,
+                EditOutcome::Mutated,
+                "composer must accept input after safe mode exits"
+            );
+        }
+    }
+
+    /// Mid-edit: draft buffer is preserved while suspended; resumes from where it
+    /// left off (§4.5 — least-surprising behaviour).
+    #[tokio::test]
+    async fn test_mid_edit_draft_preserved_during_safe_mode() {
+        use std::sync::Mutex as StdMutex;
+        use tze_hud_input::composer_draft::{ComposerDraftManager, EditOutcome};
+        use tze_hud_scene::SceneId;
+
+        let mut ctrl = make_controller();
+        let mgr = Arc::new(StdMutex::new(ComposerDraftManager::new()));
+        let mgr_for_hook = Arc::clone(&mgr);
+
+        ctrl.set_composer_suspension_hook(Arc::new(move |suspended| {
+            mgr_for_hook.lock().unwrap().set_suspended(suspended);
+        }));
+
+        let node_id = SceneId::new();
+        // Focus and type some text.
+        {
+            let mut m = mgr.lock().unwrap();
+            m.on_focus_gained(node_id, false);
+            let (outcome, _) = m.route_character("h");
+            assert_eq!(outcome, EditOutcome::Mutated);
+            let (outcome, _) = m.route_character("i");
+            assert_eq!(outcome, EditOutcome::Mutated);
+        }
+
+        // Enter safe mode — draft should retain buffer but reject further input.
+        ctrl.enter_safe_mode_viewer_action().await;
+        {
+            let mut m = mgr.lock().unwrap();
+            // Buffer preserved.
+            assert_eq!(
+                m.draft().map(|d| d.text()),
+                Some("hi"),
+                "draft buffer must be preserved while suspended"
+            );
+            // Mutations rejected.
+            let (outcome, _) = m.route_character("!");
+            assert_eq!(outcome, EditOutcome::Suspended);
+        }
+
+        // Exit safe mode — draft resumes from "hi".
+        ctrl.exit_safe_mode().await;
+        {
+            let mut m = mgr.lock().unwrap();
+            let (outcome, _) = m.route_character("!");
+            assert_eq!(outcome, EditOutcome::Mutated);
+            assert_eq!(
+                m.draft().map(|d| d.text()),
+                Some("hi!"),
+                "draft must resume from the preserved buffer"
+            );
+        }
     }
 }
