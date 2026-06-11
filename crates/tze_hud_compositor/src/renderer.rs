@@ -392,6 +392,53 @@ fn resolve_notification_control_color(
     })
 }
 
+/// Resolve `ScrollIndicatorTokens` from the compositor token map.
+///
+/// Keys follow the portal token namespace (`portal.scroll_indicator.*`).
+/// Falls back to `ScrollIndicatorTokens::default()` for any missing or
+/// unparsable token — token defaults in both crates must stay in sync per
+/// the module-level contract in `tze_hud_input::scroll_indicator`.
+#[inline]
+fn resolve_scroll_indicator_tokens(
+    token_map: &HashMap<String, String>,
+) -> tze_hud_input::ScrollIndicatorTokens {
+    let defaults = tze_hud_input::ScrollIndicatorTokens::default();
+
+    // Color: "portal.scroll_indicator.color" as #RRGGBB[AA].
+    let (color_r, color_g, color_b, color_a) =
+        if let Some(c) = resolve_token_color(token_map, "portal.scroll_indicator.color") {
+            (c.r, c.g, c.b, c.a)
+        } else {
+            (
+                defaults.color_r,
+                defaults.color_g,
+                defaults.color_b,
+                defaults.color_a,
+            )
+        };
+
+    let width_px = token_map
+        .get("portal.scroll_indicator.width_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(defaults.width_px);
+
+    let min_thumb_height_px = token_map
+        .get("portal.scroll_indicator.min_height_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(defaults.min_thumb_height_px);
+
+    tze_hud_input::ScrollIndicatorTokens {
+        color_r,
+        color_g,
+        color_b,
+        color_a,
+        width_px,
+        min_thumb_height_px,
+    }
+}
+
 #[inline]
 fn notification_dismiss_bounds(x: f32, slot_y: f32, w: f32, effective_slot_h: f32) -> Rect {
     Rect::new(
@@ -4574,6 +4621,49 @@ impl Compositor {
                     sh,
                 );
             }
+
+            // ── Scroll indicator (§6b.5) ───────────────────────────────────
+            // Rendered on top of the tile content. Geometry-only; carries no
+            // transcript text. Redaction-safe: the indicator reveals only that
+            // content overflows and approximately where the viewport sits.
+            //
+            // Only emitted for tiles that have a registered scroll config with
+            // a known content_height (set by the portal adapter via
+            // `register_tile_scroll_config`). Indicator is not shown when
+            // content fits within the viewport (no overflow).
+            if let Some(scroll_cfg) = scene.tile_scroll_config(tile.id) {
+                if let Some(content_height) = scroll_cfg.content_height {
+                    let viewport_px = tile.bounds.height;
+                    let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
+                    let indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+                    if let Some(geom) = tze_hud_input::compute_scroll_indicator(
+                        viewport_px,
+                        content_height,
+                        scroll_offset_y,
+                        &indicator_tokens,
+                    ) {
+                        // Track rect: right edge of the tile, full height.
+                        // Thumb rect: inset within the track at thumb_y_px.
+                        let track_x = tile.bounds.x + tile.bounds.width - geom.width_px;
+                        let thumb_color = self.gpu_color(Rgba::new(
+                            indicator_tokens.color_r,
+                            indicator_tokens.color_g,
+                            indicator_tokens.color_b,
+                            indicator_tokens.color_a,
+                        ));
+                        let thumb_verts = rect_vertices(
+                            track_x,
+                            tile.bounds.y + geom.thumb_y_px,
+                            geom.width_px,
+                            geom.thumb_height_px,
+                            sw,
+                            sh,
+                            thumb_color,
+                        );
+                        vertices.extend_from_slice(&thumb_verts);
+                    }
+                }
+            }
         }
 
         // Update zone animation states (fade-in/fade-out) before rendering.
@@ -4766,6 +4856,39 @@ impl Compositor {
                     sw,
                     sh,
                 );
+            }
+
+            // ── Scroll indicator (§6b.5) — same logic as windowed path ─────
+            if let Some(scroll_cfg) = scene.tile_scroll_config(tile.id) {
+                if let Some(content_height) = scroll_cfg.content_height {
+                    let viewport_px = tile.bounds.height;
+                    let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
+                    let indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+                    if let Some(geom) = tze_hud_input::compute_scroll_indicator(
+                        viewport_px,
+                        content_height,
+                        scroll_offset_y,
+                        &indicator_tokens,
+                    ) {
+                        let track_x = tile.bounds.x + tile.bounds.width - geom.width_px;
+                        let thumb_color = self.gpu_color_raw([
+                            indicator_tokens.color_r,
+                            indicator_tokens.color_g,
+                            indicator_tokens.color_b,
+                            indicator_tokens.color_a,
+                        ]);
+                        let thumb_verts = rect_vertices(
+                            track_x,
+                            tile.bounds.y + geom.thumb_y_px,
+                            geom.width_px,
+                            geom.thumb_height_px,
+                            sw,
+                            sh,
+                            thumb_color,
+                        );
+                        vertices.extend_from_slice(&thumb_verts);
+                    }
+                }
             }
         }
 
@@ -4966,6 +5089,39 @@ impl Compositor {
                     sw,
                     sh,
                 );
+            }
+
+            // ── Scroll indicator (§6b.5) ────────────────────────────────────
+            if let Some(scroll_cfg) = scene.tile_scroll_config(tile.id) {
+                if let Some(content_height) = scroll_cfg.content_height {
+                    let viewport_px = tile.bounds.height;
+                    let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
+                    let indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+                    if let Some(geom) = tze_hud_input::compute_scroll_indicator(
+                        viewport_px,
+                        content_height,
+                        scroll_offset_y,
+                        &indicator_tokens,
+                    ) {
+                        let track_x = tile.bounds.x + tile.bounds.width - geom.width_px;
+                        let thumb_color = self.gpu_color_raw([
+                            indicator_tokens.color_r,
+                            indicator_tokens.color_g,
+                            indicator_tokens.color_b,
+                            indicator_tokens.color_a,
+                        ]);
+                        let thumb_verts = rect_vertices(
+                            track_x,
+                            tile.bounds.y + geom.thumb_y_px,
+                            geom.width_px,
+                            geom.thumb_height_px,
+                            sw,
+                            sh,
+                            thumb_color,
+                        );
+                        content_vertices.extend_from_slice(&thumb_verts);
+                    }
+                }
             }
         }
 
