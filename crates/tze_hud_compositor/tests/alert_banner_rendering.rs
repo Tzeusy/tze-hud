@@ -223,6 +223,7 @@ async fn test_alert_banner_urgency0_info_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=0 Notification on alert-banner");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -268,6 +269,7 @@ async fn test_alert_banner_urgency1_info_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=1 Notification on alert-banner");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -313,6 +315,7 @@ async fn test_alert_banner_urgency2_warning_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=2 Notification on alert-banner");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -358,6 +361,7 @@ async fn test_alert_banner_urgency3_critical_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=3 Notification on alert-banner");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -462,6 +466,7 @@ async fn test_alert_banner_stacking_order() {
         "alert-banner must have 3 active publications; got {pub_count}"
     );
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -537,6 +542,7 @@ async fn test_alert_banner_stream_text_uses_default_policy_color() {
         )
         .expect("publish_to_zone must succeed for StreamText on alert-banner");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 

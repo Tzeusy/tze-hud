@@ -273,6 +273,7 @@ async fn test_notification_urgency0_low_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=0 Notification on notification-area");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -319,6 +320,7 @@ async fn test_notification_urgency1_normal_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=1 Notification on notification-area");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -365,6 +367,7 @@ async fn test_notification_urgency2_urgent_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=2 Notification on notification-area");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -411,6 +414,7 @@ async fn test_notification_urgency3_critical_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=3 Notification on notification-area");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -473,6 +477,7 @@ async fn test_notification_urgency_distinct_colors() {
                 None,
             )
             .unwrap();
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         actuals.push(HeadlessSurface::pixel_at(
@@ -572,6 +577,7 @@ async fn test_notification_icon_renders_texture_when_bytes_registered() {
         )
         .expect("publish_to_zone must succeed for notification with icon");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -617,6 +623,7 @@ async fn test_notification_without_icon_renders_backdrop_only() {
         )
         .expect("publish_to_zone must succeed for notification without icon");
 
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -666,6 +673,7 @@ async fn test_notification_icon_graceful_fallback_when_bytes_not_registered() {
         .expect("publish_to_zone must succeed even when icon bytes are absent");
 
     // MUST NOT panic. Frame renders without the icon texture.
+    compositor.prime_markdown_cache(&scene);
     compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
@@ -759,6 +767,7 @@ async fn debug_probe_pixel_values() {
                 None,
             )
             .unwrap();
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         let p = HeadlessSurface::pixel_at(&pixels, SURFACE_W, SAMPLE_X, SLOT0_Y);
