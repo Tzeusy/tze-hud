@@ -474,11 +474,19 @@ pub enum HotkeyResizeDir {
 }
 
 impl HotkeyResizeDir {
-    /// Parse from a DOM `KeyboardEvent.key` string.
+    /// Parse from a DOM `KeyboardEvent.key` string **with Ctrl modifier check**.
     ///
-    /// Returns `Some(Grow)` for `"+"` or `"="`, `Some(Shrink)` for `"-"`,
-    /// `None` for anything else.
-    pub fn from_key(key: &str) -> Option<Self> {
+    /// Returns `Some(Grow)` for `"+"` or `"="` **only when `ctrl` is true**,
+    /// `Some(Shrink)` for `"-"` **only when `ctrl` is true**,
+    /// `None` for anything else or when `ctrl` is false.
+    ///
+    /// Spec §6b.2: resize shortcuts are Ctrl-scoped. Bare `+`, `=`, and `-`
+    /// (without Ctrl held) MUST NOT trigger a resize — they may be content input
+    /// or other application shortcuts.
+    pub fn from_key(key: &str, ctrl: bool) -> Option<Self> {
+        if !ctrl {
+            return None;
+        }
         match key {
             "+" | "=" => Some(Self::Grow),
             "-" => Some(Self::Shrink),
@@ -1045,15 +1053,50 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_key_parser_from_key() {
-        assert_eq!(HotkeyResizeDir::from_key("+"), Some(HotkeyResizeDir::Grow));
-        assert_eq!(HotkeyResizeDir::from_key("="), Some(HotkeyResizeDir::Grow));
+    fn hotkey_key_parser_from_key_requires_ctrl() {
+        // Ctrl held: Grow/Shrink keys are recognised.
         assert_eq!(
-            HotkeyResizeDir::from_key("-"),
-            Some(HotkeyResizeDir::Shrink)
+            HotkeyResizeDir::from_key("+", true),
+            Some(HotkeyResizeDir::Grow),
+            "Ctrl+'+' must map to Grow"
         );
-        assert_eq!(HotkeyResizeDir::from_key("a"), None);
-        assert_eq!(HotkeyResizeDir::from_key("Enter"), None);
+        assert_eq!(
+            HotkeyResizeDir::from_key("=", true),
+            Some(HotkeyResizeDir::Grow),
+            "Ctrl+'=' must map to Grow"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key("-", true),
+            Some(HotkeyResizeDir::Shrink),
+            "Ctrl+'-' must map to Shrink"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key("a", true),
+            None,
+            "Ctrl+'a' must return None (not a resize key)"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key("Enter", true),
+            None,
+            "Ctrl+Enter must return None"
+        );
+
+        // Bare (no Ctrl): MUST NOT trigger resize regardless of key (§6b.2).
+        assert_eq!(
+            HotkeyResizeDir::from_key("+", false),
+            None,
+            "bare '+' without Ctrl MUST NOT trigger resize"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key("=", false),
+            None,
+            "bare '=' without Ctrl MUST NOT trigger resize"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key("-", false),
+            None,
+            "bare '-' without Ctrl MUST NOT trigger resize"
+        );
     }
 
     // ─── Affordance hit test ───────────────────────────────────────────────

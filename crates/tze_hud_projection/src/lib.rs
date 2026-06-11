@@ -1949,6 +1949,16 @@ struct ProjectionSession {
     pending_input_bytes: usize,
     last_input_feedback: Option<PortalInputFeedback>,
     portal_update_pending: bool,
+    /// Pending geometry batch produced by the window management layer.
+    ///
+    /// Written by [`ProjectionAuthority::push_geometry_snapshot`] when a
+    /// pointer resize gesture or hotkey resize produces a new snapshot.
+    /// Consumed (cloned) by [`projected_portal_state`] into
+    /// `ProjectedPortalState::geometry_batch` and cleared by
+    /// [`ProjectionAuthority::consume_geometry_batch`] after delivery.
+    ///
+    /// `None` until the first snapshot arrives (no resize has occurred).
+    pending_geometry_batch: Option<AdapterGeometryBatch>,
 }
 
 struct ProjectionAuditEvent<'a> {
@@ -2071,6 +2081,62 @@ impl ProjectionAuthority {
         self.sessions.get(projection_id).map(|session| {
             projected_portal_state(session, policy, self.bounds.max_visible_transcript_bytes)
         })
+    }
+
+    /// Deliver a coalescible portal geometry snapshot from the window management
+    /// layer (§6b.4).
+    ///
+    /// Called by the windowed runtime when a pointer resize gesture step or
+    /// hotkey resize produces a new `GeometrySnapshot`. The snapshot is stored
+    /// in the session's `pending_geometry_batch`; on the next call to
+    /// `projected_portal_state` the batch is included for adapter delivery.
+    ///
+    /// Returns `true` if the snapshot was accepted (session exists and the new
+    /// sequence is strictly greater than the current latest, or there is no
+    /// current snapshot). Returns `false` if the session is not found or the
+    /// snapshot is stale.
+    ///
+    /// Callers MUST call [`consume_geometry_batch`] after reading the state to
+    /// clear the pending batch; otherwise the same snapshot will be re-delivered
+    /// on every subsequent `projected_portal_state` call.
+    pub fn push_geometry_snapshot(
+        &mut self,
+        projection_id: &str,
+        snapshot: AdapterGeometrySnapshot,
+    ) -> bool {
+        let Some(session) = self.sessions.get_mut(projection_id) else {
+            return false;
+        };
+        match &mut session.pending_geometry_batch {
+            Some(batch) => {
+                // Coalesce: only accept if sequence is strictly newer.
+                if snapshot.sequence > batch.latest.map_or(0, |s| s.sequence) {
+                    batch.coalesce(snapshot);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                let mut batch = AdapterGeometryBatch::default();
+                batch.coalesce(snapshot);
+                session.pending_geometry_batch = Some(batch);
+                true
+            }
+        }
+    }
+
+    /// Consume (clear) the pending geometry batch for a session after delivery.
+    ///
+    /// The window management layer calls this after the adapter has been notified
+    /// of the geometry change so that the same snapshot is not re-delivered on
+    /// the next `projected_portal_state` call.
+    ///
+    /// No-op if the session does not exist or has no pending batch.
+    pub fn consume_geometry_batch(&mut self, projection_id: &str) {
+        if let Some(session) = self.sessions.get_mut(projection_id) {
+            session.pending_geometry_batch = None;
+        }
     }
 
     /// Collapse a projected portal into its compact content-layer surface.
@@ -2471,6 +2537,7 @@ impl ProjectionAuthority {
                 pending_input_bytes: 0,
                 last_input_feedback: None,
                 portal_update_pending: false,
+                pending_geometry_batch: None,
             },
         );
 
@@ -3340,11 +3407,12 @@ fn projected_portal_state(
         // the runtime delivers draft notifications. The authority does not own the
         // draft buffer state — the runtime's ComposerDraft does.
         draft_batch: None,
-        // geometry_batch is populated externally by the window management layer
-        // when a pointer resize gesture or hotkey resize produces a new snapshot.
-        // The authority does not own portal geometry — the runtime's
-        // PortalResizeState does.
-        geometry_batch: None,
+        // geometry_batch: include any pending snapshot that was pushed by the
+        // window management layer via `push_geometry_snapshot`. The batch is
+        // cloned here so it survives serialization to the adapter; the caller
+        // MUST call `consume_geometry_batch` after delivery to clear it.
+        // `None` until the first resize gesture or hotkey resize occurs.
+        geometry_batch: session.pending_geometry_batch.clone(),
     }
 }
 
@@ -6227,5 +6295,199 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── AdapterGeometryBatch::coalesce (§6b.4) ───────────────────────────────
+
+    fn make_snapshot(sequence: u64, gesture_active: bool) -> AdapterGeometrySnapshot {
+        AdapterGeometrySnapshot {
+            rect: AdapterPortalRect {
+                x_px: 10,
+                y_px: 20,
+                width_px: 400,
+                height_px: 300,
+            },
+            gesture_active,
+            sequence,
+        }
+    }
+
+    #[test]
+    fn coalesce_first_snapshot_is_stored() {
+        let mut batch = AdapterGeometryBatch::default();
+        assert!(batch.is_empty(), "batch must start empty");
+
+        batch.coalesce(make_snapshot(1, true));
+
+        assert!(!batch.is_empty(), "batch must not be empty after coalesce");
+        let latest = batch.latest.expect("latest must be Some after coalesce");
+        assert_eq!(latest.sequence, 1, "latest sequence must be 1");
+        assert!(latest.gesture_active, "gesture_active must match snapshot");
+    }
+
+    #[test]
+    fn coalesce_newer_snapshot_replaces_older() {
+        let mut batch = AdapterGeometryBatch::default();
+        batch.coalesce(make_snapshot(1, true));
+        batch.coalesce(make_snapshot(2, false)); // newer
+
+        let latest = batch.latest.expect("latest must be Some");
+        assert_eq!(
+            latest.sequence, 2,
+            "newer snapshot (seq=2) must replace older (seq=1)"
+        );
+        assert!(
+            !latest.gesture_active,
+            "gesture_active from newer snapshot must win"
+        );
+    }
+
+    #[test]
+    fn coalesce_older_snapshot_does_not_replace_newer() {
+        let mut batch = AdapterGeometryBatch::default();
+        batch.coalesce(make_snapshot(5, false));
+        batch.coalesce(make_snapshot(3, true)); // older — must be dropped
+
+        let latest = batch.latest.expect("latest must be Some");
+        assert_eq!(
+            latest.sequence, 5,
+            "older snapshot (seq=3) must NOT displace newer (seq=5)"
+        );
+        assert!(
+            !latest.gesture_active,
+            "gesture_active from older snapshot must be ignored"
+        );
+    }
+
+    #[test]
+    fn coalesce_equal_sequence_does_not_replace() {
+        let mut batch = AdapterGeometryBatch::default();
+        batch.coalesce(make_snapshot(7, false));
+
+        // Same sequence with different geometry — first write wins (not strictly
+        // required by spec, but the coalescer MUST NOT drop the existing entry
+        // for an equal sequence in a way that loses a confirmed snapshot).
+        let mut snap_same_seq = make_snapshot(7, true); // gesture_active differs
+        snap_same_seq.rect = AdapterPortalRect {
+            x_px: 99,
+            y_px: 99,
+            width_px: 100,
+            height_px: 100,
+        };
+        batch.coalesce(snap_same_seq);
+
+        let latest = batch.latest.expect("latest must be Some");
+        assert_eq!(
+            latest.sequence, 7,
+            "sequence must remain 7 after equal-sequence coalesce attempt"
+        );
+        assert!(
+            !latest.gesture_active,
+            "first write (gesture_active=false) must be retained for equal sequence"
+        );
+    }
+
+    proptest! {
+        /// For any sequence of (sequence, gesture_active) pairs,
+        /// `latest.sequence` must equal the maximum sequence seen.
+        #[test]
+        fn coalesce_latest_wins_monotone(pairs in proptest::collection::vec((0u64..100u64, proptest::bool::ANY), 1..20usize)) {
+            let mut batch = AdapterGeometryBatch::default();
+            let mut max_seq = 0u64;
+            for (seq, gesture_active) in &pairs {
+                if *seq > max_seq { max_seq = *seq; }
+                batch.coalesce(make_snapshot(*seq, *gesture_active));
+            }
+            let latest = batch.latest.expect("batch must be non-empty after coalescing snapshots");
+            prop_assert_eq!(
+                latest.sequence, max_seq,
+                "latest sequence must equal maximum sequence seen"
+            );
+        }
+    }
+
+    // ── ProjectionAuthority geometry batch flow (§6b.4) ─────────────────────
+    //
+    // Covers push_geometry_snapshot → projected_portal_state → consume_geometry_batch
+    // so that callers cannot accidentally re-deliver geometry indefinitely or
+    // fail to surface it in ProjectedPortalState.
+
+    #[test]
+    fn geometry_batch_not_surfaced_before_first_push() {
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "p-geo");
+        // No snapshot has been pushed — geometry_batch must be None.
+        let state = authority
+            .projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all())
+            .expect("session must exist");
+        assert!(
+            state.geometry_batch.is_none(),
+            "geometry_batch must be None before any push"
+        );
+    }
+
+    #[test]
+    fn geometry_batch_surfaced_after_push_and_cleared_after_consume() {
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "p-geo");
+
+        let snap = make_snapshot(1, false);
+        let accepted = authority.push_geometry_snapshot("p-geo", snap);
+        assert!(accepted, "push must return true for a new snapshot");
+
+        // After push: projected_portal_state must include the batch.
+        let state = authority
+            .projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all())
+            .expect("session must exist");
+        let batch = state
+            .geometry_batch
+            .expect("geometry_batch must be Some after push");
+        let latest = batch.latest.expect("batch.latest must be Some");
+        assert_eq!(
+            latest.sequence, 1,
+            "surfaced sequence must match pushed snapshot"
+        );
+
+        // After consume: projected_portal_state must return None for geometry_batch.
+        authority.consume_geometry_batch("p-geo");
+        let state2 = authority
+            .projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all())
+            .expect("session must still exist");
+        assert!(
+            state2.geometry_batch.is_none(),
+            "geometry_batch must be None after consume"
+        );
+    }
+
+    #[test]
+    fn geometry_batch_not_re_delivered_without_new_push() {
+        // Verifies that a caller that calls projected_portal_state twice after one
+        // consume does NOT receive stale geometry on the second call.
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "p-geo");
+
+        authority.push_geometry_snapshot("p-geo", make_snapshot(3, true));
+        // First read + consume.
+        let _ = authority.projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all());
+        authority.consume_geometry_batch("p-geo");
+
+        // Second read without a new push — must be empty.
+        let state = authority
+            .projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all())
+            .expect("session must exist");
+        assert!(
+            state.geometry_batch.is_none(),
+            "geometry_batch must remain None after consume with no new push"
+        );
+    }
+
+    #[test]
+    fn push_geometry_snapshot_rejects_unknown_session() {
+        let mut authority = ProjectionAuthority::default();
+        let accepted = authority.push_geometry_snapshot("does-not-exist", make_snapshot(1, false));
+        assert!(
+            !accepted,
+            "push must return false for an unknown projection_id"
+        );
     }
 }

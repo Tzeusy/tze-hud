@@ -93,8 +93,9 @@ use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{Compositor, CompositorSurface, WindowSurface};
 use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{
-    DragEventOutcome, FocusManager, InputProcessor, KeyboardProcessor, PointerEvent,
-    PointerEventKind, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
+    DragEventOutcome, FocusManager, HotkeyResizeDir, InputProcessor, KeyboardProcessor,
+    PointerEvent, PointerEventKind, PortalRect, PortalResizeState, PortalWindowTokens,
+    RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ResizeBounds, apply_hotkey_resize,
 };
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
@@ -1112,6 +1113,19 @@ struct WindowedRuntimeState {
     /// Cleared on focus-gain to prevent stale context from leaking across
     /// focus boundaries.
     pending_blur_delivery_context: Option<(String, [u8; 16])>,
+    /// Per-portal resize state machines keyed by tile `SceneId`.
+    ///
+    /// Holds `PortalResizeState` for every portal tile that has been focused
+    /// at least once. Created lazily on the first hotkey resize for a given
+    /// portal tile; retained across keystrokes to maintain the monotonic
+    /// sequence counter (which the adapter uses to detect skipped snapshots).
+    ///
+    /// NOTE: entries are not currently pruned when a tile is removed from the
+    /// scene. The map grows at most one entry per distinct portal tile seen
+    /// during the session (bounded by the number of portal tiles ever created),
+    /// so the leak is bounded. Proper cleanup on tile removal is tracked in
+    /// hud-38236 (constraint-authority follow-up).
+    portal_resize_states: std::collections::HashMap<tze_hud_scene::SceneId, PortalResizeState>,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -2444,6 +2458,40 @@ impl WinitApp {
         let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
 
+        // ── Portal resize hotkey intercept (§6b.2) ────────────────────────
+        //
+        // Ctrl+`+`/Ctrl+`=` (grow) and Ctrl+`-` (shrink) resize the focused
+        // portal tile. The hotkey is focus-scoped: only the portal that holds
+        // keyboard focus consumes it; other portals and non-portal tiles are
+        // unaffected.
+        //
+        // Per spec §6b.2: chrome/shell-reserved shortcuts and safe-mode capture
+        // take precedence over resize hotkeys. Both of those checks happen in
+        // the OS event path (Stage 1) before this function is called, so we
+        // only need to gate on focus and the Ctrl modifier here.
+        //
+        // The hotkey is consumed (returns early) when applied so it does NOT
+        // propagate to the composer or the agent's raw KeyDown path.
+        //
+        // COMPOSER PRECEDENCE (§4.4 beats §6b.2 when composer is active):
+        // A portal tile may contain an active composer region (e.g. a text
+        // input node inside a scrollable tile). When the composer is active,
+        // Ctrl+`+`/`=`/`-` are composer shortcuts (font-size, accept, etc.)
+        // and MUST NOT be stolen by the resize intercept. Skip the resize
+        // check entirely when a composer is active — the composer intercept
+        // immediately below will handle the key.
+        if !self.state.input_processor.is_composer_active() {
+            if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
+                if self.apply_portal_resize_hotkey(tab_id, dir) {
+                    tracing::debug!(
+                        key = %raw.key,
+                        "portal resize: Ctrl hotkey consumed (resize applied)"
+                    );
+                    return;
+                }
+            }
+        }
+
         // ── Composer draft intercept (§4.4) ──────────────────────────────
         if self.state.input_processor.is_composer_active() {
             let (consumed, batch) = self.state.input_processor.route_key_down_to_composer(
@@ -2641,6 +2689,133 @@ impl WinitApp {
         let state = self.state.shared_state.blocking_lock();
         let scene = state.scene.blocking_lock();
         scene.tiles.get(&tile_id).map(|tile| tile.namespace.clone())
+    }
+
+    /// Apply a Ctrl-gated portal resize hotkey to the focused portal tile.
+    ///
+    /// Looks up the currently focused tile in `tab_id`. If the focused tile is
+    /// a portal tile (has a registered scroll config), applies the resize step
+    /// locally (local-first per §6b.2), updates the scene tile bounds, and
+    /// broadcasts an `ElementRepositionedEvent` on the `SCENE_TOPOLOGY` channel
+    /// via `element_repositioned_tx` so gRPC subscribers receive the updated
+    /// portal geometry (relative %).
+    ///
+    /// Returns `true` when the hotkey was consumed (applied to a focused portal
+    /// tile) so the caller knows to stop propagating the key event.
+    /// Returns `false` when no focused portal tile was found (the key must not
+    /// be consumed and should fall through to the normal dispatch path).
+    fn apply_portal_resize_hotkey(
+        &mut self,
+        tab_id: tze_hud_scene::SceneId,
+        dir: tze_hud_input::HotkeyResizeDir,
+    ) -> bool {
+        // Resolve the focused tile from the focus manager.
+        let focused_tile_id = match self.state.focus_manager.current_owner(tab_id).tile_id() {
+            Some(id) => id,
+            None => return false,
+        };
+
+        // Acquire scene + check if focused tile is a portal (has scroll config).
+        // Resolve the bounds and display dimensions we need for clamping.
+        let (current_rect, bounds, portal_id_hash) = {
+            let Ok(state) = self.state.shared_state.try_lock() else {
+                return false;
+            };
+            let Ok(scene) = state.scene.try_lock() else {
+                return false;
+            };
+            // Only scrollable portal tiles accept resize hotkeys.
+            if scene.tile_scroll_config(focused_tile_id).is_none() {
+                return false;
+            }
+            let tile = match scene.tiles.get(&focused_tile_id) {
+                Some(t) => t,
+                None => return false,
+            };
+            let display_w = self.state.config.window.width as f32;
+            let display_h = self.state.config.window.height as f32;
+            let current = PortalRect {
+                x: tile.bounds.x,
+                y: tile.bounds.y,
+                width: tile.bounds.width,
+                height: tile.bounds.height,
+            };
+            let tokens = PortalWindowTokens::default(); // token-resolved; placeholder per §6b.2
+            let resize_bounds = ResizeBounds {
+                tokens,
+                // Lease/scene budget max: use full display minus tile origin as a
+                // practical upper bound. Real lease-budget enforcement is a
+                // follow-up (hud-38236 handles full constraint authority).
+                max_width_px: (display_w - tile.bounds.x).max(tokens.min_width_px),
+                max_height_px: (display_h - tile.bounds.y).max(tokens.min_height_px),
+                display_w,
+                display_h,
+            };
+            // Stable hash of the tile's interaction_id to use as `portal_id_hash`
+            // in `PortalResizeState`. We use the `SceneId`'s UUID bytes as a cheap
+            // 64-bit hash (truncating the 128-bit UUID to its lower 64 bits).
+            let hash = focused_tile_id.as_uuid().as_u128() as u64;
+            (current, resize_bounds, hash)
+        };
+
+        // Get or lazily create the per-portal resize state.
+        let resize_state = self
+            .state
+            .portal_resize_states
+            .entry(focused_tile_id)
+            .or_insert_with(|| PortalResizeState::new(portal_id_hash));
+
+        // Apply the hotkey resize (O(1), no allocation on hot path per §6b perf contract).
+        let outcome = apply_hotkey_resize(
+            true, // portal is focused (checked above)
+            dir,
+            current_rect,
+            &bounds,
+            resize_state,
+        );
+
+        let snapshot = match outcome {
+            tze_hud_input::HotkeyResizeOutcome::Applied { snapshot } => snapshot,
+            tze_hud_input::HotkeyResizeOutcome::NotFocused => return false,
+        };
+
+        // Local-first feedback: update tile bounds immediately in the scene
+        // (same frame, no adapter roundtrip) per §6b.2 / local-feedback-first.
+        {
+            let Ok(state) = self.state.shared_state.try_lock() else {
+                return true; // hotkey consumed even if local update fails
+            };
+            let Ok(mut scene) = state.scene.try_lock() else {
+                return true;
+            };
+            if let Some(tile) = scene.tiles.get_mut(&focused_tile_id) {
+                tile.bounds.x = snapshot.rect.x;
+                tile.bounds.y = snapshot.rect.y;
+                tile.bounds.width = snapshot.rect.width;
+                tile.bounds.height = snapshot.rect.height;
+            }
+        }
+
+        // Broadcast geometry snapshot to gRPC subscribers via ElementRepositionedEvent.
+        // Local-first: scene bounds were already updated above.  This notifies adapters
+        // that the portal geometry has changed (§6b.4: coalescible state-stream delivery).
+        dispatch_portal_geometry_event(
+            &self.state.element_repositioned_tx,
+            focused_tile_id,
+            &snapshot,
+            self.state.config.window.width as f32,
+            self.state.config.window.height as f32,
+        );
+
+        tracing::debug!(
+            tile_id = ?focused_tile_id,
+            new_width = snapshot.rect.width,
+            new_height = snapshot.rect.height,
+            sequence = snapshot.sequence,
+            "portal resize: hotkey applied — tile bounds updated locally"
+        );
+
+        true // hotkey consumed
     }
 
     /// Resolve the (namespace, node_id_bytes) pair for the currently focused
@@ -3485,6 +3660,7 @@ impl WindowedRuntime {
             element_repositioned_tx,
             input_event_tx,
             pending_blur_delivery_context: None,
+            portal_resize_states: std::collections::HashMap::new(),
         };
 
         let mut app = WinitApp { state: app_state };
@@ -4327,6 +4503,59 @@ fn dispatch_capture_released_event(
 
     // Broadcast to FOCUS_EVENTS subscribers.  Errors are silently ignored.
     let _ = tx.send((dispatch.namespace, batch));
+}
+
+/// Broadcast an `ElementRepositionedEvent` after a hotkey-driven portal resize.
+///
+/// The scene tile bounds have already been updated locally (local-first feedback).
+/// This function notifies gRPC subscribers subscribed to `SCENE_TOPOLOGY` that
+/// the portal geometry has changed, using the same `ElementRepositionedEvent`
+/// that drag-reposition uses (§6b.4).
+///
+/// Delivery is best-effort (fire-and-forget): errors (no receivers, channel
+/// lagged) are silently ignored.
+fn dispatch_portal_geometry_event(
+    tx: &Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
+    tile_id: tze_hud_scene::SceneId,
+    snapshot: &tze_hud_input::GeometrySnapshot,
+    display_w: f32,
+    display_h: f32,
+) {
+    let Some(tx) = tx else { return };
+
+    // Convert the absolute pixel rect to a relative (percentage) geometry policy
+    // so subscribers see the same wire format as drag-reposition events.
+    let (x_pct, y_pct, w_pct, h_pct) = if display_w > 0.0 && display_h > 0.0 {
+        (
+            snapshot.rect.x / display_w,
+            snapshot.rect.y / display_h,
+            snapshot.rect.width / display_w,
+            snapshot.rect.height / display_h,
+        )
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+
+    let new_geometry = tze_hud_protocol::proto::GeometryPolicyProto {
+        policy: Some(
+            tze_hud_protocol::proto::geometry_policy_proto::Policy::Relative(
+                tze_hud_protocol::proto::RelativeGeometryPolicy {
+                    x_pct,
+                    y_pct,
+                    width_pct: w_pct,
+                    height_pct: h_pct,
+                },
+            ),
+        ),
+    };
+
+    let event = tze_hud_protocol::proto::ElementRepositionedEvent {
+        element_id: tile_id.as_uuid().as_bytes().to_vec(),
+        new_geometry: Some(new_geometry),
+        previous_geometry: None,
+    };
+
+    let _ = tx.send(event);
 }
 
 /// Push an `InputEvent` into the ring buffer, dropping the oldest if full.
