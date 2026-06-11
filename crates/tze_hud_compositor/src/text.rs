@@ -2888,4 +2888,273 @@ mod tests {
             "short text must pass through unchanged"
         );
     }
+
+    // ── Mid-drag re-truncation tests (hud-ghhxa — spec §6b.3) ─────────────────
+    //
+    // These tests verify that when a portal tile's bounds change during a resize
+    // drag, the TruncationCache correctly re-resolves at each new intermediate
+    // geometry.  The key invariant from spec §6b.3: "pane re-layout under the
+    // overflow contract at every intermediate geometry."
+    //
+    // Because TruncationCache is keyed on bounds (bounds_width_bits /
+    // bounds_height_bits are part of TruncationKey), a bounds change produces a
+    // cache miss.  These tests confirm that:
+    //   a) priming at a new (narrower) geometry produces truncation at that
+    //      geometry, not at the old geometry.
+    //   b) an intermediate geometry is independently primed and its result
+    //      differs from the initial geometry.
+    //   c) the cache holds separate entries for each distinct geometry.
+
+    /// Priming at a narrower intermediate geometry produces a separate cache
+    /// entry with truncation that fits within the new (narrower) bounds.
+    ///
+    /// This is the core §6b.3 invariant: at each intermediate geometry during
+    /// a resize, the overflow contract is re-applied to the new bounds.
+    #[test]
+    fn intermediate_resize_geometry_re_resolves_truncation() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        // Long content that will overflow a narrow box but fits a wide one.
+        let content = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 39 'A's
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+        let font_size = 16.0_f32;
+        let height = 100.0_f32;
+
+        // ── Step 1: prime at initial (wide) geometry ──────────────────────────
+        let wide_w = 600.0_f32;
+        let key_wide = TruncationKey::new(
+            content,
+            wide_w,
+            height,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
+        let result_wide = cache
+            .prime(
+                key_wide,
+                content,
+                wide_w,
+                height,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+                &mut fs,
+            )
+            .clone();
+
+        // Wide box: long content likely fits without truncation.
+        // (We don't assert on was_truncated for the wide case as it depends on
+        // font metrics — just record the result for comparison.)
+
+        // ── Step 2: prime at an intermediate (narrow) geometry ───────────────
+        // This simulates a resize drag that has moved the pane to a narrower width.
+        let narrow_w = 60.0_f32; // narrow enough to force truncation
+        let key_narrow = TruncationKey::new(
+            content,
+            narrow_w,
+            height,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
+        let result_narrow = cache
+            .prime(
+                key_narrow,
+                content,
+                narrow_w,
+                height,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+                &mut fs,
+            )
+            .clone();
+
+        // The narrow-geometry result must be independently cached (separate key).
+        assert_eq!(
+            cache.len(),
+            2,
+            "wide and narrow geometries must produce separate cache entries \
+             (one for each distinct bounds_width); got {} entries",
+            cache.len(),
+        );
+
+        // The narrow result must be truncated (39 'A's will not fit in 60px).
+        assert!(
+            result_narrow.was_truncated,
+            "content must be truncated at the intermediate narrow geometry ({narrow_w}px); \
+             got: {:?}",
+            result_narrow.text,
+        );
+        assert!(
+            result_narrow.text.ends_with(crate::overflow::ELLIPSIS),
+            "truncated result at intermediate geometry must end with '…'; got: {:?}",
+            result_narrow.text,
+        );
+
+        // The narrow result must be strictly shorter than the wide result
+        // (or at least differ — the wide result may or may not truncate
+        // depending on font metrics, but the narrow one always will).
+        if !result_wide.was_truncated {
+            assert_ne!(
+                result_wide.text, result_narrow.text,
+                "wide (untruncated) and narrow (truncated) results must differ \
+                 — the narrow intermediate geometry must trigger independent re-resolution"
+            );
+        }
+    }
+
+    /// A sequence of three intermediate geometries each produces an independently
+    /// cached result.  The cache holds one entry per distinct bounds, and each
+    /// entry reflects the correct truncation for its bounds.
+    ///
+    /// This validates that the re-truncation is not just at drag-end (the widest
+    /// or narrowest bound) but at *every* distinct intermediate geometry the
+    /// cache is primed for.
+    #[test]
+    fn sequence_of_intermediate_geometries_all_independently_cached() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        // Content long enough to overflow at mid and narrow widths.
+        let content = "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW"; // 43 'W's
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+        let font_size = 16.0_f32;
+        let height = 100.0_f32;
+
+        let widths: [f32; 3] = [500.0, 200.0, 60.0];
+
+        // Prime at each intermediate geometry in order (simulating a resize drag
+        // from wide to mid to narrow).
+        let mut results = Vec::new();
+        for &w in &widths {
+            let key = TruncationKey::new(
+                content,
+                w,
+                height,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+            );
+            let result = cache
+                .prime(
+                    key,
+                    content,
+                    w,
+                    height,
+                    font_size,
+                    family,
+                    weight,
+                    TruncationViewport::HeadAnchored,
+                    &mut fs,
+                )
+                .clone();
+            results.push((w, result));
+        }
+
+        // Each geometry must have produced a separate cache entry.
+        assert_eq!(
+            cache.len(),
+            3,
+            "three distinct intermediate geometries must produce three cache entries; \
+             got {} entries",
+            cache.len(),
+        );
+
+        // The narrowest geometry must be truncated.
+        let (narrow_w, ref narrow_result) = results[2];
+        assert!(
+            narrow_result.was_truncated,
+            "content must be truncated at narrowest intermediate geometry ({narrow_w}px)"
+        );
+        assert!(
+            narrow_result.text.ends_with(crate::overflow::ELLIPSIS),
+            "narrowest intermediate result must end with '…'; got: {:?}",
+            narrow_result.text,
+        );
+
+        // The narrow result must be shorter than the widest result (which may
+        // not be truncated).  At minimum the texts must differ.
+        let (wide_w, ref wide_result) = results[0];
+        if !wide_result.was_truncated {
+            assert_ne!(
+                wide_result.text, narrow_result.text,
+                "intermediate geometry at {wide_w}px and {narrow_w}px must produce \
+                 different truncation results (widths differ significantly)"
+            );
+        }
+    }
+
+    /// Verify that TruncationKey encodes bounds in the key: the same content
+    /// at two different widths produces two different keys (so the cache miss
+    /// mechanism that drives intermediate-geometry re-resolution is sound).
+    ///
+    /// This is the structural guarantee underlying the entire §6b.3 re-truncation
+    /// design: the TruncationCache already invalidates naturally on bounds change
+    /// because bounds are part of the key.
+    #[test]
+    fn truncation_key_encodes_bounds_width_distinctly() {
+        let content = "any content string";
+        let key_a = TruncationKey::new(
+            content,
+            100.0,
+            50.0,
+            16.0,
+            FontFamily::SystemSansSerif,
+            400,
+            TruncationViewport::HeadAnchored,
+        );
+        let key_b = TruncationKey::new(
+            content,
+            200.0,
+            50.0,
+            16.0,
+            FontFamily::SystemSansSerif,
+            400,
+            TruncationViewport::HeadAnchored,
+        );
+        assert_ne!(
+            key_a, key_b,
+            "TruncationKey must differ when bounds_width differs \
+             (required for mid-drag cache-invalidation correctness)"
+        );
+    }
+
+    /// Verify that TruncationKey encodes bounds height in the key.
+    #[test]
+    fn truncation_key_encodes_bounds_height_distinctly() {
+        let content = "any content string";
+        let key_a = TruncationKey::new(
+            content,
+            200.0,
+            50.0,
+            16.0,
+            FontFamily::SystemSansSerif,
+            400,
+            TruncationViewport::HeadAnchored,
+        );
+        let key_b = TruncationKey::new(
+            content,
+            200.0,
+            80.0,
+            16.0,
+            FontFamily::SystemSansSerif,
+            400,
+            TruncationViewport::HeadAnchored,
+        );
+        assert_ne!(
+            key_a, key_b,
+            "TruncationKey must differ when bounds_height differs \
+             (required for mid-drag cache-invalidation correctness)"
+        );
+    }
 }

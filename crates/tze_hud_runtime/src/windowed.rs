@@ -2873,6 +2873,13 @@ impl WinitApp {
 
         // Local-first feedback: update tile bounds immediately in the scene
         // (same frame, no adapter roundtrip) per §6b.2 / local-feedback-first.
+        //
+        // scene.version is incremented so that `prime_truncation_cache` in the
+        // compositor detects the geometry change and re-resolves the tile's
+        // overflow contract at this intermediate geometry (hud-ghhxa — spec §6b.3).
+        // The cadence gate in `prime_truncation_cache` caps the re-prime rate
+        // so repeated hotkey presses during a fast resize do not blow the frame
+        // budget (re-prime at most once per RESIZE_REPRIME_INTERVAL_MS).
         {
             let Ok(state) = self.state.shared_state.try_lock() else {
                 return true; // hotkey consumed even if local update fails
@@ -2885,6 +2892,9 @@ impl WinitApp {
                 tile.bounds.y = snapshot.rect.y;
                 tile.bounds.width = snapshot.rect.width;
                 tile.bounds.height = snapshot.rect.height;
+                // Increment scene version so the truncation cache is invalidated
+                // and re-primed at the new (intermediate) geometry.
+                scene.version = scene.version.wrapping_add(1);
             }
         }
 
