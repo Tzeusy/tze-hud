@@ -3442,7 +3442,7 @@ impl Compositor {
                                     // Font weight: policy explicit > 400 default
                                     let font_weight = policy.font_weight.unwrap_or(400);
                                     items.push(TextItem {
-                                        text: payload.text.clone(),
+                                        text: std::sync::Arc::from(payload.text.as_str()),
                                         pixel_x: text_x,
                                         pixel_y: slot_y + inset_v,
                                         bounds_width: text_w,
@@ -3477,7 +3477,7 @@ impl Compositor {
 
                                     // Title line (bold)
                                     items.push(TextItem {
-                                        text: payload.title.clone(),
+                                        text: std::sync::Arc::from(payload.title.as_str()),
                                         pixel_x: text_x,
                                         pixel_y: content_top,
                                         bounds_width: text_w,
@@ -3506,7 +3506,7 @@ impl Compositor {
                                     let body_bounds_h =
                                         ((slot_y + effective_slot_h - inset_v) - body_top).max(1.0);
                                     items.push(TextItem {
-                                        text: payload.text.clone(),
+                                        text: std::sync::Arc::from(payload.text.as_str()),
                                         pixel_x: text_x,
                                         pixel_y: body_top,
                                         bounds_width: text_w,
@@ -3544,7 +3544,7 @@ impl Compositor {
                                         effective_opacity,
                                     );
                                     items.push(TextItem {
-                                        text: "X".to_string(),
+                                        text: std::sync::Arc::from("X"),
                                         pixel_x: dismiss_bounds.x,
                                         pixel_y: dismiss_bounds.y + 1.0,
                                         bounds_width: dismiss_bounds.width.max(1.0),
@@ -3692,7 +3692,7 @@ impl Compositor {
                                                 _ => (None, None),
                                             };
                                         items.push(TextItem {
-                                            text: payload.text.clone(),
+                                            text: std::sync::Arc::from(payload.text.as_str()),
                                             pixel_x: zx + margin_h + icon_width_reserved,
                                             pixel_y: zy + margin_v,
                                             bounds_width: (zw
@@ -3836,7 +3836,7 @@ impl Compositor {
                                             _ => (None, None),
                                         };
                                     items.push(TextItem {
-                                        text: payload.text.clone(),
+                                        text: std::sync::Arc::from(payload.text.as_str()),
                                         pixel_x: zx + margin_h + icon_width_reserved,
                                         pixel_y: zy + margin_v,
                                         bounds_width: (zw
@@ -8612,7 +8612,7 @@ mod tests {
         let item = &items[0];
         // Entries are sorted by key ("battery" < "time") and separated by newlines.
         assert_eq!(
-            item.text, "battery: 95%\ntime: 12:34",
+            &*item.text, "battery: 95%\ntime: 12:34",
             "Entries should be sorted by key and formatted correctly"
         );
         // The TextItem position should be within the zone geometry.
@@ -11873,11 +11873,11 @@ mod tests {
 
         let body_item = items
             .iter()
-            .find(|item| item.text == "Dismissible notification")
+            .find(|item| &*item.text == "Dismissible notification")
             .expect("body text item must exist");
         let dismiss_item = items
             .iter()
-            .find(|item| item.text == "X")
+            .find(|item| &*item.text == "X")
             .expect("dismiss text item must exist");
 
         assert_eq!(body_item.pixel_x, 9.0, "body text keeps left inset");
@@ -12102,7 +12102,7 @@ mod tests {
             "single-line notification (empty title) must produce exactly 1 TextItem"
         );
         assert_eq!(
-            items[0].text, "Body only notification",
+            &*items[0].text, "Body only notification",
             "single-line TextItem must contain body text"
         );
         assert_eq!(
@@ -12184,7 +12184,7 @@ mod tests {
 
         // Title item checks.
         assert_eq!(
-            title_item.text, "System Alert",
+            &*title_item.text, "System Alert",
             "first item must be the title text"
         );
         assert_eq!(
@@ -12200,7 +12200,7 @@ mod tests {
 
         // Body item checks.
         assert_eq!(
-            body_item.text, "Disk space low on /dev/sda1",
+            &*body_item.text, "Disk space low on /dev/sda1",
             "second item must be the body text"
         );
         assert_eq!(
@@ -12806,8 +12806,8 @@ mod tests {
         // Oldest remaining (Beta = agent-b) is at slot 1.
         // slot_h = line_height(16*1.4) + 2*margin_v(8) + SLOT_BASELINE_GAP(4) = 42.4px.
         // Slot 1 starts at y=42.4, text at y=42.4+9=51.4.
-        let gamma_item = items_after.iter().find(|i| i.text == "Gamma");
-        let beta_item = items_after.iter().find(|i| i.text == "Beta");
+        let gamma_item = items_after.iter().find(|i| &*i.text == "Gamma");
+        let beta_item = items_after.iter().find(|i| &*i.text == "Beta");
 
         assert!(gamma_item.is_some(), "Gamma must be in remaining TextItems");
         assert!(beta_item.is_some(), "Beta must be in remaining TextItems");
@@ -13953,7 +13953,7 @@ mod tests {
 
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
         assert!(!items.is_empty(), "must produce at least one TextItem");
-        let visible_text = &items[0].text;
+        let visible_text = &*items[0].text;
         assert_eq!(
             visible_text, "The",
             "initial reveal must show only text up to first breakpoint (\"The\")"
@@ -15037,7 +15037,7 @@ mod tests {
         );
         let scrolled_item = &items_scrolled[0];
         assert_eq!(
-            scrolled_item.text, "scroll test line",
+            &*scrolled_item.text, "scroll test line",
             "TextItem content must match the node"
         );
 

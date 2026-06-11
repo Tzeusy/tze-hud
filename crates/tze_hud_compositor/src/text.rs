@@ -33,6 +33,7 @@
 //!   glyph rows.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
@@ -710,7 +711,13 @@ impl TextRasterizer {
 #[derive(Debug, Clone)]
 pub struct TextItem {
     /// The text content to render (plain text for v1; Markdown stripped).
-    pub text: String,
+    ///
+    /// Stored as `Arc<str>` so the per-frame path in
+    /// [`TextItem::from_text_markdown_cached`] can clone it with a cheap
+    /// reference-count bump rather than a deep string copy.  Call sites that
+    /// need a `&str` can deref directly; those that need an owned `String` can
+    /// call `.to_string()`.
+    pub text: Arc<str>,
     /// Left edge in physical pixels (absolute, not tile-relative).
     pub pixel_x: f32,
     /// Top edge in physical pixels (absolute, not tile-relative).
@@ -834,10 +841,10 @@ impl TextItem {
         // Zero-length sentinel runs (start_byte == end_byte) carry metadata
         // only; they do not reference content offsets, so we can still strip.
         let has_pixel_runs = node.color_runs.iter().any(|r| r.start_byte < r.end_byte);
-        let text = if has_pixel_runs {
-            node.content.clone()
+        let text: Arc<str> = if has_pixel_runs {
+            Arc::from(node.content.as_str())
         } else {
-            strip_markdown_v1(&node.content)
+            Arc::from(strip_markdown_v1(&node.content).as_str())
         };
 
         // Convert linear f32 color [0..1] to sRGB u8 [0..255].
@@ -952,7 +959,10 @@ impl TextItem {
         );
         use crate::markdown::StyledSpan;
 
-        let text = parsed.plain_text.clone();
+        // PERF: Arc::clone is a refcount bump — no heap allocation or string copy.
+        // This is the hot per-frame path: `parsed` lives in the MarkdownCache and
+        // its `plain_text: Arc<str>` is shared across all frames for the same content.
+        let text: Arc<str> = Arc::clone(&parsed.plain_text);
 
         // Convert linear f32 color [0..1] to sRGB u8 [0..255].
         let r = linear_to_srgb_u8(node.color.r);
@@ -1076,7 +1086,7 @@ impl TextItem {
         };
 
         TextItem {
-            text: text.to_owned(),
+            text: Arc::from(text),
             pixel_x: x + margin_h,
             pixel_y: y + margin_v,
             bounds_width: (w - margin_h * 2.0).max(1.0),
@@ -1120,7 +1130,7 @@ impl TextItem {
     ) -> Self {
         let margin = 8.0_f32;
         TextItem {
-            text: text.to_owned(),
+            text: Arc::from(text),
             pixel_x: x + margin,
             pixel_y: y + margin,
             bounds_width: (w - margin * 2.0).max(1.0),
@@ -1163,7 +1173,7 @@ impl TextItem {
     ) -> Self {
         let margin = 8.0_f32;
         TextItem {
-            text: text.to_owned(),
+            text: Arc::from(text),
             pixel_x: x + margin,
             pixel_y: y + margin,
             bounds_width: (w - margin * 2.0).max(1.0),
@@ -1575,7 +1585,7 @@ mod tests {
         assert_eq!(item.pixel_y, 18.0);
         assert_eq!(item.bounds_width, 284.0);
         assert_eq!(item.bounds_height, 44.0);
-        assert_eq!(item.text, "Alert: ready");
+        assert_eq!(&*item.text, "Alert: ready");
         assert_eq!(item.font_size_px, 18.0);
         assert_eq!(item.color, [255, 255, 255, 220]);
     }
@@ -1598,7 +1608,7 @@ mod tests {
         // tile_x=50, tile_y=50, node.bounds.x=10, node.bounds.y=20, margin=6
         assert_eq!(item.pixel_x, 66.0);
         assert_eq!(item.pixel_y, 76.0);
-        assert_eq!(item.text, "Hello\nworld");
+        assert_eq!(&*item.text, "Hello\nworld");
         // New fields default correctly.
         assert!(item.outline_color.is_none());
         assert!(item.outline_width.is_none());
