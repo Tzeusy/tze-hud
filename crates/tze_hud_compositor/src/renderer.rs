@@ -3543,8 +3543,12 @@ impl Compositor {
                                         base_color,
                                         effective_opacity,
                                     );
+                                    static DISMISS_LABEL: std::sync::OnceLock<Arc<str>> =
+                                        std::sync::OnceLock::new();
                                     items.push(TextItem {
-                                        text: std::sync::Arc::from("X"),
+                                        text: Arc::clone(
+                                            DISMISS_LABEL.get_or_init(|| Arc::from("X")),
+                                        ),
                                         pixel_x: dismiss_bounds.x,
                                         pixel_y: dismiss_bounds.y + 1.0,
                                         bounds_width: dismiss_bounds.width.max(1.0),
