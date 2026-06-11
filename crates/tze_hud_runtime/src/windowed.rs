@@ -2496,8 +2496,10 @@ impl WinitApp {
         //
         // Shell-reserved shortcuts (Ctrl+Tab, Ctrl+1..9, Ctrl+Shift+M, etc.)
         // MUST win over portal resize hotkeys.  A reserved key is never
-        // consumed by a portal.  We return early here so that the portal
-        // resize intercept below never sees the key.
+        // consumed by a portal.  The portal-resize intercept is skipped so
+        // the reserved key is never consumed by a portal, but normal routing
+        // still runs so the key reaches the agent (e.g. chrome handles Ctrl+Tab
+        // at a higher layer, but the event is not suppressed here).
         //
         // Note: Ctrl+Shift+F8/F9 (monitor cycling) is handled even earlier —
         // in the OS event path (Stage 1, `WindowEvent::KeyboardInput`) — so it
@@ -2603,7 +2605,24 @@ impl WinitApp {
     /// and broadcast it over the `INPUT_EVENTS` gRPC channel.
     ///
     /// Events are dropped silently when `current_owner` is `FocusOwner::None`.
+    ///
+    /// Safe-mode capture applies here as well: when safe mode is active, key-up
+    /// events are dropped so agents never see a key-release for a key-down that
+    /// was already captured by the chrome layer.
     fn dispatch_key_up_event(&mut self, raw: &RawKeyUpEvent) {
+        // ── Safe-mode capture ──────────────────────────────────────────────
+        // Mirror the key-down safe-mode guard: if safe mode is active, chrome
+        // owns ALL input including key-release events.
+        if let Ok(st) = self.state.shared_state.try_lock() {
+            if st.safe_mode_active {
+                tracing::debug!(
+                    key = %raw.key,
+                    "safe-mode capture: KeyUp dropped (safe mode active — chrome layer owns input)"
+                );
+                return;
+            }
+        }
+
         let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
@@ -2631,9 +2650,15 @@ impl WinitApp {
     /// log it, and broadcast it over the `INPUT_EVENTS` gRPC channel.
     ///
     /// Called both from `WindowEvent::Ime(Ime::Commit)` (IME path) and from
-    /// `Key::Character` in `WindowEvent::KeyboardInput` (direct input path).
+    /// `Key::Character` in `WindowEvent::KeyboardInput` (direct input path), as
+    /// well as the paste-shortcut path (Ctrl+V clipboard text).
     ///
     /// Events are dropped silently when `current_owner` is `FocusOwner::None`.
+    ///
+    /// # Safe-mode capture
+    ///
+    /// When safe mode is active, character events (including paste and IME commits)
+    /// are dropped so agents never receive character input while chrome owns input.
     ///
     /// # Composer interception (§4.1)
     ///
@@ -2642,6 +2667,18 @@ impl WinitApp {
     /// agent as a raw `CharacterEvent`.  Only `EditOutcome::Unchanged` (no
     /// active composer) allows the normal dispatch path.
     fn dispatch_character_event(&mut self, raw: &RawCharacterEvent) {
+        // ── Safe-mode capture ──────────────────────────────────────────────
+        // All character input (Key::Character, paste shortcut, IME commits) is
+        // captured by the chrome layer when safe mode is active.
+        if let Ok(st) = self.state.shared_state.try_lock() {
+            if st.safe_mode_active {
+                tracing::debug!(
+                    "safe-mode capture: CharacterEvent dropped (safe mode active — chrome layer owns input)"
+                );
+                return;
+            }
+        }
+
         let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
 

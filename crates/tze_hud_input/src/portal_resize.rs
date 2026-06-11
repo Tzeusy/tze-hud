@@ -46,8 +46,8 @@
 //!    [`ShellReservedShortcut::is_reserved`] win over portal resize hotkeys.
 //!    A reserved key is never consumed by a portal.
 //! 3. **Composer** — if an active composer region holds focus,
-//!    `Ctrl+`+`/`=`/`-`` are composer shortcuts and MUST NOT be stolen.
-//! 4. **Portal resize hotkey** — `Ctrl+`+`/`=`` (grow) and `Ctrl+`-`` (shrink)
+//!    `Ctrl++`/`Ctrl+=`/`Ctrl+-` are composer shortcuts and MUST NOT be stolen.
+//! 4. **Portal resize hotkey** — `Ctrl++`/`Ctrl+=` (grow) and `Ctrl+-` (shrink)
 //!    on the focused portal tile.
 //! 5. **Normal routing** — key forwarded to the owning agent.
 //!
@@ -579,9 +579,11 @@ impl PortalResizeState {
     ///
     /// Returns `ResizeOutcome::GestureStarted` with the clamped initial rect.
     ///
-    /// Increments the gesture epoch (odd value → gesture active) so that any
-    /// in-flight adapter publish sampled before this call is rejected by
-    /// [`accept_adapter_publish`].
+    /// On idle→active transition (first pointer down on this portal), increments
+    /// the gesture epoch to an odd value (odd → active) so that any in-flight
+    /// adapter publish sampled before this call is rejected by
+    /// [`accept_adapter_publish`].  Subsequent pointer-downs while already active
+    /// (multi-device) do not change the epoch so the even/odd invariant holds.
     pub fn on_pointer_down(
         &mut self,
         device_id: u32,
@@ -591,13 +593,21 @@ impl PortalResizeState {
         current_rect: PortalRect,
         bounds: &ResizeBounds,
     ) -> ResizeOutcome {
-        // Advance epoch: gesture is now active (odd epoch → adapter publishes rejected).
-        self.gesture_epoch = self.gesture_epoch.wrapping_add(1);
+        // Advance epoch only on idle→active transition (no prior active gesture).
+        // This preserves the even/odd invariant: even = idle, odd = active.
+        // With multiple devices, only the first pointer-down advances the epoch
+        // (idle → active); subsequent pointer-downs while already active do not
+        // change parity.
+        let was_idle = !self.gesture_active();
         let initial = current_rect.clamped(bounds);
         self.device_states.insert(
             device_id,
             DeviceResizeState::new(edge, press_x, press_y, initial),
         );
+        if was_idle {
+            // Epoch was even (idle); advance to odd (active).
+            self.gesture_epoch = self.gesture_epoch.wrapping_add(1);
+        }
         let snap = self.snapshot(initial, true);
         ResizeOutcome::GestureStarted { snapshot: snap }
     }
@@ -629,11 +639,14 @@ impl PortalResizeState {
     /// Returns `ResizeOutcome::GestureEnded` with the final clamped rect, or
     /// `ResizeOutcome::Idle` if no gesture was active.
     ///
-    /// When the last device gesture ends, increments the gesture epoch (even
-    /// value → no gesture active) so that adapter publishes sampled before this
-    /// call continue to be rejected until the adapter re-samples the new epoch.
-    /// This prevents a stale publish that was in-flight during the gesture from
-    /// slipping through immediately after gesture end.
+    /// On active→idle transition (last device gesture ends), increments the
+    /// gesture epoch to an even value (even → idle) so that adapter publishes
+    /// sampled before this call continue to be rejected until the adapter
+    /// re-samples the new epoch.  This prevents a stale publish that was
+    /// in-flight during the gesture from slipping through immediately after
+    /// gesture end.  Intermediate pointer-ups while other devices are still
+    /// active (multi-device) do not change the epoch so the even/odd invariant
+    /// holds.
     pub fn on_pointer_up(
         &mut self,
         device_id: u32,
@@ -647,10 +660,15 @@ impl PortalResizeState {
         let rect = state.compute_rect(pointer_x, pointer_y, bounds);
         // gesture_active reflects remaining devices after removal.
         let still_active = self.gesture_active();
-        // Advance epoch on gesture end (no remaining gesture → even epoch).
-        // Even if more devices are still active, advance so in-flight publishes
-        // from before this pointer-up are rejected.
-        self.gesture_epoch = self.gesture_epoch.wrapping_add(1);
+        // Advance epoch only on active→idle transition (last active device ended).
+        // This preserves the even/odd invariant: odd = active, even = idle.
+        // With multiple devices, only the final pointer-up advances the epoch
+        // (active → idle); intermediate pointer-ups while other devices are still
+        // active do not change parity.
+        if !still_active {
+            // Epoch was odd (active); advance to even (idle).
+            self.gesture_epoch = self.gesture_epoch.wrapping_add(1);
+        }
         let snap = self.snapshot(rect, still_active);
         ResizeOutcome::GestureEnded { snapshot: snap }
     }
