@@ -423,6 +423,34 @@ impl ResidentGrpcPortalAdapter {
         &self.config.lease_id
     }
 
+    /// Returns the configured expanded-presentation viewport height in pixels.
+    ///
+    /// Equals `ResidentGrpcPortalConfig::expanded_bounds.height` as set at
+    /// adapter construction time (default: `DEFAULT_EXPANDED_H`).
+    pub fn config_expanded_height(&self) -> f32 {
+        self.config.expanded_bounds.height
+    }
+
+    /// Returns the configured compact-presentation viewport height in pixels.
+    ///
+    /// Equals `ResidentGrpcPortalConfig::compact_bounds.height` as set at
+    /// adapter construction time (default: `DEFAULT_COMPACT_H`).
+    pub fn config_compact_height(&self) -> f32 {
+        self.config.compact_bounds.height
+    }
+
+    /// Returns the configured viewport height for the given presentation mode.
+    ///
+    /// Used by the drain loop to populate `PortalAppendGeometry::viewport_height_px`
+    /// as a fallback when no live geometry snapshot is available (hud-0528i).
+    /// Expanded → `expanded_bounds.height`; Collapsed → `compact_bounds.height`.
+    pub fn config_viewport_height(&self, presentation: crate::ProjectedPortalPresentation) -> f32 {
+        match presentation {
+            crate::ProjectedPortalPresentation::Expanded => self.config.expanded_bounds.height,
+            crate::ProjectedPortalPresentation::Collapsed => self.config.compact_bounds.height,
+        }
+    }
+
     /// Record the tile ID returned by the resident `CreateTile` mutation.
     pub fn record_created_tile(&mut self, tile_id: Vec<u8>) {
         self.tile_id = Some(tile_id);
