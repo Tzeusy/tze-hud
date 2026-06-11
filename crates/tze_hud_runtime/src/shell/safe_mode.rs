@@ -245,8 +245,9 @@ impl SafeModeController {
     /// This is the canonical wiring point for
     /// `InputProcessor::set_composer_suspended` (§4.5).
     ///
-    /// Calling this a second time replaces the previous hook.  Pass `None` to
-    /// remove an existing hook (e.g., when the `InputProcessor` is torn down).
+    /// Calling this a second time replaces the previous hook.  Use
+    /// [`Self::clear_composer_suspension_hook`] to remove an existing hook
+    /// (e.g., when the `InputProcessor` is torn down).
     ///
     /// # Example
     ///
