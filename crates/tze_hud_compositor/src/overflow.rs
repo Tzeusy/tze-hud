@@ -158,8 +158,17 @@ pub fn truncate_for_ellipsis<'a>(
     line_height: f32,
     font_system: &mut FontSystem,
 ) -> TruncationResult {
-    // Guard: degenerate geometry produces an empty result.
-    if bounds_width <= 0.0 || bounds_height <= 0.0 || font_size_px <= 0.0 {
+    // Guard: degenerate or non-finite geometry produces an empty result.
+    // NaN comparisons always return false, so we must check is_finite() before
+    // arithmetic that feeds into floor() / usize casts.
+    if !bounds_width.is_finite()
+        || !bounds_height.is_finite()
+        || !font_size_px.is_finite()
+        || !line_height.is_finite()
+        || bounds_width <= 0.0
+        || bounds_height <= 0.0
+        || font_size_px <= 0.0
+    {
         return TruncationResult {
             text: String::new(),
             was_truncated: !text.is_empty(),
@@ -943,6 +952,54 @@ mod tests {
             result.was_truncated,
             "was_truncated must be true for non-empty input"
         );
+    }
+
+    /// NaN and infinite geometry inputs are guarded: no panic, empty result with
+    /// was_truncated=true for non-empty input.
+    ///
+    /// Mirrors the is_finite() guard added to `truncate_tail_anchored` in
+    /// PR #678/#684.  NaN bypasses `<= 0.0` comparisons and flows into
+    /// floor()/usize casts, panicking in debug mode.
+    #[test]
+    fn non_finite_geometry_produces_empty_no_panic() {
+        let inputs: &[(&str, f32, f32, f32, f32)] = &[
+            // (label omitted — indexed below)
+            ("hello", f32::NAN, 100.0, 16.0, 22.4),
+            ("hello", 200.0, f32::NAN, 16.0, 22.4),
+            ("hello", 200.0, 100.0, f32::NAN, 22.4),
+            ("hello", 200.0, 100.0, 16.0, f32::NAN),
+            ("hello", f32::INFINITY, 100.0, 16.0, 22.4),
+            ("hello", 200.0, f32::INFINITY, 16.0, 22.4),
+            ("hello", 200.0, 100.0, f32::INFINITY, 22.4),
+            ("hello", 200.0, 100.0, 16.0, f32::INFINITY),
+            ("hello", f32::NEG_INFINITY, 100.0, 16.0, 22.4),
+            ("hello", 200.0, f32::NEG_INFINITY, 16.0, 22.4),
+            // Empty text must still return empty with was_truncated=false.
+            ("", f32::NAN, 100.0, 16.0, 22.4),
+        ];
+        for (i, &(text, bw, bh, fs_px, lh)) in inputs.iter().enumerate() {
+            let mut font_system = make_font_system();
+            let result =
+                truncate_for_ellipsis(text, base_attrs(), bw, bh, fs_px, lh, &mut font_system);
+            assert_eq!(
+                result.text, "",
+                "input #{i}: non-finite geometry must produce empty text; \
+                 bounds_width={bw} bounds_height={bh} font_size={fs_px} line_height={lh}"
+            );
+            let expected_truncated = !text.is_empty();
+            assert_eq!(
+                result.was_truncated,
+                expected_truncated,
+                "input #{i}: was_truncated must be {} for {:?} input; \
+                 bounds_width={bw} bounds_height={bh} font_size={fs_px} line_height={lh}",
+                expected_truncated,
+                if text.is_empty() {
+                    "empty"
+                } else {
+                    "non-empty"
+                },
+            );
+        }
     }
 
     /// When text is truncated, the result ends with the ellipsis character.
