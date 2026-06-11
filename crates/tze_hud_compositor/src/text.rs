@@ -834,6 +834,24 @@ impl TextItem {
     /// Zero-length runs (`start_byte == end_byte`) are treated as pure
     /// sentinels (no pixel coverage); their presence does **not** suppress
     /// Markdown stripping.
+    ///
+    /// # Deprecation notice — empty `color_runs` path
+    ///
+    /// When `color_runs` is entirely empty (no pixel runs), this constructor
+    /// calls `strip_markdown_v1` which is **lossy** — it strips markdown syntax
+    /// characters but does not produce [`StyledRunItem`]s, so all markdown
+    /// structure and styling is discarded.
+    ///
+    /// In the Phase-1 render path the compositor now always goes through
+    /// [`TextItem::from_text_markdown_cached`] (primed at commit-time by
+    /// `Compositor::prime_markdown_cache`).  The renderer's cache-miss
+    /// fallback (hud-xcp9b) parses inline via `parse_markdown_subset` rather
+    /// than falling through to this constructor, so the lossy strip path is no
+    /// longer reachable from the render pipeline.
+    ///
+    /// **Do not call this constructor with an empty `color_runs` slice from any
+    /// new production code.**  Use `from_text_markdown_cached` +
+    /// `MarkdownCache::prime` instead for markdown-fidelity rendering.
     pub fn from_text_markdown_node(node: &TextMarkdownNode, tile_x: f32, tile_y: f32) -> Self {
         // Skip Markdown stripping only when at least one run has a non-empty
         // byte range — those runs reference offsets into the raw (un-stripped)

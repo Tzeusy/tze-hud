@@ -2055,6 +2055,7 @@ impl Compositor {
                     at_tail,
                     &self.markdown_cache,
                     &self.node_key_cache,
+                    &self.markdown_tokens,
                     &mut live_items,
                 );
             }
@@ -4305,9 +4306,7 @@ impl Compositor {
             // Phase-1 (hud-5jbra.2): try the markdown cache first.  Use
             // `get_by_key` with a precomputed key (O(1) — no re-hash on the
             // frame path).  The cache is primed by `prime_markdown_cache` on
-            // every scene-version change; a miss (e.g. very first frame before
-            // any commit) falls back to the legacy `strip_markdown_v1` path so
-            // rendering is never blocked.
+            // every scene-version change (commit-time prime, hud-380dl).
             //
             // color_runs bypass: `from_text_markdown_cached` uses markdown
             // plain_text as the text base and discards `node.color_runs`.
@@ -4323,6 +4322,16 @@ impl Compositor {
             // If the key is absent (first frame before any prime, or a node
             // added mid-frame) the fallback re-computes the key once and
             // consults the markdown_cache directly.  (hud-gpqde)
+            //
+            // Cache-miss fallback (hud-xcp9b): if the markdown cache is cold
+            // (first frame before any commit-time prime, or a node added
+            // mid-frame after prime_markdown_cache ran), we parse the content
+            // inline on the spot and use from_text_markdown_cached so markdown
+            // structure and styling are preserved.  This honors the 'never
+            // dropped' contract (spec task 2.2).  A tracing::warn! fires so the
+            // miss is observable in production logs.  No debug_assert: the
+            // first-frame miss is normal operation, not a bug. [hud-rbf91]
+            // In steady-state (commit-time-primed) frames this branch is never taken.
             let mut item = if tm.color_runs.is_empty() {
                 let content_key = self
                     .node_key_cache
@@ -4337,10 +4346,26 @@ impl Compositor {
                         parsed,
                     )
                 } else {
-                    TextItem::from_text_markdown_node(
+                    // Cache miss: parse inline (non-lossy) so styling is
+                    // preserved.  This is the expected path on the first frame
+                    // before any commit-time prime and for nodes added mid-frame
+                    // after prime_markdown_cache ran — both are normal operation.
+                    // In steady-state (commit-time-primed) frames this branch is
+                    // never taken.  The warn! makes the miss observable in
+                    // production logs without panicking. [hud-rbf91]
+                    tracing::warn!(
+                        node_id = ?node_id,
+                        content_len = tm.content.len(),
+                        "markdown cache miss on render path — expected commit-time prime \
+                         (hud-xcp9b); parsing inline to preserve styling [hud-380dl]"
+                    );
+                    let parsed =
+                        crate::markdown::parse_markdown_subset(&tm.content, &self.markdown_tokens);
+                    TextItem::from_text_markdown_cached(
                         tm,
                         tile.bounds.x - scroll_x,
                         tile.bounds.y - scroll_y,
+                        &parsed,
                     )
                 }
             } else {
@@ -7572,6 +7597,8 @@ pub(crate) fn should_defer_reprime(last_at: Option<std::time::Instant>, interval
 /// `at_tail`: whether the tile owning these nodes is currently in follow-tail/at-tail
 /// mode.  `true` → `TailAnchored` truncation (spec §3.2 — newest lines visible);
 /// `false` → `HeadAnchored` (spec §3.3 — viewport stability after user scroll-back).
+/// `markdown_tokens`: used for the cache-miss non-lossy inline parse fallback
+/// (hud-xcp9b); in steady-state this argument is never consumed.
 #[allow(clippy::too_many_arguments)]
 fn collect_ellipsis_text_items_from_node(
     node_id: SceneId,
@@ -7581,6 +7608,7 @@ fn collect_ellipsis_text_items_from_node(
     at_tail: bool,
     markdown_cache: &crate::markdown::MarkdownCache,
     node_key_cache: &HashMap<SceneId, [u8; 32]>,
+    markdown_tokens: &crate::markdown::MarkdownTokens,
     items: &mut Vec<TextItem>,
 ) {
     let node = match scene.nodes.get(&node_id) {
@@ -7598,6 +7626,11 @@ fn collect_ellipsis_text_items_from_node(
             // to avoid re-hashing content on the frame path.  Falls back to
             // compute_key only if the entry is absent (pre-prime first frame).
             // (hud-gpqde)
+            //
+            // Cache-miss fallback (hud-xcp9b): same non-lossy inline-parse
+            // strategy as collect_text_items_from_node.  See that site for the
+            // full rationale.  In steady-state (commit-time-primed) frames this
+            // branch is never taken.
             let mut item = if tm.color_runs.is_empty() {
                 let content_key = node_key_cache
                     .get(&node_id)
@@ -7606,7 +7639,18 @@ fn collect_ellipsis_text_items_from_node(
                 if let Some(parsed) = markdown_cache.get_by_key(&content_key) {
                     TextItem::from_text_markdown_cached(tm, tile_x, tile_y, parsed)
                 } else {
-                    TextItem::from_text_markdown_node(tm, tile_x, tile_y)
+                    // Cache miss: same non-lossy inline-parse strategy as
+                    // collect_text_items_from_node — normal on first frame /
+                    // mid-frame node add.  warn! provides observability. [hud-rbf91]
+                    tracing::warn!(
+                        node_id = ?node_id,
+                        content_len = tm.content.len(),
+                        "markdown cache miss on ellipsis render path — expected commit-time prime \
+                         (hud-xcp9b); parsing inline to preserve styling [hud-380dl]"
+                    );
+                    let parsed =
+                        crate::markdown::parse_markdown_subset(&tm.content, markdown_tokens);
+                    TextItem::from_text_markdown_cached(tm, tile_x, tile_y, &parsed)
                 }
             } else {
                 TextItem::from_text_markdown_node(tm, tile_x, tile_y)
@@ -7628,6 +7672,7 @@ fn collect_ellipsis_text_items_from_node(
             at_tail,
             markdown_cache,
             node_key_cache,
+            markdown_tokens,
             items,
         );
     }
@@ -15792,8 +15837,9 @@ mod tests {
     ///
     /// This exercises the full token-map invalidation path.  Without the clear,
     /// node_key_cache would map node IDs to stale keys referencing evicted
-    /// markdown_cache entries, causing silent cache misses and falling through
-    /// to the slower strip_markdown_v1 fallback.
+    /// markdown_cache entries, causing cache misses on the render path.  After
+    /// hud-xcp9b those misses trigger an inline non-lossy parse + tracing::warn!
+    /// rather than the old silent lossy strip_markdown_v1 fallback.
     #[tokio::test]
     async fn set_token_map_clears_node_key_cache() {
         let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
@@ -15889,7 +15935,7 @@ mod tests {
     ///
     /// Specifically, `render_frame_headless` MUST NOT increment
     /// `markdown_cache_scene_version` relative to the version set by the
-    /// commit-time prime — meaning the debug_assert fallback in render_frame_headless
+    /// commit-time prime — meaning the cache-miss fallback in render_frame_headless
     /// must not fire, and the scene version sentinel must remain equal to
     /// `scene.version` after the prime.
     ///
@@ -15943,7 +15989,7 @@ mod tests {
 
         // ── Render frame — must be parse-free ────────────────────────────────
         // render_frame_headless checks `scene.version != markdown_cache_scene_version`
-        // and finds them equal → no parse occurs → the debug_assert fallback is NOT
+        // and finds them equal → no parse occurs → the cache-miss fallback is NOT
         // triggered.  The scene version sentinel is not modified by render_frame_headless.
         let _telemetry = compositor.render_frame_headless(&mut scene, &surface);
 
@@ -16094,6 +16140,90 @@ mod tests {
             !should_defer_reprime(Some(past), interval_ms),
             "should_defer_reprime must return false once the interval has elapsed \
              (final/settled geometry must be primed)"
+        );
+    }
+
+    /// Cache-miss fallback produces non-lossy styled output (hud-xcp9b, spec task 2.2).
+    ///
+    /// When the markdown cache is cold (no prior prime) and a node with
+    /// `color_runs.is_empty()` is rendered, the renderer's fallback path must
+    /// NOT use the lossy `strip_markdown_v1` path.  Instead it must call
+    /// `parse_markdown_subset` inline and produce `styled_runs` that encode
+    /// the markdown structure.
+    ///
+    /// Invariants verified (CPU-only, no GPU):
+    ///  - `TextItem::text` equals the non-lossy plain text from `parse_markdown_subset`
+    ///    for the same content (not the output of `strip_markdown_v1`).
+    ///  - `TextItem::styled_runs` is non-empty for content that contains
+    ///    markdown constructs (e.g. `**bold**` → at least one bold run).
+    ///
+    /// This is a Layer 0 invariant test for the 'never dropped' contract.
+    #[test]
+    fn markdown_cache_miss_fallback_is_non_lossy() {
+        use tze_hud_scene::types::{
+            FontFamily, Rect, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
+        };
+
+        // Content with markdown constructs that distinguish the lossy path from
+        // the non-lossy path:
+        //  - `strip_markdown_v1` would produce "Hello bold world" (strips ** and #)
+        //  - `parse_markdown_subset` would produce "Hello bold world" in `plain_text`
+        //    AND a bold StyledSpan covering "bold".
+        let content = "Hello **bold** world";
+
+        let node = TextMarkdownNode {
+            content: content.to_owned(),
+            bounds: Rect::new(0.0, 0.0, 200.0, 50.0),
+            font_size_px: 12.0,
+            font_family: FontFamily::SystemSansSerif,
+            color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            color_runs: Box::default(), // empty: this is the cache-miss path
+        };
+
+        // Construct a cold (empty) markdown cache and token set — simulates the
+        // first-frame-before-any-prime scenario.
+        let cold_cache = crate::markdown::MarkdownCache::new();
+        let tokens = crate::markdown::MarkdownTokens::default();
+
+        // Verify the cache is cold (no entry for this content).
+        let content_key = crate::markdown::MarkdownCache::compute_key(content);
+        assert!(
+            cold_cache.get_by_key(&content_key).is_none(),
+            "cache must be cold before the test"
+        );
+
+        // Invoke the non-lossy inline-parse path directly (mirrors what the
+        // renderer does on a cache miss after hud-xcp9b).
+        let parsed = crate::markdown::parse_markdown_subset(content, &tokens);
+        let item = crate::text::TextItem::from_text_markdown_cached(&node, 0.0, 0.0, &parsed);
+
+        // The plain text must be the non-lossy form — same for both paths in
+        // this example, but `styled_runs` must be non-empty to distinguish
+        // from the lossy strip path.
+        assert_eq!(
+            &*item.text, "Hello bold world",
+            "non-lossy fallback must produce plain text without markdown syntax"
+        );
+
+        // The non-lossy path must produce styled runs encoding markdown structure.
+        // The lossy strip_markdown_v1 path produces no styled_runs at all.
+        assert!(
+            !item.styled_runs.is_empty(),
+            "non-lossy cache-miss fallback must produce styled_runs for markdown content \
+             (lossy strip_markdown_v1 would leave styled_runs empty)"
+        );
+
+        // At least one run must be bold (weight >= 700) covering "bold".
+        let has_bold_run = item
+            .styled_runs
+            .iter()
+            .any(|r| r.weight.map(|w| w >= 700).unwrap_or(false));
+        assert!(
+            has_bold_run,
+            "non-lossy fallback must produce a bold styled run for **bold** markdown syntax"
         );
     }
 }
