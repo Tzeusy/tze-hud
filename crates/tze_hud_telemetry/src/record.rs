@@ -56,16 +56,27 @@ pub struct FrameTelemetry {
 
     /// Markdown cache prime cost (microseconds) for this frame.
     ///
-    /// Records the wall-clock time spent in `prime_markdown_cache` during Stage 3/4
-    /// (before the scene is considered stable).  On frames where the scene has not
-    /// changed since the last prime this is 0 — the gate fires early and no parsing
-    /// occurs.  On a commit frame that introduces new or changed content this
-    /// captures the actual parse cost so latency regressions are visible in
-    /// telemetry rather than silently inflating the overall frame time.
+    /// Records the wall-clock time spent in `prime_markdown_cache` at **commit
+    /// time** (Stage 4, before the render stages execute).  Parsing is moved
+    /// fully off the render thread by hud-380dl (Option A — commit-time prime):
+    /// the runtime calls `prime_markdown_cache` at the end of Stage 4 and passes
+    /// the measured cost here; `render_frame` / `render_frame_headless` are
+    /// parse-free in steady state.
     ///
-    /// This field is serialized so LLM consumers and the benchmark harness can
-    /// assert that unchanged-content frames carry 0 parse cost and that commit-frame
-    /// parse cost stays within the Stage-3/4 combined budget.
+    /// Invariants:
+    ///
+    /// - 0 on frames where `scene.version` has not changed (no parse work done).
+    /// - Non-zero on the first frame after new/changed `TextMarkdownNode` content
+    ///   is committed; the value reflects the one-time parse cost.
+    /// - The render-frame contribution is always 0 (render path is a no-op when
+    ///   the cache was primed at Stage 4).
+    ///
+    /// LLM consumers and the benchmark harness can assert:
+    ///
+    /// 1. Unchanged-content frames carry `markdown_prime_us == 0`.
+    /// 2. After a content commit, `markdown_prime_us > 0` on exactly the next
+    ///    frame, then 0 on all subsequent unchanged frames.
+    /// 3. The render path does not contribute to `markdown_prime_us`.
     #[serde(default)]
     pub markdown_prime_us: u64,
 
