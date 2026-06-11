@@ -193,6 +193,9 @@ impl TruncationCache {
             };
             let weight = Weight(font_weight.clamp(100, 900));
             let base_attrs = Attrs::new().family(family).weight(weight);
+            // Cross-ref: PORTAL_LINE_HEIGHT_MULTIPLIER in
+            // crates/tze_hud_projection/src/bin/projection_authority.rs mirrors this
+            // value. If you change 1.4 here, update that constant in the same PR.
             let line_height = font_size_px * 1.4;
             // Dispatch to the correct truncation algorithm via TruncationViewport.
             // TailAnchored shows the LAST max_lines runs (newest content visible).

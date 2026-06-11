@@ -229,7 +229,11 @@ const PORTAL_LINE_HEIGHT_MULTIPLIER: f32 = 1.4;
 struct PortalAppendGeometry {
     /// Estimated total content height (physical pixels) of the visible
     /// transcript after this append, computed as:
-    ///   `visible_transcript_units * line_height_px`
+    ///   `total_lines * line_height_px`
+    ///
+    /// `total_lines` counts actual rendered lines across all visible transcript
+    /// units (using `.lines().count().max(1)` per unit) so that multiline
+    /// `TranscriptUnit.output_text` values are counted correctly.
     ///
     /// This is a whole-line estimate consistent with the text shaper's
     /// `content_height = lines * line_height` contract. It is suitable for
@@ -239,7 +243,8 @@ struct PortalAppendGeometry {
     ///
     /// Taken from `state.geometry_batch.latest.rect.height_px` when a geometry
     /// snapshot is present; otherwise falls back to the adapter's configured
-    /// `expanded_bounds.height` (the bounds the adapter was created with).
+    /// bounds for the current presentation mode — `expanded_bounds.height` when
+    /// Expanded, `compact_bounds.height` when Collapsed.
     ///
     /// The caller passes this as `viewport_height_px` to
     /// `notify_tile_content_appended`.
@@ -1317,25 +1322,37 @@ fn drain_and_emit_portal_updates(
         // The geometry values are derived from:
         //   - line_height_px     = transcript_font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER
         //                         (matches tze_hud_compositor::text — same multiplier)
-        //   - new_content_height = visible_transcript_units * line_height_px
-        //                         (whole-line estimate, consistent with the shaper contract)
+        //   - new_content_height = total_lines * line_height_px, where total_lines
+        //                         counts actual text lines across all visible units
+        //                         (a TranscriptUnit may contain embedded newlines)
         //   - viewport_height    = geometry_batch.latest.rect.height_px when a live
         //                         geometry snapshot is present; else the adapter's
-        //                         configured expanded_bounds.height
+        //                         configured bounds for the current presentation mode
+        //                         (Expanded → expanded_bounds.height, Collapsed →
+        //                         compact_bounds.height)
         let append_geometry = if matches!(command_kind, ResidentGrpcPortalCommandKind::RenderPortal)
         {
             let line_height_px =
                 adapter.visual_tokens().transcript_font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
-            let visible_units = update.visible_transcript.len();
-            let new_content_height_px = visible_units as f32 * line_height_px;
+            // Count actual rendered lines: a TranscriptUnit's output_text can contain
+            // embedded newlines (e.g. multiline assistant outputs, coalesced updates).
+            // Using `.lines().count().max(1)` per unit avoids underestimating
+            // new_content_height_px when units span multiple lines.
+            let total_lines: usize = update
+                .visible_transcript
+                .iter()
+                .map(|unit| unit.output_text.lines().count().max(1))
+                .sum();
+            let new_content_height_px = total_lines as f32 * line_height_px;
             // Viewport height: prefer the live geometry snapshot (most accurate after
-            // a resize), fall back to the adapter's configured expanded bounds.
+            // a resize), fall back to the adapter's configured bounds for the current
+            // presentation mode (Collapsed uses compact bounds, Expanded uses expanded).
             let viewport_height_px = state
                 .geometry_batch
                 .as_ref()
                 .and_then(|gb| gb.latest)
                 .map(|snap| snap.rect.height_px as f32)
-                .unwrap_or_else(|| adapter.config_expanded_height());
+                .unwrap_or_else(|| adapter.config_viewport_height(state.presentation));
             Some(PortalAppendGeometry {
                 new_content_height_px,
                 viewport_height_px,
@@ -1932,13 +1949,18 @@ mod tests {
             "line_height_px must be positive finite; got {}",
             g.line_height_px
         );
-        // line_height_px = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER (1.4)
-        // Default transcript_font_size_px = 13.0 → line_height_px ≈ 18.2
-        let expected_line_h = 13.0_f32 * PORTAL_LINE_HEIGHT_MULTIPLIER;
+        // Derive expected line height from the adapter's actual font-size token so
+        // the test remains valid if the default PortalVisualTokens change.
+        let font_size_px = drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .visual_tokens()
+            .transcript_font_size_px;
+        let expected_line_h = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
         assert!(
             (g.line_height_px - expected_line_h).abs() < 0.1,
             "line_height_px must be font_size({}) * {} = {}; got {}",
-            13.0_f32,
+            font_size_px,
             PORTAL_LINE_HEIGHT_MULTIPLIER,
             expected_line_h,
             g.line_height_px
@@ -1979,8 +2001,8 @@ mod tests {
     ///
     /// The drain loop derives `viewport_height_px` from `state.geometry_batch` when
     /// a geometry snapshot is present (preferred), or falls back to the adapter's
-    /// configured `expanded_bounds.height`. To make the content overflow and trigger
-    /// follow-tail advancement, we:
+    /// configured bounds for the current presentation mode. To make the content
+    /// overflow and trigger follow-tail advancement, we:
     ///   1. Push a geometry snapshot with a small viewport (1 line height) so the
     ///      drain geometry reflects a 1-line tall tile.
     ///   2. Create the scene tile with the same 1-line viewport so the scroll
@@ -2003,8 +2025,14 @@ mod tests {
         let token_a = attach_projection(&mut authority, "proj-a");
         drive.attach_adapter("proj-a", Vec::new());
 
-        // Compute line height from default token font size.
-        let line_height_px = 13.0_f32 * PORTAL_LINE_HEIGHT_MULTIPLIER;
+        // Derive line height from the adapter's actual font-size token so the test
+        // remains valid if the default PortalVisualTokens font size changes.
+        let font_size_px = drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .visual_tokens()
+            .transcript_font_size_px;
+        let line_height_px = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
 
         // Push a geometry snapshot with a 1-line viewport so the drain geometry
         // uses a small enough viewport that a few transcript units overflow.
@@ -2190,7 +2218,14 @@ mod tests {
             .unwrap();
 
         let mut processor = InputProcessor::new();
-        let line_h = 13.0_f32 * PORTAL_LINE_HEIGHT_MULTIPLIER;
+        // Derive line height from the adapter's actual font-size token so the test
+        // remains valid if the default PortalVisualTokens font size changes.
+        let font_size_px = drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .visual_tokens()
+            .transcript_font_size_px;
+        let line_h = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
 
         // First publish → CreatePortalTile.
         publish_output(&mut authority, "proj-a", &token_a, "initial line", 20);
