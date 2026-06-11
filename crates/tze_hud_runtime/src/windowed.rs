@@ -2888,13 +2888,21 @@ impl WinitApp {
                 return true;
             };
             if let Some(tile) = scene.tiles.get_mut(&focused_tile_id) {
+                let size_changed = tile.bounds.width != snapshot.rect.width
+                    || tile.bounds.height != snapshot.rect.height;
                 tile.bounds.x = snapshot.rect.x;
                 tile.bounds.y = snapshot.rect.y;
                 tile.bounds.width = snapshot.rect.width;
                 tile.bounds.height = snapshot.rect.height;
-                // Increment scene version so the truncation cache is invalidated
-                // and re-primed at the new (intermediate) geometry.
-                scene.version = scene.version.wrapping_add(1);
+                if size_changed {
+                    // Increment scene version so the truncation cache is
+                    // invalidated and re-primed at the new (intermediate)
+                    // geometry.  Guard on size_changed to avoid spurious
+                    // cache invalidations when the hotkey is pressed at a
+                    // clamped boundary (geometry identical, only sequence
+                    // number advanced).
+                    scene.version += 1;
+                }
             }
         }
 

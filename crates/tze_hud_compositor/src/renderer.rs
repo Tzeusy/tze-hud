@@ -1993,16 +1993,22 @@ impl Compositor {
         //  c) At drag-end (geometry settles), the final geometry is primed on the
         //     next tick after the interval elapses — completing the re-resolution
         //     required by spec §6b.3.
-        if let Some(last_at) = self.resize_reprime_last_at {
-            if last_at.elapsed().as_millis() < RESIZE_REPRIME_INTERVAL_MS as u128 {
-                // Within the debounce window: defer, do not update the sentinel.
-                tracing::trace!(
-                    scene_version = scene.version,
-                    interval_ms = RESIZE_REPRIME_INTERVAL_MS,
-                    "prime_truncation_cache: mid-drag cadence defer (within interval)"
-                );
-                return;
-            }
+        //
+        // The cadence gate is bypassed when the sentinel is `u64::MAX` (a forced
+        // re-prime requested by `set_token_map` or initialisation) so that token/
+        // font-metric changes are always reflected immediately regardless of resize
+        // cadence.
+        let forced_prime = self.truncation_cache_scene_version == u64::MAX;
+        if !forced_prime
+            && should_defer_reprime(self.resize_reprime_last_at, RESIZE_REPRIME_INTERVAL_MS)
+        {
+            // Within the debounce window: defer, do not update the sentinel.
+            tracing::trace!(
+                scene_version = scene.version,
+                interval_ms = RESIZE_REPRIME_INTERVAL_MS,
+                "prime_truncation_cache: mid-drag cadence defer (within interval)"
+            );
+            return;
         }
 
         // Build the set of TextItems with Ellipsis overflow that are currently
@@ -7511,6 +7517,30 @@ impl Compositor {
 ///
 /// The geometry produced here is identical to what `collect_text_items_from_node`
 /// produces at scroll_x=0, scroll_y=0 (valid because truncation is geometry-
+/// Returns `true` if the mid-drag cadence gate should defer a truncation cache
+/// re-prime call.
+///
+/// Called by [`Compositor::prime_truncation_cache`] to rate-limit re-primes
+/// during rapid geometry changes (e.g. hotkey resize).  The gate is bypassed
+/// for forced primes (`truncation_cache_scene_version == u64::MAX`) — callers
+/// are responsible for that check.
+///
+/// # Parameters
+/// - `last_at`: timestamp of the last successful truncation cache prime, or
+///   `None` if no prime has ever run.
+/// - `interval_ms`: minimum interval between primes in milliseconds
+///   (typically [`RESIZE_REPRIME_INTERVAL_MS`]).
+///
+/// Returns `true` (defer) only when `last_at` is `Some` and the elapsed time
+/// is less than `interval_ms`.  Returns `false` (allow) when `last_at` is
+/// `None` (first call ever) or the interval has elapsed.
+pub(crate) fn should_defer_reprime(last_at: Option<std::time::Instant>, interval_ms: u64) -> bool {
+    match last_at {
+        None => false, // first call: never defer
+        Some(last) => last.elapsed() < std::time::Duration::from_millis(interval_ms),
+    }
+}
+
 /// dependent only on `bounds_width` / `bounds_height`, which are scroll-invariant).
 /// `at_tail`: whether the tile owning these nodes is currently in follow-tail/at-tail
 /// mode.  `true` → `TailAnchored` truncation (spec §3.2 — newest lines visible);
@@ -15835,218 +15865,97 @@ mod tests {
 
     // ── Mid-drag cadence gate tests (hud-ghhxa — spec §6b.3) ──────────────────
     //
-    // These tests verify the `prime_truncation_cache` cadence gate behavior
-    // without a GPU — the gate operates on `resize_reprime_last_at` and
-    // `truncation_cache_scene_version` which are CPU-only fields.
+    // These tests verify the `should_defer_reprime` helper used by
+    // `prime_truncation_cache`.  By testing the extracted helper directly, any
+    // change to the gate logic in `prime_truncation_cache` that diverges from
+    // `should_defer_reprime` will cause a compile or test failure.
     //
     // Key invariants:
-    //   a) When `resize_reprime_last_at` is None (first call ever), the gate
-    //      does not defer — the prime proceeds unconditionally.
-    //   b) When called again within RESIZE_REPRIME_INTERVAL_MS, the sentinel
-    //      is NOT updated (defer: returns early without updating the scene
-    //      version sentinel, so the next out-of-interval call will re-prime).
-    //   c) When called outside the interval, the gate allows the prime.
-    //
-    // Because we have no GPU here, `text_rasterizer` is `None` and
-    // `prime_truncation_cache` exits early after the rasterizer check.
-    // The tests observe the sentinel (`truncation_cache_scene_version`) and
-    // `resize_reprime_last_at` to infer which code path ran.
+    //   a) When `last_at` is None (first call ever), the gate does not defer.
+    //   b) When called again within the interval, the gate defers (returns true).
+    //   c) When called outside the interval, the gate allows (returns false).
+    //   d) A forced prime (sentinel == u64::MAX) bypasses the gate entirely
+    //      (this bypass is checked in prime_truncation_cache, not in
+    //      should_defer_reprime; these tests confirm the helper contract only).
 
-    /// First call with no prior prime timestamp does NOT defer: the sentinel
-    /// advances and `resize_reprime_last_at` is set.
+    /// First call with no prior prime timestamp (last_at = None) does NOT defer.
     ///
-    /// (The actual prime exits early due to `text_rasterizer = None`, but the
-    /// cadence gate is cleared before that check, so the sentinel is NOT
-    /// updated.  This is correct and intentional: the sentinel is only updated
-    /// after the rasterizer proceeds.  What we verify here is that the cadence
-    /// gate itself did NOT return early — i.e. `resize_reprime_last_at` remains
-    /// `None` until a real prime runs.)
-    ///
-    /// Specifically: first call, no rasterizer → cadence gate passes, rasterizer
-    /// check returns early → sentinel unchanged, last_at unchanged.
+    /// Invariant (a): should_defer_reprime(None, _) == false.
     #[test]
     fn cadence_gate_first_call_no_prior_timestamp_allows_prime() {
-        // Use the struct fields directly (cadence gate is on Compositor).
-        // We simulate the gate by setting up the relevant fields and calling
-        // prime_truncation_cache with a no-rasterizer compositor.
-        //
-        // No GPU needed: text_rasterizer = None causes early return after gate.
-        // We verify the gate did NOT defer by checking that `resize_reprime_last_at`
-        // stays None (the rasterizer was never initialized, so no prime ran).
-        // The key property: the gate's early return (within interval) is distinct
-        // from the rasterizer's early return — only the gate early-return leaves
-        // the sentinel un-updated.
-        //
-        // We simulate the gate logic directly to keep this test CPU-only.
-
-        // Build a fresh compositor struct (no GPU) by testing the fields directly.
-        let mut last_at: Option<std::time::Instant> = None;
-        let mut sentinel: u64 = u64::MAX;
-
-        // Simulate prime_truncation_cache's cadence gate for scene.version = 1.
-        let scene_version: u64 = 1;
-
-        // Gate check: is last_at within RESIZE_REPRIME_INTERVAL_MS?
-        let deferred = if let Some(last) = last_at {
-            last.elapsed().as_millis() < RESIZE_REPRIME_INTERVAL_MS as u128
-        } else {
-            // No prior prime: never defer.
-            false
-        };
-
-        // First call: not deferred (no prior timestamp).
         assert!(
-            !deferred,
+            !should_defer_reprime(None, RESIZE_REPRIME_INTERVAL_MS),
             "cadence gate must not defer on the first call (no prior timestamp)"
         );
-
-        // Simulate: prime proceeds (rasterizer None → exits early), but sentinel
-        // would be updated and last_at set IF rasterizer were present.  The test
-        // verifies the gate decision (not deferred) is correct.
-        if !deferred {
-            // This is what prime_truncation_cache does after the gate passes and
-            // the rasterizer is Some.  With no rasterizer, these lines don't run
-            // in the real code, but the gate decision is what matters here.
-            sentinel = scene_version;
-            last_at = Some(std::time::Instant::now());
-        }
-
-        assert_eq!(sentinel, 1, "sentinel updated after non-deferred prime");
-        assert!(last_at.is_some(), "last_at set after non-deferred prime");
     }
 
-    /// Within RESIZE_REPRIME_INTERVAL_MS, a second call with a new scene version
-    /// is deferred: the sentinel is NOT updated.
+    /// Within the interval, a call defers (returns true).
     ///
-    /// This verifies property (b): the debounce prevents per-frame re-priming
-    /// during a fast resize drag.
+    /// Invariant (b): elapsed < interval_ms → should_defer_reprime returns true.
     #[test]
     fn cadence_gate_within_interval_defers_reprime() {
-        let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
-
-        // Simulate: last prime ran "just now" (0ms ago — well within interval).
-        let last_at: Option<std::time::Instant> = Some(std::time::Instant::now());
-        let sentinel_before: u64 = 5;
-        let mut sentinel = sentinel_before;
-        let new_scene_version: u64 = 6;
-
-        // Gate check: within interval?
-        let deferred = if let Some(last) = last_at {
-            last.elapsed().as_millis() < interval_ms as u128
-        } else {
-            false
-        };
-
-        // Must be deferred: last prime was within the interval.
+        // last prime ran "just now" — well within any reasonable interval.
+        let last_at = Some(std::time::Instant::now());
         assert!(
-            deferred,
-            "cadence gate must defer when within RESIZE_REPRIME_INTERVAL_MS ({interval_ms}ms)"
-        );
-
-        // Simulate: deferred → sentinel NOT updated.
-        if !deferred {
-            sentinel = new_scene_version;
-        }
-
-        assert_eq!(
-            sentinel, sentinel_before,
-            "sentinel must NOT be updated when prime is deferred by cadence gate"
+            should_defer_reprime(last_at, RESIZE_REPRIME_INTERVAL_MS),
+            "cadence gate must defer when within RESIZE_REPRIME_INTERVAL_MS ({RESIZE_REPRIME_INTERVAL_MS}ms)"
         );
     }
 
-    /// After RESIZE_REPRIME_INTERVAL_MS has elapsed, the gate allows the prime.
+    /// After the interval has elapsed, the gate allows the prime (returns false).
     ///
-    /// This verifies property (c): after the interval elapses, the most-recent
-    /// intermediate geometry is primed — completing the overflow re-resolution.
-    ///
-    /// We use a `last_at` that is artificially aged by subtracting the interval
-    /// from `Instant::now()` to simulate elapsed time without sleeping.
+    /// Invariant (c): elapsed >= interval_ms → should_defer_reprime returns false.
+    /// Uses a back-dated Instant to avoid sleeping.
     #[test]
     fn cadence_gate_after_interval_allows_reprime() {
         let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
-        let interval_dur = std::time::Duration::from_millis(interval_ms + 10); // 10ms past
-
-        // Simulate: last prime ran `interval_dur` ago (past the interval).
-        let last_at: Option<std::time::Instant> = Some(std::time::Instant::now() - interval_dur);
-        let mut sentinel: u64 = 5;
-        let new_scene_version: u64 = 10;
-
-        // Gate check.
-        let deferred = if let Some(last) = last_at {
-            last.elapsed().as_millis() < interval_ms as u128
-        } else {
-            false
-        };
-
-        // Must NOT be deferred: interval has elapsed.
+        let past = std::time::Instant::now() - std::time::Duration::from_millis(interval_ms + 10);
         assert!(
-            !deferred,
+            !should_defer_reprime(Some(past), interval_ms),
             "cadence gate must allow prime when RESIZE_REPRIME_INTERVAL_MS has elapsed"
-        );
-
-        if !deferred {
-            sentinel = new_scene_version;
-        }
-
-        assert_eq!(
-            sentinel, new_scene_version,
-            "sentinel must be updated when prime is allowed after interval elapses"
         );
     }
 
-    /// The cadence gate leaves the sentinel unchanged on defer, so the
-    /// most-recent intermediate geometry is primed on the next allowed tick.
+    /// The cadence gate correctly handles interval boundary (exactly at interval).
     ///
-    /// This verifies the "settle" property: even if geometry changes several
-    /// times within the interval, the final geometry is always picked up after
-    /// the interval elapses (sentinel not updated → next call sees the diff).
+    /// Elapsed == interval_ms should allow the prime (not defer), since the
+    /// Duration comparison is strict less-than.
+    #[test]
+    fn cadence_gate_at_exact_interval_boundary_allows_reprime() {
+        let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
+        // Back-date by exactly the interval: elapsed >= interval_ms.
+        let past = std::time::Instant::now() - std::time::Duration::from_millis(interval_ms);
+        // elapsed() is at least interval_ms so should_defer_reprime must return false.
+        assert!(
+            !should_defer_reprime(Some(past), interval_ms),
+            "cadence gate must allow prime when elapsed >= RESIZE_REPRIME_INTERVAL_MS"
+        );
+    }
+
+    /// Settle scenario: several geometry changes within the interval all defer,
+    /// then the next call after the interval allows the prime.
+    ///
+    /// This verifies the "sentinel not updated on defer → final geometry primed
+    /// after interval" property end-to-end through the helper.
     #[test]
     fn cadence_gate_deferred_sentinel_unchanged_enables_settle_prime() {
         let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
 
-        // Simulate: last prime was recent.
-        let last_at: Option<std::time::Instant> = Some(std::time::Instant::now());
-        let initial_sentinel: u64 = 3;
-        let mut sentinel = initial_sentinel;
-
-        // Several geometry changes happen within the interval.
-        // Each call within interval should defer (sentinel not updated).
-        for new_version in [4u64, 5, 6, 7] {
-            let deferred = if let Some(last) = last_at {
-                last.elapsed().as_millis() < interval_ms as u128
-            } else {
-                false
-            };
-            if !deferred {
-                sentinel = new_version;
-            }
+        // All calls within the interval must defer.
+        let last_at = Some(std::time::Instant::now());
+        for _ in 0..5 {
+            assert!(
+                should_defer_reprime(last_at, interval_ms),
+                "should_defer_reprime must return true for calls within the interval"
+            );
         }
 
-        // Sentinel remains at initial value (all calls were within interval).
-        assert_eq!(
-            sentinel, initial_sentinel,
-            "sentinel must remain unchanged when all calls are deferred within the interval; \
-             the most-recent geometry (version 7) will be picked up after the interval elapses"
-        );
-
-        // Now simulate the interval elapsing and a subsequent call with version 7.
-        let aged_at: Option<std::time::Instant> =
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(interval_ms + 10));
-        let deferred_after_interval = if let Some(last) = aged_at {
-            last.elapsed().as_millis() < interval_ms as u128
-        } else {
-            false
-        };
+        // After the interval elapses, the next call must allow the prime.
+        let past = std::time::Instant::now() - std::time::Duration::from_millis(interval_ms + 10);
         assert!(
-            !deferred_after_interval,
-            "gate must allow the prime once the interval has elapsed"
-        );
-        if !deferred_after_interval {
-            sentinel = 7;
-        }
-        assert_eq!(
-            sentinel, 7,
-            "after interval elapses the latest geometry (version 7) must be primed"
+            !should_defer_reprime(Some(past), interval_ms),
+            "should_defer_reprime must return false once the interval has elapsed \
+             (final/settled geometry must be primed)"
         );
     }
 }
