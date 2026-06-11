@@ -37,6 +37,7 @@
 //! - lease-governance/spec.md §Safe Mode Suspends Leases (line 92)
 //! - lease-governance/spec.md §Safe Mode Resume (line 105)
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -342,7 +343,10 @@ impl SafeModeController {
             };
 
             // Step 3: Signal safe mode active so mutation intake rejects new batches.
+            // The AtomicBool mirror is also set here so the winit event-thread can read
+            // the flag lock-free (Ordering::Release pairs with Acquire on the reader side).
             st.safe_mode_active = true;
+            st.safe_mode_atomic.store(true, Ordering::Release);
 
             // Step 4: Broadcast SessionSuspended to all connected sessions.
             // Sessions that are subscribed receive this via their server_message_tx.
@@ -520,7 +524,10 @@ impl SafeModeController {
                 .collect();
 
             // Step 3: Clear safe mode flag — mutation intake accepts new batches.
+            // Clear the AtomicBool mirror too so the event-thread sees the exit
+            // immediately on its next Acquire load (Ordering::Release).
             st.safe_mode_active = false;
+            st.safe_mode_atomic.store(false, Ordering::Release);
 
             // Step 4: Broadcast SessionResumed to all connected sessions.
             // sequence = 0: same known limitation as SessionSuspended above — per-session
@@ -663,6 +670,7 @@ mod tests {
 
     fn make_shared_state() -> Arc<Mutex<SharedState>> {
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
         use tze_hud_protocol::session::RuntimeDegradationLevel;
         Arc::new(Mutex::new(SharedState {
             scene: Arc::new(Mutex::new(SceneGraph::new(1920.0, 1080.0))),
@@ -675,6 +683,7 @@ mod tests {
             element_store: tze_hud_scene::element_store::ElementStore::default(),
             element_store_path: None,
             safe_mode_active: false,
+            safe_mode_atomic: Arc::new(AtomicBool::new(false)),
             freeze_active: false,
             token_store: TokenStore::new(),
             degradation_level: RuntimeDegradationLevel::Normal,
@@ -1501,5 +1510,98 @@ mod tests {
                 "draft must resume from the preserved buffer"
             );
         }
+    }
+
+    // ── 13. Lock-free safe_mode_atomic mirror (hud-opgdq) ────────────────────
+
+    /// `enter_safe_mode` sets `SharedState.safe_mode_atomic` to `true` with
+    /// `Ordering::Release`, and `exit_safe_mode` clears it back to `false`.
+    ///
+    /// This is the AtomicBool that the winit event thread reads without ever
+    /// acquiring the `SharedState` Tokio mutex, eliminating the `try_lock`
+    /// key-drop hazard on the safe-mode-capture path.
+    #[tokio::test]
+    async fn test_safe_mode_atomic_updated_on_enter_and_exit() {
+        use std::sync::atomic::Ordering;
+
+        let shared = make_shared_state();
+        let chrome = Arc::new(RwLock::new(ChromeState::new()));
+        let mut ctrl = SafeModeController::new_headless(Arc::clone(&shared), chrome);
+
+        // Clone the Arc before entering safe mode so we can read it like the event thread would.
+        let atomic = {
+            let st = shared.lock().await;
+            Arc::clone(&st.safe_mode_atomic)
+        };
+
+        assert!(
+            !atomic.load(Ordering::Acquire),
+            "safe_mode_atomic must be false before entering safe mode"
+        );
+
+        ctrl.enter_safe_mode_viewer_action().await;
+
+        assert!(
+            atomic.load(Ordering::Acquire),
+            "safe_mode_atomic must be true immediately after enter_safe_mode"
+        );
+        // SharedState.safe_mode_active must also be true (belt-and-suspenders check).
+        {
+            let st = shared.lock().await;
+            assert!(
+                st.safe_mode_active,
+                "SharedState.safe_mode_active must be true after enter"
+            );
+        }
+
+        ctrl.exit_safe_mode().await;
+
+        assert!(
+            !atomic.load(Ordering::Acquire),
+            "safe_mode_atomic must be false after exit_safe_mode"
+        );
+        {
+            let st = shared.lock().await;
+            assert!(
+                !st.safe_mode_active,
+                "SharedState.safe_mode_active must be false after exit"
+            );
+        }
+    }
+
+    /// The `safe_mode_atomic` read is lock-free: the event thread can observe the
+    /// safe-mode flag even while another task holds the `SharedState` Tokio mutex.
+    ///
+    /// This test simulates contention by entering safe mode (which writes the
+    /// AtomicBool under the lock) and then verifying the read is observable from a
+    /// separate synchronous context without acquiring the lock.
+    #[tokio::test]
+    async fn test_safe_mode_atomic_readable_without_acquiring_shared_state_lock() {
+        use std::sync::atomic::Ordering;
+
+        let shared = make_shared_state();
+        let chrome = Arc::new(RwLock::new(ChromeState::new()));
+        let mut ctrl = SafeModeController::new_headless(Arc::clone(&shared), chrome);
+
+        let atomic = {
+            let st = shared.lock().await;
+            Arc::clone(&st.safe_mode_atomic)
+        };
+
+        ctrl.enter_safe_mode_viewer_action().await;
+
+        // Acquire the SharedState lock, simulating a concurrent async task that
+        // holds the lock during a long operation.  While the lock is held, the
+        // event-thread dispatch code (which cannot call try_lock successfully
+        // when the lock is contended) must still be able to observe safe-mode.
+        let _guard = shared.lock().await;
+
+        // Lock is held here — the AtomicBool must still be readable without
+        // waiting for the lock, exactly as the event thread does.
+        assert!(
+            atomic.load(Ordering::Acquire),
+            "safe_mode_atomic must be readable (Acquire) even while SharedState lock is held by \
+             another task — this is the lock-free property that prevents try_lock key-drops"
+        );
     }
 }

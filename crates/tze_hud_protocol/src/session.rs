@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, mpsc};
 use tonic::Status;
 use tze_hud_resource::{ResourceStore, RuntimeWidgetStore};
@@ -128,6 +129,24 @@ pub struct SharedState {
     /// Whether the runtime is currently in safe mode (RFC 0005 §3.7).
     /// When true, all active sessions reject MutationBatch with SAFE_MODE_ACTIVE.
     pub safe_mode_active: bool,
+    /// Lock-free mirror of `safe_mode_active` for use on the winit event thread.
+    ///
+    /// The winit event thread reads this in the `dispatch_key_down_event` /
+    /// `dispatch_key_up_event` / `dispatch_character_event` hot paths without
+    /// acquiring the `SharedState` mutex.  Writers (exclusively
+    /// `SafeModeController::enter_safe_mode` and `exit_safe_mode`) update
+    /// **both** this field and `safe_mode_active` while holding the lock:
+    ///
+    ///   1. `safe_mode_active = true`  (under lock)
+    ///   2. `safe_mode_atomic.store(true, Ordering::Release)` (under lock —
+    ///      Release pairs with the Acquire load on the event thread)
+    ///
+    /// `Ordering::Release` ensures the boolean write is visible before the
+    /// atomic flag is raised.  `Ordering::Acquire` on the read side ensures
+    /// the event thread sees any stores that preceded the flag.  Together they
+    /// form a proper Release-Acquire pair even though the `SharedState` mutex
+    /// is not held by the reader.
+    pub safe_mode_atomic: Arc<AtomicBool>,
     /// In-memory resume token store (RFC 0005 §6.1).
     /// Cleared on process restart; never persisted.
     pub token_store: TokenStore,
