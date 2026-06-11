@@ -7802,6 +7802,7 @@ mod tests {
             )
             .unwrap();
         scene.set_tile_root(tile_id, node).unwrap();
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -7884,6 +7885,7 @@ mod tests {
             )
             .unwrap();
 
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8075,6 +8077,8 @@ mod tests {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
         let scene = SceneGraph::new(256.0, 256.0);
 
+        // Prime before render per the Stage-4 commit-time prime contract (hud-380dl).
+        compositor.prime_markdown_cache(&scene);
         // render_frame takes &dyn CompositorSurface — no special headless branch.
         let telemetry =
             compositor.render_frame(&scene, &surface as &dyn crate::surface::CompositorSurface);
@@ -8215,6 +8219,7 @@ mod tests {
             }),
         };
         let mut scene = scene_with_node(node);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8255,6 +8260,7 @@ mod tests {
             }),
         };
         let mut scene = scene_with_node(node);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8305,6 +8311,7 @@ mod tests {
             }),
         };
         let mut scene = scene_with_node(node);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8361,6 +8368,7 @@ mod tests {
             }),
         };
         let mut scene = scene_with_node(node);
+        compositor.prime_markdown_cache(&scene);
         // Must not panic.
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
@@ -8421,6 +8429,7 @@ mod tests {
             )
             .unwrap();
 
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -8510,6 +8519,7 @@ mod tests {
             )
             .unwrap();
 
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -8617,6 +8627,7 @@ mod tests {
         );
 
         // Render to pixels and verify bright text appears in the top zone area.
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -8650,6 +8661,7 @@ mod tests {
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut scene = SceneGraph::new(64.0, 64.0);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         // No panic = pass.
     }
@@ -8660,6 +8672,7 @@ mod tests {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut scene = SceneGraph::new(64.0, 64.0);
+        compositor.prime_markdown_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
     }
 
@@ -8775,6 +8788,9 @@ mod tests {
         // the timed measurement window.  Shader compilation is a one-time cost
         // that does not reflect steady-state Stage 6 performance; excluding it
         // mirrors production behaviour where shaders are pre-compiled.
+        // Prime once before the loop — scene does not change in this benchmark,
+        // so subsequent frames are all cache-hit no-ops (hud-380dl).
+        compositor.prime_markdown_cache(&scene);
         for _ in 0..5 {
             compositor.render_frame_headless(&mut scene, &surface);
         }
