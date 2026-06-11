@@ -18,8 +18,14 @@
 //!
 //! - Gesture authority: during an active resize gesture the adapter's
 //!   `publish_geometry` requests MUST be dropped. Only `GeometrySnapshot`
-//!   events emitted by this module are applied. This is enforced by the caller
-//!   checking `PortalResizeState::gesture_active()`.
+//!   events emitted by this module are applied. This is enforced through two
+//!   complementary mechanisms:
+//!   1. `PortalResizeState::gesture_active()` — advisory flag for callers.
+//!   2. `PortalResizeState::accept_adapter_publish()` — **real enforcement
+//!      point** using a `gesture_epoch` counter. Adapters obtain the current
+//!      epoch before dispatching a geometry publish; the epoch is checked on
+//!      arrival and the publish is rejected if the gesture epoch has advanced
+//!      (gesture started or ended) since the epoch was sampled.
 //! - Local feedback first: geometry updates happen immediately in the same
 //!   frame as the pointer event — no adapter roundtrip.
 //! - Token-defined bounds: `min_width_px`, `min_height_px`, and
@@ -29,6 +35,22 @@
 //!   The transport MAY deliver only the latest snapshot per adapter delivery
 //!   window (latest-wins).
 //!
+//! ## Input precedence order (§6b.2 + §6b.6 authority scenarios)
+//!
+//! The following priority order is enforced in `dispatch_key_down_event` (in
+//! `tze_hud_runtime::windowed`):
+//!
+//! 1. **Safe-mode capture** — when safe mode is active, ALL input is captured
+//!    by the chrome layer. Portal resize hotkeys are NOT reached.
+//! 2. **Shell/chrome-reserved shortcuts** — shortcuts in
+//!    [`ShellReservedShortcut::is_reserved`] win over portal resize hotkeys.
+//!    A reserved key is never consumed by a portal.
+//! 3. **Composer** — if an active composer region holds focus,
+//!    `Ctrl++`/`Ctrl+=`/`Ctrl+-` are composer shortcuts and MUST NOT be stolen.
+//! 4. **Portal resize hotkey** — `Ctrl++`/`Ctrl+=` (grow) and `Ctrl+-` (shrink)
+//!    on the focused portal tile.
+//! 5. **Normal routing** — key forwarded to the owning agent.
+//!
 //! ## Performance contract
 //!
 //! Each state update runs in O(1) with no allocations on the hot path.
@@ -36,6 +58,75 @@
 //! input to local ack < 4 ms.
 
 use serde::{Deserialize, Serialize};
+
+// ─── Shell/chrome-reserved shortcut check (§6b.2) ────────────────────────────
+
+/// Classifier for shell/chrome-reserved keyboard shortcuts.
+///
+/// Reserved shortcuts are owned by the chrome/shell layer and MUST win over
+/// portal resize hotkeys.  A reserved key is **never** consumed by a portal —
+/// it must either be dispatched to the chrome layer or suppressed, but portal
+/// resize MUST NOT consume it.
+///
+/// The reserved set mirrors `ChromeShortcut` (in
+/// `tze_hud_runtime::shell::chrome`) and the monitor-cycling shortcuts
+/// (`Ctrl+Shift+F8/F9`) that are handled at the OS-event stage.  It is
+/// replicated here so that `tze_hud_input` can classify a key before any
+/// portal resize attempt without depending on the runtime crate.
+///
+/// # Why replicate instead of calling into the runtime?
+///
+/// `tze_hud_input` is a dependency of `tze_hud_runtime`, not the other way
+/// around.  Importing the runtime classification from input would create a
+/// circular dependency.  The set is small and stable; keep the two in sync
+/// when new chrome shortcuts are added.
+pub struct ShellReservedShortcut;
+
+impl ShellReservedShortcut {
+    /// Returns `true` if the key+modifier combination is a shell/chrome-reserved
+    /// shortcut that MUST win over portal resize hotkeys.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` — DOM `KeyboardEvent.key` string (logical key, e.g. `"Tab"`, `"1"`).
+    /// * `ctrl` — Ctrl modifier held.
+    /// * `shift` — Shift modifier held.
+    /// * `alt` — Alt modifier held (reserved shortcuts NEVER require Alt).
+    ///
+    /// # Reserved set
+    ///
+    /// | Shortcut | Notes |
+    /// |----------|-------|
+    /// | `Ctrl+Tab` | NextTab |
+    /// | `Ctrl+Shift+Tab` | PrevTab |
+    /// | `Ctrl+1` … `Ctrl+8` | GotoTab(1..8) |
+    /// | `Ctrl+9` | LastTab |
+    /// | `Ctrl+Shift+M` | MuteToggle (v1-reserved) |
+    /// | `Ctrl+Shift+Escape` | SafeMode toggle |
+    /// | `Ctrl+Shift+F8` | Monitor cycle prev |
+    /// | `Ctrl+Shift+F9` | Monitor cycle next |
+    pub fn is_reserved(key: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
+        // Reserved shortcuts never require Alt.
+        if !ctrl || alt {
+            return false;
+        }
+        match (key, shift) {
+            // Tab navigation
+            ("Tab", false) => true, // Ctrl+Tab → NextTab
+            ("Tab", true) => true,  // Ctrl+Shift+Tab → PrevTab
+            // Numbered tab jump (Ctrl+1..9)
+            ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9", false) => true,
+            // Mute toggle (v1-reserved noop, but still consumed)
+            ("m" | "M", true) => true, // Ctrl+Shift+M
+            // Safe mode toggle
+            ("Escape", true) => true, // Ctrl+Shift+Escape
+            // Monitor cycling (also returned early at the OS stage, but model here
+            // so the reserved-set is complete for in-process callers)
+            ("F8" | "F9", true) => true, // Ctrl+Shift+F8 / F9
+            _ => false,
+        }
+    }
+}
 
 // ─── Token-resolved window geometry bounds ────────────────────────────────────
 
@@ -329,6 +420,22 @@ pub enum ResizeOutcome {
 
 // ─── Portal resize state (per-portal) ────────────────────────────────────────
 
+/// Error returned when an adapter geometry publish is rejected by the gesture
+/// authority enforcement point.
+///
+/// See [`PortalResizeState::accept_adapter_publish`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GestureAuthorityError {
+    /// A local resize gesture is currently active.  The adapter's geometry
+    /// publish is dropped; the gesture is authoritative (§6b.4).
+    GestureActive,
+    /// The epoch offered by the adapter is stale (the gesture epoch has
+    /// advanced since the adapter sampled it, meaning a gesture started or
+    /// ended between the sample and the publish).  The publish is dropped to
+    /// prevent a race where the adapter "wins" against a just-finished gesture.
+    StaleEpoch,
+}
+
 /// Per-portal resize management — tracks active pointer gestures and emits
 /// coalescible geometry snapshots.
 ///
@@ -337,6 +444,20 @@ pub enum ResizeOutcome {
 ///
 /// Use [`PortalResizeState::new`] to construct — `Default` is intentionally
 /// not derived to enforce explicit initialization with a valid `portal_id_hash`.
+///
+/// ## Gesture-authority enforcement (§6b.4)
+///
+/// The `gesture_epoch` field provides a real enforcement point beyond the
+/// advisory `gesture_active()` flag.  The epoch monotonically increments on
+/// every gesture **start** AND every gesture **end** so that a publish that
+/// was in-flight when a gesture started or ended is unambiguously stale.
+///
+/// Adapters MUST sample the epoch before dispatching a geometry publish, then
+/// present it to [`PortalResizeState::accept_adapter_publish`] on arrival.
+/// The method returns an error and the publish is discarded if:
+/// - a gesture is currently active, OR
+/// - the offered epoch does not match the current epoch (gesture lifecycle
+///   changed since the sample).
 #[derive(Debug)]
 pub struct PortalResizeState {
     /// Per-device resize gestures (usually only one device at a time).
@@ -345,6 +466,15 @@ pub struct PortalResizeState {
     sequence: u64,
     /// Hash of the portal ID (used in snapshots; callers set this at creation).
     portal_id_hash: u64,
+    /// Gesture epoch — monotonically incremented on every gesture start and
+    /// every gesture end.  Adapters sample this before dispatching a geometry
+    /// publish and present it on arrival; a mismatch means the gesture
+    /// lifecycle changed in the interval and the publish must be rejected.
+    ///
+    /// Starts at 0 (no gesture ever started, adapter may publish freely).
+    /// Even values: no gesture in progress (adapter may publish if epoch matches).
+    /// Odd values: gesture in progress (adapter MUST NOT publish).
+    gesture_epoch: u64,
 }
 
 impl PortalResizeState {
@@ -361,10 +491,14 @@ impl PortalResizeState {
             device_states: std::collections::HashMap::with_capacity(1),
             sequence: 0,
             portal_id_hash,
+            gesture_epoch: 0,
         }
     }
 
     /// Returns true while any pointer device has an active resize gesture.
+    ///
+    /// Advisory flag.  For the **enforcement point** that actually rejects
+    /// adapter publishes, use [`accept_adapter_publish`].
     ///
     /// When this is true, the caller MUST reject adapter geometry publishes
     /// (gesture is authoritative — §6b.4).
@@ -372,6 +506,59 @@ impl PortalResizeState {
         self.device_states
             .values()
             .any(|s| s.phase == ResizePhase::Active)
+    }
+
+    /// Sample the current gesture epoch.
+    ///
+    /// Adapters MUST call this **before** dispatching an adapter geometry
+    /// publish and then pass the sampled value to [`accept_adapter_publish`]
+    /// on arrival.  A publish that does not present a matching epoch will be
+    /// rejected, guarding against races around gesture start/end.
+    ///
+    /// Epoch semantics:
+    /// - `0` on construction (no gesture ever started).
+    /// - Incremented (odd) on gesture **start** → adapter publishes rejected.
+    /// - Incremented again (even) on gesture **end** → adapter may publish if
+    ///   epoch still matches.
+    #[inline]
+    pub fn current_gesture_epoch(&self) -> u64 {
+        self.gesture_epoch
+    }
+
+    /// Enforcement point for adapter geometry publishes (§6b.4).
+    ///
+    /// Returns `Ok(())` if the publish may proceed; returns
+    /// `Err(GestureAuthorityError)` if it must be dropped.
+    ///
+    /// A publish is rejected when:
+    /// 1. A local gesture is currently active (`gesture_active() == true`), OR
+    /// 2. `offered_epoch` does not match the current epoch (the gesture
+    ///    lifecycle changed since the adapter sampled the epoch — a race
+    ///    around gesture start or end).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tze_hud_input::portal_resize::{PortalResizeState, GestureAuthorityError};
+    ///
+    /// let mut state = PortalResizeState::new(0xdeadbeef);
+    ///
+    /// // Sample the epoch before the publish is dispatched.
+    /// let epoch = state.current_gesture_epoch();
+    ///
+    /// // … adapter dispatches the publish; on arrival: …
+    /// assert!(state.accept_adapter_publish(epoch).is_ok());
+    /// ```
+    pub fn accept_adapter_publish(&self, offered_epoch: u64) -> Result<(), GestureAuthorityError> {
+        // Check gesture first: an active gesture always rejects, regardless of epoch.
+        if self.gesture_active() {
+            return Err(GestureAuthorityError::GestureActive);
+        }
+        // Epoch mismatch means the gesture lifecycle changed since the adapter sampled.
+        if offered_epoch != self.gesture_epoch {
+            return Err(GestureAuthorityError::StaleEpoch);
+        }
+        Ok(())
     }
 
     fn next_sequence(&mut self) -> u64 {
@@ -391,6 +578,12 @@ impl PortalResizeState {
     /// Process a pointer-down event on a resize affordance.
     ///
     /// Returns `ResizeOutcome::GestureStarted` with the clamped initial rect.
+    ///
+    /// On idle→active transition (first pointer down on this portal), increments
+    /// the gesture epoch to an odd value (odd → active) so that any in-flight
+    /// adapter publish sampled before this call is rejected by
+    /// [`accept_adapter_publish`].  Subsequent pointer-downs while already active
+    /// (multi-device) do not change the epoch so the even/odd invariant holds.
     pub fn on_pointer_down(
         &mut self,
         device_id: u32,
@@ -400,11 +593,21 @@ impl PortalResizeState {
         current_rect: PortalRect,
         bounds: &ResizeBounds,
     ) -> ResizeOutcome {
+        // Advance epoch only on idle→active transition (no prior active gesture).
+        // This preserves the even/odd invariant: even = idle, odd = active.
+        // With multiple devices, only the first pointer-down advances the epoch
+        // (idle → active); subsequent pointer-downs while already active do not
+        // change parity.
+        let was_idle = !self.gesture_active();
         let initial = current_rect.clamped(bounds);
         self.device_states.insert(
             device_id,
             DeviceResizeState::new(edge, press_x, press_y, initial),
         );
+        if was_idle {
+            // Epoch was even (idle); advance to odd (active).
+            self.gesture_epoch = self.gesture_epoch.wrapping_add(1);
+        }
         let snap = self.snapshot(initial, true);
         ResizeOutcome::GestureStarted { snapshot: snap }
     }
@@ -435,6 +638,15 @@ impl PortalResizeState {
     ///
     /// Returns `ResizeOutcome::GestureEnded` with the final clamped rect, or
     /// `ResizeOutcome::Idle` if no gesture was active.
+    ///
+    /// On active→idle transition (last device gesture ends), increments the
+    /// gesture epoch to an even value (even → idle) so that adapter publishes
+    /// sampled before this call continue to be rejected until the adapter
+    /// re-samples the new epoch.  This prevents a stale publish that was
+    /// in-flight during the gesture from slipping through immediately after
+    /// gesture end.  Intermediate pointer-ups while other devices are still
+    /// active (multi-device) do not change the epoch so the even/odd invariant
+    /// holds.
     pub fn on_pointer_up(
         &mut self,
         device_id: u32,
@@ -446,8 +658,17 @@ impl PortalResizeState {
             return ResizeOutcome::Idle;
         };
         let rect = state.compute_rect(pointer_x, pointer_y, bounds);
-        // gesture_active reflects remaining devices, but this gesture is over
+        // gesture_active reflects remaining devices after removal.
         let still_active = self.gesture_active();
+        // Advance epoch only on active→idle transition (last active device ended).
+        // This preserves the even/odd invariant: odd = active, even = idle.
+        // With multiple devices, only the final pointer-up advances the epoch
+        // (active → idle); intermediate pointer-ups while other devices are still
+        // active do not change parity.
+        if !still_active {
+            // Epoch was odd (active); advance to even (idle).
+            self.gesture_epoch = self.gesture_epoch.wrapping_add(1);
+        }
         let snap = self.snapshot(rect, still_active);
         ResizeOutcome::GestureEnded { snapshot: snap }
     }
@@ -1215,7 +1436,7 @@ mod tests {
     // ─── Adapter authority (§6b.4) ────────────────────────────────────────
 
     /// During an active gesture, `gesture_active()` returns true, which the
-    /// caller uses to reject adapter geometry publishes.
+    /// caller uses to reject adapter geometry publishes (advisory path).
     #[test]
     fn adapter_publishes_must_be_rejected_during_gesture() {
         let mut state = PortalResizeState::new(0xdeadbeef);
@@ -1247,6 +1468,234 @@ mod tests {
         assert!(
             !state.gesture_active(),
             "adapter may publish after gesture ends"
+        );
+    }
+
+    // ─── Gesture-authority enforcement point: accept_adapter_publish ─────
+
+    /// `accept_adapter_publish` accepts a publish with a fresh epoch when no
+    /// gesture is active.
+    #[test]
+    fn accept_adapter_publish_ok_outside_gesture() {
+        let state = PortalResizeState::new(0xdeadbeef);
+        let epoch = state.current_gesture_epoch();
+        assert_eq!(
+            state.accept_adapter_publish(epoch),
+            Ok(()),
+            "publish with matching epoch must be accepted when no gesture is active"
+        );
+    }
+
+    /// `accept_adapter_publish` rejects during an active gesture, regardless
+    /// of epoch.  This is the real enforcement point (§6b.4).
+    #[test]
+    fn accept_adapter_publish_rejected_during_gesture() {
+        let mut state = PortalResizeState::new(0xdeadbeef);
+        let bounds = default_bounds();
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+
+        // Sample epoch before the gesture starts — this is the "in-flight" case.
+        let epoch_before = state.current_gesture_epoch();
+
+        state.on_pointer_down(1, ResizeEdge::Right, 500.0, 250.0, rect, &bounds);
+
+        // Offering the pre-gesture epoch must be rejected (gesture active).
+        assert_eq!(
+            state.accept_adapter_publish(epoch_before),
+            Err(GestureAuthorityError::GestureActive),
+            "in-flight publish with pre-gesture epoch must be rejected during gesture"
+        );
+
+        // Offering the current epoch (odd — gesture active) must also be rejected.
+        let epoch_during = state.current_gesture_epoch();
+        assert_eq!(
+            state.accept_adapter_publish(epoch_during),
+            Err(GestureAuthorityError::GestureActive),
+            "publish with current (odd) epoch must be rejected while gesture is active"
+        );
+    }
+
+    /// After gesture end the publish is accepted only with the new (post-gesture)
+    /// epoch.  A publish that sampled the epoch *before* gesture start and arrives
+    /// after gesture end presents a stale epoch and MUST be rejected.
+    #[test]
+    fn accept_adapter_publish_stale_epoch_after_gesture_end() {
+        let mut state = PortalResizeState::new(0xdeadbeef);
+        let bounds = default_bounds();
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+
+        // Adapter samples the epoch before gesture start and dispatches a publish.
+        let epoch_sampled_before_gesture = state.current_gesture_epoch(); // 0
+
+        // Gesture starts and ends — epoch advances twice (0 → 1 → 2).
+        state.on_pointer_down(1, ResizeEdge::Bottom, 300.0, 400.0, rect, &bounds);
+        state.on_pointer_up(1, 300.0, 450.0, &bounds);
+
+        // Gesture is over; adapter publish now arrives.
+        // Offering the pre-gesture epoch (0) must be rejected as stale.
+        assert_eq!(
+            state.accept_adapter_publish(epoch_sampled_before_gesture),
+            Err(GestureAuthorityError::StaleEpoch),
+            "publish sampled before gesture start must be rejected as stale after gesture end"
+        );
+
+        // Adapter re-samples and publishes with the new epoch.
+        let fresh_epoch = state.current_gesture_epoch(); // 2 (even — no gesture)
+        assert_eq!(
+            state.accept_adapter_publish(fresh_epoch),
+            Ok(()),
+            "publish with fresh post-gesture epoch must be accepted"
+        );
+    }
+
+    /// A publish that sampled the epoch *during* a gesture (odd epoch) must be
+    /// rejected after the gesture ends, even though no gesture is active.
+    #[test]
+    fn accept_adapter_publish_in_flight_during_gesture_rejected_after_end() {
+        let mut state = PortalResizeState::new(0xdeadbeef);
+        let bounds = default_bounds();
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+
+        state.on_pointer_down(1, ResizeEdge::Right, 500.0, 250.0, rect, &bounds);
+
+        // Adapter is blocked — but suppose it somehow sampled the odd epoch.
+        let epoch_during_gesture = state.current_gesture_epoch(); // odd
+
+        state.on_pointer_up(1, 550.0, 250.0, &bounds);
+
+        // Now gesture is over; the publish arrives with the in-gesture epoch.
+        // It must be rejected as stale (epoch advanced on pointer-up).
+        assert_eq!(
+            state.accept_adapter_publish(epoch_during_gesture),
+            Err(GestureAuthorityError::StaleEpoch),
+            "publish sampled during gesture must be rejected as stale after gesture end"
+        );
+    }
+
+    // ─── Shell/chrome-reserved shortcut classifier (§6b.2) ───────────────
+
+    #[test]
+    fn shell_reserved_ctrl_tab_navigation() {
+        assert!(
+            ShellReservedShortcut::is_reserved("Tab", true, false, false),
+            "Ctrl+Tab must be reserved (NextTab)"
+        );
+        assert!(
+            ShellReservedShortcut::is_reserved("Tab", true, true, false),
+            "Ctrl+Shift+Tab must be reserved (PrevTab)"
+        );
+    }
+
+    #[test]
+    fn shell_reserved_ctrl_digit_tab_jump() {
+        for digit in &["1", "2", "3", "4", "5", "6", "7", "8", "9"] {
+            assert!(
+                ShellReservedShortcut::is_reserved(digit, true, false, false),
+                "Ctrl+{digit} must be reserved (GotoTab)",
+            );
+        }
+    }
+
+    #[test]
+    fn shell_reserved_ctrl_shift_m_mute() {
+        assert!(
+            ShellReservedShortcut::is_reserved("m", true, true, false),
+            "Ctrl+Shift+m must be reserved (MuteToggle)"
+        );
+        assert!(
+            ShellReservedShortcut::is_reserved("M", true, true, false),
+            "Ctrl+Shift+M must be reserved (MuteToggle)"
+        );
+    }
+
+    #[test]
+    fn shell_reserved_ctrl_shift_escape_safe_mode() {
+        assert!(
+            ShellReservedShortcut::is_reserved("Escape", true, true, false),
+            "Ctrl+Shift+Escape must be reserved (SafeMode toggle)"
+        );
+    }
+
+    #[test]
+    fn shell_reserved_ctrl_shift_f8_f9_monitor_cycle() {
+        assert!(
+            ShellReservedShortcut::is_reserved("F8", true, true, false),
+            "Ctrl+Shift+F8 must be reserved (monitor cycle prev)"
+        );
+        assert!(
+            ShellReservedShortcut::is_reserved("F9", true, true, false),
+            "Ctrl+Shift+F9 must be reserved (monitor cycle next)"
+        );
+    }
+
+    #[test]
+    fn shell_reserved_does_not_claim_portal_resize_keys() {
+        // Portal resize keys (Ctrl+`+`, Ctrl+`=`, Ctrl+`-`) must NOT be
+        // in the reserved set — they are handled at Priority 4.
+        assert!(
+            !ShellReservedShortcut::is_reserved("+", true, false, false),
+            "Ctrl+'+' must NOT be reserved (portal resize key)"
+        );
+        assert!(
+            !ShellReservedShortcut::is_reserved("=", true, false, false),
+            "Ctrl+'=' must NOT be reserved (portal resize key)"
+        );
+        assert!(
+            !ShellReservedShortcut::is_reserved("-", true, false, false),
+            "Ctrl+'-' must NOT be reserved (portal resize key)"
+        );
+    }
+
+    #[test]
+    fn shell_reserved_alt_modifier_never_reserved() {
+        // Alt is never part of the reserved set.
+        assert!(
+            !ShellReservedShortcut::is_reserved("Tab", true, false, true),
+            "Ctrl+Alt+Tab must NOT be reserved"
+        );
+        assert!(
+            !ShellReservedShortcut::is_reserved("1", true, false, true),
+            "Ctrl+Alt+1 must NOT be reserved"
+        );
+    }
+
+    #[test]
+    fn shell_reserved_bare_keys_without_ctrl_not_reserved() {
+        // Without Ctrl, nothing is reserved.
+        assert!(
+            !ShellReservedShortcut::is_reserved("Tab", false, false, false),
+            "bare Tab must NOT be reserved"
+        );
+        assert!(
+            !ShellReservedShortcut::is_reserved("Escape", false, true, false),
+            "bare Shift+Escape must NOT be reserved"
+        );
+    }
+
+    #[test]
+    fn shell_reserved_arbitrary_key_not_reserved() {
+        assert!(
+            !ShellReservedShortcut::is_reserved("a", true, false, false),
+            "Ctrl+a must NOT be reserved (not in the chrome set)"
+        );
+        assert!(
+            !ShellReservedShortcut::is_reserved("Enter", true, false, false),
+            "Ctrl+Enter must NOT be reserved"
         );
     }
 }

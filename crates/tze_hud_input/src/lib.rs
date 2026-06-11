@@ -130,9 +130,10 @@ pub use keyboard::{
     RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
 };
 pub use portal_resize::{
-    DeviceResizeState, GeometrySnapshot, HotkeyResizeDir, HotkeyResizeOutcome, PortalRect,
-    PortalResizeState, PortalWindowTokens, ResizeBounds, ResizeEdge, ResizeOutcome, ResizePhase,
-    apply_hotkey_resize, hit_affordance,
+    DeviceResizeState, GeometrySnapshot, GestureAuthorityError, HotkeyResizeDir,
+    HotkeyResizeOutcome, PortalRect, PortalResizeState, PortalWindowTokens, ResizeBounds,
+    ResizeEdge, ResizeOutcome, ResizePhase, ShellReservedShortcut, apply_hotkey_resize,
+    hit_affordance,
 };
 pub use scroll_indicator::{
     ScrollIndicatorGeometry, ScrollIndicatorTokens, compute_scroll_indicator,

@@ -95,7 +95,8 @@ use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{
     DragEventOutcome, FocusManager, HotkeyResizeDir, InputProcessor, KeyboardProcessor,
     PointerEvent, PointerEventKind, PortalRect, PortalResizeState, PortalWindowTokens,
-    RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ResizeBounds, apply_hotkey_resize,
+    RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ResizeBounds, ShellReservedShortcut,
+    apply_hotkey_resize,
 };
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
@@ -2458,36 +2459,92 @@ impl WinitApp {
         let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
 
-        // ── Portal resize hotkey intercept (§6b.2) ────────────────────────
+        // ── Input precedence order (§6b.2 + §6b.6) ───────────────────────
         //
-        // Ctrl+`+`/Ctrl+`=` (grow) and Ctrl+`-` (shrink) resize the focused
-        // portal tile. The hotkey is focus-scoped: only the portal that holds
-        // keyboard focus consumes it; other portals and non-portal tiles are
-        // unaffected.
+        // Priority (highest → lowest):
+        //   1. Safe-mode capture — ALL input captured by the chrome layer;
+        //      portals and agents never see it.
+        //   2. Shell/chrome-reserved shortcuts — win over portal resize hotkeys;
+        //      a reserved key is never consumed by a portal.
+        //   3. Composer (active composer region) — Ctrl+`+`/`=`/`-` are
+        //      composer shortcuts; portal resize MUST NOT steal them.
+        //   4. Portal resize hotkey — Ctrl+`+`/`=` grow, Ctrl+`-` shrink.
+        //   5. Normal routing — forwarded to the owning agent.
+
+        // ── Priority 1: Safe-mode capture ─────────────────────────────────
         //
-        // Per spec §6b.2: chrome/shell-reserved shortcuts and safe-mode capture
-        // take precedence over resize hotkeys. Both of those checks happen in
-        // the OS event path (Stage 1) before this function is called, so we
-        // only need to gate on focus and the Ctrl modifier here.
+        // When safe mode is active, ALL keystrokes belong to the chrome layer.
+        // Portal resize hotkeys are never reached; agents never see the event.
+        // We do NOT forward to agents; we do NOT consume portal shortcuts; we
+        // simply return silently (the chrome layer handles safe-mode input via
+        // the overlay render path, not through this dispatch function).
         //
-        // The hotkey is consumed (returns early) when applied so it does NOT
-        // propagate to the composer or the agent's raw KeyDown path.
+        // Only Ctrl+Shift+Escape (the safe-mode toggle itself) must still be
+        // processed — but that is handled before this function is called (in
+        // the OS event path, Stage 1) and never reaches here.
+        if let Ok(st) = self.state.shared_state.try_lock() {
+            if st.safe_mode_active {
+                tracing::debug!(
+                    key = %raw.key,
+                    "safe-mode capture: key dropped (safe mode active — chrome layer owns input)"
+                );
+                return;
+            }
+        }
+
+        // ── Priority 2: Shell/chrome-reserved shortcuts ───────────────────
         //
-        // COMPOSER PRECEDENCE (§4.4 beats §6b.2 when composer is active):
-        // A portal tile may contain an active composer region (e.g. a text
-        // input node inside a scrollable tile). When the composer is active,
-        // Ctrl+`+`/`=`/`-` are composer shortcuts (font-size, accept, etc.)
-        // and MUST NOT be stolen by the resize intercept. Skip the resize
-        // check entirely when a composer is active — the composer intercept
-        // immediately below will handle the key.
-        if !self.state.input_processor.is_composer_active() {
-            if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
-                if self.apply_portal_resize_hotkey(tab_id, dir) {
-                    tracing::debug!(
-                        key = %raw.key,
-                        "portal resize: Ctrl hotkey consumed (resize applied)"
-                    );
-                    return;
+        // Shell-reserved shortcuts (Ctrl+Tab, Ctrl+1..9, Ctrl+Shift+M, etc.)
+        // MUST win over portal resize hotkeys.  A reserved key is never
+        // consumed by a portal.  The portal-resize intercept is skipped so
+        // the reserved key is never consumed by a portal, but normal routing
+        // still runs so the key reaches the agent (e.g. chrome handles Ctrl+Tab
+        // at a higher layer, but the event is not suppressed here).
+        //
+        // Note: Ctrl+Shift+F8/F9 (monitor cycling) is handled even earlier —
+        // in the OS event path (Stage 1, `WindowEvent::KeyboardInput`) — so it
+        // never reaches this function at all.  The `is_reserved` check below
+        // handles the remaining reserved set that does reach here.
+        if ShellReservedShortcut::is_reserved(
+            &raw.key,
+            raw.modifiers.ctrl,
+            raw.modifiers.shift,
+            raw.modifiers.alt,
+        ) {
+            tracing::debug!(
+                key = %raw.key,
+                ctrl = raw.modifiers.ctrl,
+                shift = raw.modifiers.shift,
+                "shell-reserved shortcut: portal resize skipped (chrome layer handles)"
+            );
+            // Fall through to normal routing — the key may still need to be
+            // delivered to the agent (e.g. Ctrl+Tab dispatched as a chrome
+            // event, not suppressed entirely).  The important invariant is
+            // that portal resize DOES NOT consume it.
+        } else {
+            // ── Priority 4: Portal resize hotkey intercept (§6b.2) ────────
+            //
+            // Ctrl+`+`/Ctrl+`=` (grow) and Ctrl+`-` (shrink) resize the
+            // focused portal tile.  The hotkey is focus-scoped: only the
+            // portal that holds keyboard focus consumes it.
+            //
+            // COMPOSER PRECEDENCE (§4.4 / Priority 3 above):
+            // When a composer is active, Ctrl+`+`/`=`/`-` are composer
+            // shortcuts and MUST NOT be stolen by the resize intercept.
+            // Skip the resize check entirely; the composer intercept below
+            // will handle the key.
+            //
+            // The hotkey is consumed (returns early) when applied so it does
+            // NOT propagate to the composer or the agent's raw KeyDown path.
+            if !self.state.input_processor.is_composer_active() {
+                if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
+                    if self.apply_portal_resize_hotkey(tab_id, dir) {
+                        tracing::debug!(
+                            key = %raw.key,
+                            "portal resize: Ctrl hotkey consumed (resize applied)"
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -2548,7 +2605,24 @@ impl WinitApp {
     /// and broadcast it over the `INPUT_EVENTS` gRPC channel.
     ///
     /// Events are dropped silently when `current_owner` is `FocusOwner::None`.
+    ///
+    /// Safe-mode capture applies here as well: when safe mode is active, key-up
+    /// events are dropped so agents never see a key-release for a key-down that
+    /// was already captured by the chrome layer.
     fn dispatch_key_up_event(&mut self, raw: &RawKeyUpEvent) {
+        // ── Safe-mode capture ──────────────────────────────────────────────
+        // Mirror the key-down safe-mode guard: if safe mode is active, chrome
+        // owns ALL input including key-release events.
+        if let Ok(st) = self.state.shared_state.try_lock() {
+            if st.safe_mode_active {
+                tracing::debug!(
+                    key = %raw.key,
+                    "safe-mode capture: KeyUp dropped (safe mode active — chrome layer owns input)"
+                );
+                return;
+            }
+        }
+
         let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
@@ -2576,9 +2650,15 @@ impl WinitApp {
     /// log it, and broadcast it over the `INPUT_EVENTS` gRPC channel.
     ///
     /// Called both from `WindowEvent::Ime(Ime::Commit)` (IME path) and from
-    /// `Key::Character` in `WindowEvent::KeyboardInput` (direct input path).
+    /// `Key::Character` in `WindowEvent::KeyboardInput` (direct input path), as
+    /// well as the paste-shortcut path (Ctrl+V clipboard text).
     ///
     /// Events are dropped silently when `current_owner` is `FocusOwner::None`.
+    ///
+    /// # Safe-mode capture
+    ///
+    /// When safe mode is active, character events (including paste and IME commits)
+    /// are dropped so agents never receive character input while chrome owns input.
     ///
     /// # Composer interception (§4.1)
     ///
@@ -2587,6 +2667,18 @@ impl WinitApp {
     /// agent as a raw `CharacterEvent`.  Only `EditOutcome::Unchanged` (no
     /// active composer) allows the normal dispatch path.
     fn dispatch_character_event(&mut self, raw: &RawCharacterEvent) {
+        // ── Safe-mode capture ──────────────────────────────────────────────
+        // All character input (Key::Character, paste shortcut, IME commits) is
+        // captured by the chrome layer when safe mode is active.
+        if let Ok(st) = self.state.shared_state.try_lock() {
+            if st.safe_mode_active {
+                tracing::debug!(
+                    "safe-mode capture: CharacterEvent dropped (safe mode active — chrome layer owns input)"
+                );
+                return;
+            }
+        }
+
         let active_tab = self.active_tab_for_keyboard_dispatch();
         let Some(tab_id) = active_tab else { return };
 
