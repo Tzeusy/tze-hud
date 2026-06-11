@@ -423,6 +423,19 @@ impl ResidentGrpcPortalAdapter {
         &self.config.lease_id
     }
 
+    /// Returns the configured expanded-presentation viewport height in pixels.
+    ///
+    /// This is the default viewport height used as a fallback when the caller
+    /// has no live geometry snapshot (`state.geometry_batch` is `None`). It
+    /// equals `ResidentGrpcPortalConfig::expanded_bounds.height` as set at
+    /// adapter construction time (default: `DEFAULT_EXPANDED_H`).
+    ///
+    /// Used by the drain loop to populate `PortalAppendGeometry::viewport_height_px`
+    /// when no runtime geometry snapshot is available (hud-0528i).
+    pub fn config_expanded_height(&self) -> f32 {
+        self.config.expanded_bounds.height
+    }
+
     /// Record the tile ID returned by the resident `CreateTile` mutation.
     pub fn record_created_tile(&mut self, tile_id: Vec<u8>) {
         self.tile_id = Some(tile_id);

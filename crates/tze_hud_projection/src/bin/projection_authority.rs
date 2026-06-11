@@ -36,10 +36,11 @@
 //!   and currently logged at trace level. A structured telemetry bucket should
 //!   be added here once hud-ttq97 lands.
 //!
-//! - **hud-0528i** (follow-tail notify_tile_content_appended): after the adapter
-//!   emits a `RenderPortal` command, the caller should trigger
-//!   `notify_tile_content_appended` to advance the follow-tail scroll position.
-//!   See `TODO(hud-0528i)` comment in `drain_and_emit_portal_updates`.
+//! - **hud-0528i** (follow-tail notify_tile_content_appended): wired. After the
+//!   adapter emits a `RenderPortal` command, `CliPortalDrainRecord::append_geometry`
+//!   carries `new_content_height_px`, `viewport_height_px`, and `line_height_px` so
+//!   the runtime can call `InputProcessor::notify_tile_content_appended` immediately
+//!   after forwarding the drain record to the gRPC session (spec §3.2 / §3.3).
 //!
 //! - **hud-pkg2g** (head-trim notify_head_content_removed): when a transcript
 //!   head-trim prunes older units, the caller should trigger
@@ -190,6 +191,69 @@ impl PortalDriveState {
     }
 }
 
+/// Line-height multiplier used by the compositor's text shaper (text.rs).
+///
+/// `line_height_px = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER`
+///
+/// Must stay in sync with `tze_hud_compositor::text` — search for `1.4` there.
+/// When the compositor's multiplier changes, update this constant in the same PR.
+const PORTAL_LINE_HEIGHT_MULTIPLIER: f32 = 1.4;
+
+/// Geometry data required by the runtime to call
+/// `InputProcessor::notify_tile_content_appended` after a `RenderPortal`.
+///
+/// The runtime (caller of the stdio drain output) has the `SceneId` / tile
+/// handle, but the geometry values used to compute the follow-tail offset must
+/// come from the projection authority side because only this process knows
+/// the transcript line count and the current design-token font size.
+///
+/// # How to use (runtime side)
+///
+/// After reading a `CliPortalDrainRecord` with `command_kind = render_portal`
+/// and `append_geometry = Some(g)`:
+///
+/// ```text
+/// input_processor.notify_tile_content_appended(
+///     tile_id,                  // SceneId from the caller's tile registry
+///     g.new_content_height_px,
+///     g.viewport_height_px,
+///     g.line_height_px,
+///     &mut scene,
+/// );
+/// ```
+///
+/// The call is a no-op when the tile is `ScrolledBack` (spec §3.3 — appends
+/// do not disturb a scrolled-back viewport). It advances by whole lines when
+/// the tile is `AtTail` (spec §3.2).
+#[derive(Debug, Clone, Copy, Serialize)]
+struct PortalAppendGeometry {
+    /// Estimated total content height (physical pixels) of the visible
+    /// transcript after this append, computed as:
+    ///   `visible_transcript_units * line_height_px`
+    ///
+    /// This is a whole-line estimate consistent with the text shaper's
+    /// `content_height = lines * line_height` contract. It is suitable for
+    /// `notify_tile_content_appended`'s `new_content_height_px` argument.
+    pub new_content_height_px: f32,
+    /// Visible viewport height of the portal tile in physical pixels.
+    ///
+    /// Taken from `state.geometry_batch.latest.rect.height_px` when a geometry
+    /// snapshot is present; otherwise falls back to the adapter's configured
+    /// `expanded_bounds.height` (the bounds the adapter was created with).
+    ///
+    /// The caller passes this as `viewport_height_px` to
+    /// `notify_tile_content_appended`.
+    pub viewport_height_px: f32,
+    /// Logical line height in physical pixels, computed as:
+    ///   `transcript_font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER`
+    ///
+    /// Must match the value used by the text shaper when laying out this
+    /// portal's transcript lines. Passed as `line_height_px` to
+    /// `notify_tile_content_appended` so follow-tail advancement is snapped
+    /// to whole lines.
+    pub line_height_px: f32,
+}
+
 /// Serialized form of one drained portal update produced by the drive loop.
 ///
 /// Drain records are embedded in `CliOperationResult.portal_drain` and
@@ -242,6 +306,21 @@ struct CliPortalDrainRecord {
     budget_us: u64,
     /// True when `elapsed_us <= budget_us`.
     within_budget: bool,
+    /// Geometry for the runtime to call `InputProcessor::notify_tile_content_appended`.
+    ///
+    /// Present only for `command_kind = render_portal` (content appended to an
+    /// existing tile). `None` for `create_portal_tile` (first render) and
+    /// `release_lease`.
+    ///
+    /// After reading this record the runtime MUST call
+    /// `input_processor.notify_tile_content_appended(tile_id, g.new_content_height_px,
+    /// g.viewport_height_px, g.line_height_px, &mut scene)` to advance the
+    /// follow-tail scroll position (spec §3.2) or leave it unchanged when the
+    /// tile is scrolled-back (spec §3.3).
+    ///
+    /// **Wired by hud-0528i.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    append_geometry: Option<PortalAppendGeometry>,
 }
 
 /// Serializable variant of `ResidentGrpcPortalCommandKind`.
@@ -1105,15 +1184,34 @@ fn dispatch_set_token_map(
 /// served in the order the coalescer tracks, preventing starvation under equal
 /// sustained input rates (tasks.md §5.1, §5.4).
 ///
+/// ## Follow-tail wiring (hud-0528i)
+///
+/// For every `RenderPortal` record, `append_geometry` carries the geometry
+/// needed by the runtime to call `InputProcessor::notify_tile_content_appended`.
+/// The runtime MUST make this call (spec §3.2 / §3.3) immediately after
+/// forwarding the drain record to the gRPC session layer:
+///
+/// ```text
+/// for record in drain_records {
+///     if record.command_kind == "render_portal" {
+///         if let Some(g) = record.append_geometry {
+///             input_processor.notify_tile_content_appended(
+///                 tile_id,               // SceneId from caller's registry
+///                 g.new_content_height_px,
+///                 g.viewport_height_px,
+///                 g.line_height_px,
+///                 &mut scene,
+///             );
+///         }
+///     }
+/// }
+/// ```
+///
 /// ## Hook points
 ///
 /// - **hud-ttq97** (telemetry bucket): `submitted_at_us` in each
 ///   `CliPortalDrainRecord` captures the arrival→present latency anchor.
 ///   A structured bucket should be emitted here once hud-ttq97 lands.
-///
-/// - **hud-0528i** (follow-tail notify): after `RenderPortal`, the caller
-///   should trigger `notify_tile_content_appended` to advance the follow-tail
-///   scroll position. Leave a TODO comment so the hook point is visible.
 ///
 /// - **hud-pkg2g** (head-trim notify): when the transcript head is pruned,
 ///   the caller should trigger `notify_head_content_removed`. This fires when
@@ -1210,11 +1308,42 @@ fn drain_and_emit_portal_updates(
             tze_hud_projection::ProjectedPortalPresentation::Collapsed => "collapsed".to_string(),
         };
 
-        // TODO(hud-0528i): after RenderPortal, trigger notify_tile_content_appended
-        // on the tile so the follow-tail scroll position advances. Hook point:
-        //   if matches!(command_kind, ResidentGrpcPortalCommandKind::RenderPortal) {
-        //       notify_tile_content_appended(tile_id, ...);
-        //   }
+        // hud-0528i: build append_geometry for RenderPortal so the runtime can
+        // call InputProcessor::notify_tile_content_appended (spec §3.2 / §3.3).
+        //
+        // Only set for RenderPortal (content appended to an existing tile). The
+        // CreatePortalTile path is the first render — no prior content to advance.
+        //
+        // The geometry values are derived from:
+        //   - line_height_px     = transcript_font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER
+        //                         (matches tze_hud_compositor::text — same multiplier)
+        //   - new_content_height = visible_transcript_units * line_height_px
+        //                         (whole-line estimate, consistent with the shaper contract)
+        //   - viewport_height    = geometry_batch.latest.rect.height_px when a live
+        //                         geometry snapshot is present; else the adapter's
+        //                         configured expanded_bounds.height
+        let append_geometry = if matches!(command_kind, ResidentGrpcPortalCommandKind::RenderPortal)
+        {
+            let line_height_px =
+                adapter.visual_tokens().transcript_font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
+            let visible_units = update.visible_transcript.len();
+            let new_content_height_px = visible_units as f32 * line_height_px;
+            // Viewport height: prefer the live geometry snapshot (most accurate after
+            // a resize), fall back to the adapter's configured expanded bounds.
+            let viewport_height_px = state
+                .geometry_batch
+                .as_ref()
+                .and_then(|gb| gb.latest)
+                .map(|snap| snap.rect.height_px as f32)
+                .unwrap_or_else(|| adapter.config_expanded_height());
+            Some(PortalAppendGeometry {
+                new_content_height_px,
+                viewport_height_px,
+                line_height_px,
+            })
+        } else {
+            None
+        };
 
         // TODO(hud-pkg2g): when update.visible_transcript_bytes < previous bytes,
         // a head-trim occurred. Trigger notify_head_content_removed so scroll
@@ -1246,6 +1375,7 @@ fn drain_and_emit_portal_updates(
             elapsed_us,
             budget_us,
             within_budget,
+            append_geometry,
         });
     }
 
@@ -1732,5 +1862,425 @@ mod tests {
         // The portal markdown is rendered — just verify it is non-empty
         // (the actual color application is in the proto message layer).
         assert!(!after[0].portal_markdown.is_empty());
+    }
+
+    // ── Part (c): hud-0528i — follow-tail trigger via drain/present path ──────
+    //
+    // These tests prove that:
+    // 1. A RenderPortal drain record carries correct append_geometry (non-None,
+    //    non-zero values consistent with the transcript and token font size).
+    // 2. The geometry values, when fed to InputProcessor::notify_tile_content_appended,
+    //    advance an at-tail tile (spec §3.2).
+    // 3. The same call does NOT disturb a scrolled-back tile (spec §3.3).
+    //
+    // The runtime (caller of this binary's stdout) is responsible for the
+    // actual InputProcessor call; these tests simulate that call to close the
+    // end-to-end loop from the drain path.
+
+    /// A second `PublishOutput` (which triggers `RenderPortal`) must produce a
+    /// drain record with `append_geometry = Some(...)` carrying positive,
+    /// finite geometry values derived from the transcript line count and the
+    /// adapter's font-size token.
+    ///
+    /// This guards the geometry plumbing: if the adapter tokens are not
+    /// resolved or the transcript is empty, the values would be 0 / NaN.
+    #[test]
+    fn render_portal_drain_record_carries_append_geometry() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let token_a = attach_projection(&mut authority, "proj-a");
+        drive.attach_adapter("proj-a", Vec::new());
+
+        // First publish — produces CreatePortalTile (no tile registered yet).
+        publish_output(&mut authority, "proj-a", &token_a, "line one", 20);
+        let first = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+        assert_eq!(first.len(), 1, "first drain must produce one record");
+        // CreatePortalTile: no tile_id yet → append_geometry must be None
+        // (first render, not an append into existing tile).
+        assert!(
+            first[0].append_geometry.is_none(),
+            "CreatePortalTile must not carry append_geometry; got {:?}",
+            first[0].append_geometry
+        );
+
+        // Simulate the runtime recording the created tile id (so the adapter
+        // knows a tile exists and the next drain produces RenderPortal).
+        let fake_tile_id = vec![0xAB, 0xCD];
+        drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .record_created_tile(fake_tile_id);
+
+        // Second publish after rate window — produces RenderPortal.
+        let ts2 = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 25;
+        publish_output(&mut authority, "proj-a", &token_a, "line two", ts2);
+        let second = drain_and_emit_portal_updates(&mut authority, &mut drive, ts2);
+        assert_eq!(second.len(), 1, "second drain must produce one record");
+
+        // RenderPortal: append_geometry must be Some with positive finite values.
+        let g = second[0]
+            .append_geometry
+            .expect("RenderPortal must carry append_geometry");
+
+        assert!(
+            g.line_height_px > 0.0 && g.line_height_px.is_finite(),
+            "line_height_px must be positive finite; got {}",
+            g.line_height_px
+        );
+        // line_height_px = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER (1.4)
+        // Default transcript_font_size_px = 13.0 → line_height_px ≈ 18.2
+        let expected_line_h = 13.0_f32 * PORTAL_LINE_HEIGHT_MULTIPLIER;
+        assert!(
+            (g.line_height_px - expected_line_h).abs() < 0.1,
+            "line_height_px must be font_size({}) * {} = {}; got {}",
+            13.0_f32,
+            PORTAL_LINE_HEIGHT_MULTIPLIER,
+            expected_line_h,
+            g.line_height_px
+        );
+
+        assert!(
+            g.viewport_height_px > 0.0 && g.viewport_height_px.is_finite(),
+            "viewport_height_px must be positive finite; got {}",
+            g.viewport_height_px
+        );
+
+        assert!(
+            g.new_content_height_px > 0.0 && g.new_content_height_px.is_finite(),
+            "new_content_height_px must be positive finite; got {}",
+            g.new_content_height_px
+        );
+
+        // new_content_height_px = visible_units * line_height_px (≥ 1 unit)
+        assert!(
+            g.new_content_height_px >= g.line_height_px,
+            "new_content_height_px ({}) must be >= line_height_px ({})",
+            g.new_content_height_px,
+            g.line_height_px
+        );
+    }
+
+    /// End-to-end spec §3.2 from the drain path:
+    ///
+    /// After a `RenderPortal` drain record, the runtime calls
+    /// `InputProcessor::notify_tile_content_appended` with the geometry from
+    /// `append_geometry`. An at-tail tile MUST advance its scroll offset by
+    /// whole lines.
+    ///
+    /// This closes the loop from the drain path all the way through the input
+    /// processor (the full runtime path without a live gRPC session).
+    ///
+    /// # Viewport sizing strategy
+    ///
+    /// The drain loop derives `viewport_height_px` from `state.geometry_batch` when
+    /// a geometry snapshot is present (preferred), or falls back to the adapter's
+    /// configured `expanded_bounds.height`. To make the content overflow and trigger
+    /// follow-tail advancement, we:
+    ///   1. Push a geometry snapshot with a small viewport (1 line height) so the
+    ///      drain geometry reflects a 1-line tall tile.
+    ///   2. Create the scene tile with the same 1-line viewport so the scroll
+    ///      state is consistent.
+    ///   3. Publish 10 transcript units — `new_content_height_px` = 10 × line_h,
+    ///      which overflows the 1-line viewport and triggers a whole-line advance.
+    #[test]
+    fn drain_append_geometry_at_tail_tile_advances_scroll_offset() {
+        use tze_hud_input::InputProcessor;
+        use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect};
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let token_a = attach_projection(&mut authority, "proj-a");
+        drive.attach_adapter("proj-a", Vec::new());
+
+        // Compute line height from default token font size.
+        let line_height_px = 13.0_f32 * PORTAL_LINE_HEIGHT_MULTIPLIER;
+
+        // Push a geometry snapshot with a 1-line viewport so the drain geometry
+        // uses a small enough viewport that a few transcript units overflow.
+        // viewport_height_px = 1 * line_height_px; we use the nearest integer.
+        let viewport_h = (1.0 * line_height_px).ceil() as i32;
+        authority.push_geometry_snapshot(
+            "proj-a",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: viewport_h,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        // Scene tile: match the geometry snapshot viewport height.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 600.0, viewport_h as f32),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                tze_hud_scene::TileScrollConfig {
+                    scrollable_x: false,
+                    scrollable_y: true,
+                    content_width: None,
+                    content_height: None,
+                },
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+
+        // First publish → CreatePortalTile (no tile yet).
+        publish_output(&mut authority, "proj-a", &token_a, "unit-0", 20);
+        let _ = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+
+        // Register tile in the adapter (simulates the runtime recording the tile).
+        let fake_tile: Vec<u8> = tile_id.to_bytes_le().to_vec();
+        drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .record_created_tile(fake_tile);
+
+        // Prime the scroll state with 1 unit at current viewport height.
+        processor.notify_tile_content_appended(
+            tile_id,
+            1.0 * line_height_px,
+            viewport_h as f32,
+            line_height_px,
+            &mut scene,
+        );
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "tile must start at-tail"
+        );
+
+        // Publish 9 more units → 10 units total (9 units overflow 1-line viewport).
+        let ts_base = PORTAL_UPDATE_RATE_WINDOW_WALL_US;
+        for i in 1..=9_u64 {
+            let ts = ts_base + i * 10 + 25;
+            publish_output(&mut authority, "proj-a", &token_a, &format!("unit-{i}"), ts);
+        }
+        // Drain at the last timestamp so all 9 are coalesced.
+        let ts_drain = ts_base + 9 * 10 + 25;
+        let drain = drain_and_emit_portal_updates(&mut authority, &mut drive, ts_drain);
+        assert_eq!(drain.len(), 1, "drain must produce one record");
+
+        let g = drain[0]
+            .append_geometry
+            .expect("RenderPortal must carry append_geometry");
+
+        // viewport_height_px must come from the geometry snapshot, not the
+        // adapter config default (360px).
+        assert!(
+            (g.viewport_height_px - viewport_h as f32).abs() < 1.0,
+            "viewport_height_px must come from geometry_batch; expected {} got {}",
+            viewport_h,
+            g.viewport_height_px
+        );
+
+        // Simulate the runtime calling notify_tile_content_appended with drain geometry.
+        let changed = processor.notify_tile_content_appended(
+            tile_id,
+            g.new_content_height_px,
+            g.viewport_height_px,
+            g.line_height_px,
+            &mut scene,
+        );
+
+        // Spec §3.2: at-tail tile must advance.
+        assert!(
+            changed,
+            "spec §3.2: at-tail tile must advance scroll offset after append; \
+             new_content_h={} viewport_h={} line_h={} changed=false",
+            g.new_content_height_px, g.viewport_height_px, g.line_height_px
+        );
+        let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            offset_y > 0.0,
+            "spec §3.2: scroll offset must be positive after at-tail advance; got {offset_y}"
+        );
+        // The offset is clamped to `(new_content_height - viewport_height).max(0)` (the
+        // tail boundary). The tail boundary is NOT required to be a whole-line multiple
+        // since viewport_h may be non-integer. Verify that the unclamped advancement was
+        // a whole-line multiple: i.e. offset_y ≤ tail_offset, and either the offset is a
+        // whole-line multiple OR it equals the tail offset (clamped case).
+        let tail_offset = (g.new_content_height_px - g.viewport_height_px).max(0.0);
+        let remainder = offset_y % g.line_height_px;
+        let at_tail_boundary = (offset_y - tail_offset).abs() < 0.5;
+        let whole_line = remainder < 0.5;
+        assert!(
+            whole_line || at_tail_boundary,
+            "spec §3.2: offset must be a whole-line multiple or clamped to tail boundary; \
+             offset={offset_y} tail={tail_offset} line_h={} remainder={remainder}",
+            g.line_height_px
+        );
+        // Tile stays at-tail in the scene.
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "spec §3.2: tile must remain at-tail in scene after advance"
+        );
+    }
+
+    /// End-to-end spec §3.3 from the drain path:
+    ///
+    /// After a user scroll-back, a `RenderPortal` drain record is produced and
+    /// the runtime calls `InputProcessor::notify_tile_content_appended` with the
+    /// geometry from `append_geometry`. A scrolled-back tile MUST NOT change its
+    /// scroll offset.
+    #[test]
+    fn drain_append_geometry_scrolled_back_tile_is_stable() {
+        use tze_hud_input::{InputProcessor, ScrollEvent};
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let token_a = attach_projection(&mut authority, "proj-a");
+        drive.attach_adapter("proj-a", Vec::new());
+
+        // Scene setup.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let viewport_h = 200.0_f32;
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 600.0, viewport_h),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                tze_hud_scene::TileScrollConfig {
+                    scrollable_x: false,
+                    scrollable_y: true,
+                    content_width: None,
+                    content_height: None,
+                },
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+        let line_h = 13.0_f32 * PORTAL_LINE_HEIGHT_MULTIPLIER;
+
+        // First publish → CreatePortalTile.
+        publish_output(&mut authority, "proj-a", &token_a, "initial line", 20);
+        let _ = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+
+        // Register tile.
+        let fake_tile: Vec<u8> = tile_id.to_bytes_le().to_vec();
+        drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .record_created_tile(fake_tile);
+
+        // Prime scroll state with enough content that the tile can scroll back.
+        // 20 lines of content: max_scroll = 20 * line_h - viewport_h.
+        let initial_content_h = 20.0 * line_h;
+        processor.notify_tile_content_appended(
+            tile_id,
+            initial_content_h,
+            viewport_h,
+            line_h,
+            &mut scene,
+        );
+
+        // Scroll to the tail, then scroll back.
+        let max_scroll = initial_content_h - viewport_h;
+        let _ = processor.process_scroll_event(
+            &ScrollEvent {
+                x: 300.0,
+                y: 100.0,
+                delta_x: 0.0,
+                delta_y: max_scroll,
+            },
+            &mut scene,
+        );
+        // Scroll back 6 lines.
+        let _ = processor.process_scroll_event(
+            &ScrollEvent {
+                x: 300.0,
+                y: 100.0,
+                delta_x: 0.0,
+                delta_y: -6.0 * line_h,
+            },
+            &mut scene,
+        );
+        assert!(
+            !scene.tile_follow_tail_at_tail(tile_id),
+            "tile must be ScrolledBack after user scrolled up"
+        );
+        let (_, offset_before) = scene.tile_scroll_offset_local(tile_id);
+
+        // Second publish (RenderPortal) — more content appended.
+        let ts2 = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 25;
+        publish_output(
+            &mut authority,
+            "proj-a",
+            &token_a,
+            "extra line twenty-one\nextra line twenty-two",
+            ts2,
+        );
+        let drain = drain_and_emit_portal_updates(&mut authority, &mut drive, ts2);
+        assert_eq!(drain.len(), 1);
+
+        let g = drain[0]
+            .append_geometry
+            .expect("RenderPortal must carry append_geometry");
+
+        // Runtime call: simulate notify with drain geometry.
+        let changed = processor.notify_tile_content_appended(
+            tile_id,
+            g.new_content_height_px,
+            g.viewport_height_px,
+            g.line_height_px,
+            &mut scene,
+        );
+
+        // Spec §3.3: scrolled-back tile must NOT change offset.
+        assert!(
+            !changed,
+            "spec §3.3: scrolled-back tile must NOT advance on append; changed=true"
+        );
+        let (_, offset_after) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (offset_after - offset_before).abs() < 1.0,
+            "spec §3.3: offset must be stable after append on scrolled-back tile; \
+             before={offset_before} after={offset_after}"
+        );
+        // Anchor must remain scrolled-back.
+        assert!(
+            !scene.tile_follow_tail_at_tail(tile_id),
+            "spec §3.3: tile must remain ScrolledBack in scene after append"
+        );
     }
 }
