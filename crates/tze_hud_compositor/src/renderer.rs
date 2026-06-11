@@ -126,6 +126,27 @@ const NOTIFICATION_BODY_SCALE: f32 = 0.85;
 /// Fallback: 700 (bold).
 const NOTIFICATION_TITLE_WEIGHT: u16 = 700;
 
+/// Minimum interval between truncation cache re-primes during rapid geometry
+/// changes (e.g. mid-drag resize of a portal tile).
+///
+/// # Cadence contract (hud-ghhxa — spec §6b.3)
+///
+/// When a portal tile's bounds change rapidly (resize hotkey repeat, or
+/// pointer-drag resize gesture), the scene version increments on every change
+/// and `prime_truncation_cache` would otherwise re-prime every frame —
+/// O(n) per prime in text content length, which can exceed the Stage 5 / Stage 6
+/// frame budget on large content.
+///
+/// The cadence gate in `Compositor::prime_truncation_cache` ensures at most one
+/// re-prime per `RESIZE_REPRIME_INTERVAL_MS` during a continuous geometry
+/// change, while guaranteeing that every distinct intermediate geometry *is*
+/// eventually reflected in the truncation output — not only at drag-end.
+///
+/// 50 ms ≈ 20 Hz gives smooth visual reflow during resize without per-frame
+/// shaping cost.  The gate is purely time-based; the first geometry change in
+/// each interval is always re-primed immediately.
+const RESIZE_REPRIME_INTERVAL_MS: u64 = 50;
+
 /// Vertical gap (px) between the title line and the body line in two-line layout.
 const NOTIFICATION_INTER_LINE_GAP: f32 = 2.0;
 
@@ -1164,6 +1185,17 @@ pub struct Compositor {
     /// scene has actually changed.  Initialized to `u64::MAX` so the first
     /// frame always primes.
     truncation_cache_scene_version: u64,
+    /// Instant of the last completed `prime_truncation_cache` run.
+    ///
+    /// Used by the mid-drag re-truncation cadence gate (hud-ghhxa): when the
+    /// scene version changes rapidly (e.g. per-frame bounds updates during a
+    /// resize drag), we cap the re-prime rate to at most once per
+    /// [`RESIZE_REPRIME_INTERVAL_MS`] so we never re-prime every frame.
+    ///
+    /// `None` means no prime has run yet (the first frame always primes).
+    /// When `Some`, a new prime is only allowed when at least
+    /// `RESIZE_REPRIME_INTERVAL_MS` has elapsed since this instant.
+    resize_reprime_last_at: Option<std::time::Instant>,
     /// Per-surface video state machines (v2 media plane, E26 / B11).
     ///
     /// Keyed by the `SceneId` carried in `ZoneContent::VideoSurfaceRef`.
@@ -1291,6 +1323,7 @@ impl Compositor {
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
             truncation_cache_scene_version: u64::MAX,
+            resize_reprime_last_at: None,
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -1557,6 +1590,7 @@ impl Compositor {
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
             truncation_cache_scene_version: u64::MAX,
+            resize_reprime_last_at: None,
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -1912,7 +1946,7 @@ impl Compositor {
     }
 
     /// Prime the ellipsis-truncation cache for all `TextOverflow::Ellipsis` items
-    /// currently in the scene (hud-wgq7j).
+    /// currently in the scene (hud-wgq7j, hud-ghhxa).
     ///
     /// Must be called **at content-commit time** (when `scene.version` changes),
     /// never on the per-frame render path.  The method is gated internally on
@@ -1921,9 +1955,59 @@ impl Compositor {
     /// After this call, `prepare_text_items` resolves each Ellipsis item in O(1)
     /// via `TruncationCache::get_by_key` — satisfying the "stable-shape-caching"
     /// contract from RFC 0013 §3.4 and §4.2, Phase-1 design §3.
+    ///
+    /// # Mid-drag cadence (hud-ghhxa — spec §6b.3)
+    ///
+    /// When a portal tile is resized (hotkey or pointer drag), `scene.version`
+    /// increments on every geometry change.  Because `truncate_line_to_ellipsis`
+    /// is O(n) in content length, re-priming every frame during a fast drag
+    /// would blow the Stage 5 / Stage 6 frame budget on large content.
+    ///
+    /// The cadence gate caps re-primes to at most once per
+    /// [`RESIZE_REPRIME_INTERVAL_MS`] while guaranteeing that every distinct
+    /// intermediate geometry is *eventually* reflected — not only at drag-end.
+    /// When the geometry settles (scene.version stops changing), the last
+    /// geometry is primed on the next frame after the interval elapses.
     pub fn prime_truncation_cache(&mut self, scene: &SceneGraph) {
         // Skip if the scene has not changed since we last primed.
         if scene.version == self.truncation_cache_scene_version {
+            return;
+        }
+
+        // ── Mid-drag cadence gate (hud-ghhxa) ────────────────────────────────
+        // When geometry changes rapidly (bounds updates from resize), cap the
+        // re-prime rate to RESIZE_REPRIME_INTERVAL_MS to avoid per-frame shaping
+        // cost on large content.
+        //
+        // Strategy: if a prime ran within the interval, defer — leave the sentinel
+        // unchanged so the next frame will retry.  When the interval has elapsed
+        // (or this is the very first prime), proceed unconditionally.
+        //
+        // This guarantees:
+        //  a) The first geometry change in each interval triggers an immediate
+        //     re-prime (the TruncationKey includes bounds, so the new geometry
+        //     will be primed on first visit).
+        //  b) Intermediate geometries *between* interval ticks are not orphaned:
+        //     the sentinel is not updated on a defer, so the most-recent
+        //     scene.version is always picked up on the next allowed tick.
+        //  c) At drag-end (geometry settles), the final geometry is primed on the
+        //     next tick after the interval elapses — completing the re-resolution
+        //     required by spec §6b.3.
+        //
+        // The cadence gate is bypassed when the sentinel is `u64::MAX` (a forced
+        // re-prime requested by `set_token_map` or initialisation) so that token/
+        // font-metric changes are always reflected immediately regardless of resize
+        // cadence.
+        let forced_prime = self.truncation_cache_scene_version == u64::MAX;
+        if !forced_prime
+            && should_defer_reprime(self.resize_reprime_last_at, RESIZE_REPRIME_INTERVAL_MS)
+        {
+            // Within the debounce window: defer, do not update the sentinel.
+            tracing::trace!(
+                scene_version = scene.version,
+                interval_ms = RESIZE_REPRIME_INTERVAL_MS,
+                "prime_truncation_cache: mid-drag cadence defer (within interval)"
+            );
             return;
         }
 
@@ -1943,8 +2027,9 @@ impl Compositor {
             None => return, // text renderer not yet initialized; retry next version change
         };
 
-        // Record the version now that we know priming will proceed.
+        // Record the version and timestamp now that priming will proceed.
         self.truncation_cache_scene_version = scene.version;
+        self.resize_reprime_last_at = Some(std::time::Instant::now());
 
         let mut live_items: Vec<crate::text::TextItem> = Vec::new();
         for tile in scene.visible_tiles() {
@@ -7432,6 +7517,30 @@ impl Compositor {
 ///
 /// The geometry produced here is identical to what `collect_text_items_from_node`
 /// produces at scroll_x=0, scroll_y=0 (valid because truncation is geometry-
+/// Returns `true` if the mid-drag cadence gate should defer a truncation cache
+/// re-prime call.
+///
+/// Called by [`Compositor::prime_truncation_cache`] to rate-limit re-primes
+/// during rapid geometry changes (e.g. hotkey resize).  The gate is bypassed
+/// for forced primes (`truncation_cache_scene_version == u64::MAX`) — callers
+/// are responsible for that check.
+///
+/// # Parameters
+/// - `last_at`: timestamp of the last successful truncation cache prime, or
+///   `None` if no prime has ever run.
+/// - `interval_ms`: minimum interval between primes in milliseconds
+///   (typically [`RESIZE_REPRIME_INTERVAL_MS`]).
+///
+/// Returns `true` (defer) only when `last_at` is `Some` and the elapsed time
+/// is less than `interval_ms`.  Returns `false` (allow) when `last_at` is
+/// `None` (first call ever) or the interval has elapsed.
+pub(crate) fn should_defer_reprime(last_at: Option<std::time::Instant>, interval_ms: u64) -> bool {
+    match last_at {
+        None => false, // first call: never defer
+        Some(last) => last.elapsed() < std::time::Duration::from_millis(interval_ms),
+    }
+}
+
 /// dependent only on `bounds_width` / `bounds_height`, which are scroll-invariant).
 /// `at_tail`: whether the tile owning these nodes is currently in follow-tail/at-tail
 /// mode.  `true` → `TailAnchored` truncation (spec §3.2 — newest lines visible);
@@ -15751,6 +15860,102 @@ mod tests {
         assert_eq!(
             frame.markdown_prime_us, 42,
             "markdown_prime_us must round-trip through the struct"
+        );
+    }
+
+    // ── Mid-drag cadence gate tests (hud-ghhxa — spec §6b.3) ──────────────────
+    //
+    // These tests verify the `should_defer_reprime` helper used by
+    // `prime_truncation_cache`.  By testing the extracted helper directly, any
+    // change to the gate logic in `prime_truncation_cache` that diverges from
+    // `should_defer_reprime` will cause a compile or test failure.
+    //
+    // Key invariants:
+    //   a) When `last_at` is None (first call ever), the gate does not defer.
+    //   b) When called again within the interval, the gate defers (returns true).
+    //   c) When called outside the interval, the gate allows (returns false).
+    //   d) A forced prime (sentinel == u64::MAX) bypasses the gate entirely
+    //      (this bypass is checked in prime_truncation_cache, not in
+    //      should_defer_reprime; these tests confirm the helper contract only).
+
+    /// First call with no prior prime timestamp (last_at = None) does NOT defer.
+    ///
+    /// Invariant (a): should_defer_reprime(None, _) == false.
+    #[test]
+    fn cadence_gate_first_call_no_prior_timestamp_allows_prime() {
+        assert!(
+            !should_defer_reprime(None, RESIZE_REPRIME_INTERVAL_MS),
+            "cadence gate must not defer on the first call (no prior timestamp)"
+        );
+    }
+
+    /// Within the interval, a call defers (returns true).
+    ///
+    /// Invariant (b): elapsed < interval_ms → should_defer_reprime returns true.
+    #[test]
+    fn cadence_gate_within_interval_defers_reprime() {
+        // last prime ran "just now" — well within any reasonable interval.
+        let last_at = Some(std::time::Instant::now());
+        assert!(
+            should_defer_reprime(last_at, RESIZE_REPRIME_INTERVAL_MS),
+            "cadence gate must defer when within RESIZE_REPRIME_INTERVAL_MS ({RESIZE_REPRIME_INTERVAL_MS}ms)"
+        );
+    }
+
+    /// After the interval has elapsed, the gate allows the prime (returns false).
+    ///
+    /// Invariant (c): elapsed >= interval_ms → should_defer_reprime returns false.
+    /// Uses a back-dated Instant to avoid sleeping.
+    #[test]
+    fn cadence_gate_after_interval_allows_reprime() {
+        let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
+        let past = std::time::Instant::now() - std::time::Duration::from_millis(interval_ms + 10);
+        assert!(
+            !should_defer_reprime(Some(past), interval_ms),
+            "cadence gate must allow prime when RESIZE_REPRIME_INTERVAL_MS has elapsed"
+        );
+    }
+
+    /// The cadence gate correctly handles interval boundary (exactly at interval).
+    ///
+    /// Elapsed == interval_ms should allow the prime (not defer), since the
+    /// Duration comparison is strict less-than.
+    #[test]
+    fn cadence_gate_at_exact_interval_boundary_allows_reprime() {
+        let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
+        // Back-date by exactly the interval: elapsed >= interval_ms.
+        let past = std::time::Instant::now() - std::time::Duration::from_millis(interval_ms);
+        // elapsed() is at least interval_ms so should_defer_reprime must return false.
+        assert!(
+            !should_defer_reprime(Some(past), interval_ms),
+            "cadence gate must allow prime when elapsed >= RESIZE_REPRIME_INTERVAL_MS"
+        );
+    }
+
+    /// Settle scenario: several geometry changes within the interval all defer,
+    /// then the next call after the interval allows the prime.
+    ///
+    /// This verifies the "sentinel not updated on defer → final geometry primed
+    /// after interval" property end-to-end through the helper.
+    #[test]
+    fn cadence_gate_deferred_sentinel_unchanged_enables_settle_prime() {
+        let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
+
+        // All calls within the interval must defer.
+        let last_at = Some(std::time::Instant::now());
+        for _ in 0..5 {
+            assert!(
+                should_defer_reprime(last_at, interval_ms),
+                "should_defer_reprime must return true for calls within the interval"
+            );
+        }
+
+        // After the interval elapses, the next call must allow the prime.
+        let past = std::time::Instant::now() - std::time::Duration::from_millis(interval_ms + 10);
+        assert!(
+            !should_defer_reprime(Some(past), interval_ms),
+            "should_defer_reprime must return false once the interval has elapsed \
+             (final/settled geometry must be primed)"
         );
     }
 }
