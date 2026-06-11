@@ -1120,7 +1120,11 @@ struct WindowedRuntimeState {
     /// portal tile; retained across keystrokes to maintain the monotonic
     /// sequence counter (which the adapter uses to detect skipped snapshots).
     ///
-    /// Entries are removed when a tile is removed from the scene.
+    /// NOTE: entries are not currently pruned when a tile is removed from the
+    /// scene. The map grows at most one entry per distinct portal tile seen
+    /// during the session (bounded by the number of portal tiles ever created),
+    /// so the leak is bounded. Proper cleanup on tile removal is tracked in
+    /// hud-38236 (constraint-authority follow-up).
     portal_resize_states: std::collections::HashMap<tze_hud_scene::SceneId, PortalResizeState>,
 }
 
@@ -2468,13 +2472,23 @@ impl WinitApp {
         //
         // The hotkey is consumed (returns early) when applied so it does NOT
         // propagate to the composer or the agent's raw KeyDown path.
-        if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
-            if self.apply_portal_resize_hotkey(tab_id, dir) {
-                tracing::debug!(
-                    key = %raw.key,
-                    "portal resize: Ctrl hotkey consumed (resize applied)"
-                );
-                return;
+        //
+        // COMPOSER PRECEDENCE (§4.4 beats §6b.2 when composer is active):
+        // A portal tile may contain an active composer region (e.g. a text
+        // input node inside a scrollable tile). When the composer is active,
+        // Ctrl+`+`/`=`/`-` are composer shortcuts (font-size, accept, etc.)
+        // and MUST NOT be stolen by the resize intercept. Skip the resize
+        // check entirely when a composer is active — the composer intercept
+        // immediately below will handle the key.
+        if !self.state.input_processor.is_composer_active() {
+            if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
+                if self.apply_portal_resize_hotkey(tab_id, dir) {
+                    tracing::debug!(
+                        key = %raw.key,
+                        "portal resize: Ctrl hotkey consumed (resize applied)"
+                    );
+                    return;
+                }
             }
         }
 
@@ -2682,8 +2696,9 @@ impl WinitApp {
     /// Looks up the currently focused tile in `tab_id`. If the focused tile is
     /// a portal tile (has a registered scroll config), applies the resize step
     /// locally (local-first per §6b.2), updates the scene tile bounds, and
-    /// dispatches a `GeometryChanged` affordance event to the tile's owning
-    /// adapter via the `INPUT_EVENTS` channel.
+    /// broadcasts an `ElementRepositionedEvent` on the `SCENE_TOPOLOGY` channel
+    /// via `element_repositioned_tx` so gRPC subscribers receive the updated
+    /// portal geometry (relative %).
     ///
     /// Returns `true` when the hotkey was consumed (applied to a focused portal
     /// tile) so the caller knows to stop propagating the key event.

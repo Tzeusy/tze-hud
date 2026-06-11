@@ -6405,4 +6405,89 @@ mod tests {
             );
         }
     }
+
+    // ── ProjectionAuthority geometry batch flow (§6b.4) ─────────────────────
+    //
+    // Covers push_geometry_snapshot → projected_portal_state → consume_geometry_batch
+    // so that callers cannot accidentally re-deliver geometry indefinitely or
+    // fail to surface it in ProjectedPortalState.
+
+    #[test]
+    fn geometry_batch_not_surfaced_before_first_push() {
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "p-geo");
+        // No snapshot has been pushed — geometry_batch must be None.
+        let state = authority
+            .projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all())
+            .expect("session must exist");
+        assert!(
+            state.geometry_batch.is_none(),
+            "geometry_batch must be None before any push"
+        );
+    }
+
+    #[test]
+    fn geometry_batch_surfaced_after_push_and_cleared_after_consume() {
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "p-geo");
+
+        let snap = make_snapshot(1, false);
+        let accepted = authority.push_geometry_snapshot("p-geo", snap);
+        assert!(accepted, "push must return true for a new snapshot");
+
+        // After push: projected_portal_state must include the batch.
+        let state = authority
+            .projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all())
+            .expect("session must exist");
+        let batch = state
+            .geometry_batch
+            .expect("geometry_batch must be Some after push");
+        let latest = batch.latest.expect("batch.latest must be Some");
+        assert_eq!(
+            latest.sequence, 1,
+            "surfaced sequence must match pushed snapshot"
+        );
+
+        // After consume: projected_portal_state must return None for geometry_batch.
+        authority.consume_geometry_batch("p-geo");
+        let state2 = authority
+            .projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all())
+            .expect("session must still exist");
+        assert!(
+            state2.geometry_batch.is_none(),
+            "geometry_batch must be None after consume"
+        );
+    }
+
+    #[test]
+    fn geometry_batch_not_re_delivered_without_new_push() {
+        // Verifies that a caller that calls projected_portal_state twice after one
+        // consume does NOT receive stale geometry on the second call.
+        let mut authority = ProjectionAuthority::default();
+        attach(&mut authority, "p-geo");
+
+        authority.push_geometry_snapshot("p-geo", make_snapshot(3, true));
+        // First read + consume.
+        let _ = authority.projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all());
+        authority.consume_geometry_batch("p-geo");
+
+        // Second read without a new push — must be empty.
+        let state = authority
+            .projected_portal_state("p-geo", &ProjectedPortalPolicy::permit_all())
+            .expect("session must exist");
+        assert!(
+            state.geometry_batch.is_none(),
+            "geometry_batch must remain None after consume with no new push"
+        );
+    }
+
+    #[test]
+    fn push_geometry_snapshot_rejects_unknown_session() {
+        let mut authority = ProjectionAuthority::default();
+        let accepted = authority.push_geometry_snapshot("does-not-exist", make_snapshot(1, false));
+        assert!(
+            !accepted,
+            "push must return false for an unknown projection_id"
+        );
+    }
 }

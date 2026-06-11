@@ -4595,6 +4595,10 @@ impl Compositor {
         // split the flat-rect pass and interleave the Background SDF pass.
         let bg_vertex_count = vertices.len();
 
+        // Resolve scroll-indicator tokens once per frame (not per tile) since
+        // the token map does not change during the tile loop.
+        let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+
         for tile in &tiles {
             if let Some(bg_color) = self.tile_background_color(tile, scene) {
                 let verts = rect_vertices(
@@ -4635,26 +4639,28 @@ impl Compositor {
                 if let Some(content_height) = scroll_cfg.content_height {
                     let viewport_px = tile.bounds.height;
                     let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
-                    let indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
                     if let Some(geom) = tze_hud_input::compute_scroll_indicator(
                         viewport_px,
                         content_height,
                         scroll_offset_y,
-                        &indicator_tokens,
+                        &scroll_indicator_tokens,
                     ) {
+                        // Clamp indicator width to tile width so an out-of-range
+                        // token value can never push the thumb outside the tile.
+                        let indicator_w = geom.width_px.min(tile.bounds.width);
                         // Track rect: right edge of the tile, full height.
                         // Thumb rect: inset within the track at thumb_y_px.
-                        let track_x = tile.bounds.x + tile.bounds.width - geom.width_px;
+                        let track_x = tile.bounds.x + tile.bounds.width - indicator_w;
                         let thumb_color = self.gpu_color(Rgba::new(
-                            indicator_tokens.color_r,
-                            indicator_tokens.color_g,
-                            indicator_tokens.color_b,
-                            indicator_tokens.color_a,
+                            scroll_indicator_tokens.color_r,
+                            scroll_indicator_tokens.color_g,
+                            scroll_indicator_tokens.color_b,
+                            scroll_indicator_tokens.color_a,
                         ));
                         let thumb_verts = rect_vertices(
                             track_x,
                             tile.bounds.y + geom.thumb_y_px,
-                            geom.width_px,
+                            indicator_w,
                             geom.thumb_height_px,
                             sw,
                             sh,
@@ -4832,6 +4838,10 @@ impl Compositor {
         // split the flat-rect pass and interleave the Background SDF pass.
         let bg_vertex_count = vertices.len();
 
+        // Resolve scroll-indicator tokens once per frame (not per tile) since
+        // the token map does not change during the tile loop.
+        let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+
         for tile in &tiles {
             if let Some(bg_color) = self.tile_background_color(tile, scene) {
                 let verts = rect_vertices(
@@ -4863,24 +4873,24 @@ impl Compositor {
                 if let Some(content_height) = scroll_cfg.content_height {
                     let viewport_px = tile.bounds.height;
                     let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
-                    let indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
                     if let Some(geom) = tze_hud_input::compute_scroll_indicator(
                         viewport_px,
                         content_height,
                         scroll_offset_y,
-                        &indicator_tokens,
+                        &scroll_indicator_tokens,
                     ) {
-                        let track_x = tile.bounds.x + tile.bounds.width - geom.width_px;
+                        let indicator_w = geom.width_px.min(tile.bounds.width);
+                        let track_x = tile.bounds.x + tile.bounds.width - indicator_w;
                         let thumb_color = self.gpu_color_raw([
-                            indicator_tokens.color_r,
-                            indicator_tokens.color_g,
-                            indicator_tokens.color_b,
-                            indicator_tokens.color_a,
+                            scroll_indicator_tokens.color_r,
+                            scroll_indicator_tokens.color_g,
+                            scroll_indicator_tokens.color_b,
+                            scroll_indicator_tokens.color_a,
                         ]);
                         let thumb_verts = rect_vertices(
                             track_x,
                             tile.bounds.y + geom.thumb_y_px,
-                            geom.width_px,
+                            indicator_w,
                             geom.thumb_height_px,
                             sw,
                             sh,
@@ -5066,6 +5076,10 @@ impl Compositor {
         // the tile/content/chrome pass below.
         let bg_vertex_count = content_vertices.len();
 
+        // Resolve scroll-indicator tokens once per frame (not per tile) since
+        // the token map does not change during the tile loop.
+        let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+
         for tile in &tiles {
             if let Some(bg_color) = self.tile_background_color(tile, scene) {
                 let verts = rect_vertices(
@@ -5096,24 +5110,24 @@ impl Compositor {
                 if let Some(content_height) = scroll_cfg.content_height {
                     let viewport_px = tile.bounds.height;
                     let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
-                    let indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
                     if let Some(geom) = tze_hud_input::compute_scroll_indicator(
                         viewport_px,
                         content_height,
                         scroll_offset_y,
-                        &indicator_tokens,
+                        &scroll_indicator_tokens,
                     ) {
-                        let track_x = tile.bounds.x + tile.bounds.width - geom.width_px;
+                        let indicator_w = geom.width_px.min(tile.bounds.width);
+                        let track_x = tile.bounds.x + tile.bounds.width - indicator_w;
                         let thumb_color = self.gpu_color_raw([
-                            indicator_tokens.color_r,
-                            indicator_tokens.color_g,
-                            indicator_tokens.color_b,
-                            indicator_tokens.color_a,
+                            scroll_indicator_tokens.color_r,
+                            scroll_indicator_tokens.color_g,
+                            scroll_indicator_tokens.color_b,
+                            scroll_indicator_tokens.color_a,
                         ]);
                         let thumb_verts = rect_vertices(
                             track_x,
                             tile.bounds.y + geom.thumb_y_px,
-                            geom.width_px,
+                            indicator_w,
                             geom.thumb_height_px,
                             sw,
                             sh,
