@@ -4459,6 +4459,21 @@ fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeContext, bool) {
 
 // ─── Network service startup ──────────────────────────────────────────────────
 
+/// Select the gRPC bind host based on the `bind_all_interfaces` flag.
+///
+/// Security fix (hud-1aswu.1): the default is loopback (`127.0.0.1`).
+/// `0.0.0.0` (all interfaces) requires an explicit opt-in.
+///
+/// Extracted as a pure function to allow unit-testing of the bind-host
+/// selection without spinning up a Tokio runtime or gRPC server (hud-stl9j).
+fn select_grpc_bind_host(bind_all_interfaces: bool) -> &'static str {
+    if bind_all_interfaces {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    }
+}
+
 /// Start network services (gRPC) on a dedicated Tokio multi-thread runtime.
 ///
 /// Returns `(network_rt, handles)`:
@@ -4507,11 +4522,7 @@ fn start_network_services(
         .map_err(|e| format!("windowed runtime: failed to build network Tokio runtime: {e}"))?;
 
     // Security fix (hud-1aswu.1): default to loopback; opt-in for all interfaces.
-    let grpc_bind_host = if bind_all_interfaces {
-        "0.0.0.0"
-    } else {
-        "127.0.0.1"
-    };
+    let grpc_bind_host = select_grpc_bind_host(bind_all_interfaces);
     tracing::info!(
         bind_all_interfaces,
         grpc_bind_host,
@@ -6236,41 +6247,115 @@ mod tests {
         );
     }
 
+    // ── select_grpc_bind_host unit tests (hud-stl9j) ─────────────────────────
+    //
+    // These tests pin the bind-host selection logic directly on the pure
+    // `select_grpc_bind_host` function.  They are independent of OS port
+    // availability and always run deterministically.
+
+    /// `select_grpc_bind_host(false)` must return `"127.0.0.1"` (loopback).
+    ///
+    /// Security gate (hud-1aswu.1): the default path — `bind_all_interfaces = false` —
+    /// must select a loopback address.  A future change that swaps the arms would
+    /// fail this test instead of silently exposing the service on all interfaces.
+    #[test]
+    fn select_grpc_bind_host_default_is_loopback() {
+        let host = select_grpc_bind_host(false);
+        let addr: std::net::IpAddr = host
+            .parse()
+            .expect("select_grpc_bind_host must return a valid IP string");
+        assert!(
+            addr.is_loopback(),
+            "bind_all_interfaces=false must select a loopback address; got {host}"
+        );
+    }
+
+    /// `select_grpc_bind_host(true)` must return `"0.0.0.0"` (all interfaces).
+    ///
+    /// Pins the opt-in path: explicit `bind_all_interfaces = true` must select
+    /// `0.0.0.0`, not a loopback address.
+    #[test]
+    fn select_grpc_bind_host_all_interfaces_is_not_loopback() {
+        let host = select_grpc_bind_host(true);
+        let addr: std::net::IpAddr = host
+            .parse()
+            .expect("select_grpc_bind_host must return a valid IP string");
+        assert!(
+            !addr.is_loopback(),
+            "bind_all_interfaces=true must select a non-loopback (all-interfaces) address; got {host}"
+        );
+        assert_eq!(
+            host, "0.0.0.0",
+            "bind_all_interfaces=true must return the all-interfaces sentinel 0.0.0.0"
+        );
+    }
+
+    /// The two `select_grpc_bind_host` outputs are distinct — loopback and
+    /// all-interfaces are not the same address.
+    #[test]
+    fn select_grpc_bind_host_outputs_are_distinct() {
+        assert_ne!(
+            select_grpc_bind_host(false),
+            select_grpc_bind_host(true),
+            "loopback and all-interfaces bind hosts must be different strings"
+        );
+    }
+
+    // ── start_network_services bind tests ─────────────────────────────────────
+    //
+    // These tests verify that start_network_services actually succeeds (does not
+    // silently swallow a bind error).  Each test allocates an ephemeral port via
+    // TcpListener::bind(":0") so the OS picks a free port, eliminating port-
+    // conflict flakiness in parallel CI runs.
+
     /// When `bind_all_interfaces = false`, `start_network_services` binds to
-    /// `127.0.0.1` (loopback only).  We verify the gRPC task starts and the
-    /// loopback bind address resolves without error.
+    /// `127.0.0.1` (loopback only) and must succeed.
+    ///
+    /// The bound address is determined by `select_grpc_bind_host` (separately
+    /// pinned by the unit tests above).  This test asserts that the full
+    /// service startup path with the loopback bind host succeeds — not just
+    /// that it doesn't error on an early-exit code path.
     #[test]
     fn start_network_services_loopback_default_binds_successfully() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .expect("failed to allocate ephemeral port for loopback bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        // Use port 0 to let the OS pick a free port.  Port 0 causes the gRPC
-        // function to early-return before binding, but we can verify the
-        // start_network_services succeeds with loopback=false.
-        // Use a real port to verify actual bind (not port 0 early-exit).
-        // Pick an obscure port unlikely to conflict; if it conflicts the test
-        // is skipped gracefully via the Result.
-        let result = start_network_services(59701, "psk", shared_state, ctx, false, false);
-        if let Ok((rt, handles, _, _)) = result {
-            assert!(rt.is_some(), "loopback bind must create a runtime");
-            for h in handles {
-                h.abort();
-            }
+        let (rt, handles, _, _) =
+            start_network_services(port, "psk", shared_state, ctx, false, false)
+                .expect("loopback bind must succeed on a freshly allocated ephemeral port");
+        assert!(rt.is_some(), "loopback bind must create a NetworkRuntime");
+        assert!(!handles.is_empty(), "loopback bind must spawn task handles");
+        for h in handles {
+            h.abort();
         }
-        // If port is in use, the bind fails — acceptable for a unit test.
     }
 
     /// `start_network_services` with `bind_all_interfaces = true` binds on
-    /// 0.0.0.0 (explicit opt-in for LAN/remote exposure).
+    /// `0.0.0.0` (explicit opt-in for LAN/remote exposure) and must succeed.
     #[test]
     fn start_network_services_bind_all_interfaces_opt_in_binds_successfully() {
+        let port = std::net::TcpListener::bind("0.0.0.0:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .expect("failed to allocate ephemeral port for all-interfaces bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let result = start_network_services(59702, "psk", shared_state, ctx, false, true);
-        if let Ok((rt, handles, _, _)) = result {
-            assert!(rt.is_some(), "all-interfaces bind must create a runtime");
-            for h in handles {
-                h.abort();
-            }
+        let (rt, handles, _, _) =
+            start_network_services(port, "psk", shared_state, ctx, false, true)
+                .expect("all-interfaces bind must succeed on a freshly allocated ephemeral port");
+        assert!(
+            rt.is_some(),
+            "all-interfaces bind must create a NetworkRuntime"
+        );
+        assert!(
+            !handles.is_empty(),
+            "all-interfaces bind must spawn task handles"
+        );
+        for h in handles {
+            h.abort();
         }
     }
 

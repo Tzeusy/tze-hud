@@ -79,14 +79,6 @@ pub enum AuthResult {
     Unimplemented(String),
 }
 
-/// Returns `true` if `addr` is a loopback address (IPv4 `127.x.x.x` or IPv6 `::1`).
-///
-/// Used to gate `LocalSocketCredential` acceptance: only loopback peers may
-/// authenticate with a local-socket credential (hud-1aswu.1).
-pub fn is_loopback(addr: IpAddr) -> bool {
-    addr.is_loopback()
-}
-
 /// Evaluate a structured `AuthCredential` against the server configuration.
 ///
 /// `psk` is the pre-shared key configured on the server.
@@ -557,6 +549,23 @@ mod tests {
         Some("192.168.1.42".parse().unwrap())
     }
 
+    fn non_loopback_tailnet() -> Option<IpAddr> {
+        Some("10.0.0.5".parse().unwrap())
+    }
+
+    fn loopback_v4_alt() -> Option<IpAddr> {
+        // 127.0.0.2 — still in the 127.0.0.0/8 loopback range; IpAddr::is_loopback() returns true.
+        Some("127.0.0.2".parse().unwrap())
+    }
+
+    fn ipv4_mapped_loopback() -> Option<IpAddr> {
+        // ::ffff:127.0.0.1 — IPv4-mapped IPv6 address for the IPv4 loopback.
+        // IpAddr::is_loopback() returns false for this form (only ::1 and 127.x.x.x qualify).
+        // The runtime is fail-closed: it rejects this as non-loopback until a future
+        // release adds explicit dual-stack normalisation (hud-stl9j).
+        Some("::ffff:127.0.0.1".parse().unwrap())
+    }
+
     // ── Auth credential tests ──────────────────────────────────────────────────
 
     #[test]
@@ -627,6 +636,69 @@ mod tests {
             other => {
                 panic!("Expected Failed for unknown peer with LocalSocket cred, got: {other:?}")
             }
+        }
+    }
+
+    /// LocalSocketCredential from a non-loopback tailnet/VPN peer (10.x.x.x) is rejected.
+    ///
+    /// Pins the hud-1aswu.1 rejection for a realistic attack surface: an agent on the
+    /// same tailnet attempting to use a local-socket credential that is only valid for
+    /// same-machine loopback connections.
+    #[test]
+    fn test_local_socket_credential_rejected_tailnet_peer() {
+        let cred = local_socket_credential();
+        match evaluate_auth_credential(&cred, "secret", non_loopback_tailnet()) {
+            AuthResult::Failed(msg) => {
+                assert!(
+                    msg.contains("not a loopback address"),
+                    "rejection message must mention loopback: {msg}"
+                );
+                // Error must include the actual peer address so operators can diagnose.
+                assert!(
+                    msg.contains("10.0.0.5"),
+                    "rejection message must include the peer address: {msg}"
+                );
+            }
+            other => panic!(
+                "Expected AUTH_FAILED for tailnet peer with LocalSocket cred, got: {other:?}"
+            ),
+        }
+    }
+
+    /// LocalSocketCredential from `127.0.0.2` (loopback /8 range, not just 127.0.0.1) is accepted.
+    ///
+    /// Pins the `IpAddr::is_loopback()` contract: the entire 127.0.0.0/8 range is
+    /// loopback per IANA, so 127.0.0.2, 127.1.0.1, etc., must all be accepted.
+    /// This matters for container environments that alias multiple loopback addresses.
+    #[test]
+    fn test_local_socket_credential_accepted_loopback_127_0_0_2() {
+        let cred = local_socket_credential();
+        assert_eq!(
+            evaluate_auth_credential(&cred, "secret", loopback_v4_alt()),
+            AuthResult::Accepted,
+            "127.0.0.2 is in the loopback /8 range and must be accepted"
+        );
+    }
+
+    /// LocalSocketCredential from `::ffff:127.0.0.1` (IPv4-mapped loopback) is rejected.
+    ///
+    /// Pins the fail-closed behaviour: `IpAddr::is_loopback()` returns `false` for the
+    /// IPv4-mapped form even though the underlying IPv4 address is loopback.
+    /// The runtime currently rejects this conservatively (hud-stl9j).  If a future
+    /// release normalises IPv4-mapped addresses before the loopback check, this test
+    /// must be updated to reflect the new semantics.
+    #[test]
+    fn test_local_socket_credential_rejected_ipv4_mapped_loopback() {
+        let cred = local_socket_credential();
+        match evaluate_auth_credential(&cred, "secret", ipv4_mapped_loopback()) {
+            AuthResult::Failed(_) => {
+                // Correct: fail-closed for IPv4-mapped form (hud-stl9j).
+                // If dual-stack normalisation is added this test will need updating.
+            }
+            other => panic!(
+                "Expected AUTH_FAILED for ::ffff:127.0.0.1 (IPv4-mapped loopback, fail-closed), \
+                 got: {other:?}"
+            ),
         }
     }
 

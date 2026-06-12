@@ -11069,6 +11069,178 @@ mod tests {
         }
     }
 
+    // ── Wire-level LocalSocket non-loopback rejection (hud-stl9j / hud-1aswu.1) ──
+    //
+    // The gRPC integration tests above always connect from loopback (::1), so
+    // peer_ip is always loopback there.  These unit tests call handle_session_init
+    // and handle_session_resume directly — bypassing the TCP transport — so we can
+    // inject an arbitrary peer_ip and assert AUTH_FAILED on the non-loopback path.
+
+    fn local_socket_session_init(agent_id: &str) -> SessionInit {
+        SessionInit {
+            agent_id: agent_id.to_string(),
+            agent_display_name: agent_id.to_string(),
+            pre_shared_key: String::new(),
+            requested_capabilities: Vec::new(),
+            initial_subscriptions: Vec::new(),
+            resume_token: Vec::new(),
+            agent_timestamp_wall_us: 0,
+            min_protocol_version: 1000,
+            max_protocol_version: 1001,
+            auth_credential: Some(crate::proto::session::AuthCredential {
+                credential: Some(
+                    crate::proto::session::auth_credential::Credential::LocalSocket(
+                        crate::proto::session::LocalSocketCredential {
+                            socket_path: "/run/tze_hud.sock".to_string(),
+                            pid_hint: "42".to_string(),
+                        },
+                    ),
+                ),
+            }),
+        }
+    }
+
+    /// Scenario: LocalSocketCredential + non-loopback peer → wire AUTH_FAILED on init path.
+    ///
+    /// GIVEN a SessionInit carrying a LocalSocketCredential,
+    /// WHEN handle_session_init is called with peer_ip = Some(10.0.0.5),
+    /// THEN the server message channel receives SessionError { code: "AUTH_FAILED" }
+    ///      and handle_session_init returns None (session not established).
+    ///
+    /// Security regression gate for hud-1aswu.1: a future refactor that removes
+    /// the loopback check would cause this test to fail instead of silently breaking.
+    #[tokio::test]
+    async fn test_handle_session_init_local_socket_non_loopback_auth_failed() {
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+        let state = service.state.clone();
+        let caps: HashMap<String, Vec<String>> = HashMap::new();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(16);
+
+        let init = local_socket_session_init("non-loopback-agent");
+        let non_loopback_ip: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+
+        let session = handle_session_init(
+            &state,
+            "test-key",
+            &tx,
+            &init,
+            &caps,
+            true, // fallback_unrestricted — irrelevant, auth fires first
+            Some(non_loopback_ip),
+        )
+        .await;
+
+        assert!(
+            session.is_none(),
+            "handle_session_init must return None for non-loopback LocalSocket peer"
+        );
+
+        let server_msg = rx
+            .recv()
+            .await
+            .expect("server must send a message on auth failure")
+            .expect("message must not be a transport error");
+
+        match server_msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(
+                    err.code, "AUTH_FAILED",
+                    "non-loopback LocalSocket must produce AUTH_FAILED, got: {}",
+                    err.code
+                );
+                assert!(
+                    err.message.contains("not a loopback address"),
+                    "error message must mention loopback, got: {}",
+                    err.message
+                );
+            }
+            other => panic!(
+                "Expected SessionError(AUTH_FAILED) for non-loopback LocalSocket init, \
+                 got: {other:?}"
+            ),
+        }
+    }
+
+    /// Scenario: LocalSocketCredential + non-loopback peer → wire AUTH_FAILED on resume path.
+    ///
+    /// GIVEN a SessionResume carrying a LocalSocketCredential,
+    /// WHEN handle_session_resume is called with peer_ip = Some(10.0.0.5),
+    /// THEN the server message channel receives SessionError { code: "AUTH_FAILED" }
+    ///      and handle_session_resume returns None (resume rejected before token check).
+    ///
+    /// Security regression gate for hud-1aswu.1 resume path: the resume path re-
+    /// authenticates independently; this test pins it.
+    #[tokio::test]
+    async fn test_handle_session_resume_local_socket_non_loopback_auth_failed() {
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+        let state = service.state.clone();
+        let caps: HashMap<String, Vec<String>> = HashMap::new();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(16);
+
+        // A bogus resume token — auth is checked before the token, so this value is
+        // irrelevant; the test asserts AUTH_FAILED fires before SESSION_GRACE_EXPIRED.
+        let bogus_token = vec![0u8; 16];
+
+        let resume = SessionResume {
+            agent_id: "non-loopback-resume-agent".to_string(),
+            resume_token: bogus_token,
+            last_seen_server_sequence: 0,
+            pre_shared_key: String::new(),
+            auth_credential: Some(crate::proto::session::AuthCredential {
+                credential: Some(
+                    crate::proto::session::auth_credential::Credential::LocalSocket(
+                        crate::proto::session::LocalSocketCredential {
+                            socket_path: "/run/tze_hud.sock".to_string(),
+                            pid_hint: "99".to_string(),
+                        },
+                    ),
+                ),
+            }),
+        };
+
+        let non_loopback_ip: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+
+        let session = handle_session_resume(
+            &state,
+            "test-key",
+            &tx,
+            &resume,
+            &caps,
+            true, // fallback_unrestricted
+            Some(non_loopback_ip),
+        )
+        .await;
+
+        assert!(
+            session.is_none(),
+            "handle_session_resume must return None for non-loopback LocalSocket peer"
+        );
+
+        let server_msg = rx
+            .recv()
+            .await
+            .expect("server must send a message on auth failure")
+            .expect("message must not be a transport error");
+
+        match server_msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(
+                    err.code, "AUTH_FAILED",
+                    "non-loopback LocalSocket resume must produce AUTH_FAILED, got: {}",
+                    err.code
+                );
+            }
+            other => panic!(
+                "Expected SessionError(AUTH_FAILED) for non-loopback LocalSocket resume, \
+                 got: {other:?}"
+            ),
+        }
+    }
+
     /// Scenario: Version negotiated successfully (RFC 0005 §4.1)
     /// WHEN agent declares min=1000, max=1001 and runtime supports 1000-1001,
     /// THEN SessionEstablished contains negotiated_protocol_version=1001.
