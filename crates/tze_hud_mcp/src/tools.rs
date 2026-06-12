@@ -3352,6 +3352,7 @@ mod tests {
             },
             default_rendering_policy: RenderingPolicy::default(),
             default_contention_policy: CP::LatestWins,
+            max_publishers: WidgetDefinition::default_max_publishers(),
             ephemeral: false,
             hover_behavior: None,
         });

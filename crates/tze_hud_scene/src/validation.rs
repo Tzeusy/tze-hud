@@ -182,6 +182,14 @@ pub enum ValidationError {
     /// Widget publish rejected: calling agent lacks `publish_widget:<widget_name>` capability.
     #[error("widget capability missing: publish_widget:{widget}")]
     WidgetCapabilityMissing { widget: String },
+
+    /// Widget publish rejected: publisher has reached the per-namespace publication limit.
+    ///
+    /// Mirrors `ZoneMaxPublishersReached` for the widget publish path.
+    /// Returned by `publish_to_widget` under `Stack` contention when the
+    /// publisher's active record count equals `WidgetDefinition::max_publishers`.
+    #[error("widget '{widget}' has reached max publishers ({max}) for namespace")]
+    WidgetMaxPublishersReached { widget: String, max: u32 },
 }
 
 // ─── Stable error codes (RFC 0001 §3.4) ─────────────────────────────────────
@@ -257,6 +265,7 @@ pub enum ValidationErrorCode {
     WidgetParameterTypeMismatch,
     WidgetParameterInvalidValue,
     WidgetCapabilityMissing,
+    WidgetMaxPublishersReached,
 
     // Unknown / future-proof catch-all
     Unknown,
@@ -323,6 +332,7 @@ impl ValidationErrorCode {
                 Self::WidgetParameterInvalidValue
             }
             ValidationError::WidgetCapabilityMissing { .. } => Self::WidgetCapabilityMissing,
+            ValidationError::WidgetMaxPublishersReached { .. } => Self::WidgetMaxPublishersReached,
         }
     }
 }
@@ -550,6 +560,10 @@ fn build_context_and_hint(
         ),
         ValidationError::WidgetCapabilityMissing { widget } => (
             json!({ "field": "capability", "value": format!("publish_widget:{widget}"), "constraint": "session must have publish_widget:<widget_name> capability" }),
+            None,
+        ),
+        ValidationError::WidgetMaxPublishersReached { widget, max } => (
+            json!({ "field": "widget_name", "value": widget, "constraint": format!("max {} publishers per namespace", max) }),
             None,
         ),
     }

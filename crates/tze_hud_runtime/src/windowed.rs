@@ -6357,6 +6357,7 @@ mod tests {
                 },
                 default_rendering_policy: tze_hud_scene::types::RenderingPolicy::default(),
                 default_contention_policy: tze_hud_scene::types::ContentionPolicy::LatestWins,
+                max_publishers: tze_hud_scene::types::WidgetDefinition::default_max_publishers(),
                 ephemeral: false,
                 hover_behavior: Some(tze_hud_scene::types::WidgetHoverBehavior {
                     trigger_rect: tze_hud_scene::types::WidgetNormalizedRect {

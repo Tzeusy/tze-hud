@@ -176,6 +176,114 @@ pub const MAX_MARKDOWN_BYTES: usize = 65_535;
 /// zone tiles. RFC 0001 §2.3.
 pub const ZONE_TILE_Z_MIN: u32 = 0x8000_0000;
 
+// ─── Contention policy helper ────────────────────────────────────────────────
+
+/// Accessor trait for the fields that `apply_contention` reads from a publish
+/// record.  Implemented by both `ZonePublishRecord` and `WidgetPublishRecord`
+/// so the single contention function can serve all three publish entry points.
+///
+/// This trait is intentionally private to this module.
+trait ContentionRecord {
+    fn record_publisher_namespace(&self) -> &str;
+    fn record_merge_key(&self) -> Option<&str>;
+}
+
+impl ContentionRecord for ZonePublishRecord {
+    fn record_publisher_namespace(&self) -> &str {
+        &self.publisher_namespace
+    }
+    fn record_merge_key(&self) -> Option<&str> {
+        self.merge_key.as_deref()
+    }
+}
+
+impl ContentionRecord for WidgetPublishRecord {
+    fn record_publisher_namespace(&self) -> &str {
+        &self.publisher_namespace
+    }
+    fn record_merge_key(&self) -> Option<&str> {
+        self.merge_key.as_deref()
+    }
+}
+
+/// Apply `contention_policy` to `publishes`, inserting `record`.
+///
+/// # Canonical semantics (all three zone/widget publish entry points use these)
+///
+/// - `LatestWins` / `Replace` — replace all existing records with the new one.
+/// - `Stack { max_depth }` — enforce `max_publishers` per namespace, push the
+///   record, then trim oldest so the total stays within `max_depth`.
+///   `max_depth == 0` trims the stack to zero (i.e. the publish is silently
+///   discarded); callers that want to reject rather than discard should validate
+///   `max_depth` before calling.
+/// - `MergeByKey { max_keys }` — replace the same-key entry in place, or add a
+///   new key (evicting the oldest when at capacity).
+///
+/// # Arguments
+///
+/// - `publishes` — the mutable record list for this zone/widget
+/// - `record` — the new publish record to apply
+/// - `contention_policy` — the active policy
+/// - `max_publishers` — per-namespace publication limit (enforced for `Stack`)
+/// - `make_max_publishers_err` — constructs the rejection error when the limit
+///   is reached; called with the effective limit.  Zone callers supply
+///   `ZoneMaxPublishersReached`; widget callers supply `WidgetMaxPublishersReached`.
+fn apply_contention<R: ContentionRecord>(
+    publishes: &mut Vec<R>,
+    record: R,
+    contention_policy: ContentionPolicy,
+    max_publishers: u32,
+    make_max_publishers_err: impl Fn(u32) -> ValidationError,
+) -> Result<(), ValidationError> {
+    match contention_policy {
+        ContentionPolicy::LatestWins => {
+            *publishes = vec![record];
+        }
+        ContentionPolicy::Replace => {
+            *publishes = vec![record];
+        }
+        ContentionPolicy::Stack { max_depth } => {
+            // Check publisher count limit before accepting the record.
+            let publisher_count = publishes
+                .iter()
+                .filter(|r| r.record_publisher_namespace() == record.record_publisher_namespace())
+                .count() as u32;
+            if publisher_count >= max_publishers {
+                return Err(make_max_publishers_err(max_publishers));
+            }
+            publishes.push(record);
+            // Trim oldest entries so the stack stays within max_depth.
+            // max_depth == 0 trims to zero (the pushed record is removed).
+            let max = max_depth as usize;
+            if publishes.len() > max {
+                let excess = publishes.len() - max;
+                publishes.drain(0..excess);
+            }
+        }
+        ContentionPolicy::MergeByKey { max_keys } => {
+            let key = record.record_merge_key().unwrap_or("").to_string();
+            if let Some(pos) = publishes
+                .iter()
+                .position(|r| r.record_merge_key().unwrap_or("") == key.as_str())
+            {
+                publishes[pos] = record;
+            } else {
+                let max = max_keys as usize;
+                if max > 0 && publishes.len() >= max {
+                    // At max key capacity — evict the oldest entry so the new key
+                    // can take its place.  "Oldest" is the front of the
+                    // insertion-ordered Vec (index 0).
+                    // Spec: openspec/changes/exemplar-status-bar/tasks.md §2.5
+                    //   "oldest evicted, 32 remain"
+                    publishes.remove(0);
+                }
+                publishes.push(record);
+            }
+        }
+    }
+    Ok(())
+}
+
 impl SceneGraph {
     fn coerce_widget_param_value(
         widget_name: &str,
@@ -2991,57 +3099,16 @@ impl SceneGraph {
             .entry(zone_name.to_string())
             .or_default();
 
-        match contention_policy {
-            ContentionPolicy::LatestWins => {
-                // Replace all with the single new record
-                *publishes = vec![record];
-            }
-            ContentionPolicy::Replace => {
-                // Single occupant: evict current and replace
-                *publishes = vec![record];
-            }
-            ContentionPolicy::Stack { max_depth } => {
-                // Check publisher count limit
-                let publisher_count = publishes
-                    .iter()
-                    .filter(|r| r.publisher_namespace == publisher_namespace)
-                    .count() as u32;
-                if publisher_count >= max_publishers {
-                    return Err(ValidationError::ZoneMaxPublishersReached {
-                        zone: zone_name.to_string(),
-                        max: max_publishers,
-                    });
-                }
-                publishes.push(record);
-                // Trim oldest if stack exceeds max_depth
-                let max = max_depth as usize;
-                if publishes.len() > max {
-                    let excess = publishes.len() - max;
-                    publishes.drain(0..excess);
-                }
-            }
-            ContentionPolicy::MergeByKey { max_keys } => {
-                let key = merge_key.clone().unwrap_or_default();
-                // Replace existing entry with same key
-                if let Some(pos) = publishes
-                    .iter()
-                    .position(|r| r.merge_key.as_deref().unwrap_or("") == key.as_str())
-                {
-                    publishes[pos] = record;
-                } else {
-                    let max = max_keys as usize;
-                    if max > 0 && publishes.len() >= max {
-                        // At max key capacity — evict the oldest entry so the new key can
-                        // take its place.  "Oldest" is the front of the insertion-ordered
-                        // Vec (index 0); drain it before pushing the new record.
-                        // Spec: openspec/changes/exemplar-status-bar/tasks.md §2.5
-                        //   "oldest evicted, 32 remain"
-                        publishes.remove(0);
-                    }
-                    publishes.push(record);
-                }
-            }
-        }
+        apply_contention(
+            publishes,
+            record,
+            contention_policy,
+            max_publishers,
+            |max| ValidationError::ZoneMaxPublishersReached {
+                zone: zone_name.to_string(),
+                max,
+            },
+        )?;
 
         self.version += 1;
         Ok(())
@@ -3284,47 +3351,16 @@ impl SceneGraph {
             .entry(zone_name.to_string())
             .or_default();
 
-        match contention_policy {
-            ContentionPolicy::LatestWins => {
-                *publishes = vec![record];
-            }
-            ContentionPolicy::Replace => {
-                *publishes = vec![record];
-            }
-            ContentionPolicy::Stack { max_depth } => {
-                let publisher_count = publishes
-                    .iter()
-                    .filter(|r| r.publisher_namespace == publisher_namespace)
-                    .count() as u32;
-                if publisher_count >= max_publishers {
-                    return Err(ValidationError::ZoneMaxPublishersReached {
-                        zone: zone_name.to_string(),
-                        max: max_publishers,
-                    });
-                }
-                publishes.push(record);
-                let max = max_depth as usize;
-                if publishes.len() > max {
-                    let excess = publishes.len() - max;
-                    publishes.drain(0..excess);
-                }
-            }
-            ContentionPolicy::MergeByKey { max_keys } => {
-                let key = merge_key.clone().unwrap_or_default();
-                if let Some(pos) = publishes
-                    .iter()
-                    .position(|r| r.merge_key.as_deref().unwrap_or("") == key.as_str())
-                {
-                    publishes[pos] = record;
-                } else {
-                    let max = max_keys as usize;
-                    if max > 0 && publishes.len() >= max {
-                        publishes.remove(0);
-                    }
-                    publishes.push(record);
-                }
-            }
-        }
+        apply_contention(
+            publishes,
+            record,
+            contention_policy,
+            max_publishers,
+            |max| ValidationError::ZoneMaxPublishersReached {
+                zone: zone_name.to_string(),
+                max,
+            },
+        )?;
 
         self.version += 1;
         Ok(())
@@ -3366,8 +3402,6 @@ impl SceneGraph {
         transition_ms: u32,
         expires_at_wall_us: Option<u64>,
     ) -> Result<bool, ValidationError> {
-        use crate::types::{ContentionPolicy, WidgetParameterValue};
-
         // ── Step 1: Resolve the widget instance ──────────────────────────────
         let instance_name = widget_name;
         let instance = self
@@ -3414,6 +3448,7 @@ impl SceneGraph {
         let contention_policy = instance
             .contention_override
             .unwrap_or(definition.default_contention_policy);
+        let max_publishers = definition.max_publishers;
 
         let now_us = self.clock.now_us();
 
@@ -3433,41 +3468,16 @@ impl SceneGraph {
             .entry(widget_name.to_string())
             .or_default();
 
-        match contention_policy {
-            ContentionPolicy::LatestWins => {
-                *publishes = vec![record];
-            }
-            ContentionPolicy::Replace => {
-                *publishes = vec![record];
-            }
-            ContentionPolicy::Stack { max_depth } => {
-                publishes.push(record);
-                let max = max_depth as usize;
-                if max > 0 && publishes.len() > max {
-                    let excess = publishes.len() - max;
-                    publishes.drain(0..excess);
-                }
-            }
-            ContentionPolicy::MergeByKey { max_keys } => {
-                let key = merge_key.clone().unwrap_or_default();
-                if let Some(pos) = publishes
-                    .iter()
-                    .position(|r| r.merge_key.as_deref().unwrap_or("") == key.as_str())
-                {
-                    publishes[pos] = record;
-                } else {
-                    let max = max_keys as usize;
-                    if max > 0 && publishes.len() >= max {
-                        // At max key capacity — replace the oldest entry (LRU approximation)
-                        if !publishes.is_empty() {
-                            publishes[0] = record;
-                        }
-                    } else {
-                        publishes.push(record);
-                    }
-                }
-            }
-        }
+        apply_contention(
+            publishes,
+            record,
+            contention_policy,
+            max_publishers,
+            |max| ValidationError::WidgetMaxPublishersReached {
+                widget: widget_name.to_string(),
+                max,
+            },
+        )?;
 
         // ── Step 4: Update current_params on the instance ─────────────────────
         // Merge new validated params over existing current_params.
@@ -5204,6 +5214,324 @@ mod tests {
         let publishes = scene.zone_registry.active_for_zone("pip");
         assert_eq!(publishes.len(), 1);
         assert_eq!(publishes[0].publisher_namespace, "a2");
+    }
+
+    // ─── Contention policy: apply_contention extraction tests ────────────────
+    // These tests were added alongside the extraction of apply_contention (the
+    // shared helper used by all three zone/widget publish entry points).  They
+    // specifically cover the behaviors that were either untested or diverged in
+    // the pre-extraction widget copy.
+    //
+    // Issue: hud-r5q6p
+    //   - max_publishers rejection was untested on zones, absent on widgets.
+    //   - max_depth == 0 was treated as "unbounded" on widgets but "reject all"
+    //     (trim-to-zero) on zones — the zone behavior is canonical.
+    //   - All three entry points (publish_to_zone, publish_to_zone_with_breakpoints,
+    //     publish_to_widget) now share the single apply_contention function.
+
+    /// Zone Stack: WHEN a publisher exceeds max_publishers THEN ZoneMaxPublishersReached.
+    ///
+    /// max_publishers is per-namespace: each agent gets its own per-namespace
+    /// slot count.  This test uses a zone with max_publishers=1 and two publishes
+    /// from the same namespace to trigger the limit.
+    #[test]
+    fn test_contention_zone_max_publishers_rejected() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "single-pub".to_string(),
+            description: "Stack zone with max_publishers=1".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.5,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 10 },
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        let notification = |text: &str| {
+            ZoneContent::Notification(NotificationPayload {
+                text: text.to_string(),
+                icon: String::new(),
+                urgency: 1,
+                ttl_ms: None,
+                title: String::new(),
+                actions: Vec::new(),
+            })
+        };
+
+        // First publish from "agent.a" succeeds.
+        scene
+            .publish_to_zone(
+                "single-pub",
+                notification("first"),
+                "agent.a",
+                None,
+                None,
+                None,
+            )
+            .expect("first publish from agent.a should succeed");
+
+        // Second publish from the same namespace must be rejected.
+        let err = scene
+            .publish_to_zone(
+                "single-pub",
+                notification("second"),
+                "agent.a",
+                None,
+                None,
+                None,
+            )
+            .expect_err("second publish from same namespace must be rejected");
+
+        assert!(
+            matches!(
+                err,
+                ValidationError::ZoneMaxPublishersReached { max: 1, .. }
+            ),
+            "expected ZoneMaxPublishersReached(max=1), got: {err:?}"
+        );
+
+        // A different namespace is unaffected — it has its own slot count.
+        scene
+            .publish_to_zone(
+                "single-pub",
+                notification("from-b"),
+                "agent.b",
+                None,
+                None,
+                None,
+            )
+            .expect("publish from a different namespace must succeed");
+    }
+
+    /// Zone Stack: WHEN max_depth == 0 THEN every publish is trimmed to zero
+    /// (canonical behavior — mirrors widget path after apply_contention fix).
+    #[test]
+    fn test_contention_zone_stack_max_depth_zero_discards_all() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "depth-zero".to_string(),
+            description: "Stack zone with max_depth=0".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.5,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 0 },
+            max_publishers: 100,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        let notification = |text: &str| {
+            ZoneContent::Notification(NotificationPayload {
+                text: text.to_string(),
+                icon: String::new(),
+                urgency: 1,
+                ttl_ms: None,
+                title: String::new(),
+                actions: Vec::new(),
+            })
+        };
+
+        for i in 0..3 {
+            scene
+                .publish_to_zone(
+                    "depth-zero",
+                    notification(&format!("msg{i}")),
+                    &format!("agent.{i}"),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let active = scene.zone_registry.active_for_zone("depth-zero");
+        assert_eq!(
+            active.len(),
+            0,
+            "Stack(max_depth=0) must trim to 0 — all publishes discarded"
+        );
+    }
+
+    /// Widget Stack: WHEN a publisher exceeds max_publishers THEN WidgetMaxPublishersReached.
+    #[test]
+    fn test_contention_widget_max_publishers_rejected() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        scene.widget_registry.register_definition(WidgetDefinition {
+            id: "counter".to_string(),
+            name: "counter".to_string(),
+            description: "test counter widget".to_string(),
+            parameter_schema: vec![WidgetParameterDeclaration {
+                name: "value".to_string(),
+                param_type: WidgetParamType::F32,
+                default_value: WidgetParameterValue::F32(0.0),
+                constraints: None,
+            }],
+            layers: vec![],
+            default_geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.1,
+                height_pct: 0.1,
+            },
+            default_rendering_policy: RenderingPolicy::default(),
+            default_contention_policy: ContentionPolicy::Stack { max_depth: 10 },
+            max_publishers: 1,
+            ephemeral: false,
+            hover_behavior: None,
+        });
+        scene.widget_registry.register_instance(WidgetInstance {
+            id: SceneId::new(),
+            widget_type_name: "counter".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "counter".to_string(),
+            current_params: std::collections::HashMap::from([(
+                "value".to_string(),
+                WidgetParameterValue::F32(0.0),
+            )]),
+        });
+
+        let params = || {
+            std::collections::HashMap::from([("value".to_string(), WidgetParameterValue::F32(0.5))])
+        };
+
+        // First publish from "agent.a" succeeds.
+        scene
+            .publish_to_widget("counter", params(), "agent.a", None, 0, None)
+            .expect("first publish from agent.a should succeed");
+
+        // Second publish from the same namespace must be rejected.
+        let err = scene
+            .publish_to_widget("counter", params(), "agent.a", None, 0, None)
+            .expect_err("second publish from same namespace must be rejected");
+
+        assert!(
+            matches!(
+                err,
+                ValidationError::WidgetMaxPublishersReached { max: 1, .. }
+            ),
+            "expected WidgetMaxPublishersReached(max=1), got: {err:?}"
+        );
+
+        // A different namespace is unaffected.
+        scene
+            .publish_to_widget("counter", params(), "agent.b", None, 0, None)
+            .expect("publish from a different namespace must succeed");
+    }
+
+    /// Cross-entry-point: publish_to_zone and publish_to_zone_with_breakpoints
+    /// must produce identical record counts and apply identical contention logic.
+    ///
+    /// This test verifies that both paths share the same apply_contention function.
+    #[test]
+    fn test_contention_zone_vs_breakpoints_entry_point_consistency() {
+        // Zone via publish_to_zone.
+        let mut scene_a = SceneGraph::new(1920.0, 1080.0);
+        scene_a.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "sub".to_string(),
+            description: String::new(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 0.1,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 2 },
+            max_publishers: 2,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // Zone via publish_to_zone_with_breakpoints.
+        let mut scene_b = SceneGraph::new(1920.0, 1080.0);
+        scene_b.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "sub".to_string(),
+            description: String::new(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 0.1,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 2 },
+            max_publishers: 2,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        for (ns, text) in [
+            ("agent.a", "hello"),
+            ("agent.b", "world"),
+            ("agent.a", "overflow"),
+        ] {
+            let _ = scene_a.publish_to_zone(
+                "sub",
+                ZoneContent::StreamText(text.to_string()),
+                ns,
+                None,
+                None,
+                None,
+            );
+            let _ = scene_b.publish_to_zone_with_breakpoints(
+                "sub",
+                ZoneContent::StreamText(text.to_string()),
+                ns,
+                None,
+                None,
+                None,
+                Vec::new(),
+            );
+        }
+
+        let count_a = scene_a.zone_registry.active_for_zone("sub").len();
+        let count_b = scene_b.zone_registry.active_for_zone("sub").len();
+        assert_eq!(
+            count_a, count_b,
+            "publish_to_zone and publish_to_zone_with_breakpoints must produce identical record counts; got {count_a} vs {count_b}"
+        );
+
+        // Both should be 2: agent.a's first publish is at the limit for that namespace
+        // (max_publishers=2 across all namespaces but only 1 per ns is counted before
+        // the limit kicks in at max_publishers-per-namespace=2).
+        // Actually max_publishers is per-namespace: agent.a published "hello" and
+        // tried "overflow" as 2nd — 2nd is allowed since max_publishers=2.
+        // agent.b published "world" as 1st = allowed.
+        // Total stack is trimmed to max_depth=2 from back.
+        assert_eq!(
+            count_a, 2,
+            "Stack(max_depth=2, max_publishers=2) should hold exactly 2 records after 3 publishes"
+        );
     }
 
     #[test]
@@ -8234,6 +8562,7 @@ mod spec_scenarios {
             },
             default_rendering_policy: RenderingPolicy::default(),
             default_contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: u32::MAX,
             ephemeral: false,
             hover_behavior: None,
         }
@@ -9165,12 +9494,19 @@ mod spec_scenarios {
         );
     }
 
-    /// Stack: WHEN max_depth=0 THEN publishes stack without limit.
+    /// Stack: WHEN max_depth=0 THEN every publish is immediately trimmed out,
+    /// leaving the stack empty.
+    ///
+    /// Canonical semantics (matches zone publish_to_zone behavior): the push is
+    /// followed by a trim that drains all entries when max_depth == 0, so the
+    /// record is silently discarded.  The old widget implementation had a
+    /// diverged `if max > 0 &&` guard that made max_depth=0 unbounded instead —
+    /// that was a bug corrected by extracting apply_contention.
     #[test]
-    fn widget_contention_stack_max_depth_zero_is_unlimited() {
+    fn widget_contention_stack_max_depth_zero_discards_all() {
         let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::Stack { max_depth: 0 });
 
-        for i in 0u32..10 {
+        for i in 0u32..3 {
             scene
                 .publish_to_widget(
                     "gauge",
@@ -9187,7 +9523,11 @@ mod spec_scenarios {
         }
 
         let active = scene.widget_registry.active_for_widget("gauge");
-        assert_eq!(active.len(), 10, "Stack(0) should allow unlimited depth");
+        assert_eq!(
+            active.len(),
+            0,
+            "Stack(0) trims to 0: all publishes must be discarded (canonical semantics)"
+        );
     }
 
     /// MergeByKey: WHEN same key is published twice THEN the record is replaced.
