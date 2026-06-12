@@ -158,6 +158,11 @@ jobs:
             --workspace \
             --all-targets \
             --exclude integration
+        env:
+          # Require a GPU adapter — Mesa llvmpipe is installed above.
+          # If the adapter is missing the gpu_canary test fails loudly instead
+          # of silently skipping ~129 compositor GPU tests (hud-2sxfk).
+          TZE_HUD_REQUIRE_GPU: "1"
 
   # ── Integration: headless multi-crate suites ───────────────────────────────
   #
@@ -598,3 +603,6 @@ jobs:
         env:
           HEADLESS_FORCE_SOFTWARE: "1"
           LLVMPIPE_CI: "1"
+          # Canary: fail loudly if the adapter is missing instead of silently
+          # skipping GPU tests (hud-2sxfk).
+          TZE_HUD_REQUIRE_GPU: "1"
