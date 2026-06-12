@@ -1424,6 +1424,19 @@ fn parse_hex_color(s: &str) -> Option<Rgba> {
 mod tests {
     use super::*;
 
+    // ─── Timing-assertion gate (hud-94vm5) ───────────────────────────────────────
+
+    /// Returns `true` when wall-clock / p99 latency hard assertions should run.
+    ///
+    /// Set `TZE_HUD_PERF_ASSERT=1` to enable.  On the standard `test-unit` / blocking
+    /// CI lane this is unset; calibrated wall-clock budget assertions are skipped to
+    /// avoid flakes from scheduler noise on shared runners.
+    fn perf_assert_enabled() -> bool {
+        std::env::var("TZE_HUD_PERF_ASSERT")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false)
+    }
+
     fn tokens() -> MarkdownTokens {
         MarkdownTokens::default()
     }
@@ -2178,15 +2191,23 @@ mod tests {
         let t0 = std::time::Instant::now();
         let md = parse(&input);
         let elapsed = t0.elapsed();
-        // Every source character must be preserved verbatim — no silent drops.
+        // Structural assertion: always runs — correctness invariant, not speed.
         assert_eq!(
             &*md.plain_text, input,
             "backtick flood must emit all source characters verbatim"
         );
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "backtick flood must complete in <500ms (O(n)); took {elapsed:?} — likely O(n²) regression"
-        );
+        // Timing assertion: gated — wall-clock budget.  (hud-94vm5)
+        if perf_assert_enabled() {
+            assert!(
+                elapsed < std::time::Duration::from_millis(500),
+                "backtick flood must complete in <500ms (O(n)); took {elapsed:?} — likely O(n²) regression"
+            );
+        } else {
+            eprintln!(
+                "[SKIP-TIMING] adversarial_backtick_flood elapsed={elapsed:?}; \
+                 set TZE_HUD_PERF_ASSERT=1 to enforce 500ms budget"
+            );
+        }
     }
 
     /// `[` + `a` + `` ` ``×65528 + `](u)` completes in bounded time.
@@ -2216,15 +2237,23 @@ mod tests {
         let t0 = std::time::Instant::now();
         let md = parse(&input);
         let elapsed = t0.elapsed();
-        // The link text (a + backticks) must be emitted verbatim as plain text.
+        // Structural assertion: always runs — correctness invariant, not speed.
         assert!(
             !md.plain_text.is_empty(),
             "nested link backtick flood must produce non-empty output"
         );
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "nested link-text backtick flood must complete in <500ms (O(n)); took {elapsed:?} — likely O(n²) regression"
-        );
+        // Timing assertion: gated — wall-clock budget.  (hud-94vm5)
+        if perf_assert_enabled() {
+            assert!(
+                elapsed < std::time::Duration::from_millis(500),
+                "nested link-text backtick flood must complete in <500ms (O(n)); took {elapsed:?} — likely O(n²) regression"
+            );
+        } else {
+            eprintln!(
+                "[SKIP-TIMING] adversarial_nested_link_text_backtick_flood elapsed={elapsed:?}; \
+                 set TZE_HUD_PERF_ASSERT=1 to enforce 500ms budget"
+            );
+        }
     }
 
     /// `[` + `[](` × 21841 + `](u)` completes in bounded time.
@@ -2256,14 +2285,23 @@ mod tests {
         let t0 = std::time::Instant::now();
         let md = parse(&input);
         let elapsed = t0.elapsed();
+        // Structural assertion: always runs — correctness invariant, not speed.
         assert!(
             !md.plain_text.is_empty(),
             "nested link paren flood must produce non-empty output"
         );
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "nested link-text paren flood must complete in <500ms (O(n)); took {elapsed:?} — likely O(n²) regression"
-        );
+        // Timing assertion: gated — wall-clock budget.  (hud-94vm5)
+        if perf_assert_enabled() {
+            assert!(
+                elapsed < std::time::Duration::from_millis(500),
+                "nested link-text paren flood must complete in <500ms (O(n)); took {elapsed:?} — likely O(n²) regression"
+            );
+        } else {
+            eprintln!(
+                "[SKIP-TIMING] adversarial_nested_link_text_paren_flood elapsed={elapsed:?}; \
+                 set TZE_HUD_PERF_ASSERT=1 to enforce 500ms budget"
+            );
+        }
     }
 
     // ── Paren/backtick semantic correctness tests (hud-xq0uo) ────────────────

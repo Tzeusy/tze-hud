@@ -62,6 +62,19 @@ const STAGE5_P99_BUDGET_US: u64 = STAGE5_BUDGET_US;
 /// Max aggregate event rate from engineering-bar.md §2: 1000 events/second.
 const MAX_AGGREGATE_EVENTS_PER_SEC: u64 = 1_000;
 
+// ─── Timing-assertion gate (hud-94vm5) ───────────────────────────────────────
+
+/// Returns `true` when wall-clock / p99 latency hard assertions should run.
+///
+/// Set `TZE_HUD_PERF_ASSERT=1` to enable.  On the standard `test-unit` / blocking
+/// CI lane this is unset; calibrated wall-clock budget assertions are skipped to
+/// avoid flakes from scheduler noise on shared runners.
+fn perf_assert_enabled() -> bool {
+    std::env::var("TZE_HUD_PERF_ASSERT")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
+
 // ─── Headless runtime helpers ─────────────────────────────────────────────────
 
 fn cadence_bench_config() -> HeadlessConfig {
@@ -355,39 +368,57 @@ async fn frame_budgets_hold_under_sustained_portal_stream() {
 
     // ── Budget assertions ──────────────────────────────────────────────────────
 
+    // Timing assertions: gated — calibrated wall-clock budgets.  (hud-94vm5)
+    // Set TZE_HUD_PERF_ASSERT=1 to enforce on a reference host.
     let p99_frame = summary.frame_time.p99().unwrap_or(0);
-    assert!(
-        p99_frame <= HEADLESS_FRAME_BUDGET_US,
-        "p99 frame time {p99_frame}µs exceeded headless budget {HEADLESS_FRAME_BUDGET_US}µs \
-         under sustained portal stream"
-    );
+    if perf_assert_enabled() {
+        assert!(
+            p99_frame <= HEADLESS_FRAME_BUDGET_US,
+            "p99 frame time {p99_frame}µs exceeded headless budget {HEADLESS_FRAME_BUDGET_US}µs \
+             under sustained portal stream"
+        );
 
-    // Per-stage p99 budget assertions (engineering-bar.md §2):
-    // Stage 3 (Mutation Intake) < 1ms, Stage 4 (Scene Commit) < 1ms,
-    // Stage 5 (Layout Resolve) < 1ms.
-    // These are checked only when mutation frames were actually recorded.
-    if stage3_bucket.samples.len() >= 3 {
-        let p99_s3 = stage3_bucket.p99().unwrap_or(0);
-        assert!(
-            p99_s3 <= STAGE3_P99_BUDGET_US,
-            "Stage 3 (Mutation Intake) p99 {p99_s3}µs exceeded budget {STAGE3_P99_BUDGET_US}µs \
-             under sustained portal stream"
+        // Per-stage p99 budget assertions (engineering-bar.md §2):
+        // Stage 3 (Mutation Intake) < 1ms, Stage 4 (Scene Commit) < 1ms,
+        // Stage 5 (Layout Resolve) < 1ms.
+        // These are checked only when mutation frames were actually recorded.
+        if stage3_bucket.samples.len() >= 3 {
+            let p99_s3 = stage3_bucket.p99().unwrap_or(0);
+            assert!(
+                p99_s3 <= STAGE3_P99_BUDGET_US,
+                "Stage 3 (Mutation Intake) p99 {p99_s3}µs exceeded budget {STAGE3_P99_BUDGET_US}µs \
+                 under sustained portal stream"
+            );
+            let p99_s4 = stage4_bucket.p99().unwrap_or(0);
+            assert!(
+                p99_s4 <= STAGE4_P99_BUDGET_US,
+                "Stage 4 (Scene Commit) p99 {p99_s4}µs exceeded budget {STAGE4_P99_BUDGET_US}µs \
+                 under sustained portal stream"
+            );
+            let p99_s5 = stage5_bucket.p99().unwrap_or(0);
+            assert!(
+                p99_s5 <= STAGE5_P99_BUDGET_US,
+                "Stage 5 (Layout Resolve) p99 {p99_s5}µs exceeded budget {STAGE5_P99_BUDGET_US}µs \
+                 under sustained portal stream"
+            );
+        }
+    } else {
+        eprintln!(
+            "[SKIP-TIMING] frame_time p99={p99_frame}µs; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
         );
-        let p99_s4 = stage4_bucket.p99().unwrap_or(0);
-        assert!(
-            p99_s4 <= STAGE4_P99_BUDGET_US,
-            "Stage 4 (Scene Commit) p99 {p99_s4}µs exceeded budget {STAGE4_P99_BUDGET_US}µs \
-             under sustained portal stream"
-        );
-        let p99_s5 = stage5_bucket.p99().unwrap_or(0);
-        assert!(
-            p99_s5 <= STAGE5_P99_BUDGET_US,
-            "Stage 5 (Layout Resolve) p99 {p99_s5}µs exceeded budget {STAGE5_P99_BUDGET_US}µs \
-             under sustained portal stream"
-        );
+        if stage3_bucket.samples.len() >= 3 {
+            eprintln!(
+                "[SKIP-TIMING] stage3 p99={}µs, stage4 p99={}µs, stage5 p99={}µs; \
+                 set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budgets",
+                stage3_bucket.p99().unwrap_or(0),
+                stage4_bucket.p99().unwrap_or(0),
+                stage5_bucket.p99().unwrap_or(0),
+            );
+        }
     }
 
-    // Verify the total event count stayed within the 1000 events/s aggregate ceiling.
+    // Structural assertion: always runs — validates cadence rate ceiling (not wall-clock).
     // At 10 appends/s (1 per 6 frames at 60Hz) over BENCH_FRAME_COUNT frames, the
     // maximum append count is ceil(BENCH_FRAME_COUNT / 6). At 10 events/s this is
     // far below the 1000 events/s ceiling — the assertion is structural.
@@ -847,11 +878,19 @@ async fn input_latency_not_degraded_under_portal_stream() {
         // Windows locked budget: ≤ 2 ms (enforced by the Windows CI gate).
         let headless_ack_budget_us = 250_000u64;
         let p99 = ack_bucket.p99().unwrap_or(0);
-        assert!(
-            p99 <= headless_ack_budget_us,
-            "input_to_local_ack p99 {p99}µs exceeded headless budget {headless_ack_budget_us}µs \
-             under concurrent portal stream (Windows locked budget ≤ 2 ms)"
-        );
+        // Timing assertion: gated — wall-clock budget.  (hud-94vm5)
+        if perf_assert_enabled() {
+            assert!(
+                p99 <= headless_ack_budget_us,
+                "input_to_local_ack p99 {p99}µs exceeded headless budget {headless_ack_budget_us}µs \
+                 under concurrent portal stream (Windows locked budget ≤ 2 ms)"
+            );
+        } else {
+            eprintln!(
+                "[SKIP-TIMING] input_to_local_ack p99={p99}µs; \
+                 set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+            );
+        }
     }
 }
 

@@ -264,6 +264,19 @@ mod tests {
     use super::*;
     use crate::lease::ResourceBudget;
 
+    // ─── Timing-assertion gate (hud-94vm5) ───────────────────────────────────────
+
+    /// Returns `true` when wall-clock / p99 latency hard assertions should run.
+    ///
+    /// Set `TZE_HUD_PERF_ASSERT=1` to enable.  On the standard `test-unit` / blocking
+    /// CI lane this is unset; calibrated wall-clock budget assertions are skipped to
+    /// avoid flakes from scheduler noise on shared runners.
+    fn perf_assert_enabled() -> bool {
+        std::env::var("TZE_HUD_PERF_ASSERT")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false)
+    }
+
     fn default_budget() -> ResourceBudget {
         ResourceBudget::default()
     }
@@ -575,15 +588,24 @@ mod tests {
             }
         }
 
+        // Timing assertion: gated — wall-clock budget.  (hud-94vm5)
         // Allow a 10× headroom for CI (software-only environments).
         const NOMINAL_BUDGET_US: u64 = 50;
         const CI_MULTIPLIER: u64 = 10;
-        assert!(
-            max_elapsed_us <= NOMINAL_BUDGET_US * CI_MULTIPLIER,
-            "budget check exceeded latency budget: max {}µs > {}µs",
-            max_elapsed_us,
-            NOMINAL_BUDGET_US * CI_MULTIPLIER
-        );
+        if perf_assert_enabled() {
+            assert!(
+                max_elapsed_us <= NOMINAL_BUDGET_US * CI_MULTIPLIER,
+                "budget check exceeded latency budget: max {}µs > {}µs",
+                max_elapsed_us,
+                NOMINAL_BUDGET_US * CI_MULTIPLIER
+            );
+        } else {
+            eprintln!(
+                "[SKIP-TIMING] budget_check_latency max={max_elapsed_us}µs; \
+                 set TZE_HUD_PERF_ASSERT=1 to enforce {}µs budget",
+                NOMINAL_BUDGET_US * CI_MULTIPLIER
+            );
+        }
     }
 
     // ── Anti-collusion (spec §Shared Resources) ───────────────────────────

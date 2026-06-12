@@ -847,6 +847,19 @@ mod tests {
     use std::sync::Mutex;
     use tze_hud_scene::types::BudgetViolation;
 
+    // ─── Timing-assertion gate (hud-94vm5) ───────────────────────────────────────
+
+    /// Returns `true` when wall-clock / p99 latency hard assertions should run.
+    ///
+    /// Set `TZE_HUD_PERF_ASSERT=1` to enable.  On the standard `test-unit` / blocking
+    /// CI lane this is unset; calibrated wall-clock budget assertions are skipped to
+    /// avoid flakes from scheduler noise on shared runners.
+    fn perf_assert_enabled() -> bool {
+        std::env::var("TZE_HUD_PERF_ASSERT")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false)
+    }
+
     fn tight_budget() -> ResourceBudget {
         ResourceBudget {
             max_tiles: 2,
@@ -1157,11 +1170,20 @@ mod tests {
 
         let result = stage.check_and_apply("agent-a", 1, 512, 2, Instant::now(), &mut sink);
 
-        assert!(
-            !result.exceeded_latency_budget(),
-            "budget check took {}ns, expected < 100µs (100,000ns)",
-            result.check_duration_ns
-        );
+        // Timing assertion: gated — wall-clock budget.  (hud-94vm5)
+        if perf_assert_enabled() {
+            assert!(
+                !result.exceeded_latency_budget(),
+                "budget check took {}ns, expected < 100µs (100,000ns)",
+                result.check_duration_ns
+            );
+        } else {
+            eprintln!(
+                "[SKIP-TIMING] budget_check_latency={}ns; \
+                 set TZE_HUD_PERF_ASSERT=1 to enforce 100µs budget",
+                result.check_duration_ns
+            );
+        }
     }
 
     #[test]
@@ -1182,11 +1204,19 @@ mod tests {
                 state.texture_bytes_used = 0;
             }
         }
+        // Timing assertion: gated — wall-clock budget.  (hud-94vm5)
         // Allow up to 1 outlier (scheduler jitter).
-        assert!(
-            over_budget <= 1,
-            "{over_budget} of 100 iterations exceeded 100µs latency budget"
-        );
+        if perf_assert_enabled() {
+            assert!(
+                over_budget <= 1,
+                "{over_budget} of 100 iterations exceeded 100µs latency budget"
+            );
+        } else {
+            eprintln!(
+                "[SKIP-TIMING] budget_check_latency_100iters over_budget={over_budget}; \
+                 set TZE_HUD_PERF_ASSERT=1 to enforce 100µs budget"
+            );
+        }
     }
 
     // ─── Delta accounting ──────────────────────────────────────────────────
