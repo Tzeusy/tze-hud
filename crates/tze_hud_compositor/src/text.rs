@@ -589,7 +589,10 @@ impl TextRasterizer {
                     // they address the correct bytes in "…\n{tail}".  See
                     // `reslice_styled_runs_tail_anchored` for the shift logic.
                     if let Some(truncated_str) = truncated {
-                        let resliced = if item.viewport == TruncationViewport::TailAnchored
+                        let resliced = if truncated_str == &*item.text {
+                            // Text fit without truncation — preserve original runs.
+                            item.styled_runs.to_vec()
+                        } else if item.viewport == TruncationViewport::TailAnchored
                             && truncated_str.starts_with(crate::overflow::ELLIPSIS)
                         {
                             // Leading-ellipsis output: shift offsets from
@@ -669,7 +672,10 @@ impl TextRasterizer {
                     // leading-ellipsis shift; HeadAnchored uses a trailing-
                     // ellipsis clamp.  See reslice_color_runs_tail_anchored.
                     if let Some(truncated_str) = truncated {
-                        let resliced = if item.viewport == TruncationViewport::TailAnchored
+                        let resliced = if truncated_str == &*item.text {
+                            // Text fit without truncation — preserve original color runs.
+                            item.color_runs.to_vec()
+                        } else if item.viewport == TruncationViewport::TailAnchored
                             && truncated_str.starts_with(crate::overflow::ELLIPSIS)
                         {
                             reslice_color_runs_tail_anchored(
@@ -3993,5 +3999,112 @@ mod tests {
             "when first line is horizontally truncated, must return empty (unstyled fallback); \
              got {result:?}"
         );
+    }
+
+    // ── hud-jrr72: no-truncation short-circuit tests ──────────────────────────
+    //
+    // Regression: when the cache returns Some(truncated_str) but truncated_str
+    // equals the original text (it fit without truncation), the code must NOT
+    // enter the tail-anchored or head-anchored reslice branches — even when the
+    // original text starts with ELLIPSIS.  Before this fix, a text starting
+    // with "…" in TailAnchored mode would incorrectly trigger the leading-ellipsis
+    // shift, painting styled/color runs on wrong glyph positions.
+
+    /// styled_runs: no-truncation short-circuit preserves runs unchanged even
+    /// when the original text starts with ELLIPSIS (the pre-fix false trigger).
+    #[test]
+    fn styled_runs_no_truncation_preserves_runs_when_text_starts_with_ellipsis() {
+        // Original text that happens to start with the ellipsis character.
+        let text: Arc<str> = Arc::from("…already_short");
+        // truncated_str identical to original — text fit, no truncation occurred.
+        let truncated_str: Arc<str> = Arc::clone(&text);
+
+        let runs = vec![
+            StyledRunItem {
+                start_byte: 0,
+                end_byte: 3, // 3-byte UTF-8 ellipsis
+                weight: Some(700),
+                italic: false,
+                monospace: false,
+                color: None,
+            },
+            StyledRunItem {
+                start_byte: 3,
+                end_byte: 14,
+                weight: None,
+                italic: true,
+                monospace: false,
+                color: None,
+            },
+        ];
+
+        // Simulate the reslice decision that prepare_text_items now makes.
+        // The short-circuit must fire: no offset shift must occur.
+        // Note: in production code `truncated_str` is `&str`; here we hold
+        // `Arc<str>` and deref with `&**` to get a `&str` for comparison.
+        let resliced: Vec<StyledRunItem> = if &*truncated_str == &*text {
+            runs.to_vec()
+        } else if truncated_str.starts_with(crate::overflow::ELLIPSIS) {
+            reslice_styled_runs_tail_anchored(&text, &truncated_str, &runs)
+        } else {
+            let content_end = truncated_str
+                .strip_suffix(crate::overflow::ELLIPSIS)
+                .map(|s| s.len())
+                .unwrap_or(truncated_str.len());
+            reslice_styled_runs(&runs, content_end)
+        };
+
+        assert_eq!(
+            resliced.len(),
+            2,
+            "all runs must be preserved by the no-truncation short-circuit; got {resliced:?}"
+        );
+        assert_eq!(
+            resliced[0].start_byte, 0,
+            "first run start must be unshifted"
+        );
+        assert_eq!(resliced[0].end_byte, 3, "first run end must be unshifted");
+        assert_eq!(
+            resliced[1].start_byte, 3,
+            "second run start must be unshifted"
+        );
+        assert_eq!(resliced[1].end_byte, 14, "second run end must be unshifted");
+    }
+
+    /// color_runs: no-truncation short-circuit preserves runs unchanged even
+    /// when the original text starts with ELLIPSIS.
+    #[test]
+    fn color_runs_no_truncation_preserves_runs_when_text_starts_with_ellipsis() {
+        let text: Arc<str> = Arc::from("…short");
+        let truncated_str: Arc<str> = Arc::clone(&text);
+
+        let runs = vec![ColorRunItem {
+            start_byte: 0,
+            end_byte: 3, // 3-byte ellipsis
+            color: [255, 0, 0, 255],
+        }];
+
+        // Simulate the color-runs reslice decision.
+        // Note: in production code `truncated_str` is `&str`; here we hold
+        // `Arc<str>` and deref with `&**` to get a `&str` for comparison.
+        let resliced: Vec<ColorRunItem> = if &*truncated_str == &*text {
+            runs.to_vec()
+        } else if truncated_str.starts_with(crate::overflow::ELLIPSIS) {
+            reslice_color_runs_tail_anchored(&text, &truncated_str, &runs)
+        } else {
+            let content_end = truncated_str
+                .strip_suffix(crate::overflow::ELLIPSIS)
+                .map(|s| s.len())
+                .unwrap_or(truncated_str.len());
+            reslice_color_runs(&runs, content_end)
+        };
+
+        assert_eq!(
+            resliced.len(),
+            1,
+            "color run must be preserved by no-truncation short-circuit; got {resliced:?}"
+        );
+        assert_eq!(resliced[0].start_byte, 0, "run start must be unshifted");
+        assert_eq!(resliced[0].end_byte, 3, "run end must be unshifted");
     }
 }
