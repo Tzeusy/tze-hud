@@ -90,7 +90,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
 use crate::component_startup::{register_profile_widgets, run_component_startup};
-use tze_hud_compositor::{Compositor, CompositorSurface, WindowSurface};
+use tze_hud_compositor::{
+    Compositor, CompositorSurface, LocalComposerState, LocalComposerStateHandle, WindowSurface,
+};
 use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{
     DragEventOutcome, FocusManager, HotkeyResizeDir, InputProcessor, KeyboardProcessor,
@@ -1367,6 +1369,15 @@ struct WindowedRuntimeState {
     /// so the leak is bounded. Proper cleanup on tile removal is tracked in
     /// hud-38236 (constraint-authority follow-up).
     portal_resize_states: std::collections::HashMap<tze_hud_scene::SceneId, PortalResizeState>,
+    /// Shared local composer echo state for the compositor thread (hud-r3ax6).
+    ///
+    /// Written by the input-event thread (this thread) on every keystroke that
+    /// mutates the composer draft.  The compositor thread drains it once per
+    /// frame at frame start via `drain_local_composer_state`.
+    ///
+    /// `Some(Some(state))` = new draft snapshot; `Some(None)` = deactivate.
+    /// `None` = no update since last drain (compositor keeps prior state).
+    local_composer_state: LocalComposerStateHandle,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -1667,6 +1678,12 @@ impl ApplicationHandler for WinitApp {
 
         // ── Elevate main thread priority ──────────────────────────────────
         crate::threads::elevate_main_thread_priority();
+
+        // ── Wire local composer echo channel to the compositor (hud-r3ax6) ──
+        // Clone the Arc from the compositor so the input-event thread (this
+        // thread) can push draft snapshots to the compositor thread without any
+        // additional allocations or locks on the hot path.
+        self.state.local_composer_state = Arc::clone(&compositor.local_composer_state);
 
         // ── Wire compositor thread ─────────────────────────────────────────
         // Pre-clone the scene Arc so the compositor thread can lock the scene
@@ -2375,6 +2392,10 @@ impl WinitApp {
         // without holding the scene lock.
         let drag_released: Option<DragReleasedData>;
         let portal_resize_outcome: Option<PortalResizePointerOutcome>;
+        // Flag set when a composer focus-lost transition is detected inside the
+        // locked block below; consumed after the lock is released to call
+        // clear_local_composer_echo() without a borrow conflict (hud-r3ax6).
+        let mut composer_focus_lost = false;
         if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(mut scene) = state.scene.try_lock() {
                 // ── Click-to-focus (Stage 2) ─────────────────────────────────
@@ -2439,6 +2460,11 @@ impl WinitApp {
                             self.state.pending_blur_delivery_context =
                                 Some((ns.clone(), *node_id.as_uuid().as_bytes()));
                         }
+                        // Mark that the local echo should be cleared after this
+                        // borrow scope ends (cannot call clear_local_composer_echo
+                        // here because we hold the shared_state lock).
+                        // Cleared below after the lock is released.
+                        composer_focus_lost = true;
                     }
                 }
                 if let Some(transition) = focus_transition {
@@ -2602,6 +2628,12 @@ impl WinitApp {
                 outcome.display_w,
                 outcome.display_h,
             );
+        }
+
+        // Post-lock: clear local composer echo if composer focus was lost inside
+        // the shared_state lock scope above (hud-r3ax6).
+        if composer_focus_lost {
+            self.clear_local_composer_echo();
         }
     }
 
@@ -2863,6 +2895,9 @@ impl WinitApp {
 
         // ── Composer draft intercept (§4.4) ──────────────────────────────
         if self.state.input_processor.is_composer_active() {
+            // Capture the input-started-at instant for local-ack latency
+            // measurement on the composer keystroke path (hud-r3ax6 / hud-o9ybl).
+            let composer_input_started = Instant::now();
             let (consumed, batch) = self.state.input_processor.route_key_down_to_composer(
                 &raw.key_code,
                 &raw.key,
@@ -2870,7 +2905,11 @@ impl WinitApp {
                 raw.modifiers.ctrl,
                 raw.modifiers.alt,
             );
+            // Track whether this keystroke submitted or cancelled the composer so
+            // we can suppress the push below (clear must win over push; hud-r3ax6).
+            let mut key_down_is_terminal = false;
             if let Some(b) = batch {
+                key_down_is_terminal = b.cancel.is_some() || b.submission.is_some();
                 // Resolve delivery context before the batch is consumed.
                 if let Some((namespace, node_id_bytes)) = self.composer_delivery_context() {
                     deliver_composer_batch(
@@ -2880,12 +2919,21 @@ impl WinitApp {
                         b,
                     );
                 }
+                if key_down_is_terminal {
+                    // Submit or cancel: clear the local echo overlay.
+                    self.clear_local_composer_echo();
+                }
             }
             if consumed {
                 tracing::debug!(
                     key_code = %raw.key_code,
                     "composer: KeyDown consumed by draft manager"
                 );
+                // Push updated draft snapshot for local echo rendering (hud-r3ax6).
+                // Guard: do NOT push after a terminal batch — clear must win.
+                if !key_down_is_terminal {
+                    self.push_local_composer_echo(composer_input_started);
+                }
                 return;
             }
         }
@@ -3004,11 +3052,22 @@ impl WinitApp {
 
         // ── Composer draft intercept (§4.1) ──────────────────────────────
         if self.state.input_processor.is_composer_active() {
+            // Capture the input-started-at instant for local-ack latency
+            // measurement (hud-r3ax6 / hud-o9ybl).
+            let composer_input_started = Instant::now();
             let (outcome, batch) = self
                 .state
                 .input_processor
                 .route_character_to_composer(&raw.character);
+            // Track whether this character event submitted or cancelled the composer
+            // so we can suppress the push below (clear must win; hud-r3ax6).
+            let mut char_is_terminal = false;
             if let Some(b) = batch {
+                char_is_terminal = b.cancel.is_some() || b.submission.is_some();
+                if char_is_terminal {
+                    // Submit or cancel: clear the local echo overlay.
+                    self.clear_local_composer_echo();
+                }
                 if let Some((namespace, node_id_bytes)) = self.composer_delivery_context() {
                     deliver_composer_batch(
                         &self.state.input_event_tx,
@@ -3026,6 +3085,13 @@ impl WinitApp {
                     outcome = ?outcome,
                     "composer: Character consumed by draft manager"
                 );
+                // Push the updated draft snapshot for local echo rendering
+                // (hud-r3ax6).  This is the Stage 2 "local feedback" path;
+                // no adapter round-trip.
+                // Guard: do NOT push after a terminal batch — clear must win.
+                if !char_is_terminal {
+                    self.push_local_composer_echo(composer_input_started);
+                }
                 return;
             }
         }
@@ -3268,6 +3334,59 @@ impl WinitApp {
         let tile_id = self.state.focus_manager.current_owner(tab_id).tile_id()?;
         let namespace = self.namespace_for_keyboard_tile(tile_id)?;
         Some((namespace, node_id_bytes))
+    }
+
+    /// Push the current composer draft snapshot to the compositor thread for
+    /// local echo rendering (hud-r3ax6).
+    ///
+    /// Called immediately after every keystroke that mutates the draft buffer.
+    /// The snapshot is written to the shared `local_composer_state` slot;
+    /// the compositor thread drains it once per frame (no round-trip).
+    ///
+    /// Also records an input-to-local-ack latency sample so the p99 measurement
+    /// required by hud-o9ybl can be produced for the composer path.
+    ///
+    /// No-ops if the draft manager reports no active draft (safety guard).
+    fn push_local_composer_echo(&mut self, input_started_at: std::time::Instant) {
+        if let Some((text, cursor_byte, at_capacity, node_id)) =
+            self.state.input_processor.composer_draft_snapshot()
+        {
+            let state = LocalComposerState {
+                text,
+                cursor_byte,
+                at_capacity,
+                node_id,
+            };
+            if let Ok(mut guard) = self.state.local_composer_state.lock() {
+                *guard = Some(Some(state));
+            }
+            // Measure input-to-local-ack: the "local ack" for a composer
+            // keystroke is the moment the snapshot is handed to the compositor.
+            // This is the equivalent of `result.local_ack_us` for pointer events.
+            let local_ack_us = input_started_at.elapsed().as_micros() as u64;
+            record_pending_input_latency(
+                &self.state.pending_input_latency,
+                input_started_at,
+                local_ack_us,
+            );
+            // Request a redraw so the compositor picks up the new state promptly.
+            if let Some(window) = &self.state.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// Clear the local composer echo (called on blur, submit, cancel).
+    ///
+    /// Stores `Some(None)` (explicit deactivation) in the shared slot so the
+    /// compositor clears the overlay on the next frame.
+    fn clear_local_composer_echo(&mut self) {
+        if let Ok(mut guard) = self.state.local_composer_state.lock() {
+            *guard = Some(None);
+        }
+        if let Some(window) = &self.state.window {
+            window.request_redraw();
+        }
     }
 
     /// Update the active hit-regions for overlay input passthrough.
@@ -4094,6 +4213,9 @@ impl WindowedRuntime {
             input_event_tx,
             pending_blur_delivery_context: None,
             portal_resize_states: std::collections::HashMap::new(),
+            // Placeholder; replaced in resumed() with the Arc cloned from the
+            // compositor.  Separate Arc so it works before compositor is created.
+            local_composer_state: Arc::new(StdMutex::new(None)),
         };
 
         let mut app = WinitApp { state: app_state };
