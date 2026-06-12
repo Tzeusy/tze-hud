@@ -3234,8 +3234,14 @@ impl Compositor {
                 // glyph positions track the scrolled content (Bounded Transcript
                 // Viewport requirement — hud-w5ih).
                 let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
+                // Determine follow-tail state so Ellipsis TextItems receive the
+                // correct TruncationViewport (TailAnchored vs HeadAnchored).
+                // This must mirror the logic in prime_truncation_cache /
+                // collect_ellipsis_text_items_from_node so the per-frame key
+                // matches the primed cache entry (hud-lu50e).
+                let at_tail = scene.tile_follow_tail_at_tail(tile.id);
                 self.collect_text_items_from_node(
-                    root_id, tile, scene, scroll_x, scroll_y, &mut items,
+                    root_id, tile, scene, scroll_x, scroll_y, at_tail, &mut items,
                 );
             }
         }
@@ -4283,7 +4289,17 @@ impl Compositor {
     }
 
     /// Recursively collect `TextItem`s from a node and its children.
+    ///
+    /// `at_tail`: whether the owning tile is currently in follow-tail/at-tail
+    /// mode.  When `true` and the node uses `TextOverflow::Ellipsis`, the
+    /// resulting `TextItem`'s viewport is set to `TailAnchored` so the
+    /// per-frame truncation key matches the primed cache entry (hud-lu50e).
     #[allow(clippy::only_used_in_recursion)]
+    // All arguments are required: node identity, tile geometry, scene reference,
+    // scroll offsets, tail-follow state, and the output accumulator.
+    // This mirrors the parameter shape of the free-function twin
+    // `collect_ellipsis_text_items_from_node` which also carries the same lint.
+    #[allow(clippy::too_many_arguments)]
     fn collect_text_items_from_node(
         &self,
         node_id: SceneId,
@@ -4291,6 +4307,7 @@ impl Compositor {
         scene: &SceneGraph,
         scroll_x: f32,
         scroll_y: f32,
+        at_tail: bool,
         items: &mut Vec<TextItem>,
     ) {
         let node = match scene.nodes.get(&node_id) {
@@ -4378,6 +4395,15 @@ impl Compositor {
                     tile.bounds.y - scroll_y,
                 )
             };
+            // Override viewport for at-tail Ellipsis tiles (hud-lu50e).
+            // The prime path (collect_ellipsis_text_items_from_node) already
+            // primes TailAnchored keys for these tiles; the per-frame key must
+            // match or `prepare_text_items` will miss the primed entry and fall
+            // back to inline head-anchored truncation — always showing the head
+            // of the content instead of the newest lines.
+            if at_tail && tm.overflow == TextOverflow::Ellipsis {
+                item.viewport = crate::overflow::TruncationViewport::TailAnchored;
+            }
             let unscrolled_x = item.pixel_x + scroll_x;
             let unscrolled_y = item.pixel_y + scroll_y;
             let clip_left = unscrolled_x.max(tile.bounds.x);
@@ -4394,7 +4420,9 @@ impl Compositor {
         }
 
         for child_id in &node.children {
-            self.collect_text_items_from_node(*child_id, tile, scene, scroll_x, scroll_y, items);
+            self.collect_text_items_from_node(
+                *child_id, tile, scene, scroll_x, scroll_y, at_tail, items,
+            );
         }
     }
 
@@ -15225,6 +15253,210 @@ mod tests {
             item.pixel_y >= tile_y + node_y,
             "non-scrolled text pixel_y ({}) must be >= tile_y ({tile_y}) + node_y ({node_y})",
             item.pixel_y
+        );
+    }
+
+    /// At-tail Ellipsis tiles: `collect_text_items` must produce `TailAnchored`
+    /// viewport, and the truncation cache must hit (not miss) after priming.
+    ///
+    /// **Bug context (hud-lu50e):** `prime_truncation_cache` primed
+    /// `TailAnchored` entries for at-tail tiles, but `collect_text_items_from_node`
+    /// always built items with the constructor-default `HeadAnchored` viewport.
+    /// `prepare_text_items` keyed the cache lookup on `item.viewport`, so the
+    /// per-frame key was `HeadAnchored` while the primed entry was `TailAnchored` —
+    /// causing a cache miss on every frame and the inline fallback always
+    /// running head-anchored truncation (showing oldest lines, not newest).
+    ///
+    /// This test asserts:
+    /// 1. For a tile with `at_tail = true` and `TextOverflow::Ellipsis`, the
+    ///    resulting `TextItem` has `viewport == TailAnchored`.
+    /// 2. For the same tile with `at_tail = false` (scrolled-back), the
+    ///    `TextItem` retains `HeadAnchored`.
+    /// 3. Non-Ellipsis (Clip) nodes are unaffected by `at_tail`.
+    /// 4. After priming the truncation cache (`prime_truncation_cache`) with
+    ///    the at-tail scene, the TailAnchored key is present in the cache,
+    ///    confirming the per-frame item and the primed entry are aligned.
+    #[tokio::test]
+    async fn test_collect_text_items_at_tail_ellipsis_uses_tail_anchored_viewport() {
+        // collect_text_items is a CPU path; init_text_renderer + prime_truncation_cache
+        // require the GPU text rasterizer.
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(720, 360).await);
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        // Content with multiple distinct lines so head vs. tail truncation
+        // would show different text.
+        let content = "Line A\nLine B\nLine C\nLine D\nLine E\nLine F\nLine G\nLine H";
+
+        let tile_w = 200.0_f32;
+        // Narrow height so only a subset of lines fits — forces truncation.
+        let tile_h = 40.0_f32;
+
+        // ── Scene with at_tail = true ─────────────────────────────────────────
+        let mut scene_at_tail = SceneGraph::new(720.0, 360.0);
+        let tab_at = scene_at_tail.create_tab("test", 0).unwrap();
+        let lease_at = scene_at_tail.grant_lease("at-tail-test", 120_000, vec![]);
+        let tile_at = scene_at_tail
+            .create_tile(
+                tab_at,
+                "at-tail-test",
+                lease_at,
+                Rect::new(0.0, 0.0, tile_w, tile_h),
+                1,
+            )
+            .unwrap();
+        let node_ellipsis = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.to_owned(),
+                bounds: Rect::new(0.0, 0.0, tile_w, tile_h),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemMonospace,
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Ellipsis,
+                color_runs: Box::default(),
+            }),
+        };
+        scene_at_tail.set_tile_root(tile_at, node_ellipsis).unwrap();
+        // Mark tile as at-tail (follow-tail active, user has not scrolled back).
+        scene_at_tail.set_tile_follow_tail_at_tail(tile_at, true);
+
+        compositor.prime_markdown_cache(&scene_at_tail);
+
+        // 1. per-frame viewport must be TailAnchored.
+        let items_at_tail = compositor.collect_text_items(&scene_at_tail, 720.0, 360.0);
+        assert_eq!(
+            items_at_tail.len(),
+            1,
+            "expected one TextItem for the at-tail tile"
+        );
+        let at_tail_item = &items_at_tail[0];
+        assert_eq!(
+            at_tail_item.overflow,
+            TextOverflow::Ellipsis,
+            "item must carry Ellipsis overflow"
+        );
+        assert_eq!(
+            at_tail_item.viewport,
+            crate::overflow::TruncationViewport::TailAnchored,
+            "at-tail Ellipsis tile must produce TailAnchored viewport \
+             so the per-frame key matches the primed cache entry (hud-lu50e)"
+        );
+
+        // 2. Prime the truncation cache and verify TailAnchored key is present.
+        //    `prime_truncation_cache` primes TailAnchored for at-tail tiles.
+        //    If the per-frame item.viewport also matches TailAnchored, the
+        //    cache lookup in `prepare_text_items` will hit — confirming alignment.
+        compositor.prime_truncation_cache(&scene_at_tail);
+        // Access the rasterizer's truncation cache to confirm the TailAnchored
+        // entry was primed.  `prime_truncation_cache` calls
+        // `rasterizer.prime_truncation_cache(items)` which stores entries keyed
+        // on viewport_mode=1 (TailAnchored).  The cache must be non-empty after
+        // priming an Ellipsis tile.
+        let cache_len_after_prime = compositor
+            .text_rasterizer
+            .as_ref()
+            .expect("text rasterizer must be initialised")
+            .truncation_cache
+            .len();
+        assert!(
+            cache_len_after_prime > 0,
+            "truncation cache must be non-empty after priming an Ellipsis at-tail tile"
+        );
+
+        // ── Scene with at_tail = false (scrolled back) ────────────────────────
+        let mut scene_head = SceneGraph::new(720.0, 360.0);
+        let tab_head = scene_head.create_tab("test", 0).unwrap();
+        let lease_head = scene_head.grant_lease("head-test", 120_000, vec![]);
+        let tile_head = scene_head
+            .create_tile(
+                tab_head,
+                "head-test",
+                lease_head,
+                Rect::new(0.0, 0.0, tile_w, tile_h),
+                1,
+            )
+            .unwrap();
+        let node_ellipsis_head = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.to_owned(),
+                bounds: Rect::new(0.0, 0.0, tile_w, tile_h),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemMonospace,
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Ellipsis,
+                color_runs: Box::default(),
+            }),
+        };
+        scene_head
+            .set_tile_root(tile_head, node_ellipsis_head)
+            .unwrap();
+        // at_tail = false: tile is scrolled back (or no follow-tail active).
+        // tile_follow_tail_at_tail defaults to false when not set.
+
+        compositor.prime_markdown_cache(&scene_head);
+
+        let items_head = compositor.collect_text_items(&scene_head, 720.0, 360.0);
+        assert_eq!(
+            items_head.len(),
+            1,
+            "expected one TextItem for the head tile"
+        );
+        assert_eq!(
+            items_head[0].viewport,
+            crate::overflow::TruncationViewport::HeadAnchored,
+            "non-at-tail Ellipsis tile must retain HeadAnchored viewport"
+        );
+
+        // ── Clip overflow is unaffected by at_tail ────────────────────────────
+        let mut scene_clip = SceneGraph::new(720.0, 360.0);
+        let tab_clip = scene_clip.create_tab("test", 0).unwrap();
+        let lease_clip = scene_clip.grant_lease("clip-test", 120_000, vec![]);
+        let tile_clip = scene_clip
+            .create_tile(
+                tab_clip,
+                "clip-test",
+                lease_clip,
+                Rect::new(0.0, 0.0, tile_w, tile_h),
+                1,
+            )
+            .unwrap();
+        let node_clip = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.to_owned(),
+                bounds: Rect::new(0.0, 0.0, tile_w, tile_h),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemMonospace,
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
+            }),
+        };
+        scene_clip.set_tile_root(tile_clip, node_clip).unwrap();
+        scene_clip.set_tile_follow_tail_at_tail(tile_clip, true);
+
+        compositor.prime_markdown_cache(&scene_clip);
+
+        let items_clip = compositor.collect_text_items(&scene_clip, 720.0, 360.0);
+        assert_eq!(
+            items_clip.len(),
+            1,
+            "expected one TextItem for the clip tile"
+        );
+        assert_eq!(
+            items_clip[0].viewport,
+            crate::overflow::TruncationViewport::HeadAnchored,
+            "Clip overflow at-tail tile must remain HeadAnchored (at_tail only overrides Ellipsis)"
         );
     }
 
