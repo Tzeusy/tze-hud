@@ -4,34 +4,37 @@ This map documents every crate in the tze_hud workspace: what it does, what it d
 
 ## Crate Inventory
 
-### Core crates (13)
+### Core crates (13 active + 3 parked = 16 total)
 
-| Crate | Plane(s) | Responsibility | Key entry points |
-|---|---|---|---|
-| `tze_hud_scene` | None (data model) | Pure scene graph: `Scene` → `Tab[]` → `Tile[]` → `Node[]`. Types, mutations, diffs, timing, leases, validation. No GPU dependency. Also the single source of truth for shared numeric contracts that span multiple crates: emission rate limits (`events::emission`), and attention budget defaults (`ATTENTION_DEFAULT_PER_AGENT`, `ATTENTION_DEFAULT_PER_ZONE`, `ATTENTION_DEFAULT_PER_ZONE_STACK`) used by both `tze_hud_policy` and `tze_hud_runtime`. | `graph::SceneGraph`, `mutation::MutationBatch`, `diff::SceneDiff`, `timing::TimingHints`, `lease::capability::*` |
-| `tze_hud_compositor` | None (renderer) | wgpu compositor: renders scene graph to native window or headless offscreen texture. Text rasterisation (glyphon), SVG widget rendering (resvg), GPU adapter selection. | `renderer::Compositor`, `surface::{WindowSurface, HeadlessSurface}`, `adapter::select_gpu_adapter`, `widget::WidgetRenderer`, `text::TextRasterizer` |
-| `tze_hud_runtime` | MCP + gRPC | Runtime kernel: 8-stage frame pipeline orchestration, 4-thread model, budget enforcement, admission control, channels, shell/chrome, quiet hours, attention budgets, reload triggers. | `windowed::WindowedRuntime`, `headless::HeadlessRuntime`, `pipeline::FramePipeline`, `budget::BudgetEnforcer`, `channels::ChannelSet`, `mcp::start_mcp_http_server` |
-| `tze_hud_protocol` | gRPC | gRPC session protocol: protobuf codegen, session server, auth, lease management, MCP bridge, subscription dispatch, widget asset store, dedup. | `proto::*` (generated), `session_server::*`, `session::*`, `auth::*`, `mcp_bridge::*` |
-| `tze_hud_input` | None (pipeline) | Input pipeline: pointer events, hit-testing, pointer capture, focus tree/manager, keyboard dispatch, command model, local feedback (< 4 ms), event coalescing/batching. | `InputProcessor::process()`, `dispatch::DispatchProcessor`, `focus::FocusManager`, `capture::PointerCaptureManager`, `coalescing::FrameCoalescer` |
-| `tze_hud_telemetry` | None (observability) | Structured per-frame telemetry: timing, throughput, resource metrics as machine-readable JSON. Hardware-normalised validation. | `collector::TelemetryCollector`, `record::FrameTelemetry`, `resource_monitor::ResourceMonitor`, `validation::ValidationReport` |
-| `tze_hud_mcp` | MCP | MCP compatibility bridge: JSON-RPC 2.0 server exposing named tools (`create_tab`, `create_tile`, `set_content`, `dismiss`, `publish_to_zone`, `list_zones`, `list_scene`, `register_widget_asset`). | `server::McpServer`, `tools::*`, `types::{McpRequest, McpResponse}` |
-| `tze_hud_a11y` | None (platform bridge) | Accessibility bridge: converts scene graph to platform a11y tree. Stubs for AT-SPI2 (Linux), UIA (Windows), NSAccessibility (macOS); no-op default. | `AccessibilityTree` trait, `NoopAccessibility`, `AccessibilityConfig` |
-| `tze_hud_policy` | None (pure evaluator) | 7-level policy arbitration stack (Human Override → Safety → Privacy → Security → Attention → Resource → Content). Pure read-only evaluator; no side effects. Not wired at runtime in v1. Attention budget default constants are sourced from `tze_hud_scene::events::emission` (single source of truth shared with `tze_hud_runtime`). Arbitration evaluation order (L3 before L2 in zone-publication path) is protected by order-invariant tests in `stack.rs`. | `stack::ArbitrationStack::evaluate()`, `mutation::evaluate_batch()`, `frame::evaluate_frame()`, `event::evaluate_event()` |
-| `tze_hud_config` | None (loading) | TOML configuration: file resolution, schema validation, display profiles, agent registration, privacy/quiet-hours, zone registry, component profiles/types, hot reload (SIGHUP). | `loader::TzeHudConfig`, `resolver::resolve_config_path`, `reload::reload_config`, `profile::resolve_profile`, `policy_builder::build_effective_policy` |
-| `tze_hud_resource` | None (storage) | Content-addressed resource store: BLAKE3 dedup, inline/chunked upload, validation pipeline, refcounting, GC, per-agent decoded-byte budget, cross-agent sharing, font cache, runtime widget durable store. | `upload::ResourceStore`, `dedup::DedupIndex`, `budget::BudgetRegistry`, `gc::GcRunner`, `font_cache::FontCache`, `runtime_widget_store::RuntimeWidgetStore` |
-| `tze_hud_validation` | None (testing) | Visual regression (Layer 2 SSIM comparison, perceptual hash pre-screening) and developer visibility artifacts (Layer 4 index.html + manifest.json generation). | `layer2::Layer2Validator::compare()`, `layer4::ArtifactBuilder`, `ssim::compute_ssim`, `phash::compute_phash` |
-| `tze_hud_widget` | None (loading) | Widget asset bundle loader: scans directories for `widget.toml` manifests, validates SVG files, resolves parameter bindings, structured error codes. | `loader::{scan_bundle_dirs, load_bundle_dir}`, `manifest::*`, `svg_ids::*`, `runtime_registration::register_runtime_widget_svg_asset` |
+Active crates are wired into the production build. Parked crates compile to stubs and have no workspace dependents; they are maintained in the workspace so the build stays exercisable on non-target platforms.
 
-### Media plane subsystems (2)
+| Crate | Status | Plane(s) | Responsibility | Key entry points |
+|---|---|---|---|---|
+| `tze_hud_scene` | active | None (data model) | Pure scene graph: `Scene` → `Tab[]` → `Tile[]` → `Node[]`. Types, mutations, diffs, timing, leases, validation. No GPU dependency. Also the single source of truth for shared numeric contracts that span multiple crates: emission rate limits (`events::emission`), and attention budget defaults (`ATTENTION_DEFAULT_PER_AGENT`, `ATTENTION_DEFAULT_PER_ZONE`, `ATTENTION_DEFAULT_PER_ZONE_STACK`) used by both `tze_hud_policy` and `tze_hud_runtime`. | `graph::SceneGraph`, `mutation::MutationBatch`, `diff::SceneDiff`, `timing::TimingHints`, `lease::capability::*` |
+| `tze_hud_compositor` | active | None (renderer) | wgpu compositor: renders scene graph to native window or headless offscreen texture. Text rasterisation (glyphon), SVG widget rendering (resvg), GPU adapter selection. | `renderer::Compositor`, `surface::{WindowSurface, HeadlessSurface}`, `adapter::select_gpu_adapter`, `widget::WidgetRenderer`, `text::TextRasterizer` |
+| `tze_hud_runtime` | active | MCP + gRPC | Runtime kernel: 8-stage frame pipeline orchestration, 4-thread model, budget enforcement, admission control, channels, shell/chrome, quiet hours, attention budgets, reload triggers. | `windowed::WindowedRuntime`, `headless::HeadlessRuntime`, `pipeline::FramePipeline`, `budget::BudgetEnforcer`, `channels::ChannelSet`, `mcp::start_mcp_http_server` |
+| `tze_hud_protocol` | active | gRPC | gRPC session protocol: protobuf codegen, session server, auth, lease management, MCP bridge, subscription dispatch, widget asset store, dedup. | `proto::*` (generated), `session_server::*`, `session::*`, `auth::*`, `mcp_bridge::*` |
+| `tze_hud_input` | active | None (pipeline) | Input pipeline: pointer events, hit-testing, pointer capture, focus tree/manager, keyboard dispatch, command model, local feedback (< 4 ms), event coalescing/batching. | `InputProcessor::process()`, `dispatch::DispatchProcessor`, `focus::FocusManager`, `capture::PointerCaptureManager`, `coalescing::FrameCoalescer` |
+| `tze_hud_telemetry` | active | None (observability) | Structured per-frame telemetry: timing, throughput, resource metrics as machine-readable JSON. Hardware-normalised validation. | `collector::TelemetryCollector`, `record::FrameTelemetry`, `resource_monitor::ResourceMonitor`, `validation::ValidationReport` |
+| `tze_hud_mcp` | active | MCP | MCP compatibility bridge: JSON-RPC 2.0 server exposing named tools (`create_tab`, `create_tile`, `set_content`, `dismiss`, `publish_to_zone`, `list_zones`, `list_scene`, `register_widget_asset`). | `server::McpServer`, `tools::*`, `types::{McpRequest, McpResponse}` |
+| `tze_hud_policy` | active | None (pure evaluator) | 7-level policy arbitration stack (Human Override → Safety → Privacy → Security → Attention → Resource → Content). Pure read-only evaluator; no side effects. Not wired at runtime in v1. Attention budget default constants are sourced from `tze_hud_scene::events::emission` (single source of truth shared with `tze_hud_runtime`). Arbitration evaluation order (L3 before L2 in zone-publication path) is protected by order-invariant tests in `stack.rs`. | `stack::ArbitrationStack::evaluate()`, `mutation::evaluate_batch()`, `frame::evaluate_frame()`, `event::evaluate_event()` |
+| `tze_hud_config` | active | None (loading) | TOML configuration: file resolution, schema validation, display profiles, agent registration, privacy/quiet-hours, zone registry, component profiles/types, hot reload (SIGHUP). | `loader::TzeHudConfig`, `resolver::resolve_config_path`, `reload::reload_config`, `profile::resolve_profile`, `policy_builder::build_effective_policy` |
+| `tze_hud_resource` | active | None (storage) | Content-addressed resource store: BLAKE3 dedup, inline/chunked upload, validation pipeline, refcounting, GC, per-agent decoded-byte budget, cross-agent sharing, font cache, runtime widget durable store. | `upload::ResourceStore`, `dedup::DedupIndex`, `budget::BudgetRegistry`, `gc::GcRunner`, `font_cache::FontCache`, `runtime_widget_store::RuntimeWidgetStore` |
+| `tze_hud_validation` | active | None (testing) | Visual regression (Layer 2 SSIM comparison, perceptual hash pre-screening) and developer visibility artifacts (Layer 4 index.html + manifest.json generation). | `layer2::Layer2Validator::compare()`, `layer4::ArtifactBuilder`, `ssim::compute_ssim`, `phash::compute_phash` |
+| `tze_hud_widget` | active | None (loading) | Widget asset bundle loader: scans directories for `widget.toml` manifests, validates SVG files, resolves parameter bindings, structured error codes. | `loader::{scan_bundle_dirs, load_bundle_dir}`, `manifest::*`, `svg_ids::*`, `runtime_registration::register_runtime_widget_svg_asset` |
+| `tze_hud_projection` | active | gRPC (out-of-process) | Provider-neutral cooperative HUD projection contract: external-agent-projection-authority spec family, drain geometry consumer, in-process portal projection driver. Depended on by `tze_hud_runtime` (feature `resident-grpc`). Ships a standalone `tze_hud_projection_authority` binary. | `ProjectionAuthority`, `DrainGeometryConsumer`, `PortalProjectionDriver` |
+| `tze_hud_a11y` | **parked** (no consumers) | None (platform bridge) | Accessibility bridge: converts scene graph to platform a11y tree. Stubs for AT-SPI2 (Linux), UIA (Windows), NSAccessibility (macOS); no-op default. No workspace crate depends on it; v1 ships the no-op path only. | `AccessibilityTree` trait, `NoopAccessibility`, `AccessibilityConfig` |
+| `tze_hud_media_apple` | **parked** (platform stub) | Media plane (Apple only) | Safe VTDecompressionSession wrapper over objc2-video-toolbox for iOS/macOS media decode. Compiles to an empty stub on Linux/Windows so the workspace remains buildable without an Apple SDK. No workspace crate depends on it; activation is post-v1. | `VTDecodeSession` (Apple targets only) |
+| `tze_hud_media_android` | **parked** (platform stub) | Media plane (Android only) | Android GStreamer media shim — phase 3 D19 Pixel target. cdylib + rlib; compiles to a no-op stub on non-Android hosts. No workspace crate depends on it; activation is post-v1. | Android JNI entrypoint (Android targets only) |
 
-These subsystems activate only when the `media-ingress` capability is granted
-(RFC 0008 Amendment A1). They are in-process, compositor-owned, and never
-access the wgpu GPU device directly.
+### Media plane subsystems — deferred design (not shipped crates)
 
-| Subsystem | Plane(s) | Responsibility | Key entry points |
-|---|---|---|---|
-| `media-worker-pool` (E24) | Media plane (in-process) | N = 2–4 compositor-owned tokio tasks; each manages one GStreamer pipeline for one active `media-ingress` stream. Capability-gated activation: `media-ingress` capability grant required before any worker spawns. Priority-preempted (lease_priority sort per RFC 0008 §2.2). Watchdog-bounded: CPU time (200ms/10s), GPU texture occupancy (256 MiB), ring-buffer occupancy (75% for 30 frames), decoder lifetime (24h). Budget-pressure contraction to 1 slot at degradation Level 2+. Worker state machine: SPAWNING → RUNNING → DRAINING → TERMINATED; FAILED is terminal. Pool manager runs on compositor thread at Stage 3. Watchdog runs as a shared tokio task on the network tokio runtime. | Pool manager (compositor thread, Stage 3 / spawn-request handling); `SessionCoordinator` tokio task (one per active worker); `DecodedFrameReady` ring buffer (4 slots per stream, drop-oldest) |
-| `audio-routing` (E22) | Media plane (in-process) | cpal-based runtime-owned audio output. Decoupled from video decode pipelines. Default output device is operator-selected at first run, sticky per platform, changeable via config. Receives decoded Opus PCM from the GStreamer pipeline via a lock-free ring buffer; cpal data callback drains the ring buffer into hardware output. WASAPI (Windows), CoreAudio (macOS), ALSA / PipeWire (Linux). Sample-rate negotiation is caller responsibility; resamples to 48 kHz if device native rate differs. | `AudioRoutingSubsystem` (tokio task); cpal `Stream` (dedicated audio thread, non-Tokio); ring buffer producer (GStreamer PCM output) / consumer (cpal callback) |
+The following subsystems are **deferred design artefacts** (design notes and RFC appendices for the post-v1 media plane). They are NOT compiled workspace crates and do NOT currently exist as source in `crates/`. The v1 media-ingress path that IS shipped lives in `tze_hud_runtime` (`gst_decode_pipeline.rs`, `media_ingress.rs`, `media_admission.rs`) as a narrower, GStreamer-backed Windows-first path.
+
+| Subsystem | Design ref | Status |
+|---|---|---|
+| `media-worker-pool` (E24) | `docs/decisions/e24-in-process-worker-posture.md`, RFC 0002 Amendment A1 | Deferred design — post-v1 |
+| `audio-routing` (E22) | `docs/audits/cpal-audio-io-crate-audit.md` | Deferred design — post-v1 |
 
 **Cross-references:**
 - Worker pool contract: `about/legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md` (RFC 0002 Amendment A1, issue hud-ora8.1.9)
@@ -55,7 +58,7 @@ Layer 0 — Scene Model (no external crate deps)
 
 Layer 1 — Leaf subsystems (depend only on scene)
     tze_hud_telemetry        → scene
-    tze_hud_a11y             → scene
+    tze_hud_a11y [parked]    → scene
     tze_hud_policy           → scene
 
 Layer 2 — Resource and widget systems
@@ -68,24 +71,25 @@ Layer 3 — Protocol adapters
     tze_hud_mcp              → scene
     tze_hud_compositor       → scene, telemetry
     tze_hud_protocol         → scene, widget, telemetry, resource
+    tze_hud_projection       → config, protocol, uuid (feature: resident-grpc)
 
 Layer 4 — Validation (testing only)
     tze_hud_validation       → (standalone; image)
 
 Layer 5 — Runtime orchestration (hub crate)
     tze_hud_runtime          → scene, compositor, protocol, input, telemetry,
-                               config, widget, mcp, resource
+                               config, widget, mcp, resource, projection
 
 Layer 6 — App shell
     tze_hud_app              → runtime, config
 
-Layer M — Media plane subsystems (capability-gated; in-process; activate only when
-           media-ingress capability is granted)
-    media-worker-pool (E24)  → tze_hud_runtime (frame pipeline Stage 3),
-                               GStreamer pipeline thread pool (black box),
-                               DecodedFrameReady ring buffer → compositor
-    audio-routing (E22)      → GStreamer PCM output (ring buffer producer),
-                               cpal stream (audio thread, non-Tokio)
+Layer P — Parked platform stubs (no workspace dependents; compile to no-ops on non-target hosts)
+    tze_hud_media_apple      → tokio, tracing, thiserror; objc2-video-toolbox (Apple targets only)
+    tze_hud_media_android    → (Android targets only)
+
+Layer M — Deferred media plane design (post-v1; NOT compiled workspace crates)
+    media-worker-pool (E24)  — deferred design; see docs/decisions/e24-in-process-worker-posture.md
+    audio-routing (E22)      — deferred design; see docs/audits/cpal-audio-io-crate-audit.md
 ```
 
 ### Dependency detail for `tze_hud_runtime` (the hub)
@@ -101,6 +105,7 @@ tze_hud_runtime
 ├── tze_hud_widget
 ├── tze_hud_mcp [features = ["http"]]
 ├── tze_hud_resource
+├── tze_hud_projection [features = ["resident-grpc"]]
 ├── tokio, tonic, wgpu, winit, arc-swap, uuid
 └── [platform] libc (Linux), windows (Windows)
 ```
@@ -191,10 +196,10 @@ tze_hud_runtime
 ## Cross-references
 
 - **Protocol plane definitions**: `about/heart-and-soul/architecture.md` (MCP / gRPC / WebRTC three-plane model)
-- **Wire contracts**: `about/legends-and-lore/rfcs/` (13 RFCs):
-  - RFC 0001 (scene), 0002 (runtime kernel), 0003 (timing), 0004 (input), 0005 (session protocol), 0006 (configuration), 0007 (system shell), 0008 (lease governance), 0009 (policy arbitration), 0010 (scene events), 0011 (resource store), 0013 (text stream portals)
+- **Wire contracts**: `about/legends-and-lore/rfcs/` (14 RFCs):
+  - RFC 0001 (scene), 0002 (runtime kernel), 0003 (timing), 0004 (input), 0005 (session protocol), 0006 (configuration), 0007 (system shell), 0008 (lease governance), 0009 (policy arbitration), 0010 (scene events), 0011 (resource store), 0013 (text stream portals), 0014 (media plane wire protocol), 0018 (WHIP signaling adapter)
   - RFC 0002 Amendment A1 (media worker lifecycle): `about/legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md`
-- **Capability specs**: `openspec/specs/` (exemplar-notification, media-webrtc specs)
+- **Capability specs**: `openspec/specs/` (exemplar-notification, external-agent-projection-authority, media-webrtc specs)
 - **v1 scope**: `about/heart-and-soul/v1.md`
 - **Validation framework**: `about/heart-and-soul/validation.md`
 - **Runtime widget asset topology**: `about/lay-and-land/runtime-widget-asset-topology.md`
