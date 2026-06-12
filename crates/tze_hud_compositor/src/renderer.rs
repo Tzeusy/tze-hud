@@ -7769,13 +7769,15 @@ impl Compositor {
         let strip_y = (tile.bounds.y + tile.bounds.height - strip_h).max(tile.bounds.y);
         let text_margin = 6.0;
 
-        // Convert sRGB linear floats → u8 for TextItem.
-        let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        // Convert linear-sRGB floats → sRGB u8 for TextItem (matches rgba_to_srgb_u8
+        // in text.rs: RGB channels go through the sRGB transfer curve; alpha is linear).
+        let to_srgb_u8 = |v: f32| (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+        let to_alpha_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         let text_color = [
-            to_u8(tokens.text_r),
-            to_u8(tokens.text_g),
-            to_u8(tokens.text_b),
-            to_u8(tokens.text_a),
+            to_srgb_u8(tokens.text_r),
+            to_srgb_u8(tokens.text_g),
+            to_srgb_u8(tokens.text_b),
+            to_alpha_u8(tokens.text_a),
         ];
 
         let bw = (tile.bounds.width - text_margin * 2.0).max(1.0);

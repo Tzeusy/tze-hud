@@ -2905,8 +2905,11 @@ impl WinitApp {
                 raw.modifiers.ctrl,
                 raw.modifiers.alt,
             );
+            // Track whether this keystroke submitted or cancelled the composer so
+            // we can suppress the push below (clear must win over push; hud-r3ax6).
+            let mut key_down_is_terminal = false;
             if let Some(b) = batch {
-                let is_terminal = b.cancel.is_some() || b.submission.is_some();
+                key_down_is_terminal = b.cancel.is_some() || b.submission.is_some();
                 // Resolve delivery context before the batch is consumed.
                 if let Some((namespace, node_id_bytes)) = self.composer_delivery_context() {
                     deliver_composer_batch(
@@ -2916,7 +2919,7 @@ impl WinitApp {
                         b,
                     );
                 }
-                if is_terminal {
+                if key_down_is_terminal {
                     // Submit or cancel: clear the local echo overlay.
                     self.clear_local_composer_echo();
                 }
@@ -2927,7 +2930,10 @@ impl WinitApp {
                     "composer: KeyDown consumed by draft manager"
                 );
                 // Push updated draft snapshot for local echo rendering (hud-r3ax6).
-                self.push_local_composer_echo(composer_input_started);
+                // Guard: do NOT push after a terminal batch — clear must win.
+                if !key_down_is_terminal {
+                    self.push_local_composer_echo(composer_input_started);
+                }
                 return;
             }
         }
@@ -3053,8 +3059,12 @@ impl WinitApp {
                 .state
                 .input_processor
                 .route_character_to_composer(&raw.character);
+            // Track whether this character event submitted or cancelled the composer
+            // so we can suppress the push below (clear must win; hud-r3ax6).
+            let mut char_is_terminal = false;
             if let Some(b) = batch {
-                if b.cancel.is_some() || b.submission.is_some() {
+                char_is_terminal = b.cancel.is_some() || b.submission.is_some();
+                if char_is_terminal {
                     // Submit or cancel: clear the local echo overlay.
                     self.clear_local_composer_echo();
                 }
@@ -3078,7 +3088,10 @@ impl WinitApp {
                 // Push the updated draft snapshot for local echo rendering
                 // (hud-r3ax6).  This is the Stage 2 "local feedback" path;
                 // no adapter round-trip.
-                self.push_local_composer_echo(composer_input_started);
+                // Guard: do NOT push after a terminal batch — clear must win.
+                if !char_is_terminal {
+                    self.push_local_composer_echo(composer_input_started);
+                }
                 return;
             }
         }
