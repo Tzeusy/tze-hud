@@ -3,6 +3,8 @@
 ## Purpose
 Defines transport-agnostic text stream portal behavior for resident raw-tile pilots, including output rendering, bounded input, session metadata, and cooperative projection integration points.
 
+Implementation: crates/tze_hud_projection/; crates/tze_hud_runtime/src/portal_projection_driver.rs
+
 ## Requirements
 ### Requirement: Transport-Agnostic Stream Boundary
 

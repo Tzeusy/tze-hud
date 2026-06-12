@@ -3,6 +3,8 @@
 ## Purpose
 Define the provider-neutral, cooperative HUD projection contract that lets already-running LLM sessions attach to a governed text-stream portal through an external projection authority, without terminal capture or runtime ownership of provider processes.
 
+Implementation: crates/tze_hud_projection/
+
 ## Requirements
 ### Requirement: Cooperative Attachment Contract
 An already-running LLM session SHALL attach to HUD projection only by explicitly registering a cooperative projection session with a projection daemon. Attachment SHALL use a stable projection ID, provider kind, display name, optional workspace/repository hints, optional icon/profile hint, lifecycle state, and content classification. The projection contract MUST NOT claim OS-level attachment to arbitrary process stdin/stdout, terminal byte streams, or PTY state.

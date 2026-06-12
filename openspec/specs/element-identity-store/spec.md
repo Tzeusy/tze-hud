@@ -1,7 +1,9 @@
 # element-identity-store Specification
 
 ## Purpose
-TBD - synced from persistent-movable-elements change [hud-mu38].
+Governs persistent element identity for scene objects (zones, widgets, tiles): stable ID survival across runtime restarts, additive-only v1 growth semantics, and the lease-gated `PublishToTileMutation` path that addresses tiles through resolved element identity with runtime geometry overrides applied atomically at commit.
+
+Implementation: crates/tze_hud_scene/src/element_store.rs; crates/tze_hud_runtime/src/element_store.rs
 
 ## Requirements
 
