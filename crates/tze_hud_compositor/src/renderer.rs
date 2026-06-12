@@ -5047,7 +5047,17 @@ impl Compositor {
 
         // Acquire frame through the surface trait (surface-agnostic).
         // The CompositorFrame._guard keeps the backing resource alive until drop.
-        let frame = surface.acquire_frame();
+        // Returns None when the swapchain is temporarily unavailable (double
+        // failure) — skip this frame gracefully rather than panicking.
+        let frame = match surface.acquire_frame() {
+            Some(f) => f,
+            None => {
+                // Surface unavailable: skip render pass, return zeroed telemetry.
+                // The runtime will retry on the next frame cycle.
+                telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
+                return telemetry;
+            }
+        };
 
         let (mut encoder, encode_us) = self.encode_frame(
             &vertices,
@@ -5298,7 +5308,17 @@ impl Compositor {
         self.sync_widget_textures(scene, self.degradation_level);
 
         // Acquire frame via trait — same code path as render_frame().
-        let frame = surface.acquire_frame();
+        // HeadlessSurface never returns None, but we handle it for API
+        // consistency and future-proofing. See WindowSurface for the case
+        // where None signals a double swapchain-acquire failure.
+        let frame = match surface.acquire_frame() {
+            Some(f) => f,
+            None => {
+                // Surface unavailable: skip render pass, return zeroed telemetry.
+                telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
+                return telemetry;
+            }
+        };
 
         // Headless never uses overlay mode — pass false for the pipeline selector.
         let (mut encoder, encode_us) = self.encode_frame(
