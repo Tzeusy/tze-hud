@@ -2607,8 +2607,7 @@ mod tests {
         // AtTail → offset = max_scroll = 4*line_h.  Back 2 lines → 2*line_h.
         assert!(
             offset_before_trim > 0.0,
-            "offset_before_trim must be > 0 (expected ~2*line_h); got {}",
-            offset_before_trim
+            "offset_before_trim must be > 0 (expected ~2*line_h); got {offset_before_trim}",
         );
 
         // ── Phase 4: head-trim drain — 55B unit evicts oldest 50B unit ────────
