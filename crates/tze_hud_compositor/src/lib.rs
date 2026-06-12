@@ -36,7 +36,9 @@ pub use overflow::{
     ELLIPSIS, TruncationResult, TruncationViewport, truncate_for_ellipsis, truncate_tail_anchored,
 };
 pub use pipeline::{ChromeDrawCmd, RoundedRectDrawCmd, TexturedRectVertex};
-pub use renderer::{Compositor, CompositorError, ImageTextureEntry};
+pub use renderer::{
+    Compositor, CompositorError, ImageTextureEntry, LocalComposerState, LocalComposerStateHandle,
+};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
 pub use text::{StyledRunItem, TextItem, TextRasterizer};
 #[cfg(feature = "v2_preview")]

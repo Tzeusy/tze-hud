@@ -23,7 +23,7 @@
 //! (capture-safe architecture): the content and chrome passes are structurally independent.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::pipeline::{
     ChromeDrawCmd, ROUNDED_RECT_OVERLAY_SHADER, ROUNDED_RECT_SHADER, RectVertex,
@@ -468,6 +468,73 @@ fn notification_dismiss_bounds(x: f32, slot_y: f32, w: f32, effective_slot_h: f3
         NOTIFICATION_DISMISS_BUTTON_SIZE_PX,
         NOTIFICATION_DISMISS_BUTTON_SIZE_PX.min(effective_slot_h),
     )
+}
+
+/// Resolved visual tokens for the local composer echo overlay.
+///
+/// Populated from the compositor token map in
+/// [`resolve_composer_overlay_tokens`].  All colors are **linear sRGB**
+/// (converted from sRGB hex by `parse_hex_color`).
+struct ComposerOverlayTokens {
+    /// Background fill for the composer strip (linear sRGB).
+    bg_r: f32,
+    bg_g: f32,
+    bg_b: f32,
+    bg_a: f32,
+    /// Text / caret color (linear sRGB).
+    text_r: f32,
+    text_g: f32,
+    text_b: f32,
+    text_a: f32,
+    /// At-capacity indicator color (linear sRGB).
+    at_capacity_r: f32,
+    at_capacity_g: f32,
+    at_capacity_b: f32,
+    at_capacity_a: f32,
+    /// Font size in pixels.
+    font_size_px: f32,
+}
+
+fn resolve_composer_overlay_tokens(token_map: &HashMap<String, String>) -> ComposerOverlayTokens {
+    // Background (default: #0F1418 @ 1.0 alpha)
+    let (bg_r, bg_g, bg_b, bg_a) = resolve_token_color(token_map, "portal.composer.background")
+        .map(|c| (c.r, c.g, c.b, c.a))
+        .unwrap_or((0.059, 0.078, 0.094, 1.0));
+
+    // Text color (default: #E0E8F4)
+    let (text_r, text_g, text_b, text_a) =
+        resolve_token_color(token_map, "portal.composer.text_color")
+            .map(|c| (c.r, c.g, c.b, c.a))
+            .unwrap_or((0.878, 0.910, 0.957, 1.0));
+
+    // At-capacity indicator color (default: #B87333, muted amber)
+    let (at_capacity_r, at_capacity_g, at_capacity_b, at_capacity_a) =
+        resolve_token_color(token_map, "portal.composer.at_capacity_color")
+            .map(|c| (c.r, c.g, c.b, c.a))
+            .unwrap_or((0.722, 0.451, 0.200, 1.0));
+
+    // Font size (default: 13)
+    let font_size_px = token_map
+        .get("portal.composer.font_size")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|&v| v.is_finite() && v > 0.0)
+        .unwrap_or(13.0);
+
+    ComposerOverlayTokens {
+        bg_r,
+        bg_g,
+        bg_b,
+        bg_a,
+        text_r,
+        text_g,
+        text_b,
+        text_a,
+        at_capacity_r,
+        at_capacity_g,
+        at_capacity_b,
+        at_capacity_a,
+        font_size_px,
+    }
 }
 
 /// Emit 4 thin 1px border quads positioned inside the given backdrop rectangle.
@@ -1028,6 +1095,43 @@ pub struct ImageTextureEntry {
 }
 
 /// GPU state and render pipeline.
+/// Runtime-side local composer echo state.
+///
+/// Passed from the input-event thread to the compositor thread via an
+/// [`Arc<StdMutex<Option<LocalComposerState>>>`] so the compositor can render
+/// the current draft text + caret locally on every frame — WITHOUT waiting for
+/// an adapter round-trip (§4.1 "Local feedback first").
+///
+/// Created by the windowed runtime on every keystroke that mutates the draft,
+/// cleared when the composer is deactivated (blur, submit, cancel).
+#[derive(Debug, Clone)]
+pub struct LocalComposerState {
+    /// Draft text at the cursor byte position (pre-caret).
+    pub text: String,
+    /// Caret position as a byte offset into `text`.
+    pub cursor_byte: usize,
+    /// True when the draft buffer has reached its byte capacity.
+    pub at_capacity: bool,
+    /// The `SceneId` of the `HitRegionNode` that owns this composer region.
+    /// Used to locate the tile bounds for overlay placement.
+    pub node_id: tze_hud_scene::types::SceneId,
+}
+
+/// Shared update slot for delivering [`LocalComposerState`] from the
+/// input-event thread to the compositor thread without locking the full scene.
+///
+/// Semantics:
+/// - `None` — no new update since the last frame; compositor keeps its current
+///   `local_composer` unchanged.
+/// - `Some(None)` — explicit deactivation (blur / submit / cancel); compositor
+///   clears `local_composer` so the overlay disappears.
+/// - `Some(Some(state))` — new draft state; compositor replaces `local_composer`.
+///
+/// Written by the input-event thread (main thread) on every composer mutation
+/// and on deactivation.  Drained (taken) by the compositor thread once per
+/// frame at the top of the render loop.
+pub type LocalComposerStateHandle = Arc<StdMutex<Option<Option<LocalComposerState>>>>;
+
 pub struct Compositor {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -1217,6 +1321,20 @@ pub struct Compositor {
     /// path always falls back to the dark placeholder quad.
     #[cfg(feature = "v2_preview")]
     pub(crate) video_frame_cache: HashMap<tze_hud_scene::types::SceneId, ImageTextureEntry>,
+    /// Shared handle for receiving local composer echo state from the
+    /// input-event thread (main thread) without blocking on the scene lock.
+    ///
+    /// Drained at the start of each frame loop iteration in the compositor
+    /// thread.  `None` when no composer is active or no draft has arrived
+    /// for the current frame.
+    pub local_composer_state: LocalComposerStateHandle,
+    /// Most-recently drained local composer state for this frame.
+    ///
+    /// Populated by draining `local_composer_state` at frame start.
+    /// Consumed by `collect_text_items` (text pass) and the geometry pass
+    /// (background rect + caret rect).  Cleared when the handle delivers
+    /// `None` (composer deactivated).
+    pub(crate) local_composer: Option<LocalComposerState>,
 }
 
 /// Partitioned rounded-rectangle draw commands organized by layer.
@@ -1331,6 +1449,8 @@ impl Compositor {
             video_surfaces: crate::video_surface::VideoSurfaceMap::new(),
             #[cfg(feature = "v2_preview")]
             video_frame_cache: HashMap::new(),
+            local_composer_state: Arc::new(StdMutex::new(None)),
+            local_composer: None,
         })
     }
 
@@ -1598,6 +1718,8 @@ impl Compositor {
             video_surfaces: crate::video_surface::VideoSurfaceMap::new(),
             #[cfg(feature = "v2_preview")]
             video_frame_cache: HashMap::new(),
+            local_composer_state: Arc::new(StdMutex::new(None)),
+            local_composer: None,
         };
 
         let window_surface = WindowSurface::new(surface, config);
@@ -1889,6 +2011,28 @@ impl Compositor {
         // cache here lets icons that previously failed due to a missing token
         // be retried with the updated map (e.g. on hot-reload or late init).
         self.failed_icon_paths.clear();
+    }
+
+    /// Drain any pending [`LocalComposerState`] update from the shared handle.
+    ///
+    /// Called once per frame at the top of the compositor render loop.
+    ///
+    /// - `Some(Some(state))` in the slot → update `self.local_composer`.
+    /// - `Some(None)` in the slot → clear `self.local_composer` (composer
+    ///   deactivated by blur / submit / cancel).
+    /// - `None` in the slot → no update; keep the current frame state so the
+    ///   overlay persists between keystrokes.
+    ///
+    /// Taking the value (`.take()`) resets the slot to `None` so the
+    /// same update is not applied twice.
+    pub fn drain_local_composer_state(&mut self) {
+        if let Ok(mut guard) = self.local_composer_state.lock() {
+            if let Some(update) = guard.take() {
+                // update = Some(state) → new draft; update = None → deactivate.
+                self.local_composer = update;
+            }
+            // guard held None → no new update this frame; local_composer unchanged.
+        }
     }
 
     /// Prime the markdown parse cache for all [`TextMarkdownNode`] nodes in the scene.
@@ -3945,6 +4089,23 @@ impl Compositor {
             }
         }
 
+        // ── Composer echo text (hud-r3ax6) ───────────────────────────────────
+        // Inject a TextItem for the local composer draft + caret glyph on top of
+        // the composer-active tile.  The background geometry is handled in
+        // render_composer_overlay / render_frame tile loop.
+        if self.local_composer.is_some() {
+            let composer_tokens = resolve_composer_overlay_tokens(&self.token_map);
+            for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
+                if let Some(text_item) =
+                    self.collect_composer_text_item(tile, scene, sw, sh, &composer_tokens)
+                {
+                    items.push(text_item);
+                    // Only the first matching tile renders the composer (focus is exclusive).
+                    break;
+                }
+            }
+        }
+
         items
     }
 
@@ -4664,6 +4825,12 @@ impl Compositor {
         let frame_start = std::time::Instant::now();
         self.frame_number += 1;
 
+        // ── Drain local composer echo state (hud-r3ax6) ───────────────────
+        // Must happen before any render work so the overlay is current for
+        // this frame.  Lock contention is negligible: the shared slot is
+        // written ≤ once per keystroke and drained once per frame (60 Hz).
+        self.drain_local_composer_state();
+
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
         // ── Phase-1 markdown cache prime (hud-380dl: commit-time prime) ─────
@@ -4756,6 +4923,8 @@ impl Compositor {
         // Resolve scroll-indicator tokens once per frame (not per tile) since
         // the token map does not change during the tile loop.
         let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+        // Resolve composer overlay tokens once per frame (hud-r3ax6).
+        let composer_overlay_tokens = resolve_composer_overlay_tokens(&self.token_map);
 
         for tile in &tiles {
             if let Some(bg_color) = self.tile_background_color(tile, scene) {
@@ -4828,6 +4997,19 @@ impl Compositor {
                     }
                 }
             }
+
+            // ── Composer echo overlay (hud-r3ax6) ─────────────────────────
+            // Renders the local draft text background strip on top of the
+            // tile.  The text itself is injected in collect_text_items via
+            // collect_composer_text_item.  NO adapter round-trip.
+            self.render_composer_overlay(
+                tile,
+                scene,
+                &mut vertices,
+                sw,
+                sh,
+                &composer_overlay_tokens,
+            );
         }
 
         // Update zone animation states (fade-in/fade-out) before rendering.
@@ -4936,6 +5118,9 @@ impl Compositor {
         let frame_start = std::time::Instant::now();
         self.frame_number += 1;
 
+        // ── Drain local composer echo state (hud-r3ax6) ───────────────────
+        self.drain_local_composer_state();
+
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
         // ── Phase-1 markdown cache prime (hud-380dl: commit-time prime) ─────
@@ -5006,6 +5191,8 @@ impl Compositor {
         // Resolve scroll-indicator tokens once per frame (not per tile) since
         // the token map does not change during the tile loop.
         let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+        // Resolve composer overlay tokens once per frame (hud-r3ax6).
+        let composer_overlay_tokens = resolve_composer_overlay_tokens(&self.token_map);
 
         for tile in &tiles {
             if let Some(bg_color) = self.tile_background_color(tile, scene) {
@@ -5065,6 +5252,16 @@ impl Compositor {
                     }
                 }
             }
+
+            // ── Composer echo overlay (hud-r3ax6) ─────────────────────────
+            self.render_composer_overlay(
+                tile,
+                scene,
+                &mut vertices,
+                sw,
+                sh,
+                &composer_overlay_tokens,
+            );
         }
 
         // Update zone animation states before rendering zone content.
@@ -5196,6 +5393,9 @@ impl Compositor {
         let frame_start = std::time::Instant::now();
         self.frame_number += 1;
 
+        // ── Drain local composer echo state (hud-r3ax6) ───────────────────
+        self.drain_local_composer_state();
+
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
         // ── Widget texture sync before encoding (avoids surface-texture race).
@@ -5244,6 +5444,8 @@ impl Compositor {
         // Resolve scroll-indicator tokens once per frame (not per tile) since
         // the token map does not change during the tile loop.
         let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+        // Resolve composer overlay tokens once per frame (hud-r3ax6).
+        let composer_overlay_tokens = resolve_composer_overlay_tokens(&self.token_map);
 
         for tile in &tiles {
             if let Some(bg_color) = self.tile_background_color(tile, scene) {
@@ -5302,6 +5504,16 @@ impl Compositor {
                     }
                 }
             }
+
+            // ── Composer echo overlay (hud-r3ax6) ─────────────────────────
+            self.render_composer_overlay(
+                tile,
+                scene,
+                &mut content_vertices,
+                sw,
+                sh,
+                &composer_overlay_tokens,
+            );
         }
 
         // Update zone animation states, streaming reveal, and render zone content backdrops.
@@ -7410,6 +7622,191 @@ impl Compositor {
             }
         }
         Some([0.1, 0.1, 0.2, opacity])
+    }
+
+    /// Emit geometry for the local composer echo overlay.
+    ///
+    /// Called from the tile loop (after the content pass) when
+    /// `self.local_composer` is `Some` and the state's `node_id` belongs to a
+    /// `HitRegionNode` with `accepts_composer_input = true` inside the given
+    /// tile.  If no matching node is found in the tile the call is a no-op.
+    ///
+    /// Emits:
+    /// 1. A background fill rect for the composer strip (bottom
+    ///    `font_size_px * 1.6` pixels of the tile).
+    /// 2. When at_capacity, a 2px left-edge accent rect using the at-capacity
+    ///    color so the user has a visual signal that no further input is
+    ///    accepted.  The text pass (see `collect_composer_text_item`) renders
+    ///    the draft text on top.
+    ///
+    /// Geometry is clamped to the tile bounds to avoid overdraw outside the portal.
+    fn render_composer_overlay(
+        &self,
+        tile: &Tile,
+        scene: &SceneGraph,
+        vertices: &mut Vec<RectVertex>,
+        sw: f32,
+        sh: f32,
+        tokens: &ComposerOverlayTokens,
+    ) {
+        let Some(ref cs) = self.local_composer else {
+            return;
+        };
+
+        // Only render inside the tile that owns the focused composer node.
+        if !self.tile_contains_composer_node(tile, scene, cs.node_id) {
+            return;
+        }
+
+        let strip_h = (tokens.font_size_px * 1.6).max(20.0);
+        let strip_y = tile.bounds.y + tile.bounds.height - strip_h;
+        let strip_y = strip_y.max(tile.bounds.y); // never above tile top
+
+        // Background fill.
+        let bg_color = [tokens.bg_r, tokens.bg_g, tokens.bg_b, tokens.bg_a];
+        vertices.extend_from_slice(&rect_vertices(
+            tile.bounds.x,
+            strip_y,
+            tile.bounds.width,
+            strip_h,
+            sw,
+            sh,
+            bg_color,
+        ));
+
+        // At-capacity left-edge accent (2px wide, full strip height).
+        if cs.at_capacity {
+            let accent = [
+                tokens.at_capacity_r,
+                tokens.at_capacity_g,
+                tokens.at_capacity_b,
+                tokens.at_capacity_a,
+            ];
+            vertices.extend_from_slice(&rect_vertices(
+                tile.bounds.x,
+                strip_y,
+                2.0,
+                strip_h,
+                sw,
+                sh,
+                accent,
+            ));
+        }
+    }
+
+    /// Return `true` when `node_id` is a `HitRegionNode` with
+    /// `accepts_composer_input = true` that lives somewhere in the subtree
+    /// rooted at `tile.root_node`.
+    ///
+    /// The search is bounded by the tile's node tree; the common case (one root
+    /// node with a few children) terminates in O(n) with n typically ≤ 10.
+    fn tile_contains_composer_node(
+        &self,
+        tile: &Tile,
+        scene: &SceneGraph,
+        target: SceneId,
+    ) -> bool {
+        let Some(root_id) = tile.root_node else {
+            return false;
+        };
+        self.node_tree_contains(root_id, scene, target)
+    }
+
+    /// Depth-first search for `target` in the node sub-tree rooted at `node_id`.
+    #[allow(clippy::only_used_in_recursion)]
+    fn node_tree_contains(&self, node_id: SceneId, scene: &SceneGraph, target: SceneId) -> bool {
+        if node_id == target {
+            // Verify the node is indeed a composer-capable HitRegion.
+            return scene.nodes.get(&node_id).is_some_and(|n| match &n.data {
+                NodeData::HitRegion(hr) => hr.accepts_composer_input,
+                _ => false,
+            });
+        }
+        if let Some(node) = scene.nodes.get(&node_id) {
+            for child in &node.children {
+                if self.node_tree_contains(*child, scene, target) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Build a [`TextItem`] for the local composer echo draft text.
+    ///
+    /// Returns `None` when:
+    /// - `self.local_composer` is absent (no active composer).
+    /// - `self.text_rasterizer` is absent (text path not initialised).
+    /// - The tile does not contain the focused composer node.
+    ///
+    /// The caret character (`▌`, U+258C, LEFT HALF BLOCK) is inserted at the
+    /// cursor byte position in the draft text so glyphon renders it as part of
+    /// the normal text flow.  This avoids a separate GPU draw call for the
+    /// caret while giving a visually correct block-caret appearance.
+    fn collect_composer_text_item(
+        &self,
+        tile: &Tile,
+        scene: &SceneGraph,
+        sw: f32,
+        sh: f32,
+        tokens: &ComposerOverlayTokens,
+    ) -> Option<crate::text::TextItem> {
+        let cs = self.local_composer.as_ref()?;
+        self.text_rasterizer.as_ref()?;
+        if !self.tile_contains_composer_node(tile, scene, cs.node_id) {
+            return None;
+        }
+
+        // Insert the caret glyph (LEFT HALF BLOCK ▌) at the cursor byte offset.
+        // The byte offset is clamped to [0, text.len()] so it is always valid.
+        let cursor = cs.cursor_byte.min(cs.text.len());
+        let mut display_text = String::with_capacity(cs.text.len() + 4);
+        display_text.push_str(&cs.text[..cursor]);
+        display_text.push('▌');
+        display_text.push_str(&cs.text[cursor..]);
+
+        let strip_h = (tokens.font_size_px * 1.6).max(20.0);
+        let strip_y = (tile.bounds.y + tile.bounds.height - strip_h).max(tile.bounds.y);
+        let text_margin = 6.0;
+
+        // Convert sRGB linear floats → u8 for TextItem.
+        let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let text_color = [
+            to_u8(tokens.text_r),
+            to_u8(tokens.text_g),
+            to_u8(tokens.text_b),
+            to_u8(tokens.text_a),
+        ];
+
+        let bw = (tile.bounds.width - text_margin * 2.0).max(1.0);
+        let bh = (strip_h - text_margin).max(1.0);
+
+        let _ = sw; // retained for API symmetry with other collect helpers
+        let _ = sh;
+
+        Some(crate::text::TextItem {
+            text: Arc::from(display_text.as_str()),
+            pixel_x: tile.bounds.x + text_margin,
+            pixel_y: strip_y + text_margin * 0.5,
+            bounds_width: bw,
+            bounds_height: bh,
+            clip_pixel_x: tile.bounds.x + text_margin,
+            clip_pixel_y: strip_y,
+            clip_bounds_width: bw.max(1.0),
+            clip_bounds_height: strip_h.max(1.0),
+            font_size_px: tokens.font_size_px,
+            font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
+            font_weight: 400,
+            color: text_color,
+            alignment: tze_hud_scene::types::TextAlign::Start,
+            overflow: tze_hud_scene::types::TextOverflow::Clip,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
+            color_runs: Box::new([]),
+            styled_runs: Box::new([]),
+            viewport: crate::overflow::TruncationViewport::HeadAnchored,
+        })
     }
 
     /// Render a node and its children within a tile.
@@ -16457,5 +16854,204 @@ mod tests {
             has_bold_run,
             "non-lossy fallback must produce a bold styled run for **bold** markdown syntax"
         );
+    }
+
+    // ── hud-r3ax6: composer echo local render tests ───────────────────────────
+
+    /// `LocalComposerStateHandle` slot semantics:
+    ///
+    /// - `None`             → no pending update; `local_composer` unchanged.
+    /// - `Some(None)`       → explicit deactivation; clears `local_composer`.
+    /// - `Some(Some(state))`→ new draft state; replaces `local_composer`.
+    ///
+    /// This test exercises all three transitions by directly managing the handle,
+    /// mirroring exactly what `drain_local_composer_state` does, without
+    /// requiring a GPU-backed `Compositor` instance.
+    #[test]
+    fn local_composer_state_handle_slot_semantics() {
+        use tze_hud_scene::types::SceneId;
+
+        let handle: LocalComposerStateHandle = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        // Helper: simulate one drain cycle on a raw Option<LocalComposerState>.
+        fn drain(handle: &LocalComposerStateHandle, current: &mut Option<LocalComposerState>) {
+            if let Ok(mut guard) = handle.lock() {
+                if let Some(update) = guard.take() {
+                    *current = update;
+                }
+            }
+        }
+
+        let node_id = SceneId::new();
+        let mut local_composer: Option<LocalComposerState> = None;
+
+        // 1. Slot = None → no change.
+        drain(&handle, &mut local_composer);
+        assert!(
+            local_composer.is_none(),
+            "None slot must leave local_composer unchanged"
+        );
+
+        // 2. Slot = Some(Some(state)) → activate.
+        {
+            let mut guard = handle.lock().unwrap();
+            *guard = Some(Some(LocalComposerState {
+                text: "hello".to_owned(),
+                cursor_byte: 5,
+                at_capacity: false,
+                node_id,
+            }));
+        }
+        drain(&handle, &mut local_composer);
+        let cs = local_composer
+            .as_ref()
+            .expect("local_composer must be set after Some(Some)");
+        assert_eq!(cs.text, "hello", "text must match pushed draft");
+        assert_eq!(cs.cursor_byte, 5, "cursor_byte must match pushed draft");
+        assert!(!cs.at_capacity, "at_capacity must match pushed draft");
+        assert_eq!(cs.node_id, node_id, "node_id must match pushed draft");
+
+        // Slot is taken → drained to None.
+        {
+            let guard = handle.lock().unwrap();
+            assert!(guard.is_none(), "slot must be cleared after drain");
+        }
+
+        // 3. Second drain with None slot → local_composer UNCHANGED (still active).
+        drain(&handle, &mut local_composer);
+        assert!(
+            local_composer.is_some(),
+            "None slot must not clear a previously set local_composer"
+        );
+
+        // 4. Slot = Some(None) → deactivate.
+        {
+            let mut guard = handle.lock().unwrap();
+            *guard = Some(None);
+        }
+        drain(&handle, &mut local_composer);
+        assert!(
+            local_composer.is_none(),
+            "Some(None) slot must clear local_composer (deactivation)"
+        );
+    }
+
+    /// The caret glyph (`▌`, U+258C LEFT HALF BLOCK) must be inserted at the
+    /// correct byte offset in the draft text.
+    ///
+    /// - Offset 0 → caret leads the text.
+    /// - Offset == text.len() → caret trails the text.
+    /// - Offset in the middle → caret splits the text at that byte.
+    /// - Offset > text.len() → clamped to text.len() (no panic on OOB).
+    ///
+    /// This mirrors the string-building logic inside `collect_composer_text_item`
+    /// without requiring a GPU-backed `Compositor`.
+    #[test]
+    fn composer_caret_insertion_positions() {
+        const CARET: char = '▌'; // U+258C LEFT HALF BLOCK
+
+        fn build_display(text: &str, cursor_byte: usize) -> String {
+            // Mirrors the caret insertion in collect_composer_text_item.
+            let cursor = cursor_byte.min(text.len());
+            let mut s = String::with_capacity(text.len() + 4);
+            s.push_str(&text[..cursor]);
+            s.push(CARET);
+            s.push_str(&text[cursor..]);
+            s
+        }
+
+        // Caret at start.
+        let display = build_display("hello", 0);
+        assert!(
+            display.starts_with(CARET),
+            "cursor=0: caret must lead the text, got {:?}",
+            display
+        );
+        assert_eq!(&display[CARET.len_utf8()..], "hello");
+
+        // Caret at end.
+        let text = "hello";
+        let display = build_display(text, text.len());
+        assert!(
+            display.ends_with(CARET),
+            "cursor=len: caret must trail the text, got {:?}",
+            display
+        );
+        assert_eq!(&display[..display.len() - CARET.len_utf8()], "hello");
+
+        // Caret in the middle (at byte 2 of "hello" → "he" + CARET + "llo").
+        let display = build_display("hello", 2);
+        let caret_s = CARET.to_string();
+        assert_eq!(
+            display,
+            format!("he{}llo", caret_s),
+            "cursor=2: caret must split text at byte 2"
+        );
+
+        // Caret out-of-bounds → clamped to end (no panic).
+        let display = build_display("hi", 9999);
+        assert!(
+            display.ends_with(CARET),
+            "out-of-bounds cursor must be clamped to text end, got {:?}",
+            display
+        );
+        assert_eq!(&display[..display.len() - CARET.len_utf8()], "hi");
+
+        // Empty text + cursor=0 → only the caret.
+        let display = build_display("", 0);
+        assert_eq!(
+            display,
+            CARET.to_string(),
+            "empty text + cursor=0 must produce only the caret"
+        );
+    }
+
+    /// `resolve_composer_overlay_tokens` must return valid, non-degenerate token
+    /// values for an empty token map (all defaults applied).
+    ///
+    /// This is a CPU-only smoke test — no GPU required.
+    #[test]
+    fn composer_overlay_tokens_defaults_are_valid() {
+        use std::collections::HashMap;
+
+        // Empty token map → all defaults kick in.
+        let tokens: std::collections::HashMap<String, String> = HashMap::new();
+        let t = resolve_composer_overlay_tokens(&tokens);
+
+        // Font size must be finite and positive.
+        assert!(
+            t.font_size_px.is_finite() && t.font_size_px > 0.0,
+            "font_size_px must be positive finite, got {}",
+            t.font_size_px
+        );
+
+        // Background alpha must be > 0 so the overlay is actually visible.
+        assert!(
+            t.bg_a > 0.0,
+            "default background alpha must be > 0 (overlay must be visible)"
+        );
+
+        // All color channels must be in [0, 1].
+        for (name, val) in [
+            ("bg_r", t.bg_r),
+            ("bg_g", t.bg_g),
+            ("bg_b", t.bg_b),
+            ("bg_a", t.bg_a),
+            ("text_r", t.text_r),
+            ("text_g", t.text_g),
+            ("text_b", t.text_b),
+            ("text_a", t.text_a),
+            ("at_capacity_r", t.at_capacity_r),
+            ("at_capacity_g", t.at_capacity_g),
+            ("at_capacity_b", t.at_capacity_b),
+            ("at_capacity_a", t.at_capacity_a),
+        ] {
+            assert!(
+                (0.0..=1.0).contains(&val),
+                "token {} must be in [0, 1], got {}",
+                name,
+                val
+            );
+        }
     }
 }

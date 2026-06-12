@@ -756,6 +756,30 @@ impl InputProcessor {
         self.composer_draft_manager.focused_node()
     }
 
+    /// Snapshot current composer draft state for local echo rendering.
+    ///
+    /// Returns `(text, cursor_byte, at_capacity, focused_node_id)` when a
+    /// composer region is focused, `None` otherwise.
+    ///
+    /// Used by the windowed runtime to push a [`LocalComposerState`]-equivalent
+    /// snapshot to the compositor thread after every composer mutation.
+    ///
+    /// Spec: §4.1 local feedback first — the snapshot is pushed WITHOUT an
+    /// adapter round-trip so the compositor can render the echo on the next
+    /// frame.
+    pub fn composer_draft_snapshot(
+        &self,
+    ) -> Option<(String, usize, bool, tze_hud_scene::SceneId)> {
+        let node_id = self.composer_draft_manager.focused_node()?;
+        let draft = self.composer_draft_manager.draft()?;
+        Some((
+            draft.text().to_owned(),
+            draft.cursor(),
+            draft.is_at_capacity(),
+            node_id,
+        ))
+    }
+
     /// Suspend or resume the composer draft manager for safe-mode governance (§4.5).
     ///
     /// Called by the safe-mode controller on safe-mode enter (`suspended = true`)
