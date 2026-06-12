@@ -20,7 +20,6 @@
 //! - [`pointer`] — rich pointer event types (PointerDownEvent, ClickEvent, etc.)
 //! - [`events`] — HitTestResult, RouteTarget, SceneLocalPatch, InputEnvelope, EventBatch
 //! - [`hit_test`] — headless-testable hit-test pipeline
-//! - [`dispatch`] — Stage 1+2 dispatch pipeline (DispatchProcessor)
 //! - `local_feedback` — `LocalFeedbackStyle`, `ResolvedFeedbackStyle`, rollback tracker
 //! - `scroll` — `ScrollConfig`, `ScrollState`, scroll-local-first processing
 //! - `capture`    — pointer capture manager (RFC 0004 §2)
@@ -73,15 +72,12 @@ pub use envelope::{
 pub use event_queue::{AgentEventQueue, DEFAULT_QUEUE_DEPTH, HARD_CAP_QUEUE_DEPTH};
 
 pub mod capture;
-pub mod dispatch;
 pub mod events;
 pub mod hit_test;
 pub mod local_feedback;
 pub mod pointer;
 pub mod scroll;
 
-// Re-export core dispatch types at the crate root for convenience.
-pub use dispatch::{DispatchOutcome, DispatchProcessor, build_agent_batch};
 pub use events::{
     EventBatch, HitTestResult, InputEnvelope, LocalStateUpdate, RouteTarget, SceneLocalPatch,
     ScrollOffsetUpdate,
@@ -1044,6 +1040,10 @@ impl InputProcessor {
         let mut interaction_id: Option<String> = None;
         let mut activated = false;
         let mut dispatch: Option<AgentDispatch> = None;
+        // Extra dispatches produced by a single pointer event (e.g. PointerLeave + PointerEnter
+        // on a hover transition, or PointerUp + CaptureReleased).  Callers MUST deliver these
+        // in order after `dispatch`.
+        let mut extra_dispatches: Vec<AgentDispatch> = Vec::new();
         // Accumulate local state changes for the SceneLocalPatch
         let mut local_patch = SceneLocalPatch::new();
 
@@ -1127,12 +1127,13 @@ impl InputProcessor {
                 }
                 // Emit local patch for hover-on
                 local_patch.push_state(LocalStateUpdate::new(new_id).with_hovered(true));
-                // Dispatch pointer_enter to new owning agent (overwrites leave above —
-                // enter takes priority; the caller can queue both if needed)
+                // Dispatch pointer_enter to new owning agent.  If dispatch already holds a
+                // PointerLeave for the old agent, preserve it — the enter goes into
+                // extra_dispatches so both events are delivered in order (leave first).
                 if let Some(tile_id) = hit_tile_id {
                     if let Some(namespace) = tile_namespace(scene, tile_id) {
                         let (local_x, local_y) = display_to_local(scene, tile_id, event.x, event.y);
-                        dispatch = Some(AgentDispatch {
+                        let enter = AgentDispatch {
                             namespace,
                             tile_id,
                             node_id: new_id,
@@ -1144,7 +1145,13 @@ impl InputProcessor {
                             device_id,
                             kind: AgentDispatchKind::PointerEnter,
                             capture_released_reason: None,
-                        });
+                        };
+                        if dispatch.is_some() {
+                            // PointerLeave already occupies the primary slot; queue enter after.
+                            extra_dispatches.push(enter);
+                        } else {
+                            dispatch = Some(enter);
+                        }
                     }
                 }
             }
@@ -1330,7 +1337,7 @@ impl InputProcessor {
             local_ack_us,
             hit_test_us,
             dispatch,
-            extra_dispatches: vec![],
+            extra_dispatches,
             local_patch,
         }
     }
@@ -2040,6 +2047,134 @@ mod tests {
         assert_eq!(dispatch.tile_id, tile_id);
         assert_eq!(dispatch.node_id, hr_node_id);
         assert_eq!(dispatch.interaction_id, "test-button");
+    }
+
+    // ── Regression: pointer_leave must not be dropped on node-to-node hover transition ──
+    //
+    // Before the fix, moving the pointer directly from a hit region on tile A to a hit region
+    // on tile B in a single Move event produced only PointerEnter(B) — the PointerLeave(A) was
+    // silently overwritten in the single-slot `dispatch` field.  After the fix both events are
+    // present: dispatch=PointerLeave(A), extra_dispatches=[PointerEnter(B)].
+    #[test]
+    fn test_pointer_leave_not_dropped_on_node_to_node_transition() {
+        // Two non-overlapping tiles placed side-by-side, each with a hit region.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        // Tile A — left half
+        let lease_a = scene.grant_lease("agent-a", 60_000, vec![Capability::CreateTile]);
+        let tile_a = scene
+            .create_tile(
+                tab_id,
+                "agent-a",
+                lease_a,
+                Rect::new(0.0, 0.0, 400.0, 400.0),
+                1,
+            )
+            .unwrap();
+        let node_a = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_a,
+                Node {
+                    id: node_a,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 400.0, 400.0),
+                        interaction_id: "node-a".to_string(),
+                        accepts_pointer: true,
+                        accepts_focus: false,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        // Tile B — right half
+        let lease_b = scene.grant_lease("agent-b", 60_000, vec![Capability::CreateTile]);
+        let tile_b = scene
+            .create_tile(
+                tab_id,
+                "agent-b",
+                lease_b,
+                Rect::new(400.0, 0.0, 400.0, 400.0),
+                1,
+            )
+            .unwrap();
+        let node_b = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_b,
+                Node {
+                    id: node_b,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 400.0, 400.0),
+                        interaction_id: "node-b".to_string(),
+                        accepts_pointer: true,
+                        accepts_focus: false,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+
+        // Move into tile A — establishes hover on node_a
+        processor.process(
+            &PointerEvent {
+                x: 200.0,
+                y: 200.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
+            &mut scene,
+        );
+
+        // Move directly into tile B in one event — must produce PointerLeave(A) + PointerEnter(B)
+        let result = processor.process(
+            &PointerEvent {
+                x: 600.0,
+                y: 200.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
+            &mut scene,
+        );
+
+        let primary = result
+            .dispatch
+            .expect("expected PointerLeave as primary dispatch on A→B transition");
+        assert_eq!(
+            primary.kind,
+            AgentDispatchKind::PointerLeave,
+            "primary dispatch must be PointerLeave for the old node"
+        );
+        assert_eq!(primary.node_id, node_a, "PointerLeave must target node A");
+        assert_eq!(
+            primary.interaction_id, "node-a",
+            "PointerLeave must carry node A's interaction_id"
+        );
+
+        assert_eq!(
+            result.extra_dispatches.len(),
+            1,
+            "extra_dispatches must contain exactly one event (PointerEnter for node B)"
+        );
+        let enter = &result.extra_dispatches[0];
+        assert_eq!(
+            enter.kind,
+            AgentDispatchKind::PointerEnter,
+            "extra dispatch must be PointerEnter for the new node"
+        );
+        assert_eq!(enter.node_id, node_b, "PointerEnter must target node B");
+        assert_eq!(
+            enter.interaction_id, "node-b",
+            "PointerEnter must carry node B's interaction_id"
+        );
     }
 
     #[test]
