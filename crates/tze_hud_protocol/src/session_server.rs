@@ -3621,6 +3621,384 @@ fn validate_timing_hints(
     Ok(())
 }
 
+/// Output of [`convert_proto_mutations`]: the converted scene mutations and the
+/// element-store bookkeeping side-effects needed after a successful apply.
+struct ConvertedBatch {
+    scene_mutations: Vec<SceneMutation>,
+    /// Elements that should have `last_published_at` updated, keyed by ID.
+    pending_touch_ids: Vec<(SceneId, ElementType)>,
+    /// Elements that should have `last_published_at` updated, keyed by namespace string.
+    pending_touch_names: Vec<(ElementType, String)>,
+}
+
+/// Convert a slice of proto [`MutationProto`] into a [`ConvertedBatch`].
+///
+/// This is the single authoritative conversion path used by both the live path
+/// ([`handle_mutation_batch`]) and the freeze-drain path
+/// ([`apply_queued_batch_to_scene`]). The only intentional behavioural
+/// difference between those two call sites is the log-line suffix; pass
+/// `log_suffix = " (queued)"` for the drain path and `""` for the live path.
+///
+/// Returns `Err((error_code, message))` if any mutation cannot be converted
+/// and the batch should be rejected. In that case the caller is responsible for
+/// deciding what to do with the error (send a `MutationResult` on the live
+/// path; log-and-skip on the drain path).
+fn convert_proto_mutations(
+    mutations: &[crate::proto::MutationProto],
+    element_store: &tze_hud_scene::element_store::ElementStore,
+    tab_id: SceneId,
+    lease_id: SceneId,
+    display_area: tze_hud_scene::Rect,
+    namespace: &str,
+    log_suffix: &str,
+) -> Result<ConvertedBatch, (String, String)> {
+    let mut scene_mutations = Vec::new();
+    let mut pending_touch_ids: Vec<(SceneId, ElementType)> = Vec::new();
+    let mut pending_touch_names: Vec<(ElementType, String)> = Vec::new();
+
+    for m in mutations {
+        match &m.mutation {
+            Some(crate::proto::mutation_proto::Mutation::CreateTile(ct)) => {
+                let requested_bounds = ct
+                    .bounds
+                    .as_ref()
+                    .map(convert::proto_rect_to_scene)
+                    .unwrap_or(tze_hud_scene::Rect::new(0.0, 0.0, 200.0, 150.0));
+                let bounds =
+                    resolve_tile_bounds_with_override(None, Some(requested_bounds), display_area)
+                        .unwrap_or(requested_bounds);
+                scene_mutations.push(SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: namespace.to_string(),
+                    lease_id,
+                    bounds,
+                    z_order: ct.z_order,
+                });
+            }
+            Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
+                // tile_id is encoded as uuid::Uuid::as_bytes() (big-endian RFC 4122 bytes),
+                // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
+                match bytes_to_scene_id(&str_.tile_id) {
+                    Ok(tile_id) => {
+                        if let Some(ref node_proto) = str_.node
+                            && let Some(node) = convert::proto_node_to_scene(node_proto)
+                        {
+                            scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = str_.tile_id.len(),
+                            "SetTileRoot{log_suffix}: invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::PublishToZone(pz)) => {
+                let content = pz
+                    .content
+                    .as_ref()
+                    .and_then(convert::proto_zone_content_to_scene);
+                if let Some(content) = content {
+                    let resolved_zone_name = if !pz.element_id.is_empty() {
+                        match bytes_to_scene_id(&pz.element_id) {
+                            Ok(element_id) => match element_store.entries.get(&element_id) {
+                                Some(entry) if entry.element_type == ElementType::Zone => {
+                                    pending_touch_ids.push((element_id, ElementType::Zone));
+                                    entry.namespace.clone()
+                                }
+                                _ => {
+                                    return Err((
+                                        "ELEMENT_NOT_FOUND".to_string(),
+                                        "publish_to_zone element_id does not reference a known zone"
+                                            .to_string(),
+                                    ));
+                                }
+                            },
+                            Err(_) => {
+                                return Err((
+                                    "INVALID_ARGUMENT".to_string(),
+                                    "publish_to_zone element_id must be 16 bytes".to_string(),
+                                ));
+                            }
+                        }
+                    } else {
+                        pending_touch_names.push((ElementType::Zone, pz.zone_name.clone()));
+                        pz.zone_name.clone()
+                    };
+                    let token = tze_hud_scene::types::ZonePublishToken {
+                        token: pz
+                            .publish_token
+                            .as_ref()
+                            .map(|t| t.token.clone())
+                            .unwrap_or_default(),
+                    };
+                    let merge_key = if pz.merge_key.is_empty() {
+                        None
+                    } else {
+                        Some(pz.merge_key.clone())
+                    };
+                    scene_mutations.push(SceneMutation::PublishToZone {
+                        zone_name: resolved_zone_name,
+                        content,
+                        publish_token: token,
+                        merge_key,
+                        // expires_at_wall_us and content_classification are not yet present
+                        // in the PublishToZoneMutation proto (post-v1 wire extensions).
+                        expires_at_wall_us: None,
+                        content_classification: None,
+                        // breakpoints are not in the MutationBatch PublishToZoneMutation proto
+                        // (post-v1 wire extension); use ZonePublish path for streaming.
+                        breakpoints: Vec::new(),
+                    });
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::PublishToTile(pt)) => {
+                let element_id = match bytes_to_scene_id(&pt.element_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        return Err((
+                            "INVALID_ARGUMENT".to_string(),
+                            "publish_to_tile element_id must be 16 bytes".to_string(),
+                        ));
+                    }
+                };
+
+                let entry = match element_store.entries.get(&element_id) {
+                    Some(entry) if entry.element_type == ElementType::Tile => entry.clone(),
+                    _ => {
+                        return Err((
+                            "ELEMENT_NOT_FOUND".to_string(),
+                            "publish_to_tile element_id does not reference a known tile"
+                                .to_string(),
+                        ));
+                    }
+                };
+
+                let requested_bounds = pt.bounds.as_ref().map(convert::proto_rect_to_scene);
+                if let Some(resolved_bounds) =
+                    resolve_tile_bounds_with_override(Some(&entry), requested_bounds, display_area)
+                {
+                    scene_mutations.push(SceneMutation::UpdateTileBounds {
+                        tile_id: element_id,
+                        bounds: resolved_bounds,
+                    });
+                }
+
+                let mut had_content = false;
+                if let Some(ref node_proto) = pt.node {
+                    if let Some(node) = convert::proto_node_to_scene(node_proto) {
+                        scene_mutations.push(SceneMutation::SetTileRoot {
+                            tile_id: element_id,
+                            node,
+                        });
+                        had_content = true;
+                    } else {
+                        return Err((
+                            "INVALID_ARGUMENT".to_string(),
+                            "publish_to_tile node content is invalid or missing data".to_string(),
+                        ));
+                    }
+                }
+
+                if !had_content && requested_bounds.is_none() {
+                    return Err((
+                        "INVALID_ARGUMENT".to_string(),
+                        "publish_to_tile requires at least one of bounds or node".to_string(),
+                    ));
+                }
+
+                pending_touch_ids.push((element_id, ElementType::Tile));
+            }
+            Some(crate::proto::mutation_proto::Mutation::ClearZone(cz)) => {
+                let token = tze_hud_scene::types::ZonePublishToken {
+                    token: cz
+                        .publish_token
+                        .as_ref()
+                        .map(|t| t.token.clone())
+                        .unwrap_or_default(),
+                };
+                scene_mutations.push(SceneMutation::ClearZone {
+                    zone_name: cz.zone_name.clone(),
+                    publish_token: token,
+                });
+            }
+            Some(crate::proto::mutation_proto::Mutation::ClearWidget(cw)) => {
+                let instance_id = (!cw.instance_id.is_empty()).then_some(cw.instance_id.clone());
+                scene_mutations.push(SceneMutation::ClearWidget {
+                    widget_name: cw.widget_name.clone(),
+                    instance_id,
+                });
+            }
+            Some(crate::proto::mutation_proto::Mutation::UpdateNodeContent(unc)) => {
+                match (
+                    bytes_to_scene_id(&unc.tile_id),
+                    bytes_to_scene_id(&unc.node_id),
+                ) {
+                    (Ok(tile_id), Ok(node_id)) => {
+                        if let Some(ref d) = unc.data
+                            && let Some(data) = convert::proto_update_node_content_data_to_scene(d)
+                        {
+                            scene_mutations.push(SceneMutation::UpdateNodeContent {
+                                tile_id,
+                                node_id,
+                                data,
+                            });
+                        } else {
+                            tracing::warn!(
+                                "UpdateNodeContent{log_suffix}: missing or unrecognised data \
+                                 variant; mutation skipped"
+                            );
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(
+                            tile_id_len = unc.tile_id.len(),
+                            node_id_len = unc.node_id.len(),
+                            "UpdateNodeContent{log_suffix}: invalid tile_id or node_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::AddNode(an)) => {
+                match bytes_to_scene_id(&an.tile_id) {
+                    Ok(tile_id) => {
+                        let parent_id_result = if an.parent_id.is_empty() {
+                            Ok(None)
+                        } else {
+                            bytes_to_scene_id(&an.parent_id).map(Some)
+                        };
+                        match parent_id_result {
+                            Ok(parent_id) => {
+                                if let Some(ref node_proto) = an.node
+                                    && let Some(node) = convert::proto_node_to_scene(node_proto)
+                                {
+                                    scene_mutations.push(SceneMutation::AddNode {
+                                        tile_id,
+                                        parent_id,
+                                        node,
+                                    });
+                                }
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    parent_id_len = an.parent_id.len(),
+                                    "AddNode{log_suffix}: invalid parent_id length (expected 16 \
+                                     bytes); mutation skipped — SDK bug or wire corruption"
+                                );
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = an.tile_id.len(),
+                            "AddNode{log_suffix}: invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::UpdateTileOpacity(uto)) => {
+                match bytes_to_scene_id(&uto.tile_id) {
+                    Ok(tile_id) => {
+                        scene_mutations.push(SceneMutation::UpdateTileOpacity {
+                            tile_id,
+                            opacity: uto.opacity,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = uto.tile_id.len(),
+                            "UpdateTileOpacity{log_suffix}: invalid tile_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::UpdateTileInputMode(utim)) => {
+                match bytes_to_scene_id(&utim.tile_id) {
+                    Ok(tile_id) => {
+                        let input_mode = convert::proto_input_mode_to_scene(
+                            crate::proto::TileInputModeProto::try_from(utim.input_mode).unwrap_or(
+                                crate::proto::TileInputModeProto::TileInputModeUnspecified,
+                            ),
+                        );
+                        scene_mutations.push(SceneMutation::UpdateTileInputMode {
+                            tile_id,
+                            input_mode,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = utim.tile_id.len(),
+                            "UpdateTileInputMode{log_suffix}: invalid tile_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::RegisterTileScroll(rts)) => {
+                match bytes_to_scene_id(&rts.tile_id) {
+                    Ok(tile_id) => {
+                        // -1.0 sentinel = unset (no clamp); >= 0.0 = clamp limit.
+                        let content_width = if rts.content_width >= 0.0 {
+                            Some(rts.content_width)
+                        } else {
+                            None
+                        };
+                        let content_height = if rts.content_height >= 0.0 {
+                            Some(rts.content_height)
+                        } else {
+                            None
+                        };
+                        scene_mutations.push(SceneMutation::RegisterTileScroll {
+                            tile_id,
+                            scrollable_x: rts.scrollable_x,
+                            scrollable_y: rts.scrollable_y,
+                            content_width,
+                            content_height,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = rts.tile_id.len(),
+                            "RegisterTileScroll{log_suffix}: invalid tile_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::SetScrollOffset(sso)) => {
+                match bytes_to_scene_id(&sso.tile_id) {
+                    Ok(tile_id) => {
+                        scene_mutations.push(SceneMutation::SetScrollOffset {
+                            tile_id,
+                            offset_x: sso.offset_x,
+                            offset_y: sso.offset_y,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = sso.tile_id.len(),
+                            "SetScrollOffset{log_suffix}: invalid tile_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    Ok(ConvertedBatch {
+        scene_mutations,
+        pending_touch_ids,
+        pending_touch_names,
+    })
+}
+
 async fn handle_mutation_batch(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -3935,382 +4313,54 @@ async fn handle_mutation_batch(
         }
     };
 
-    // Convert proto mutations to scene mutations
+    // Convert proto mutations to scene mutations (single canonical path shared
+    // with the freeze-drain path; only the log suffix differs between the two).
     let display_area = { st.scene.lock().await.display_area };
-    let mut scene_mutations = Vec::new();
-    let mut pending_touch_ids: Vec<(SceneId, ElementType)> = Vec::new();
-    let mut pending_touch_names: Vec<(ElementType, String)> = Vec::new();
-    let mut mutation_conversion_error: Option<(String, String)> = None;
-    for m in &batch.mutations {
-        match &m.mutation {
-            Some(crate::proto::mutation_proto::Mutation::CreateTile(ct)) => {
-                let requested_bounds = ct
-                    .bounds
-                    .as_ref()
-                    .map(convert::proto_rect_to_scene)
-                    .unwrap_or(tze_hud_scene::Rect::new(0.0, 0.0, 200.0, 150.0));
-                let bounds =
-                    resolve_tile_bounds_with_override(None, Some(requested_bounds), display_area)
-                        .unwrap_or(requested_bounds);
-                scene_mutations.push(SceneMutation::CreateTile {
-                    tab_id,
-                    namespace: session.namespace.clone(),
-                    lease_id,
-                    bounds,
-                    z_order: ct.z_order,
-                });
+    let converted = match convert_proto_mutations(
+        &batch.mutations,
+        &st.element_store,
+        tab_id,
+        lease_id,
+        display_area,
+        &session.namespace,
+        "",
+    ) {
+        Ok(c) => c,
+        Err((error_code, error_message)) => {
+            let cached = CachedResult {
+                accepted: false,
+                created_ids: Vec::new(),
+                error_code: error_code.clone(),
+                error_message: error_message.clone(),
+            };
+            if !batch.batch_id.is_empty() {
+                session
+                    .dedup_window
+                    .insert(batch.batch_id.clone(), cached.clone());
             }
-            Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
-                // tile_id is encoded as uuid::Uuid::as_bytes() (big-endian RFC 4122 bytes),
-                // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
-                match bytes_to_scene_id(&str_.tile_id) {
-                    Ok(tile_id) => {
-                        if let Some(ref node_proto) = str_.node
-                            && let Some(node) = convert::proto_node_to_scene(node_proto)
-                        {
-                            scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
-                        }
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = str_.tile_id.len(),
-                            "SetTileRoot: invalid tile_id length (expected 16 bytes); \
-                             mutation skipped — SDK bug or wire corruption"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::PublishToZone(pz)) => {
-                let content = pz
-                    .content
-                    .as_ref()
-                    .and_then(convert::proto_zone_content_to_scene);
-                if let Some(content) = content {
-                    let resolved_zone_name = if !pz.element_id.is_empty() {
-                        match bytes_to_scene_id(&pz.element_id) {
-                            Ok(element_id) => match st.element_store.entries.get(&element_id) {
-                                Some(entry) if entry.element_type == ElementType::Zone => {
-                                    pending_touch_ids.push((element_id, ElementType::Zone));
-                                    entry.namespace.clone()
-                                }
-                                _ => {
-                                    mutation_conversion_error = Some((
-                                        "ELEMENT_NOT_FOUND".to_string(),
-                                        "publish_to_zone element_id does not reference a known zone"
-                                            .to_string(),
-                                    ));
-                                    break;
-                                }
-                            },
-                            Err(_) => {
-                                mutation_conversion_error = Some((
-                                    "INVALID_ARGUMENT".to_string(),
-                                    "publish_to_zone element_id must be 16 bytes".to_string(),
-                                ));
-                                break;
-                            }
-                        }
-                    } else {
-                        pending_touch_names.push((ElementType::Zone, pz.zone_name.clone()));
-                        pz.zone_name.clone()
-                    };
-                    let token = tze_hud_scene::types::ZonePublishToken {
-                        token: pz
-                            .publish_token
-                            .as_ref()
-                            .map(|t| t.token.clone())
-                            .unwrap_or_default(),
-                    };
-                    let merge_key = if pz.merge_key.is_empty() {
-                        None
-                    } else {
-                        Some(pz.merge_key.clone())
-                    };
-                    scene_mutations.push(SceneMutation::PublishToZone {
-                        zone_name: resolved_zone_name,
-                        content,
-                        publish_token: token,
-                        merge_key,
-                        // expires_at_wall_us and content_classification are not yet present
-                        // in the PublishToZoneMutation proto (post-v1 wire extensions).
-                        expires_at_wall_us: None,
-                        content_classification: None,
-                        // breakpoints are not in the MutationBatch PublishToZoneMutation proto
-                        // (post-v1 wire extension); use ZonePublish path for streaming.
-                        breakpoints: Vec::new(),
-                    });
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::PublishToTile(pt)) => {
-                let element_id = match bytes_to_scene_id(&pt.element_id) {
-                    Ok(id) => id,
-                    Err(_) => {
-                        mutation_conversion_error = Some((
-                            "INVALID_ARGUMENT".to_string(),
-                            "publish_to_tile element_id must be 16 bytes".to_string(),
-                        ));
-                        break;
-                    }
-                };
-
-                let entry = match st.element_store.entries.get(&element_id) {
-                    Some(entry) if entry.element_type == ElementType::Tile => entry.clone(),
-                    _ => {
-                        mutation_conversion_error = Some((
-                            "ELEMENT_NOT_FOUND".to_string(),
-                            "publish_to_tile element_id does not reference a known tile"
-                                .to_string(),
-                        ));
-                        break;
-                    }
-                };
-
-                let requested_bounds = pt.bounds.as_ref().map(convert::proto_rect_to_scene);
-                if let Some(resolved_bounds) =
-                    resolve_tile_bounds_with_override(Some(&entry), requested_bounds, display_area)
-                {
-                    scene_mutations.push(SceneMutation::UpdateTileBounds {
-                        tile_id: element_id,
-                        bounds: resolved_bounds,
-                    });
-                }
-
-                let mut had_content = false;
-                if let Some(ref node_proto) = pt.node {
-                    if let Some(node) = convert::proto_node_to_scene(node_proto) {
-                        scene_mutations.push(SceneMutation::SetTileRoot {
-                            tile_id: element_id,
-                            node,
-                        });
-                        had_content = true;
-                    } else {
-                        mutation_conversion_error = Some((
-                            "INVALID_ARGUMENT".to_string(),
-                            "publish_to_tile node content is invalid or missing data".to_string(),
-                        ));
-                        break;
-                    }
-                }
-
-                if !had_content && requested_bounds.is_none() {
-                    mutation_conversion_error = Some((
-                        "INVALID_ARGUMENT".to_string(),
-                        "publish_to_tile requires at least one of bounds or node".to_string(),
-                    ));
-                    break;
-                }
-
-                pending_touch_ids.push((element_id, ElementType::Tile));
-            }
-            Some(crate::proto::mutation_proto::Mutation::ClearZone(cz)) => {
-                let token = tze_hud_scene::types::ZonePublishToken {
-                    token: cz
-                        .publish_token
-                        .as_ref()
-                        .map(|t| t.token.clone())
-                        .unwrap_or_default(),
-                };
-                scene_mutations.push(SceneMutation::ClearZone {
-                    zone_name: cz.zone_name.clone(),
-                    publish_token: token,
-                });
-            }
-            Some(crate::proto::mutation_proto::Mutation::ClearWidget(cw)) => {
-                let instance_id = (!cw.instance_id.is_empty()).then_some(cw.instance_id.clone());
-                scene_mutations.push(SceneMutation::ClearWidget {
-                    widget_name: cw.widget_name.clone(),
-                    instance_id,
-                });
-            }
-            Some(crate::proto::mutation_proto::Mutation::UpdateNodeContent(unc)) => {
-                match (
-                    bytes_to_scene_id(&unc.tile_id),
-                    bytes_to_scene_id(&unc.node_id),
-                ) {
-                    (Ok(tile_id), Ok(node_id)) => {
-                        if let Some(ref d) = unc.data
-                            && let Some(data) = convert::proto_update_node_content_data_to_scene(d)
-                        {
-                            scene_mutations.push(SceneMutation::UpdateNodeContent {
-                                tile_id,
-                                node_id,
-                                data,
-                            });
-                        } else {
-                            tracing::warn!(
-                                "UpdateNodeContent: missing or unrecognised data variant; \
-                                 mutation skipped"
-                            );
-                        }
-                    }
-                    _ => {
-                        tracing::warn!(
-                            tile_id_len = unc.tile_id.len(),
-                            node_id_len = unc.node_id.len(),
-                            "UpdateNodeContent: invalid tile_id or node_id length (expected 16 \
-                             bytes); mutation skipped — SDK bug or wire corruption"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::AddNode(an)) => {
-                match bytes_to_scene_id(&an.tile_id) {
-                    Ok(tile_id) => {
-                        let parent_id = if an.parent_id.is_empty() {
-                            None
-                        } else {
-                            match bytes_to_scene_id(&an.parent_id) {
-                                Ok(id) => Some(id),
-                                Err(_) => {
-                                    tracing::warn!(
-                                        parent_id_len = an.parent_id.len(),
-                                        "AddNode: invalid parent_id length (expected 16 bytes); \
-                                         mutation skipped — SDK bug or wire corruption"
-                                    );
-                                    continue;
-                                }
-                            }
-                        };
-                        if let Some(ref node_proto) = an.node
-                            && let Some(node) = convert::proto_node_to_scene(node_proto)
-                        {
-                            scene_mutations.push(SceneMutation::AddNode {
-                                tile_id,
-                                parent_id,
-                                node,
-                            });
-                        }
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = an.tile_id.len(),
-                            "AddNode: invalid tile_id length (expected 16 bytes); \
-                             mutation skipped — SDK bug or wire corruption"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::UpdateTileOpacity(uto)) => {
-                match bytes_to_scene_id(&uto.tile_id) {
-                    Ok(tile_id) => {
-                        scene_mutations.push(SceneMutation::UpdateTileOpacity {
-                            tile_id,
-                            opacity: uto.opacity,
-                        });
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = uto.tile_id.len(),
-                            "UpdateTileOpacity: invalid tile_id length (expected 16 bytes); \
-                             mutation skipped — SDK bug or wire corruption"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::UpdateTileInputMode(utim)) => {
-                match bytes_to_scene_id(&utim.tile_id) {
-                    Ok(tile_id) => {
-                        let input_mode = convert::proto_input_mode_to_scene(
-                            crate::proto::TileInputModeProto::try_from(utim.input_mode).unwrap_or(
-                                crate::proto::TileInputModeProto::TileInputModeUnspecified,
-                            ),
-                        );
-                        scene_mutations.push(SceneMutation::UpdateTileInputMode {
-                            tile_id,
-                            input_mode,
-                        });
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = utim.tile_id.len(),
-                            "UpdateTileInputMode: invalid tile_id length (expected 16 bytes); \
-                             mutation skipped — SDK bug or wire corruption"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::RegisterTileScroll(rts)) => {
-                match bytes_to_scene_id(&rts.tile_id) {
-                    Ok(tile_id) => {
-                        // -1.0 sentinel = unset (no clamp); >= 0.0 = clamp limit.
-                        let content_width = if rts.content_width >= 0.0 {
-                            Some(rts.content_width)
-                        } else {
-                            None
-                        };
-                        let content_height = if rts.content_height >= 0.0 {
-                            Some(rts.content_height)
-                        } else {
-                            None
-                        };
-                        scene_mutations.push(SceneMutation::RegisterTileScroll {
-                            tile_id,
-                            scrollable_x: rts.scrollable_x,
-                            scrollable_y: rts.scrollable_y,
-                            content_width,
-                            content_height,
-                        });
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = rts.tile_id.len(),
-                            "RegisterTileScroll: invalid tile_id length (expected 16 bytes); \
-                             mutation skipped — SDK bug or wire corruption"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::SetScrollOffset(sso)) => {
-                match bytes_to_scene_id(&sso.tile_id) {
-                    Ok(tile_id) => {
-                        scene_mutations.push(SceneMutation::SetScrollOffset {
-                            tile_id,
-                            offset_x: sso.offset_x,
-                            offset_y: sso.offset_y,
-                        });
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = sso.tile_id.len(),
-                            "SetScrollOffset: invalid tile_id length (expected 16 bytes); \
-                             mutation skipped — SDK bug or wire corruption"
-                        );
-                    }
-                }
-            }
-            None => {}
+            let seq = session.next_server_seq();
+            drop(st);
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::MutationResult(MutationResult {
+                        batch_id: batch.batch_id,
+                        accepted: false,
+                        created_ids: Vec::new(),
+                        error_code: cached.error_code,
+                        error_message: cached.error_message,
+                    })),
+                }))
+                .await;
+            return;
         }
-    }
-
-    if let Some((error_code, error_message)) = mutation_conversion_error {
-        let cached = CachedResult {
-            accepted: false,
-            created_ids: Vec::new(),
-            error_code: error_code.clone(),
-            error_message: error_message.clone(),
-        };
-        if !batch.batch_id.is_empty() {
-            session
-                .dedup_window
-                .insert(batch.batch_id.clone(), cached.clone());
-        }
-        let seq = session.next_server_seq();
-        drop(st);
-        let _ = tx
-            .send(Ok(ServerMessage {
-                sequence: seq,
-                timestamp_wall_us: now_wall_us(),
-                payload: Some(ServerPayload::MutationResult(MutationResult {
-                    batch_id: batch.batch_id,
-                    accepted: false,
-                    created_ids: Vec::new(),
-                    error_code: cached.error_code,
-                    error_message: cached.error_message,
-                })),
-            }))
-            .await;
-        return;
-    }
+    };
+    let ConvertedBatch {
+        scene_mutations,
+        pending_touch_ids,
+        pending_touch_names,
+    } = converted;
 
     // Map the proto batch_id bytes to a SceneId for rejection-correlation.
     // Falls back (with a debug log) when the field is absent or malformed.
@@ -4465,351 +4515,33 @@ async fn apply_queued_batch_to_scene(
         None => return, // no active tab — skip silently
     };
 
+    // Convert proto mutations to scene mutations (single canonical path shared
+    // with the live path; the " (queued)" suffix distinguishes drain-path logs).
     let display_area = { st.scene.lock().await.display_area };
-    let mut scene_mutations = Vec::new();
-    let mut pending_touch_ids: Vec<(SceneId, ElementType)> = Vec::new();
-    let mut pending_touch_names: Vec<(ElementType, String)> = Vec::new();
-    let mut mutation_conversion_error: Option<(String, String)> = None;
-    for m in &batch.mutations {
-        match &m.mutation {
-            Some(crate::proto::mutation_proto::Mutation::CreateTile(ct)) => {
-                let requested_bounds = ct
-                    .bounds
-                    .as_ref()
-                    .map(convert::proto_rect_to_scene)
-                    .unwrap_or(tze_hud_scene::Rect::new(0.0, 0.0, 200.0, 150.0));
-                let bounds =
-                    resolve_tile_bounds_with_override(None, Some(requested_bounds), display_area)
-                        .unwrap_or(requested_bounds);
-                scene_mutations.push(SceneMutation::CreateTile {
-                    tab_id,
-                    namespace: session.namespace.clone(),
-                    lease_id,
-                    bounds,
-                    z_order: ct.z_order,
-                });
-            }
-            Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
-                // tile_id is encoded as uuid::Uuid::as_bytes() (big-endian RFC 4122 bytes),
-                // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
-                match bytes_to_scene_id(&str_.tile_id) {
-                    Ok(tile_id) => {
-                        if let Some(ref node_proto) = str_.node
-                            && let Some(node) = convert::proto_node_to_scene(node_proto)
-                        {
-                            scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
-                        }
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = str_.tile_id.len(),
-                            "SetTileRoot (queued): invalid tile_id length (expected 16 bytes); \
-                             mutation skipped — SDK bug or wire corruption"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::PublishToZone(pz)) => {
-                let content = pz
-                    .content
-                    .as_ref()
-                    .and_then(convert::proto_zone_content_to_scene);
-                if let Some(content) = content {
-                    let resolved_zone_name = if !pz.element_id.is_empty() {
-                        match bytes_to_scene_id(&pz.element_id) {
-                            Ok(element_id) => match st.element_store.entries.get(&element_id) {
-                                Some(entry) if entry.element_type == ElementType::Zone => {
-                                    pending_touch_ids.push((element_id, ElementType::Zone));
-                                    entry.namespace.clone()
-                                }
-                                _ => {
-                                    mutation_conversion_error = Some((
-                                        "ELEMENT_NOT_FOUND".to_string(),
-                                        "publish_to_zone element_id does not reference a known zone"
-                                            .to_string(),
-                                    ));
-                                    break;
-                                }
-                            },
-                            Err(_) => {
-                                mutation_conversion_error = Some((
-                                    "INVALID_ARGUMENT".to_string(),
-                                    "publish_to_zone element_id must be 16 bytes".to_string(),
-                                ));
-                                break;
-                            }
-                        }
-                    } else {
-                        pending_touch_names.push((ElementType::Zone, pz.zone_name.clone()));
-                        pz.zone_name.clone()
-                    };
-                    let token = tze_hud_scene::types::ZonePublishToken {
-                        token: pz
-                            .publish_token
-                            .as_ref()
-                            .map(|t| t.token.clone())
-                            .unwrap_or_default(),
-                    };
-                    let merge_key = if pz.merge_key.is_empty() {
-                        None
-                    } else {
-                        Some(pz.merge_key.clone())
-                    };
-                    scene_mutations.push(SceneMutation::PublishToZone {
-                        zone_name: resolved_zone_name,
-                        content,
-                        publish_token: token,
-                        merge_key,
-                        expires_at_wall_us: None,
-                        content_classification: None,
-                        breakpoints: Vec::new(),
-                    });
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::PublishToTile(pt)) => {
-                let element_id = match bytes_to_scene_id(&pt.element_id) {
-                    Ok(id) => id,
-                    Err(_) => {
-                        mutation_conversion_error = Some((
-                            "INVALID_ARGUMENT".to_string(),
-                            "publish_to_tile element_id must be 16 bytes".to_string(),
-                        ));
-                        break;
-                    }
-                };
-
-                let entry = match st.element_store.entries.get(&element_id) {
-                    Some(entry) if entry.element_type == ElementType::Tile => entry.clone(),
-                    _ => {
-                        mutation_conversion_error = Some((
-                            "ELEMENT_NOT_FOUND".to_string(),
-                            "publish_to_tile element_id does not reference a known tile"
-                                .to_string(),
-                        ));
-                        break;
-                    }
-                };
-
-                let requested_bounds = pt.bounds.as_ref().map(convert::proto_rect_to_scene);
-                if let Some(resolved_bounds) =
-                    resolve_tile_bounds_with_override(Some(&entry), requested_bounds, display_area)
-                {
-                    scene_mutations.push(SceneMutation::UpdateTileBounds {
-                        tile_id: element_id,
-                        bounds: resolved_bounds,
-                    });
-                }
-
-                let mut had_content = false;
-                if let Some(ref node_proto) = pt.node {
-                    if let Some(node) = convert::proto_node_to_scene(node_proto) {
-                        scene_mutations.push(SceneMutation::SetTileRoot {
-                            tile_id: element_id,
-                            node,
-                        });
-                        had_content = true;
-                    } else {
-                        mutation_conversion_error = Some((
-                            "INVALID_ARGUMENT".to_string(),
-                            "publish_to_tile node content is invalid or missing data".to_string(),
-                        ));
-                        break;
-                    }
-                }
-
-                if !had_content && requested_bounds.is_none() {
-                    mutation_conversion_error = Some((
-                        "INVALID_ARGUMENT".to_string(),
-                        "publish_to_tile requires at least one of bounds or node".to_string(),
-                    ));
-                    break;
-                }
-
-                pending_touch_ids.push((element_id, ElementType::Tile));
-            }
-            Some(crate::proto::mutation_proto::Mutation::ClearZone(cz)) => {
-                let token = tze_hud_scene::types::ZonePublishToken {
-                    token: cz
-                        .publish_token
-                        .as_ref()
-                        .map(|t| t.token.clone())
-                        .unwrap_or_default(),
-                };
-                scene_mutations.push(SceneMutation::ClearZone {
-                    zone_name: cz.zone_name.clone(),
-                    publish_token: token,
-                });
-            }
-            Some(crate::proto::mutation_proto::Mutation::ClearWidget(cw)) => {
-                let instance_id = (!cw.instance_id.is_empty()).then_some(cw.instance_id.clone());
-                scene_mutations.push(SceneMutation::ClearWidget {
-                    widget_name: cw.widget_name.clone(),
-                    instance_id,
-                });
-            }
-            Some(crate::proto::mutation_proto::Mutation::UpdateNodeContent(unc)) => {
-                match (
-                    bytes_to_scene_id(&unc.tile_id),
-                    bytes_to_scene_id(&unc.node_id),
-                ) {
-                    (Ok(tile_id), Ok(node_id)) => {
-                        if let Some(ref d) = unc.data
-                            && let Some(data) = convert::proto_update_node_content_data_to_scene(d)
-                        {
-                            scene_mutations.push(SceneMutation::UpdateNodeContent {
-                                tile_id,
-                                node_id,
-                                data,
-                            });
-                        } else {
-                            tracing::warn!(
-                                "UpdateNodeContent (queued): missing or unrecognised data \
-                                 variant; mutation skipped"
-                            );
-                        }
-                    }
-                    _ => {
-                        tracing::warn!(
-                            tile_id_len = unc.tile_id.len(),
-                            node_id_len = unc.node_id.len(),
-                            "UpdateNodeContent (queued): invalid tile_id or node_id length \
-                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::AddNode(an)) => {
-                match bytes_to_scene_id(&an.tile_id) {
-                    Ok(tile_id) => {
-                        let parent_id_result = if an.parent_id.is_empty() {
-                            Ok(None)
-                        } else {
-                            bytes_to_scene_id(&an.parent_id).map(Some)
-                        };
-                        match parent_id_result {
-                            Ok(parent_id) => {
-                                if let Some(ref node_proto) = an.node
-                                    && let Some(node) = convert::proto_node_to_scene(node_proto)
-                                {
-                                    scene_mutations.push(SceneMutation::AddNode {
-                                        tile_id,
-                                        parent_id,
-                                        node,
-                                    });
-                                }
-                            }
-                            Err(_) => {
-                                tracing::warn!(
-                                    parent_id_len = an.parent_id.len(),
-                                    "AddNode (queued): invalid parent_id length (expected 16 \
-                                     bytes); mutation skipped — SDK bug or wire corruption"
-                                );
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = an.tile_id.len(),
-                            "AddNode (queued): invalid tile_id length; mutation skipped"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::UpdateTileOpacity(uto)) => {
-                match bytes_to_scene_id(&uto.tile_id) {
-                    Ok(tile_id) => {
-                        scene_mutations.push(SceneMutation::UpdateTileOpacity {
-                            tile_id,
-                            opacity: uto.opacity,
-                        });
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = uto.tile_id.len(),
-                            "UpdateTileOpacity (queued): invalid tile_id length; mutation skipped"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::UpdateTileInputMode(utim)) => {
-                match bytes_to_scene_id(&utim.tile_id) {
-                    Ok(tile_id) => {
-                        let input_mode = convert::proto_input_mode_to_scene(
-                            crate::proto::TileInputModeProto::try_from(utim.input_mode).unwrap_or(
-                                crate::proto::TileInputModeProto::TileInputModeUnspecified,
-                            ),
-                        );
-                        scene_mutations.push(SceneMutation::UpdateTileInputMode {
-                            tile_id,
-                            input_mode,
-                        });
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = utim.tile_id.len(),
-                            "UpdateTileInputMode (queued): invalid tile_id length; mutation skipped"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::RegisterTileScroll(rts)) => {
-                match bytes_to_scene_id(&rts.tile_id) {
-                    Ok(tile_id) => {
-                        let content_width = if rts.content_width >= 0.0 {
-                            Some(rts.content_width)
-                        } else {
-                            None
-                        };
-                        let content_height = if rts.content_height >= 0.0 {
-                            Some(rts.content_height)
-                        } else {
-                            None
-                        };
-                        scene_mutations.push(SceneMutation::RegisterTileScroll {
-                            tile_id,
-                            scrollable_x: rts.scrollable_x,
-                            scrollable_y: rts.scrollable_y,
-                            content_width,
-                            content_height,
-                        });
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = rts.tile_id.len(),
-                            "RegisterTileScroll (queued): invalid tile_id length; mutation skipped"
-                        );
-                    }
-                }
-            }
-            Some(crate::proto::mutation_proto::Mutation::SetScrollOffset(sso)) => {
-                match bytes_to_scene_id(&sso.tile_id) {
-                    Ok(tile_id) => {
-                        scene_mutations.push(SceneMutation::SetScrollOffset {
-                            tile_id,
-                            offset_x: sso.offset_x,
-                            offset_y: sso.offset_y,
-                        });
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tile_id_len = sso.tile_id.len(),
-                            "SetScrollOffset (queued): invalid tile_id length; mutation skipped"
-                        );
-                    }
-                }
-            }
-            None => {}
+    let converted = match convert_proto_mutations(
+        &batch.mutations,
+        &st.element_store,
+        tab_id,
+        lease_id,
+        display_area,
+        &session.namespace,
+        " (queued)",
+    ) {
+        Ok(c) => c,
+        Err((error_code, error_message)) => {
+            tracing::warn!(
+                error_code,
+                error_message,
+                "queued mutation batch skipped due to conversion error after enqueue"
+            );
+            return;
         }
-    }
-
-    if let Some((error_code, error_message)) = mutation_conversion_error {
-        tracing::warn!(
-            error_code,
-            error_message,
-            "queued mutation batch skipped due to conversion error after enqueue"
-        );
-        return;
-    }
+    };
+    let ConvertedBatch {
+        scene_mutations,
+        pending_touch_ids,
+        pending_touch_names,
+    } = converted;
 
     // Map the proto batch_id bytes to a SceneId for validation correlation.
     let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
