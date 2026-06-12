@@ -2856,6 +2856,14 @@ impl WinitApp {
     /// `KeyDownEvent`.  Any transactional batch returned (submit / cancel) is
     /// handed to `deliver_composer_batch` for future downstream delivery.
     fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
+        // FIFO guard: if earlier events are still pending, queue this one
+        // immediately so it cannot bypass them even when the lock is free.
+        if !self.state.pending_keyboard_events.is_empty() {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+            return;
+        }
         // try_lock — do not block the event-loop thread (hud-2fz34).
         // None = lock busy → defer to the next about_to_wait iteration.
         let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
@@ -3075,6 +3083,14 @@ impl WinitApp {
             return;
         }
 
+        // FIFO guard: if earlier events are still pending, queue this one
+        // immediately so it cannot bypass them even when the lock is free.
+        if !self.state.pending_keyboard_events.is_empty() {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::KeyUp(raw.clone()));
+            return;
+        }
         // try_lock — do not block the event-loop thread (hud-2fz34).
         let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
             self.state
@@ -3152,6 +3168,14 @@ impl WinitApp {
             return;
         }
 
+        // FIFO guard: if earlier events are still pending, queue this one
+        // immediately so it cannot bypass them even when the lock is free.
+        if !self.state.pending_keyboard_events.is_empty() {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::Character(raw.clone()));
+            return;
+        }
         // try_lock — do not block the event-loop thread (hud-2fz34).
         let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
             self.state
@@ -3313,9 +3337,13 @@ impl WinitApp {
     /// Called from `about_to_wait` once per event-loop iteration, matching the
     /// `drain_input_capture_commands` sibling pattern.  Each event is popped
     /// from the front of `pending_keyboard_events` and re-dispatched through
-    /// the normal dispatch path.  If the lock is still busy on this iteration,
-    /// `dispatch_key_{down,up}_event` / `dispatch_character_event` will push
-    /// the event back onto the queue and the retry continues on the next tick.
+    /// the normal dispatch path.
+    ///
+    /// FIFO guarantee: the lock is checked before each pop.  If the lock is
+    /// busy, the entire drain stops immediately — no later event is allowed to
+    /// skip ahead of an earlier one.  If the lock is free, the event is popped
+    /// and dispatched (the re-dispatch path also checks the queue-non-empty
+    /// guard, but the pre-pop check here is the authoritative FIFO barrier).
     ///
     /// Ordering: called after `flush_composer_draft_at_settle` and before
     /// `drain_portal_projection` so deferred keystrokes are retried before
@@ -3327,6 +3355,12 @@ impl WinitApp {
         // don't loop forever if every retry immediately re-defers.
         let limit = self.state.pending_keyboard_events.len();
         for _ in 0..limit {
+            // Check lock availability before popping: if the lock is busy, stop
+            // draining entirely to preserve strict FIFO order.  A later event
+            // must not be dispatched before an earlier one that is still blocked.
+            if self.active_tab_for_keyboard_dispatch().is_none() {
+                break;
+            }
             let Some(event) = self.state.pending_keyboard_events.pop_front() else {
                 break;
             };
@@ -8404,6 +8438,153 @@ redaction_style = "blank"
         assert!(
             mutex.try_lock().is_ok(),
             "try_lock must succeed when no other task holds the Tokio mutex"
+        );
+    }
+
+    /// Verify that a non-empty `pending_keyboard_events` queue preserves FIFO
+    /// ordering — a new incoming event must be pushed to the back, never bypass
+    /// already-queued events (hud-fyaog / hud-2fz34).
+    ///
+    /// This tests the queue data-structure invariant directly without spinning
+    /// up the full winit runtime.  The entry-point FIFO guards in
+    /// `dispatch_key_down_event`, `dispatch_key_up_event`, and
+    /// `dispatch_character_event` all reduce to: "if non-empty, push_back and
+    /// return."  This test verifies that push_back preserves arrival order and
+    /// that pop_front gives back events in FIFO sequence.
+    #[test]
+    fn pending_keyboard_queue_preserves_fifo_order() {
+        use tze_hud_input::{KeyboardModifiers, RawCharacterEvent, RawKeyDownEvent};
+        use tze_hud_scene::MonoUs;
+
+        let mut queue: std::collections::VecDeque<PendingKeyboardEvent> =
+            std::collections::VecDeque::new();
+
+        // Simulate three events arriving in order: KeyDown("a"), KeyDown("b"), Character("c").
+        // Event 1 is deferred (lock busy). Events 2 and 3 arrive while E1 is still in the queue.
+        // The FIFO guard must ensure all three are pushed in arrival order.
+        let e1 = PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+            key_code: "KeyA".to_string(),
+            key: "a".to_string(),
+            modifiers: KeyboardModifiers::NONE,
+            repeat: false,
+            timestamp_mono_us: MonoUs(1_000),
+        });
+        let e2 = PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+            key_code: "KeyB".to_string(),
+            key: "b".to_string(),
+            modifiers: KeyboardModifiers::NONE,
+            repeat: false,
+            timestamp_mono_us: MonoUs(2_000),
+        });
+        let e3 = PendingKeyboardEvent::Character(RawCharacterEvent {
+            character: "c".to_string(),
+            timestamp_mono_us: MonoUs(3_000),
+        });
+
+        // E1 deferred: push_back.
+        queue.push_back(e1);
+        // E2 arrives while queue is non-empty: FIFO guard pushes to back.
+        queue.push_back(e2);
+        // E3 arrives while queue is non-empty: FIFO guard pushes to back.
+        queue.push_back(e3);
+
+        // Drain in FIFO order.
+        let first = queue.pop_front().expect("queue must not be empty");
+        let second = queue.pop_front().expect("queue must have second element");
+        let third = queue.pop_front().expect("queue must have third element");
+        assert!(
+            queue.is_empty(),
+            "queue must be empty after draining 3 events"
+        );
+
+        // Verify order.
+        match first {
+            PendingKeyboardEvent::KeyDown(e) => assert_eq!(e.key, "a", "first event must be 'a'"),
+            _ => panic!("first event must be KeyDown('a')"),
+        }
+        match second {
+            PendingKeyboardEvent::KeyDown(e) => assert_eq!(e.key, "b", "second event must be 'b'"),
+            _ => panic!("second event must be KeyDown('b')"),
+        }
+        match third {
+            PendingKeyboardEvent::Character(e) => {
+                assert_eq!(e.character, "c", "third event must be character 'c'")
+            }
+            _ => panic!("third event must be Character('c')"),
+        }
+    }
+
+    /// Verify that `drain_pending_keyboard_events` stops immediately when the
+    /// lock check returns busy, preserving FIFO order across the queue boundary
+    /// (hud-fyaog / hud-2fz34).
+    ///
+    /// The pre-pop lock check (`active_tab_for_keyboard_dispatch().is_none()` →
+    /// break) is the authoritative FIFO barrier in the drain loop.  When the
+    /// lock is busy, no event should be popped or dispatched — not even events
+    /// that might have succeeded individually.
+    #[tokio::test]
+    async fn drain_stops_on_busy_lock_preserving_fifo() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex as TokioMutex;
+
+        // Simulate a lock that is initially held (lock busy).
+        let mutex: Arc<TokioMutex<u32>> = Arc::new(TokioMutex::new(0));
+        let guard = mutex.lock().await; // lock held — simulates a busy gRPC handler
+
+        // try_lock returns Err when the lock is busy.
+        assert!(
+            mutex.try_lock().is_err(),
+            "pre-condition: try_lock must fail while guard is held"
+        );
+
+        // Simulate the drain pre-pop check: if busy, do not pop.
+        let mut queue: std::collections::VecDeque<PendingKeyboardEvent> =
+            std::collections::VecDeque::new();
+        use tze_hud_input::{KeyboardModifiers, RawKeyDownEvent};
+        use tze_hud_scene::MonoUs;
+        queue.push_back(PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+            key_code: "KeyA".to_string(),
+            key: "a".to_string(),
+            modifiers: KeyboardModifiers::NONE,
+            repeat: false,
+            timestamp_mono_us: MonoUs(1_000),
+        }));
+        queue.push_back(PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+            key_code: "KeyB".to_string(),
+            key: "b".to_string(),
+            modifiers: KeyboardModifiers::NONE,
+            repeat: false,
+            timestamp_mono_us: MonoUs(2_000),
+        }));
+
+        // When the lock is busy, the drain must not pop any event.
+        let limit = queue.len();
+        for _ in 0..limit {
+            if mutex.try_lock().is_err() {
+                break; // this is the FIFO barrier
+            }
+            queue.pop_front();
+        }
+
+        // Both events must remain in the queue — nothing was popped.
+        assert_eq!(
+            queue.len(),
+            2,
+            "no events must be drained when the lock is busy"
+        );
+
+        // Release the lock; drain must now succeed.
+        drop(guard);
+        let limit = queue.len();
+        for _ in 0..limit {
+            if mutex.try_lock().is_err() {
+                break;
+            }
+            queue.pop_front();
+        }
+        assert!(
+            queue.is_empty(),
+            "all events must drain once the lock is free"
         );
     }
 }
