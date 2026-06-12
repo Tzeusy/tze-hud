@@ -95,8 +95,8 @@ use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{
     DragEventOutcome, FocusManager, HotkeyResizeDir, InputProcessor, KeyboardProcessor,
     PointerEvent, PointerEventKind, PortalRect, PortalResizeState, PortalWindowTokens,
-    RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ResizeBounds, ShellReservedShortcut,
-    apply_hotkey_resize,
+    RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ResizeBounds, ResizeEdge, ResizeOutcome,
+    ShellReservedShortcut, apply_hotkey_resize, hit_affordance,
 };
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
@@ -152,6 +152,22 @@ struct DragReleasedData {
     display_height: f32,
     /// Agent namespace that owns the tile, used for `ElementRepositionedEvent` routing.
     namespace: String,
+}
+
+// ── Portal-resize pointer: geometry carried out of scene lock ────────────────
+
+/// Outcome of a pointer-driven portal resize step, carried out of the scene
+/// lock so that [`dispatch_portal_geometry_event`] can be called without
+/// holding locks (fire-and-forget gRPC send).
+struct PortalResizePointerOutcome {
+    /// Tile whose bounds were updated.
+    tile_id: tze_hud_scene::SceneId,
+    /// Geometry snapshot from the resize state machine.
+    snapshot: tze_hud_input::GeometrySnapshot,
+    /// Display width at the time of the event (for geometry normalisation).
+    display_w: f32,
+    /// Display height at the time of the event.
+    display_h: f32,
 }
 
 fn sync_scene_display_area(scene: &mut tze_hud_scene::graph::SceneGraph, width: u32, height: u32) {
@@ -486,6 +502,219 @@ fn apply_drag_handle_pointer_event(
                 display_width,
                 display_height,
                 namespace,
+            })
+        }
+    }
+}
+
+/// Pointer-driven portal resize state machine step.
+///
+/// Called from [`WinitApp::enqueue_pointer_event`] while the scene lock is held.
+/// Drives `PortalResizeState` through the pointer-down / pointer-move / pointer-up
+/// lifecycle for resize affordances (§6b.1 pointer resize scenario).
+///
+/// On **PointerDown**: performs a hit-test against the focused portal's resize
+/// affordances.  If the pointer lands on an affordance, starts the gesture and
+/// returns a [`PortalResizePointerOutcome`] with the initial snapshot so the
+/// caller can apply local bounds and broadcast the geometry event.
+///
+/// On **PointerMove**: if a gesture is active for `device_id`, computes the new
+/// intermediate rect and applies it to the scene immediately (local-first).
+///
+/// On **PointerUp**: ends the gesture, applies the final clamped rect, and
+/// returns an outcome the caller must broadcast.
+///
+/// Returns `None` when there is nothing to do (no portal focused, pointer
+/// outside affordances, no gesture active, or lock contention).
+///
+/// ## Gesture authority
+///
+/// The gesture epoch is advanced inside `PortalResizeState::on_pointer_down` (to
+/// odd, blocking adapter publishes) and `on_pointer_up` (back to even, releasing
+/// the block after the gesture ends).  The caller MUST propagate snapshots with
+/// `gesture_active = true` to prevent adapter geometry from stomping the in-flight
+/// resize.
+fn apply_portal_resize_pointer_event(
+    pointer_event: &PointerEvent,
+    portal_resize_states: &mut std::collections::HashMap<tze_hud_scene::SceneId, PortalResizeState>,
+    active_tab: Option<tze_hud_scene::SceneId>,
+    focus_manager: &tze_hud_input::FocusManager,
+    scene: &mut tze_hud_scene::graph::SceneGraph,
+    display_w: f32,
+    display_h: f32,
+) -> Option<PortalResizePointerOutcome> {
+    let device_id = pointer_event.device_id;
+    let x = pointer_event.x;
+    let y = pointer_event.y;
+
+    // Resolve the focused portal tile for this tab (only portal tiles accept
+    // pointer-affordance resize, same gate as hotkey resize).
+    let tab_id = active_tab?;
+    let focused_tile_id = focus_manager.current_owner(tab_id).tile_id()?;
+
+    let tokens = PortalWindowTokens::default();
+
+    match pointer_event.kind {
+        PointerEventKind::Down => {
+            // Hit-test the focused portal's affordance strip.
+            let tile = scene.tiles.get(&focused_tile_id)?;
+            // Only scrollable (portal) tiles accept resize affordances.
+            scene.tile_scroll_config(focused_tile_id)?;
+            let current_rect = PortalRect {
+                x: tile.bounds.x,
+                y: tile.bounds.y,
+                width: tile.bounds.width,
+                height: tile.bounds.height,
+            };
+            let edge: ResizeEdge = hit_affordance(x, y, &current_rect, tokens.affordance_px)?;
+
+            let resize_bounds = ResizeBounds {
+                tokens,
+                max_width_px: (display_w - tile.bounds.x).max(tokens.min_width_px),
+                max_height_px: (display_h - tile.bounds.y).max(tokens.min_height_px),
+                display_w,
+                display_h,
+            };
+            let portal_id_hash = focused_tile_id.as_uuid().as_u128() as u64;
+            let resize_state = portal_resize_states
+                .entry(focused_tile_id)
+                .or_insert_with(|| PortalResizeState::new(portal_id_hash));
+
+            let outcome =
+                resize_state.on_pointer_down(device_id, edge, x, y, current_rect, &resize_bounds);
+            let snapshot = match outcome {
+                ResizeOutcome::GestureStarted { snapshot } => snapshot,
+                _ => return None,
+            };
+
+            // Apply initial (clamped) rect immediately — local-first.
+            if let Some(tile) = scene.tiles.get_mut(&focused_tile_id) {
+                tile.bounds.x = snapshot.rect.x;
+                tile.bounds.y = snapshot.rect.y;
+                tile.bounds.width = snapshot.rect.width;
+                tile.bounds.height = snapshot.rect.height;
+                // No version bump on gesture start; rect is unchanged (clamped initial).
+            }
+
+            tracing::debug!(
+                tile_id = ?focused_tile_id,
+                ?edge,
+                x,
+                y,
+                gesture_epoch = resize_state.current_gesture_epoch(),
+                "portal resize: pointer-down on affordance — gesture started"
+            );
+
+            Some(PortalResizePointerOutcome {
+                tile_id: focused_tile_id,
+                snapshot,
+                display_w,
+                display_h,
+            })
+        }
+
+        PointerEventKind::Move => {
+            // Look for any tile with an active gesture for this device.
+            let (tile_id, resize_state) = portal_resize_states
+                .iter_mut()
+                .find(|(_, s)| s.gesture_active())?;
+            let tile_id = *tile_id;
+
+            let tile_bounds = scene.tiles.get(&tile_id).map(|t| t.bounds)?;
+            let resize_bounds = ResizeBounds {
+                tokens,
+                max_width_px: (display_w - tile_bounds.x).max(tokens.min_width_px),
+                max_height_px: (display_h - tile_bounds.y).max(tokens.min_height_px),
+                display_w,
+                display_h,
+            };
+
+            let outcome = resize_state.on_pointer_move(device_id, x, y, &resize_bounds);
+            let snapshot = match outcome {
+                ResizeOutcome::GestureUpdate { snapshot } => snapshot,
+                _ => return None,
+            };
+
+            // Apply updated rect immediately (local-first feedback on every move).
+            if let Some(tile) = scene.tiles.get_mut(&tile_id) {
+                let size_changed = tile.bounds.width != snapshot.rect.width
+                    || tile.bounds.height != snapshot.rect.height;
+                tile.bounds.x = snapshot.rect.x;
+                tile.bounds.y = snapshot.rect.y;
+                tile.bounds.width = snapshot.rect.width;
+                tile.bounds.height = snapshot.rect.height;
+                if size_changed {
+                    scene.version += 1;
+                }
+            }
+
+            tracing::trace!(
+                tile_id = ?tile_id,
+                x,
+                y,
+                new_w = snapshot.rect.width,
+                new_h = snapshot.rect.height,
+                "portal resize: pointer-move — bounds updated locally"
+            );
+
+            Some(PortalResizePointerOutcome {
+                tile_id,
+                snapshot,
+                display_w,
+                display_h,
+            })
+        }
+
+        PointerEventKind::Up => {
+            // Look for any tile with an active gesture for this device.
+            let (tile_id, resize_state) = portal_resize_states
+                .iter_mut()
+                .find(|(_, s)| s.gesture_active())?;
+            let tile_id = *tile_id;
+
+            let tile_bounds = scene.tiles.get(&tile_id).map(|t| t.bounds)?;
+            let resize_bounds = ResizeBounds {
+                tokens,
+                max_width_px: (display_w - tile_bounds.x).max(tokens.min_width_px),
+                max_height_px: (display_h - tile_bounds.y).max(tokens.min_height_px),
+                display_w,
+                display_h,
+            };
+
+            let outcome = resize_state.on_pointer_up(device_id, x, y, &resize_bounds);
+            let snapshot = match outcome {
+                ResizeOutcome::GestureEnded { snapshot } => snapshot,
+                _ => return None,
+            };
+
+            // Apply final clamped rect (local-first).
+            if let Some(tile) = scene.tiles.get_mut(&tile_id) {
+                let size_changed = tile.bounds.width != snapshot.rect.width
+                    || tile.bounds.height != snapshot.rect.height;
+                tile.bounds.x = snapshot.rect.x;
+                tile.bounds.y = snapshot.rect.y;
+                tile.bounds.width = snapshot.rect.width;
+                tile.bounds.height = snapshot.rect.height;
+                if size_changed {
+                    scene.version += 1;
+                }
+            }
+
+            tracing::debug!(
+                tile_id = ?tile_id,
+                x,
+                y,
+                final_w = snapshot.rect.width,
+                final_h = snapshot.rect.height,
+                gesture_epoch = resize_state.current_gesture_epoch(),
+                "portal resize: pointer-up — gesture ended, final bounds applied"
+            );
+
+            Some(PortalResizePointerOutcome {
+                tile_id,
+                snapshot,
+                display_w,
+                display_h,
             })
         }
     }
@@ -2140,7 +2369,12 @@ impl WinitApp {
         // `drag_released` carries the geometry payload that must be persisted to the
         // element store after the locks are released (avoids holding locks during
         // disk I/O in the `DragEventOutcome::Released` path).
+        //
+        // `portal_resize_outcome` carries the geometry snapshot from a pointer-driven
+        // portal resize step so that `dispatch_portal_geometry_event` can be called
+        // without holding the scene lock.
         let drag_released: Option<DragReleasedData>;
+        let portal_resize_outcome: Option<PortalResizePointerOutcome>;
         if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(mut scene) = state.scene.try_lock() {
                 // ── Click-to-focus (Stage 2) ─────────────────────────────────
@@ -2265,7 +2499,7 @@ impl WinitApp {
                 // ── Drag-to-move: long-press drag state machine ──────────────
                 // Drives the per-device long-press drag recogniser.  On Down on a
                 // drag handle, starts accumulating.  On Move/Up while a drag is
-                // active, moves the tile (Moved) or finalises it (Released).
+                // active, moves the tile (Moved) or finalised it (Released).
                 //
                 // Hysteresis: the 250 ms hold threshold means a quick tap (click)
                 // never reaches Activated, so click-to-focus (wired above) is
@@ -2277,6 +2511,24 @@ impl WinitApp {
                     &mut self.state.input_processor,
                     &pointer_event,
                     &result.hit,
+                    &mut scene,
+                    display_w,
+                    display_h,
+                );
+
+                // ── Pointer-affordance portal resize (§6b.1) ─────────────────
+                // Hit-test the focused portal's resize affordance strip on every
+                // pointer event.  On PointerDown inside an affordance, starts the
+                // drag gesture (gesture_active = true → adapter publishes blocked).
+                // On PointerMove/Up while a gesture is active, updates tile bounds
+                // immediately (local-first) and carries a snapshot out of the lock
+                // so the caller can broadcast an ElementRepositionedEvent after
+                // releasing the scene lock.
+                portal_resize_outcome = apply_portal_resize_pointer_event(
+                    &pointer_event,
+                    &mut self.state.portal_resize_states,
+                    active_tab,
+                    &self.state.focus_manager,
                     &mut scene,
                     display_w,
                     display_h,
@@ -2319,9 +2571,11 @@ impl WinitApp {
                 }
             } else {
                 drag_released = None;
+                portal_resize_outcome = None;
             }
         } else {
             drag_released = None;
+            portal_resize_outcome = None;
         }
 
         // ── Post-lock: persist geometry override after drag release ───────────
@@ -2331,6 +2585,23 @@ impl WinitApp {
         // the tile moved.
         if let Some(released) = drag_released {
             self.persist_drag_release(released);
+        }
+
+        // ── Post-lock: broadcast geometry event after pointer-affordance resize ─
+        // Tile bounds were already updated inside the lock (local-first).  We
+        // broadcast an ElementRepositionedEvent here so adapter subscribers see
+        // intermediate (move) and final (up) geometry changes.  GestureStarted
+        // (down) events are also emitted so adapters can observe gesture
+        // lifecycle.  Fire-and-forget (best-effort coalescible state-stream
+        // delivery per §6b.4).
+        if let Some(outcome) = portal_resize_outcome {
+            dispatch_portal_geometry_event(
+                &self.state.element_repositioned_tx,
+                outcome.tile_id,
+                &outcome.snapshot,
+                outcome.display_w,
+                outcome.display_h,
+            );
         }
     }
 
@@ -7144,6 +7415,369 @@ redaction_style = "blank"
             "post-submit clear seq={} must exceed submission seq={}",
             clr.sequence,
             sub.sequence
+        );
+    }
+
+    // ── Pointer-affordance portal resize ─────────────────────────────────────
+
+    /// Helper: build a minimal portal scene with a scrollable tile focused in
+    /// the FocusManager, and return (scene, tab_id, tile_id, focus_manager).
+    fn portal_scene_with_focus() -> (
+        tze_hud_scene::graph::SceneGraph,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        tze_hud_input::FocusManager,
+    ) {
+        use tze_hud_input::{FocusManager, FocusRequest};
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                // Place tile well inside the display so affordances don't hit boundaries.
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+
+        // Mark the tile as scrollable so tile_scroll_config returns Some.
+        let _ = scene.register_tile_scroll_config(
+            tile_id,
+            tze_hud_scene::types::TileScrollConfig::vertical(),
+        );
+
+        // Set focus to this tile so apply_portal_resize_pointer_event resolves it.
+        let mut fm = FocusManager::new();
+        fm.request_focus(
+            FocusRequest {
+                tile_id,
+                node_id: None,
+                steal: true,
+                requesting_namespace: "portal-agent".to_string(),
+            },
+            tab_id,
+            &scene,
+        );
+
+        (scene, tab_id, tile_id, fm)
+    }
+
+    /// A pointer-down on a resize affordance starts the gesture:
+    ///   - `gesture_active()` becomes true.
+    ///   - An outcome (snapshot) is returned.
+    ///   - The snapshot's `gesture_active` flag is true.
+    ///   - Tile bounds are unchanged (clamped initial = current).
+    #[test]
+    fn pointer_down_on_affordance_starts_gesture() {
+        let (mut scene, tab_id, tile_id, fm) = portal_scene_with_focus();
+        let mut resize_states = std::collections::HashMap::new();
+        let display_w = 1920.0_f32;
+        let display_h = 1080.0_f32;
+
+        // Tile is at (100, 100, 400, 300). Affordance strip is 8px.
+        // Pointer at (496, 250) is on the right edge (100+400-8 = 492 ≤ 496 ≤ 500).
+        let event = PointerEvent {
+            x: 496.0,
+            y: 250.0,
+            kind: PointerEventKind::Down,
+            device_id: 1,
+            timestamp: None,
+        };
+
+        let outcome = apply_portal_resize_pointer_event(
+            &event,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+        );
+
+        assert!(
+            outcome.is_some(),
+            "pointer-down on affordance must return an outcome"
+        );
+        let outcome = outcome.unwrap();
+        assert_eq!(
+            outcome.tile_id, tile_id,
+            "outcome must reference the focused portal tile"
+        );
+        assert!(
+            outcome.snapshot.gesture_active,
+            "snapshot must have gesture_active=true on pointer-down"
+        );
+
+        // Resize state map must now have an entry with gesture_active=true.
+        let resize_state = resize_states
+            .get(&tile_id)
+            .expect("resize state must be created on pointer-down");
+        assert!(
+            resize_state.gesture_active(),
+            "gesture_active() must be true after pointer-down on affordance"
+        );
+    }
+
+    /// A pointer-move during an active gesture applies local bounds immediately
+    /// (local-first feedback), and the tile width grows as the pointer moves right.
+    #[test]
+    fn pointer_move_during_gesture_updates_tile_bounds_locally() {
+        let (mut scene, tab_id, tile_id, fm) = portal_scene_with_focus();
+        let mut resize_states = std::collections::HashMap::new();
+        let display_w = 1920.0_f32;
+        let display_h = 1080.0_f32;
+
+        // Start gesture on the right edge.
+        let down = PointerEvent {
+            x: 496.0,
+            y: 250.0,
+            kind: PointerEventKind::Down,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &down,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+        );
+
+        let width_before = scene.tiles[&tile_id].bounds.width;
+
+        // Move pointer 20px to the right → right edge should grow by 20px.
+        let mv = PointerEvent {
+            x: 516.0,
+            y: 250.0,
+            kind: PointerEventKind::Move,
+            device_id: 1,
+            timestamp: None,
+        };
+        let outcome = apply_portal_resize_pointer_event(
+            &mv,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+        );
+
+        assert!(
+            outcome.is_some(),
+            "pointer-move during gesture must return an outcome"
+        );
+        let new_width = scene.tiles[&tile_id].bounds.width;
+        assert!(
+            new_width > width_before,
+            "tile width must grow when pointer moves right on right edge: before={width_before}, after={new_width}"
+        );
+    }
+
+    /// A pointer-up ends the gesture and broadcasts the final geometry snapshot.
+    ///   - After pointer-up, `gesture_active()` becomes false.
+    ///   - The final snapshot's `gesture_active` is false.
+    ///   - Tile bounds reflect the final clamped position.
+    ///   - A geometry event outcome is returned (for broadcasting).
+    #[test]
+    fn pointer_up_ends_gesture_and_returns_geometry_event() {
+        let (mut scene, tab_id, tile_id, fm) = portal_scene_with_focus();
+        let mut resize_states = std::collections::HashMap::new();
+        let display_w = 1920.0_f32;
+        let display_h = 1080.0_f32;
+
+        // Start gesture on the right edge.
+        let down = PointerEvent {
+            x: 496.0,
+            y: 250.0,
+            kind: PointerEventKind::Down,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &down,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+        );
+
+        // Move to establish a drag delta.
+        let mv = PointerEvent {
+            x: 530.0,
+            y: 250.0,
+            kind: PointerEventKind::Move,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &mv,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+        );
+
+        // Release pointer.
+        let up = PointerEvent {
+            x: 530.0,
+            y: 250.0,
+            kind: PointerEventKind::Up,
+            device_id: 1,
+            timestamp: None,
+        };
+        let outcome = apply_portal_resize_pointer_event(
+            &up,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+        );
+
+        assert!(
+            outcome.is_some(),
+            "pointer-up must return a geometry event outcome"
+        );
+        let outcome = outcome.unwrap();
+        assert!(
+            !outcome.snapshot.gesture_active,
+            "snapshot gesture_active must be false after pointer-up"
+        );
+        assert_eq!(
+            outcome.tile_id, tile_id,
+            "outcome tile_id must match the resized portal"
+        );
+
+        // gesture_active() must be false after the last device lifts.
+        let resize_state = resize_states
+            .get(&tile_id)
+            .expect("resize state must exist");
+        assert!(
+            !resize_state.gesture_active(),
+            "gesture_active() must be false after pointer-up"
+        );
+
+        // Final tile width should reflect the drag delta (496→530 = +34px on right edge).
+        let final_width = scene.tiles[&tile_id].bounds.width;
+        assert!(
+            final_width > 400.0,
+            "tile width must be larger than initial 400px after rightward drag: {final_width}"
+        );
+    }
+
+    /// gesture_active() is true during the drag, making adapter publishes
+    /// rejectable — the primary reason this code path must exist in production
+    /// (hud-o0st9 acceptance criterion: gesture_active becomes reachable).
+    #[test]
+    fn gesture_active_is_true_during_pointer_drag() {
+        let (mut scene, tab_id, tile_id, fm) = portal_scene_with_focus();
+        let mut resize_states = std::collections::HashMap::new();
+        let display_w = 1920.0_f32;
+        let display_h = 1080.0_f32;
+
+        // Before any gesture, no entry exists — gesture_active is implicitly false.
+        assert!(
+            resize_states
+                .get(&tile_id)
+                .map_or(true, |s: &PortalResizeState| !s.gesture_active()),
+            "gesture must not be active before pointer-down"
+        );
+
+        let down = PointerEvent {
+            x: 496.0,
+            y: 250.0,
+            kind: PointerEventKind::Down,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &down,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+        );
+
+        assert!(
+            resize_states[&tile_id].gesture_active(),
+            "gesture_active() must be true between pointer-down and pointer-up"
+        );
+
+        let up = PointerEvent {
+            x: 510.0,
+            y: 250.0,
+            kind: PointerEventKind::Up,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &up,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+        );
+
+        assert!(
+            !resize_states[&tile_id].gesture_active(),
+            "gesture_active() must be false after pointer-up"
+        );
+    }
+
+    /// A pointer-down outside any affordance (in the content area) must NOT
+    /// start a gesture.
+    #[test]
+    fn pointer_down_in_content_area_does_not_start_gesture() {
+        let (mut scene, tab_id, tile_id, fm) = portal_scene_with_focus();
+        let mut resize_states = std::collections::HashMap::new();
+        let display_w = 1920.0_f32;
+        let display_h = 1080.0_f32;
+
+        // Tile is at (100, 100, 400, 300). Content area center is at (300, 250).
+        let event = PointerEvent {
+            x: 300.0,
+            y: 250.0,
+            kind: PointerEventKind::Down,
+            device_id: 1,
+            timestamp: None,
+        };
+
+        let outcome = apply_portal_resize_pointer_event(
+            &event,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+        );
+
+        assert!(
+            outcome.is_none(),
+            "pointer-down in content area must not start a gesture"
+        );
+        assert!(
+            resize_states
+                .get(&tile_id)
+                .map_or(true, |s| !s.gesture_active()),
+            "no gesture must be active after content-area pointer-down"
         );
     }
 }
