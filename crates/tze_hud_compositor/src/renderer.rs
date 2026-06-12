@@ -1132,6 +1132,48 @@ pub struct LocalComposerState {
 /// frame at the top of the render loop.
 pub type LocalComposerStateHandle = Arc<StdMutex<Option<Option<LocalComposerState>>>>;
 
+/// Build the display string for the composer echo overlay: the draft text with
+/// the caret glyph (`▌`, U+258C LEFT HALF BLOCK) inserted at `cursor_byte`.
+///
+/// `cursor_byte` is an **agent-provided** offset and may be:
+/// - out-of-range (> `text.len()`) — clamped to `text.len()`.
+/// - mid-multi-byte-character — snapped **down** to the nearest valid char
+///   boundary (same pattern as the overflow / input crates).
+///
+/// Either way this function never panics on agent input.
+pub(crate) fn composer_display_text(text: &str, cursor_byte: usize) -> String {
+    // Clamp to [0, text.len()] first, then walk back to a char boundary.
+    let mut cursor = cursor_byte.min(text.len());
+    while cursor > 0 && !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let mut display = String::with_capacity(text.len() + '▌'.len_utf8());
+    display.push_str(&text[..cursor]);
+    display.push('▌');
+    display.push_str(&text[cursor..]);
+    display
+}
+
+/// Apply one drain cycle: take the pending update from `handle` and write it
+/// into `current`.
+///
+/// - `handle` holds `None`          → `current` is left unchanged.
+/// - `handle` holds `Some(None)`    → `current` is cleared (deactivation).
+/// - `handle` holds `Some(Some(s))` → `current` is replaced with `s`.
+///
+/// This is the pure logic extracted from [`Compositor::drain_local_composer_state`]
+/// so that tests can drive it without a GPU-backed [`Compositor`].
+pub(crate) fn apply_composer_slot(
+    handle: &LocalComposerStateHandle,
+    current: &mut Option<LocalComposerState>,
+) {
+    if let Ok(mut guard) = handle.lock() {
+        if let Some(update) = guard.take() {
+            *current = update;
+        }
+    }
+}
+
 pub struct Compositor {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -2026,13 +2068,7 @@ impl Compositor {
     /// Taking the value (`.take()`) resets the slot to `None` so the
     /// same update is not applied twice.
     pub fn drain_local_composer_state(&mut self) {
-        if let Ok(mut guard) = self.local_composer_state.lock() {
-            if let Some(update) = guard.take() {
-                // update = Some(state) → new draft; update = None → deactivate.
-                self.local_composer = update;
-            }
-            // guard held None → no new update this frame; local_composer unchanged.
-        }
+        apply_composer_slot(&self.local_composer_state, &mut self.local_composer);
     }
 
     /// Prime the markdown parse cache for all [`TextMarkdownNode`] nodes in the scene.
@@ -7777,13 +7813,9 @@ impl Compositor {
             return None;
         }
 
-        // Insert the caret glyph (LEFT HALF BLOCK ▌) at the cursor byte offset.
-        // The byte offset is clamped to [0, text.len()] so it is always valid.
-        let cursor = cs.cursor_byte.min(cs.text.len());
-        let mut display_text = String::with_capacity(cs.text.len() + 4);
-        display_text.push_str(&cs.text[..cursor]);
-        display_text.push('▌');
-        display_text.push_str(&cs.text[cursor..]);
+        // Insert the caret glyph at the cursor byte offset.
+        // composer_display_text handles OOB and non-char-boundary offsets safely.
+        let display_text = composer_display_text(&cs.text, cs.cursor_byte);
 
         let strip_h = (tokens.font_size_px * 1.6).max(20.0);
         let strip_y = (tile.bounds.y + tile.bounds.height - strip_h).max(tile.bounds.y);
@@ -16886,29 +16918,19 @@ mod tests {
     /// - `Some(None)`       → explicit deactivation; clears `local_composer`.
     /// - `Some(Some(state))`→ new draft state; replaces `local_composer`.
     ///
-    /// This test exercises all three transitions by directly managing the handle,
-    /// mirroring exactly what `drain_local_composer_state` does, without
-    /// requiring a GPU-backed `Compositor` instance.
+    /// Drives the real `apply_composer_slot` free function (production code path)
+    /// without requiring a GPU-backed `Compositor` instance.
     #[test]
     fn local_composer_state_handle_slot_semantics() {
         use tze_hud_scene::types::SceneId;
 
         let handle: LocalComposerStateHandle = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-        // Helper: simulate one drain cycle on a raw Option<LocalComposerState>.
-        fn drain(handle: &LocalComposerStateHandle, current: &mut Option<LocalComposerState>) {
-            if let Ok(mut guard) = handle.lock() {
-                if let Some(update) = guard.take() {
-                    *current = update;
-                }
-            }
-        }
-
         let node_id = SceneId::new();
         let mut local_composer: Option<LocalComposerState> = None;
 
         // 1. Slot = None → no change.
-        drain(&handle, &mut local_composer);
+        apply_composer_slot(&handle, &mut local_composer);
         assert!(
             local_composer.is_none(),
             "None slot must leave local_composer unchanged"
@@ -16924,7 +16946,7 @@ mod tests {
                 node_id,
             }));
         }
-        drain(&handle, &mut local_composer);
+        apply_composer_slot(&handle, &mut local_composer);
         let cs = local_composer
             .as_ref()
             .expect("local_composer must be set after Some(Some)");
@@ -16940,7 +16962,7 @@ mod tests {
         }
 
         // 3. Second drain with None slot → local_composer UNCHANGED (still active).
-        drain(&handle, &mut local_composer);
+        apply_composer_slot(&handle, &mut local_composer);
         assert!(
             local_composer.is_some(),
             "None slot must not clear a previously set local_composer"
@@ -16951,7 +16973,7 @@ mod tests {
             let mut guard = handle.lock().unwrap();
             *guard = Some(None);
         }
-        drain(&handle, &mut local_composer);
+        apply_composer_slot(&handle, &mut local_composer);
         assert!(
             local_composer.is_none(),
             "Some(None) slot must clear local_composer (deactivation)"
@@ -16966,24 +16988,14 @@ mod tests {
     /// - Offset in the middle → caret splits the text at that byte.
     /// - Offset > text.len() → clamped to text.len() (no panic on OOB).
     ///
-    /// This mirrors the string-building logic inside `collect_composer_text_item`
-    /// without requiring a GPU-backed `Compositor`.
+    /// Calls the real `composer_display_text` free function (production code path)
+    /// so changes to the production logic are caught here automatically.
     #[test]
     fn composer_caret_insertion_positions() {
         const CARET: char = '▌'; // U+258C LEFT HALF BLOCK
 
-        fn build_display(text: &str, cursor_byte: usize) -> String {
-            // Mirrors the caret insertion in collect_composer_text_item.
-            let cursor = cursor_byte.min(text.len());
-            let mut s = String::with_capacity(text.len() + 4);
-            s.push_str(&text[..cursor]);
-            s.push(CARET);
-            s.push_str(&text[cursor..]);
-            s
-        }
-
         // Caret at start.
-        let display = build_display("hello", 0);
+        let display = composer_display_text("hello", 0);
         assert!(
             display.starts_with(CARET),
             "cursor=0: caret must lead the text, got {display:?}"
@@ -16992,7 +17004,7 @@ mod tests {
 
         // Caret at end.
         let text = "hello";
-        let display = build_display(text, text.len());
+        let display = composer_display_text(text, text.len());
         assert!(
             display.ends_with(CARET),
             "cursor=len: caret must trail the text, got {display:?}"
@@ -17000,7 +17012,7 @@ mod tests {
         assert_eq!(&display[..display.len() - CARET.len_utf8()], "hello");
 
         // Caret in the middle (at byte 2 of "hello" → "he" + CARET + "llo").
-        let display = build_display("hello", 2);
+        let display = composer_display_text("hello", 2);
         let caret_s = CARET.to_string();
         assert_eq!(
             display,
@@ -17009,7 +17021,7 @@ mod tests {
         );
 
         // Caret out-of-bounds → clamped to end (no panic).
-        let display = build_display("hi", 9999);
+        let display = composer_display_text("hi", 9999);
         assert!(
             display.ends_with(CARET),
             "out-of-bounds cursor must be clamped to text end, got {display:?}"
@@ -17017,11 +17029,68 @@ mod tests {
         assert_eq!(&display[..display.len() - CARET.len_utf8()], "hi");
 
         // Empty text + cursor=0 → only the caret.
-        let display = build_display("", 0);
+        let display = composer_display_text("", 0);
         assert_eq!(
             display,
             CARET.to_string(),
             "empty text + cursor=0 must produce only the caret"
+        );
+    }
+
+    /// A mid-multi-byte `cursor_byte` must NOT panic; the caret must snap to the
+    /// nearest valid char boundary below the given offset.
+    ///
+    /// Regression test for the pre-fix bug where `cs.text[..cursor]` panicked
+    /// when `cursor` was not on a char boundary (e.g. `cursor_byte=1` inside the
+    /// 2-byte é U+00E9 at the start of "éclat").
+    #[test]
+    fn composer_caret_mid_multibyte_snaps_to_boundary() {
+        const CARET: char = '▌'; // U+258C LEFT HALF BLOCK
+        let caret_s = CARET.to_string();
+
+        // "éclat": é is U+00E9, encoded as [0xC3, 0xA9] (2 bytes).
+        //   byte 0 → start of é (valid boundary)
+        //   byte 1 → inside é  (NOT a boundary — must snap to 0)
+        //   byte 2 → start of 'c' (valid boundary)
+        let text = "éclat";
+        assert_eq!(text.len(), 6, "é is 2 bytes; éclat is 6 bytes total");
+        assert!(text.is_char_boundary(0));
+        assert!(!text.is_char_boundary(1), "byte 1 is inside é");
+        assert!(text.is_char_boundary(2));
+
+        // cursor_byte=1 is mid-char → must snap down to 0 (no panic).
+        let display = composer_display_text(text, 1);
+        // Caret snapped to byte 0 → caret leads the entire text.
+        assert_eq!(
+            display,
+            format!("{caret_s}éclat"),
+            "cursor_byte=1 (mid-é) must snap to byte 0: caret leads text, got {display:?}"
+        );
+
+        // cursor_byte=2 → valid boundary between é and c.
+        let display = composer_display_text(text, 2);
+        assert_eq!(
+            display,
+            format!("é{caret_s}clat"),
+            "cursor_byte=2 (after é) must split correctly, got {display:?}"
+        );
+
+        // cursor_byte way out of range → clamped to end (no panic).
+        let display = composer_display_text(text, 99999);
+        assert_eq!(
+            display,
+            format!("éclat{caret_s}"),
+            "out-of-range cursor must trail the text, got {display:?}"
+        );
+
+        // Verify the pre-fix code path WOULD have panicked (documents the regression).
+        // We cannot call the old code, but we can assert the invariant that snapping
+        // produces a result whose prefix is a valid UTF-8 slice — the exact property
+        // the pre-fix bare `&text[..cursor]` violated.
+        let snap_result = std::panic::catch_unwind(|| composer_display_text(text, 1));
+        assert!(
+            snap_result.is_ok(),
+            "composer_display_text must not panic on mid-multibyte cursor_byte"
         );
     }
 
