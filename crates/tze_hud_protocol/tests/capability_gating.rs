@@ -7,6 +7,8 @@
 //!
 //! Test count target: ≥10 tests.
 
+use std::net::IpAddr;
+
 use tze_hud_protocol::auth::AuthResult;
 use tze_hud_protocol::auth::{
     CapabilityPolicy, RUNTIME_MAX_VERSION, RUNTIME_MIN_VERSION, authenticate_session_init,
@@ -16,6 +18,10 @@ use tze_hud_protocol::proto::session::auth_credential::Credential;
 use tze_hud_protocol::proto::session::{
     AuthCredential, LocalSocketCredential, PreSharedKeyCredential,
 };
+
+fn loopback() -> Option<IpAddr> {
+    Some("127.0.0.1".parse().unwrap())
+}
 
 // ─── Capability Policy ───────────────────────────────────────────────────────
 
@@ -133,7 +139,7 @@ fn psk_authentication_succeeds_with_correct_key() {
             key: "secret-key-abc".to_string(),
         })),
     };
-    let result = authenticate_session_init(Some(&cred), "", server_psk);
+    let result = authenticate_session_init(Some(&cred), "", server_psk, loopback());
     assert_eq!(result, AuthResult::Accepted);
 }
 
@@ -146,27 +152,45 @@ fn psk_authentication_fails_with_wrong_key() {
             key: "wrong-key".to_string(),
         })),
     };
-    let result = authenticate_session_init(Some(&cred), "", server_psk);
+    let result = authenticate_session_init(Some(&cred), "", server_psk, loopback());
     assert!(
         matches!(result, AuthResult::Failed(_)),
         "wrong PSK must fail authentication"
     );
 }
 
-/// WHEN local socket credential provided THEN authentication accepted unconditionally (v1).
+/// WHEN local socket credential provided from loopback peer THEN authentication accepted.
 #[test]
-fn local_socket_authentication_accepted_unconditionally() {
+fn local_socket_authentication_accepted_from_loopback() {
     let cred = AuthCredential {
         credential: Some(Credential::LocalSocket(LocalSocketCredential {
             socket_path: "/run/tze_hud.sock".to_string(),
             pid_hint: "1234".to_string(),
         })),
     };
-    let result = authenticate_session_init(Some(&cred), "", "server-psk");
+    let result = authenticate_session_init(Some(&cred), "", "server-psk", loopback());
     assert_eq!(
         result,
         AuthResult::Accepted,
-        "local socket credential must be accepted unconditionally on loopback"
+        "local socket credential from loopback must be accepted"
+    );
+}
+
+/// WHEN local socket credential provided from non-loopback peer THEN authentication rejected.
+/// Security fix: hud-1aswu.1 — reject LocalSocket for non-loopback peers.
+#[test]
+fn local_socket_authentication_rejected_from_lan_peer() {
+    let cred = AuthCredential {
+        credential: Some(Credential::LocalSocket(LocalSocketCredential {
+            socket_path: "/run/tze_hud.sock".to_string(),
+            pid_hint: "1234".to_string(),
+        })),
+    };
+    let lan_peer: Option<IpAddr> = Some("10.0.0.5".parse().unwrap());
+    let result = authenticate_session_init(Some(&cred), "", "server-psk", lan_peer);
+    assert!(
+        matches!(result, AuthResult::Failed(_)),
+        "local socket credential from LAN peer must be rejected with AUTH_FAILED"
     );
 }
 
@@ -175,7 +199,7 @@ fn local_socket_authentication_accepted_unconditionally() {
 fn legacy_psk_fallback_accepted() {
     let server_psk = "legacy-key";
     // No auth_credential — falls back to legacy pre_shared_key string
-    let result = authenticate_session_init(None, "legacy-key", server_psk);
+    let result = authenticate_session_init(None, "legacy-key", server_psk, loopback());
     assert_eq!(result, AuthResult::Accepted);
 }
 
@@ -183,7 +207,7 @@ fn legacy_psk_fallback_accepted() {
 #[test]
 fn legacy_psk_fallback_rejected() {
     let server_psk = "legacy-key";
-    let result = authenticate_session_init(None, "wrong-legacy-key", server_psk);
+    let result = authenticate_session_init(None, "wrong-legacy-key", server_psk, loopback());
     assert!(matches!(result, AuthResult::Failed(_)));
 }
 
@@ -191,7 +215,7 @@ fn legacy_psk_fallback_rejected() {
 #[test]
 fn empty_auth_credential_fails() {
     let cred = AuthCredential { credential: None };
-    let result = authenticate_session_init(Some(&cred), "", "server-psk");
+    let result = authenticate_session_init(Some(&cred), "", "server-psk", loopback());
     assert!(
         matches!(result, AuthResult::Failed(_)),
         "empty AuthCredential must fail authentication"
