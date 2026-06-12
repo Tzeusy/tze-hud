@@ -2249,12 +2249,29 @@ pub struct WidgetDefinition {
     pub default_geometry_policy: GeometryPolicy,
     pub default_rendering_policy: RenderingPolicy,
     pub default_contention_policy: ContentionPolicy,
+    /// Maximum number of active publications per publisher namespace.
+    ///
+    /// Mirrors `ZoneDefinition::max_publishers`. Enforced by `publish_to_widget`
+    /// under `Stack` contention (the only policy where multiple records from the
+    /// same namespace can coexist). Defaults to `u32::MAX` (unbounded) for
+    /// backward compatibility when deserializing older widget definitions.
+    #[serde(default = "WidgetDefinition::default_max_publishers")]
+    pub max_publishers: u32,
     /// When true, publishes to this widget are fire-and-forget (no WidgetPublishResult).
     #[serde(default)]
     pub ephemeral: bool,
     /// Optional runtime-managed hover behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hover_behavior: Option<WidgetHoverBehavior>,
+}
+
+impl WidgetDefinition {
+    /// Default value for `max_publishers` when deserializing older definitions
+    /// that predate the field.  `u32::MAX` means "unbounded" and preserves the
+    /// behavior of every existing widget definition that did not set the field.
+    pub fn default_max_publishers() -> u32 {
+        u32::MAX
+    }
 }
 
 /// A widget instance — a widget type bound to a specific tab.
@@ -3374,6 +3391,7 @@ mod tests {
             default_geometry_policy: default_policy,
             default_rendering_policy: RenderingPolicy::default(),
             default_contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: WidgetDefinition::default_max_publishers(),
             ephemeral: false,
             hover_behavior: None,
         });
