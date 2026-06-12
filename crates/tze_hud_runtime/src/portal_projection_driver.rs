@@ -1052,10 +1052,10 @@ mod tests {
     ///      height — this is what the window management layer now does after a
     ///      hotkey resize.
     ///   3. Drain again with overflowing content and confirm that:
-    ///      (a) the drain used the geometry-batch viewport (scroll advanced,
-    ///          `tile_follow_tail_at_tail` is true), and
-    ///      (b) the authority's pending batch was consumed so it is `None` after
-    ///          the drain (no stale re-delivery).
+    ///      (a) the drain used the geometry-batch viewport — scroll advanced and
+    ///      `tile_follow_tail_at_tail` is true, and
+    ///      (b) the authority's pending batch was consumed so it is `None`
+    ///      after the drain (no stale re-delivery).
     ///
     /// Removing the `push_geometry_snapshot_for_tile` call (or the wiring in
     /// windowed.rs) causes the drain to fall back to the adapter-configured height
