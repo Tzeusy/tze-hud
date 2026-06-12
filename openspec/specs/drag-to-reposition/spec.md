@@ -1,7 +1,9 @@
 # drag-to-reposition Specification
 
 ## Purpose
-TBD - synced from persistent-movable-elements change [hud-mu38].
+Defines the v1-compatible drag-to-reposition interaction contract for movable chrome elements: the long-press activation state machine, permitted visual feedback (z-order boost, highlight border, immediate opacity), the conflict-free reset gesture (short tap → auto-dismiss affordance), and the invariant that drag feedback must not depend on deferred animation systems.
+
+Implementation: crates/tze_hud_input/src/drag.rs; crates/tze_hud_scene/src/element_store.rs
 
 ## Requirements
 

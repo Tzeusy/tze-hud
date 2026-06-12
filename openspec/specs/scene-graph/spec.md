@@ -3,6 +3,8 @@
 ## Purpose
 The scene graph is the authoritative data model for tze_hud. It defines the scene as a pure data structure (no GPU dependency): the identity model (SceneId, ResourceId), the hierarchy (Scene → Tab → Tile → Node), all mutation operations and their validation pipeline, atomic batch semantics, hit-testing, the zone registry, snapshot serialization, and performance budgets. Every other subsystem (compositor, session protocol, lease governance, input) depends on this contract. Source: RFC 0001 (Scene Contract).
 
+Implementation: crates/tze_hud_scene/
+
 ## Requirements
 
 ### Requirement: SceneId Identity

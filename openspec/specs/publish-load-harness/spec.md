@@ -2,6 +2,9 @@
 
 ## Purpose
 Defines the requirements for the Rust-based resident publish-load harness, used for benchmarking gRPC widget publishing performance and ensuring protocol contract alignment.
+
+Implementation: examples/widget_publish_load_harness/
+
 ## Requirements
 ### Requirement: Rust Resident Publish Harness
 The repository SHALL provide a Rust benchmark executable for resident-agent publish-load measurement. The executable SHALL connect to a configured target over one bidirectional gRPC session stream, perform the same session bootstrap, authentication, and capability-grant flow used by resident agents, and exercise durable widget publishing using `WidgetPublish` on that stream. The initial v1 scope SHALL support only gRPC widget publishing against the same primary target class used by `/user-test-performance`; MCP, zones, tiles, and multi-target orchestration SHALL remain out of scope.
