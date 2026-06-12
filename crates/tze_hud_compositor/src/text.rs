@@ -4041,8 +4041,8 @@ mod tests {
         // Simulate the reslice decision that prepare_text_items now makes.
         // The short-circuit must fire: no offset shift must occur.
         // Note: in production code `truncated_str` is `&str`; here we hold
-        // `Arc<str>` and deref with `&**` to get a `&str` for comparison.
-        let resliced: Vec<StyledRunItem> = if &*truncated_str == &*text {
+        // `Arc<str>` and deref to compare the str values directly.
+        let resliced: Vec<StyledRunItem> = if *truncated_str == *text {
             runs.to_vec()
         } else if truncated_str.starts_with(crate::overflow::ELLIPSIS) {
             reslice_styled_runs_tail_anchored(&text, &truncated_str, &runs)
@@ -4086,8 +4086,8 @@ mod tests {
 
         // Simulate the color-runs reslice decision.
         // Note: in production code `truncated_str` is `&str`; here we hold
-        // `Arc<str>` and deref with `&**` to get a `&str` for comparison.
-        let resliced: Vec<ColorRunItem> = if &*truncated_str == &*text {
+        // `Arc<str>` and deref to compare the str values directly.
+        let resliced: Vec<ColorRunItem> = if *truncated_str == *text {
             runs.to_vec()
         } else if truncated_str.starts_with(crate::overflow::ELLIPSIS) {
             reslice_color_runs_tail_anchored(&text, &truncated_str, &runs)
