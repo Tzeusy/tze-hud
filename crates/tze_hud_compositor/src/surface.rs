@@ -346,36 +346,72 @@ impl CompositorSurface for WindowSurface {
                 })
             }
             Err(e) => {
-                // Recoverable: Outdated/Lost/Timeout happen on resize/minimize.
-                // Log a warning and retry once.
-                tracing::warn!(
-                    error = %e,
-                    "WindowSurface::acquire_frame: first acquire failed; retrying"
-                );
-                // Re-attempt once. If this also fails, return None so the
-                // caller can skip this frame gracefully. The EncodingGuard
-                // drops here too (via RAII), clearing encoding_in_progress.
-                match self.surface.get_current_texture() {
-                    Ok(t) => {
-                        let v = t
-                            .texture
-                            .create_view(&wgpu::TextureViewDescriptor::default());
-                        *pending = Some(t);
-                        Some(CompositorFrame {
-                            view: v,
-                            _guard: Box::new(guard),
-                        })
+                // Differentiate by error variant to avoid wasted GPU calls and
+                // log noise during normal resize/minimize cycles:
+                //
+                //   Timeout    — transient; retry once (GPU may have been busy).
+                //   Outdated   — surface changed (resize/DPI); reconfiguration
+                //                is needed before the next acquire succeeds, so
+                //                an immediate retry would fail again. Skip frame.
+                //   Lost       — swapchain lost; same logic as Outdated.
+                //   OutOfMemory — GPU memory exhausted; log error, skip frame.
+                //   Other      — generic/unexpected; skip frame.
+                //
+                // In all skip cases the EncodingGuard RAII drop clears
+                // encoding_in_progress automatically.
+                match e {
+                    wgpu::SurfaceError::Timeout => {
+                        tracing::warn!(
+                            error = %e,
+                            "WindowSurface::acquire_frame: timeout acquiring texture; retrying once"
+                        );
+                        // Retry once for transient timeout.
+                        match self.surface.get_current_texture() {
+                            Ok(t) => {
+                                let v = t
+                                    .texture
+                                    .create_view(&wgpu::TextureViewDescriptor::default());
+                                *pending = Some(t);
+                                Some(CompositorFrame {
+                                    view: v,
+                                    _guard: Box::new(guard),
+                                })
+                            }
+                            Err(e2) => {
+                                tracing::error!(
+                                    first_error = %e,
+                                    second_error = %e2,
+                                    "WindowSurface::acquire_frame: retry after timeout also failed; \
+                                     skipping frame (runtime will retry next cycle)"
+                                );
+                                // guard drops here, clearing encoding_in_progress
+                                None
+                            }
+                        }
                     }
-                    Err(e2) => {
-                        // Double failure — driver reset, device loss, or surface
-                        // destroyed. Return None so the compositor skips this
-                        // frame and retries next cycle. The EncodingGuard RAII
-                        // drop clears encoding_in_progress automatically.
+                    wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
+                        // Reconfiguration required before next acquire — do not
+                        // retry immediately as it will fail again.
+                        tracing::warn!(
+                            error = %e,
+                            "WindowSurface::acquire_frame: surface outdated or lost; \
+                             skipping frame to allow reconfiguration"
+                        );
+                        // guard drops here, clearing encoding_in_progress
+                        None
+                    }
+                    wgpu::SurfaceError::OutOfMemory => {
                         tracing::error!(
-                            first_error = %e,
-                            second_error = %e2,
-                            "WindowSurface::acquire_frame: retry also failed; \
-                             skipping frame (runtime will retry next cycle)"
+                            error = %e,
+                            "WindowSurface::acquire_frame: out of GPU memory; skipping frame"
+                        );
+                        // guard drops here, clearing encoding_in_progress
+                        None
+                    }
+                    wgpu::SurfaceError::Other => {
+                        tracing::error!(
+                            error = %e,
+                            "WindowSurface::acquire_frame: unexpected surface error; skipping frame"
                         );
                         // guard drops here, clearing encoding_in_progress
                         None
