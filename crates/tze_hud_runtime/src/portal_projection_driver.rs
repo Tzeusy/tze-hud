@@ -41,8 +41,10 @@
 //! - **hud-ttq97** (submitted_at_us telemetry bucket): `submitted_at_us` from
 //!   `PortalTranscriptUpdate` is available here; a structured bucket should be
 //!   added once hud-ttq97 lands.
-//! - **hud-pkg2g** (head-trim notify_head_content_removed): when the transcript
-//!   head is trimmed, `notify_head_content_removed` should be called here.
+//! - **hud-pkg2g** (head-trim notify_head_content_removed): wired — the drain
+//!   loop detects head-trim via `visible_transcript_bytes` / content-height
+//!   decrease and calls `notify_head_content_removed` on the `InputProcessor`
+//!   so scrolled-back viewports stay stable (spec §3.3).
 
 use std::collections::HashMap;
 
@@ -82,6 +84,21 @@ struct DriveEntry {
     adapter: ResidentGrpcPortalAdapter,
     /// Scene tile ID assigned to this portal, or `None` if not yet created.
     tile_scene_id: Option<SceneId>,
+    /// Estimated total content height (px) from the last `RenderPortal` drain.
+    ///
+    /// Used to detect head-trim: when `new_content_height_px` on the next
+    /// drain is less than this value while `visible_transcript_bytes` also
+    /// decreased, the coalescer (64 KiB cap) or visible-window (16 KiB cap)
+    /// trimmed head content.  `notify_head_content_removed` is called with the
+    /// difference so a scrolled-back viewport stays stable (spec §3.3 / hud-pkg2g).
+    prev_content_height_px: f32,
+    /// Visible-transcript byte count from the last `RenderPortal` drain.
+    ///
+    /// A decrease in this value on the next drain is the observable signal that
+    /// a head-trim occurred (either the 64 KiB coalescer cap in
+    /// `PortalCadenceCoalescer::record_append` or the 16 KiB visible-window cap
+    /// in `visible_transcript_window`).
+    prev_visible_bytes: usize,
 }
 
 /// In-process state for the portal projection drive loop.
@@ -119,6 +136,8 @@ impl InProcessPortalDriveState {
             DriveEntry {
                 adapter,
                 tile_scene_id: None,
+                prev_content_height_px: 0.0,
+                prev_visible_bytes: 0,
             },
         );
     }
@@ -427,9 +446,42 @@ impl InProcessPortalDriver {
                     // TODO(hud-ttq97): emit structured latency telemetry for
                     //   update.submitted_at_us → now_us (arrival→present latency).
 
-                    // TODO(hud-pkg2g): detect head-trim and call
-                    //   notify_head_content_removed when visible_transcript_bytes
-                    //   shrinks below the previous value.
+                    // hud-pkg2g: detect head-trim and call notify_head_content_removed.
+                    //
+                    // A head-trim has occurred when visible_transcript_bytes decreased
+                    // AND new_content_height_px is less than the previous value.
+                    // Two trim sites surface this signal:
+                    //   1. PortalCadenceCoalescer::record_append (64 KiB cap): drops
+                    //      oldest bytes from the payload before storing the snapshot.
+                    //   2. visible_transcript_window (16 KiB cap): slices the retained
+                    //      transcript to the newest max_visible_transcript_bytes.
+                    // In both cases the observable effect is a reduction in
+                    // visible_transcript_bytes + a reduction in new_content_height_px.
+                    //
+                    // We adjust the scroll offset BEFORE calling notify_tile_content_appended
+                    // so that the content-height fields inside ScrollTileState are up to
+                    // date when notify_content_appended recomputes the follow-tail bound.
+                    let prev_height = entry.prev_content_height_px;
+                    let prev_bytes = entry.prev_visible_bytes;
+                    if update.visible_transcript_bytes < prev_bytes
+                        && new_content_height_px < prev_height
+                    {
+                        let removed_px = prev_height - new_content_height_px;
+                        let trim_changed =
+                            input_processor.notify_head_content_removed(tile_scene_id, removed_px);
+                        tracing::debug!(
+                            proj_id = %proj_id,
+                            tile_id = ?tile_scene_id,
+                            removed_px,
+                            prev_bytes,
+                            new_bytes = update.visible_transcript_bytes,
+                            scroll_adjusted = trim_changed,
+                            "portal drain: head-trim detected — notify_head_content_removed"
+                        );
+                    }
+                    // Update per-portal tracking for the next drain cycle.
+                    entry.prev_content_height_px = new_content_height_px;
+                    entry.prev_visible_bytes = update.visible_transcript_bytes;
 
                     // spec §3.2 / §3.3: call notify_tile_content_appended.
                     // - AtTail  → InputProcessor advances follow-tail (§3.2).

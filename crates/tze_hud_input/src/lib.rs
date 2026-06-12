@@ -524,6 +524,41 @@ impl InputProcessor {
         changed
     }
 
+    /// Notify a tile that leading (head) content has been removed.
+    ///
+    /// Called when the transcript head is trimmed — either by the 64 KiB
+    /// `PortalCadenceCoalescer` payload cap or the 16 KiB `visible_transcript_window`
+    /// cap — so that a scrolled-back viewport stays visually stable rather than
+    /// jumping into the gap left by the removed content (spec §3.3 / hud-pkg2g).
+    ///
+    /// Delegates to [`ScrollState::notify_head_content_removed`].
+    ///
+    /// # Parameters
+    ///
+    /// - `tile_id` — the tile whose scroll state should be adjusted.
+    /// - `removed_height_px` — height (physical pixels) of the content dropped
+    ///   from the head.  Non-positive or non-finite values are ignored.
+    ///
+    /// # Returns
+    ///
+    /// `true` if `offset_y` changed (tile was `ScrolledBack` and offset moved),
+    /// `false` otherwise (tile was `AtTail` or no registered scroll state).
+    ///
+    /// Note: this method does NOT propagate the updated offset to the scene graph
+    /// because head-trim notifications are always paired with a subsequent
+    /// `notify_tile_content_appended` call that will sync the offset at that point.
+    /// The caller is responsible for order: call this BEFORE
+    /// `notify_tile_content_appended` so that `ScrollTileState` content-height
+    /// fields are correct when the follow-tail bound is recomputed.
+    pub fn notify_head_content_removed(
+        &mut self,
+        tile_id: SceneId,
+        removed_height_px: f32,
+    ) -> bool {
+        self.scroll_state
+            .notify_head_content_removed(tile_id, removed_height_px)
+    }
+
     /// Commit queued adapter-driven scroll requests and apply local offsets.
     pub fn commit_scroll_updates(
         &mut self,
