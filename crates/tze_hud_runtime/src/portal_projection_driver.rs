@@ -232,8 +232,9 @@ impl InProcessPortalDriver {
         input_processor: &mut InputProcessor,
         tab_id: Option<SceneId>,
     ) {
+        let now_us = now_wall_us();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.drain_inner(scene, input_processor, tab_id)
+            self.drain_inner(scene, input_processor, tab_id, now_us)
         }));
         if let Err(payload) = result {
             let msg = if let Some(s) = payload.downcast_ref::<&str>() {
@@ -252,13 +253,19 @@ impl InProcessPortalDriver {
         }
     }
 
+    /// Inner drain implementation.
+    ///
+    /// `now_us` is the caller-supplied wall-clock timestamp in microseconds
+    /// since UNIX epoch.  Production callers pass `now_wall_us()`; tests pass a
+    /// deterministic value so time-dependent behaviour is reproducible without
+    /// wall-clock coupling.
     fn drain_inner(
         &mut self,
         scene: &mut SceneGraph,
         input_processor: &mut InputProcessor,
         tab_id: Option<SceneId>,
+        now_us: u64,
     ) {
-        let now_us = now_wall_us();
         let policy = ProjectedPortalPolicy::permit_all();
 
         loop {
@@ -633,11 +640,22 @@ mod tests {
         assert!(resp.accepted, "publish_output must be accepted");
     }
 
-    /// `append_geometry` drives `notify_tile_content_appended` in the production
-    /// path: after a RenderPortal drain the driver calls notify and the tile's
-    /// scroll config is present.
+    /// Regression guard for the `notify_tile_content_appended` wiring at the
+    /// RenderPortal drain site (portal_projection_driver.rs, spec §3.2).
+    ///
+    /// After a RenderPortal drain with content that overflows the viewport the
+    /// `InputProcessor` must have advanced follow-tail and recorded the tile as
+    /// at-tail in the scene graph.  This assertion only passes when the driver
+    /// actually calls `notify_tile_content_appended`; removing that call causes
+    /// `tile_follow_tail_at_tail` to remain `false` and the test to fail.
+    ///
+    /// Uses a deterministic `now_us` via `drain_inner` so the rate-window
+    /// comparison is clock-independent.
     #[test]
-    fn drain_append_geometry_calls_notify_tile_content_appended() {
+    fn drain_render_portal_notify_tile_content_appended_wiring() {
+        use tze_hud_projection::AdapterGeometrySnapshot;
+        use tze_hud_projection::AdapterPortalRect;
+
         let mut driver = InProcessPortalDriver {
             authority: ProjectionAuthority::new(ProjectionBounds {
                 max_portal_updates_per_second: 100,
@@ -651,13 +669,44 @@ mod tests {
         let token = attach_and_get_token(&mut driver, "proj-a");
         driver.attach_projection("proj-a", Vec::new());
 
+        // Derive line height from the adapter's font token so the geometry is
+        // consistent with whatever font size the design tokens resolve to.
+        let font_size_px = driver
+            .drive
+            .entries
+            .get("proj-a")
+            .unwrap()
+            .adapter
+            .visual_tokens()
+            .transcript_font_size_px;
+        let line_h = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
+        // One-line viewport: content with 10 units overflows and forces scroll.
+        let viewport_h = (1.0 * line_h).ceil();
+
+        // Push a geometry snapshot so the RenderPortal path uses the small
+        // viewport — otherwise it falls back to the adapter configured height
+        // which may be large enough that content never overflows.
+        driver.authority_mut().push_geometry_snapshot(
+            "proj-a",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: viewport_h as i32,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let mut processor = InputProcessor::new();
 
-        // First drain: CreatePortalTile.
-        publish(&mut driver, "proj-a", &token, "hello world", 200);
-        driver.drain_inner(&mut scene, &mut processor, Some(tab_id));
+        // Drain 1 (CreatePortalTile): publish at t=100 µs, drain at t=200 µs.
+        publish(&mut driver, "proj-a", &token, "line-0", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
 
         let tile_id = driver
             .drive
@@ -667,20 +716,47 @@ mod tests {
             .tile_scene_id
             .expect("tile must be created after first drain");
 
-        // The tile must be registered as scrollable.
+        // Confirm scroll config was registered.
         assert!(
             scene.tile_scroll_config(tile_id).is_some(),
             "tile must have scroll config after CreatePortalTile drain"
         );
 
-        // Second publish at a timestamp past the rate window.
-        let ts2 = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 500;
-        publish(&mut driver, "proj-a", &token, "second line", ts2);
+        // Resize the tile to the small viewport so overflow is detectable.
+        let _ = scene.update_tile_bounds(
+            tile_id,
+            Rect::new(0.0, 0.0, 600.0, viewport_h),
+            PORTAL_DRIVER_NAMESPACE,
+        );
 
-        // Second drain: RenderPortal → notify_tile_content_appended called.
-        // We verify via the tile persisting and the driver not panicking.
-        driver.drain_inner(&mut scene, &mut processor, Some(tab_id));
+        // Drain 2 (RenderPortal): publish 9 more lines at timestamps inside the
+        // rate window, then drain at a time well past PORTAL_UPDATE_RATE_WINDOW_WALL_US
+        // so the coalescer releases the update.
+        let base_ts = PORTAL_UPDATE_RATE_WINDOW_WALL_US;
+        for i in 1..=9_u64 {
+            publish(
+                &mut driver,
+                "proj-a",
+                &token,
+                &format!("line-{i}"),
+                base_ts + i * 5,
+            );
+        }
+        // now_us is past the rate window — the authority will release the update.
+        let drain2_now_us = base_ts + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain2_now_us);
 
+        // Primary regression assertion: notify_tile_content_appended must have been
+        // called — it is the only code path that sets tile_follow_tail_at_tail.
+        // If the call at the RenderPortal drain site is removed, this assertion fails.
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "spec §3.2 regression: tile must be at-tail after RenderPortal drain \
+             with overflowing content — removing notify_tile_content_appended wiring \
+             at the drain site causes this assertion to fail"
+        );
+
+        // Secondary: the tile must still exist (no panic / state reset).
         assert!(
             driver
                 .drive
@@ -694,7 +770,10 @@ mod tests {
     }
 
     /// Follow-tail (spec §3.2): after a RenderPortal drain on an at-tail tile,
-    /// `notify_tile_content_appended` returns `true` (scroll advanced).
+    /// the scroll offset advances and `tile_follow_tail_at_tail` is still true.
+    ///
+    /// Uses deterministic time injection via `drain_inner` (injectable clock seam
+    /// introduced by hud-28j7v).
     #[test]
     fn follow_tail_advances_on_append_at_tail_tile() {
         use tze_hud_projection::AdapterGeometrySnapshot;
@@ -744,9 +823,9 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let mut processor = InputProcessor::new();
 
-        // First drain: CreatePortalTile.
+        // Drain 1 (CreatePortalTile): deterministic t=200 µs.
         publish(&mut driver, "proj-b", &token, "unit-0", 100);
-        driver.drain_inner(&mut scene, &mut processor, Some(tab_id));
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
 
         let tile_id = driver
             .drive
@@ -763,33 +842,15 @@ mod tests {
             PORTAL_DRIVER_NAMESPACE,
         );
 
-        // Update the scroll config to match the small viewport.
-        scene
-            .register_tile_scroll_config(
-                tile_id,
-                TileScrollConfig {
-                    scrollable_x: false,
-                    scrollable_y: true,
-                    content_width: None,
-                    content_height: None,
-                },
-            )
-            .unwrap();
-
-        // Prime follow-tail by calling notify once for 1 unit at viewport height.
-        processor.notify_tile_content_appended(
-            tile_id,
-            1.0 * line_h,
-            viewport_h,
-            line_h,
-            &mut scene,
-        );
+        // The tile's scroll config was registered during CreatePortalTile drain.
+        // Confirm it's present before draining the RenderPortal step.
         assert!(
-            scene.tile_follow_tail_at_tail(tile_id),
-            "tile must start at-tail"
+            scene.tile_scroll_config(tile_id).is_some(),
+            "tile must have scroll config before RenderPortal drain"
         );
 
-        // Publish 9 more units past the rate window — content now overflows viewport.
+        // Publish 9 more units with timestamps inside the first rate window so the
+        // coalescer accumulates them, then drain at a time past the window.
         let base_ts = PORTAL_UPDATE_RATE_WINDOW_WALL_US;
         for i in 1..=9_u64 {
             publish(
@@ -801,19 +862,27 @@ mod tests {
             );
         }
 
-        // Drain at a timestamp that satisfies the rate window.
-        // drain_inner uses now_wall_us() so we must supply real time.
-        // However, the authority's take_due_portal_update compares against
-        // server_timestamp_wall_us. We call drain_inner with the live clock,
-        // so we need to use real wall time here.
-        //
-        // Since this test runs synchronously, the wall clock has already
-        // advanced well past PORTAL_UPDATE_RATE_WINDOW_WALL_US (1s). We call
-        // drain_inner and verify the tile entry still exists (RenderPortal path
-        // ran without panic). Full advancement assertion requires a seam to
-        // inject the timestamp; leave that to the bin tests which already cover it.
-        driver.drain_inner(&mut scene, &mut processor, Some(tab_id));
+        // Drain 2 (RenderPortal): now_us is past two rate windows so the update
+        // is guaranteed due.  Deterministic timestamp — no wall-clock dependency.
+        let drain2_now_us = base_ts + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain2_now_us);
 
+        // The driver must have called notify_tile_content_appended: with 10 lines
+        // in a 1-line viewport the content overflows and at-tail stays true.
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "spec §3.2: tile must be at-tail after RenderPortal drain with overflow"
+        );
+
+        // The scroll offset must be positive: follow-tail advanced to show the tail.
+        let (_, scroll_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            scroll_y > 0.0,
+            "spec §3.2: scroll offset must advance for at-tail tile after overflow \
+             (got scroll_y={scroll_y})"
+        );
+
+        // Drive entry must survive (no panic / state reset).
         assert!(
             driver
                 .drive
