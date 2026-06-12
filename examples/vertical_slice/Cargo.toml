@@ -3,6 +3,7 @@ name = "vertical_slice"
 description = "Reference vertical slice example for tze_hud"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "vertical_slice"

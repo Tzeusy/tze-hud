@@ -3,6 +3,7 @@ name = "dashboard_tile_agent"
 description = "Exemplar dashboard tile agent — raw tile API reference for tze_hud"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "dashboard_tile_agent"

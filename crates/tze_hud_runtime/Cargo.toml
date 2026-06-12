@@ -3,6 +3,7 @@ name = "tze_hud_runtime"
 description = "Runtime kernel for tze_hud — frame pipeline, admission, budgets"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [features]
 headless = ["tze_hud_compositor/headless"]

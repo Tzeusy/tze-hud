@@ -3,6 +3,7 @@ name = "tze_hud_compositor"
 description = "wgpu compositor for tze_hud — renders scene graph to screen or offscreen"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [features]
 headless = []

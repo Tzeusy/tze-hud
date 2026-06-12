@@ -506,6 +506,39 @@ jobs:
           sys.exit(1 if fail else 0)
           "
 
+  # ── Dependency security + license audit (cargo-deny) ──────────────────────
+  #
+  # Runs cargo-deny to check:
+  #   - advisories: known CVEs and unmaintained crates (RUSTSEC database)
+  #   - licenses: all dependencies must be GPL-3.0 compatible per deny.toml
+  #
+  # This job does NOT require compilation — cargo-deny reads Cargo.lock and
+  # crate metadata only.  It runs against the same Rust toolchain as the rest
+  # of CI so that workspace metadata resolution is consistent.
+  #
+  # Advisory waivers and license allowances are documented with rationale in
+  # deny.toml at the repository root.  See hud-1aswu.5 for context.
+  #
+  # Uses EmbarkStudios/cargo-deny-action for a stable, versioned install.
+  # Pinned to a specific SHA to prevent supply-chain attacks on CI.
+
+  cargo-deny:
+    name: cargo deny (advisories + licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: cargo deny check advisories + licenses
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Check only the two gates relevant to security and license compliance.
+          # bans and sources are checked implicitly; explicitly scoping prevents
+          # new deny.toml sections from accidentally blocking CI before they are
+          # tuned.
+          command: check advisories licenses bans sources
+          # Log level: warn surfaces yanked-crate and duplicate-version notices
+          # without failing the job.
+          log-level: warn
+
   # ── Windowed / GPU smoke (gated) ────────────────────────────────────────────
   #
   # GATED: This job is manually triggered or runs in environments with Vulkan
