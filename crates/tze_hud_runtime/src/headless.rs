@@ -470,8 +470,8 @@ impl HeadlessRuntime {
             .compositor
             .render_frame_headless(&mut scene_guard, &self.surface);
         // Total frame time from Compositor covers encode + submit
-        let stage6_us = compositor_telemetry.render_encode_us;
-        let stage7_us = compositor_telemetry.gpu_submit_us;
+        let stage6_us = compositor_telemetry.stage6_render_encode_us;
+        let stage7_us = compositor_telemetry.stage7_gpu_submit_us;
 
         // Total frame time: stage 1 start → stage 7 end
         let frame_time_us = frame_start.elapsed().as_micros() as u64;
@@ -521,7 +521,6 @@ impl HeadlessRuntime {
         // Non-zero only when scene.version changed this frame (new/changed content
         // required a parse pass); zero on steady-state frames (cache hit, no work).
         telemetry.markdown_prime_us = markdown_prime_us;
-        telemetry.sync_legacy_aliases();
 
         // Stage 8: Telemetry Emit — non-blocking record into collector.
         // Timer wraps the actual emit so the measurement reflects its cost.

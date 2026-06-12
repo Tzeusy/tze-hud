@@ -4610,7 +4610,7 @@ impl Compositor {
     /// # Returns
     ///
     /// `(encoder, encode_us)` — the ready-to-submit encoder and the wall-clock
-    /// microseconds spent encoding (for `FrameTelemetry::render_encode_us`).
+    /// microseconds spent encoding (for `FrameTelemetry::stage6_render_encode_us`).
     /// `bg_vertex_count`: number of vertices at the start of `vertices` that
     /// make up the initial Background slice.  This includes any overlay-mode
     /// clear quad prepended before Background zone vertices, so in overlay
@@ -5068,7 +5068,7 @@ impl Compositor {
             self.overlay_mode,
             bg_vertex_count,
         );
-        telemetry.render_encode_us = encode_us;
+        telemetry.stage6_render_encode_us = encode_us;
 
         // ── Image pass: draw textured quads on top of color geometry ─────────
         self.encode_image_pass(&mut encoder, &frame.view, &textured_cmds, sw, sh);
@@ -5101,7 +5101,7 @@ impl Compositor {
         drop(frame);
 
         self.device.poll(wgpu::Maintain::Wait);
-        telemetry.gpu_submit_us = submit_start.elapsed().as_micros() as u64;
+        telemetry.stage7_gpu_submit_us = submit_start.elapsed().as_micros() as u64;
 
         // Evict terminal video surface entries periodically to prevent unbounded growth.
         self.maybe_prune_terminal_video_surfaces();
@@ -5330,7 +5330,7 @@ impl Compositor {
             false,
             bg_vertex_count,
         );
-        telemetry.render_encode_us = encode_us;
+        telemetry.stage6_render_encode_us = encode_us;
 
         // ── Image pass: draw textured quads on top of color geometry ─────────
         self.encode_image_pass(&mut encoder, &frame.view, &textured_cmds, sw, sh);
@@ -5361,7 +5361,7 @@ impl Compositor {
         surface.present(); // no-op for headless
         drop(frame);
         self.device.poll(wgpu::Maintain::Wait);
-        telemetry.gpu_submit_us = submit_start.elapsed().as_micros() as u64;
+        telemetry.stage7_gpu_submit_us = submit_start.elapsed().as_micros() as u64;
 
         telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
 
@@ -5756,14 +5756,14 @@ impl Compositor {
             }
         }
 
-        telemetry.render_encode_us = encode_start.elapsed().as_micros() as u64;
+        telemetry.stage6_render_encode_us = encode_start.elapsed().as_micros() as u64;
 
         surface.copy_to_buffer(&mut encoder);
 
         let submit_start = std::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
         self.device.poll(wgpu::Maintain::Wait);
-        telemetry.gpu_submit_us = submit_start.elapsed().as_micros() as u64;
+        telemetry.stage7_gpu_submit_us = submit_start.elapsed().as_micros() as u64;
 
         // Evict terminal video surface entries periodically to prevent unbounded growth.
         self.maybe_prune_terminal_video_surfaces();
@@ -9176,7 +9176,7 @@ mod tests {
     ///
     /// Renders 60 frames with `init_text_renderer` active, a `TextMarkdownNode`
     /// tile, and a zone with `StreamText` content.  Asserts that the p99 of
-    /// `render_encode_us` (the Stage 6 wall-clock encode time returned by
+    /// `stage6_render_encode_us` (the Stage 6 wall-clock encode time returned by
     /// `render_frame_headless`) stays below a calibrated budget derived from
     /// `STAGE6_BUDGET_US` (4 ms = 4 000 µs).
     ///
@@ -9295,8 +9295,8 @@ mod tests {
         let mut timings: Vec<u64> = Vec::with_capacity(FRAME_COUNT);
         for _ in 0..FRAME_COUNT {
             let telem = compositor.render_frame_headless(&mut scene, &surface);
-            // render_encode_us is the Stage 6 wall-clock encode duration.
-            timings.push(telem.render_encode_us);
+            // stage6_render_encode_us is the Stage 6 wall-clock encode duration.
+            timings.push(telem.stage6_render_encode_us);
         }
 
         // ── p99 assertion ────────────────────────────────────────────────────────

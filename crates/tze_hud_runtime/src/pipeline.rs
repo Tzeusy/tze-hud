@@ -475,9 +475,6 @@ impl FramePipeline {
         // Update telemetry overflow count (may have incremented in Stage 8)
         telemetry.telemetry_overflow_count = self.telemetry_overflow_count.load(Ordering::Relaxed);
 
-        // Sync legacy alias fields
-        telemetry.sync_legacy_aliases();
-
         telemetry
     }
 
@@ -580,9 +577,6 @@ impl FramePipeline {
 
         // Update overflow count
         telemetry.telemetry_overflow_count = self.telemetry_overflow_count.load(Ordering::Relaxed);
-
-        // Sync legacy alias fields for backward compatibility
-        telemetry.sync_legacy_aliases();
 
         telemetry
     }
@@ -1093,32 +1087,6 @@ mod tests {
         let _: u64 = telemetry.stage8_telemetry_emit_us;
         let _: u64 = telemetry.frame_time_us;
         let _: u64 = telemetry.telemetry_overflow_count;
-    }
-
-    /// Verify that legacy alias fields are synced from per-stage fields.
-    #[test]
-    fn test_legacy_aliases_synced() {
-        let mut pipeline = FramePipeline::new();
-        let empty_scene = SceneGraph::new(800.0, 600.0);
-
-        let telemetry = pipeline.run_frame(
-            || {},
-            |_| {},
-            || 0,
-            || (0, 0, HitTestSnapshot::from_scene(&empty_scene)),
-            || 0,
-            || {},
-            || {},
-            || false,
-        );
-
-        assert_eq!(telemetry.input_drain_us, telemetry.stage1_input_drain_us);
-        assert_eq!(telemetry.scene_commit_us, telemetry.stage4_scene_commit_us);
-        assert_eq!(
-            telemetry.render_encode_us,
-            telemetry.stage6_render_encode_us
-        );
-        assert_eq!(telemetry.gpu_submit_us, telemetry.stage7_gpu_submit_us);
     }
 
     /// Verify the HitTestSnapshot correctly builds from a scene and performs hit-testing.
