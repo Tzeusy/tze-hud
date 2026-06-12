@@ -186,6 +186,7 @@ pub async fn make_scene_runtime() -> tze_hud_runtime::HeadlessRuntime {
         width: SCENE_W,
         height: SCENE_H,
         grpc_port: 0,
+        bind_all_interfaces: false,
         psk: "test".to_string(),
         config_toml: None,
     })

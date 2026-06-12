@@ -115,13 +115,16 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         width: 1920,
         height: 1080,
         grpc_port: GRPC_PORT,
+        // This example is a demo entrypoint where external agents connect;
+        // opt in to all-interfaces binding so connections from outside loopback work.
+        bind_all_interfaces: true,
         psk: AGENT_PSK.to_string(),
         config_toml,
     };
 
     let runtime = HeadlessRuntime::new(config).await?;
     let _server = runtime.start_grpc_server().await?;
-    println!("Runtime initialized: 1920x1080, gRPC on 127.0.0.1:{GRPC_PORT}\n");
+    println!("Runtime initialized: 1920x1080, gRPC on [::]:{GRPC_PORT}\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // PHASE 1: Session Establishment (tasks.md §1.1–1.2)
@@ -810,7 +813,26 @@ pub async fn establish_session() -> Result<SessionState, Box<dyn std::error::Err
 ///
 /// Accepts connection parameters so tests can spin up isolated runtimes on
 /// ephemeral ports without conflicting with production constants.
+///
+/// The gRPC endpoint is `http://127.0.0.1:{port}`.  For tests that start a
+/// loopback-only server (`bind_all_interfaces = false`, which binds `[::1]`),
+/// call [`establish_session_with_host`] and pass `"[::1]"` explicitly.
 async fn establish_session_with(
+    port: u16,
+    psk: &str,
+    agent_id: &str,
+    agent_display_name: &str,
+) -> Result<SessionState, Box<dyn std::error::Error>> {
+    establish_session_with_host("127.0.0.1", port, psk, agent_id, agent_display_name).await
+}
+
+/// Like [`establish_session_with`] but accepts an explicit `host` address.
+///
+/// Tests that spin up a server with `bind_all_interfaces = false` (which binds
+/// `[::1]` not `[::]`) must pass `host = "[::1]"` so the client connects on
+/// the same interface as the server.
+async fn establish_session_with_host(
+    host: &str,
     port: u16,
     psk: &str,
     agent_id: &str,
@@ -824,7 +846,7 @@ async fn establish_session_with(
     // All session traffic — handshake, mutations, events, heartbeats,
     // lease management — flows over this one stream per agent.
     #[allow(deprecated)]
-    let mut session_client = HudSessionClient::connect(format!("http://127.0.0.1:{port}")).await?;
+    let mut session_client = HudSessionClient::connect(format!("http://{host}:{port}")).await?;
 
     // Channel for client → server messages.  Buffer = 64 gives the agent
     // headroom during bursts (e.g., mutation batches) without unbounded growth.
@@ -1817,8 +1839,11 @@ mod tests {
     /// Bind an ephemeral port and return it.  The listener is dropped before
     /// the gRPC server starts; there is a brief TOCTOU window, but this is the
     /// same pattern used across the integration test suite.
+    ///
+    /// Binds on `[::1]:0` (IPv6 loopback) to match the default
+    /// `HeadlessConfig { bind_all_interfaces: false }` server bind address.
     fn ephemeral_port() -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let listener = std::net::TcpListener::bind("[::1]:0").expect("bind ephemeral port");
         let port = listener.local_addr().expect("get local addr").port();
         drop(listener);
         port
@@ -1831,6 +1856,11 @@ mod tests {
             width: 800,
             height: 600,
             grpc_port: port,
+            // Test helpers connect via 127.0.0.1 (IPv4); use the dual-stack
+            // wildcard so the server accepts both IPv4 and IPv6 loopback clients.
+            // Tests that specifically validate the loopback default live in
+            // crates/tze_hud_runtime/src/headless.rs::tests.
+            bind_all_interfaces: true,
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
@@ -1873,10 +1903,15 @@ mod tests {
         // Allow the server a moment to bind before the client connects.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let state =
-            crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
-                .await
-                .expect("establish_session_with");
+        let state = crate::establish_session_with_host(
+            "[::1]",
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+        )
+        .await
+        .expect("establish_session_with_host");
 
         assert!(
             !state.session_id.is_empty(),
@@ -1897,10 +1932,15 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let state =
-            crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
-                .await
-                .expect("establish_session_with");
+        let state = crate::establish_session_with_host(
+            "[::1]",
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+        )
+        .await
+        .expect("establish_session_with_host");
 
         assert!(
             !state.namespace.is_empty(),
@@ -1963,7 +2003,7 @@ mod tests {
         // ── 1. Open a session ─────────────────────────────────────────────────
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
                 .await
                 .expect("connect");
 
@@ -2107,6 +2147,9 @@ mod tests {
             width: 1920,
             height: 1080,
             grpc_port: port,
+            // Test helpers connect via 127.0.0.1 (IPv4); use the dual-stack
+            // wildcard so the server accepts both IPv4 and IPv6 loopback clients.
+            bind_all_interfaces: true,
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
@@ -2351,7 +2394,7 @@ mod tests {
         // Open a session and acquire a lease.
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
                 .await
                 .expect("connect");
 
@@ -2605,7 +2648,7 @@ mod tests {
         // Open session and acquire lease.
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
                 .await
                 .expect("connect");
 
@@ -3036,7 +3079,7 @@ mod tests {
         //       rejected. This simulates the "expired / unknown lease" path.
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
                 .await
                 .expect("connect");
 

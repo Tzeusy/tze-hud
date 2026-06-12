@@ -88,6 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         width: args.width,
         height: args.height,
         grpc_port: 0,
+        bind_all_interfaces: false,
         psk: "readback-proof".to_string(),
         config_toml: Some(readback_config_toml()),
     })

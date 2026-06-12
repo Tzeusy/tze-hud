@@ -1073,6 +1073,7 @@ async fn test_three_agents_presence_card_coexistence() -> Result<(), Box<dyn std
         width: DISPLAY_W as u32,
         height: DISPLAY_H as u32,
         grpc_port: GRPC_PORT,
+        bind_all_interfaces: false,
         psk: TEST_PSK.to_string(),
         config_toml: None,
     };

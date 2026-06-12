@@ -117,6 +117,7 @@ async fn start_runtime_with_subtitle_zone(
         width: DISPLAY_W,
         height: DISPLAY_H,
         grpc_port: port,
+        bind_all_interfaces: false,
         psk: TEST_PSK.to_string(),
         config_toml: None,
     };
