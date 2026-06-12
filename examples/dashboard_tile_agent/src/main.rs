@@ -846,8 +846,7 @@ async fn establish_session_with_host(
     // All session traffic — handshake, mutations, events, heartbeats,
     // lease management — flows over this one stream per agent.
     #[allow(deprecated)]
-    let mut session_client =
-        HudSessionClient::connect(format!("http://{host}:{port}")).await?;
+    let mut session_client = HudSessionClient::connect(format!("http://{host}:{port}")).await?;
 
     // Channel for client → server messages.  Buffer = 64 gives the agent
     // headroom during bursts (e.g., mutation batches) without unbounded growth.
