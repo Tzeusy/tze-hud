@@ -74,6 +74,12 @@ message TextMarkdownNodeProto {
   // bytes before any Markdown stripping.  Field 6 is stable and must not
   // be renumbered.
   repeated TextColorRunProto color_runs = 6;
+  // Overflow behaviour for text that overflows the node bounds.
+  // UNSPECIFIED = compositor default (Ellipsis).  Field 7 is stable and
+  // must not be renumbered.  Callers that want explicit clip must set
+  // TEXT_OVERFLOW_PROTO_CLIP.  Live portal transcript panes set
+  // TEXT_OVERFLOW_PROTO_ELLIPSIS to engage the TruncationCache contract.
+  TextOverflowProto overflow = 7;
 }
 
 message HitRegionNodeProto {

@@ -298,6 +298,7 @@ fn proto_node_text_zero_font_size_defaults_to_16() {
             }),
             background: None,
             color_runs: vec![],
+            overflow: 0, // Unspecified → defaults to Ellipsis in scene
         })),
     };
     let node = proto_node_to_scene(&n).expect("must produce a node");
