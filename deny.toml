@@ -67,13 +67,11 @@ ignore = [
 #
 # GPL-3.0-only: our own workspace crates.
 #
-# GPL-2.0-only — EXCEPTION: self_cell@1.2.2 declares
-#   "Apache-2.0 OR GPL-2.0-only". Under an OR SPDX expression cargo-deny
-#   requires ALL alternatives to appear in the allow list. We exercise the
-#   Apache-2.0 option and include GPL-2.0-only solely to satisfy that
-#   mechanical requirement. Bare GPL-2.0-only dependencies (without an
-#   Apache/MIT alternative) would be INCOMPATIBLE with our GPL-3.0-only
-#   project and must not be added without owner review.
+# GPL-2.0-only — EXCEPTION via per-crate exceptions table: self_cell@1.2.2
+#   declares "Apache-2.0 OR GPL-2.0-only". We use it under Apache-2.0. Rather
+#   than allowing GPL-2.0-only globally (which would silently permit future
+#   solely-GPL-2.0-only crates that are incompatible with GPL-3.0-only), this
+#   license is scoped to self_cell only via the exceptions table below.
 [licenses]
 version = 2
 
@@ -113,22 +111,21 @@ allow = [
     # GPL-3.0-only: our own workspace crates.
     "GPL-3.0-only",
 
-    # GPL-2.0-only: allowed ONLY because self_cell@1.2.2 uses the compound
-    # SPDX expression "Apache-2.0 OR GPL-2.0-only" and cargo-deny requires
-    # all alternatives to be listed. We use self_cell under Apache-2.0.
-    # WARNING: Do NOT add any dependency that is SOLELY GPL-2.0-only (no
-    # permissive alternative) — that is incompatible with GPL-3.0-only and
-    # requires owner sign-off.
-    # Crate: self_cell@1.2.2 (transitive: cosmic-text ← glyphon ← compositor)
-    "GPL-2.0-only",
 ]
 
 # Minimum confidence threshold for license text detection.
 confidence-threshold = 0.8
 
-# Per-crate license exceptions (none needed at present; all licenses are
-# handled by the allow list above).
-exceptions = []
+# Per-crate license exceptions.
+# self_cell@1.2.2 uses "Apache-2.0 OR GPL-2.0-only". We use it under
+# Apache-2.0, but cargo-deny requires all OR alternatives to appear somewhere
+# in the configuration. Scoping GPL-2.0-only to this single crate exception
+# prevents any future solely-GPL-2.0-only dependency (which would be
+# incompatible with our GPL-3.0-only project) from being silently allowed.
+# Transitive chain: self_cell ← cosmic-text ← glyphon ← tze_hud_compositor.
+exceptions = [
+    { name = "self_cell", allow = ["GPL-2.0-only"] },
+]
 
 # ─── Bans ────────────────────────────────────────────────────────────────────
 #
