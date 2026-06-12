@@ -813,7 +813,26 @@ pub async fn establish_session() -> Result<SessionState, Box<dyn std::error::Err
 ///
 /// Accepts connection parameters so tests can spin up isolated runtimes on
 /// ephemeral ports without conflicting with production constants.
+///
+/// The gRPC endpoint is `http://127.0.0.1:{port}`.  For tests that start a
+/// loopback-only server (`bind_all_interfaces = false`, which binds `[::1]`),
+/// call [`establish_session_with_host`] and pass `"[::1]"` explicitly.
 async fn establish_session_with(
+    port: u16,
+    psk: &str,
+    agent_id: &str,
+    agent_display_name: &str,
+) -> Result<SessionState, Box<dyn std::error::Error>> {
+    establish_session_with_host("127.0.0.1", port, psk, agent_id, agent_display_name).await
+}
+
+/// Like [`establish_session_with`] but accepts an explicit `host` address.
+///
+/// Tests that spin up a server with `bind_all_interfaces = false` (which binds
+/// `[::1]` not `[::]`) must pass `host = "[::1]"` so the client connects on
+/// the same interface as the server.
+async fn establish_session_with_host(
+    host: &str,
     port: u16,
     psk: &str,
     agent_id: &str,
@@ -827,7 +846,8 @@ async fn establish_session_with(
     // All session traffic — handshake, mutations, events, heartbeats,
     // lease management — flows over this one stream per agent.
     #[allow(deprecated)]
-    let mut session_client = HudSessionClient::connect(format!("http://127.0.0.1:{port}")).await?;
+    let mut session_client =
+        HudSessionClient::connect(format!("http://{host}:{port}")).await?;
 
     // Channel for client → server messages.  Buffer = 64 gives the agent
     // headroom during bursts (e.g., mutation batches) without unbounded growth.
@@ -1837,7 +1857,11 @@ mod tests {
             width: 800,
             height: 600,
             grpc_port: port,
-            bind_all_interfaces: false,
+            // Test helpers connect via 127.0.0.1 (IPv4); use the dual-stack
+            // wildcard so the server accepts both IPv4 and IPv6 loopback clients.
+            // Tests that specifically validate the loopback default live in
+            // crates/tze_hud_runtime/src/headless.rs::tests.
+            bind_all_interfaces: true,
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
@@ -1880,10 +1904,15 @@ mod tests {
         // Allow the server a moment to bind before the client connects.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let state =
-            crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
-                .await
-                .expect("establish_session_with");
+        let state = crate::establish_session_with_host(
+            "[::1]",
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+        )
+        .await
+        .expect("establish_session_with_host");
 
         assert!(
             !state.session_id.is_empty(),
@@ -1904,10 +1933,15 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let state =
-            crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
-                .await
-                .expect("establish_session_with");
+        let state = crate::establish_session_with_host(
+            "[::1]",
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+        )
+        .await
+        .expect("establish_session_with_host");
 
         assert!(
             !state.namespace.is_empty(),
@@ -2114,7 +2148,9 @@ mod tests {
             width: 1920,
             height: 1080,
             grpc_port: port,
-            bind_all_interfaces: false,
+            // Test helpers connect via 127.0.0.1 (IPv4); use the dual-stack
+            // wildcard so the server accepts both IPv4 and IPv6 loopback clients.
+            bind_all_interfaces: true,
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
