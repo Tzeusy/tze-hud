@@ -42,16 +42,17 @@
 //!   counter used by the policy arbitration stack (Level 4) for pure evaluation. It uses
 //!   a per-second slot ring rather than a timestamp VecDeque, optimised for O(1) reads.
 //!
-//! Both modules define the same default constants (`DEFAULT_AGENT_BUDGET = 20`,
-//! `DEFAULT_ZONE_BUDGET = 10`, `DEFAULT_STACK_ZONE_BUDGET = 30`). The runtime crate
-//! does not depend on the policy crate; these constants are deliberately mirrored and
-//! must be kept in sync with `tze_hud_policy::attention_budget`. See:
-//! `crates/tze_hud_policy/src/attention_budget.rs` constants
-//! `DEFAULT_PER_AGENT_LIMIT`, `DEFAULT_PER_ZONE_LIMIT`, `DEFAULT_PER_ZONE_STACK_LIMIT`.
+//! **Canonical constants**: All three per-agent/per-zone/per-zone-stack budget defaults
+//! are defined ONCE in `tze_hud_scene::events::emission` and re-exported here as
+//! `DEFAULT_AGENT_BUDGET`, `DEFAULT_ZONE_BUDGET`, `DEFAULT_STACK_ZONE_BUDGET`.
+//! `tze_hud_policy::attention_budget` re-exports the same constants under different names.
+//! There are NO duplicate numeric literals for these values; any mismatch is a compile
+//! error (missing re-export), not a silent divergence.
 //!
-//! **Do not consolidate** these into one implementation: the policy crate must remain
-//! dependency-free (it cannot import the runtime), and the runtime needs the timestamp
-//! VecDeque for event-pipeline integration. The constants are the single shared contract.
+//! The two modules still have separate implementations (runtime uses `VecDeque<u64>`
+//! timestamp windows; policy uses a per-second ring buffer) because they serve different
+//! purposes: the runtime enforcer is stateful and drives the event pipeline; the policy
+//! evaluator is a pure read-only snapshot check.  The constants are the shared contract.
 
 pub mod urgency;
 
@@ -66,11 +67,23 @@ pub use urgency::{EarnedUrgencyConfig, EarnedUrgencyTracker, UrgencyRecord};
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Default per-agent interruption budget (interruptions per minute).
-pub const DEFAULT_AGENT_BUDGET: u32 = 20;
+///
+/// Re-exported from `tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_AGENT`.
+/// RFC 0010 §3.1.
+pub use tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_AGENT as DEFAULT_AGENT_BUDGET;
+
 /// Default per-zone interruption budget (interruptions per minute).
-pub const DEFAULT_ZONE_BUDGET: u32 = 10;
+///
+/// Re-exported from `tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_ZONE`.
+/// RFC 0010 §3.1.
+pub use tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_ZONE as DEFAULT_ZONE_BUDGET;
+
 /// Default per-zone budget for Stack-policy zones.
-pub const DEFAULT_STACK_ZONE_BUDGET: u32 = 30;
+///
+/// Re-exported from `tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_ZONE_STACK`.
+/// RFC 0010 §7.
+pub use tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_ZONE_STACK as DEFAULT_STACK_ZONE_BUDGET;
+
 /// Budget fraction at which the warning is emitted.
 pub const WARNING_FRACTION: f64 = 0.80;
 /// Rolling window size in microseconds (1 minute).

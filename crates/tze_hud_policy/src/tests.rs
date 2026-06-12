@@ -315,6 +315,237 @@ mod arbitration_stack_tests {
         );
     }
 
+    // ─── Requirement: Arbitration Evaluation Order (spec §3.4) ──────────────
+    //
+    // These tests protect the EVALUATION ORDER within the zone-publication path
+    // (spec §3.4: 0 → 3 → 2 → 4 → 5 → 6).  The enum-ordinal test
+    // `test_stack_ordering_is_immutable` only checks that Privacy < Security
+    // as a type-level ordering; it does NOT verify that the evaluation code
+    // actually runs Level 3 before Level 2.  These tests do.
+    //
+    // Implementation note: if the evaluation order in `stack.rs` were swapped
+    // so that Level 2 (Privacy, Transform) ran before Level 3 (Security,
+    // Suppress), then:
+    //
+    //   - `test_security_deny_suppresses_privacy_redaction` would observe
+    //     `CommitRedacted` (Privacy applied first) instead of
+    //     `Reject(CapabilityDenied)` (Security short-circuit), causing failure.
+    //
+    //   - `test_pairwise_deny_precedence_l3_over_l2` would observe that a
+    //     security-denied zone publication mistakenly receives the Privacy
+    //     Transform, surfacing the wrong outcome.
+    //
+    // Together these two tests are order-sensitive in a way that compile-time
+    // enum ordering cannot express.
+
+    /// WHEN Level 3 (Security) denies a zone publication AND Level 2 (Privacy)
+    /// would redact the same mutation (viewer class insufficient)
+    /// THEN the outcome MUST be Reject(CapabilityDenied) — NOT CommitRedacted.
+    ///
+    /// Spec §3.4 (Per-Mutation Evaluation, zone publication path):
+    /// "Level 3: Security gate (before Privacy — Security rejects, no redaction needed)"
+    /// Spec §2 Rule CL-2: "When a higher level blocks an action, the lower level's
+    /// side effects do not fire."
+    ///
+    /// Privacy is Level 2; Security is Level 3.  Level 3 SHOULD run before Level 2
+    /// in the zone-publication path so that a security-rejected mutation never
+    /// receives the Privacy Transform decoration.  This test fails if the code
+    /// evaluates L2 before L3.
+    #[test]
+    fn test_security_deny_suppresses_privacy_redaction() {
+        let stack = make_stack();
+        let mut ctx = default_policy_context();
+
+        // Level 3 condition: no capabilities → Security will reject.
+        ctx.security_context.granted_capabilities = vec![];
+        ctx.security_context.lease_valid = true;
+
+        // Level 2 condition: viewer cannot see Private content → Privacy would redact.
+        ctx.privacy_context.effective_viewer_class = ViewerClass::KnownGuest;
+        ctx.privacy_context.viewer_classes = vec![ViewerClass::KnownGuest];
+
+        let outcome = stack.evaluate(
+            &ctx,
+            SceneId::new(),
+            VisibilityClassification::Private, // Privacy would redact this
+            &["publish_zone:subtitle"],        // Security: not in granted_capabilities
+            "agent_a",
+            MutationKind::ZonePublication,
+        );
+
+        // Security (L3) MUST short-circuit before Privacy (L2) can apply its Transform.
+        // If L2 ran first the outcome would be CommitRedacted; the correct answer is Reject.
+        assert!(
+            matches!(
+                &outcome,
+                ArbitrationOutcome::Reject(err)
+                    if err.code == crate::ArbitrationErrorCode::CapabilityDenied
+            ),
+            "L3 Security deny MUST short-circuit before L2 Privacy redaction: \
+             expected Reject(CapabilityDenied), got {outcome:?}"
+        );
+        // Confirm the level attribution is correct (not just any Reject).
+        if let ArbitrationOutcome::Reject(err) = &outcome {
+            assert_eq!(
+                err.level,
+                ArbitrationLevel::Security.index(),
+                "Rejection level must be 3 (Security), not {}",
+                err.level
+            );
+        }
+    }
+
+    /// WHEN Level 3 (Security) denies AND Level 4 (Attention) would queue
+    /// THEN the outcome MUST be Reject — Security short-circuits before Attention.
+    ///
+    /// Spec §3.4: order is 0 → 3 → 2 → 4 → 5 → 6.  Security (L3) precedes
+    /// Attention (L4).  A security-rejected mutation must never reach L4.
+    #[test]
+    fn test_security_deny_suppresses_attention_queue() {
+        let stack = make_stack();
+        let mut ctx = default_policy_context();
+
+        // Level 3: no capabilities.
+        ctx.security_context.granted_capabilities = vec![];
+        ctx.security_context.lease_valid = true;
+
+        // Level 4: quiet hours active → Attention would Queue this mutation.
+        ctx.attention_context.quiet_hours_active = true;
+        ctx.attention_context.quiet_hours_end_us = Some(7_200_000_000);
+        ctx.attention_context.interruption_class = InterruptionClass::Normal;
+
+        let outcome = stack.evaluate(
+            &ctx,
+            SceneId::new(),
+            VisibilityClassification::Public,
+            &["publish_zone:subtitle"],
+            "agent_a",
+            MutationKind::ZonePublication,
+        );
+
+        assert!(
+            matches!(
+                &outcome,
+                ArbitrationOutcome::Reject(err)
+                    if err.code == crate::ArbitrationErrorCode::CapabilityDenied
+            ),
+            "L3 Security deny MUST short-circuit before L4 Attention queue: \
+             expected Reject(CapabilityDenied), got {outcome:?}"
+        );
+    }
+
+    /// Pairwise deny-precedence: for each pair of adjacent levels where the
+    /// higher level SUPPRESSES and the lower level would APPLY, the higher level
+    /// must win.  This test drives the zone-publication path with every
+    /// combination that is exercisable via `PolicyContext` fields.
+    ///
+    /// Pairs tested (higher, lower):
+    ///   (L0 Freeze / Block, L3 Security / Suppress)  — freeze wins over security
+    ///   (L3 Security / Suppress, L2 Privacy / Transform) — security wins, no redaction
+    ///   (L3 Security / Suppress, L4 Attention / Block)   — security wins, no queue
+    ///   (L3 Security / Suppress, L5 Resource / Suppress) — security wins over resource
+    ///
+    /// Any reordering of L2/L3 in `stack.rs` would break the L3 rows above.
+    #[test]
+    fn test_pairwise_deny_precedence_zone_publication() {
+        let stack = make_stack();
+
+        // ── Pair 1: L0 (Freeze/Block) over L3 (Security/Suppress) ──────────
+        {
+            let mut ctx = default_policy_context();
+            ctx.override_state.freeze_active = true;
+            // Security would deny (no capability), but L0 freeze must win.
+            ctx.security_context.granted_capabilities = vec![];
+
+            let outcome = stack.evaluate(
+                &ctx,
+                SceneId::new(),
+                VisibilityClassification::Public,
+                &["publish_zone:subtitle"],
+                "agent_a",
+                MutationKind::ZonePublication,
+            );
+            assert!(
+                matches!(
+                    outcome,
+                    ArbitrationOutcome::Blocked {
+                        block_reason: BlockReason::Freeze
+                    }
+                ),
+                "Pair L0/L3: L0 Freeze must win over L3 Security deny; got {outcome:?}"
+            );
+        }
+
+        // ── Pair 2: L3 (Security/Suppress) over L2 (Privacy/Transform) ─────
+        {
+            let mut ctx = default_policy_context();
+            // L3: deny
+            ctx.security_context.granted_capabilities = vec![];
+            // L2: would redact
+            ctx.privacy_context.effective_viewer_class = ViewerClass::KnownGuest;
+            ctx.privacy_context.viewer_classes = vec![ViewerClass::KnownGuest];
+
+            let outcome = stack.evaluate(
+                &ctx,
+                SceneId::new(),
+                VisibilityClassification::Private,
+                &["publish_zone:subtitle"],
+                "agent_a",
+                MutationKind::ZonePublication,
+            );
+            assert!(
+                matches!(&outcome, ArbitrationOutcome::Reject(e) if e.code == crate::ArbitrationErrorCode::CapabilityDenied),
+                "Pair L3/L2: L3 Security deny must win over L2 Privacy redact; got {outcome:?}"
+            );
+        }
+
+        // ── Pair 3: L3 (Security/Suppress) over L4 (Attention/Block) ───────
+        {
+            let mut ctx = default_policy_context();
+            // L3: deny
+            ctx.security_context.granted_capabilities = vec![];
+            // L4: quiet hours → would queue
+            ctx.attention_context.quiet_hours_active = true;
+            ctx.attention_context.interruption_class = InterruptionClass::Normal;
+
+            let outcome = stack.evaluate(
+                &ctx,
+                SceneId::new(),
+                VisibilityClassification::Public,
+                &["publish_zone:subtitle"],
+                "agent_a",
+                MutationKind::ZonePublication,
+            );
+            assert!(
+                matches!(&outcome, ArbitrationOutcome::Reject(e) if e.code == crate::ArbitrationErrorCode::CapabilityDenied),
+                "Pair L3/L4: L3 Security deny must win over L4 Attention queue; got {outcome:?}"
+            );
+        }
+
+        // ── Pair 4: L3 (Security/Suppress) over L5 (Resource/Suppress) ─────
+        {
+            let mut ctx = default_policy_context();
+            // L3: deny
+            ctx.security_context.granted_capabilities = vec![];
+            // L5: would shed
+            ctx.resource_context.should_shed = true;
+            ctx.resource_context.degradation_level = 4;
+
+            let outcome = stack.evaluate(
+                &ctx,
+                SceneId::new(),
+                VisibilityClassification::Public,
+                &["publish_zone:subtitle"],
+                "agent_a",
+                MutationKind::ZonePublication,
+            );
+            assert!(
+                matches!(&outcome, ArbitrationOutcome::Reject(e) if e.code == crate::ArbitrationErrorCode::CapabilityDenied),
+                "Pair L3/L5: L3 Security deny must win over L5 Resource shed; got {outcome:?}"
+            );
+        }
+    }
+
     /// WHEN Level 1 (Safety) enters safe mode while Level 4 (Attention) has queued notifications
     /// THEN the queued notifications MUST be discarded; safe mode overrides
     ///

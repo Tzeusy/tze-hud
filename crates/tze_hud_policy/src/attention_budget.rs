@@ -37,25 +37,33 @@
 //! used by Level 4 of the arbitration stack (`tze_hud_policy::stack`). It is evaluated
 //! as part of the read-only policy evaluation path — no event-pipeline state is written here.
 //!
-//! **Mirror constants**: The runtime attention-budget module
-//! (`tze_hud_runtime::attention_budget`) also defines the same defaults under different
-//! names: `DEFAULT_AGENT_BUDGET = 20`, `DEFAULT_ZONE_BUDGET = 10`,
-//! `DEFAULT_STACK_ZONE_BUDGET = 30`. These must be kept in sync with
-//! `DEFAULT_PER_AGENT_LIMIT`, `DEFAULT_PER_ZONE_LIMIT`, `DEFAULT_PER_ZONE_STACK_LIMIT`
-//! defined here. The runtime crate cannot depend on this crate, so the constants are
-//! intentionally duplicated. Any change here requires a matching change there.
+//! **Canonical constants**: The three per-agent/per-zone/per-zone-stack budget defaults
+//! are defined ONCE in `tze_hud_scene::events::emission` and re-exported here as
+//! `DEFAULT_PER_AGENT_LIMIT`, `DEFAULT_PER_ZONE_LIMIT`, `DEFAULT_PER_ZONE_STACK_LIMIT`.
+//! `tze_hud_runtime::attention_budget` re-exports the same scene-level constants under
+//! `DEFAULT_AGENT_BUDGET`, `DEFAULT_ZONE_BUDGET`, `DEFAULT_STACK_ZONE_BUDGET`.
+//! There are NO duplicate numeric literals for these three values; a mismatch is a
+//! compile error (missing constant), not a silent divergence.
 
 /// Default rolling window in seconds.
 pub const DEFAULT_WINDOW_SECS: u32 = 60;
 
-/// Default per-agent limit (RFC 0010 §3.1).
-pub const DEFAULT_PER_AGENT_LIMIT: u32 = 20;
+/// Default per-agent interruption budget (interruptions per rolling minute).
+///
+/// Sourced from `tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_AGENT`.
+/// RFC 0010 §3.1.
+pub use tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_AGENT as DEFAULT_PER_AGENT_LIMIT;
 
-/// Default per-zone limit (RFC 0010 §3.1).
-pub const DEFAULT_PER_ZONE_LIMIT: u32 = 10;
+/// Default per-zone interruption budget (interruptions per rolling minute).
+///
+/// Sourced from `tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_ZONE`.
+/// RFC 0010 §3.1.
+pub use tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_ZONE as DEFAULT_PER_ZONE_LIMIT;
 
-/// Default per-zone limit for Stack-policy zones (RFC 0010 §7).
-pub const DEFAULT_PER_ZONE_STACK_LIMIT: u32 = 30;
+/// Default per-zone budget for Stack-policy zones (RFC 0010 §7).
+///
+/// Sourced from `tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_ZONE_STACK`.
+pub use tze_hud_scene::events::emission::ATTENTION_DEFAULT_PER_ZONE_STACK as DEFAULT_PER_ZONE_STACK_LIMIT;
 
 /// Maximum supported window in seconds (hard cap to bound array size).
 const MAX_WINDOW_SECS: usize = 3600; // 1 hour
