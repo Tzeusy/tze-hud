@@ -69,6 +69,7 @@ fn cadence_bench_config() -> HeadlessConfig {
         width: DISPLAY_W,
         height: DISPLAY_H,
         grpc_port: 0,
+        bind_all_interfaces: false,
         psk: "cadence-test-key".to_string(),
         config_toml: None,
     }

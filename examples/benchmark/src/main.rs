@@ -146,6 +146,7 @@ mod headless_impl {
             width: 1920,
             height: 1080,
             grpc_port: 0,
+            bind_all_interfaces: false,
             psk: psk.to_string(),
             config_toml: Some(String::new()),
         }

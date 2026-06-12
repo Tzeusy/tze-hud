@@ -67,6 +67,7 @@ fn benchmark_headless_config() -> HeadlessConfig {
         width: 320,
         height: 240,
         grpc_port: 0,
+        bind_all_interfaces: false,
         psk: "benchmark-config-test".to_string(),
         config_toml: Some(benchmark_config_for_headless()),
     }
@@ -166,6 +167,7 @@ async fn windows_media_config_boot_registers_only_media_pip_for_video_surface_re
         width: 320,
         height: 240,
         grpc_port: 0,
+        bind_all_interfaces: false,
         psk: "media-config-test".to_string(),
         config_toml: Some(media_config_for_headless()),
     })

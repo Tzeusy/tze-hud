@@ -894,6 +894,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         width: DISPLAY_W,
         height: DISPLAY_H,
         grpc_port: GRPC_PORT,
+        bind_all_interfaces: false,
         psk: TEST_PSK.to_string(),
         config_toml: None,
     };

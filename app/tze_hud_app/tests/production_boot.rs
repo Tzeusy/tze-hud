@@ -54,6 +54,7 @@ fn canonical_headless_config() -> HeadlessConfig {
         width: 320,
         height: 240,
         grpc_port: 0,
+        bind_all_interfaces: false,
         psk: "canonical-app-production-boot-test".to_string(),
         config_toml: Some(canonical_config_for_headless()),
     }

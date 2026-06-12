@@ -146,6 +146,7 @@ async fn production_config_boot_succeeds() {
         width: 320,
         height: 240,
         grpc_port: 0, // No gRPC server — pure boot test.
+        bind_all_interfaces: false,
         psk: "production-boot-test".to_string(),
         config_toml: Some(config_toml),
     };
@@ -182,6 +183,7 @@ async fn production_config_grants_registered_agent_capabilities() {
         width: 320,
         height: 240,
         grpc_port: free_port,
+        bind_all_interfaces: false,
         psk: "production-boot-test".to_string(),
         config_toml: Some(config_toml),
     };
@@ -304,6 +306,7 @@ async fn production_config_denies_unregistered_agent() {
         width: 320,
         height: 240,
         grpc_port: free_port,
+        bind_all_interfaces: false,
         psk: "production-boot-test".to_string(),
         config_toml: Some(config_toml),
     };
@@ -503,6 +506,7 @@ alert-banner  = "exemplar-alert-banner"
         width: 320,
         height: 240,
         grpc_port: 0,
+        bind_all_interfaces: false,
         psk: "profile-load-test".to_string(),
         config_toml: Some(config_toml),
     };

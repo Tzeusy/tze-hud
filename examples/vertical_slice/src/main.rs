@@ -226,13 +226,16 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         width: 800,
         height: 600,
         grpc_port: 50051,
+        // This example is a demo entrypoint where external agents connect;
+        // opt in to all-interfaces binding so connections from outside loopback work.
+        bind_all_interfaces: true,
         psk: "vertical-slice-key".to_string(),
         config_toml,
     };
 
     let mut runtime = HeadlessRuntime::new(config).await?;
     let _server = runtime.start_grpc_server().await?;
-    println!("Runtime initialized: 800x600, gRPC on [::1]:50051\n");
+    println!("Runtime initialized: 800x600, gRPC on [::]:50051\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // PHASE 1: Session + Lease (streaming)
@@ -1390,6 +1393,7 @@ capabilities = ["create_tiles"]
             width: 320,
             height: 240,
             grpc_port: free_port,
+            bind_all_interfaces: false,
             psk: "test-key".to_string(),
             config_toml: Some(toml.to_string()),
         };
@@ -2016,6 +2020,7 @@ capabilities = ["create_tiles", "modify_own_tiles"]
             width: 320,
             height: 240,
             grpc_port: free_port,
+            bind_all_interfaces: false,
             psk: "test-key".to_string(),
             config_toml: Some(toml.to_string()),
         };

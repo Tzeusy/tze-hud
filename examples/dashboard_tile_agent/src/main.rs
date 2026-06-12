@@ -115,13 +115,16 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         width: 1920,
         height: 1080,
         grpc_port: GRPC_PORT,
+        // This example is a demo entrypoint where external agents connect;
+        // opt in to all-interfaces binding so connections from outside loopback work.
+        bind_all_interfaces: true,
         psk: AGENT_PSK.to_string(),
         config_toml,
     };
 
     let runtime = HeadlessRuntime::new(config).await?;
     let _server = runtime.start_grpc_server().await?;
-    println!("Runtime initialized: 1920x1080, gRPC on 127.0.0.1:{GRPC_PORT}\n");
+    println!("Runtime initialized: 1920x1080, gRPC on [::]:${GRPC_PORT}\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // PHASE 1: Session Establishment (tasks.md §1.1–1.2)
@@ -1831,6 +1834,7 @@ mod tests {
             width: 800,
             height: 600,
             grpc_port: port,
+            bind_all_interfaces: false,
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
@@ -2107,6 +2111,7 @@ mod tests {
             width: 1920,
             height: 1080,
             grpc_port: port,
+            bind_all_interfaces: false,
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
