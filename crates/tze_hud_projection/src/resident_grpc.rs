@@ -667,37 +667,81 @@ impl ResidentGrpcPortalAdapter {
             .tile_id
             .clone()
             .ok_or(ResidentGrpcAdapterError::MissingPortalTile)?;
+
+        // Generate an explicit root node ID so we can reference it as parent_id
+        // in the composer hit-region AddNodeMutation within the same batch.
+        //
+        // NodeProto.id wire encoding: little-endian UUID bytes (per RFC 0001 §4.1).
+        // AddNodeMutation.parent_id wire encoding: big-endian RFC 4122 bytes.
+        // These two encodings reference the same underlying UUID.
+        let root_uuid = uuid::Uuid::now_v7();
+        let root_id_le = root_uuid.to_bytes_le().to_vec();
+        let root_id_be = root_uuid.as_bytes().to_vec();
+
+        let mut mutations = vec![
+            proto::MutationProto {
+                mutation: Some(proto::mutation_proto::Mutation::PublishToTile(
+                    proto::PublishToTileMutation {
+                        element_id: tile_id.clone(),
+                        bounds: Some(self.bounds_for_state(state)),
+                        node: Some(self.portal_node(state, root_id_le)),
+                    },
+                )),
+            },
+            proto::MutationProto {
+                mutation: Some(proto::mutation_proto::Mutation::UpdateTileInputMode(
+                    proto::UpdateTileInputModeMutation {
+                        tile_id: tile_id.clone(),
+                        input_mode: if state.interaction_enabled {
+                            proto::TileInputModeProto::TileInputModeCapture as i32
+                        } else {
+                            proto::TileInputModeProto::TileInputModeLocalOnly as i32
+                        },
+                    },
+                )),
+            },
+        ];
+
+        // When interaction is enabled, publish a composer hit region as a child
+        // of the portal root so the runtime's ComposerDraftManager can activate.
+        // Without this AddNodeMutation, accepts_composer_input is never true in
+        // any wire-driven scene (is_composer_active() always returns false).
+        if state.interaction_enabled {
+            let composer_bounds = self.local_bounds_for_state(state);
+            let composer_interaction_id = format!("{}-composer", state.portal_id);
+            mutations.push(proto::MutationProto {
+                mutation: Some(proto::mutation_proto::Mutation::AddNode(
+                    proto::AddNodeMutation {
+                        tile_id,
+                        parent_id: root_id_be,
+                        node: Some(proto::NodeProto {
+                            id: Vec::new(),
+                            data: Some(proto::node_proto::Data::HitRegion(
+                                proto::HitRegionNodeProto {
+                                    bounds: Some(composer_bounds),
+                                    interaction_id: composer_interaction_id,
+                                    accepts_focus: true,
+                                    accepts_pointer: false,
+                                    auto_capture: false,
+                                    release_on_up: false,
+                                    accepts_composer_input: true,
+                                },
+                            )),
+                        }),
+                    },
+                )),
+            });
+        }
+
         Ok(session_proto::MutationBatch {
             batch_id: new_scene_id_bytes(),
             lease_id: self.config.lease_id.clone(),
-            mutations: vec![
-                proto::MutationProto {
-                    mutation: Some(proto::mutation_proto::Mutation::PublishToTile(
-                        proto::PublishToTileMutation {
-                            element_id: tile_id.clone(),
-                            bounds: Some(self.bounds_for_state(state)),
-                            node: Some(self.portal_node(state)),
-                        },
-                    )),
-                },
-                proto::MutationProto {
-                    mutation: Some(proto::mutation_proto::Mutation::UpdateTileInputMode(
-                        proto::UpdateTileInputModeMutation {
-                            tile_id,
-                            input_mode: if state.interaction_enabled {
-                                proto::TileInputModeProto::TileInputModeCapture as i32
-                            } else {
-                                proto::TileInputModeProto::TileInputModeLocalOnly as i32
-                            },
-                        },
-                    )),
-                },
-            ],
+            mutations,
             timing: None,
         })
     }
 
-    fn portal_node(&self, state: &ProjectedPortalState) -> proto::NodeProto {
+    fn portal_node(&self, state: &ProjectedPortalState, root_id_le: Vec<u8>) -> proto::NodeProto {
         // §6.1 enforcement: every visual value sourced from self.visual_tokens —
         // no literal colors, font sizes, or opacities permitted here.
         let bounds = self.local_bounds_for_state(state);
@@ -714,7 +758,10 @@ impl ResidentGrpcPortalAdapter {
             ),
         };
         proto::NodeProto {
-            id: Vec::new(),
+            // Explicit root ID (little-endian UUID bytes per RFC 0001 §4.1) so
+            // render_batch can reference it as AddNodeMutation.parent_id in the
+            // same batch when adding the composer hit region.
+            id: root_id_le,
             data: Some(proto::node_proto::Data::TextMarkdown(
                 proto::TextMarkdownNodeProto {
                     content: portal_markdown(state, self.composer_display.as_ref()),
@@ -1079,7 +1126,173 @@ pub fn portal_visual_tokens_from_part_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::OutputKind;
+    use crate::{
+        ContentClassification, OutputKind, ProjectedPortalAdapterFamily, ProjectedPortalAttention,
+        ProjectedPortalLayer, ProjectedPortalPresentation, ProjectedPortalRuntimeAuthority,
+        ProjectedPortalState,
+    };
+
+    /// Build a minimal interaction-enabled expanded portal state for adapter tests.
+    fn make_expanded_interaction_state(portal_id: &str) -> ProjectedPortalState {
+        ProjectedPortalState {
+            projection_id: "test-proj-1".to_string(),
+            portal_id: portal_id.to_string(),
+            adapter_family: ProjectedPortalAdapterFamily::CooperativeProjection,
+            runtime_authority: ProjectedPortalRuntimeAuthority::ResidentSessionLease,
+            layer: ProjectedPortalLayer::Content,
+            presentation: ProjectedPortalPresentation::Expanded,
+            preserve_geometry: false,
+            redacted: false,
+            interaction_enabled: true,
+            attention: ProjectedPortalAttention::Ambient,
+            provider_kind: None,
+            display_name: Some("Test Session".to_string()),
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            lifecycle_state: None,
+            status_text: None,
+            visible_transcript: vec![],
+            visible_transcript_bytes: 0,
+            unread_output_count: None,
+            pending_input_count: None,
+            pending_input_bytes: None,
+            last_input_feedback: None,
+            draft_batch: None,
+            geometry_batch: None,
+        }
+    }
+
+    // ── Composer hit region activation (hud-hxe91) ────────────────────────────
+
+    /// render_batch must emit an AddNodeMutation with a HitRegionNodeProto
+    /// carrying accepts_composer_input=true when interaction_enabled is true.
+    /// This is the production path that unblocks is_composer_active() in
+    /// wire-driven scenes.
+    #[test]
+    fn render_batch_emits_composer_hit_region_when_interaction_enabled() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        // Record a fake tile_id so render_batch doesn't return MissingPortalTile.
+        adapter.record_created_tile(vec![0u8; 16]);
+
+        let state = make_expanded_interaction_state("portal-composer-test");
+
+        let batch = adapter
+            .render_batch(&state)
+            .expect("render_batch must succeed with interaction_enabled");
+
+        // Should be 3 mutations: PublishToTile, UpdateTileInputMode, AddNode.
+        assert_eq!(
+            batch.mutations.len(),
+            3,
+            "interaction_enabled=true must produce PublishToTile + UpdateTileInputMode + AddNode \
+             (composer hit region)"
+        );
+
+        // The third mutation must be AddNode with accepts_composer_input=true.
+        let add_node_mutation = &batch.mutations[2];
+        match &add_node_mutation.mutation {
+            Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
+                assert_eq!(
+                    an.parent_id.len(),
+                    16,
+                    "parent_id must be 16 bytes (big-endian UUID)"
+                );
+                let node = an.node.as_ref().expect("AddNode must carry a NodeProto");
+                match &node.data {
+                    Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(hr)) => {
+                        assert!(
+                            hr.accepts_composer_input,
+                            "composer hit region must have accepts_composer_input=true"
+                        );
+                        assert!(
+                            hr.accepts_focus,
+                            "composer hit region must have accepts_focus=true"
+                        );
+                        assert!(
+                            hr.interaction_id.contains("portal-composer-test"),
+                            "interaction_id must contain the portal_id: got '{}'",
+                            hr.interaction_id
+                        );
+                        assert!(
+                            hr.interaction_id.ends_with("-composer"),
+                            "interaction_id must end with '-composer': got '{}'",
+                            hr.interaction_id
+                        );
+                    }
+                    other => panic!("AddNode node data must be HitRegion, got {other:?}"),
+                }
+            }
+            other => panic!("Third mutation must be AddNode (composer hit region), got {other:?}"),
+        }
+    }
+
+    /// When interaction_enabled is false, render_batch must NOT emit an
+    /// AddNodeMutation for the composer hit region.
+    #[test]
+    fn render_batch_does_not_emit_composer_hit_region_when_interaction_disabled() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![0u8; 16]);
+
+        let mut state = make_expanded_interaction_state("portal-no-input");
+        state.interaction_enabled = false;
+
+        let batch = adapter
+            .render_batch(&state)
+            .expect("render_batch must succeed");
+
+        // Should be 2 mutations only: PublishToTile + UpdateTileInputMode.
+        assert_eq!(
+            batch.mutations.len(),
+            2,
+            "interaction_enabled=false must produce exactly 2 mutations (no AddNode)"
+        );
+    }
+
+    /// The portal root node must carry an explicit (non-empty) ID so the
+    /// AddNodeMutation can reference it as parent_id in the same batch.
+    #[test]
+    fn portal_node_carries_explicit_root_id() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![0u8; 16]);
+
+        let state = make_expanded_interaction_state("portal-root-id");
+
+        let batch = adapter
+            .render_batch(&state)
+            .expect("render_batch must succeed");
+
+        // The PublishToTile mutation must carry a NodeProto with a non-empty ID.
+        match &batch.mutations[0].mutation {
+            Some(tze_hud_protocol::proto::mutation_proto::Mutation::PublishToTile(p)) => {
+                let root = p.node.as_ref().expect("PublishToTile must carry a node");
+                assert_eq!(
+                    root.id.len(),
+                    16,
+                    "portal root NodeProto.id must be 16 bytes (explicit little-endian UUID)"
+                );
+                // The AddNodeMutation's parent_id must match the same UUID (different encoding).
+                // Both are 16 bytes; the relationship is verified by the runtime.
+                match &batch.mutations[2].mutation {
+                    Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
+                        assert_eq!(an.parent_id.len(), 16, "parent_id must be 16 bytes");
+                        // Verify they're NOT byte-equal (they encode the same UUID
+                        // in different endian orders).
+                        assert_ne!(
+                            root.id, an.parent_id,
+                            "NodeProto.id (little-endian) and parent_id (big-endian) must differ \
+                             for the same UUID — same UUID, different wire encodings"
+                        );
+                    }
+                    other => panic!("Third mutation must be AddNode, got {other:?}"),
+                }
+            }
+            other => panic!("First mutation must be PublishToTile, got {other:?}"),
+        }
+    }
 
     #[test]
     fn clamp_utf8_borrows_at_valid_character_boundary() {
