@@ -1,5 +1,7 @@
 # RFC 0018: WHIP Signaling Adapter
 
+> **DEFERRED INDEFINITELY (2026-05-09).** This RFC is parked. The project has refocused on a performant single-device Rust HUD runtime for Windows; all media-plane work (including cloud-relay and WHIP signaling) is deferred. Do not implement against this RFC or gate v1 work on it. Active source of truth: `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`.
+
 **Status:** Draft — pending external review (≥1 external reviewer required per signoff packet F29; F29 gate blocks phase 4b bead creation)
 **Issue:** hud-amf17
 **Date:** 2026-04-19

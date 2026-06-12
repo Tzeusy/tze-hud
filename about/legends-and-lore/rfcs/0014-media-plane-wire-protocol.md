@@ -1,5 +1,7 @@
 # RFC 0014: Media Plane Wire Protocol
 
+> **DEFERRED INDEFINITELY (2026-05-09).** This RFC is parked. The project has refocused on a performant single-device Rust HUD runtime for Windows; all media-plane work is deferred. Do not implement against this RFC or gate v1 work on it. Active source of truth: `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`.
+
 **Status:** Draft — pending external review (≥2 external reviewers required per signoff packet F29)
 **Issue:** hud-ora8.1.8
 **Date:** 2026-04-19

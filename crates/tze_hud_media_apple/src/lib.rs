@@ -1,5 +1,12 @@
 //! # tze_hud_media_apple
 //!
+//! **PARKED — DEFERRED INDEFINITELY (2026-05-09).** This crate is a platform
+//! stub for the deferred mobile/media program. The project has refocused on a
+//! performant single-device Rust HUD runtime for Windows. Do not implement
+//! against this crate or depend on it for v1 work. Revival condition: single-
+//! Windows runtime delivered to high performance bar and mobile program
+//! re-scoped. Active source of truth: `openspec/changes/windows-first-performant-runtime/`.
+//!
 //! Safe Rust wrapper over `objc2-video-toolbox` for tze_hud iOS media decode.
 //!
 //! ## Scope
