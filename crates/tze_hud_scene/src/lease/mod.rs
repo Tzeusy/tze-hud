@@ -1009,4 +1009,156 @@ pub mod tests {
         assert_eq!(ev3.len(), 1, "only the Resumed event since last drain");
         assert!(matches!(ev3[0].kind, LeaseEventKind::Resumed { .. }));
     }
+
+    // ─── State machine matrix-consistency proptest ────────────────────────────
+    //
+    // Property: `can_transition_to` is the single source of truth.
+    //
+    // For every (from_state, to_state) pair across the full 9-state machine:
+    //   - If the corresponding transition method succeeds → can_transition_to must return true.
+    //   - If can_transition_to returns true → the transition method must succeed.
+    //
+    // This prevents the revoke/can_transition_to drift (and any future equivalent)
+    // from silently surviving.  The test sets the state directly via a helper that
+    // constructs the lease in the target from_state, then probes every to_state.
+
+    /// All non-deprecated non-terminal source states the test drives from.
+    ///
+    /// `Disconnected` is omitted: it is a legacy alias for `Orphaned` tracked in
+    /// the cruft-batch bead (hud-t55vn) and intentionally excluded here.
+    const FROM_STATES: &[LeaseState] = &[
+        LeaseState::Requested,
+        LeaseState::Active,
+        LeaseState::Suspended,
+        LeaseState::Orphaned,
+    ];
+
+    /// All target states to probe (including terminals — can_transition_to must
+    /// return false for them when the lease is already terminal, and the matrix
+    /// covers each from_state × each to_state).
+    const ALL_STATES: &[LeaseState] = &[
+        LeaseState::Requested,
+        LeaseState::Active,
+        LeaseState::Suspended,
+        LeaseState::Orphaned,
+        LeaseState::Denied,
+        LeaseState::Revoked,
+        LeaseState::Expired,
+        LeaseState::Released,
+    ];
+
+    /// Build a `LeaseImpl<TestClock>` in the requested `from` state.
+    ///
+    /// Returns `None` for states that cannot be reached via the normal
+    /// transition API (i.e. `Requested` is the only start state; terminals
+    /// reached via their respective methods).
+    fn lease_in_state(from: LeaseState) -> Option<Impl> {
+        use LeaseState::*;
+        let clock = TestClock::new(1_000);
+        match from {
+            Requested => {
+                let lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock);
+                Some(lease)
+            }
+            Active => {
+                let mut lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock);
+                lease.activate().ok()?;
+                Some(lease)
+            }
+            Suspended => {
+                let mut lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock);
+                lease.activate().ok()?;
+                lease.suspend().ok()?;
+                Some(lease)
+            }
+            Orphaned => {
+                let mut lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock);
+                lease.activate().ok()?;
+                lease.orphan().ok()?;
+                Some(lease)
+            }
+            // Terminal states are not from-states for this test.
+            Denied | Revoked | Expired | Released | Disconnected => None,
+        }
+    }
+
+    /// Attempt to drive `lease` from its current state to `to`.
+    ///
+    /// Returns `Ok(())` if the transition succeeded, `Err` otherwise.
+    /// Uses the canonical transition method for each `to` target.
+    /// For transitions that need a reason or have multiple entry methods,
+    /// we use a representative choice.
+    fn attempt_transition(lease: &mut Impl, to: LeaseState) -> Result<(), ()> {
+        use LeaseState::*;
+        match to {
+            Active => lease
+                .activate()
+                .or_else(|_| lease.resume())
+                .or_else(|_| lease.reconnect())
+                .map_err(|_| ()),
+            Denied => lease.deny(DenyReason::CapabilitiesExceeded).map_err(|_| ()),
+            Suspended => lease.suspend().map_err(|_| ()),
+            Orphaned => lease.orphan().map_err(|_| ()),
+            Revoked => lease.revoke(RevokeReason::ViewerDismissed).map_err(|_| ()),
+            Expired => lease.expire().map_err(|_| ()),
+            Released => lease.release().map_err(|_| ()),
+            // Requested and Disconnected are not valid transition targets.
+            Requested | Disconnected => Err(()),
+        }
+    }
+
+    /// FOR ALL non-terminal from-states and ALL to-states:
+    ///
+    /// Direction 1 (mutator → predicate):
+    ///   If `attempt_transition(from → to)` succeeds, then
+    ///   `can_transition_to(to)` must have returned true *before* the call.
+    ///
+    /// Direction 2 (predicate → mutator):
+    ///   If `can_transition_to(to)` returns true, then
+    ///   `attempt_transition(from → to)` must succeed.
+    ///
+    /// Together these assert that the predicate is the single source of truth.
+    #[test]
+    fn impl_state_machine_predicate_mutator_consistency() {
+        for &from in FROM_STATES {
+            for &to in ALL_STATES {
+                // Build a fresh lease in the from-state.
+                let Some(lease) = lease_in_state(from) else {
+                    continue;
+                };
+
+                let predicate_says_ok = lease.can_transition_to(to);
+
+                // Build a second lease for the mutator attempt (so we don't
+                // consume the one used for the predicate check).
+                let Some(mut lease2) = lease_in_state(from) else {
+                    continue;
+                };
+                let mutator_ok = attempt_transition(&mut lease2, to).is_ok();
+
+                // Direction 1: mutator succeeded → predicate must have been true.
+                if mutator_ok {
+                    assert!(
+                        predicate_says_ok,
+                        "state machine inconsistency: \
+                         {from:?} → {to:?} succeeded via mutator but \
+                         can_transition_to returned false. \
+                         The predicate must be updated to include this pair.",
+                    );
+                }
+
+                // Direction 2: predicate says ok → mutator must succeed.
+                if predicate_says_ok {
+                    assert!(
+                        mutator_ok,
+                        "state machine inconsistency: \
+                         can_transition_to({from:?}, {to:?}) returned true but \
+                         the transition method returned Err. \
+                         Either the predicate is over-permissive or the mutator \
+                         is under-permissive.",
+                    );
+                }
+            }
+        }
+    }
 }

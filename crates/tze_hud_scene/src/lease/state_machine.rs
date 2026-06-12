@@ -479,6 +479,11 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
                 | (Suspended, Revoked)
                 | (Orphaned, Active)
                 | (Orphaned, Expired)
+                // RFC 0008 SS3.1 / SS6.6: runtime can force-revoke an orphaned lease
+                // (e.g. "disconnect all agents" during the reconnect grace window).
+                // The revoke() mutator already accepts Orphaned; this arm makes the
+                // predicate the single source of truth.
+                | (Orphaned, Revoked)
         )
     }
 
