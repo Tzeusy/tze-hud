@@ -767,9 +767,7 @@ impl InputProcessor {
     /// Spec: §4.1 local feedback first — the snapshot is pushed WITHOUT an
     /// adapter round-trip so the compositor can render the echo on the next
     /// frame.
-    pub fn composer_draft_snapshot(
-        &self,
-    ) -> Option<(String, usize, bool, tze_hud_scene::SceneId)> {
+    pub fn composer_draft_snapshot(&self) -> Option<(String, usize, bool, tze_hud_scene::SceneId)> {
         let node_id = self.composer_draft_manager.focused_node()?;
         let draft = self.composer_draft_manager.draft()?;
         Some((

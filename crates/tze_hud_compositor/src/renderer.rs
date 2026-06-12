@@ -16964,8 +16964,7 @@ mod tests {
         let display = build_display("hello", 0);
         assert!(
             display.starts_with(CARET),
-            "cursor=0: caret must lead the text, got {:?}",
-            display
+            "cursor=0: caret must lead the text, got {display:?}"
         );
         assert_eq!(&display[CARET.len_utf8()..], "hello");
 
@@ -16974,8 +16973,7 @@ mod tests {
         let display = build_display(text, text.len());
         assert!(
             display.ends_with(CARET),
-            "cursor=len: caret must trail the text, got {:?}",
-            display
+            "cursor=len: caret must trail the text, got {display:?}"
         );
         assert_eq!(&display[..display.len() - CARET.len_utf8()], "hello");
 
@@ -16984,7 +16982,7 @@ mod tests {
         let caret_s = CARET.to_string();
         assert_eq!(
             display,
-            format!("he{}llo", caret_s),
+            format!("he{caret_s}llo"),
             "cursor=2: caret must split text at byte 2"
         );
 
@@ -16992,8 +16990,7 @@ mod tests {
         let display = build_display("hi", 9999);
         assert!(
             display.ends_with(CARET),
-            "out-of-bounds cursor must be clamped to text end, got {:?}",
-            display
+            "out-of-bounds cursor must be clamped to text end, got {display:?}"
         );
         assert_eq!(&display[..display.len() - CARET.len_utf8()], "hi");
 
@@ -17048,9 +17045,7 @@ mod tests {
         ] {
             assert!(
                 (0.0..=1.0).contains(&val),
-                "token {} must be in [0, 1], got {}",
-                name,
-                val
+                "token {name} must be in [0, 1], got {val}"
             );
         }
     }
