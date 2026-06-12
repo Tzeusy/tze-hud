@@ -370,8 +370,8 @@ async fn frame_budgets_hold_under_sustained_portal_stream() {
 
     // Timing assertions: gated — calibrated wall-clock budgets.  (hud-94vm5)
     // Set TZE_HUD_PERF_ASSERT=1 to enforce on a reference host.
+    let p99_frame = summary.frame_time.p99().unwrap_or(0);
     if perf_assert_enabled() {
-        let p99_frame = summary.frame_time.p99().unwrap_or(0);
         assert!(
             p99_frame <= HEADLESS_FRAME_BUDGET_US,
             "p99 frame time {p99_frame}µs exceeded headless budget {HEADLESS_FRAME_BUDGET_US}µs \
@@ -403,7 +403,6 @@ async fn frame_budgets_hold_under_sustained_portal_stream() {
             );
         }
     } else {
-        let p99_frame = summary.frame_time.p99().unwrap_or(0);
         eprintln!(
             "[SKIP-TIMING] frame_time p99={p99_frame}µs; \
              set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
