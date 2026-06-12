@@ -2414,7 +2414,7 @@ impl ProjectionAuthority {
             // Rate window never started — portal is immediately serviceable.
             return None;
         }
-        let next_due = window_start + PORTAL_UPDATE_RATE_WINDOW_WALL_US;
+        let next_due = window_start.checked_add(PORTAL_UPDATE_RATE_WINDOW_WALL_US)?;
         if server_timestamp_wall_us >= next_due {
             // Rate window already elapsed — no wait needed.
             None
