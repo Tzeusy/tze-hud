@@ -2423,29 +2423,35 @@ mod tests {
 
     // ── hud-pkg2g: head-trim keeps scrolled-back viewport stable ─────────────
 
-    /// Spec §3.3 regression: when head content is trimmed (visible-window 16 KiB
-    /// cap), a scrolled-back viewport must NOT jump.
+    /// Spec §3.3 regression: when head content is trimmed (visible-window cap),
+    /// a scrolled-back viewport must NOT jump.
     ///
-    /// Scenario:
-    ///   1. Fill a small-bounded authority with many transcript units until the
-    ///      visible-window cap forces head-trimming.
-    ///   2. Scroll the tile back (into ScrolledBack state).
-    ///   3. Publish more content that causes another visible-window trim.
-    ///   4. Drain — verify `head_trim_geometry` is emitted.
-    ///   5. Call `notify_head_content_removed` with the emitted value.
-    ///   6. Verify the scroll offset is compensated (stable, not jumped).
+    /// Byte/line layout (max_vis=250, 1-line viewport):
     ///
-    /// Without this wiring (pre-hud-pkg2g), step 5 would not be called and the
-    /// offset would jump because `ScrollTileState` still tracks the old (larger)
-    /// content height.
+    ///   drain1 (CreatePortalTile): 1 unit × 50B  → 50B visible,  1 line
+    ///   drain2 (RenderPortal):     5 units × 50B  → 250B visible, 5 lines
+    ///     max_scroll = (5-1)*line_h = 4*line_h
+    ///   user scrolls back 2 lines → offset = 4*line_h - 2*line_h = 2*line_h (> 0) ✓
+    ///   drain3 (RenderPortal):     1 unit × 55B added
+    ///     visible window (newest→oldest): 55 + 50 + 50 + 50 = 205 ≤ 250, then +50=255>250.
+    ///     visible_bytes=205 (4 units), content_height=4*line_h.
+    ///     205 < 250 (drain2) ✓  AND  4*line_h < 5*line_h (drain2) ✓  → head_trim fires.
+    ///     removed_height_px = 5*line_h - 4*line_h = 1*line_h
+    ///     compensated offset = max(2*line_h - 1*line_h, 0) = 1*line_h  (> 0 → meaningful) ✓
+    ///
+    /// Without this wiring (pre-hud-pkg2g), notify_head_content_removed is not called
+    /// and ScrollTileState retains stale content-height, corrupting the follow-tail
+    /// recomputation and potentially jumping the viewport.
     #[test]
     fn head_trim_scrolled_back_viewport_stays_stable_via_drain_record() {
         use tze_hud_input::{InputProcessor, ScrollEvent};
         use tze_hud_scene::{Capability, Rect, SceneGraph};
 
-        // Use a tiny visible-transcript window (64 bytes) so even a modest
-        // publish sequence triggers the 16 KiB (here 64 byte) cap.
-        let max_vis: usize = 64;
+        // max_vis=250: five 50B units fill the window exactly.
+        // A subsequent 55B unit displaces the oldest 50B unit
+        // (55+50+50+50+50=255 > 250), shrinking visible_bytes from 250 to 205 and
+        // content from 5 to 4 lines.  This guarantees head_trim_geometry = Some.
+        let max_vis: usize = 250;
         let mut authority = ProjectionAuthority::new(ProjectionBounds {
             max_portal_updates_per_second: 100,
             max_visible_transcript_bytes: max_vis,
@@ -2457,7 +2463,6 @@ mod tests {
         let token_a = attach_projection(&mut authority, "proj-a");
         drive.attach_adapter("proj-a", Vec::new());
 
-        // Derive line height from the adapter's actual font-size token.
         let font_size_px = drive
             .adapter_mut("proj-a")
             .unwrap()
@@ -2465,8 +2470,9 @@ mod tests {
             .transcript_font_size_px;
         let line_h = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
 
-        // Set up a small viewport: 3 lines tall.
-        let viewport_h = (3.0 * line_h).ceil() as i32;
+        // 1-line viewport: with 5 lines of content, max_scroll = 4*line_h.
+        // The user scrolls back 2 lines → offset = 2*line_h (well within bounds).
+        let viewport_h = line_h.ceil() as i32;
         authority.push_geometry_snapshot(
             "proj-a",
             tze_hud_projection::AdapterGeometrySnapshot {
@@ -2507,86 +2513,88 @@ mod tests {
 
         let mut processor = InputProcessor::new();
 
-        // ── Phase 1: establish initial content (CreatePortalTile) ─────────────
-        // Each unit is longer than max_vis bytes so the very second drain will
-        // already be a trim scenario.  We use a 70-character unit string so
-        // visible_transcript_bytes would be ≤ max_vis (64) only from the tail.
-        let unit_long = "A".repeat(70); // 70 bytes > max_vis=64
+        // ── Phase 1: first drain (CreatePortalTile) ───────────────────────────
+        // Each 50B unit fits within max_vis individually; five of them together
+        // exactly fill the visible window (5×50=250=max_vis).
+        let unit_50 = "A".repeat(50);
+        // 55B unit: when added as the 6th unit, only 4 predecessors (4×50=200)
+        // still fit (55+50×4=255>250 forces the oldest out, 55+50×3=205≤250).
+        let unit_55 = "B".repeat(55);
 
-        publish_output(&mut authority, "proj-a", &token_a, &unit_long, 20);
+        publish_output(&mut authority, "proj-a", &token_a, &unit_50, 20);
         let first_drain = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
         assert_eq!(first_drain.len(), 1, "must produce one drain record");
-        // First drain is CreatePortalTile — register the tile in the adapter.
         let fake_tile: Vec<u8> = tile_id.to_bytes_le().to_vec();
         drive
             .adapter_mut("proj-a")
             .unwrap()
             .record_created_tile(fake_tile);
 
-        // Prime processor: visible window = 1 line (truncated to max_vis).
-        // Use the actual bytes from the first drain's visible_transcript_bytes.
-        let first_vis_bytes = first_drain[0].visible_transcript_bytes;
-        // content_height = 1 line (the window only sees 1 unit, though truncated).
-        let initial_content_h = 1.0 * line_h;
+        // Prime processor: 1 unit, 1 line.
         processor.notify_tile_content_appended(
             tile_id,
-            initial_content_h,
+            line_h,
             viewport_h as f32,
             line_h,
             &mut scene,
         );
 
-        // ── Phase 2: add enough content to overflow the viewport and trim head ─
-        // Publish 10 more long units. The visible window (64 bytes) will trim
-        // to the latest content, so older lines vanish from the window.
+        // ── Phase 2: second drain — five 50B units visible (250B = max_vis) ───
+        // Publish 4 more 50B units past the rate window, then drain.
         let base_ts = PORTAL_UPDATE_RATE_WINDOW_WALL_US;
-        for i in 1_u64..=10 {
+        for i in 0_u64..4 {
             publish_output(
                 &mut authority,
                 "proj-a",
                 &token_a,
-                &unit_long,
-                base_ts + i * 10 + 5,
+                &unit_50,
+                base_ts + i * 5 + 1,
             );
         }
-        let ts_drain2 = base_ts + 10 * 10 + 10;
+        let ts_drain2 = base_ts + 30;
         let drain2 = drain_and_emit_portal_updates(&mut authority, &mut drive, ts_drain2);
         assert_eq!(drain2.len(), 1, "second drain must produce one record");
 
-        // Simulate runtime: apply append geometry to grow the scroll state.
-        if let Some(ag) = drain2[0].append_geometry {
-            // No head-trim on second drain yet (first time tracking).
-            processor.notify_tile_content_appended(
-                tile_id,
-                ag.new_content_height_px,
-                ag.viewport_height_px,
-                ag.line_height_px,
-                &mut scene,
-            );
-        }
+        // Verify the geometry that the stability proof depends on.
+        assert_eq!(
+            drain2[0].visible_transcript_bytes, 250,
+            "drain2 must show 250 visible bytes (5 × 50B)"
+        );
+        let ag2 = drain2[0]
+            .append_geometry
+            .expect("drain2 RenderPortal must carry append_geometry");
+        assert!(
+            (ag2.new_content_height_px - 5.0 * line_h).abs() < f32::EPSILON,
+            "drain2 must show 5 lines; got {}",
+            ag2.new_content_height_px
+        );
 
-        // ── Phase 3: scroll back ──────────────────────────────────────────────
-        // Drive to tail, then scroll up several lines so we are ScrolledBack.
-        let (_, current_offset) = scene.tile_scroll_offset_local(tile_id);
-        // Scroll to tail first if not already there.
-        if current_offset < line_h {
-            let _ = processor.process_scroll_event(
-                &ScrollEvent {
-                    x: 300.0,
-                    y: (viewport_h as f32) / 2.0,
-                    delta_x: 0.0,
-                    delta_y: line_h * 20.0, // large forward scroll
-                },
-                &mut scene,
-            );
-        }
-        // Scroll back 2 lines.
+        // Simulate runtime: 5 lines visible, viewport 1 line → max_scroll = 4*line_h.
+        processor.notify_tile_content_appended(
+            tile_id,
+            ag2.new_content_height_px,
+            ag2.viewport_height_px,
+            ag2.line_height_px,
+            &mut scene,
+        );
+
+        // ── Phase 3: scroll back 2 lines ─────────────────────────────────────
+        // max_scroll = 4*line_h.  Forward scroll to AtTail then back 2 lines.
         let _ = processor.process_scroll_event(
             &ScrollEvent {
                 x: 300.0,
                 y: (viewport_h as f32) / 2.0,
                 delta_x: 0.0,
-                delta_y: -2.0 * line_h,
+                delta_y: line_h * 20.0, // large forward → AtTail at 4*line_h
+            },
+            &mut scene,
+        );
+        let _ = processor.process_scroll_event(
+            &ScrollEvent {
+                x: 300.0,
+                y: (viewport_h as f32) / 2.0,
+                delta_x: 0.0,
+                delta_y: -2.0 * line_h, // back 2 lines → offset = 2*line_h
             },
             &mut scene,
         );
@@ -2595,70 +2603,84 @@ mod tests {
             "tile must be ScrolledBack before the head-trim drain"
         );
         let (_, offset_before_trim) = scene.tile_scroll_offset_local(tile_id);
+        // Scroll model: offset_y = distance scrolled from content origin toward tail.
+        // AtTail → offset = max_scroll = 4*line_h.  Back 2 lines → 2*line_h.
+        assert!(
+            offset_before_trim > 0.0,
+            "offset_before_trim must be > 0 (expected ~2*line_h); got {}",
+            offset_before_trim
+        );
 
-        // ── Phase 4: trigger a visible-window head-trim via new publish ───────
-        // Publish another long unit past the rate window.
-        let ts_drain3 = base_ts + 20 * 10 + 10;
-        publish_output(&mut authority, "proj-a", &token_a, &unit_long, ts_drain3);
+        // ── Phase 4: head-trim drain — 55B unit evicts oldest 50B unit ────────
+        // visible window from tail: 55B + 50B + 50B + 50B = 205 ≤ 250 → 4 units.
+        // Adding the 5th (50B): 205+50=255 > 250 → stops.
+        // visible_bytes=205 (down from 250), content_height=4 lines (down from 5).
+        let ts_drain3 = base_ts + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 5;
+        publish_output(&mut authority, "proj-a", &token_a, &unit_55, ts_drain3);
         let drain3 = drain_and_emit_portal_updates(&mut authority, &mut drive, ts_drain3);
         assert_eq!(drain3.len(), 1, "third drain must produce one record");
 
-        // ── Phase 5: verify head_trim_geometry is emitted ────────────────────
-        // Because we've been publishing content that exceeds max_vis=64 bytes,
-        // the visible window will have been trimming head content.  The drive
-        // state should detect the shrinkage and set head_trim_geometry.
-        //
-        // NOTE: The trim may not trigger on every drain because visible_bytes
-        // may stay stable at max_vis after the first trim.  We accept either:
-        //   (a) head_trim_geometry is Some — apply it and verify stability;
-        //   (b) head_trim_geometry is None — content was stable, offset must also
-        //       be stable (no disturbance).
-        if let Some(htg) = drain3[0].head_trim_geometry {
-            assert!(
-                htg.removed_height_px > 0.0,
-                "head_trim_geometry.removed_height_px must be positive; got {}",
-                htg.removed_height_px
-            );
-            // Simulate runtime: call notify_head_content_removed BEFORE
-            // notify_tile_content_appended (hud-pkg2g contract).
-            let _trim_changed =
-                processor.notify_head_content_removed(tile_id, htg.removed_height_px);
+        // ── Phase 5: head_trim_geometry must be Some (unconditional) ─────────
+        // visible_bytes dropped 250 → 205 AND content_height dropped 5 → 4 lines.
+        // Both conditions fire the detection; if this changes, the test setup is broken.
+        let htg = drain3[0].head_trim_geometry.expect(
+            "head_trim_geometry must be Some: visible_bytes dropped 250→205 \
+             (55B unit evicted oldest 50B unit from visible window)",
+        );
+        assert!(
+            htg.removed_height_px > 0.0,
+            "removed_height_px must be positive; got {}",
+            htg.removed_height_px,
+        );
+        // We expect exactly 1 line removed (5 lines → 4 lines).  Allow for f32
+        // rounding on line_h = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER.
+        assert!(
+            (htg.removed_height_px - line_h).abs() < 1.0,
+            "removed_height_px must be approximately 1*line_h={line_h}; got {}",
+            htg.removed_height_px,
+        );
 
-            // Verify: offset was adjusted (reduced by removed_height_px or clamped
-            // to zero), not jumped to an arbitrary value.
-            let (_, offset_after_trim) = scene.tile_scroll_offset_local(tile_id);
-            let expected_min = (offset_before_trim - htg.removed_height_px).max(0.0);
-            assert!(
-                offset_after_trim >= expected_min - f32::EPSILON,
-                "scroll offset must be compensated after head-trim; \
-                 before={offset_before_trim} removed={} expected_min={expected_min} got={offset_after_trim}",
-                htg.removed_height_px
-            );
-            assert!(
-                offset_after_trim <= offset_before_trim + f32::EPSILON,
-                "scroll offset must not INCREASE after head-trim; \
-                 before={offset_before_trim} got={offset_after_trim}"
-            );
-        }
+        // ── Phase 6: notify_head_content_removed BEFORE notify_tile_content_appended
+        // hud-pkg2g contract: adjust offset BEFORE appended so ScrollTileState
+        // content-height is correct for the follow-tail recomputation.
+        let trim_changed = processor.notify_head_content_removed(tile_id, htg.removed_height_px);
+        assert!(
+            trim_changed,
+            "notify_head_content_removed must return true (tile is ScrolledBack)"
+        );
 
-        // Apply append geometry (may be present).
-        if let Some(ag) = drain3[0].append_geometry {
-            let changed = processor.notify_tile_content_appended(
-                tile_id,
-                ag.new_content_height_px,
-                ag.viewport_height_px,
-                ag.line_height_px,
-                &mut scene,
-            );
-            // Spec §3.3: a ScrolledBack tile must NOT advance on append.
-            assert!(
-                !changed,
-                "spec §3.3: scrolled-back tile must NOT advance after append+head-trim; \
-                 changed=true means viewport jumped"
-            );
-        }
+        // ── Phase 7: verify scroll offset was compensated, not jumped ─────────
+        // notify_head_content_removed adjusts the internal scroll offset but does NOT
+        // propagate it to the scene graph by design (the method has no scene parameter).
+        // commit_scroll_updates flushes the dirty state to the scene so we can assert.
+        let _ = processor.commit_scroll_updates(&mut scene);
 
-        // Double-check: first_vis_bytes field is used above; suppress unused-variable lint.
-        let _ = first_vis_bytes;
+        // Before: ~2*line_h.  Removed: ~1*line_h.  Expected: ~1*line_h.
+        let (_, offset_after_trim) = scene.tile_scroll_offset_local(tile_id);
+        let expected_compensated = (offset_before_trim - htg.removed_height_px).max(0.0);
+        // Allow 1.0 px tolerance for f32 accumulation in line-height arithmetic.
+        assert!(
+            (offset_after_trim - expected_compensated).abs() < 1.0,
+            "scroll offset must equal offset_before - removed after head-trim; \
+             before={offset_before_trim} removed={} expected={expected_compensated} got={offset_after_trim}",
+            htg.removed_height_px
+        );
+
+        // Apply append geometry — tile is ScrolledBack so it must NOT advance.
+        let ag3 = drain3[0]
+            .append_geometry
+            .expect("drain3 RenderPortal must carry append_geometry");
+        let advanced = processor.notify_tile_content_appended(
+            tile_id,
+            ag3.new_content_height_px,
+            ag3.viewport_height_px,
+            ag3.line_height_px,
+            &mut scene,
+        );
+        assert!(
+            !advanced,
+            "spec §3.3: scrolled-back tile must NOT advance after append+head-trim; \
+             advanced=true means viewport jumped to tail"
+        );
     }
 }
