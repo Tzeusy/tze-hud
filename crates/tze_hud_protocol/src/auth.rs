@@ -14,11 +14,15 @@
 //! fully implemented:
 //!
 //! - `PreSharedKeyCredential` — matched against the server PSK.
-//! - `LocalSocketCredential` — accepted unconditionally on loopback.
+//! - `LocalSocketCredential` — accepted only when the peer address is a
+//!   loopback address (`127.0.0.0/8` or `::1`).  Non-loopback peers are
+//!   rejected with `AUTH_FAILED` (see `hud-1aswu.1`).
 //!
 //! `OauthTokenCredential` and `MtlsCredential` are schema-defined
 //! (proto messages exist) but their implementations are v1-reserved; they
 //! are rejected with `AUTH_FAILED` until a future release enables them.
+
+use std::net::IpAddr;
 
 use crate::proto::session::{AuthCredential, auth_credential::Credential};
 
@@ -75,10 +79,28 @@ pub enum AuthResult {
     Unimplemented(String),
 }
 
+/// Returns `true` if `addr` is a loopback address (IPv4 `127.x.x.x` or IPv6 `::1`).
+///
+/// Used to gate `LocalSocketCredential` acceptance: only loopback peers may
+/// authenticate with a local-socket credential (hud-1aswu.1).
+pub fn is_loopback(addr: IpAddr) -> bool {
+    addr.is_loopback()
+}
+
 /// Evaluate a structured `AuthCredential` against the server configuration.
 ///
 /// `psk` is the pre-shared key configured on the server.
-pub fn evaluate_auth_credential(credential: &AuthCredential, psk: &str) -> AuthResult {
+///
+/// `peer_addr` is the remote address of the connecting client, used to gate
+/// `LocalSocketCredential` acceptance — only loopback peers are accepted
+/// (hud-1aswu.1).  Pass `None` when the peer address is unavailable (e.g.
+/// in unit tests); in that case `LocalSocketCredential` is rejected as a
+/// conservative fallback.
+pub fn evaluate_auth_credential(
+    credential: &AuthCredential,
+    psk: &str,
+    peer_addr: Option<IpAddr>,
+) -> AuthResult {
     match &credential.credential {
         Some(Credential::PreSharedKey(cred)) => {
             // Use branch-free comparison to resist timing side-channels.
@@ -89,9 +111,24 @@ pub fn evaluate_auth_credential(credential: &AuthCredential, psk: &str) -> AuthR
             }
         }
         Some(Credential::LocalSocket(_cred)) => {
-            // V1: local socket connections are accepted unconditionally.
-            // In a production system we would verify the PID/socket path.
-            AuthResult::Accepted
+            // Security fix (hud-1aswu.1): LocalSocketCredential is only valid
+            // when the connection originates from loopback.  A non-loopback peer
+            // (LAN, tailnet, etc.) presenting this credential is rejected with
+            // AUTH_FAILED — the stable error code for authentication failures.
+            //
+            // `peer_addr = None` is treated as non-loopback (conservative).
+            match peer_addr {
+                Some(addr) if addr.is_loopback() => AuthResult::Accepted,
+                Some(addr) => AuthResult::Failed(format!(
+                    "LocalSocketCredential rejected: peer {addr} is not a loopback address; \
+                     use PreSharedKeyCredential for non-local connections"
+                )),
+                None => AuthResult::Failed(
+                    "LocalSocketCredential rejected: peer address unknown (non-loopback assumed); \
+                     use PreSharedKeyCredential"
+                        .to_string(),
+                ),
+            }
         }
         Some(Credential::OauthToken(_)) => {
             // v1-reserved: OauthTokenCredential schema exists but is not implemented.
@@ -118,15 +155,19 @@ pub fn evaluate_auth_credential(credential: &AuthCredential, psk: &str) -> AuthR
 /// Checks the structured `auth_credential` field first; falls back to the
 /// deprecated `pre_shared_key` string field for backward compatibility with
 /// agents built before the `AuthCredential` oneof was added.
+///
+/// `peer_addr` is forwarded to `evaluate_auth_credential` for
+/// `LocalSocketCredential` loopback gating (hud-1aswu.1).
 pub fn authenticate_session_init(
     auth_credential: Option<&AuthCredential>,
     legacy_psk: &str,
     server_psk: &str,
+    peer_addr: Option<IpAddr>,
 ) -> AuthResult {
     // If a structured credential is provided, use it.
     if let Some(cred) = auth_credential {
         if cred.credential.is_some() {
-            return evaluate_auth_credential(cred, server_psk);
+            return evaluate_auth_credential(cred, server_psk, peer_addr);
         }
     }
 
@@ -502,13 +543,27 @@ mod tests {
         }
     }
 
+    // ── Loopback helpers for tests ─────────────────────────────────────────────
+
+    fn loopback_v4() -> Option<IpAddr> {
+        Some("127.0.0.1".parse().unwrap())
+    }
+
+    fn loopback_v6() -> Option<IpAddr> {
+        Some("::1".parse().unwrap())
+    }
+
+    fn lan_peer() -> Option<IpAddr> {
+        Some("192.168.1.42".parse().unwrap())
+    }
+
     // ── Auth credential tests ──────────────────────────────────────────────────
 
     #[test]
     fn test_psk_credential_success() {
         let cred = psk_credential("secret");
         assert_eq!(
-            evaluate_auth_credential(&cred, "secret"),
+            evaluate_auth_credential(&cred, "secret", loopback_v4()),
             AuthResult::Accepted
         );
     }
@@ -516,19 +571,63 @@ mod tests {
     #[test]
     fn test_psk_credential_failure() {
         let cred = psk_credential("wrong");
-        match evaluate_auth_credential(&cred, "secret") {
+        match evaluate_auth_credential(&cred, "secret", loopback_v4()) {
             AuthResult::Failed(_) => {}
             other => panic!("Expected Failed, got: {other:?}"),
         }
     }
 
+    /// LocalSocketCredential from loopback IPv4 peer is accepted.
     #[test]
-    fn test_local_socket_credential_accepted() {
+    fn test_local_socket_credential_accepted_loopback_v4() {
         let cred = local_socket_credential();
         assert_eq!(
-            evaluate_auth_credential(&cred, "secret"),
+            evaluate_auth_credential(&cred, "secret", loopback_v4()),
             AuthResult::Accepted
         );
+    }
+
+    /// LocalSocketCredential from loopback IPv6 peer is accepted.
+    #[test]
+    fn test_local_socket_credential_accepted_loopback_v6() {
+        let cred = local_socket_credential();
+        assert_eq!(
+            evaluate_auth_credential(&cred, "secret", loopback_v6()),
+            AuthResult::Accepted
+        );
+    }
+
+    /// LocalSocketCredential from a LAN (non-loopback) peer is rejected with AUTH_FAILED.
+    /// Security fix: hud-1aswu.1.
+    #[test]
+    fn test_local_socket_credential_rejected_lan_peer() {
+        let cred = local_socket_credential();
+        match evaluate_auth_credential(&cred, "secret", lan_peer()) {
+            AuthResult::Failed(msg) => {
+                assert!(
+                    msg.contains("not a loopback address"),
+                    "rejection message must mention loopback: {msg}"
+                );
+            }
+            other => panic!("Expected Failed for LAN peer with LocalSocket cred, got: {other:?}"),
+        }
+    }
+
+    /// LocalSocketCredential with unknown peer address (None) is rejected conservatively.
+    #[test]
+    fn test_local_socket_credential_rejected_unknown_peer() {
+        let cred = local_socket_credential();
+        match evaluate_auth_credential(&cred, "secret", None) {
+            AuthResult::Failed(msg) => {
+                assert!(
+                    msg.contains("peer address unknown"),
+                    "rejection message must mention unknown peer: {msg}"
+                );
+            }
+            other => {
+                panic!("Expected Failed for unknown peer with LocalSocket cred, got: {other:?}")
+            }
+        }
     }
 
     #[test]
@@ -540,7 +639,7 @@ mod tests {
                 token_type: "Bearer".to_string(),
             })),
         };
-        match evaluate_auth_credential(&cred, "secret") {
+        match evaluate_auth_credential(&cred, "secret", loopback_v4()) {
             AuthResult::Unimplemented(_) => {}
             other => panic!("Expected Unimplemented, got: {other:?}"),
         }
@@ -555,7 +654,7 @@ mod tests {
                 expected_san: "test".to_string(),
             })),
         };
-        match evaluate_auth_credential(&cred, "secret") {
+        match evaluate_auth_credential(&cred, "secret", loopback_v4()) {
             AuthResult::Unimplemented(_) => {}
             other => panic!("Expected Unimplemented, got: {other:?}"),
         }
@@ -564,7 +663,7 @@ mod tests {
     #[test]
     fn test_empty_credential_fails() {
         let cred = AuthCredential { credential: None };
-        match evaluate_auth_credential(&cred, "secret") {
+        match evaluate_auth_credential(&cred, "secret", loopback_v4()) {
             AuthResult::Failed(_) => {}
             other => panic!("Expected Failed, got: {other:?}"),
         }
@@ -577,7 +676,7 @@ mod tests {
         let cred = psk_credential("correct");
         // Even with wrong legacy PSK, structured cred with correct key should pass
         assert_eq!(
-            authenticate_session_init(Some(&cred), "wrong-legacy", "correct"),
+            authenticate_session_init(Some(&cred), "wrong-legacy", "correct", loopback_v4()),
             AuthResult::Accepted
         );
     }
@@ -586,14 +685,14 @@ mod tests {
     fn test_session_init_legacy_psk_fallback() {
         // No structured credential → falls back to legacy pre_shared_key field
         assert_eq!(
-            authenticate_session_init(None, "correct", "correct"),
+            authenticate_session_init(None, "correct", "correct", loopback_v4()),
             AuthResult::Accepted
         );
     }
 
     #[test]
     fn test_session_init_legacy_psk_fallback_failure() {
-        match authenticate_session_init(None, "wrong", "correct") {
+        match authenticate_session_init(None, "wrong", "correct", loopback_v4()) {
             AuthResult::Failed(_) => {}
             other => panic!("Expected Failed, got: {other:?}"),
         }
@@ -604,7 +703,7 @@ mod tests {
         // AuthCredential with no credential variant set → fall back to legacy field
         let empty_cred = AuthCredential { credential: None };
         assert_eq!(
-            authenticate_session_init(Some(&empty_cred), "correct", "correct"),
+            authenticate_session_init(Some(&empty_cred), "correct", "correct", loopback_v4()),
             AuthResult::Accepted
         );
     }

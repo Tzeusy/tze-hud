@@ -161,6 +161,7 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
         debug_zones: false,     // Render zone boundaries — disabled for the demo.
         monitor_index: None,    // Use primary monitor.
         benchmark: None,        // Demo mode is unbounded until the window closes.
+        bind_all_interfaces: false, // Demo binds loopback only (ports are 0 anyway).
     };
 
     let runtime = WindowedRuntime::new(config);

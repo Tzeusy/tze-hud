@@ -1921,6 +1921,10 @@ impl HudSession for HudSessionImpl {
         &self,
         request: Request<tonic::Streaming<ClientMessage>>,
     ) -> Result<Response<Self::SessionStream>, Status> {
+        // Extract peer address BEFORE consuming the request via into_inner().
+        // This is needed for LocalSocketCredential loopback gating (hud-1aswu.1).
+        let peer_ip: Option<std::net::IpAddr> = request.remote_addr().map(|addr| addr.ip());
+
         let mut inbound = request.into_inner();
         let state = self.state.clone();
         let psk = self.psk.clone();
@@ -2014,6 +2018,7 @@ impl HudSession for HudSessionImpl {
                         &init,
                         &agent_capabilities,
                         fallback_unrestricted,
+                        peer_ip,
                     )
                     .await
                 }
@@ -2025,6 +2030,7 @@ impl HudSession for HudSessionImpl {
                         &resume,
                         &agent_capabilities,
                         fallback_unrestricted,
+                        peer_ip,
                     )
                     .await
                 }
@@ -2548,6 +2554,7 @@ async fn handle_session_init(
     init: &SessionInit,
     agent_capabilities: &HashMap<String, Vec<String>>,
     fallback_unrestricted: bool,
+    peer_ip: Option<std::net::IpAddr>,
 ) -> Option<StreamSession> {
     // ── Step 1: Version negotiation (RFC 0005 §4.1) ──────────────────────────
     // Do this before authentication so agents can learn about version
@@ -2577,8 +2584,13 @@ async fn handle_session_init(
 
     // ── Step 2: Authentication (RFC 0005 §1.4) ───────────────────────────────
     // Authentication is evaluated synchronously before SessionEstablished is sent.
-    let auth_result =
-        authenticate_session_init(init.auth_credential.as_ref(), &init.pre_shared_key, psk);
+    // peer_ip is passed for LocalSocketCredential loopback gating (hud-1aswu.1).
+    let auth_result = authenticate_session_init(
+        init.auth_credential.as_ref(),
+        &init.pre_shared_key,
+        psk,
+        peer_ip,
+    );
 
     match auth_result {
         AuthResult::Accepted => {}
@@ -2767,10 +2779,16 @@ async fn handle_session_resume(
     resume: &SessionResume,
     agent_capabilities: &HashMap<String, Vec<String>>,
     fallback_unrestricted: bool,
+    peer_ip: Option<std::net::IpAddr>,
 ) -> Option<StreamSession> {
     // Re-authentication is required on resume (RFC 0005 §6.2).
-    let auth_result =
-        authenticate_session_init(resume.auth_credential.as_ref(), &resume.pre_shared_key, psk);
+    // peer_ip is passed for LocalSocketCredential loopback gating (hud-1aswu.1).
+    let auth_result = authenticate_session_init(
+        resume.auth_credential.as_ref(),
+        &resume.pre_shared_key,
+        psk,
+        peer_ip,
+    );
     match auth_result {
         AuthResult::Accepted => {}
         AuthResult::Failed(reason) | AuthResult::Unimplemented(reason) => {

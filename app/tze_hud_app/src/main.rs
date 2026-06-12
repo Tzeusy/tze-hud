@@ -21,6 +21,7 @@
 //! | `--mcp-port <port>` | `TZE_HUD_MCP_PORT`     | `9090`       | MCP HTTP listen port (0 to disable).     |
 //! | `--psk <key>`       | `TZE_HUD_PSK`          | `tze-hud-key`| Pre-shared key for session authentication.|
 //! | `--fps <n>`         | `TZE_HUD_FPS`          | `60`         | Target frames per second.                |
+//! | `--bind-all-interfaces` | `TZE_HUD_BIND_ALL_INTERFACES` | `false` | Bind gRPC+MCP on `0.0.0.0` (LAN/remote opt-in; default is loopback). |
 //! | `--benchmark-emit <path>` | `TZE_HUD_BENCHMARK_EMIT` | — | Emit bounded windowed benchmark JSON and exit. |
 //! | `--benchmark-frames <n>` | `TZE_HUD_BENCHMARK_FRAMES` | `600` | Measured frames for benchmark mode. |
 //! | `--benchmark-warmup-frames <n>` | `TZE_HUD_BENCHMARK_WARMUP_FRAMES` | `120` | Warmup frames skipped before measurement. |
@@ -104,6 +105,8 @@ OPTIONS:
                            (env: TZE_HUD_PSK)
     --fps <n>              Target frames per second  [default: 60]
                            (env: TZE_HUD_FPS)
+    --bind-all-interfaces  Bind gRPC+MCP on 0.0.0.0 (LAN/remote opt-in; default: 127.0.0.1)
+                           (env: TZE_HUD_BIND_ALL_INTERFACES=1)
     --benchmark-emit <path>
                            Emit bounded windowed compositor benchmark JSON and exit
                            (env: TZE_HUD_BENCHMARK_EMIT)
@@ -160,6 +163,12 @@ struct StartupOptions {
     mcp_port: u16,
     psk: String,
     fps: u32,
+    /// Bind gRPC and MCP servers on all interfaces (`0.0.0.0`) instead of
+    /// loopback only (`127.0.0.1`).
+    ///
+    /// Security opt-in (hud-1aswu.1): default is loopback-only.  Set this
+    /// flag or `TZE_HUD_BIND_ALL_INTERFACES=1` to allow LAN/remote access.
+    bind_all_interfaces: bool,
     /// When true, render zone boundaries with colored debug tints.
     debug_zones: bool,
     /// Monitor index for overlay placement (0-based). `None` = primary monitor.
@@ -185,6 +194,7 @@ impl Default for StartupOptions {
             mcp_port: 9090,
             psk: DEFAULT_PSK.to_string(),
             fps: 60,
+            bind_all_interfaces: false,
             debug_zones: false,
             monitor_index: None,
             benchmark_emit: None,
@@ -287,6 +297,10 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
     if let Ok(v) = std::env::var("TZE_HUD_PSK") {
         opts.psk = v;
     }
+    if let Ok(v) = std::env::var("TZE_HUD_BIND_ALL_INTERFACES") {
+        // Security opt-in (hud-1aswu.1): "1" or "true" (case-insensitive).
+        opts.bind_all_interfaces = v == "1" || v.eq_ignore_ascii_case("true");
+    }
     if let Ok(v) = std::env::var("TZE_HUD_FPS") {
         opts.fps = v
             .parse::<u32>()
@@ -386,6 +400,10 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
                 opts.fps = val
                     .parse::<u32>()
                     .map_err(|_| format!("--fps: invalid integer: {val:?}"))?;
+            }
+            "--bind-all-interfaces" => {
+                // Security opt-in (hud-1aswu.1): bind gRPC and MCP on 0.0.0.0.
+                opts.bind_all_interfaces = true;
             }
             "--debug-zones" => {
                 opts.debug_zones = true;
@@ -660,6 +678,7 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
         debug_zones: opts.debug_zones,
         monitor_index: opts.monitor_index,
         benchmark,
+        bind_all_interfaces: opts.bind_all_interfaces,
     };
 
     // Diagnostic: write resolved config to disk so we can verify args were parsed.

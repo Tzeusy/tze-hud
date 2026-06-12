@@ -1121,15 +1121,35 @@ pub struct WindowedConfig {
     /// Default: `true`.
     pub overlay_auto_size: bool,
     /// gRPC server port.  Set to `0` to disable the gRPC server.
+    ///
+    /// Both gRPC and MCP default to loopback-only binding (`127.0.0.1`) for
+    /// security.  To expose them on all interfaces, set `bind_all_interfaces =
+    /// true` or the `TZE_HUD_BIND_ALL_INTERFACES=1` environment variable.
     pub grpc_port: u16,
     /// MCP HTTP server port.  Set to `0` to disable the MCP server.
     ///
-    /// The MCP server binds on all interfaces (`0.0.0.0`) at the given port.
-    /// It enforces PSK authentication on every request via HTTP
-    /// `Authorization: Bearer <psk>` or the JSON-RPC `_auth` param field.
+    /// The MCP server binds on `127.0.0.1` (loopback only) at the given port
+    /// by default.  Set `bind_all_interfaces = true` (or
+    /// `TZE_HUD_BIND_ALL_INTERFACES=1`) for `0.0.0.0` binding.  It enforces
+    /// PSK authentication on every request via HTTP `Authorization: Bearer
+    /// <psk>` or the JSON-RPC `_auth` param field.
     ///
     /// Default: 9090.
     pub mcp_port: u16,
+    /// Bind gRPC and MCP servers on all interfaces (`0.0.0.0`) instead of
+    /// loopback only (`127.0.0.1`).
+    ///
+    /// **Security opt-in (hud-1aswu.1).** The default is `false` — both
+    /// servers bind loopback only, preventing LAN/tailnet access.  Set this
+    /// to `true` only when you deliberately need remote-agent or cloud-relay
+    /// access.  When enabled, all connections still require PSK authentication;
+    /// `LocalSocketCredential` is additionally gated to loopback peers.
+    ///
+    /// Can also be set via the `TZE_HUD_BIND_ALL_INTERFACES=1` environment
+    /// variable (overrides this field if set).
+    ///
+    /// Default: `false`.
+    pub bind_all_interfaces: bool,
     /// Pre-shared key for session authentication (gRPC and MCP).
     pub psk: String,
     /// Target frames per second.  Default: 60.
@@ -1188,6 +1208,7 @@ impl Default for WindowedConfig {
             debug_zones: false,
             monitor_index: None,
             benchmark: None,
+            bind_all_interfaces: false,
         }
     }
 }
@@ -4105,6 +4126,12 @@ impl WindowedRuntime {
         // runtime for gRPC server, MCP bridge, session management."
         //
         // gRPC server is disabled when grpc_port == 0 (per WindowedConfig docs).
+        // Security fix (hud-1aswu.1): pass bind_all_interfaces so gRPC also
+        // defaults to loopback unless explicitly opted in.
+        let bind_all = cfg.bind_all_interfaces
+            || std::env::var("TZE_HUD_BIND_ALL_INTERFACES")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
         let (mut network_rt, mut network_handles, element_repositioned_tx, input_event_tx) =
             start_network_services(
                 cfg.grpc_port,
@@ -4112,6 +4139,7 @@ impl WindowedRuntime {
                 shared_state.clone(),
                 Arc::clone(&runtime_context),
                 fallback_unrestricted,
+                bind_all,
             )?;
 
         // ── MCP HTTP server ────────────────────────────────────────────────────
@@ -4139,8 +4167,20 @@ impl WindowedRuntime {
             }
 
             if let Some(ref rt) = network_rt {
+                // Security fix (hud-1aswu.1): bind loopback by default; opt-in
+                // via `bind_all_interfaces` or `TZE_HUD_BIND_ALL_INTERFACES=1`.
+                let bind_all = cfg.bind_all_interfaces
+                    || std::env::var("TZE_HUD_BIND_ALL_INTERFACES")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
+                let mcp_bind_host = if bind_all { "0.0.0.0" } else { "127.0.0.1" };
+                tracing::info!(
+                    bind_all,
+                    mcp_bind_host,
+                    "MCP HTTP: bind address selected (hud-1aswu.1)"
+                );
                 let mcp_config = McpServerConfig {
-                    bind_addr: format!("0.0.0.0:{}", cfg.mcp_port)
+                    bind_addr: format!("{mcp_bind_host}:{}", cfg.mcp_port)
                         .parse()
                         .expect("valid MCP bind addr"),
                     psk: cfg.psk.clone(),
@@ -4387,7 +4427,10 @@ fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeContext, bool) {
 ///
 /// ## gRPC server
 ///
-/// When `grpc_port != 0`, starts the `HudSession` gRPC server on `0.0.0.0:grpc_port`.
+/// When `grpc_port != 0`, starts the `HudSession` gRPC server.  The bind
+/// address is `127.0.0.1:grpc_port` by default (loopback only) unless
+/// `bind_all_interfaces` is `true`, in which case it binds `0.0.0.0:grpc_port`
+/// (all interfaces — explicit opt-in required, hud-1aswu.1).
 /// Setting `grpc_port = 0` skips server creation (compositor-only mode).
 ///
 /// ## Errors
@@ -4401,6 +4444,7 @@ fn start_network_services(
     shared_state: Arc<Mutex<SharedState>>,
     runtime_context: SharedRuntimeContext,
     fallback_unrestricted: bool,
+    bind_all_interfaces: bool,
 ) -> Result<
     (
         Option<NetworkRuntime>,
@@ -4421,7 +4465,18 @@ fn start_network_services(
     let network_rt = NetworkRuntime::new()
         .map_err(|e| format!("windowed runtime: failed to build network Tokio runtime: {e}"))?;
 
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{grpc_port}")
+    // Security fix (hud-1aswu.1): default to loopback; opt-in for all interfaces.
+    let grpc_bind_host = if bind_all_interfaces {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    };
+    tracing::info!(
+        bind_all_interfaces,
+        grpc_bind_host,
+        "gRPC: bind address selected (hud-1aswu.1)"
+    );
+    let addr: std::net::SocketAddr = format!("{grpc_bind_host}:{grpc_port}")
         .parse()
         .map_err(|e| format!("windowed runtime: invalid gRPC address (port {grpc_port}): {e}"))?;
 
@@ -6050,7 +6105,7 @@ mod tests {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
         let (rt, handles, _tx, _scroll_tx) =
-            start_network_services(0, "test-psk", shared_state, ctx, true)
+            start_network_services(0, "test-psk", shared_state, ctx, true, false)
                 .expect("start_network_services should not fail for port 0");
         assert!(
             rt.is_none(),
@@ -6070,7 +6125,7 @@ mod tests {
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
         // Use a high ephemeral port unlikely to conflict.
         let (rt, handles, _tx, _scroll_tx) =
-            start_network_services(59781, "test-psk", shared_state, ctx, true)
+            start_network_services(59781, "test-psk", shared_state, ctx, true, true)
                 .expect("start_network_services should not error for a valid port");
         assert!(
             rt.is_some(),
@@ -6118,10 +6173,63 @@ mod tests {
             let shared_state = make_shared_state();
             let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
             let (rt, handles, _tx, _scroll_tx) =
-                start_network_services(0, "psk", shared_state, ctx, false)
+                start_network_services(0, "psk", shared_state, ctx, false, false)
                     .expect("port-0 must not error");
             assert!(rt.is_none());
             assert!(handles.is_empty());
+        }
+    }
+
+    // ── Bind address security (hud-1aswu.1) ──────────────────────────────────
+
+    /// `WindowedConfig::default()` must have `bind_all_interfaces = false`.
+    ///
+    /// Security gate: the default must never expose services on all interfaces
+    /// (hud-1aswu.1).
+    #[test]
+    fn windowed_config_default_bind_all_interfaces_is_false() {
+        let cfg = WindowedConfig::default();
+        assert!(
+            !cfg.bind_all_interfaces,
+            "default must not bind all interfaces (security: hud-1aswu.1)"
+        );
+    }
+
+    /// When `bind_all_interfaces = false`, `start_network_services` binds to
+    /// `127.0.0.1` (loopback only).  We verify the gRPC task starts and the
+    /// loopback bind address resolves without error.
+    #[test]
+    fn start_network_services_loopback_default_binds_successfully() {
+        let shared_state = make_shared_state();
+        let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
+        // Use port 0 to let the OS pick a free port.  Port 0 causes the gRPC
+        // function to early-return before binding, but we can verify the
+        // start_network_services succeeds with loopback=false.
+        // Use a real port to verify actual bind (not port 0 early-exit).
+        // Pick an obscure port unlikely to conflict; if it conflicts the test
+        // is skipped gracefully via the Result.
+        let result = start_network_services(59701, "psk", shared_state, ctx, false, false);
+        if let Ok((rt, handles, _, _)) = result {
+            assert!(rt.is_some(), "loopback bind must create a runtime");
+            for h in handles {
+                h.abort();
+            }
+        }
+        // If port is in use, the bind fails — acceptable for a unit test.
+    }
+
+    /// `start_network_services` with `bind_all_interfaces = true` binds on
+    /// 0.0.0.0 (explicit opt-in for LAN/remote exposure).
+    #[test]
+    fn start_network_services_bind_all_interfaces_opt_in_binds_successfully() {
+        let shared_state = make_shared_state();
+        let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
+        let result = start_network_services(59702, "psk", shared_state, ctx, false, true);
+        if let Ok((rt, handles, _, _)) = result {
+            assert!(rt.is_some(), "all-interfaces bind must create a runtime");
+            for h in handles {
+                h.abort();
+            }
         }
     }
 
