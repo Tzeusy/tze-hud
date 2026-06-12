@@ -112,26 +112,6 @@ pub struct FrameTelemetry {
     /// on a frame that carries a scene commit triggered by input; 0 otherwise.
     pub input_to_next_present_us: u64,
 
-    // ── Legacy field aliases (in-process API compatibility only) ────────────
-    //
-    // These fields are excluded from serialization (`#[serde(skip)]`) so they
-    // do NOT appear in JSON telemetry output. They exist solely for in-process
-    // Rust callers that were written against the pre-stage-naming API.
-    // If downstream consumers read the serialized JSON, migrate to the canonical
-    // `stageN_*_us` field names; these aliases will not be present in the output.
-    /// Alias for stage1_input_drain_us (in-process only; not serialized).
-    #[serde(skip)]
-    pub input_drain_us: u64,
-    /// Alias for stage4_scene_commit_us (in-process only; not serialized).
-    #[serde(skip)]
-    pub scene_commit_us: u64,
-    /// Alias for stage6_render_encode_us (in-process only; not serialized).
-    #[serde(skip)]
-    pub render_encode_us: u64,
-    /// Alias for stage7_gpu_submit_us (in-process only; not serialized).
-    #[serde(skip)]
-    pub gpu_submit_us: u64,
-
     // ── Scene counters ───────────────────────────────────────────────────────
     /// Number of visible tiles this frame.
     pub tile_count: u32,
@@ -202,11 +182,6 @@ impl FrameTelemetry {
             input_to_local_ack_us: 0,
             input_to_scene_commit_us: 0,
             input_to_next_present_us: 0,
-            // Legacy aliases
-            input_drain_us: 0,
-            scene_commit_us: 0,
-            render_encode_us: 0,
-            gpu_submit_us: 0,
             tile_count: 0,
             node_count: 0,
             active_leases: 0,
@@ -217,17 +192,6 @@ impl FrameTelemetry {
             invariant_violations_this_frame: 0,
             layer0_checks_failed_this_frame: 0,
         }
-    }
-
-    /// Synchronize legacy alias fields from the per-stage fields.
-    ///
-    /// Call this after setting all stage fields to keep the deprecated aliases
-    /// consistent with the canonical per-stage values.
-    pub fn sync_legacy_aliases(&mut self) {
-        self.input_drain_us = self.stage1_input_drain_us;
-        self.scene_commit_us = self.stage4_scene_commit_us;
-        self.render_encode_us = self.stage6_render_encode_us;
-        self.gpu_submit_us = self.stage7_gpu_submit_us;
     }
 }
 

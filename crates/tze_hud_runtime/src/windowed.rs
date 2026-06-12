@@ -1898,8 +1898,9 @@ impl ApplicationHandler for WinitApp {
                             compositor_telemetry.frame_number,
                         );
                         telem.frame_time_us = frame_start.elapsed().as_micros() as u64;
-                        telem.stage6_render_encode_us = compositor_telemetry.render_encode_us;
-                        telem.stage7_gpu_submit_us = compositor_telemetry.gpu_submit_us;
+                        telem.stage6_render_encode_us =
+                            compositor_telemetry.stage6_render_encode_us;
+                        telem.stage7_gpu_submit_us = compositor_telemetry.stage7_gpu_submit_us;
                         telem.tile_count = compositor_telemetry.tile_count;
                         // Propagate commit-time markdown prime cost (hud-380dl).
                         // Non-zero only on frames where scene.version changed;
@@ -1916,7 +1917,6 @@ impl ApplicationHandler for WinitApp {
                             telem.input_to_scene_commit_us = scene_commit_us;
                             telem.input_to_next_present_us = next_present_us;
                         }
-                        telem.sync_legacy_aliases();
                         telemetry.record(telem);
 
                         if let Some(state) = benchmark_state.as_mut() {

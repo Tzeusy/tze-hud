@@ -978,9 +978,12 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     println!("    active_leases  = {}", frame_telemetry.active_leases);
     println!(
         "    render_encode  = {}us",
-        frame_telemetry.render_encode_us
+        frame_telemetry.stage6_render_encode_us
     );
-    println!("    gpu_submit     = {}us", frame_telemetry.gpu_submit_us);
+    println!(
+        "    gpu_submit     = {}us",
+        frame_telemetry.stage7_gpu_submit_us
+    );
 
     assert!(
         frame_telemetry.tile_count >= 2,
