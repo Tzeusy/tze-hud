@@ -626,6 +626,7 @@ impl TextRasterizer {
                                 &resliced,
                                 base_attrs,
                                 item.font_family,
+                                item.font_size_px,
                             );
                             buf.set_rich_text(
                                 &mut self.font_system,
@@ -640,6 +641,7 @@ impl TextRasterizer {
                             &item.styled_runs,
                             base_attrs,
                             item.font_family,
+                            item.font_size_px,
                         );
                         buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
                     }
@@ -893,9 +895,9 @@ pub struct TextItem {
 /// A single styled run for Phase-1 markdown rendering, with byte offsets into
 /// the **plain-text** `TextItem::text`.
 ///
-/// Carries full per-span style attributes — weight, italic, monospace, and
-/// optional color override — resolved from design tokens at parse-commit time.
-/// The frame pipeline consumes these without re-parsing.
+/// Carries full per-span style attributes — weight, italic, monospace, color,
+/// and optional font-size scale — resolved from design tokens at parse-commit
+/// time.  The frame pipeline consumes these without re-parsing.
 #[derive(Debug, Clone)]
 pub struct StyledRunItem {
     /// Inclusive byte offset into `TextItem::text`.
@@ -910,6 +912,12 @@ pub struct StyledRunItem {
     pub monospace: bool,
     /// Optional color override (linear sRGB); `None` = use `TextItem::color`.
     pub color: Option<[u8; 4]>,
+    /// Font-size multiplier relative to `TextItem::font_size_px`.
+    ///
+    /// `None` = no scaling (use base size).  Applied by setting per-span
+    /// `Attrs::metrics` in `styled_run_spans`.  Used to render heading levels
+    /// at the token-defined size.
+    pub size_scale: Option<f32>,
 }
 
 /// A single resolved color run for `TextItem` rendering, with byte offsets
@@ -1126,6 +1134,7 @@ impl TextItem {
                     italic: span.attr.italic,
                     monospace: span.attr.monospace,
                     color,
+                    size_scale: span.attr.size_scale,
                 })
             })
             .collect::<Vec<_>>()
@@ -1497,16 +1506,20 @@ pub(crate) fn color_run_spans<'t, 'a>(
 /// Build `(text_slice, Attrs)` pairs for [`Buffer::set_rich_text`] from a set of
 /// [`StyledRunItem`]s produced by the Phase-1 markdown parse cache.
 ///
-/// Each run carries weight, italic, monospace, and optional color.  Gaps
-/// between runs receive `base_attrs` with no overrides.
+/// Each run carries weight, italic, monospace, optional color, and an optional
+/// font-size scale.  Gaps between runs receive `base_attrs` with no overrides.
 ///
 /// `base_family` is the node-level font family (e.g. `SansSerif`) used for
 /// non-monospace runs.  Monospace runs use `Family::Monospace` regardless.
+///
+/// `base_font_size_px` is the node's base font size; it is multiplied by each
+/// run's `size_scale` (when `Some`) to derive the per-span `Attrs::metrics`.
 pub(crate) fn styled_run_spans<'t, 'a>(
     text: &'t str,
     runs: &[StyledRunItem],
     base_attrs: Attrs<'a>,
     base_family: FontFamily,
+    base_font_size_px: f32,
 ) -> Vec<(&'t str, Attrs<'a>)> {
     if runs.is_empty() {
         return vec![(text, base_attrs)];
@@ -1573,6 +1586,14 @@ pub(crate) fn styled_run_spans<'t, 'a>(
             run_attrs = run_attrs.color(Color::rgba(c[0], c[1], c[2], c[3]));
         }
 
+        // Apply per-span font-size scale (heading levels, etc.).
+        // cosmic-text supports per-span Metrics via Attrs::metrics().
+        if let Some(scale) = run.size_scale {
+            let scaled_size = (base_font_size_px * scale).clamp(1.0, 500.0);
+            let scaled_line_height = scaled_size * 1.4;
+            run_attrs = run_attrs.metrics(Metrics::new(scaled_size, scaled_line_height));
+        }
+
         spans.push((&text[start..end], run_attrs));
         cursor = end;
     }
@@ -1620,6 +1641,7 @@ pub(crate) fn reslice_styled_runs(
                 italic: run.italic,
                 monospace: run.monospace,
                 color: run.color,
+                size_scale: run.size_scale,
             })
         })
         .collect()
@@ -1729,6 +1751,7 @@ pub(crate) fn reslice_styled_runs_tail_anchored(
                 italic: run.italic,
                 monospace: run.monospace,
                 color: run.color,
+                size_scale: run.size_scale,
             })
         })
         .collect()
@@ -3530,6 +3553,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
             StyledRunItem {
                 start_byte: 5,
@@ -3538,6 +3562,7 @@ mod tests {
                 italic: true,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
         ];
         // content_end = 10: both runs fit entirely
@@ -3560,6 +3585,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
             StyledRunItem {
                 start_byte: 5,
@@ -3568,6 +3594,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
         ];
         // content_end = 4: second run (5..10) is entirely beyond truncation point
@@ -3587,6 +3614,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            size_scale: None,
         }];
         // content_end = 8: run 3..12 overlaps; should become 3..8
         let result = reslice_styled_runs(&runs, 8);
@@ -3683,6 +3711,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            size_scale: None,
         }];
         let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
         assert_eq!(weight, 700, "bold run must raise effective weight to 700");
@@ -3699,6 +3728,7 @@ mod tests {
             italic: false,
             monospace: true,
             color: None,
+            size_scale: None,
         }];
         let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
         assert_eq!(
@@ -3719,6 +3749,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
             StyledRunItem {
                 start_byte: 4,
@@ -3727,6 +3758,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
             StyledRunItem {
                 start_byte: 9,
@@ -3735,6 +3767,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
         ];
         let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
@@ -3790,6 +3823,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            size_scale: None,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
         assert_eq!(
@@ -3827,6 +3861,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            size_scale: None,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
         assert!(
@@ -3851,6 +3886,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            size_scale: None,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
         assert_eq!(
@@ -3893,6 +3929,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
             // Run on visible tail ("line2") → should map to [4..9] in effective_text
             StyledRunItem {
@@ -3902,6 +3939,7 @@ mod tests {
                 italic: true,
                 monospace: false,
                 color: Some([255, 0, 0, 255]),
+                size_scale: None,
             },
         ];
 
@@ -3991,6 +4029,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            size_scale: None,
         }];
         // original.ends_with("this_is_a_very…\nline3") is false, so empty is returned.
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
@@ -4027,6 +4066,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
             StyledRunItem {
                 start_byte: 3,
@@ -4035,6 +4075,7 @@ mod tests {
                 italic: true,
                 monospace: false,
                 color: None,
+                size_scale: None,
             },
         ];
 

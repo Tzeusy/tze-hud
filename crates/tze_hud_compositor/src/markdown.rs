@@ -61,8 +61,10 @@ use tze_hud_scene::types::Rgba;
 /// | Key | Effect |
 /// |-----|--------|
 /// | `typography.code.family` | `"monospace"` enables monospace for code spans |
-/// | `color.code.background` | Background tint behind inline code (currently propagated as color modifier) |
+/// | `color.code.background` | Background tint behind inline code (propagated as a color modifier in Phase 1) |
+/// | `color.code.text` | Optional foreground color for code spans and blocks |
 /// | `color.link.text` | Link text color |
+/// | `typography.bold.weight` | CSS weight for bold (`**text**`) spans; default 700 |
 /// | `typography.heading.N.weight` | CSS weight for heading level N (1–6) |
 /// | `typography.heading.N.scale` | Font-size multiplier for heading level N |
 /// | `typography.emphasis.italic` | Whether emphasis uses italic (always true) |
@@ -72,12 +74,24 @@ pub struct MarkdownTokens {
     pub heading_scale: [f32; 6],
     /// CSS font weight per heading level (index 0 = H1, 5 = H6).
     pub heading_weight: [u16; 6],
+    /// CSS font weight for bold (`**text**`) spans.  Default 700.
+    ///
+    /// Resolved from `typography.bold.weight`.  Bold-italic inherits the same weight.
+    pub bold_weight: u16,
     /// Color override for link text.  `None` = no override (falls back to node color).
     pub link_color: Option<Rgba>,
     /// Whether inline code and code blocks use the monospace family.  Defaults to `true`.
     pub code_monospace: bool,
     /// Optional foreground color for code spans and blocks.  `None` = no override.
+    ///
+    /// Resolved from `color.code.text`.
     pub code_color: Option<Rgba>,
+    /// Optional background/tint color for inline code and code blocks.
+    ///
+    /// Resolved from `color.code.background`.  Phase 1: propagated as a
+    /// foreground color modifier when no separate `code_color` is provided.
+    /// `None` = no override.
+    pub code_background: Option<Rgba>,
 }
 
 impl Default for MarkdownTokens {
@@ -88,9 +102,11 @@ impl Default for MarkdownTokens {
         Self {
             heading_scale: [1.75, 1.50, 1.25, 1.10, 1.00, 0.90],
             heading_weight: [700, 700, 700, 700, 600, 600],
+            bold_weight: 700,
             link_color: None,
             code_monospace: true,
             code_color: None,
+            code_background: None,
         }
     }
 }
@@ -139,6 +155,26 @@ impl MarkdownTokens {
             tokens.code_color = Some(c);
         }
 
+        // Code background: color.code.background
+        // Phase 1: stored for use as a foreground color modifier when no
+        // code_color is set (see StyleAttr::code_effective_color).
+        if let Some(c) = map
+            .get("color.code.background")
+            .and_then(|v| parse_hex_color(v))
+        {
+            tokens.code_background = Some(c);
+        }
+
+        // Bold weight: typography.bold.weight
+        if let Some(w) = map
+            .get("typography.bold.weight")
+            .and_then(|v| v.parse::<u16>().ok())
+        {
+            if (100..=900).contains(&w) {
+                tokens.bold_weight = w;
+            }
+        }
+
         tokens
     }
 }
@@ -159,6 +195,12 @@ pub struct StyleAttr {
     pub monospace: bool,
     /// Overrides the text color if `Some`.
     pub color: Option<Rgba>,
+    /// Font-size multiplier relative to the node's base `font_size_px`.
+    ///
+    /// `None` means no scaling (uses the node base size).  `Some(1.75)`
+    /// renders the span at 175% of the node's base font size.  Used to
+    /// apply heading-level scale from `MarkdownTokens::heading_scale`.
+    pub size_scale: Option<f32>,
 }
 
 impl StyleAttr {
@@ -169,12 +211,17 @@ impl StyleAttr {
             italic: false,
             monospace: false,
             color: None,
+            size_scale: None,
         }
     }
 
     /// Returns `true` when no attribute override is active.
     pub fn is_plain(&self) -> bool {
-        self.weight.is_none() && !self.italic && !self.monospace && self.color.is_none()
+        self.weight.is_none()
+            && !self.italic
+            && !self.monospace
+            && self.color.is_none()
+            && self.size_scale.is_none()
     }
 }
 
@@ -372,7 +419,8 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                                 weight: None,
                                 italic: false,
                                 monospace: tokens.code_monospace,
-                                color: tokens.code_color,
+                                color: tokens.code_color.or(tokens.code_background),
+                                size_scale: None,
                             },
                         });
                     }
@@ -404,7 +452,8 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                         weight: None,
                         italic: false,
                         monospace: tokens.code_monospace,
-                        color: tokens.code_color,
+                        color: tokens.code_color.or(tokens.code_background),
+                        size_scale: None,
                     },
                 });
             }
@@ -420,11 +469,18 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                     plain.push('\n');
                 }
                 let level_idx = (level as usize).saturating_sub(1).min(5);
+                let scale = tokens.heading_scale[level_idx];
                 let attr = StyleAttr {
                     weight: Some(tokens.heading_weight[level_idx]),
                     italic: false,
                     monospace: false,
                     color: None,
+                    // Apply heading scale so the font size actually changes at render time.
+                    size_scale: if (scale - 1.0).abs() > f32::EPSILON {
+                        Some(scale)
+                    } else {
+                        None
+                    },
                 };
                 let start = plain.len();
                 let prev_len = spans.len();
@@ -447,14 +503,16 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
 
         // ── List item (unordered or ordered) ────────────────────────────
         if !in_fenced_block {
-            if let Some((indent_spaces, item_text)) = parse_list_item(raw) {
+            if let Some((indent_spaces, bullet, item_text)) = parse_list_item(raw) {
                 if !prev_was_empty && !plain.is_empty() {
                     plain.push('\n');
                 }
                 // Emit indent (2 spaces per level, minimum 0).
                 let indent = "  ".repeat((indent_spaces / 2).min(4));
                 plain.push_str(&indent);
-                plain.push_str("• ");
+                // `bullet` is "• " for unordered or "N. " / "N) " for ordered,
+                // preserving the ordinal so the rendered text matches the source.
+                plain.push_str(&bullet);
                 let item_chars: Vec<char> = item_text.chars().collect();
                 process_inline(&item_chars, &mut plain, &mut spans, tokens, None);
                 prev_was_empty = false;
@@ -740,9 +798,14 @@ fn process_inline_inner(
                             weight: base_override.and_then(|b| b.weight),
                             italic: false,
                             monospace: tokens.code_monospace,
+                            // code_color (color.code.text) takes priority; fall back to
+                            // code_background (color.code.background) as a color modifier
+                            // per the Phase-1 contract, then to the base override color.
                             color: tokens
                                 .code_color
+                                .or(tokens.code_background)
                                 .or_else(|| base_override.and_then(|b| b.color)),
+                            size_scale: base_override.and_then(|b| b.size_scale),
                         },
                     });
                 }
@@ -770,11 +833,14 @@ fn process_inline_inner(
             if let Some(close_start) = emphasis_close_fail.find(chars, open_end, marker, 3) {
                 let start = out.len();
                 let prev_len = spans.len();
+                // Bold weight comes from token (typography.bold.weight), not hardcoded.
+                let base_weight = base_override.and_then(|b| b.weight).unwrap_or(400);
                 let inner_attr = StyleAttr {
-                    weight: Some(700),
+                    weight: Some(base_weight.max(tokens.bold_weight)),
                     italic: true,
                     monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                     color: base_override.and_then(|b| b.color),
+                    size_scale: base_override.and_then(|b| b.size_scale),
                 };
                 process_inline_inner(
                     &chars[open_end..close_start],
@@ -803,12 +869,14 @@ fn process_inline_inner(
             if let Some(close_start) = emphasis_close_fail.find(chars, open_end, marker, 2) {
                 let start = out.len();
                 let prev_len = spans.len();
+                // Bold weight comes from token (typography.bold.weight), not hardcoded.
                 let base_weight = base_override.and_then(|b| b.weight).unwrap_or(400);
                 let bold_attr = StyleAttr {
-                    weight: Some(base_weight.max(700)),
+                    weight: Some(base_weight.max(tokens.bold_weight)),
                     italic: base_override.map(|b| b.italic).unwrap_or(false),
                     monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                     color: base_override.and_then(|b| b.color),
+                    size_scale: base_override.and_then(|b| b.size_scale),
                 };
                 process_inline_inner(
                     &chars[open_end..close_start],
@@ -850,6 +918,7 @@ fn process_inline_inner(
                         italic: true,
                         monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                         color: base_override.and_then(|b| b.color),
+                        size_scale: base_override.and_then(|b| b.size_scale),
                     };
                     process_inline_inner(
                         &chars[open_end..close_start],
@@ -962,8 +1031,13 @@ fn parse_atx_heading(line: &str) -> Option<(u8, &str)> {
 }
 
 /// Detect a list item (ordered or unordered, with leading indent).
-/// Returns `(indent_spaces, item_text)` or `None`.
-fn parse_list_item(line: &str) -> Option<(usize, &str)> {
+///
+/// Returns `(indent_spaces, bullet, item_text)` or `None`, where:
+/// - `indent_spaces` — number of leading space characters,
+/// - `bullet` — the prefix string to emit (`"• "` for unordered; `"N. "` or
+///   `"N) "` for ordered, preserving the original ordinal number),
+/// - `item_text` — the item body text after the list marker.
+fn parse_list_item(line: &str) -> Option<(usize, String, &str)> {
     // Count leading spaces.
     let trimmed_start = line.len() - line.trim_start().len();
     let rest = line.trim_start();
@@ -971,10 +1045,12 @@ fn parse_list_item(line: &str) -> Option<(usize, &str)> {
     // Unordered: starts with `- `, `* `, or `+ `.
     // `&rest[2..]` is safe even when `rest.len() == 2` (returns "").
     if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
-        return Some((trimmed_start, &rest[2..]));
+        return Some((trimmed_start, "• ".to_string(), &rest[2..]));
     }
 
     // Ordered: starts with digits followed by `.` or `)` and a space.
+    // Preserve the ordinal and punctuation so "1. first" renders as "1. first",
+    // not "• first".
     let mut digit_count = 0;
     for ch in rest.chars() {
         if ch.is_ascii_digit() {
@@ -985,8 +1061,15 @@ fn parse_list_item(line: &str) -> Option<(usize, &str)> {
     }
     if digit_count > 0 && digit_count <= 9 {
         let after_digits = &rest[digit_count..];
-        if after_digits.starts_with(". ") || after_digits.starts_with(") ") {
-            return Some((trimmed_start, &after_digits[2..]));
+        if let Some(item_text) = after_digits.strip_prefix(". ") {
+            // "1. item" → bullet "1. "
+            let bullet = format!("{}. ", &rest[..digit_count]);
+            return Some((trimmed_start, bullet, item_text));
+        }
+        if let Some(item_text) = after_digits.strip_prefix(") ") {
+            // "1) item" → bullet "1) "
+            let bullet = format!("{}) ", &rest[..digit_count]);
+            return Some((trimmed_start, bullet, item_text));
         }
     }
 
@@ -1577,16 +1660,30 @@ mod tests {
         assert!(md.plain_text.contains("• gamma"));
     }
 
-    /// Ordered list items (`1. item`) render with bullet prefix.
+    /// Ordered list items (`1. item`) render with their ordinal preserved.
+    ///
+    /// Before hud-f8jb0 the ordinal was stripped and replaced with "• ",
+    /// causing "1. first" to appear as "• first".  This test codifies the
+    /// correct behaviour: the ordinal number and punctuation are preserved.
     #[test]
-    fn ordered_list_items_have_bullet() {
+    fn ordered_list_items_preserve_ordinal() {
         let input = "1. first\n2. second";
         let md = parse(input);
         assert!(
-            md.plain_text.contains("• first"),
-            "ordered list item must have bullet"
+            md.plain_text.contains("1. first"),
+            "ordered list item must preserve ordinal: got {:?}",
+            md.plain_text
         );
-        assert!(md.plain_text.contains("• second"));
+        assert!(
+            md.plain_text.contains("2. second"),
+            "ordered list item must preserve ordinal: got {:?}",
+            md.plain_text
+        );
+        // Unordered bullet must NOT appear for ordered lists.
+        assert!(
+            !md.plain_text.contains("• first"),
+            "ordered list must not render with unordered bullet"
+        );
     }
 
     /// Link `[text](url)` renders as styled text; destination is omitted.
@@ -2382,6 +2479,240 @@ mod tests {
             md.spans.iter().filter(|s| s.attr.monospace).count(),
             3,
             "three separate code spans must each produce a monospace span"
+        );
+    }
+
+    // ── hud-f8jb0: styling-gap fixes ─────────────────────────────────────────
+    //
+    // (a) heading_scale is now applied via size_scale on StyleAttr/StyledSpan.
+    // (b) color.code.background is now read from tokens and applied.
+    // (c) bold weight comes from tokens.bold_weight, not a hardcoded 700.
+    // (d) ordered-list ordinal is preserved, not replaced with "• ".
+
+    /// (a) Heading scale: H1 span carries size_scale = 1.75 (default token).
+    #[test]
+    fn heading_h1_size_scale_applied() {
+        let md = parse("# Hello");
+        let scale_span = md.spans.iter().find(|s| s.attr.size_scale.is_some());
+        assert!(
+            scale_span.is_some(),
+            "H1 must produce a span with size_scale set; got spans: {:?}",
+            md.spans
+        );
+        let scale = scale_span.unwrap().attr.size_scale.unwrap();
+        let expected = MarkdownTokens::default().heading_scale[0];
+        assert!(
+            (scale - expected).abs() < 1e-5,
+            "H1 size_scale must equal token heading_scale[0] ({expected}); got {scale}"
+        );
+    }
+
+    /// (a) Heading scale: H3 span carries size_scale = 1.25 (default token).
+    #[test]
+    fn heading_h3_size_scale_applied() {
+        let md = parse("### Section");
+        let scale_span = md.spans.iter().find(|s| s.attr.size_scale.is_some());
+        assert!(
+            scale_span.is_some(),
+            "H3 must produce a span with size_scale set"
+        );
+        let scale = scale_span.unwrap().attr.size_scale.unwrap();
+        let expected = MarkdownTokens::default().heading_scale[2]; // index 2 = H3
+        assert!(
+            (scale - expected).abs() < 1e-5,
+            "H3 size_scale must equal token heading_scale[2] ({expected}); got {scale}"
+        );
+    }
+
+    /// (a) Heading scale: H5 uses scale 1.0 — size_scale is None (no scaling needed).
+    ///
+    /// When the scale equals 1.0 exactly the field is set to None to avoid a
+    /// no-op Metrics override in the renderer.
+    #[test]
+    fn heading_h5_scale_one_is_none() {
+        let t = MarkdownTokens {
+            heading_scale: [1.75, 1.50, 1.25, 1.10, 1.00, 0.90],
+            ..MarkdownTokens::default()
+        };
+        let md = parse_markdown_subset("##### H5", &t);
+        // Default H5 scale is 1.00: None expected (no-op suppressed).
+        assert!(
+            md.spans.iter().all(|s| s.attr.size_scale.is_none()
+                || (s.attr.size_scale.unwrap() - 1.0).abs() > f32::EPSILON),
+            "H5 with scale 1.0 must not emit size_scale=Some(1.0); spans: {:?}",
+            md.spans
+        );
+    }
+
+    /// (a) Heading scale from custom token map flows through.
+    #[test]
+    fn heading_scale_from_custom_token_map() {
+        let mut map = HashMap::new();
+        map.insert("typography.heading.2.scale".to_string(), "2.0".to_string());
+        let t = MarkdownTokens::from_token_map(&map);
+        let md = parse_markdown_subset("## Big", &t);
+        let scale_span = md.spans.iter().find(|s| s.attr.size_scale.is_some());
+        assert!(
+            scale_span.is_some(),
+            "H2 with custom scale must carry size_scale"
+        );
+        let scale = scale_span.unwrap().attr.size_scale.unwrap();
+        assert!(
+            (scale - 2.0).abs() < 1e-5,
+            "H2 size_scale must equal custom token value 2.0; got {scale}"
+        );
+    }
+
+    /// (b) code_background token is read and applied to inline code spans.
+    #[test]
+    fn code_background_token_applied_to_inline_code() {
+        let t = MarkdownTokens {
+            code_background: Some(Rgba::new(0.1, 0.1, 0.1, 1.0)),
+            code_color: None,
+            ..MarkdownTokens::default()
+        };
+        let md = parse_markdown_subset("Use `fmt` here.", &t);
+        let code_span = md.spans.iter().find(|s| s.attr.monospace);
+        assert!(
+            code_span.is_some(),
+            "inline code must produce a monospace span"
+        );
+        let color = code_span.unwrap().attr.color;
+        assert!(
+            color.is_some(),
+            "inline code span must carry color when code_background token is set; got None"
+        );
+        // The color applied should match code_background (since code_color is None).
+        let c = color.unwrap();
+        assert!(
+            (c.r - 0.1_f32).abs() < 1e-3,
+            "code span color.r must match code_background.r; got {c:?}"
+        );
+    }
+
+    /// (b) code_color takes priority over code_background.
+    #[test]
+    fn code_color_takes_priority_over_code_background() {
+        let t = MarkdownTokens {
+            code_color: Some(Rgba::new(0.9, 0.9, 0.9, 1.0)),
+            code_background: Some(Rgba::new(0.1, 0.1, 0.1, 1.0)),
+            ..MarkdownTokens::default()
+        };
+        let md = parse_markdown_subset("Use `fmt` here.", &t);
+        let code_span = md.spans.iter().find(|s| s.attr.monospace);
+        assert!(
+            code_span.is_some(),
+            "inline code must produce a monospace span"
+        );
+        let c = code_span.unwrap().attr.color.unwrap();
+        // Should use code_color (0.9), not code_background (0.1).
+        assert!(
+            (c.r - 0.9_f32).abs() < 1e-3,
+            "code_color must take priority; got color r={} (expected ~0.9)",
+            c.r
+        );
+    }
+
+    /// (b) color.code.background token key is parsed by from_token_map.
+    #[test]
+    fn token_map_code_background_parsed() {
+        let mut map = HashMap::new();
+        map.insert("color.code.background".to_string(), "#333333".to_string());
+        let t = MarkdownTokens::from_token_map(&map);
+        assert!(
+            t.code_background.is_some(),
+            "color.code.background token must populate code_background"
+        );
+    }
+
+    /// (c) Bold weight comes from tokens (typography.bold.weight), not hardcoded 700.
+    #[test]
+    fn bold_weight_comes_from_token() {
+        let t = MarkdownTokens {
+            bold_weight: 800,
+            ..MarkdownTokens::default()
+        };
+        let md = parse_markdown_subset("Hello **world**!", &t);
+        let bold_span = md.spans.iter().find(|s| s.attr.weight == Some(800));
+        assert!(
+            bold_span.is_some(),
+            "bold span must carry weight from token (800); got spans: {:?}",
+            md.spans
+        );
+        // Must NOT carry the old hardcoded 700 when token says 800.
+        assert!(
+            !md.spans.iter().any(|s| s.attr.weight == Some(700)),
+            "bold span must use token weight 800, not hardcoded 700"
+        );
+    }
+
+    /// (c) Bold-italic weight also comes from tokens.
+    #[test]
+    fn bold_italic_weight_comes_from_token() {
+        let t = MarkdownTokens {
+            bold_weight: 900,
+            ..MarkdownTokens::default()
+        };
+        let md = parse_markdown_subset("***bold-italic***", &t);
+        let bi_span = md
+            .spans
+            .iter()
+            .find(|s| s.attr.italic && s.attr.weight == Some(900));
+        assert!(
+            bi_span.is_some(),
+            "bold-italic span must carry weight from token (900); got spans: {:?}",
+            md.spans
+        );
+    }
+
+    /// (c) typography.bold.weight token key is parsed by from_token_map.
+    #[test]
+    fn token_map_bold_weight_parsed() {
+        let mut map = HashMap::new();
+        map.insert("typography.bold.weight".to_string(), "800".to_string());
+        let t = MarkdownTokens::from_token_map(&map);
+        assert_eq!(
+            t.bold_weight, 800,
+            "typography.bold.weight token must populate bold_weight"
+        );
+    }
+
+    /// (d) Ordered-list paren-delimited items preserve ordinal.
+    #[test]
+    fn ordered_list_paren_delimiter_preserves_ordinal() {
+        let input = "1) alpha\n2) beta";
+        let md = parse(input);
+        assert!(
+            md.plain_text.contains("1) alpha"),
+            "paren-delimited ordered list must preserve ordinal; got: {:?}",
+            md.plain_text
+        );
+        assert!(
+            md.plain_text.contains("2) beta"),
+            "second paren-delimited item must preserve ordinal; got: {:?}",
+            md.plain_text
+        );
+    }
+
+    /// (d) Unordered lists still render with bullet (regression guard).
+    #[test]
+    fn unordered_list_still_uses_bullet_after_fix() {
+        let input = "- item one\n* item two\n+ item three";
+        let md = parse(input);
+        assert!(
+            md.plain_text.contains("• item one"),
+            "unordered '-' list must keep bullet; got: {:?}",
+            md.plain_text
+        );
+        assert!(
+            md.plain_text.contains("• item two"),
+            "unordered '*' list must keep bullet; got: {:?}",
+            md.plain_text
+        );
+        assert!(
+            md.plain_text.contains("• item three"),
+            "unordered '+' list must keep bullet; got: {:?}",
+            md.plain_text
         );
     }
 }
