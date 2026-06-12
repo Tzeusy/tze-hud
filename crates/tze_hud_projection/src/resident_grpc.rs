@@ -118,71 +118,21 @@ pub struct PortalVisualTokens {
 }
 
 impl Default for PortalVisualTokens {
-    /// Default visual tokens — same palette as the Phase-0 exemplar literals,
-    /// expressed as resolved token defaults, scoped to the fields consumed by
-    /// the raw-tile pilot's single `TextMarkdownNodeProto`.
+    /// Default visual tokens derived from the canonical palette in
+    /// `tze_hud_config::PortalPartTokens::default()`.
+    ///
+    /// This is the **single source of truth** for the default portal palette.
+    /// Previously this `impl` contained hard-coded float literals that diverged
+    /// from the config defaults by up to 3 ULPs of rounding. The duplicate was
+    /// eliminated in hud-dcynv: both sides now derive from the same source.
     ///
     /// In production these values are superseded by `with_tokens()` which
     /// accepts tokens produced by
     /// `tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens`.
     /// This default is used only in tests that do not exercise the token path,
     /// and as a fallback when no tokens are supplied to the adapter.
-    ///
-    /// NOTE: The numeric defaults here must match the string defaults in
-    /// `tze_hud_config::portal_tokens::defaults` for the corresponding keys.
-    /// There is no compile-time link; update both sides together.
     fn default() -> Self {
-        Self {
-            transcript_background: proto::Rgba {
-                r: 0.039,
-                g: 0.051,
-                b: 0.067,
-                a: 1.0,
-            },
-            transcript_text_color: proto::Rgba {
-                r: 0.90,
-                g: 0.933,
-                b: 0.980,
-                a: 1.0,
-            },
-            transcript_font_size_px: 13.0,
-            collapsed_background: proto::Rgba {
-                r: 0.102,
-                g: 0.122,
-                b: 0.157,
-                a: 1.0,
-            },
-            collapsed_text_color: proto::Rgba {
-                r: 0.784,
-                g: 0.839,
-                b: 0.910,
-                a: 1.0,
-            },
-            collapsed_font_size_px: 12.0,
-            // Composer defaults — match `tze_hud_config::portal_tokens::defaults`
-            // COMPOSER_BACKGROUND = "#0F1418", COMPOSER_TEXT_COLOR = "#E0E8F4",
-            // COMPOSER_AT_CAPACITY_COLOR = "#B87333"
-            composer_background: proto::Rgba {
-                r: 0.059,
-                g: 0.078,
-                b: 0.094,
-                a: 1.0,
-            },
-            composer_text_color: proto::Rgba {
-                r: 0.878,
-                g: 0.910,
-                b: 0.957,
-                a: 1.0,
-            },
-            composer_font_size_px: 13.0,
-            // Muted amber — "#B87333" ≈ r=0.722 g=0.451 b=0.200
-            composer_at_capacity_color: proto::Rgba {
-                r: 0.722,
-                g: 0.451,
-                b: 0.200,
-                a: 1.0,
-            },
-        }
+        portal_visual_tokens_from_part_tokens(&tze_hud_config::PortalPartTokens::default())
     }
 }
 

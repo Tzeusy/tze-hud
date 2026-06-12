@@ -57,6 +57,7 @@
 //! | `portal.scroll_indicator.min_height_px` | scroll indicator | minimum thumb height in px |
 
 use crate::tokens::{DesignTokenMap, Rgba, parse_color_hex, parse_numeric};
+use tracing::warn;
 
 // ── Canonical portal token keys ───────────────────────────────────────────────
 
@@ -124,10 +125,11 @@ pub const PORTAL_TOKEN_SCROLL_INDICATOR_MIN_HEIGHT_PX: &str =
 /// Colors use the same palette as the existing exemplar adapter literals,
 /// expressed as resolved token defaults rather than inline constants.
 ///
-/// NOTE: The numeric defaults here (as strings) must match the float/integer
-/// defaults in `tze_hud_projection::resident_grpc::PortalVisualTokens::default`.
-/// There is no compile-time link (the crates are independent), so update both
-/// sides if you change any default value.
+/// These string constants are the **single source of truth** for the default portal
+/// palette. `tze_hud_projection::resident_grpc::PortalVisualTokens::default()` derives
+/// from `PortalPartTokens::default()` (which parses these constants) via
+/// `portal_visual_tokens_from_part_tokens`, so changing a value here propagates to
+/// both sides automatically (hud-dcynv consolidation).
 mod defaults {
     pub const FRAME_BACKGROUND: &str = "#111720";
     pub const FRAME_OPACITY: &str = "0.90";
@@ -328,37 +330,71 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
 
     macro_rules! resolve_color {
         ($key:expr, $fallback:expr) => {
-            token_map
-                .get($key)
-                .and_then(|v| parse_color_hex(v))
-                .unwrap_or($fallback)
+            match token_map.get($key) {
+                None => $fallback,
+                Some(v) => match parse_color_hex(v) {
+                    Some(c) => c,
+                    None => {
+                        warn!(
+                            token_key = $key,
+                            bad_value = %v,
+                            "portal token color is unparseable; using default fallback",
+                        );
+                        $fallback
+                    }
+                },
+            }
         };
     }
 
     macro_rules! resolve_f32 {
         ($key:expr, $fallback:expr) => {
-            token_map
-                .get($key)
-                .and_then(|v| parse_numeric(v))
-                .unwrap_or($fallback)
+            match token_map.get($key) {
+                None => $fallback,
+                Some(v) => match parse_numeric(v) {
+                    Some(n) => n,
+                    None => {
+                        warn!(
+                            token_key = $key,
+                            bad_value = %v,
+                            "portal token numeric is unparseable; using default fallback",
+                        );
+                        $fallback
+                    }
+                },
+            }
         };
     }
 
     macro_rules! resolve_u32 {
         ($key:expr, $fallback:expr) => {
-            token_map
-                .get($key)
-                .and_then(|v| {
+            match token_map.get($key) {
+                None => $fallback,
+                Some(v) => {
                     // Require a positive integer string: no negatives, no
                     // decimals, no very-large floats that would overflow u32.
                     // parse_numeric accepts any finite f32 — we add strictness.
-                    let n = parse_numeric(v)?;
-                    if n < 1.0 || n > u32::MAX as f32 || n.fract() != 0.0 {
-                        return None;
+                    let parsed = parse_numeric(v).and_then(|n| {
+                        if n < 1.0 || n > u32::MAX as f32 || n.fract() != 0.0 {
+                            None
+                        } else {
+                            Some(n as u32)
+                        }
+                    });
+                    match parsed {
+                        Some(n) => n,
+                        None => {
+                            warn!(
+                                token_key = $key,
+                                bad_value = %v,
+                                "portal token u32 is unparseable or out-of-range; \
+                                 using default fallback",
+                            );
+                            $fallback
+                        }
                     }
-                    Some(n as u32)
-                })
-                .unwrap_or($fallback)
+                }
+            }
         };
     }
 
@@ -859,5 +895,139 @@ mod tests {
             tokens.scroll_indicator_color.b.abs() < 1e-2,
             "scroll indicator color blue channel must be 0"
         );
+    }
+
+    // ── Diagnostic warn path (hud-dcynv) ─────────────────────────────────
+
+    /// Verifies that a present-but-unparseable token (color) falls back to the
+    /// default value and does NOT panic. The `tracing::warn!` is emitted on the
+    /// same code path, but subscriber capture requires the `tracing_test` crate
+    /// which is not in this workspace. The behavioral invariant (fallback used)
+    /// is sufficient to assert the warn code path was reached.
+    #[test]
+    fn unparseable_color_token_triggers_fallback_and_warn_path() {
+        // ALL color-bearing token keys injected with bad values.
+        let mut bad = DesignTokenMap::new();
+        for key in [
+            PORTAL_TOKEN_FRAME_BACKGROUND,
+            PORTAL_TOKEN_FRAME_BORDER_COLOR,
+            PORTAL_TOKEN_HEADER_TEXT_COLOR,
+            PORTAL_TOKEN_COMPOSER_BACKGROUND,
+            PORTAL_TOKEN_COMPOSER_TEXT_COLOR,
+            PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR,
+            PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
+            PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR,
+            PORTAL_TOKEN_DIVIDER_COLOR,
+            PORTAL_TOKEN_COLLAPSED_BACKGROUND,
+            PORTAL_TOKEN_COLLAPSED_TEXT_COLOR,
+            PORTAL_TOKEN_SCROLL_INDICATOR_COLOR,
+        ] {
+            bad.insert(key.to_string(), "!!not-hex!!".to_string());
+        }
+        let resolved = resolve_tokens(&empty_map(), &bad);
+        let tokens = resolve_portal_tokens(&resolved);
+        let defaults = PortalPartTokens::default();
+
+        // Every color field must fall back to the canonical default.
+        assert_eq!(
+            tokens.frame_background, defaults.frame_background,
+            "bad frame_background must fall back to default"
+        );
+        assert_eq!(
+            tokens.frame_border_color, defaults.frame_border_color,
+            "bad frame_border_color must fall back to default"
+        );
+        assert_eq!(
+            tokens.header_text_color, defaults.header_text_color,
+            "bad header_text_color must fall back to default"
+        );
+        assert_eq!(
+            tokens.composer_background, defaults.composer_background,
+            "bad composer_background must fall back to default"
+        );
+        assert_eq!(
+            tokens.transcript_background, defaults.transcript_background,
+            "bad transcript_background must fall back to default"
+        );
+        assert_eq!(
+            tokens.collapsed_background, defaults.collapsed_background,
+            "bad collapsed_background must fall back to default"
+        );
+        assert_eq!(
+            tokens.scroll_indicator_color, defaults.scroll_indicator_color,
+            "bad scroll_indicator_color must fall back to default"
+        );
+    }
+
+    /// Verifies that a present-but-unparseable numeric token falls back to the
+    /// default value. The warn is emitted on the same code path.
+    #[test]
+    fn unparseable_numeric_token_triggers_fallback_and_warn_path() {
+        let mut bad = DesignTokenMap::new();
+        for key in [
+            PORTAL_TOKEN_FRAME_OPACITY,
+            PORTAL_TOKEN_HEADER_FONT_SIZE,
+            PORTAL_TOKEN_COMPOSER_FONT_SIZE,
+            PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE,
+            PORTAL_TOKEN_COLLAPSED_FONT_SIZE,
+            PORTAL_TOKEN_WINDOW_MIN_WIDTH_PX,
+            PORTAL_TOKEN_WINDOW_MIN_HEIGHT_PX,
+            PORTAL_TOKEN_WINDOW_RESIZE_STEP_PX,
+            PORTAL_TOKEN_WINDOW_RESIZE_AFFORDANCE_PX,
+            PORTAL_TOKEN_SCROLL_INDICATOR_WIDTH_PX,
+            PORTAL_TOKEN_SCROLL_INDICATOR_MIN_HEIGHT_PX,
+        ] {
+            bad.insert(key.to_string(), "definitely-not-a-number".to_string());
+        }
+        let resolved = resolve_tokens(&empty_map(), &bad);
+        let tokens = resolve_portal_tokens(&resolved);
+        let defaults = PortalPartTokens::default();
+
+        assert!(
+            (tokens.frame_opacity - defaults.frame_opacity).abs() < 1e-6,
+            "bad frame_opacity must fall back to default"
+        );
+        assert!(
+            (tokens.header_font_size_px - defaults.header_font_size_px).abs() < 1e-6,
+            "bad header_font_size_px must fall back to default"
+        );
+        assert!(
+            (tokens.window_min_width_px - defaults.window_min_width_px).abs() < 1e-6,
+            "bad window_min_width_px must fall back to default"
+        );
+        assert!(
+            (tokens.scroll_indicator_width_px - defaults.scroll_indicator_width_px).abs() < 1e-6,
+            "bad scroll_indicator_width_px must fall back to default"
+        );
+    }
+
+    /// Verifies that a present-but-invalid u32 token (negative / decimal / zero)
+    /// falls back to the default value. The warn is emitted on the same code path.
+    #[test]
+    fn invalid_u32_token_triggers_fallback_and_warn_path() {
+        let defaults = PortalPartTokens::default();
+
+        for bad_value in ["-5", "0", "0.5", "1.9", "not-a-number"] {
+            let mut bad = DesignTokenMap::new();
+            bad.insert(
+                PORTAL_TOKEN_TRANSITION_IN_MS.to_string(),
+                bad_value.to_string(),
+            );
+            bad.insert(
+                PORTAL_TOKEN_TRANSITION_OUT_MS.to_string(),
+                bad_value.to_string(),
+            );
+            let resolved = resolve_tokens(&empty_map(), &bad);
+            let tokens = resolve_portal_tokens(&resolved);
+
+            assert_eq!(
+                tokens.transition_in_ms, defaults.transition_in_ms,
+                "bad transition_in_ms ({bad_value:?}) must fall back to default"
+            );
+            assert_eq!(
+                tokens.transition_out_ms, defaults.transition_out_ms,
+                "bad transition_out_ms ({bad_value:?}) must fall back to default"
+            );
+        }
     }
 }

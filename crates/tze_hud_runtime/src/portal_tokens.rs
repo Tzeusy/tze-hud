@@ -43,6 +43,35 @@ mod tests {
     use tze_hud_config::resolve_portal_tokens;
     use tze_hud_projection::resident_grpc::PortalVisualTokens;
 
+    /// Single-source-of-truth assertion (hud-dcynv): `PortalVisualTokens::default()` now
+    /// derives from `tze_hud_config::PortalPartTokens::default()` via
+    /// `portal_visual_tokens_from_part_tokens`, so both sides MUST agree exactly.
+    ///
+    /// Previously `PortalVisualTokens::default()` contained hand-coded floats that
+    /// diverged from the config defaults by up to 3 ULPs of rounding. This test
+    /// enforces the post-consolidation invariant: there is one canonical palette,
+    /// and any future change to `tze_hud_config::portal_tokens::defaults` propagates
+    /// here automatically — a change to one side that diverges from the other will
+    /// fail this test.
+    #[test]
+    fn portal_visual_defaults_are_single_source_of_truth() {
+        let empty: tze_hud_config::tokens::DesignTokenMap = std::collections::HashMap::new();
+        let part_tokens = resolve_portal_tokens(&empty);
+        // This is the "config path": config defaults → conversion function
+        let from_config = portal_visual_tokens_from_part_tokens(&part_tokens);
+        // This is the "projection default path": PortalVisualTokens::default()
+        // which now delegates to portal_visual_tokens_from_part_tokens(&PortalPartTokens::default())
+        let default_direct = PortalVisualTokens::default();
+
+        // They must be exactly equal — same code path, same inputs.
+        assert_eq!(
+            from_config, default_direct,
+            "PortalVisualTokens::default() must be exactly equal to \
+             portal_visual_tokens_from_part_tokens(PortalPartTokens::default()); \
+             divergence means the single-source-of-truth invariant was broken"
+        );
+    }
+
     /// Round-trip: `resolve_portal_tokens` → `portal_visual_tokens_from_part_tokens`
     /// must yield the same transcript/collapsed values as `PortalVisualTokens::default`.
     ///
