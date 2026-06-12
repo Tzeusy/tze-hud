@@ -172,7 +172,6 @@ DRAG_IDLE_RELEASE_SECONDS = 1.0
 DRAG_APPLY_MIN_INTERVAL_SECONDS = 0.025
 ICON_DRAG_APPLY_MIN_INTERVAL_SECONDS = 0.008
 ICON_DRAG_START_THRESHOLD_PX = 20.0
-KEY_ECHO_TIMEOUT_SECONDS = 1.0
 COMPOSER_RENDER_DEBOUNCE_SECONDS = 0.02
 COMPOSER_CARET_BLINK_SECONDS = 0.45
 COMPOSER_CARET_W = 2.0
@@ -2158,10 +2157,7 @@ async def portal_interaction_loop(
     output_view_start = 0
     drag: Optional[dict[str, float | str]] = None
     last_output_scroll_y: Optional[float] = None
-    pending_key_echoes: list[dict[str, float | str]] = []
-    suppressed_shortcut_chars: list[dict[str, float | str]] = []
-    pending_paste_requests: list[dict[str, float | int]] = []
-    next_paste_request_id = 0
+    last_draft_sequence: int = 0
     composer_render_task: Optional[asyncio.Task[None]] = None
     composer_render_dirty = False
     composer_last_dirty_at = 0.0
@@ -2640,110 +2636,60 @@ async def portal_interaction_loop(
            input_pane_w=INPUT_PANE_W, output_pane_w=portal_pane_rects()[1].w,
            reason=reason)
 
-    async def submit_composer() -> None:
-        nonlocal composer_cursor, composer_cursor_goal_x, composer_text
-        if composer_text.strip():
+    async def on_composer_draft_state(text: str, cursor: int, at_capacity: bool, sequence: int) -> None:
+        """Handle runtime-owned ComposerDraftStateEvent — update local display state."""
+        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence
+        if sequence <= last_draft_sequence:
+            # State-stream: discard stale notifications (sequence is monotonic).
+            return
+        last_draft_sequence = sequence
+        composer_text = text
+        composer_cursor = cursor
+        composer_cursor_goal_x = None
+        emit_step_event(transcript, 10, "checkpoint", {
+            "code": "input:draft-state",
+            "title": "Composer draft state received",
+            "action": "runtime-owned draft buffer delivered coalesced text+cursor snapshot",
+            "expected_visual": "composer text window reflects runtime draft state",
+        }, text_len=len(text), cursor=cursor, at_capacity=at_capacity, sequence=sequence)
+        request_composer_render()
+
+    async def on_composer_draft_submit(text: str, sequence: int) -> None:
+        """Handle runtime-owned ComposerDraftSubmitEvent — clear local display."""
+        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence
+        last_draft_sequence = sequence
+        if text.strip():
             emit_step_event(transcript, 10, "checkpoint", {
                 "code": "input:submit",
                 "title": "Composer submitted",
-                "action": "operator submitted text from portal composer",
+                "action": "runtime-owned draft submitted; composer clears",
                 "expected_visual": "composer clears after submit",
-        }, submitted=composer_text)
+            }, submitted=text)
         composer_text = ""
         composer_cursor = 0
         composer_cursor_goal_x = None
         request_composer_render()
 
-    def prune_pending_key_echoes() -> None:
-        now = time.monotonic()
-        pending_key_echoes[:] = [
-            pending for pending in pending_key_echoes
-            if now - float(pending["at"]) < KEY_ECHO_TIMEOUT_SECONDS
-        ]
-        suppressed_shortcut_chars[:] = [
-            pending for pending in suppressed_shortcut_chars
-            if now - float(pending["at"]) < KEY_ECHO_TIMEOUT_SECONDS
-        ]
-        pending_paste_requests[:] = [
-            pending for pending in pending_paste_requests
-            if now - float(pending["at"]) < KEY_ECHO_TIMEOUT_SECONDS
-        ]
-
-    def consume_key_echo(character: str) -> bool:
-        prune_pending_key_echoes()
-        for index, pending in enumerate(pending_key_echoes):
-            if character == pending["text"]:
-                del pending_key_echoes[index]
-                return True
-        return False
-
-    def suppress_shortcut_character(character: str) -> None:
-        if character:
-            suppressed_shortcut_chars.append({
-                "text": character,
-                "at": time.monotonic(),
-            })
-
-    def consume_suppressed_shortcut_character(character: str) -> bool:
-        prune_pending_key_echoes()
-        for index, pending in enumerate(suppressed_shortcut_chars):
-            if character == pending["text"]:
-                del suppressed_shortcut_chars[index]
-                return True
-        return False
-
-    def consume_pending_paste_request() -> bool:
-        prune_pending_key_echoes()
-        if pending_paste_requests:
-            pending_paste_requests.pop(0)
-            return True
-        return False
-
-    async def fallback_paste_request(request_id: int) -> None:
-        await asyncio.sleep(0.18)
-        for index, pending in enumerate(pending_paste_requests):
-            if int(pending["id"]) == request_id:
-                del pending_paste_requests[index]
-                pasted = await paste_windows_clipboard()
-                if pasted:
-                    pending_key_echoes.append({
-                        "text": pasted,
-                        "at": time.monotonic(),
-                    })
-                return
-
-    async def paste_windows_clipboard() -> str:
-        nonlocal composer_cursor, composer_cursor_goal_x, composer_text
-        pasted = await read_windows_clipboard(
-            clipboard_host,
-            user=clipboard_user,
-            ssh_key=clipboard_ssh_key,
-            timeout_s=clipboard_timeout_s,
-        )
-        pasted = normalize_composer_input(pasted)
-        if not pasted:
-            emit_step_event(transcript, 10, "checkpoint", {
-                "code": "input:paste-empty",
-                "title": "Composer paste empty",
-                "action": "clipboard read returned no text",
-                "expected_visual": "composer text remains unchanged",
-            })
-            return ""
-        composer_text = (
-            composer_text[:composer_cursor]
-            + pasted
-            + composer_text[composer_cursor:]
-        )
-        composer_cursor += len(pasted)
-        composer_cursor_goal_x = None
+    async def on_composer_draft_cancel(sequence: int) -> None:
+        """Handle runtime-owned ComposerDraftCancelEvent — clear local display."""
+        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence
+        last_draft_sequence = sequence
         emit_step_event(transcript, 10, "checkpoint", {
-            "code": "input:paste",
-            "title": "Composer pasted clipboard",
-            "action": "inserted Windows clipboard text at cursor",
-            "expected_visual": "clipboard text appears once in composer",
-        }, chars=len(pasted), lines=len(pasted.splitlines()))
+            "code": "input:cancel",
+            "title": "Composer cancelled",
+            "action": "runtime-owned draft cancelled; composer clears",
+            "expected_visual": "composer clears without submitting",
+        }, sequence=sequence)
+        composer_text = ""
+        composer_cursor = 0
+        composer_cursor_goal_x = None
         request_composer_render()
-        return pasted
+
+    # NOTE: Clipboard paste (Ctrl+V) is not currently handled. The prior
+    # adapter-owned paste path (paste_windows_clipboard / fallback_paste_request)
+    # wrote directly into the adapter's local composer_text buffer, bypassing
+    # the runtime-owned draft. There is no runtime API to inject text from the
+    # clipboard into the runtime draft buffer yet — this is a follow-up item.
 
     while True:
         try:
@@ -2756,7 +2702,6 @@ async def portal_interaction_loop(
             timeout = min(timeouts) if timeouts else None
             batch = await asyncio.wait_for(client._event_queue.get(), timeout=timeout)
         except asyncio.TimeoutError:
-            prune_pending_key_echoes()
             if drag is not None:
                 last_activity_at = float(drag.get("last_activity_at", drag["started_at"]))
                 if time.monotonic() - last_activity_at >= DRAG_IDLE_RELEASE_SECONDS:
@@ -2765,7 +2710,6 @@ async def portal_interaction_loop(
         pending_output_scroll_y: Optional[float] = None
         for envelope in batch.events:
             kind = envelope.WhichOneof("event")
-            prune_pending_key_echoes()
 
             if kind == "pointer_down":
                 ev = envelope.pointer_down
@@ -2948,173 +2892,34 @@ async def portal_interaction_loop(
                     await finish_drag(f"capture_released:{reason_name}")
 
             elif kind == "character":
+                # Character events are observed for logging only. Composer text
+                # state is now driven exclusively by ComposerDraftStateEvent
+                # (runtime-owned draft path, spec §4.6).
                 ev = envelope.character
                 if ev.tile_id != tiles.input_scroll:
                     continue
                 character = normalize_composer_input(ev.character)
-                suppressed_shortcut = consume_suppressed_shortcut_character(character)
-                consumed_echo = consume_key_echo(character)
-                from_paste_request = consume_pending_paste_request()
                 emit_step_event(transcript, 10, "checkpoint", {
                     "code": "input:character",
-                    "title": "Composer character received",
-                    "action": "runtime delivered character input to composer",
-                    "expected_visual": "typed character appears in composer text window",
-                }, character=character, consumed_echo=consumed_echo,
-                   suppressed_shortcut=suppressed_shortcut,
-                   from_paste_request=from_paste_request)
-                if character in {"\r", "\n"}:
-                    continue
-                if suppressed_shortcut:
-                    continue
-                if consumed_echo:
-                    continue
-                composer_cursor_goal_x = None
-                composer_text = (
-                    composer_text[:composer_cursor]
-                    + character
-                    + composer_text[composer_cursor:]
-                )
-                composer_cursor += len(character)
-                request_composer_render()
+                    "title": "Composer character received (observed)",
+                    "action": "runtime delivered character input; state update arrives via composer_draft_state",
+                    "expected_visual": "composer state will update when draft-state event arrives",
+                }, character=character)
 
             elif kind == "key_down":
+                # Key events are observed for logging only. Composer state is
+                # driven by ComposerDraftStateEvent (runtime-owned, spec §4.6).
+                # Submit/cancel arrive as ComposerDraftSubmitEvent / ComposerDraftCancelEvent.
                 ev = envelope.key_down
                 if ev.tile_id != tiles.input_scroll:
                     continue
                 emit_step_event(transcript, 10, "checkpoint", {
                     "code": "input:key-down",
-                    "title": "Composer key down received",
-                    "action": "runtime delivered key input to composer",
-                    "expected_visual": "editing commands affect composer when applicable",
+                    "title": "Composer key down received (observed)",
+                    "action": "runtime delivered key input; draft state update arrives via composer_draft_state",
+                    "expected_visual": "editing result arrives via runtime-owned draft-state event",
                 }, key=ev.key, key_code=ev.key_code, repeat=ev.repeat,
                    ctrl=ev.ctrl, shift=ev.shift, alt=ev.alt, meta=ev.meta)
-                if ev.key == "Backspace" and (ev.ctrl or ev.alt):
-                    composer_cursor_goal_x = None
-                    pending_key_echoes.clear()
-                    word_start = composer_word_delete_start(composer_text, composer_cursor)
-                    if word_start < composer_cursor:
-                        composer_text = (
-                            composer_text[:word_start]
-                            + composer_text[composer_cursor:]
-                        )
-                        composer_cursor = word_start
-                    request_composer_render()
-                elif ev.key == "Backspace":
-                    composer_cursor_goal_x = None
-                    pending_key_echoes.clear()
-                    if composer_cursor > 0:
-                        composer_text = (
-                            composer_text[:composer_cursor - 1]
-                            + composer_text[composer_cursor:]
-                        )
-                        composer_cursor -= 1
-                    request_composer_render()
-                elif ev.key == "Delete":
-                    composer_cursor_goal_x = None
-                    pending_key_echoes.clear()
-                    if composer_cursor < len(composer_text):
-                        composer_text = (
-                            composer_text[:composer_cursor]
-                            + composer_text[composer_cursor + 1:]
-                        )
-                    request_composer_render()
-                elif ev.key == "Home":
-                    composer_cursor_goal_x = None
-                    composer_cursor = 0
-                    request_composer_render()
-                elif ev.key == "End":
-                    composer_cursor_goal_x = None
-                    composer_cursor = len(composer_text)
-                    request_composer_render()
-                elif ev.key == "ArrowLeft" and (ev.ctrl or ev.alt):
-                    composer_cursor_goal_x = None
-                    composer_cursor = composer_word_delete_start(composer_text, composer_cursor)
-                    request_composer_render()
-                elif ev.key == "ArrowLeft":
-                    composer_cursor_goal_x = None
-                    composer_cursor = max(0, composer_cursor - 1)
-                    request_composer_render()
-                elif ev.key == "ArrowRight" and (ev.ctrl or ev.alt):
-                    composer_cursor_goal_x = None
-                    composer_cursor = composer_word_forward_end(composer_text, composer_cursor)
-                    request_composer_render()
-                elif ev.key == "ArrowRight":
-                    composer_cursor_goal_x = None
-                    composer_cursor = min(len(composer_text), composer_cursor + 1)
-                    request_composer_render()
-                elif ev.key == "ArrowUp":
-                    composer_cursor, composer_cursor_goal_x = composer_cursor_for_vertical_move(
-                        composer_text,
-                        composer_cursor,
-                        -1,
-                        composer_cursor_goal_x,
-                    )
-                    request_composer_render()
-                elif ev.key == "ArrowDown":
-                    composer_cursor, composer_cursor_goal_x = composer_cursor_for_vertical_move(
-                        composer_text,
-                        composer_cursor,
-                        1,
-                        composer_cursor_goal_x,
-                    )
-                    request_composer_render()
-                elif ev.key == "Enter":
-                    composer_cursor_goal_x = None
-                    pending_key_echoes.clear()
-                    await submit_composer()
-                elif ev.key == "Escape":
-                    composer_cursor_goal_x = None
-                    pending_key_echoes.clear()
-                    composer_text = ""
-                    composer_cursor = 0
-                    request_composer_render()
-                elif ev.ctrl or ev.meta:
-                    composer_cursor_goal_x = None
-                    pending_key_echoes.clear()
-                    if ev.key.lower() == "v":
-                        next_paste_request_id += 1
-                        paste_request_id = next_paste_request_id
-                        pending_paste_requests.append({
-                            "id": paste_request_id,
-                            "at": time.monotonic(),
-                        })
-                        asyncio.create_task(fallback_paste_request(paste_request_id))
-                        emit_step_event(transcript, 10, "checkpoint", {
-                            "code": "input:paste-requested",
-                            "title": "Composer paste requested",
-                            "action": "waiting for runtime clipboard character payload; SSH clipboard fallback is armed",
-                            "expected_visual": "clipboard text appears once in composer",
-                        })
-                    elif len(ev.key) == 1:
-                        suppress_shortcut_character(ev.key)
-                    emit_step_event(transcript, 10, "checkpoint", {
-                        "code": "input:shortcut-ignored",
-                        "title": "Composer shortcut ignored",
-                        "action": "runtime delivered a modified key that this exemplar does not implement",
-                        "expected_visual": "shortcut key does not insert literal text",
-                    }, key=ev.key, key_code=ev.key_code, ctrl=ev.ctrl, meta=ev.meta)
-                else:
-                    fallback_text = composer_key_fallback_text(ev.key)
-                    if fallback_text is not None:
-                        composer_cursor_goal_x = None
-                        composer_text = (
-                            composer_text[:composer_cursor]
-                            + fallback_text
-                            + composer_text[composer_cursor:]
-                        )
-                        composer_cursor += len(fallback_text)
-                        pending_key_echoes.append({
-                            "text": fallback_text,
-                            "at": time.monotonic(),
-                        })
-                        emit_step_event(transcript, 10, "checkpoint", {
-                            "code": "input:key-text",
-                            "title": "Composer key text applied",
-                            "action": "printable key-down updated composer in-order",
-                            "expected_visual": "typed character appears once in composer text window",
-                        }, text=fallback_text)
-                        request_composer_render()
 
             elif kind == "scroll_offset_changed":
                 ev = envelope.scroll_offset_changed
@@ -3148,7 +2953,25 @@ async def portal_interaction_loop(
                 })
                 set_composer_focus(False)
 
-        prune_pending_key_echoes()
+            elif kind == "composer_draft_state":
+                # Runtime-owned coalesced draft state (spec §4.6).
+                ev = envelope.composer_draft_state
+                await on_composer_draft_state(
+                    ev.text,
+                    int(ev.cursor),
+                    ev.at_capacity,
+                    int(ev.sequence),
+                )
+
+            elif kind == "composer_draft_submit":
+                # Runtime-owned transactional submit (spec §4.6).
+                ev = envelope.composer_draft_submit
+                await on_composer_draft_submit(ev.text, int(ev.sequence))
+
+            elif kind == "composer_draft_cancel":
+                # Runtime-owned transactional cancel (spec §4.6).
+                ev = envelope.composer_draft_cancel
+                await on_composer_draft_cancel(int(ev.sequence))
 
         if pending_output_scroll_y is not None:
             if last_output_scroll_y is not None and abs(pending_output_scroll_y - last_output_scroll_y) < 0.5:
