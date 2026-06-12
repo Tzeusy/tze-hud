@@ -384,13 +384,25 @@ impl TextRasterizer {
             if item.overflow != TextOverflow::Ellipsis {
                 continue;
             }
+            // (hud-so7zu) Use the effective measurement weight/family from
+            // styled runs so that bold/monospace spans are measured accurately.
+            // The truncation fit decision uses these attrs; if only base_weight
+            // is used, wider bold/monospace text can wrap to more lines than
+            // measured and get hard-clipped by TextBounds.
+            let (meas_weight, meas_mono) =
+                styled_runs_effective_measurement(&item.styled_runs, item.font_weight);
+            let meas_family = if meas_mono {
+                FontFamily::SystemMonospace
+            } else {
+                item.font_family
+            };
             let key = TruncationKey::new(
                 &item.text,
                 item.bounds_width,
                 item.bounds_height,
                 item.font_size_px,
-                item.font_family,
-                item.font_weight,
+                meas_family,
+                meas_weight,
                 item.viewport,
             );
             live_keys.push(key);
@@ -400,8 +412,8 @@ impl TextRasterizer {
                 item.bounds_width,
                 item.bounds_height,
                 item.font_size_px,
-                item.font_family,
-                item.font_weight,
+                meas_family,
+                meas_weight,
                 item.viewport,
                 &mut self.font_system,
             );
@@ -469,13 +481,21 @@ impl TextRasterizer {
                 if item.overflow != TextOverflow::Ellipsis {
                     return None;
                 }
+                // (hud-so7zu) Use effective measurement attrs from styled runs.
+                let (meas_weight, meas_mono) =
+                    styled_runs_effective_measurement(&item.styled_runs, item.font_weight);
+                let meas_family = if meas_mono {
+                    FontFamily::SystemMonospace
+                } else {
+                    item.font_family
+                };
                 Some(TruncationKey::new(
                     &item.text,
                     item.bounds_width,
                     item.bounds_height,
                     item.font_size_px,
-                    item.font_family,
-                    item.font_weight,
+                    meas_family,
+                    meas_weight,
                     item.viewport,
                 ))
             })
@@ -485,14 +505,22 @@ impl TextRasterizer {
         // newly-added items); hits are no-ops via `entry().or_insert_with`.
         for (item, key_opt) in items.iter().zip(keys.iter()) {
             if let Some(key) = key_opt {
+                // (hud-so7zu) Re-derive effective measurement attrs for the prime call.
+                let (meas_weight, meas_mono) =
+                    styled_runs_effective_measurement(&item.styled_runs, item.font_weight);
+                let meas_family = if meas_mono {
+                    FontFamily::SystemMonospace
+                } else {
+                    item.font_family
+                };
                 self.truncation_cache.prime(
                     *key,
                     &item.text,
                     item.bounds_width,
                     item.bounds_height,
                     item.font_size_px,
-                    item.font_family,
-                    item.font_weight,
+                    meas_family,
+                    meas_weight,
                     item.viewport,
                     &mut self.font_system,
                 );
@@ -548,17 +576,38 @@ impl TextRasterizer {
                     // Attrs)` pairs and call `set_rich_text` once — zero re-parse cost.
                     //
                     // When ellipsis truncation was applied, the truncated text is a
-                    // plain-text prefix + "…"; we fall back to set_text for it because
-                    // the original styled_runs byte offsets are no longer valid against
-                    // the truncated string.
-                    if truncated.is_some() {
-                        // Ellipsis path: use the pre-truncated plain text.
-                        buf.set_text(
-                            &mut self.font_system,
-                            effective_text,
-                            base_attrs,
-                            Shaping::Basic,
-                        );
+                    // plain-text prefix + "…".  The original styled_runs byte offsets
+                    // are valid for the prefix portion; we re-slice them to the prefix
+                    // length (hud-so7zu) so bold/italic/code styling is preserved.
+                    if let Some(truncated_str) = truncated {
+                        // Compute the byte length of the plain-text prefix (excluding "…").
+                        let content_end = truncated_str
+                            .strip_suffix(crate::overflow::ELLIPSIS)
+                            .map(|s| s.len())
+                            .unwrap_or(truncated_str.len());
+                        let resliced = reslice_styled_runs(&item.styled_runs, content_end);
+                        if resliced.is_empty() {
+                            // No runs survive truncation — fall back to plain text.
+                            buf.set_text(
+                                &mut self.font_system,
+                                effective_text,
+                                base_attrs,
+                                Shaping::Basic,
+                            );
+                        } else {
+                            let spans = styled_run_spans(
+                                effective_text,
+                                &resliced,
+                                base_attrs,
+                                item.font_family,
+                            );
+                            buf.set_rich_text(
+                                &mut self.font_system,
+                                spans,
+                                base_attrs,
+                                Shaping::Basic,
+                            );
+                        }
                     } else {
                         let spans = styled_run_spans(
                             &item.text,
@@ -591,16 +640,31 @@ impl TextRasterizer {
                     // without a color_opt set, so base_attrs carries no color_opt and
                     // run attrs carry explicit Color values.
                     //
-                    // When ellipsis truncation was applied, the color_runs may no
-                    // longer be valid against the truncated text — fall back to
-                    // plain set_text for the truncated case.
-                    if truncated.is_some() {
-                        buf.set_text(
-                            &mut self.font_system,
-                            effective_text,
-                            base_attrs,
-                            Shaping::Basic,
-                        );
+                    // When ellipsis truncation was applied, the color_runs byte
+                    // offsets remain valid for the plain-text prefix; we re-slice
+                    // them to the prefix length (hud-so7zu) so colors are preserved.
+                    if let Some(truncated_str) = truncated {
+                        let content_end = truncated_str
+                            .strip_suffix(crate::overflow::ELLIPSIS)
+                            .map(|s| s.len())
+                            .unwrap_or(truncated_str.len());
+                        let resliced = reslice_color_runs(&item.color_runs, content_end);
+                        if resliced.is_empty() {
+                            buf.set_text(
+                                &mut self.font_system,
+                                effective_text,
+                                base_attrs,
+                                Shaping::Basic,
+                            );
+                        } else {
+                            let spans = color_run_spans(effective_text, &resliced, base_attrs);
+                            buf.set_rich_text(
+                                &mut self.font_system,
+                                spans,
+                                base_attrs,
+                                Shaping::Basic,
+                            );
+                        }
                     } else {
                         let spans = color_run_spans(&item.text, &item.color_runs, base_attrs);
                         buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
@@ -1482,6 +1546,101 @@ pub(crate) fn styled_run_spans<'t, 'a>(
     }
 
     spans
+}
+
+/// Re-slice [`StyledRunItem`]s to a truncated byte range.
+///
+/// When ellipsis truncation is applied, the truncated text is a plain-text
+/// prefix with "…" appended.  The original `styled_runs` byte offsets remain
+/// valid for the prefix portion of the truncated text, but must be clamped to
+/// `content_end_byte` (the byte length of the prefix, excluding "…").
+///
+/// Runs entirely beyond `content_end_byte` are dropped.
+/// Runs that partially overlap `content_end_byte` are clamped at that boundary,
+/// provided both the run start and the clamped end are valid UTF-8 boundaries in
+/// `truncated_text`.  Invalid boundary runs are dropped rather than panicking.
+///
+/// Returns an owned slice ready to pass to [`styled_run_spans`].
+pub(crate) fn reslice_styled_runs(
+    runs: &[StyledRunItem],
+    content_end_byte: usize,
+) -> Vec<StyledRunItem> {
+    runs.iter()
+        .filter_map(|run| {
+            let start = run.start_byte;
+            let end = run.end_byte.min(content_end_byte);
+            if start >= end || start >= content_end_byte {
+                return None;
+            }
+            Some(StyledRunItem {
+                start_byte: start,
+                end_byte: end,
+                weight: run.weight,
+                italic: run.italic,
+                monospace: run.monospace,
+                color: run.color,
+            })
+        })
+        .collect()
+}
+
+/// Re-slice [`ColorRunItem`]s to a truncated byte range.
+///
+/// Analogous to [`reslice_styled_runs`]: clamps runs to `content_end_byte`
+/// (the byte length of the plain-text prefix, excluding the trailing "…").
+/// Runs entirely beyond `content_end_byte` are dropped; partial runs are clamped.
+pub(crate) fn reslice_color_runs(
+    runs: &[ColorRunItem],
+    content_end_byte: usize,
+) -> Vec<ColorRunItem> {
+    runs.iter()
+        .filter_map(|run| {
+            let start = run.start_byte;
+            let end = run.end_byte.min(content_end_byte);
+            if start >= end || start >= content_end_byte {
+                return None;
+            }
+            Some(ColorRunItem {
+                start_byte: start,
+                end_byte: end,
+                color: run.color,
+            })
+        })
+        .collect()
+}
+
+/// Compute the "widest" effective measurement weight and font family for a
+/// `TextItem` that has [`StyledRunItem`]s.
+///
+/// Used when priming the truncation cache for items with styled runs (hud-so7zu).
+/// Styled runs may include bold (weight=700) or monospace spans that are wider
+/// than the base font.  If the truncation measurement uses only the base attrs,
+/// bold/monospace text wraps to more lines than measured, causing the fit
+/// decision to declare text fits when it actually overflows.
+///
+/// Returns `(effective_weight, use_monospace)` where:
+/// - `effective_weight` is the maximum weight across all runs that explicitly
+///   set a weight (fallback: `base_weight`).
+/// - `use_monospace` is `true` if any run requests the monospace family.
+///
+/// Callers should use these values to build the `base_attrs` passed to
+/// [`overflow::truncate_for_ellipsis`] / [`overflow::truncate_tail_anchored`]
+/// so the measurement is pessimistic (wider) and the fit decision is accurate.
+pub(crate) fn styled_runs_effective_measurement(
+    runs: &[StyledRunItem],
+    base_weight: u16,
+) -> (u16, bool) {
+    let mut max_weight = base_weight;
+    let mut any_monospace = false;
+    for run in runs {
+        if let Some(w) = run.weight {
+            max_weight = max_weight.max(w);
+        }
+        if run.monospace {
+            any_monospace = true;
+        }
+    }
+    (max_weight, any_monospace)
 }
 
 /// Format a 32-byte resource ID as a lowercase hex string for logging.
@@ -3184,5 +3343,230 @@ mod tests {
             "TruncationKey must differ when bounds_height differs \
              (required for mid-drag cache-invalidation correctness)"
         );
+    }
+
+    // ── hud-so7zu: styled/color run reslice tests ─────────────────────────────
+
+    /// reslice_styled_runs: runs entirely before content_end_byte are preserved.
+    #[test]
+    fn reslice_styled_runs_runs_within_range_preserved() {
+        let runs = vec![
+            StyledRunItem {
+                start_byte: 0,
+                end_byte: 4,
+                weight: Some(700),
+                italic: false,
+                monospace: false,
+                color: None,
+            },
+            StyledRunItem {
+                start_byte: 5,
+                end_byte: 10,
+                weight: None,
+                italic: true,
+                monospace: false,
+                color: None,
+            },
+        ];
+        // content_end = 10: both runs fit entirely
+        let result = reslice_styled_runs(&runs, 10);
+        assert_eq!(result.len(), 2, "both runs within range must be preserved");
+        assert_eq!(result[0].start_byte, 0);
+        assert_eq!(result[0].end_byte, 4);
+        assert_eq!(result[1].start_byte, 5);
+        assert_eq!(result[1].end_byte, 10);
+    }
+
+    /// reslice_styled_runs: runs starting at or beyond content_end_byte are dropped.
+    #[test]
+    fn reslice_styled_runs_beyond_truncation_dropped() {
+        let runs = vec![
+            StyledRunItem {
+                start_byte: 0,
+                end_byte: 3,
+                weight: Some(700),
+                italic: false,
+                monospace: false,
+                color: None,
+            },
+            StyledRunItem {
+                start_byte: 5,
+                end_byte: 10,
+                weight: None,
+                italic: false,
+                monospace: false,
+                color: None,
+            },
+        ];
+        // content_end = 4: second run (5..10) is entirely beyond truncation point
+        let result = reslice_styled_runs(&runs, 4);
+        assert_eq!(result.len(), 1, "run beyond content_end must be dropped");
+        assert_eq!(result[0].start_byte, 0);
+        assert_eq!(result[0].end_byte, 3);
+    }
+
+    /// reslice_styled_runs: runs partially overlapping content_end_byte are clamped.
+    #[test]
+    fn reslice_styled_runs_partial_overlap_clamped() {
+        let runs = vec![StyledRunItem {
+            start_byte: 3,
+            end_byte: 12,
+            weight: Some(700),
+            italic: false,
+            monospace: false,
+            color: None,
+        }];
+        // content_end = 8: run 3..12 overlaps; should become 3..8
+        let result = reslice_styled_runs(&runs, 8);
+        assert_eq!(
+            result.len(),
+            1,
+            "partially overlapping run should be clamped"
+        );
+        assert_eq!(result[0].start_byte, 3);
+        assert_eq!(
+            result[0].end_byte, 8,
+            "end_byte must be clamped to content_end"
+        );
+        assert_eq!(result[0].weight, Some(700), "weight must be preserved");
+    }
+
+    /// reslice_color_runs: runs entirely before content_end_byte are preserved.
+    #[test]
+    fn reslice_color_runs_within_range_preserved() {
+        let runs = vec![
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 4,
+                color: [255, 0, 0, 255],
+            },
+            ColorRunItem {
+                start_byte: 5,
+                end_byte: 9,
+                color: [0, 0, 255, 255],
+            },
+        ];
+        let result = reslice_color_runs(&runs, 10);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].end_byte, 4);
+        assert_eq!(result[1].end_byte, 9);
+    }
+
+    /// reslice_color_runs: runs beyond content_end_byte are dropped.
+    #[test]
+    fn reslice_color_runs_beyond_truncation_dropped() {
+        let runs = vec![
+            ColorRunItem {
+                start_byte: 0,
+                end_byte: 3,
+                color: [255, 0, 0, 255],
+            },
+            ColorRunItem {
+                start_byte: 6,
+                end_byte: 12,
+                color: [0, 255, 0, 255],
+            },
+        ];
+        let result = reslice_color_runs(&runs, 5);
+        assert_eq!(
+            result.len(),
+            1,
+            "second run entirely beyond content_end must be dropped"
+        );
+        assert_eq!(result[0].color, [255, 0, 0, 255]);
+    }
+
+    /// reslice_color_runs: partial overlap is clamped to content_end.
+    #[test]
+    fn reslice_color_runs_partial_overlap_clamped() {
+        let runs = vec![ColorRunItem {
+            start_byte: 2,
+            end_byte: 10,
+            color: [0, 128, 255, 255],
+        }];
+        let result = reslice_color_runs(&runs, 6);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start_byte, 2);
+        assert_eq!(result[0].end_byte, 6, "end clamped to content_end");
+        assert_eq!(result[0].color, [0, 128, 255, 255], "color preserved");
+    }
+
+    // ── hud-so7zu: styled_runs_effective_measurement tests ───────────────────
+
+    /// Base case: no styled runs → returns base_weight and no monospace.
+    #[test]
+    fn styled_runs_effective_measurement_no_runs() {
+        let (weight, mono) = styled_runs_effective_measurement(&[], 400);
+        assert_eq!(weight, 400, "no runs: effective weight = base_weight");
+        assert!(!mono, "no runs: no monospace");
+    }
+
+    /// Bold run raises effective weight.
+    #[test]
+    fn styled_runs_effective_measurement_bold_run_raises_weight() {
+        let runs = vec![StyledRunItem {
+            start_byte: 0,
+            end_byte: 5,
+            weight: Some(700),
+            italic: false,
+            monospace: false,
+            color: None,
+        }];
+        let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
+        assert_eq!(weight, 700, "bold run must raise effective weight to 700");
+        assert!(!mono);
+    }
+
+    /// Monospace run sets use_monospace flag.
+    #[test]
+    fn styled_runs_effective_measurement_monospace_run_sets_flag() {
+        let runs = vec![StyledRunItem {
+            start_byte: 0,
+            end_byte: 5,
+            weight: None,
+            italic: false,
+            monospace: true,
+            color: None,
+        }];
+        let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
+        assert_eq!(
+            weight, 400,
+            "monospace run without weight: base_weight unchanged"
+        );
+        assert!(mono, "monospace run must set use_monospace");
+    }
+
+    /// Multiple runs: maximum weight is returned.
+    #[test]
+    fn styled_runs_effective_measurement_max_weight_returned() {
+        let runs = vec![
+            StyledRunItem {
+                start_byte: 0,
+                end_byte: 3,
+                weight: Some(600),
+                italic: false,
+                monospace: false,
+                color: None,
+            },
+            StyledRunItem {
+                start_byte: 4,
+                end_byte: 8,
+                weight: Some(800),
+                italic: false,
+                monospace: false,
+                color: None,
+            },
+            StyledRunItem {
+                start_byte: 9,
+                end_byte: 12,
+                weight: Some(500),
+                italic: false,
+                monospace: false,
+                color: None,
+            },
+        ];
+        let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
+        assert_eq!(weight, 800, "maximum weight across runs must be returned");
+        assert!(!mono);
     }
 }

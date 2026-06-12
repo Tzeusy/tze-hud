@@ -234,19 +234,23 @@ pub fn truncate_for_ellipsis<'a>(
     let total_runs = runs.len();
     if total_runs <= max_lines {
         // All lines fit vertically; no vertical truncation needed.
-        // Check if the last run overflows horizontally.
-        let last_run = &runs[total_runs - 1];
-        if last_run.1 <= bounds_width {
+        // Check ALL runs for horizontal overflow, not just the last one.
+        // A long unbreakable token on any non-final line overflows horizontally
+        // and would be clipped by TextBounds without truncation (hud-so7zu).
+        let first_overflow_idx = runs.iter().position(|run| run.1 > bounds_width);
+        if first_overflow_idx.is_none() {
             // The entire text fits — no truncation.
             return TruncationResult {
                 text: text.to_owned(),
                 was_truncated: false,
             };
         }
-        // Last run overflows horizontally: we must truncate the last line.
-        // Find the text for the last run and truncate it.
-        let last_line_i = last_run.0;
-        let last_line_text = if let Some(line) = full_buf.lines.get(last_line_i) {
+        // At least one run overflows horizontally: truncate at the first
+        // overflowing run so the result fits within bounds_width.
+        let overflow_idx = first_overflow_idx.unwrap();
+        let overflow_run = &runs[overflow_idx];
+        let overflow_line_i = overflow_run.0;
+        let overflow_line_text = if let Some(line) = full_buf.lines.get(overflow_line_i) {
             line.text().to_owned()
         } else {
             return TruncationResult {
@@ -256,14 +260,15 @@ pub fn truncate_for_ellipsis<'a>(
         };
 
         // Reconstruct the prefix of `text` that corresponds to all runs before
-        // the last run, then truncate only the slice of the paragraph that
-        // belongs to the last run (avoiding duplication for word-wrapped paragraphs).
-        let prefix = text_prefix_up_to_run(&runs, total_runs - 1, text, &full_buf);
+        // the overflowing run, then truncate only the slice of the paragraph
+        // that belongs to the overflowing run (avoiding duplication for
+        // word-wrapped paragraphs).
+        let prefix = text_prefix_up_to_run(&runs, overflow_idx, text, &full_buf);
         // Use min(g.start) so RTL runs resolve to the logical start, not the
         // visual-first (logical-last) glyph that glyphs[0] gives for RTL text.
-        let run_start = run_logical_start(&runs[total_runs - 1].2);
-        let run_slice = run_start_slice(&last_line_text, run_start);
-        let truncated_last = truncate_line_to_ellipsis(
+        let run_start = run_logical_start(&overflow_run.2);
+        let run_slice = run_start_slice(&overflow_line_text, run_start);
+        let truncated_overflow = truncate_line_to_ellipsis(
             run_slice,
             base_attrs,
             bounds_width,
@@ -272,7 +277,7 @@ pub fn truncate_for_ellipsis<'a>(
             ellipsis_w,
             font_system,
         );
-        let result = format!("{prefix}{truncated_last}");
+        let result = format!("{prefix}{truncated_overflow}");
         return TruncationResult {
             text: result,
             was_truncated: true,
@@ -428,16 +433,20 @@ pub fn truncate_tail_anchored<'a>(
     // When content fits entirely, both anchoring modes produce the same result.
     if total_runs <= max_lines {
         // All lines fit vertically; no vertical truncation needed.
-        let last_run = &runs[total_runs - 1];
-        if last_run.1 <= bounds_width {
+        // Check ALL runs for horizontal overflow (hud-so7zu).
+        let first_overflow_idx = runs.iter().position(|run| run.1 > bounds_width);
+        if first_overflow_idx.is_none() {
             return TruncationResult {
                 text: text.to_owned(),
                 was_truncated: false,
             };
         }
-        // Last run overflows horizontally: truncate the last line.
-        let last_line_i = last_run.0;
-        let last_line_text = if let Some(line) = full_buf.lines.get(last_line_i) {
+        // At least one run overflows horizontally: truncate at the first
+        // overflowing run so the result fits within bounds_width.
+        let overflow_idx = first_overflow_idx.unwrap();
+        let overflow_run = &runs[overflow_idx];
+        let overflow_line_i = overflow_run.0;
+        let overflow_line_text = if let Some(line) = full_buf.lines.get(overflow_line_i) {
             line.text().to_owned()
         } else {
             return TruncationResult {
@@ -445,10 +454,10 @@ pub fn truncate_tail_anchored<'a>(
                 was_truncated: false,
             };
         };
-        let prefix = text_prefix_up_to_run(&runs, total_runs - 1, text, &full_buf);
-        let run_start = run_logical_start(&runs[total_runs - 1].2);
-        let run_slice = run_start_slice(&last_line_text, run_start);
-        let truncated_last = truncate_line_to_ellipsis(
+        let prefix = text_prefix_up_to_run(&runs, overflow_idx, text, &full_buf);
+        let run_start = run_logical_start(&overflow_run.2);
+        let run_slice = run_start_slice(&overflow_line_text, run_start);
+        let truncated_overflow = truncate_line_to_ellipsis(
             run_slice,
             base_attrs,
             bounds_width,
@@ -457,7 +466,7 @@ pub fn truncate_tail_anchored<'a>(
             ellipsis_w,
             font_system,
         );
-        let result = format!("{prefix}{truncated_last}");
+        let result = format!("{prefix}{truncated_overflow}");
         return TruncationResult {
             text: result,
             was_truncated: true,
@@ -2384,5 +2393,171 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── hud-so7zu: multi-line horizontal overflow check ───────────────────────
+
+    /// A long unbreakable token on the FIRST line (not the last) must be
+    /// truncated even when all lines fit vertically.
+    ///
+    /// Before the fix, only the last run's width was checked; a wide token on
+    /// any non-final line was silently hard-clipped by TextBounds.
+    ///
+    /// We build a two-line text where line 1 has a long unbreakable token that
+    /// overflows bounds_width, and line 2 fits.  After truncation the result
+    /// must end with ELLIPSIS (indicating horizontal truncation was applied).
+    #[test]
+    fn non_final_line_horizontal_overflow_triggers_truncation() {
+        let mut fs = make_font_system();
+        let font_size = 16.0_f32;
+        let line_h = font_size * 1.4;
+        let bounds_w = 80.0_f32;
+        // Height fits 3 lines comfortably — no vertical truncation.
+        let bounds_h = line_h * 3.0 + 1.0;
+
+        // Line 1: long unbreakable token that must overflow at bounds_w=80px
+        let long_token = "WWWWWWWWWWWWWWWWWWWW"; // 20 'W's, should overflow 80px at 16px
+        // Verify the precondition: long_token must overflow bounds_w.
+        let token_w = measure_single_line(
+            long_token,
+            base_attrs(),
+            bounds_w * 4.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        if token_w <= bounds_w {
+            // Font metrics are too narrow for this test — skip gracefully.
+            return;
+        }
+
+        // Line 2: short text that fits.
+        let text = format!("{long_token}\nshort");
+
+        let result = truncate_for_ellipsis(
+            &text,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+
+        assert!(
+            result.was_truncated,
+            "text with an overflowing first line must be truncated; \
+             token_w={token_w:.1}px bounds_w={bounds_w}px; result: {:?}",
+            result.text
+        );
+        assert!(
+            result.text.ends_with(ELLIPSIS),
+            "truncated result must end with '…'; got: {:?}",
+            result.text
+        );
+    }
+
+    /// Same test for tail-anchored truncation: non-final line overflow is caught.
+    #[test]
+    fn tail_anchored_non_final_line_horizontal_overflow_triggers_truncation() {
+        let mut fs = make_font_system();
+        let font_size = 16.0_f32;
+        let line_h = font_size * 1.4;
+        let bounds_w = 80.0_f32;
+        let bounds_h = line_h * 3.0 + 1.0;
+
+        let long_token = "WWWWWWWWWWWWWWWWWWWW";
+        let token_w = measure_single_line(
+            long_token,
+            base_attrs(),
+            bounds_w * 4.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        if token_w <= bounds_w {
+            return; // precondition unmet — skip
+        }
+
+        let text = format!("{long_token}\nshort");
+
+        let result = truncate_tail_anchored(
+            &text,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+
+        assert!(
+            result.was_truncated,
+            "tail-anchored: text with an overflowing first line must be truncated; \
+             token_w={token_w:.1}px bounds_w={bounds_w}px; result: {:?}",
+            result.text
+        );
+        assert!(
+            result.text.ends_with(ELLIPSIS),
+            "tail-anchored: truncated result must end with '…'; got: {:?}",
+            result.text
+        );
+    }
+
+    /// Multi-line text where ONLY the middle line overflows: truncation applies at
+    /// the first overflowing line, not the last.
+    #[test]
+    fn middle_line_overflow_truncated_at_correct_position() {
+        let mut fs = make_font_system();
+        let font_size = 16.0_f32;
+        let line_h = font_size * 1.4;
+        let bounds_w = 80.0_f32;
+        // Height fits 4 lines comfortably — no vertical truncation.
+        let bounds_h = line_h * 4.0 + 1.0;
+
+        let long_token = "WWWWWWWWWWWWWWWWWWWW";
+        let token_w = measure_single_line(
+            long_token,
+            base_attrs(),
+            bounds_w * 4.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        if token_w <= bounds_w {
+            return; // skip if font metrics don't trigger overflow
+        }
+
+        // Line 1 and Line 3 are short; Line 2 is the long overflowing token.
+        let text = format!("short\n{long_token}\nalso short");
+
+        let result = truncate_for_ellipsis(
+            &text,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+
+        assert!(
+            result.was_truncated,
+            "text with an overflowing middle line must be truncated; \
+             token_w={token_w:.1}px bounds_w={bounds_w}px; result: {:?}",
+            result.text
+        );
+        assert!(
+            result.text.ends_with(ELLIPSIS),
+            "truncated result must end with '…'; got: {:?}",
+            result.text
+        );
+        // The first line must appear in the result (it was before the overflow).
+        assert!(
+            result.text.starts_with("short"),
+            "first short line must be preserved before the truncation point; \
+             got: {:?}",
+            result.text
+        );
     }
 }
