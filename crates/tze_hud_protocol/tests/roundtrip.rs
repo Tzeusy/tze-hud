@@ -394,6 +394,7 @@ fn roundtrip_node_proto_hit_region() {
             accepts_pointer: true,
             auto_capture: true,
             release_on_up: true,
+            accepts_composer_input: false,
         })),
     };
     let decoded = round_trip(&orig);

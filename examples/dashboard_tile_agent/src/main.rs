@@ -525,6 +525,7 @@ pub async fn do_content_update(
                 accepts_pointer: true,
                 auto_capture: true,
                 release_on_up: true,
+                accepts_composer_input: false,
             },
         )),
     };
@@ -544,6 +545,7 @@ pub async fn do_content_update(
                 accepts_pointer: true,
                 auto_capture: true,
                 release_on_up: true,
+                accepts_composer_input: false,
             },
         )),
     };
@@ -1584,6 +1586,7 @@ pub async fn create_tile_batch(
                 accepts_pointer: true,
                 auto_capture: true,
                 release_on_up: true,
+                accepts_composer_input: false,
             },
         )),
     };
@@ -1603,6 +1606,7 @@ pub async fn create_tile_batch(
                 accepts_pointer: true,
                 auto_capture: true,
                 release_on_up: true,
+                accepts_composer_input: false,
             },
         )),
     };
