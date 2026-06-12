@@ -124,7 +124,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     let runtime = HeadlessRuntime::new(config).await?;
     let _server = runtime.start_grpc_server().await?;
-    println!("Runtime initialized: 1920x1080, gRPC on [::]:${GRPC_PORT}\n");
+    println!("Runtime initialized: 1920x1080, gRPC on [::]:{GRPC_PORT}\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // PHASE 1: Session Establishment (tasks.md §1.1–1.2)
@@ -1820,8 +1820,11 @@ mod tests {
     /// Bind an ephemeral port and return it.  The listener is dropped before
     /// the gRPC server starts; there is a brief TOCTOU window, but this is the
     /// same pattern used across the integration test suite.
+    ///
+    /// Binds on `[::1]:0` (IPv6 loopback) to match the default
+    /// `HeadlessConfig { bind_all_interfaces: false }` server bind address.
     fn ephemeral_port() -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let listener = std::net::TcpListener::bind("[::1]:0").expect("bind ephemeral port");
         let port = listener.local_addr().expect("get local addr").port();
         drop(listener);
         port
@@ -1967,7 +1970,7 @@ mod tests {
         // ── 1. Open a session ─────────────────────────────────────────────────
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
                 .await
                 .expect("connect");
 
@@ -2356,7 +2359,7 @@ mod tests {
         // Open a session and acquire a lease.
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
                 .await
                 .expect("connect");
 
@@ -2610,7 +2613,7 @@ mod tests {
         // Open session and acquire lease.
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
                 .await
                 .expect("connect");
 
@@ -3041,7 +3044,7 @@ mod tests {
         //       rejected. This simulates the "expired / unknown lease" path.
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
                 .await
                 .expect("connect");
 

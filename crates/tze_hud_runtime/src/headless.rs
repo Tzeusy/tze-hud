@@ -1451,10 +1451,12 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
     // resulting bound address is loopback or wildcard.  The `TcpListener::local_addr`
     // call reads back the OS-assigned address for the assertion.
 
-    /// Serialize all tests that mutate env vars.
+    /// Serialize all tests that mutate env vars.  `tokio::sync::Mutex` is used
+    /// so the guard can be held across `.await` points, preventing races between
+    /// concurrent Tokio test tasks that read the same env var.
     ///
     /// Pattern mirrors `tze_hud_compositor::renderer::ENV_VAR_MUTEX`.
-    static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_VAR_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Default bind (`bind_all_interfaces = false`, env var absent) must use
     /// `[::1]` (IPv6 loopback), not `[::]` (all interfaces).
@@ -1469,13 +1471,11 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
     /// confirming it resolves to `[::1]`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_start_grpc_server_default_binds_loopback() {
-        {
-            let _guard = ENV_VAR_MUTEX.lock().unwrap();
-            // Safety: single-threaded within ENV_VAR_MUTEX guard; drop before await.
-            unsafe {
-                std::env::remove_var("TZE_HUD_BIND_ALL_INTERFACES");
-            }
-        } // guard dropped before any await point
+        let _guard = ENV_VAR_MUTEX.lock().await;
+        // SAFETY: serialised by ENV_VAR_MUTEX; guard held for the full test.
+        unsafe {
+            std::env::remove_var("TZE_HUD_BIND_ALL_INTERFACES");
+        }
 
         // Pick a free port via [::1]:0 — this proves the default bind host is [::1].
         let probe = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
@@ -1506,13 +1506,11 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
     /// (all interfaces), not just `[::1]`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_start_grpc_server_bind_all_interfaces_flag_uses_wildcard() {
-        {
-            let _guard = ENV_VAR_MUTEX.lock().unwrap();
-            // Safety: single-threaded within ENV_VAR_MUTEX guard; drop before await.
-            unsafe {
-                std::env::remove_var("TZE_HUD_BIND_ALL_INTERFACES");
-            }
-        } // guard dropped before any await point
+        let _guard = ENV_VAR_MUTEX.lock().await;
+        // SAFETY: serialised by ENV_VAR_MUTEX; guard held for the full test.
+        unsafe {
+            std::env::remove_var("TZE_HUD_BIND_ALL_INTERFACES");
+        }
 
         // Pick a free port via [::]:0 — proving the bind host is [::].
         let probe = tokio::net::TcpListener::bind("[::]:0").await.unwrap();
@@ -1543,16 +1541,16 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
     /// bind `[::]` even when `bind_all_interfaces = false` in the config.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_start_grpc_server_env_var_overrides_config_to_wildcard() {
-        let free_port = {
-            let _guard = ENV_VAR_MUTEX.lock().unwrap();
-            // Safety: single-threaded within ENV_VAR_MUTEX guard; drop before await.
-            unsafe {
-                std::env::set_var("TZE_HUD_BIND_ALL_INTERFACES", "1");
-            }
-            // Allocate port while holding the guard (sync, no await).
-            let probe = std::net::TcpListener::bind("[::]:0").unwrap();
-            probe.local_addr().unwrap().port()
-        }; // guard dropped; probe socket released before any await
+        let _guard = ENV_VAR_MUTEX.lock().await;
+        // SAFETY: serialised by ENV_VAR_MUTEX; guard held for the full test.
+        unsafe {
+            std::env::set_var("TZE_HUD_BIND_ALL_INTERFACES", "1");
+        }
+
+        // Allocate port while holding the guard.
+        let probe = std::net::TcpListener::bind("[::]:0").unwrap();
+        let free_port = probe.local_addr().unwrap().port();
+        drop(probe);
 
         let config = HeadlessConfig {
             width: 64,
@@ -1574,12 +1572,9 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
         handle.abort();
 
         // Clean up env var so other tests are not affected.
-        {
-            let _guard = ENV_VAR_MUTEX.lock().unwrap();
-            // Safety: single-threaded within ENV_VAR_MUTEX guard.
-            unsafe {
-                std::env::remove_var("TZE_HUD_BIND_ALL_INTERFACES");
-            }
+        // SAFETY: serialised by ENV_VAR_MUTEX; guard still held.
+        unsafe {
+            std::env::remove_var("TZE_HUD_BIND_ALL_INTERFACES");
         }
     }
 }
