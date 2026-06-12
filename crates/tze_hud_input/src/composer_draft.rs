@@ -1119,6 +1119,20 @@ impl ComposerDraftManager {
     /// coalesced delivery path).
     ///
     /// If no composer is focused, returns `(EditOutcome::Unchanged, None)`.
+    ///
+    /// # Paste / multiline text (§4.5)
+    ///
+    /// Text that contains CR, LF, or other control characters (e.g. clipboard
+    /// paste via Ctrl+V) is routed through `draft.paste()` after stripping
+    /// newlines and control characters, rather than `draft.insert()`.
+    /// `insert()` returns `Unchanged` for such text, which would cause
+    /// `dispatch_character_event` to fall through and forward the raw text to
+    /// the agent stream — violating the invariant that editing keystrokes are
+    /// never terminal input while a composer is focused (spec §4.4).
+    ///
+    /// The sanitised text has all `\r`, `\n`, and other Unicode control
+    /// characters removed before insertion so the single-line draft constraint
+    /// (spec §4.4: no newlines in draft) is preserved.
     pub fn route_character(
         &mut self,
         character: &str,
@@ -1126,11 +1140,49 @@ impl ComposerDraftManager {
         let Some(draft) = self.draft.as_mut() else {
             return (EditOutcome::Unchanged, None);
         };
-        let outcome = draft.insert(character);
+        // Route multiline/control text through paste() after sanitisation so
+        // it is consumed by the composer rather than falling through to the
+        // agent's raw character stream (§4.4 / hud-083az).
+        let outcome = if character
+            .chars()
+            .any(|c| c == '\r' || c == '\n' || c.is_control())
+        {
+            let sanitised: String = character
+                .chars()
+                .filter(|c| *c != '\r' && *c != '\n' && !c.is_control())
+                .collect();
+            draft.paste(&sanitised)
+        } else {
+            draft.insert(character)
+        };
         if matches!(outcome, EditOutcome::Mutated | EditOutcome::AtCapacity) {
             self.scheduler.push_notification(draft.snapshot());
         }
         (outcome, None)
+    }
+
+    /// Route a pointer-down event to set the cursor position in the active
+    /// draft buffer.
+    ///
+    /// `anchor` and `cursor` are byte offsets into the draft text; callers are
+    /// responsible for computing them from the pointer position (e.g.
+    /// proportional to local_x / node width, scaled by `draft.text().len()`).
+    /// Both values are clamped and snapped to UTF-8 boundaries inside
+    /// `ComposerDraft::set_pointer_selection`.
+    ///
+    /// Returns `EditOutcome::Unchanged` when no composer is focused.
+    ///
+    /// Spec: §4.1 — pointer selection into the runtime-owned draft buffer
+    /// (hud-083az).
+    pub fn route_pointer_selection(&mut self, anchor: usize, cursor: usize) -> EditOutcome {
+        let Some(draft) = self.draft.as_mut() else {
+            return EditOutcome::Unchanged;
+        };
+        let outcome = draft.set_pointer_selection(anchor, cursor);
+        if outcome == EditOutcome::Mutated {
+            self.scheduler.push_notification(draft.snapshot());
+        }
+        outcome
     }
 
     /// Route a key-down event into the active draft buffer.
@@ -1253,6 +1305,15 @@ impl ComposerDraftManager {
                 } else {
                     (true, None)
                 }
+            }
+            "KeyV" if ctrl => {
+                // Ctrl+V (paste shortcut): consume the KeyDown so it is never
+                // forwarded to the agent as a raw KeyDownEvent while a composer
+                // is focused.  The actual paste content arrives separately via
+                // `route_character` (dispatch_character_event reads the
+                // clipboard and fires a RawCharacterEvent immediately after the
+                // KeyDown — hud-083az).
+                (true, None)
             }
             _ => {
                 // Not a handled editing key; do not consume (let caller forward
