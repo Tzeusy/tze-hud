@@ -681,6 +681,7 @@ async fn set_tile_root_text(
                                                 a: 0.8,
                                             }),
                                             color_runs: vec![],
+                                            overflow: 0, // Unspecified = proto3 default
                                         },
                                     )),
                                 }),

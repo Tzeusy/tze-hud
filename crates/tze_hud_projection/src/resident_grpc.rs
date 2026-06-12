@@ -731,6 +731,11 @@ impl ResidentGrpcPortalAdapter {
                         self.composer_display.as_ref(),
                         self.visual_tokens.composer_at_capacity_color,
                     ),
+                    // Transcript panes use Ellipsis to engage the TruncationCache
+                    // contract (word-boundary ellipsis, tail-anchored follow-tail).
+                    // This prevents partially-clipped final glyphs under
+                    // non-line-multiple viewports.
+                    overflow: proto::TextOverflowProto::Ellipsis as i32,
                 },
             )),
         }

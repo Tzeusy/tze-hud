@@ -101,6 +101,7 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 } else {
                     FontFamily::SystemSansSerif
                 };
+            let overflow = proto_text_overflow_to_scene(tm.overflow);
             NodeData::TextMarkdown(TextMarkdownNode {
                 content: tm.content.clone(),
                 bounds,
@@ -113,7 +114,7 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 color,
                 background: bg,
                 alignment: TextAlign::Start,
-                overflow: TextOverflow::Clip,
+                overflow,
                 color_runs,
             })
         }
@@ -220,6 +221,7 @@ pub fn proto_update_node_content_data_to_scene(
                 } else {
                     FontFamily::SystemSansSerif
                 };
+            let overflow = proto_text_overflow_to_scene(tm.overflow);
             Some(NodeData::TextMarkdown(TextMarkdownNode {
                 content: tm.content.clone(),
                 bounds,
@@ -232,7 +234,7 @@ pub fn proto_update_node_content_data_to_scene(
                 color,
                 background: bg,
                 alignment: TextAlign::Start,
-                overflow: TextOverflow::Clip,
+                overflow,
                 color_runs,
             }))
         }
@@ -315,6 +317,32 @@ fn proto_text_markdown_uses_literal_full_span(
         return false;
     };
     run.start_byte == 0 && run.end_byte as usize == content.len() && run.color == color
+}
+
+/// Decode a `TextOverflowProto` i32 (field 7 of `TextMarkdownNodeProto`) to the
+/// scene `TextOverflow`.
+///
+/// `UNSPECIFIED` (proto default `0`) maps to `Ellipsis` so that newly-written
+/// callers that omit the field get the correct overflow contract, and so that
+/// live portal transcript panes explicitly setting `Ellipsis` engage the
+/// `TruncationCache` path.  Callers that genuinely want clip must send
+/// `TEXT_OVERFLOW_PROTO_CLIP` explicitly.
+pub fn proto_text_overflow_to_scene(v: i32) -> TextOverflow {
+    match proto::TextOverflowProto::try_from(v).unwrap_or(proto::TextOverflowProto::Unspecified) {
+        proto::TextOverflowProto::Clip => TextOverflow::Clip,
+        proto::TextOverflowProto::Ellipsis | proto::TextOverflowProto::Unspecified => {
+            TextOverflow::Ellipsis
+        }
+    }
+}
+
+/// Convert a scene `TextOverflow` to the `TextOverflowProto` i32 used in
+/// `TextMarkdownNodeProto::overflow` (field 7).
+pub fn scene_text_overflow_to_proto(ov: TextOverflow) -> i32 {
+    match ov {
+        TextOverflow::Clip => proto::TextOverflowProto::Clip as i32,
+        TextOverflow::Ellipsis => proto::TextOverflowProto::Ellipsis as i32,
+    }
 }
 
 /// Convert a `Box<[TextColorRun]>` to a `Vec<TextColorRunProto>`.
@@ -666,6 +694,7 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
                     a: c.a,
                 }),
                 color_runs: scene_color_runs_to_proto(&tm.color_runs),
+                overflow: scene_text_overflow_to_proto(tm.overflow),
             },
         )),
         NodeData::HitRegion(hr) => Some(proto::node_proto::Data::HitRegion(

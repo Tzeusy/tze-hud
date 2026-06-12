@@ -1025,6 +1025,7 @@ async fn set_tile_text_via_grpc(
                                             }),
                                             background: None,
                                             color_runs: vec![],
+                                            overflow: 0, // Unspecified = proto3 default
                                         },
                                     )),
                                 }),

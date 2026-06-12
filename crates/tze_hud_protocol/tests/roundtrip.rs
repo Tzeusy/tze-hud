@@ -235,6 +235,7 @@ fn roundtrip_node_proto_text_markdown() {
                 a: 0.0,
             }),
             color_runs: vec![],
+            overflow: 0, // Unspecified = proto3 default
         })),
     };
     let decoded = round_trip(&orig);
@@ -300,6 +301,7 @@ fn roundtrip_node_proto_text_markdown_with_color_runs() {
                     }),
                 },
             ],
+            overflow: 0, // Unspecified = proto3 default
         })),
     };
 
@@ -2014,4 +2016,317 @@ fn roundtrip_rendering_policy_json_backward_compat_pre_extension() {
         rp.overflow.is_none(),
         "overflow must be None for pre-extension JSON"
     );
+}
+
+// ─── TextMarkdownNodeProto overflow field (hud-9kt2t) ────────────────────────
+
+/// Proto round-trip: TextMarkdownNodeProto with overflow=Ellipsis survives
+/// encode/decode.  Validates field 7 stability.
+#[test]
+fn roundtrip_text_markdown_node_proto_overflow_ellipsis() {
+    let orig = NodeProto {
+        id: b"node-overflow".to_vec(),
+        data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
+            content: "line one\nline two overflow candidate".to_string(),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 40.0,
+            }),
+            font_size_px: 14.0,
+            color: Some(Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }),
+            background: None,
+            color_runs: vec![],
+            overflow: TextOverflowProto::Ellipsis as i32,
+        })),
+    };
+    let decoded = round_trip(&orig);
+    match &decoded.data {
+        Some(NodeData::TextMarkdown(tm)) => {
+            assert_eq!(
+                tm.overflow,
+                TextOverflowProto::Ellipsis as i32,
+                "overflow=Ellipsis must survive proto round-trip (field 7)"
+            );
+        }
+        _ => panic!("wrong data variant after round-trip"),
+    }
+}
+
+/// Proto round-trip: TextMarkdownNodeProto with overflow=Clip survives
+/// encode/decode.  Validates that Clip is expressible on the wire.
+#[test]
+fn roundtrip_text_markdown_node_proto_overflow_clip() {
+    let orig = NodeProto {
+        id: b"node-clip".to_vec(),
+        data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
+            content: "explicit clip content".to_string(),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 20.0,
+            }),
+            font_size_px: 12.0,
+            color: Some(Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            background: None,
+            color_runs: vec![],
+            overflow: TextOverflowProto::Clip as i32,
+        })),
+    };
+    let decoded = round_trip(&orig);
+    match &decoded.data {
+        Some(NodeData::TextMarkdown(tm)) => {
+            assert_eq!(
+                tm.overflow,
+                TextOverflowProto::Clip as i32,
+                "overflow=Clip must survive proto round-trip (field 7)"
+            );
+        }
+        _ => panic!("wrong data variant after round-trip"),
+    }
+}
+
+/// Proto round-trip: TextMarkdownNodeProto omitting overflow (field 7) decodes
+/// as Unspecified (proto3 default 0).  Backward-compatibility: old messages
+/// that don't set field 7 are still valid.
+#[test]
+fn roundtrip_text_markdown_node_proto_overflow_absent_defaults_to_unspecified() {
+    let orig = NodeProto {
+        id: b"node-compat".to_vec(),
+        data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
+            content: "old message no overflow field".to_string(),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 20.0,
+            }),
+            font_size_px: 12.0,
+            color: Some(Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }),
+            background: None,
+            color_runs: vec![],
+            overflow: 0, // proto3 default = Unspecified
+        })),
+    };
+    let decoded = round_trip(&orig);
+    match &decoded.data {
+        Some(NodeData::TextMarkdown(tm)) => {
+            assert_eq!(
+                tm.overflow, 0,
+                "absent overflow field must decode as 0 (Unspecified)"
+            );
+        }
+        _ => panic!("wrong data variant"),
+    }
+}
+
+/// Convert round-trip: proto TextMarkdownNodeProto with overflow=Ellipsis
+/// converts to a scene TextMarkdownNode with overflow=Ellipsis.  This proves
+/// the TruncationCache path is engaged for portal transcript panes.
+#[test]
+fn convert_text_markdown_node_overflow_ellipsis_proto_to_scene() {
+    use tze_hud_protocol::convert::proto_node_to_scene;
+    use tze_hud_scene::types::TextOverflow;
+
+    let node_proto = NodeProto {
+        id: vec![0u8; 16],
+        data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
+            content: "portal transcript text".to_string(),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 80.0,
+            }),
+            font_size_px: 14.0,
+            color: Some(Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }),
+            background: None,
+            color_runs: vec![],
+            overflow: TextOverflowProto::Ellipsis as i32,
+        })),
+    };
+
+    let scene_node = proto_node_to_scene(&node_proto)
+        .expect("proto_node_to_scene must succeed for a valid TextMarkdownNodeProto");
+
+    match &scene_node.data {
+        tze_hud_scene::types::NodeData::TextMarkdown(tm) => {
+            assert_eq!(
+                tm.overflow,
+                TextOverflow::Ellipsis,
+                "proto overflow=Ellipsis must convert to scene TextOverflow::Ellipsis"
+            );
+        }
+        _ => panic!("expected TextMarkdown node data"),
+    }
+}
+
+/// Convert round-trip: proto TextMarkdownNodeProto with overflow=Clip
+/// converts to a scene TextMarkdownNode with overflow=Clip.
+#[test]
+fn convert_text_markdown_node_overflow_clip_proto_to_scene() {
+    use tze_hud_protocol::convert::proto_node_to_scene;
+    use tze_hud_scene::types::TextOverflow;
+
+    let node_proto = NodeProto {
+        id: vec![0u8; 16],
+        data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
+            content: "explicit clip text".to_string(),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 50.0,
+            }),
+            font_size_px: 12.0,
+            color: Some(Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            background: None,
+            color_runs: vec![],
+            overflow: TextOverflowProto::Clip as i32,
+        })),
+    };
+
+    let scene_node = proto_node_to_scene(&node_proto).expect("proto_node_to_scene must succeed");
+
+    match &scene_node.data {
+        tze_hud_scene::types::NodeData::TextMarkdown(tm) => {
+            assert_eq!(
+                tm.overflow,
+                TextOverflow::Clip,
+                "proto overflow=Clip must convert to scene TextOverflow::Clip"
+            );
+        }
+        _ => panic!("expected TextMarkdown node data"),
+    }
+}
+
+/// Convert round-trip: proto TextMarkdownNodeProto with overflow=Unspecified (0)
+/// converts to scene TextOverflow::Ellipsis (the safe default for new nodes).
+///
+/// This ensures that old messages without field 7 set get Ellipsis behaviour,
+/// not Clip, honouring the Phase-1 overflow contract.
+#[test]
+fn convert_text_markdown_node_overflow_unspecified_defaults_to_ellipsis() {
+    use tze_hud_protocol::convert::proto_node_to_scene;
+    use tze_hud_scene::types::TextOverflow;
+
+    let node_proto = NodeProto {
+        id: vec![0u8; 16],
+        data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
+            content: "default overflow text".to_string(),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 50.0,
+            }),
+            font_size_px: 12.0,
+            color: Some(Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }),
+            background: None,
+            color_runs: vec![],
+            overflow: 0, // TextOverflowProto::Unspecified — old wire compat
+        })),
+    };
+
+    let scene_node = proto_node_to_scene(&node_proto).expect("proto_node_to_scene must succeed");
+
+    match &scene_node.data {
+        tze_hud_scene::types::NodeData::TextMarkdown(tm) => {
+            assert_eq!(
+                tm.overflow,
+                TextOverflow::Ellipsis,
+                "Unspecified overflow must default to Ellipsis, not Clip"
+            );
+        }
+        _ => panic!("expected TextMarkdown node data"),
+    }
+}
+
+/// Convert round-trip: scene TextMarkdownNode with Ellipsis overflow serialises
+/// to proto with overflow=Ellipsis and deserialises back to Ellipsis.
+///
+/// Proves the full scene→proto→scene cycle for field 7.
+#[test]
+fn convert_text_markdown_node_overflow_scene_to_proto_roundtrip() {
+    use tze_hud_protocol::convert::{proto_node_to_scene, scene_node_to_proto};
+    use tze_hud_scene::types::{
+        FontFamily, Node, NodeData, Rect as SceneRect, Rgba as SceneRgba, SceneId, TextAlign,
+        TextMarkdownNode, TextOverflow,
+    };
+
+    let scene_node = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            content: "portal transcript pane".to_string(),
+            bounds: SceneRect::new(0.0, 0.0, 300.0, 80.0),
+            font_size_px: 14.0,
+            font_family: FontFamily::SystemSansSerif,
+            color: SceneRgba::WHITE,
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
+        }),
+    };
+
+    let proto_node = scene_node_to_proto(&scene_node);
+
+    // Check the proto carries Ellipsis on the wire.
+    // Use fully qualified proto Data path to avoid shadowing by scene NodeData.
+    match &proto_node.data {
+        Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(tm)) => {
+            assert_eq!(
+                tm.overflow,
+                TextOverflowProto::Ellipsis as i32,
+                "scene Ellipsis must serialise to proto Ellipsis (field 7)"
+            );
+        }
+        _ => panic!("expected TextMarkdown data"),
+    }
+
+    // Now round-trip back to scene and confirm Ellipsis is preserved
+    let recovered = proto_node_to_scene(&proto_node).expect("proto_node_to_scene must succeed");
+    match &recovered.data {
+        NodeData::TextMarkdown(tm) => {
+            assert_eq!(
+                tm.overflow,
+                TextOverflow::Ellipsis,
+                "Ellipsis must survive scene→proto→scene round-trip"
+            );
+        }
+        _ => panic!("expected TextMarkdown node data after round-trip"),
+    }
 }

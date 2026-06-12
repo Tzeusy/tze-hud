@@ -481,6 +481,7 @@ pub async fn do_content_update(
                 }),
                 background: None,
                 color_runs: vec![],
+                overflow: 0, // Unspecified = proto3 default
             },
         )),
     };
@@ -506,6 +507,7 @@ pub async fn do_content_update(
                 }),
                 background: None,
                 color_runs: vec![],
+                overflow: 0, // Unspecified = proto3 default
             },
         )),
     };
@@ -1541,6 +1543,7 @@ pub async fn create_tile_batch(
                 }),
                 background: None,
                 color_runs: vec![],
+                overflow: 0, // Unspecified = proto3 default
             },
         )),
     };
@@ -1565,6 +1568,7 @@ pub async fn create_tile_batch(
                 }),
                 background: None,
                 color_runs: vec![],
+                overflow: 0, // Unspecified = proto3 default
             },
         )),
     };
