@@ -1378,6 +1378,13 @@ struct WindowedRuntimeState {
     /// `Some(Some(state))` = new draft snapshot; `Some(None)` = deactivate.
     /// `None` = no update since last drain (compositor keeps prior state).
     local_composer_state: LocalComposerStateHandle,
+    /// In-process portal projection authority driver (hud-2iup7).
+    ///
+    /// Hosts a `ProjectionAuthority` in the runtime process and drives the portal
+    /// drain loop on each `about_to_wait` call.  Wires
+    /// `InputProcessor::notify_tile_content_appended` so follow-tail advances
+    /// (spec §3.2) and scrolled-back stability is preserved (spec §3.3).
+    portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -1423,6 +1430,11 @@ impl ApplicationHandler for WinitApp {
         // guarantees the terminal draft state is delivered within the same batch
         // window (spec §4.3 flush guarantee).
         self.flush_composer_draft_at_settle();
+        // Drain the in-process portal projection authority (hud-2iup7).
+        // Must run AFTER composer flush so draft state is settled before portal
+        // content is refreshed.  Uses try_lock on the scene to avoid blocking
+        // the main thread (deferred to next about_to_wait if busy).
+        self.drain_portal_projection();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -3157,6 +3169,34 @@ impl WinitApp {
         }
     }
 
+    /// Run the in-process portal projection drain loop (hud-2iup7).
+    ///
+    /// Called from `about_to_wait` after composer-draft flush.  Drives
+    /// `InProcessPortalDriver::drain` which calls
+    /// `InputProcessor::notify_tile_content_appended` for every `RenderPortal`
+    /// drain record that carries append geometry (spec §3.2 / §3.3).
+    ///
+    /// Uses `try_lock` on the shared scene to avoid blocking the main thread.
+    /// If the scene lock is busy, the drain is silently deferred to the next
+    /// `about_to_wait` call (NOT silent fail-open — the pending work is picked
+    /// up on the very next iteration).
+    fn drain_portal_projection(&mut self) {
+        let Ok(state) = self.state.shared_state.try_lock() else {
+            tracing::trace!("portal drain deferred: shared_state lock busy");
+            return;
+        };
+        let Ok(mut scene) = state.scene.try_lock() else {
+            tracing::trace!("portal drain deferred: scene lock busy");
+            return;
+        };
+        let tab_id = scene.active_tab;
+        self.state.portal_projection_driver.drain(
+            &mut scene,
+            &mut self.state.input_processor,
+            tab_id,
+        );
+    }
+
     fn active_tab_for_keyboard_dispatch(&self) -> Option<tze_hud_scene::SceneId> {
         let state = self.state.shared_state.blocking_lock();
         let scene = state.scene.blocking_lock();
@@ -4216,6 +4256,7 @@ impl WindowedRuntime {
             // Placeholder; replaced in resumed() with the Arc cloned from the
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
+            portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
         };
 
         let mut app = WinitApp { state: app_state };
