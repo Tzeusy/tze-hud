@@ -51,7 +51,8 @@ use std::collections::HashMap;
 use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
 use tze_hud_input::InputProcessor;
 use tze_hud_projection::{
-    ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds,
+    AdapterGeometrySnapshot, AdapterPortalRect, ProjectedPortalPolicy, ProjectionAuthority,
+    ProjectionBounds,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -202,6 +203,53 @@ impl InProcessPortalDriver {
     /// PublishOutput, Detach, etc.) into the authority.
     pub fn authority_mut(&mut self) -> &mut ProjectionAuthority {
         &mut self.authority
+    }
+
+    /// Push a geometry snapshot to the projection session that owns `tile_id`.
+    ///
+    /// Called by the window management layer after a hotkey resize or pointer-
+    /// affordance resize updates tile bounds in the scene (§6b.4: geometry-
+    /// snapshot producer wiring, hud-npq6g).
+    ///
+    /// The drive entries are searched by `tile_scene_id` to find the owning
+    /// `projection_id`, then `ProjectionAuthority::push_geometry_snapshot` is
+    /// called so the geometry batch is visible to the drain loop via
+    /// `projected_portal_state`.
+    ///
+    /// Returns `true` if a matching session was found and the snapshot was
+    /// accepted (sequence is strictly newer than any existing batch entry).
+    /// Returns `false` if no session owns `tile_id` or the snapshot is stale.
+    pub fn push_geometry_snapshot_for_tile(
+        &mut self,
+        tile_id: SceneId,
+        snapshot: tze_hud_input::GeometrySnapshot,
+    ) -> bool {
+        // Reverse-lookup: find the projection_id whose drive entry owns this tile.
+        let projection_id = self
+            .drive
+            .entries
+            .iter()
+            .find(|(_, entry)| entry.tile_scene_id == Some(tile_id))
+            .map(|(id, _)| id.clone());
+
+        let Some(projection_id) = projection_id else {
+            // No portal session is attached to this tile — nothing to do.
+            return false;
+        };
+
+        let adapter_snapshot = AdapterGeometrySnapshot {
+            rect: AdapterPortalRect::from_f32(
+                snapshot.rect.x,
+                snapshot.rect.y,
+                snapshot.rect.width,
+                snapshot.rect.height,
+            ),
+            gesture_active: snapshot.gesture_active,
+            sequence: snapshot.sequence,
+        };
+
+        self.authority
+            .push_geometry_snapshot(&projection_id, adapter_snapshot)
     }
 
     /// Apply a new design-token override map, propagating to all live adapters.
@@ -510,6 +558,14 @@ impl InProcessPortalDriver {
                         scroll_advanced = changed,
                         "portal drain: RenderPortal — notify_tile_content_appended"
                     );
+
+                    // §6b.4: consume the geometry batch after delivery so that
+                    // `projected_portal_state` does not re-deliver the same snapshot
+                    // on the next drain cycle. The caller (push_geometry_snapshot_for_tile)
+                    // writes new snapshots; old ones must be cleared after being read.
+                    if state.geometry_batch.is_some() {
+                        self.authority.consume_geometry_batch(&proj_id);
+                    }
                 }
 
                 ResidentGrpcPortalCommandKind::ReleaseLease => {
@@ -974,6 +1030,153 @@ mod tests {
         assert!(
             (post_y - pre_y).abs() < f32::EPSILON,
             "spec §3.3: scroll offset must be unchanged; pre={pre_y} post={post_y}"
+        );
+    }
+
+    /// Regression guard for the §6b.4 geometry-snapshot producer wiring (hud-npq6g).
+    ///
+    /// `push_geometry_snapshot_for_tile` must forward a resize geometry snapshot
+    /// into the `ProjectionAuthority` so that the drain loop consumer (the
+    /// `geometry_batch` field on `ProjectedPortalState`) reads it on the next
+    /// drain cycle.
+    ///
+    /// Precondition: `push_geometry_snapshot_for_tile` had zero production callers
+    /// before hud-npq6g.  This test fails on the pre-wiring code where the only
+    /// caller was a bin test (the authority snapshot therefore stays `None` in
+    /// production, and the drain always falls back to the adapter-configured height).
+    ///
+    /// The test drives the full producer → consumer path:
+    ///   1. Attach a projection session and drain to create the portal tile in
+    ///      the scene.
+    ///   2. Call `push_geometry_snapshot_for_tile` with a tiny (1-px) viewport
+    ///      height — this is what the window management layer now does after a
+    ///      hotkey resize.
+    ///   3. Drain again with overflowing content and confirm that:
+    ///      (a) the drain used the geometry-batch viewport (scroll advanced,
+    ///          `tile_follow_tail_at_tail` is true), and
+    ///      (b) the authority's pending batch was consumed so it is `None` after
+    ///          the drain (no stale re-delivery).
+    ///
+    /// Removing the `push_geometry_snapshot_for_tile` call (or the wiring in
+    /// windowed.rs) causes the drain to fall back to the adapter-configured height
+    /// (typically 360 px).  With a 10-line transcript the content height is much
+    /// less than 360 px, so `tile_follow_tail_at_tail` stays `false` and the
+    /// first assertion fails.
+    #[test]
+    fn hotkey_resize_geometry_reaches_drain_consumer() {
+        use tze_hud_input::{GeometrySnapshot, PortalRect};
+        use tze_hud_projection::ProjectedPortalPolicy;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+        };
+
+        let token = attach_and_get_token(&mut driver, "proj-resize");
+        driver.attach_projection("proj-resize", Vec::new());
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Drain 1 (CreatePortalTile): publish one unit, drain to create the tile.
+        publish(&mut driver, "proj-resize", &token, "initial-line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let tile_id = driver
+            .drive
+            .entries
+            .get("proj-resize")
+            .expect("drive entry must exist")
+            .tile_scene_id
+            .expect("tile must be created after first drain");
+
+        // Resize the scene tile to a tiny height so that overflow is detectable.
+        // This simulates the hotkey-resize scene mutation in windowed.rs.
+        let tiny_h = 1.0_f32;
+        let _ = scene.update_tile_bounds(
+            tile_id,
+            tze_hud_scene::Rect::new(0.0, 0.0, 600.0, tiny_h),
+            PORTAL_DRIVER_NAMESPACE,
+        );
+
+        // Producer wiring (hud-npq6g): push the geometry snapshot that the hotkey
+        // resize path now emits. The sequence counter starts at 1.
+        let geo_snapshot = GeometrySnapshot {
+            portal_id_hash: 0,
+            rect: PortalRect {
+                x: 0.0,
+                y: 0.0,
+                width: 600.0,
+                height: tiny_h,
+            },
+            gesture_active: false,
+            sequence: 1,
+        };
+        let pushed = driver.push_geometry_snapshot_for_tile(tile_id, geo_snapshot);
+        assert!(
+            pushed,
+            "push_geometry_snapshot_for_tile must return true for a known tile \
+             — the producer wiring is broken if this fails"
+        );
+
+        // Verify the authority now holds the pending batch before the drain consumes it.
+        {
+            let state = driver
+                .authority
+                .projected_portal_state("proj-resize", &ProjectedPortalPolicy::permit_all())
+                .expect("session must exist");
+            let batch = state.geometry_batch.expect(
+                "geometry_batch must be Some after push_geometry_snapshot_for_tile \
+                 — the consumer path is broken if this fails",
+            );
+            assert_eq!(
+                batch.latest.map(|s| s.sequence),
+                Some(1),
+                "pending batch must carry sequence 1 before drain"
+            );
+        }
+
+        // Drain 2 (RenderPortal): publish overflowing content, drain past the rate window.
+        let base_ts = PORTAL_UPDATE_RATE_WINDOW_WALL_US;
+        for i in 1..=9_u64 {
+            publish(
+                &mut driver,
+                "proj-resize",
+                &token,
+                &format!("overflow-line-{i}"),
+                base_ts + i * 5,
+            );
+        }
+        let drain2_now_us = base_ts + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain2_now_us);
+
+        // (a) The drain must have used the geometry-batch viewport (tiny_h = 1 px).
+        // With a 1-px viewport and 10 lines of content the tile is deep in overflow,
+        // so notify_tile_content_appended must have set the at-tail flag.
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "spec §6b.4 regression (hud-npq6g): drain must use the geometry-batch \
+             viewport height from push_geometry_snapshot_for_tile. \
+             Removing the push_geometry_snapshot_for_tile call (or wiring in windowed.rs) \
+             causes the drain to fall back to the adapter-configured height (~360 px), \
+             which is too large for 10 lines to overflow → tile_follow_tail_at_tail stays false."
+        );
+
+        // (b) The pending batch must be cleared after the drain (consume wiring).
+        let state_after = driver
+            .authority
+            .projected_portal_state("proj-resize", &ProjectedPortalPolicy::permit_all())
+            .expect("session must still exist");
+        assert!(
+            state_after.geometry_batch.is_none(),
+            "geometry_batch must be None after the drain consumed it — \
+             removing consume_geometry_batch from the drain causes stale re-delivery"
         );
     }
 }
