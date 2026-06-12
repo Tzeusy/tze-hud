@@ -204,6 +204,7 @@ fn build_scene_with_widgets(tile_count: usize, widget_count: usize) -> SceneGrap
         },
         default_rendering_policy: RenderingPolicy::default(),
         default_contention_policy: ContentionPolicy::LatestWins,
+        max_publishers: WidgetDefinition::default_max_publishers(),
         ephemeral: false,
         hover_behavior: None,
     };
