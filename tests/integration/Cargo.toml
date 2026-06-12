@@ -3,6 +3,7 @@ name = "integration"
 description = "Multi-crate integration tests for tze_hud"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[test]]
 name = "multi_agent"

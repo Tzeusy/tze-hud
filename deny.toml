@@ -1,0 +1,167 @@
+# cargo-deny configuration for tze_hud
+#
+# This project is GPL-3.0-only. All dependency licenses must be compatible with
+# the GNU General Public License v3.0 or later. cargo-deny enforces this on
+# every PR via the `cargo-deny` CI job in .github/workflows/ci.yml.
+#
+# Reference: https://embarkstudios.github.io/cargo-deny/
+
+# ─── Advisories ──────────────────────────────────────────────────────────────
+#
+# Deny known CVEs and security vulnerabilities. Unmaintained crates generate
+# errors by default; individual waivers are documented with rationale below.
+#
+# yanked = "warn" (not deny) because a yanked crate version is sometimes an
+# accidental publish that does not indicate a security issue. The lockfile
+# pins us to a specific version regardless; we accept the warning and track
+# yanked crates in the follow-up inventory.
+[advisories]
+version = 2
+yanked = "warn"
+
+# Advisory ignores — every entry documents:
+#   id: RUSTSEC-XXXX-XXXX
+#   crate: <name>@<version>
+#   reason: why we cannot upgrade right now
+#   action: what needs to happen to remove this waiver
+ignore = [
+    # RUSTSEC-2024-0436: `paste` is unmaintained (archived by dtolnay).
+    # Transitive dependency chain: paste ← metal ← wgpu-hal ← wgpu ← glyphon.
+    # The wgpu 24.x version is pinned by the glyphon 0.8.x → wgpu 24.x →
+    # Rust 1.88 co-pin documented in Cargo.toml. No safe upgrade exists until
+    # wgpu bumps its metal dep to a maintained fork, which requires wgpu 28+
+    # (needs Rust 1.92+ MSRV). Risk: compile-time proc-macro only, zero
+    # runtime attack surface.
+    # Action: Remove when MSRV is bumped to Rust 1.92+ and wgpu upgraded to 28+.
+    { id = "RUSTSEC-2024-0436", reason = "Transitive dep via metal←wgpu-hal←wgpu←glyphon. Compile-time proc-macro, no runtime attack surface. Blocked on wgpu 28+ (needs Rust 1.92+ MSRV bump, tracked with glyphon/wgpu version chain in Cargo.toml)." },
+
+    # RUSTSEC-2026-0173: `proc-macro-error2` is unmaintained.
+    # Transitive dependency chain: proc-macro-error2 ← statig_macro ← statig.
+    # `statig` is a direct workspace dependency used for v2 media plane state
+    # machines. The proc-macro-error2 author recommends `manyhow` as a
+    # replacement; upstream statig must migrate first.
+    # Risk: compile-time proc-macro only, zero runtime attack surface.
+    # Action: Remove when statig releases a version that replaces
+    # proc-macro-error2 with manyhow (or equivalent). File upstream issue.
+    { id = "RUSTSEC-2026-0173", reason = "Transitive dep via statig_macro←statig (v2 media plane state machine). Compile-time proc-macro, no runtime attack surface. Pending upstream statig migration to manyhow." },
+]
+
+# ─── Licenses ────────────────────────────────────────────────────────────────
+#
+# tze_hud is GPL-3.0-only. All dependencies must use licenses compatible with
+# GPL-3.0 as a downstream recipient.
+#
+# License compatibility rationale:
+#
+# Permissive licenses (MIT, Apache-2.0, BSD-*, ISC, CC0, 0BSD, MIT-0, Zlib,
+#   Unlicense, Unicode-3.0): all GPL-3.0 compatible.
+#
+# Apache-2.0 WITH LLVM-exception: The LLVM exception removes the patent-
+#   retaliation clause that would otherwise be incompatible with GPL-3.0.
+#   Used by: blake3, linux-raw-sys, rustix, wasi, wasip2, wasip3, wit-bindgen.
+#
+# LGPL-2.1-or-later: The "or later" clause covers LGPL-3.0, which is
+#   compatible with GPL-3.0. Linking LGPL code into a GPL-3.0 project is
+#   explicitly permitted by the GPL. Present in: r-efi (UEFI firmware
+#   interface stubs used by winit/windows targets).
+#
+# GPL-3.0-only: our own workspace crates.
+#
+# GPL-2.0-only — EXCEPTION: self_cell@1.2.2 declares
+#   "Apache-2.0 OR GPL-2.0-only". Under an OR SPDX expression cargo-deny
+#   requires ALL alternatives to appear in the allow list. We exercise the
+#   Apache-2.0 option and include GPL-2.0-only solely to satisfy that
+#   mechanical requirement. Bare GPL-2.0-only dependencies (without an
+#   Apache/MIT alternative) would be INCOMPATIBLE with our GPL-3.0-only
+#   project and must not be added without owner review.
+[licenses]
+version = 2
+
+# Explicitly allowed SPDX license identifiers.
+allow = [
+    # ── Permissive ────────────────────────────────────────────────────────
+    "MIT",
+    "Apache-2.0",
+    # The LLVM exception makes Apache-2.0 unambiguously GPL-3.0 compatible.
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    # CC0-1.0: public domain dedication. Used by blake3, constant_time_eq,
+    # hexf-parse.
+    "CC0-1.0",
+    # 0BSD: BSD Zero Clause License. Used by adler2.
+    "0BSD",
+    # MIT-0: MIT without the attribution requirement. Used by constant_time_eq.
+    "MIT-0",
+    # Zlib: permissive, GPL-compatible. Used by bytemuck, cursor-icon, glyphon,
+    # miniz_oxide, objc2-* crates, raw-window-handle, slotmap, tinyvec, etc.
+    "Zlib",
+    # Unlicense: public domain. Used by byteorder-lite, memchr, same-file,
+    # termcolor, walkdir, winapi-util.
+    "Unlicense",
+    # Unicode-3.0: Unicode, Inc. open-source license, GPL-3.0 compatible.
+    # Used by unicode-ident.
+    "Unicode-3.0",
+
+    # ── Weak copyleft (GPL-3.0 compatible) ───────────────────────────────
+    # LGPL-2.1-or-later: compatible with GPL-3.0 via the "or later" clause.
+    # Present in: r-efi (UEFI interface crate, winit/windows dep).
+    "LGPL-2.1-or-later",
+
+    # ── Strong copyleft ──────────────────────────────────────────────────
+    # GPL-3.0-only: our own workspace crates.
+    "GPL-3.0-only",
+
+    # GPL-2.0-only: allowed ONLY because self_cell@1.2.2 uses the compound
+    # SPDX expression "Apache-2.0 OR GPL-2.0-only" and cargo-deny requires
+    # all alternatives to be listed. We use self_cell under Apache-2.0.
+    # WARNING: Do NOT add any dependency that is SOLELY GPL-2.0-only (no
+    # permissive alternative) — that is incompatible with GPL-3.0-only and
+    # requires owner sign-off.
+    # Crate: self_cell@1.2.2 (transitive: cosmic-text ← glyphon ← compositor)
+    "GPL-2.0-only",
+]
+
+# Minimum confidence threshold for license text detection.
+confidence-threshold = 0.8
+
+# Per-crate license exceptions (none needed at present; all licenses are
+# handled by the allow list above).
+exceptions = []
+
+# ─── Bans ────────────────────────────────────────────────────────────────────
+#
+# Duplicate version detection and blocked crates.
+[bans]
+# Warn on duplicate crate versions. Many duplicates are unavoidable with the
+# wgpu 24.x + winit 0.30.x + glyphon 0.8.x co-pin. Promote to "deny" once
+# the co-pin is resolved.
+multiple-versions = "warn"
+
+# Wildcard version requirements in Cargo.toml. Changed to "warn" rather than
+# "deny" because workspace intra-crate path dependencies (e.g.
+# `tze_hud_scene = { path = "../../crates/tze_hud_scene" }`) do not carry a
+# `version` field by convention; cargo-deny treats them as wildcards. Fixing
+# all intra-workspace path deps is a separate housekeeping task and not the
+# scope of this bead. External (registry) wildcard deps are rejected by
+# convention — see Cargo.toml workspace deps for pinned version constraints.
+wildcards = "warn"
+
+# Workspace members are implicitly trusted.
+allow-workspace = false
+
+# No globally banned crates at present.
+deny = []
+
+# ─── Sources ─────────────────────────────────────────────────────────────────
+#
+# All production dependencies must be sourced from crates.io.
+# Workspace path dependencies are local crates and are always trusted.
+[sources]
+# Reject crates from unknown registries.
+unknown-registry = "deny"
+# Reject crates from unknown git repositories.
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

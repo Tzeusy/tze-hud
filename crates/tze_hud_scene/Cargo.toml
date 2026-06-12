@@ -3,6 +3,7 @@ name = "tze_hud_scene"
 description = "Pure scene graph data model for tze_hud — no GPU dependency"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 uuid = { workspace = true }

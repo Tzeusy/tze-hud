@@ -3,6 +3,7 @@ name = "render_artifacts"
 description = "Layer 4 render-artifacts binary — generates developer visibility artifacts"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "render-artifacts"

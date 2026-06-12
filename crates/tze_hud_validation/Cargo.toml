@@ -3,6 +3,7 @@ name = "tze_hud_validation"
 description = "Layer 2 SSIM visual regression and Layer 4 developer visibility artifacts for tze_hud"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[test]]
 name = "layer2_headless"
