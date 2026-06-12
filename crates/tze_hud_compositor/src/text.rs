@@ -575,17 +575,40 @@ impl TextRasterizer {
                     // optional color from the parse cache.  We build `(text_slice,
                     // Attrs)` pairs and call `set_rich_text` once — zero re-parse cost.
                     //
-                    // When ellipsis truncation was applied, the truncated text is a
-                    // plain-text prefix + "…".  The original styled_runs byte offsets
-                    // are valid for the prefix portion; we re-slice them to the prefix
-                    // length (hud-so7zu) so bold/italic/code styling is preserved.
+                    // When ellipsis truncation was applied, byte offsets in
+                    // `styled_runs` must be remapped to the truncated string's
+                    // coordinate system (hud-so7zu).
+                    //
+                    // HeadAnchored: truncated text is "{prefix}…" (trailing
+                    // ellipsis).  Offsets within the prefix are valid as-is;
+                    // we clamp at prefix_len = len - ELLIPSIS.len().
+                    //
+                    // TailAnchored: truncated text is "…\n{tail}" (leading
+                    // ellipsis, hud-fe4ik).  Original offsets address the tail
+                    // portion of the original text; they must be shifted so
+                    // they address the correct bytes in "…\n{tail}".  See
+                    // `reslice_styled_runs_tail_anchored` for the shift logic.
                     if let Some(truncated_str) = truncated {
-                        // Compute the byte length of the plain-text prefix (excluding "…").
-                        let content_end = truncated_str
-                            .strip_suffix(crate::overflow::ELLIPSIS)
-                            .map(|s| s.len())
-                            .unwrap_or(truncated_str.len());
-                        let resliced = reslice_styled_runs(&item.styled_runs, content_end);
+                        let resliced = if item.viewport == TruncationViewport::TailAnchored
+                            && truncated_str.starts_with(crate::overflow::ELLIPSIS)
+                        {
+                            // Leading-ellipsis output: shift offsets from
+                            // original-text space into "…\n{tail}" space.
+                            reslice_styled_runs_tail_anchored(
+                                &item.text,
+                                truncated_str,
+                                &item.styled_runs,
+                            )
+                        } else {
+                            // Trailing-ellipsis output (HeadAnchored): compute
+                            // the byte length of the plain-text prefix
+                            // (excluding "…").
+                            let content_end = truncated_str
+                                .strip_suffix(crate::overflow::ELLIPSIS)
+                                .map(|s| s.len())
+                                .unwrap_or(truncated_str.len());
+                            reslice_styled_runs(&item.styled_runs, content_end)
+                        };
                         if resliced.is_empty() {
                             // No runs survive truncation — fall back to plain text.
                             buf.set_text(
@@ -640,15 +663,27 @@ impl TextRasterizer {
                     // without a color_opt set, so base_attrs carries no color_opt and
                     // run attrs carry explicit Color values.
                     //
-                    // When ellipsis truncation was applied, the color_runs byte
-                    // offsets remain valid for the plain-text prefix; we re-slice
-                    // them to the prefix length (hud-so7zu) so colors are preserved.
+                    // When ellipsis truncation was applied, remap color_run
+                    // byte offsets to the truncated string's coordinate system
+                    // (hud-so7zu / hud-fe4ik).  TailAnchored uses a
+                    // leading-ellipsis shift; HeadAnchored uses a trailing-
+                    // ellipsis clamp.  See reslice_color_runs_tail_anchored.
                     if let Some(truncated_str) = truncated {
-                        let content_end = truncated_str
-                            .strip_suffix(crate::overflow::ELLIPSIS)
-                            .map(|s| s.len())
-                            .unwrap_or(truncated_str.len());
-                        let resliced = reslice_color_runs(&item.color_runs, content_end);
+                        let resliced = if item.viewport == TruncationViewport::TailAnchored
+                            && truncated_str.starts_with(crate::overflow::ELLIPSIS)
+                        {
+                            reslice_color_runs_tail_anchored(
+                                &item.text,
+                                truncated_str,
+                                &item.color_runs,
+                            )
+                        } else {
+                            let content_end = truncated_str
+                                .strip_suffix(crate::overflow::ELLIPSIS)
+                                .map(|s| s.len())
+                                .unwrap_or(truncated_str.len());
+                            reslice_color_runs(&item.color_runs, content_end)
+                        };
                         if resliced.is_empty() {
                             buf.set_text(
                                 &mut self.font_system,
@@ -1603,6 +1638,137 @@ pub(crate) fn reslice_color_runs(
             Some(ColorRunItem {
                 start_byte: start,
                 end_byte: end,
+                color: run.color,
+            })
+        })
+        .collect()
+}
+
+/// Re-slice [`StyledRunItem`]s for a **tail-anchored** truncated string.
+///
+/// `truncate_tail_anchored` produces a leading-ellipsis output:
+/// `"…\n{visible_tail}"`.  The original `styled_runs` byte offsets are
+/// relative to the **original** text; they must be shifted to become relative
+/// to `effective_text` (= the leading-ellipsis truncated string).
+///
+/// The shift is computed by finding where `visible_tail` begins in
+/// `original_text` (`tail_origin`) and applying:
+///
+/// ```text
+/// new_offset = old_offset - tail_origin + leading_bytes
+/// ```
+///
+/// where `leading_bytes = ELLIPSIS.len() + 1` (the `"…\n"` prefix = 4 bytes).
+///
+/// If the first visible line was also horizontally truncated (its text no
+/// longer matches the suffix of `original_text`), the shift cannot be computed
+/// exactly.  In that case an empty `Vec` is returned and the caller must fall
+/// back to `buf.set_text` (unstyled) to avoid mis-styled glyphs.
+///
+/// Runs entirely outside the visible tail range are dropped; runs partially
+/// overlapping `tail_origin` are clamped to the tail start.
+///
+/// Returns a `Vec<StyledRunItem>` with offsets valid against `truncated_str`.
+pub(crate) fn reslice_styled_runs_tail_anchored(
+    original_text: &str,
+    truncated_str: &str,
+    runs: &[StyledRunItem],
+) -> Vec<StyledRunItem> {
+    // "…\n" prefix: ELLIPSIS (3 UTF-8 bytes) + newline (1 byte).
+    let leading_bytes = crate::overflow::ELLIPSIS.len() + 1;
+
+    // Extract the visible tail content (after "…\n").
+    let tail_content = match truncated_str.get(leading_bytes..) {
+        Some(s) => s,
+        None => return Vec::new(), // truncated_str is too short — malformed
+    };
+
+    // Determine where the tail content begins in the original text.
+    // If original_text ends with tail_content, the shift is unambiguous.
+    // Otherwise the first visible line was further truncated; we cannot safely
+    // remap offsets, so return empty to trigger the unstyled fallback.
+    if !original_text.ends_with(tail_content) {
+        return Vec::new();
+    }
+    let tail_origin = original_text.len() - tail_content.len();
+
+    // Shift: subtract tail_origin (to make offsets relative to tail_content),
+    // then add leading_bytes (to account for the "…\n" prefix in truncated_str).
+    // Saturate at 0 for runs that start before tail_origin (clamped to tail).
+    runs.iter()
+        .filter_map(|run| {
+            // Drop runs entirely before the visible tail.
+            if run.end_byte <= tail_origin {
+                return None;
+            }
+            // Clamp start to tail_origin (run starts before visible range).
+            let orig_start = run.start_byte.max(tail_origin);
+            let orig_end = run.end_byte;
+
+            // Shift to effective_text coordinates.
+            let new_start = orig_start - tail_origin + leading_bytes;
+            let new_end = orig_end - tail_origin + leading_bytes;
+
+            // Clamp new_end to truncated_str length (defensive).
+            let new_end = new_end.min(truncated_str.len());
+
+            if new_start >= new_end {
+                return None;
+            }
+
+            Some(StyledRunItem {
+                start_byte: new_start,
+                end_byte: new_end,
+                weight: run.weight,
+                italic: run.italic,
+                monospace: run.monospace,
+                color: run.color,
+            })
+        })
+        .collect()
+}
+
+/// Re-slice [`ColorRunItem`]s for a **tail-anchored** truncated string.
+///
+/// Analogous to [`reslice_styled_runs_tail_anchored`]: shifts run offsets from
+/// the original-text coordinate system to the leading-ellipsis `"…\n{tail}"`
+/// coordinate system produced by [`overflow::truncate_tail_anchored`].
+///
+/// Returns an empty `Vec` when the first visible line was horizontally
+/// truncated (offsets cannot be safely remapped); the caller must fall back to
+/// `buf.set_text`.
+pub(crate) fn reslice_color_runs_tail_anchored(
+    original_text: &str,
+    truncated_str: &str,
+    runs: &[ColorRunItem],
+) -> Vec<ColorRunItem> {
+    let leading_bytes = crate::overflow::ELLIPSIS.len() + 1;
+
+    let tail_content = match truncated_str.get(leading_bytes..) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    if !original_text.ends_with(tail_content) {
+        return Vec::new();
+    }
+    let tail_origin = original_text.len() - tail_content.len();
+
+    runs.iter()
+        .filter_map(|run| {
+            if run.end_byte <= tail_origin {
+                return None;
+            }
+            let orig_start = run.start_byte.max(tail_origin);
+            let orig_end = run.end_byte;
+            let new_start = orig_start - tail_origin + leading_bytes;
+            let new_end = (orig_end - tail_origin + leading_bytes).min(truncated_str.len());
+            if new_start >= new_end {
+                return None;
+            }
+            Some(ColorRunItem {
+                start_byte: new_start,
+                end_byte: new_end,
                 color: run.color,
             })
         })
@@ -3568,5 +3734,264 @@ mod tests {
         let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
         assert_eq!(weight, 800, "maximum weight across runs must be returned");
         assert!(!mono);
+    }
+
+    // ── hud-fe4ik: tail-anchored styled-run reslice tests ────────────────────
+    //
+    // `truncate_tail_anchored` emits LEADING-ellipsis output ("…\n{tail}"),
+    // so styled_run byte offsets (relative to original text) must be shifted
+    // into the "…\n{tail}" coordinate space.  These tests verify the new
+    // `reslice_styled_runs_tail_anchored` and `reslice_color_runs_tail_anchored`
+    // helpers, and also confirm that the spans they produce slice the correct
+    // substrings from the leading-ellipsis effective text.
+
+    /// Basic shift: a bold run on the visible tail is remapped to effective_text coords.
+    ///
+    /// Original text:  "line1\nline2\nline3"  (bytes 0..17)
+    /// Truncated (tail-anchored): "…\nline2\nline3"
+    ///   - "…" = 3 bytes, "\n" = 1 byte → leading_bytes = 4
+    ///   - tail_origin = 17 - 12 = 5  ("line1\n" is the dropped prefix, 6 bytes)
+    ///
+    /// Wait — let's compute carefully:
+    ///   "line1\nline2\nline3"
+    ///    0123456789012345678
+    ///    "line2\nline3" starts at byte 6 (len 12)
+    ///    tail_origin = 18 - 12 = 6
+    ///
+    /// A bold run at [6..10] ("line") in original text should shift to
+    ///   new_start = 6 - 6 + 4 = 4
+    ///   new_end   = 10 - 6 + 4 = 8
+    /// In effective_text "…\nline2\nline3":
+    ///   bytes 0..3 = "…", byte 3 = "\n", bytes 4..10 = "line2\n", bytes 10..15 = "line3"
+    ///   → [4..8] = "line" ✓ (correct glyphs styled)
+    #[test]
+    fn reslice_styled_runs_tail_anchored_basic_shift() {
+        let original = "line1\nline2\nline3";
+        // "line2\nline3" = 12 bytes; starts at byte 6 in original
+        let truncated = "…\nline2\nline3";
+        // ELLIPSIS = "…" = 3 bytes, + "\n" = 4 bytes leading_bytes
+        // tail_origin = 17 - 12 = 5? No: original.len() = 17 actually.
+        // "line1\nline2\nline3": l-i-n-e-1 = 5, \n = 1, l-i-n-e-2 = 5, \n = 1, l-i-n-e-3 = 5 → 17 bytes
+        // "line2\nline3": l-i-n-e-2 = 5, \n = 1, l-i-n-e-3 = 5 → 11 bytes
+        // tail_origin = 17 - 11 = 6 ✓ ("line1\n" = 6 bytes)
+        // leading_bytes = 3 + 1 = 4
+        // bold run [6..11] ("line2") in original → [6-6+4 .. 11-6+4] = [4..9]
+        // In "…\nline2\nline3": bytes [4..9] = "line2" ✓
+        let runs = vec![StyledRunItem {
+            start_byte: 6,
+            end_byte: 11,
+            weight: Some(700),
+            italic: false,
+            monospace: false,
+            color: None,
+        }];
+        let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
+        assert_eq!(
+            result.len(),
+            1,
+            "bold run on visible tail must survive reslice"
+        );
+        assert_eq!(
+            result[0].start_byte, 4,
+            "start must be shifted to leading-ellipsis coords"
+        );
+        assert_eq!(
+            result[0].end_byte, 9,
+            "end must be shifted to leading-ellipsis coords"
+        );
+        assert_eq!(result[0].weight, Some(700), "weight preserved");
+        // Verify the span slices the correct substring.
+        assert_eq!(
+            &truncated[result[0].start_byte..result[0].end_byte],
+            "line2",
+            "resliced run must address 'line2' in the effective text"
+        );
+    }
+
+    /// Run entirely before the visible tail is dropped.
+    #[test]
+    fn reslice_styled_runs_tail_anchored_run_before_tail_dropped() {
+        let original = "line1\nline2\nline3";
+        let truncated = "…\nline2\nline3";
+        // Run [0..5] = "line1" is in the dropped prefix → should be dropped.
+        let runs = vec![StyledRunItem {
+            start_byte: 0,
+            end_byte: 5,
+            weight: Some(700),
+            italic: false,
+            monospace: false,
+            color: None,
+        }];
+        let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
+        assert!(
+            result.is_empty(),
+            "run entirely before tail must be dropped; got: {result:?}"
+        );
+    }
+
+    /// Run partially overlapping the tail start is clamped to the tail start.
+    #[test]
+    fn reslice_styled_runs_tail_anchored_partial_overlap_clamped() {
+        let original = "line1\nline2\nline3";
+        let truncated = "…\nline2\nline3";
+        // tail_origin = 6; run [3..9] straddles the tail boundary.
+        // Clamped start = 6; end = 9.
+        // new_start = 6 - 6 + 4 = 4; new_end = 9 - 6 + 4 = 7.
+        // truncated[4..7] = "lin" (start of "line2")
+        let runs = vec![StyledRunItem {
+            start_byte: 3,
+            end_byte: 9,
+            weight: Some(700),
+            italic: false,
+            monospace: false,
+            color: None,
+        }];
+        let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
+        assert_eq!(
+            result.len(),
+            1,
+            "partially overlapping run must survive as clamped"
+        );
+        assert_eq!(
+            result[0].start_byte, 4,
+            "clamped start must be at tail start in effective coords"
+        );
+        assert_eq!(result[0].end_byte, 7);
+        assert_eq!(
+            &truncated[result[0].start_byte..result[0].end_byte],
+            "lin",
+            "sliced text must be the overlap region in effective text"
+        );
+    }
+
+    /// Multiple runs: only runs on the visible tail survive; their offsets are
+    /// correct addresses into the leading-ellipsis effective text.
+    ///
+    /// This is the primary regression test for hud-fe4ik: before the fix,
+    /// `content_end` would equal `truncated.len()` (strip_suffix failing on
+    /// leading-ellipsis output), no clipping would occur, and the original
+    /// offsets (0..5 and 6..11) would be applied verbatim to "…\nline2\nline3".
+    /// Byte 0..5 of that string is "…\nli" (not "line1") — wrong glyphs styled.
+    #[test]
+    fn reslice_styled_runs_tail_anchored_multiple_runs_regression() {
+        let original = "line1\nline2\nline3";
+        // tail_origin = 6; leading_bytes = 4
+        let truncated = "…\nline2\nline3";
+
+        let runs = vec![
+            // Run on dropped prefix ("line1") → should be dropped
+            StyledRunItem {
+                start_byte: 0,
+                end_byte: 5,
+                weight: Some(700),
+                italic: false,
+                monospace: false,
+                color: None,
+            },
+            // Run on visible tail ("line2") → should map to [4..9] in effective_text
+            StyledRunItem {
+                start_byte: 6,
+                end_byte: 11,
+                weight: Some(400),
+                italic: true,
+                monospace: false,
+                color: Some([255, 0, 0, 255]),
+            },
+        ];
+
+        let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
+        assert_eq!(
+            result.len(),
+            1,
+            "only the run on the visible tail survives; got {result:?}"
+        );
+        assert_eq!(
+            result[0].start_byte, 4,
+            "run on 'line2' must start at byte 4 (after '…\\n') in effective text"
+        );
+        assert_eq!(
+            result[0].end_byte, 9,
+            "run on 'line2' must end at byte 9 in effective text"
+        );
+        assert_eq!(
+            &truncated[result[0].start_byte..result[0].end_byte],
+            "line2",
+            "shifted run must address 'line2' in '…\\nline2\\nline3'"
+        );
+
+        // Demonstrate the pre-fix bug: if offsets were NOT shifted, byte
+        // range [6..11] in truncated "…\nline2\nline3" addresses "\nline" — wrong.
+        // After the fix the range [4..9] correctly addresses "line2".
+        assert_ne!(
+            &truncated[6..11],
+            "line2",
+            "unshifted offset 6..11 must NOT address 'line2' in effective text \
+             (confirms the pre-fix mis-styling)"
+        );
+    }
+
+    /// `reslice_color_runs_tail_anchored`: basic color run on visible tail.
+    #[test]
+    fn reslice_color_runs_tail_anchored_basic_shift() {
+        let original = "line1\nline2\nline3";
+        let truncated = "…\nline2\nline3";
+        // Run [6..11] = "line2" in original → [4..9] in effective_text.
+        let runs = vec![ColorRunItem {
+            start_byte: 6,
+            end_byte: 11,
+            color: [0, 128, 255, 255],
+        }];
+        let result = reslice_color_runs_tail_anchored(original, truncated, &runs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start_byte, 4);
+        assert_eq!(result[0].end_byte, 9);
+        assert_eq!(result[0].color, [0, 128, 255, 255], "color preserved");
+        assert_eq!(
+            &truncated[result[0].start_byte..result[0].end_byte],
+            "line2",
+            "color run must address 'line2' in effective text"
+        );
+    }
+
+    /// `reslice_color_runs_tail_anchored`: run before tail is dropped.
+    #[test]
+    fn reslice_color_runs_tail_anchored_run_before_tail_dropped() {
+        let original = "line1\nline2\nline3";
+        let truncated = "…\nline2\nline3";
+        let runs = vec![ColorRunItem {
+            start_byte: 0,
+            end_byte: 5,
+            color: [255, 0, 0, 255],
+        }];
+        let result = reslice_color_runs_tail_anchored(original, truncated, &runs);
+        assert!(
+            result.is_empty(),
+            "color run before tail must be dropped; got {result:?}"
+        );
+    }
+
+    /// `reslice_styled_runs_tail_anchored` falls back (empty) when first
+    /// visible line was further horizontally truncated (no suffix match).
+    #[test]
+    fn reslice_styled_runs_tail_anchored_first_line_truncated_fallback() {
+        let original = "line1\nthis_is_a_very_long_line_2\nline3";
+        // First visible line was horizontally truncated: "this_is_a_very…"
+        // So truncated_str does NOT end with original text's suffix.
+        let truncated = "…\nthis_is_a_very…\nline3";
+        let runs = vec![StyledRunItem {
+            start_byte: 6,
+            end_byte: 15,
+            weight: Some(700),
+            italic: false,
+            monospace: false,
+            color: None,
+        }];
+        // original.ends_with("this_is_a_very…\nline3") is false, so empty is returned.
+        let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
+        assert!(
+            result.is_empty(),
+            "when first line is horizontally truncated, must return empty (unstyled fallback); \
+             got {result:?}"
+        );
     }
 }
