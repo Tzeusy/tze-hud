@@ -17217,6 +17217,71 @@ mod tests {
         }
     }
 
+    /// The at-capacity color token must be distinct from the background color
+    /// so it provides a visible signal when the composer draft reaches its byte cap.
+    ///
+    /// Verifies two things:
+    /// 1. The default at-capacity color (muted amber `#B87333`) has a non-zero red
+    ///    channel while the background (`#0F1418`) has a near-zero red channel —
+    ///    they are visually distinguishable.
+    /// 2. Injecting an override via the token map propagates through
+    ///    `resolve_composer_overlay_tokens` so the compositor render path is driven
+    ///    entirely by the token, with no hardcoded color values.
+    ///
+    /// CPU-only — no GPU required (hud-2axdq acceptance criterion).
+    #[test]
+    fn composer_at_capacity_token_is_distinct_from_background_and_propagates_override() {
+        use std::collections::HashMap;
+
+        // Default case: at-capacity color must differ from background.
+        let empty: HashMap<String, String> = HashMap::new();
+        let t = resolve_composer_overlay_tokens(&empty);
+
+        // At-capacity alpha must be non-zero so the indicator is actually visible.
+        assert!(
+            t.at_capacity_a > 0.0,
+            "default at_capacity_a must be > 0 (indicator must be visible)"
+        );
+        // The default at-capacity color (amber #B87333) has high red channel;
+        // the default background (#0F1418) has very low red channel. They must differ.
+        assert!(
+            (t.at_capacity_r - t.bg_r).abs() > 0.1,
+            "at_capacity_r ({}) must differ meaningfully from bg_r ({}) so the \
+             at-capacity indicator is visually distinct from the composer background",
+            t.at_capacity_r,
+            t.bg_r,
+        );
+
+        // Override case: injecting a token value must propagate to the struct.
+        let mut overrides: HashMap<String, String> = HashMap::new();
+        overrides.insert(
+            "portal.composer.at_capacity_color".to_string(),
+            "#FF0000".to_string(), // pure red sentinel
+        );
+        let t_override = resolve_composer_overlay_tokens(&overrides);
+        // Red channel must be ~1.0 (pure red), not the default amber.
+        assert!(
+            t_override.at_capacity_r > 0.9,
+            "overridden at_capacity_r must be ~1.0 (pure red sentinel), got {}",
+            t_override.at_capacity_r
+        );
+        assert!(
+            t_override.at_capacity_g < 0.1,
+            "overridden at_capacity_g must be ~0.0 (pure red sentinel), got {}",
+            t_override.at_capacity_g
+        );
+        assert!(
+            t_override.at_capacity_b < 0.1,
+            "overridden at_capacity_b must be ~0.0 (pure red sentinel), got {}",
+            t_override.at_capacity_b
+        );
+        // Baseline must differ from override (amber vs red).
+        assert!(
+            (t.at_capacity_r - t_override.at_capacity_r).abs() > 0.1,
+            "default and overridden at_capacity_r must differ (amber vs red)"
+        );
+    }
+
     // ── Tile background color token tests [hud-9wljr.10] ─────────────────────
 
     /// Fallback constants resolve to expected linear-RGB default values.
