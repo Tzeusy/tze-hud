@@ -210,6 +210,45 @@ const BORDER_DEFAULT_FALLBACK: Rgba = Rgba {
     a: 1.0,
 };
 
+// ─── Tile background token fallback colors ────────────────────────────────────
+
+/// Default tile background color for `TextMarkdown` tiles (linear sRGB) used
+/// when the `color.tile.background.text_markdown` design token is absent.
+///
+/// Per spec §Canonical Token Schema:
+///   color.tile.background.text_markdown → #636380 → (0.15, 0.15, 0.25)
+const TILE_BG_TEXT_MARKDOWN: Rgba = Rgba {
+    r: 0.15,
+    g: 0.15,
+    b: 0.25,
+    a: 1.0,
+};
+
+/// Default tile background color for `StaticImage` tiles (linear sRGB) used
+/// when the `color.tile.background.static_image` design token is absent.
+///
+/// Per spec §Canonical Token Schema:
+///   color.tile.background.static_image → #373737 → (0.05, 0.05, 0.05)
+const TILE_BG_STATIC_IMAGE: Rgba = Rgba {
+    r: 0.05,
+    g: 0.05,
+    b: 0.05,
+    a: 1.0,
+};
+
+/// Default tile background color for tiles with unknown/default content type
+/// (linear sRGB) used when the `color.tile.background.default` design token
+/// is absent.
+///
+/// Per spec §Canonical Token Schema:
+///   color.tile.background.default → #505073 → (0.1, 0.1, 0.2)
+const TILE_BG_DEFAULT: Rgba = Rgba {
+    r: 0.1,
+    g: 0.1,
+    b: 0.2,
+    a: 1.0,
+};
+
 /// Icon size in pixels for status-bar entry icons.
 ///
 /// Icons from `RenderingPolicy::key_icon_map` are rasterized at this size
@@ -400,6 +439,25 @@ fn urgency_to_notification_color(urgency: u32, token_map: &HashMap<String, Strin
 #[inline]
 fn resolve_border_default_color(token_map: &HashMap<String, String>) -> Rgba {
     resolve_token_color(token_map, "color.border.default").unwrap_or(BORDER_DEFAULT_FALLBACK)
+}
+
+/// Resolve the tile background color for a given content-type key.
+///
+/// Looks up `color.tile.background.{key}` in `token_map` first; falls back to
+/// the provided `fallback` constant when the key is absent or cannot be parsed
+/// as a valid hex color.
+///
+/// Accepted keys (per §Canonical Token Schema):
+///   - `"text_markdown"` → fallback `TILE_BG_TEXT_MARKDOWN` (#636380)
+///   - `"static_image"`  → fallback `TILE_BG_STATIC_IMAGE`  (#373737)
+///   - `"default"`       → fallback `TILE_BG_DEFAULT`        (#505073)
+///
+/// The caller supplies the `fallback` value so this function does not need
+/// to know the full token namespace; callers should prefer the typed wrapper
+/// `resolve_tile_bg_*` helpers below.
+#[inline]
+fn resolve_tile_bg_token(token_map: &HashMap<String, String>, key: &str, fallback: Rgba) -> Rgba {
+    resolve_token_color(token_map, key).unwrap_or(fallback)
 }
 
 #[inline]
@@ -7645,6 +7703,10 @@ impl Compositor {
 
     /// Determine the background fill color for a tile based on its root content.
     ///
+    /// Colors are resolved from design tokens (`color.tile.background.*`) with
+    /// documented fallback constants — no naked color literals here.  The opacity
+    /// channel is still derived from the tile's effective opacity (drag state).
+    ///
     /// Returns `None` when the tile's rounded root node should be solely
     /// responsible for its own backdrop shape.
     fn tile_background_color(&self, tile: &Tile, scene: &SceneGraph) -> Option<[f32; 4]> {
@@ -7663,7 +7725,12 @@ impl Compositor {
                     if let Some(bg) = &tm.background {
                         return Some(bg.to_array());
                     }
-                    return Some([0.15, 0.15, 0.25, opacity]);
+                    let c = resolve_tile_bg_token(
+                        &self.token_map,
+                        "color.tile.background.text_markdown",
+                        TILE_BG_TEXT_MARKDOWN,
+                    );
+                    return Some([c.r, c.g, c.b, opacity]);
                 }
                 NodeData::HitRegion(_) => {
                     // HitRegion is an invisible interaction primitive. Its visible
@@ -7672,12 +7739,21 @@ impl Compositor {
                     return None;
                 }
                 NodeData::StaticImage(_) => {
-                    // Tile background for image tiles: near-black with slight tint
-                    return Some([0.05, 0.05, 0.05, opacity]);
+                    let c = resolve_tile_bg_token(
+                        &self.token_map,
+                        "color.tile.background.static_image",
+                        TILE_BG_STATIC_IMAGE,
+                    );
+                    return Some([c.r, c.g, c.b, opacity]);
                 }
             }
         }
-        Some([0.1, 0.1, 0.2, opacity])
+        let c = resolve_tile_bg_token(
+            &self.token_map,
+            "color.tile.background.default",
+            TILE_BG_DEFAULT,
+        );
+        Some([c.r, c.g, c.b, opacity])
     }
 
     /// Emit geometry for the local composer echo overlay.
@@ -17139,5 +17215,209 @@ mod tests {
                 "token {name} must be in [0, 1], got {val}"
             );
         }
+    }
+
+    // ── Tile background color token tests [hud-9wljr.10] ─────────────────────
+
+    /// Fallback constants resolve to expected linear-RGB default values.
+    ///
+    /// Asserts the three TILE_BG_* fallback constants match the values that
+    /// were previously hardcoded in `tile_background_color`, guaranteeing no
+    /// silent visual regression from the tokenization refactor.
+    ///
+    /// CPU-only — no GPU required.
+    #[test]
+    fn tile_bg_fallback_constants_match_documented_defaults() {
+        // TextMarkdown: [0.15, 0.15, 0.25]
+        assert!(
+            (TILE_BG_TEXT_MARKDOWN.r - 0.15).abs() < f32::EPSILON,
+            "TILE_BG_TEXT_MARKDOWN.r expected 0.15, got {}",
+            TILE_BG_TEXT_MARKDOWN.r
+        );
+        assert!(
+            (TILE_BG_TEXT_MARKDOWN.g - 0.15).abs() < f32::EPSILON,
+            "TILE_BG_TEXT_MARKDOWN.g expected 0.15, got {}",
+            TILE_BG_TEXT_MARKDOWN.g
+        );
+        assert!(
+            (TILE_BG_TEXT_MARKDOWN.b - 0.25).abs() < f32::EPSILON,
+            "TILE_BG_TEXT_MARKDOWN.b expected 0.25, got {}",
+            TILE_BG_TEXT_MARKDOWN.b
+        );
+
+        // StaticImage: [0.05, 0.05, 0.05]
+        assert!(
+            (TILE_BG_STATIC_IMAGE.r - 0.05).abs() < f32::EPSILON,
+            "TILE_BG_STATIC_IMAGE.r expected 0.05, got {}",
+            TILE_BG_STATIC_IMAGE.r
+        );
+        assert!(
+            (TILE_BG_STATIC_IMAGE.g - 0.05).abs() < f32::EPSILON,
+            "TILE_BG_STATIC_IMAGE.g expected 0.05, got {}",
+            TILE_BG_STATIC_IMAGE.g
+        );
+        assert!(
+            (TILE_BG_STATIC_IMAGE.b - 0.05).abs() < f32::EPSILON,
+            "TILE_BG_STATIC_IMAGE.b expected 0.05, got {}",
+            TILE_BG_STATIC_IMAGE.b
+        );
+
+        // Default: [0.1, 0.1, 0.2]
+        assert!(
+            (TILE_BG_DEFAULT.r - 0.1).abs() < f32::EPSILON,
+            "TILE_BG_DEFAULT.r expected 0.1, got {}",
+            TILE_BG_DEFAULT.r
+        );
+        assert!(
+            (TILE_BG_DEFAULT.g - 0.1).abs() < f32::EPSILON,
+            "TILE_BG_DEFAULT.g expected 0.1, got {}",
+            TILE_BG_DEFAULT.g
+        );
+        assert!(
+            (TILE_BG_DEFAULT.b - 0.2).abs() < f32::EPSILON,
+            "TILE_BG_DEFAULT.b expected 0.2, got {}",
+            TILE_BG_DEFAULT.b
+        );
+    }
+
+    /// `resolve_tile_bg_token` returns the fallback when the token map is empty.
+    ///
+    /// CPU-only — no GPU required.
+    #[test]
+    fn resolve_tile_bg_token_returns_fallback_on_absent_token() {
+        let token_map: HashMap<String, String> = HashMap::new();
+
+        let c = resolve_tile_bg_token(
+            &token_map,
+            "color.tile.background.text_markdown",
+            TILE_BG_TEXT_MARKDOWN,
+        );
+        assert!(
+            (c.r - TILE_BG_TEXT_MARKDOWN.r).abs() < f32::EPSILON
+                && (c.g - TILE_BG_TEXT_MARKDOWN.g).abs() < f32::EPSILON
+                && (c.b - TILE_BG_TEXT_MARKDOWN.b).abs() < f32::EPSILON,
+            "absent text_markdown token must fall back to TILE_BG_TEXT_MARKDOWN, got {c:?}"
+        );
+
+        let c = resolve_tile_bg_token(
+            &token_map,
+            "color.tile.background.static_image",
+            TILE_BG_STATIC_IMAGE,
+        );
+        assert!(
+            (c.r - TILE_BG_STATIC_IMAGE.r).abs() < f32::EPSILON
+                && (c.g - TILE_BG_STATIC_IMAGE.g).abs() < f32::EPSILON
+                && (c.b - TILE_BG_STATIC_IMAGE.b).abs() < f32::EPSILON,
+            "absent static_image token must fall back to TILE_BG_STATIC_IMAGE, got {c:?}"
+        );
+
+        let c = resolve_tile_bg_token(&token_map, "color.tile.background.default", TILE_BG_DEFAULT);
+        assert!(
+            (c.r - TILE_BG_DEFAULT.r).abs() < f32::EPSILON
+                && (c.g - TILE_BG_DEFAULT.g).abs() < f32::EPSILON
+                && (c.b - TILE_BG_DEFAULT.b).abs() < f32::EPSILON,
+            "absent default token must fall back to TILE_BG_DEFAULT, got {c:?}"
+        );
+    }
+
+    /// Token override: `color.tile.background.text_markdown` overrides the fallback.
+    ///
+    /// Uses pure cyan (#00FFFF) — clearly distinct from the default blue-gray.
+    /// CPU-only — no GPU required.
+    #[test]
+    fn resolve_tile_bg_token_text_markdown_override() {
+        let mut token_map: HashMap<String, String> = HashMap::new();
+        token_map.insert(
+            "color.tile.background.text_markdown".to_string(),
+            "#00FFFF".to_string(),
+        );
+
+        let c = resolve_tile_bg_token(
+            &token_map,
+            "color.tile.background.text_markdown",
+            TILE_BG_TEXT_MARKDOWN,
+        );
+        // #00FFFF sRGB → linear: R=0.0, G≈1.0, B≈1.0
+        assert!(
+            c.r < 0.01,
+            "overridden text_markdown R should be ~0.0 (cyan), got {}",
+            c.r
+        );
+        assert!(
+            c.g > 0.9,
+            "overridden text_markdown G should be ~1.0 (cyan), got {}",
+            c.g
+        );
+        assert!(
+            c.b > 0.9,
+            "overridden text_markdown B should be ~1.0 (cyan), got {}",
+            c.b
+        );
+    }
+
+    /// Token override: `color.tile.background.static_image` overrides the fallback.
+    ///
+    /// Uses pure red (#FF0000) — clearly distinct from the default near-black.
+    /// CPU-only — no GPU required.
+    #[test]
+    fn resolve_tile_bg_token_static_image_override() {
+        let mut token_map: HashMap<String, String> = HashMap::new();
+        token_map.insert(
+            "color.tile.background.static_image".to_string(),
+            "#FF0000".to_string(),
+        );
+
+        let c = resolve_tile_bg_token(
+            &token_map,
+            "color.tile.background.static_image",
+            TILE_BG_STATIC_IMAGE,
+        );
+        // #FF0000 sRGB → linear: R≈1.0, G=0.0, B=0.0
+        assert!(
+            c.r > 0.9,
+            "overridden static_image R should be ~1.0 (red), got {}",
+            c.r
+        );
+        assert!(
+            c.g < 0.01,
+            "overridden static_image G should be ~0.0 (red), got {}",
+            c.g
+        );
+        assert!(
+            c.b < 0.01,
+            "overridden static_image B should be ~0.0 (red), got {}",
+            c.b
+        );
+    }
+
+    /// Token override: `color.tile.background.default` overrides the fallback.
+    ///
+    /// Uses pure green (#00FF00) — clearly distinct from the default blue-dark.
+    /// CPU-only — no GPU required.
+    #[test]
+    fn resolve_tile_bg_token_default_override() {
+        let mut token_map: HashMap<String, String> = HashMap::new();
+        token_map.insert(
+            "color.tile.background.default".to_string(),
+            "#00FF00".to_string(),
+        );
+
+        let c = resolve_tile_bg_token(&token_map, "color.tile.background.default", TILE_BG_DEFAULT);
+        // #00FF00 sRGB → linear: R=0.0, G≈1.0, B=0.0
+        assert!(
+            c.r < 0.01,
+            "overridden default R should be ~0.0 (green), got {}",
+            c.r
+        );
+        assert!(
+            c.g > 0.9,
+            "overridden default G should be ~1.0 (green), got {}",
+            c.g
+        );
+        assert!(
+            c.b < 0.01,
+            "overridden default B should be ~0.0 (green), got {}",
+            c.b
+        );
     }
 }
