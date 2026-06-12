@@ -2426,10 +2426,13 @@ mod tests {
             line_h,
             &mut fs,
         );
-        if token_w <= bounds_w {
-            // Font metrics are too narrow for this test — skip gracefully.
-            return;
-        }
+        assert!(
+            token_w > bounds_w,
+            "precondition failed: \"{long_token}\" ({token_w:.1}px) must overflow \
+             bounds_w={bounds_w}px at font_size={font_size}px so the \
+             non-final-line overflow regression is exercised; check that \
+             glyphon metrics are available in this environment"
+        );
 
         // Line 2: short text that fits.
         let text = format!("{long_token}\nshort");
@@ -2475,9 +2478,13 @@ mod tests {
             line_h,
             &mut fs,
         );
-        if token_w <= bounds_w {
-            return; // precondition unmet — skip
-        }
+        assert!(
+            token_w > bounds_w,
+            "precondition failed: \"{long_token}\" ({token_w:.1}px) must overflow \
+             bounds_w={bounds_w}px at font_size={font_size}px so the \
+             tail-anchored non-final-line overflow regression is exercised; \
+             check that glyphon metrics are available in this environment"
+        );
 
         let text = format!("{long_token}\nshort");
 
@@ -2524,9 +2531,13 @@ mod tests {
             line_h,
             &mut fs,
         );
-        if token_w <= bounds_w {
-            return; // skip if font metrics don't trigger overflow
-        }
+        assert!(
+            token_w > bounds_w,
+            "precondition failed: \"{long_token}\" ({token_w:.1}px) must overflow \
+             bounds_w={bounds_w}px at font_size={font_size}px so the \
+             middle-line overflow regression is exercised; check that \
+             glyphon metrics are available in this environment"
+        );
 
         // Line 1 and Line 3 are short; Line 2 is the long overflowing token.
         let text = format!("short\n{long_token}\nalso short");
