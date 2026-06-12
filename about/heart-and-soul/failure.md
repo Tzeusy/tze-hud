@@ -112,7 +112,7 @@ The "never agent-initiated" rule is not an oversight. If agents could self-degra
 
 The runtime chooses the degradation level based on current resource pressure and tile priorities. It does not ask the user — it acts, and the user can override.
 
-> **Mechanism layer:** The protocol and runtime implementation for automatic ladder descent, threshold definitions, and per-stream budget attribution are specified in RFC 0014 (forthcoming). This doctrine deliberately precedes that RFC: the ladder order and the "never agent-initiated" rule are policy invariants, not implementation details, and must hold regardless of how RFC 0014 wires the mechanism.
+> **Mechanism layer:** The runtime implementation for automatic ladder descent and threshold definitions is specified in RFC 0002 §6 (Runtime Kernel — Degradation) and implemented in `crates/tze_hud_runtime/src/degradation.rs` as a 6-level state machine (Normal → Coalesce → ReduceTextureQuality → DisableTransparency → ShedTiles → Emergency). This doctrine deliberately precedes the implementation: the ladder order and the "never agent-initiated" rule are policy invariants, not implementation details, and must hold regardless of how the mechanism is wired. The v1 6-level ladder covers frame-time-driven compositor degradation only; the 10-step E25 ladder above extends into media-plane and session teardown steps that are deferred indefinitely with the media/mobile program.
 
 ## What the user always sees
 

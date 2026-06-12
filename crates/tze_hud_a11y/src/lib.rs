@@ -1,5 +1,14 @@
 //! # tze_hud_a11y
 //!
+//! **PARKED — DEFERRED INDEFINITELY (2026-05-09).** This crate is a platform
+//! stub for the deferred mobile/accessibility program. All platform bridges
+//! (AT-SPI2, UI Automation, NSAccessibility) are stubs only. The project has
+//! refocused on a performant single-device Rust HUD runtime for Windows. Do not
+//! implement non-stub platform bridges or depend on this crate for v1 work.
+//! Revival condition: single-Windows runtime delivered to high performance bar
+//! and accessibility program re-scoped. Active source of truth:
+//! `openspec/changes/windows-first-performant-runtime/`.
+//!
 //! Accessibility bridge for tze_hud. Converts the scene graph into a
 //! platform-native accessibility tree and exposes screen-reader hooks.
 //!
