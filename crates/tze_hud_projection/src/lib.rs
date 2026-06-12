@@ -2371,8 +2371,56 @@ impl ProjectionAuthority {
     /// Use this when driving multiple concurrent portals to ensure no portal
     /// is starved: call `next_due_projection_id()` to pick the portal, then
     /// `take_due_portal_update(id, ...)` to materialize the update.
+    ///
+    /// ## Rate-limit caution
+    ///
+    /// This method returns a portal key whenever the coalescer has a **pending
+    /// snapshot** for it — it does not check whether the portal's rate window has
+    /// elapsed.  A subsequent `take_due_portal_update` call may return `Ok(None)`
+    /// because the rate window has not elapsed yet.
+    ///
+    /// A naive `while let Some(id) = next_due_projection_id()` loop will
+    /// busy-spin in that case because the coalescer entry is never consumed on the
+    /// `Ok(None)` path.  Use [`portal_next_due_at_us`] to obtain a wait hint and
+    /// break/sleep until the window elapses (defect fix: hud-endkj).
     pub fn next_due_projection_id(&mut self) -> Option<String> {
         self.cadence_coalescer.next_ready_portal()
+    }
+
+    /// Return the earliest wall-clock time (µs) at which `projection_id` will
+    /// be serviced by `take_due_portal_update`.
+    ///
+    /// Returns `Some(next_due_at_us)` when the portal has a pending coalescer
+    /// entry but its per-portal rate window has not yet elapsed.  Returns `None`
+    /// when the portal is either unknown, has no pending entry, or is already
+    /// within its rate window (i.e. `take_due_portal_update` will not be blocked
+    /// by rate-limiting right now).
+    ///
+    /// Callers that drive the drain loop with [`next_due_projection_id`] should
+    /// call this on an `Ok(None)` result from `take_due_portal_update` to avoid
+    /// busy-spinning.  Sleep / yield until `server_timestamp_wall_us >= next_due`,
+    /// then retry (defect fix: hud-endkj).
+    pub fn portal_next_due_at_us(
+        &self,
+        projection_id: &str,
+        server_timestamp_wall_us: u64,
+    ) -> Option<u64> {
+        // Only meaningful when the coalescer has a pending entry (otherwise
+        // take_due_portal_update would have returned Ok(None) for a different reason).
+        self.cadence_coalescer.peek_submitted_at(projection_id)?;
+        let session = self.sessions.get(projection_id)?;
+        let window_start = session.portal_rate_window_started_at_wall_us;
+        if window_start == 0 {
+            // Rate window never started — portal is immediately serviceable.
+            return None;
+        }
+        let next_due = window_start.checked_add(PORTAL_UPDATE_RATE_WINDOW_WALL_US)?;
+        if server_timestamp_wall_us >= next_due {
+            // Rate window already elapsed — no wait needed.
+            None
+        } else {
+            Some(next_due)
+        }
     }
 
     /// Peek the submission timestamp (µs) of the pending coalescer entry for
@@ -2602,7 +2650,7 @@ impl ProjectionAuthority {
                             "duplicate logical_unit_id accepted idempotently",
                         )
                     } else {
-                        append_transcript_unit(
+                        let coalescer_seq = append_transcript_unit(
                             session,
                             &request,
                             server_timestamp_wall_us,
@@ -2610,20 +2658,13 @@ impl ProjectionAuthority {
                             max_visible_transcript_bytes,
                             max_portal_updates_per_second,
                         );
-                        // Capture for cadence coalescer. When append_transcript_unit
-                        // inserts a new TranscriptUnit it increments
-                        // next_transcript_sequence, so `saturating_sub(1)` gives the
-                        // newly assigned sequence. When it returns early via the
-                        // coalesce-key in-place update path, next_transcript_sequence is
-                        // NOT incremented — the sequence captured here equals the last
-                        // drained or pending sequence, which the coalescer will drop as
-                        // stale. This is intentional: the portal is already registered in
-                        // service_order from the prior append; no new scheduling entry is
-                        // needed for a rate-limited in-place update.
-                        cadence_append = Some((
-                            request.envelope.projection_id.clone(),
-                            session.next_transcript_sequence.saturating_sub(1),
-                        ));
+                        // Capture for cadence coalescer. `append_transcript_unit`
+                        // returns the coalescer sequence — strictly greater than any
+                        // previously drained or pending sequence — so `record_append`
+                        // always clears the post-drain stale-sequence guard even on the
+                        // coalesce-key in-place update path (defect fix: hud-endkj).
+                        cadence_append =
+                            Some((request.envelope.projection_id.clone(), coalescer_seq));
                         let mut response = ProjectionResponse::accepted(
                             &request.envelope.request_id,
                             &request.envelope.projection_id,
@@ -2639,7 +2680,7 @@ impl ProjectionAuthority {
                         response
                     }
                 } else {
-                    append_transcript_unit(
+                    let coalescer_seq = append_transcript_unit(
                         session,
                         &request,
                         server_timestamp_wall_us,
@@ -2647,12 +2688,8 @@ impl ProjectionAuthority {
                         max_visible_transcript_bytes,
                         max_portal_updates_per_second,
                     );
-                    // Capture for cadence coalescer. See note above re: coalesce-key
-                    // early-return path and stale-sequence drop semantics.
-                    cadence_append = Some((
-                        request.envelope.projection_id.clone(),
-                        session.next_transcript_sequence.saturating_sub(1),
-                    ));
+                    // Capture for cadence coalescer. See note above re: coalescer sequence.
+                    cadence_append = Some((request.envelope.projection_id.clone(), coalescer_seq));
                     let mut response = ProjectionResponse::accepted(
                         &request.envelope.request_id,
                         &request.envelope.projection_id,
@@ -3462,6 +3499,32 @@ fn validate_pending_input_item(
     Ok(())
 }
 
+/// Append or coalesce a transcript unit for `session`.
+///
+/// Returns the **coalescer sequence** — a monotonically increasing value that
+/// callers must pass to [`PortalCadenceCoalescer::record_append`].
+///
+/// ## Why a separate return value?
+///
+/// Two distinct code paths exist inside this function:
+///
+/// 1. **New-unit path**: a new [`TranscriptUnit`] is pushed with the current
+///    `next_transcript_sequence`, which is then incremented.  The coalescer
+///    receives the newly allocated sequence.
+///
+/// 2. **Coalesce-key in-place update path**: an existing unit is mutated in-place
+///    and `next_transcript_sequence` is NOT incremented (the transcript unit keeps
+///    its original sequence).  If the caller naively passed
+///    `next_transcript_sequence - 1` to `record_append`, it would be the same
+///    sequence that was already drained — the post-drain stale-sequence guard in
+///    [`PortalCadenceCoalescer`] would drop it as stale, so the coalesced
+///    final-state value would never be presented.
+///
+///    Fix: on the in-place path, bump `next_transcript_sequence` and return the
+///    new value so the coalescer always receives a strictly-increasing sequence
+///    that clears the stale guard.  `next_transcript_sequence` is an internal
+///    counter used by both the transcript and the coalescer; bumping it here is
+///    safe because it is never used to infer the number of stored units.
 fn append_transcript_unit(
     session: &mut ProjectionSession,
     request: &PublishOutputRequest,
@@ -3469,7 +3532,7 @@ fn append_transcript_unit(
     max_retained_transcript_bytes: usize,
     max_visible_transcript_bytes: usize,
     max_portal_updates_per_second: u32,
-) {
+) -> u64 {
     let portal_update_ready = portal_update_allowed(
         session,
         server_timestamp_wall_us,
@@ -3505,7 +3568,11 @@ fn append_transcript_unit(
                 );
                 promote_to_active_if_recovering(session);
                 session.unread_output_count += 1;
-                return;
+                // Bump next_transcript_sequence so the coalescer receives a
+                // strictly-increasing sequence that clears the post-drain
+                // stale-sequence guard (defect fix: hud-endkj).
+                session.next_transcript_sequence += 1;
+                return session.next_transcript_sequence - 1;
             }
         }
     }
@@ -3529,6 +3596,7 @@ fn append_transcript_unit(
     );
     promote_to_active_if_recovering(session);
     session.unread_output_count += 1;
+    session.next_transcript_sequence - 1
 }
 
 fn promote_to_active_if_recovering(session: &mut ProjectionSession) {
@@ -6488,6 +6556,284 @@ mod tests {
         assert!(
             !accepted,
             "push must return false for an unknown projection_id"
+        );
+    }
+
+    // ── Regression tests for hud-endkj defect fixes ──────────────────────────
+    //
+    // Defect 1: coalesce-key in-place update path passed a stale sequence to
+    // record_append, causing the coalescer to drop it after the first drain.
+    // Final-state for a coalesce-key would never be presented until an unrelated
+    // fresh append arrived.
+    //
+    // Defect 2: next_due_projection_id returns a rate-limited portal whose
+    // take_due_portal_update returns Ok(None) without consuming the coalescer
+    // entry, allowing a naive driver to busy-spin.  portal_next_due_at_us
+    // provides the wait hint that breaks the spin.
+
+    /// Regression: coalesce-key final-state must appear via next_due_projection_id
+    /// after the first drain, even when no new append follows.
+    ///
+    /// Scenario:
+    /// 1. First append (portal_update_ready = true) → coalescer entry seq=0 accepted.
+    /// 2. take_due_portal_update → drains coalescer (last_drained_sequence=0).
+    /// 3. Second append (same coalesce_key, rate-limited) → previously bugged
+    ///    code passed seq=0 → stale guard dropped it → portal vanished from
+    ///    next_due_projection_id forever.
+    ///
+    /// After fix: append_transcript_unit bumps next_transcript_sequence on the
+    /// in-place path, returning seq=1, which clears the stale guard.
+    #[test]
+    fn coalesce_key_final_state_reappears_after_drain_without_fresh_append() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 1,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let owner_token = attach(&mut authority, "proj-coalesce");
+        let portal_id = "proj-coalesce";
+
+        // First append — rate window is open.
+        let mut first = output_request(portal_id, &owner_token, "req-1");
+        first.output_text = "initial".to_string();
+        first.logical_unit_id = Some("unit-1".to_string());
+        first.coalesce_key = Some("status".to_string());
+        let r1 = authority.handle_publish_output(first, "caller", 10);
+        assert!(r1.accepted, "first append must be accepted");
+        assert!(
+            r1.portal_update_ready,
+            "first append must be immediately ready"
+        );
+
+        // Oracle confirms a pending update.
+        assert_eq!(
+            authority.next_due_projection_id().as_deref(),
+            Some(portal_id),
+            "portal must be ready after first append"
+        );
+
+        // Drain the coalescer — last_drained_sequence is now recorded.
+        let update = authority
+            .take_due_portal_update(portal_id, 10)
+            .expect("no error")
+            .expect("first update must be present");
+        assert_eq!(update.unread_output_count, 1);
+
+        // Oracle must return None after draining (nothing pending).
+        assert!(
+            authority.next_due_projection_id().is_none(),
+            "oracle must be idle after drain"
+        );
+
+        // Second append — rate window is closed (same timestamp 10).
+        // Uses the same coalesce_key → in-place update path.
+        let mut second = output_request(portal_id, &owner_token, "req-2");
+        second.output_text = "final-value".to_string();
+        second.logical_unit_id = Some("unit-2".to_string());
+        second.coalesce_key = Some("status".to_string());
+        let r2 = authority.handle_publish_output(second, "caller", 10);
+        assert!(r2.accepted, "second append must be accepted");
+        assert!(
+            !r2.portal_update_ready,
+            "second append must be rate-limited (same window)"
+        );
+
+        // The coalescer must have a pending entry for this portal.
+        // Previously this was dropped as stale — verify the fix.
+        assert_eq!(
+            authority.next_due_projection_id().as_deref(),
+            Some(portal_id),
+            "portal must re-appear in oracle after coalesce-key in-place update (hud-endkj defect 1)"
+        );
+
+        // And drain at the next window to confirm final value is delivered.
+        let update2 = authority
+            .take_due_portal_update(portal_id, 10 + PORTAL_UPDATE_RATE_WINDOW_WALL_US)
+            .expect("no error")
+            .expect("second update must be due in next window");
+        let last_text = update2
+            .visible_transcript
+            .iter()
+            .find(|u| u.coalesce_key.as_deref() == Some("status"))
+            .map(|u| u.output_text.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            last_text, "final-value",
+            "coalesced final value must be delivered (hud-endkj defect 1)"
+        );
+    }
+
+    /// Regression: multiple coalesce-key in-place updates within the same rate
+    /// window must ALL produce strictly-increasing coalescer sequences, so each
+    /// successive in-place update remains visible via next_due_projection_id.
+    #[test]
+    fn coalesce_key_successive_in_place_updates_stay_in_oracle() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 1,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let owner_token = attach(&mut authority, "proj-multi");
+        let portal_id = "proj-multi";
+
+        // Seed with a first ready append.
+        let mut seed = output_request(portal_id, &owner_token, "req-seed");
+        seed.output_text = "seed".to_string();
+        seed.logical_unit_id = Some("unit-seed".to_string());
+        seed.coalesce_key = Some("progress".to_string());
+        authority.handle_publish_output(seed, "caller", 5);
+        authority
+            .take_due_portal_update(portal_id, 5)
+            .expect("no error")
+            .expect("seed must be drained");
+
+        // Three successive in-place updates within the same rate window.
+        for i in 1u64..=3u64 {
+            let mut req = output_request(portal_id, &owner_token, &format!("req-{i}"));
+            req.output_text = format!("progress-{i}");
+            req.logical_unit_id = None;
+            req.coalesce_key = Some("progress".to_string());
+            let r = authority.handle_publish_output(req, "caller", 5);
+            assert!(r.accepted);
+            // After each in-place update the oracle must show this portal.
+            assert_eq!(
+                authority.next_due_projection_id().as_deref(),
+                Some(portal_id),
+                "oracle must show portal after in-place update {i} (hud-endkj defect 1)"
+            );
+            // Peek back into the oracle without consuming (internal rotation).
+            // Re-insert by querying once — this is fine; the VecDeque rotates.
+        }
+
+        // Final drain should deliver the last in-place value.
+        let final_update = authority
+            .take_due_portal_update(portal_id, 5 + PORTAL_UPDATE_RATE_WINDOW_WALL_US)
+            .expect("no error")
+            .expect("final update must be present");
+        let last_text = final_update
+            .visible_transcript
+            .iter()
+            .find(|u| u.coalesce_key.as_deref() == Some("progress"))
+            .map(|u| u.output_text.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            last_text, "progress-3",
+            "latest coalesced value must be delivered"
+        );
+    }
+
+    /// Regression (defect 2): portal_next_due_at_us returns Some when the portal
+    /// is rate-limited, giving a wait hint to avoid busy-spinning.
+    #[test]
+    fn portal_next_due_at_us_returns_wait_hint_when_rate_limited() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 1,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let owner_token = attach(&mut authority, "proj-rate");
+        let portal_id = "proj-rate";
+
+        // First append (rate window open at t=100).
+        let mut first = output_request(portal_id, &owner_token, "req-1");
+        first.output_text = "first".to_string();
+        first.logical_unit_id = Some("unit-1".to_string());
+        authority.handle_publish_output(first, "caller", 100);
+
+        // Drain the first update.
+        authority
+            .take_due_portal_update(portal_id, 100)
+            .expect("no error")
+            .expect("first update must be present");
+
+        // Second append at the same timestamp → rate-limited, coalescer entry pending.
+        let mut second = output_request(portal_id, &owner_token, "req-2");
+        second.output_text = "second".to_string();
+        second.logical_unit_id = Some("unit-2".to_string());
+        authority.handle_publish_output(second, "caller", 100);
+
+        // next_due_projection_id returns the portal (coalescer has a pending entry).
+        assert_eq!(
+            authority.next_due_projection_id().as_deref(),
+            Some(portal_id),
+            "oracle must show portal when coalescer entry is pending"
+        );
+
+        // take_due_portal_update returns Ok(None) (rate window not elapsed).
+        let result = authority.take_due_portal_update(portal_id, 100);
+        assert!(
+            matches!(result, Ok(None)),
+            "take_due must return Ok(None) when rate window has not elapsed"
+        );
+
+        // portal_next_due_at_us must return Some to prevent busy-spin.
+        let next_due = authority.portal_next_due_at_us(portal_id, 100);
+        assert!(
+            next_due.is_some(),
+            "portal_next_due_at_us must return Some when portal is rate-limited (hud-endkj defect 2)"
+        );
+        let next_due_us = next_due.unwrap();
+        assert!(
+            next_due_us > 100,
+            "next_due must be in the future; got {next_due_us}"
+        );
+        assert_eq!(
+            next_due_us,
+            100 + PORTAL_UPDATE_RATE_WINDOW_WALL_US,
+            "next_due must equal rate window start + window duration"
+        );
+
+        // After the rate window elapses, portal_next_due_at_us returns None.
+        let after_window = authority.portal_next_due_at_us(portal_id, next_due_us);
+        assert!(
+            after_window.is_none(),
+            "portal_next_due_at_us must return None after rate window elapses"
+        );
+
+        // And take_due_portal_update now succeeds.
+        let update = authority
+            .take_due_portal_update(portal_id, next_due_us)
+            .expect("no error")
+            .expect("update must be present after rate window elapses");
+        assert_eq!(update.unread_output_count, 1);
+    }
+
+    /// portal_next_due_at_us returns None for an unknown projection.
+    #[test]
+    fn portal_next_due_at_us_returns_none_for_unknown_projection() {
+        let authority = ProjectionAuthority::default();
+        assert!(
+            authority
+                .portal_next_due_at_us("does-not-exist", 1_000_000)
+                .is_none(),
+            "must return None for unknown projection"
+        );
+    }
+
+    /// portal_next_due_at_us returns None immediately after a successful drain
+    /// (no pending coalescer entry).
+    #[test]
+    fn portal_next_due_at_us_returns_none_when_no_pending_entry() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 1,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let owner_token = attach(&mut authority, "proj-idle");
+        let portal_id = "proj-idle";
+
+        let mut req = output_request(portal_id, &owner_token, "req-1");
+        req.logical_unit_id = Some("unit-1".to_string());
+        authority.handle_publish_output(req, "caller", 10);
+        authority
+            .take_due_portal_update(portal_id, 10)
+            .expect("no error")
+            .expect("must drain");
+
+        // No pending coalescer entry → returns None.
+        assert!(
+            authority.portal_next_due_at_us(portal_id, 10).is_none(),
+            "portal_next_due_at_us must return None when no coalescer entry is pending"
         );
     }
 }
