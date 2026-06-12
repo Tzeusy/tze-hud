@@ -28,6 +28,24 @@
 //! Per the spec: when calibration factors are not available (`None`), budget tests
 //! MUST emit a warning and skip the hard pass/fail assertion.  Use
 //! `LatencyBucket::assert_p99_calibrated` for this behaviour.
+//!
+//! ## Timing-assertion quarantine (hud-1aswu.3)
+//!
+//! Calibrated wall-clock / p99 latency assertions are **gated** behind the
+//! `TZE_HUD_PERF_ASSERT=1` environment variable so they never block the
+//! standard `test-unit` CI lane on shared runners (where scheduler noise
+//! causes spurious failures).  See `about/heart-and-soul/validation.md`
+//! determinism doctrine: "flaky tests poison the feedback loop".
+//!
+//! - **Blocking everywhere**: structural assertions (sample counts, correctness
+//!   invariants, pixel readback, scene rendering completeness).
+//! - **Gated (`TZE_HUD_PERF_ASSERT=1`)**: all `assert_p99_under` and
+//!   `assert_p99_calibrated` hard-failure calls.
+//!
+//! To run wall-clock assertions locally or on a reference host:
+//!   ```sh
+//!   TZE_HUD_PERF_ASSERT=1 cargo test -p vertical_slice --test budget_assertions
+//!   ```
 
 use tze_hud_compositor::HeadlessSurface;
 use tze_hud_input::{PointerEvent, PointerEventKind};
@@ -44,6 +62,23 @@ use tze_hud_scene::types::{
     TextAlign, TextMarkdownNode, TextOverflow,
 };
 use tze_hud_telemetry::{CalibrationStatus, LatencyBucket};
+
+// ─── Timing-assertion gate (hud-1aswu.3) ─────────────────────────────────────
+
+/// Returns `true` when wall-clock / p99 latency hard assertions should run.
+///
+/// Set `TZE_HUD_PERF_ASSERT=1` in the environment to enable timing assertions.
+/// On the standard `test-unit` CI lane (shared Ubuntu runners) this is unset,
+/// so calibrated budget assertions are skipped — structural correctness assertions
+/// always run regardless of this flag.
+///
+/// On a reference host or the `windows-performance-budget` lane, callers that
+/// want to enforce p99 budgets should set this variable before invoking the suite.
+fn perf_assert_enabled() -> bool {
+    std::env::var("TZE_HUD_PERF_ASSERT")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
 
 // ─── GPU calibration workloads ───────────────────────────────────────────────
 
@@ -283,30 +318,42 @@ async fn test_frame_time_p99_within_budget() {
     }
 
     let summary = runtime.telemetry.summary();
+    // Structural assertion: always runs — validates telemetry plumbing, not speed.
     assert_eq!(
         summary.total_frames, FRAME_COUNT as u64,
         "expected {FRAME_COUNT} frames recorded"
     );
 
-    // Use calibrated assert: emits warning (not failure) if gpu_fill_factor is None.
-    let status = summary
-        .frame_time
-        .assert_p99_calibrated(calibrated_budget, NOMINAL_BUDGET_US)
-        .expect("frame_time p99 calibrated budget");
+    // Timing assertion: gated — calibrated wall-clock budget that would flake on
+    // shared CI runners.  Set TZE_HUD_PERF_ASSERT=1 to enable.  (hud-1aswu.3)
+    if perf_assert_enabled() {
+        let status = summary
+            .frame_time
+            .assert_p99_calibrated(calibrated_budget, NOMINAL_BUDGET_US)
+            .expect("frame_time p99 calibrated budget");
 
-    match status {
-        CalibrationStatus::Pass(p99) => {
-            eprintln!(
-                "[PASS] frame_time p99={}us within calibrated budget={}us (factor={:.2}×)",
-                p99,
-                calibrated_budget.unwrap_or(0),
-                cal.gpu_fill_factor.unwrap_or(0.0),
-            );
+        match status {
+            CalibrationStatus::Pass(p99) => {
+                eprintln!(
+                    "[PASS] frame_time p99={}us within calibrated budget={}us (factor={:.2}×)",
+                    p99,
+                    calibrated_budget.unwrap_or(0),
+                    cal.gpu_fill_factor.unwrap_or(0.0),
+                );
+            }
+            CalibrationStatus::Uncalibrated { raw_p99 } => {
+                // Already printed warning inside assert_p99_calibrated.
+                eprintln!(
+                    "[UNCALIBRATED] frame_time raw_p99={raw_p99}us; test is informational only",
+                );
+            }
         }
-        CalibrationStatus::Uncalibrated { raw_p99 } => {
-            // Already printed warning inside assert_p99_calibrated.
-            eprintln!("[UNCALIBRATED] frame_time raw_p99={raw_p99}us; test is informational only",);
-        }
+    } else {
+        let raw_p99 = summary.frame_time.p99().unwrap_or(0);
+        eprintln!(
+            "[SKIP-TIMING] frame_time raw_p99={raw_p99}us; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+        );
     }
 }
 
@@ -396,10 +443,19 @@ async fn test_input_to_local_ack_p99_within_budget() {
 
     let summary = runtime.telemetry.summary();
 
-    summary
-        .input_to_local_ack
-        .assert_p99_under(budget_us)
-        .expect("input_to_local_ack p99 budget");
+    // Timing assertion: gated — calibrated wall-clock budget.  (hud-1aswu.3)
+    if perf_assert_enabled() {
+        summary
+            .input_to_local_ack
+            .assert_p99_under(budget_us)
+            .expect("input_to_local_ack p99 budget");
+    } else {
+        let raw_p99 = summary.input_to_local_ack.p99().unwrap_or(0);
+        eprintln!(
+            "[SKIP-TIMING] input_to_local_ack raw_p99={raw_p99}us; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+        );
+    }
 }
 
 /// Assert that input_to_scene_commit p99 is under the 50ms budget.
@@ -451,9 +507,18 @@ async fn test_input_to_scene_commit_p99_within_budget() {
         bucket.record(telemetry.input_to_scene_commit_us);
     }
 
-    bucket
-        .assert_p99_under(BUDGET_US)
-        .expect("input_to_scene_commit p99 budget");
+    // Timing assertion: gated — wall-clock budget.  (hud-1aswu.3)
+    if perf_assert_enabled() {
+        bucket
+            .assert_p99_under(BUDGET_US)
+            .expect("input_to_scene_commit p99 budget");
+    } else {
+        let raw_p99 = bucket.p99().unwrap_or(0);
+        eprintln!(
+            "[SKIP-TIMING] input_to_scene_commit raw_p99={raw_p99}us; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+        );
+    }
 
     // Also record into the shared summary for cross-test consistency
     runtime
@@ -525,15 +590,25 @@ async fn test_input_to_next_present_p99_within_budget() {
         bucket.record(telemetry.input_to_next_present_us);
     }
 
+    // Structural assertion: always runs — validates sample collection plumbing.
     assert_eq!(
         bucket.samples.len(),
         FRAME_COUNT,
         "expected {FRAME_COUNT} samples in input_to_next_present bucket"
     );
 
-    bucket
-        .assert_p99_under(BUDGET_US)
-        .expect("input_to_next_present p99 budget");
+    // Timing assertion: gated — wall-clock budget.  (hud-1aswu.3)
+    if perf_assert_enabled() {
+        bucket
+            .assert_p99_under(BUDGET_US)
+            .expect("input_to_next_present p99 budget");
+    } else {
+        let raw_p99 = bucket.p99().unwrap_or(0);
+        eprintln!(
+            "[SKIP-TIMING] input_to_next_present raw_p99={raw_p99}us; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+        );
+    }
 
     // Also record into the shared summary for cross-test consistency
     runtime
@@ -621,10 +696,19 @@ async fn test_hit_test_p99_within_budget() {
     }
 
     let summary = runtime.telemetry.summary();
-    summary
-        .hit_test_latency
-        .assert_p99_under(budget_us)
-        .expect("hit_test p99 budget");
+    // Timing assertion: gated — calibrated wall-clock budget.  (hud-1aswu.3)
+    if perf_assert_enabled() {
+        summary
+            .hit_test_latency
+            .assert_p99_under(budget_us)
+            .expect("hit_test p99 budget");
+    } else {
+        let raw_p99 = summary.hit_test_latency.p99().unwrap_or(0);
+        eprintln!(
+            "[SKIP-TIMING] hit_test raw_p99={raw_p99}us; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+        );
+    }
 }
 
 /// Assert that transaction validation p99 is under the 200µs CPU-calibrated budget.
@@ -700,9 +784,18 @@ fn test_transaction_validation_p99_within_budget() {
         assert!(result.applied, "batch {i} should have applied");
     }
 
-    validation_bucket
-        .assert_p99_under(budget_us)
-        .expect("transaction validation p99 budget");
+    // Timing assertion: gated — calibrated wall-clock budget.  (hud-1aswu.3)
+    if perf_assert_enabled() {
+        validation_bucket
+            .assert_p99_under(budget_us)
+            .expect("transaction validation p99 budget");
+    } else {
+        let raw_p99 = validation_bucket.p99().unwrap_or(0);
+        eprintln!(
+            "[SKIP-TIMING] transaction_validation raw_p99={raw_p99}us; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+        );
+    }
 }
 
 /// Assert that scene diff p99 is under the 500µs CPU-calibrated budget.
@@ -756,9 +849,18 @@ fn test_scene_diff_p99_within_budget() {
         assert!(!diff.is_empty(), "diff should detect the new tile");
     }
 
-    diff_bucket
-        .assert_p99_under(budget_us)
-        .expect("scene diff p99 budget");
+    // Timing assertion: gated — calibrated wall-clock budget.  (hud-1aswu.3)
+    if perf_assert_enabled() {
+        diff_bucket
+            .assert_p99_under(budget_us)
+            .expect("scene diff p99 budget");
+    } else {
+        let raw_p99 = diff_bucket.p99().unwrap_or(0);
+        eprintln!(
+            "[SKIP-TIMING] scene_diff raw_p99={raw_p99}us; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+        );
+    }
 }
 
 /// Assert that texture upload throughput meets the hardware-normalized budget.
@@ -940,25 +1042,35 @@ async fn test_texture_upload_p99_within_budget() {
         upload_bucket.record(start.elapsed().as_micros() as u64);
     }
 
-    // Use calibrated assert: emits warning (not failure) if texture_upload_factor is None.
-    let status = upload_bucket
-        .assert_p99_calibrated(calibrated_budget, NOMINAL_BUDGET_US)
-        .expect("texture_upload p99 calibrated budget");
+    // Timing assertion: gated — calibrated wall-clock budget that caused the
+    // recurring flake hud-1aswu.3 on the blocking test-unit lane.
+    // Set TZE_HUD_PERF_ASSERT=1 to enable hard p99 assertion on a reference host.
+    if perf_assert_enabled() {
+        let status = upload_bucket
+            .assert_p99_calibrated(calibrated_budget, NOMINAL_BUDGET_US)
+            .expect("texture_upload p99 calibrated budget");
 
-    match status {
-        CalibrationStatus::Pass(p99) => {
-            eprintln!(
-                "[PASS] texture_upload p99={}us within calibrated budget={}us (factor={:.2}×)",
-                p99,
-                calibrated_budget.unwrap_or(0),
-                cal.texture_upload_factor.unwrap_or(0.0),
-            );
+        match status {
+            CalibrationStatus::Pass(p99) => {
+                eprintln!(
+                    "[PASS] texture_upload p99={}us within calibrated budget={}us (factor={:.2}×)",
+                    p99,
+                    calibrated_budget.unwrap_or(0),
+                    cal.texture_upload_factor.unwrap_or(0.0),
+                );
+            }
+            CalibrationStatus::Uncalibrated { raw_p99 } => {
+                eprintln!(
+                    "[UNCALIBRATED] texture_upload raw_p99={raw_p99}us; test is informational only",
+                );
+            }
         }
-        CalibrationStatus::Uncalibrated { raw_p99 } => {
-            eprintln!(
-                "[UNCALIBRATED] texture_upload raw_p99={raw_p99}us; test is informational only",
-            );
-        }
+    } else {
+        let raw_p99 = upload_bucket.p99().unwrap_or(0);
+        eprintln!(
+            "[SKIP-TIMING] texture_upload raw_p99={raw_p99}us; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+        );
     }
 }
 
@@ -1116,31 +1228,42 @@ async fn test_stage6_render_encode_p99_within_budget() {
         "expected {FRAME_COUNT} stage6 samples"
     );
 
-    // ── Budget assertion (calibrated) ─────────────────────────────────────────
-    // effective_budget is always Some: CI_BUDGET_US is used as the fallback when
-    // gpu_scaled_budget returns None (uncalibrated GPU). Passing Some(...) to
-    // assert_p99_calibrated means uncalibrated machines still get a hard assertion
-    // against the 16ms CI floor — intentional, since 16ms is conservative enough
-    // to be safe on any runner, including those without GPU calibration data.
-    let effective_budget = calibrated_budget.unwrap_or(CI_BUDGET_US);
-    let status = bucket
-        .assert_p99_calibrated(Some(effective_budget), NOMINAL_BUDGET_US)
-        .expect("stage6_render_encode p99 calibrated budget");
+    // ── Budget assertion (calibrated) — gated (hud-1aswu.3) ──────────────────
+    // Set TZE_HUD_PERF_ASSERT=1 to enable the hard p99 assertion on a reference
+    // host.  On the standard test-unit CI lane (shared runners) the timing
+    // assertion is skipped; only the structural sample-count assertion above runs.
+    if perf_assert_enabled() {
+        // effective_budget is always Some: CI_BUDGET_US is used as the fallback when
+        // gpu_scaled_budget returns None (uncalibrated GPU). Passing Some(...) to
+        // assert_p99_calibrated means uncalibrated machines still get a hard assertion
+        // against the 16ms CI floor — intentional, since 16ms is conservative enough
+        // to be safe on any runner, including those without GPU calibration data.
+        let effective_budget = calibrated_budget.unwrap_or(CI_BUDGET_US);
+        let status = bucket
+            .assert_p99_calibrated(Some(effective_budget), NOMINAL_BUDGET_US)
+            .expect("stage6_render_encode p99 calibrated budget");
 
-    // CalibrationStatus::Uncalibrated is unreachable here because we always pass
-    // Some(effective_budget) — but Rust requires exhaustive enum handling.
-    let CalibrationStatus::Pass(p99) = status else {
-        unreachable!(
-            "assert_p99_calibrated returns Uncalibrated only when passed None; \
-             effective_budget is always Some"
+        // CalibrationStatus::Uncalibrated is unreachable here because we always pass
+        // Some(effective_budget) — but Rust requires exhaustive enum handling.
+        let CalibrationStatus::Pass(p99) = status else {
+            unreachable!(
+                "assert_p99_calibrated returns Uncalibrated only when passed None; \
+                 effective_budget is always Some"
+            );
+        };
+        eprintln!(
+            "[PASS] stage6_render_encode p99={p99}us within budget={effective_budget}us \
+             (spec target={NOMINAL_BUDGET_US}us, ci floor={CI_BUDGET_US}us, \
+             gpu_fill_factor={:.2}×)",
+            cal.gpu_fill_factor.unwrap_or(0.0),
         );
-    };
-    eprintln!(
-        "[PASS] stage6_render_encode p99={p99}us within budget={effective_budget}us \
-         (spec target={NOMINAL_BUDGET_US}us, ci floor={CI_BUDGET_US}us, \
-         gpu_fill_factor={:.2}×)",
-        cal.gpu_fill_factor.unwrap_or(0.0),
-    );
+    } else {
+        let raw_p99 = bucket.p99().unwrap_or(0);
+        eprintln!(
+            "[SKIP-TIMING] stage6_render_encode raw_p99={raw_p99}us; \
+             set TZE_HUD_PERF_ASSERT=1 to enforce calibrated budget"
+        );
+    }
 }
 
 // ─── Layer 1: Pixel readback assertions ──────────────────────────────────────
