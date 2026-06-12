@@ -584,6 +584,19 @@ fn save_calibration_cache(result: &CalibrationResult) -> Result<(), Box<dyn std:
 mod tests {
     use super::*;
 
+    // ─── Timing-assertion gate (hud-94vm5) ───────────────────────────────────────
+
+    /// Returns `true` when wall-clock / p99 latency hard assertions should run.
+    ///
+    /// Set `TZE_HUD_PERF_ASSERT=1` to enable.  On the standard `test-unit` / blocking
+    /// CI lane this is unset; calibrated wall-clock budget assertions are skipped to
+    /// avoid flakes from scheduler noise on shared runners.
+    fn perf_assert_enabled() -> bool {
+        std::env::var("TZE_HUD_PERF_ASSERT")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false)
+    }
+
     #[test]
     fn test_calibration_runs_and_produces_valid_result() {
         let result = calibrate();
@@ -633,10 +646,18 @@ mod tests {
         let _result = calibrate();
         let elapsed_ms = start.elapsed().as_millis();
 
-        assert!(
-            elapsed_ms < 500,
-            "calibration took {elapsed_ms}ms, budget is 500ms",
-        );
+        // Timing assertion: gated — wall-clock budget.  (hud-94vm5)
+        if perf_assert_enabled() {
+            assert!(
+                elapsed_ms < 500,
+                "calibration took {elapsed_ms}ms, budget is 500ms",
+            );
+        } else {
+            eprintln!(
+                "[SKIP-TIMING] calibration elapsed={elapsed_ms}ms; \
+                 set TZE_HUD_PERF_ASSERT=1 to enforce 500ms budget"
+            );
+        }
     }
 
     #[test]
