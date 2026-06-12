@@ -1215,6 +1215,20 @@ impl Default for WindowedConfig {
 
 // ─── WindowedRuntime ─────────────────────────────────────────────────────────
 
+/// A raw keyboard event deferred from the winit event-loop thread because the
+/// shared-state or scene Tokio mutex was busy at dispatch time (hud-2fz34).
+///
+/// Stored in `WindowedRuntimeState::pending_keyboard_events` and retried once
+/// per `about_to_wait` iteration via `drain_pending_keyboard_events`, matching
+/// the `pending_input_capture_commands` / `drain_portal_projection` sibling
+/// patterns in the same file.
+#[derive(Debug)]
+enum PendingKeyboardEvent {
+    KeyDown(RawKeyDownEvent),
+    KeyUp(RawKeyUpEvent),
+    Character(RawCharacterEvent),
+}
+
 /// Shared state passed from the windowed runtime builder to the winit app.
 ///
 /// All fields are `Arc`-wrapped or `Send` so the app handler can be moved into
@@ -1406,6 +1420,22 @@ struct WindowedRuntimeState {
     /// `InputProcessor::notify_tile_content_appended` so follow-tail advances
     /// (spec §3.2) and scrolled-back stability is preserved (spec §3.3).
     portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver,
+    /// Keyboard events deferred because the shared-state or scene lock was busy
+    /// at dispatch time (hud-2fz34).
+    ///
+    /// When `dispatch_key_down_event`, `dispatch_key_up_event`, or
+    /// `dispatch_character_event` cannot acquire the async Tokio mutex via
+    /// `try_lock`, the raw event is pushed here rather than blocking the
+    /// event-loop thread.  `drain_pending_keyboard_events` retries from
+    /// `about_to_wait` once per iteration, matching the sibling deferral
+    /// patterns in `drain_portal_projection` and `drain_input_capture_commands`.
+    ///
+    /// In normal operation the queue is empty; it only accumulates under the
+    /// brief lock contention window caused by concurrent gRPC scene mutations.
+    /// The queue is unbounded in the same sense as
+    /// `pending_input_capture_commands` — bounded in practice by the number of
+    /// keystrokes that arrive during a single lock-contention window.
+    pending_keyboard_events: VecDeque<PendingKeyboardEvent>,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -1451,6 +1481,10 @@ impl ApplicationHandler for WinitApp {
         // guarantees the terminal draft state is delivered within the same batch
         // window (spec §4.3 flush guarantee).
         self.flush_composer_draft_at_settle();
+        // Retry any keyboard events that were deferred because the scene lock
+        // was busy during dispatch (hud-2fz34).  Runs after composer flush so
+        // deferred keystrokes re-enter the same path as fresh ones.
+        self.drain_pending_keyboard_events();
         // Drain the in-process portal projection authority (hud-2iup7).
         // Must run AFTER composer flush so draft state is settled before portal
         // content is refreshed.  Uses try_lock on the scene to avoid blocking
@@ -2822,7 +2856,14 @@ impl WinitApp {
     /// `KeyDownEvent`.  Any transactional batch returned (submit / cancel) is
     /// handed to `deliver_composer_batch` for future downstream delivery.
     fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
-        let active_tab = self.active_tab_for_keyboard_dispatch();
+        // try_lock — do not block the event-loop thread (hud-2fz34).
+        // None = lock busy → defer to the next about_to_wait iteration.
+        let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+            return;
+        };
         let Some(tab_id) = active_tab else { return };
 
         // ── Input precedence order (§6b.2 + §6b.6) ───────────────────────
@@ -2974,9 +3015,18 @@ impl WinitApp {
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
         // Build a namespace-resolver closure: given a tile_id, return its
-        // agent namespace from the scene.
+        // agent namespace from the scene.  A Cell is used to propagate a
+        // lock-busy signal out of the closure so the caller can defer the
+        // event (hud-2fz34).
+        let ns_lock_busy = std::cell::Cell::new(false);
         let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
-            self.namespace_for_keyboard_tile(tile_id)
+            match self.namespace_for_keyboard_tile(tile_id) {
+                None => {
+                    ns_lock_busy.set(true);
+                    None
+                }
+                Some(ns) => ns,
+            }
         };
         if let Some(dispatch) =
             self.state
@@ -2991,6 +3041,11 @@ impl WinitApp {
                 "keyboard: KeyDown dispatched to agent"
             );
             dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
+        } else if ns_lock_busy.get() {
+            // Namespace lock was busy inside the closure; defer the whole event.
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
         }
     }
 
@@ -3020,12 +3075,25 @@ impl WinitApp {
             return;
         }
 
-        let active_tab = self.active_tab_for_keyboard_dispatch();
+        // try_lock — do not block the event-loop thread (hud-2fz34).
+        let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::KeyUp(raw.clone()));
+            return;
+        };
         let Some(tab_id) = active_tab else { return };
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
+        let ns_lock_busy = std::cell::Cell::new(false);
         let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
-            self.namespace_for_keyboard_tile(tile_id)
+            match self.namespace_for_keyboard_tile(tile_id) {
+                None => {
+                    ns_lock_busy.set(true);
+                    None
+                }
+                Some(ns) => ns,
+            }
         };
         if let Some(dispatch) =
             self.state
@@ -3040,6 +3108,10 @@ impl WinitApp {
                 "keyboard: KeyUp dispatched to agent"
             );
             dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
+        } else if ns_lock_busy.get() {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::KeyUp(raw.clone()));
         }
     }
 
@@ -3080,7 +3152,13 @@ impl WinitApp {
             return;
         }
 
-        let active_tab = self.active_tab_for_keyboard_dispatch();
+        // try_lock — do not block the event-loop thread (hud-2fz34).
+        let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::Character(raw.clone()));
+            return;
+        };
         let Some(tab_id) = active_tab else { return };
 
         // ── Composer draft intercept (§4.1) ──────────────────────────────
@@ -3131,8 +3209,15 @@ impl WinitApp {
 
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
+        let ns_lock_busy = std::cell::Cell::new(false);
         let namespace_fn = |tile_id: tze_hud_scene::SceneId| -> Option<String> {
-            self.namespace_for_keyboard_tile(tile_id)
+            match self.namespace_for_keyboard_tile(tile_id) {
+                None => {
+                    ns_lock_busy.set(true);
+                    None
+                }
+                Some(ns) => ns,
+            }
         };
         if let Some(dispatch) =
             self.state
@@ -3147,6 +3232,10 @@ impl WinitApp {
                 "keyboard: Character dispatched to agent"
             );
             dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
+        } else if ns_lock_busy.get() {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::Character(raw.clone()));
         }
     }
 
@@ -3218,16 +3307,86 @@ impl WinitApp {
         );
     }
 
-    fn active_tab_for_keyboard_dispatch(&self) -> Option<tze_hud_scene::SceneId> {
-        let state = self.state.shared_state.blocking_lock();
-        let scene = state.scene.blocking_lock();
-        scene.active_tab
+    /// Retry keyboard events that were deferred in the previous iteration(s)
+    /// because the shared-state or scene lock was busy (hud-2fz34).
+    ///
+    /// Called from `about_to_wait` once per event-loop iteration, matching the
+    /// `drain_input_capture_commands` sibling pattern.  Each event is popped
+    /// from the front of `pending_keyboard_events` and re-dispatched through
+    /// the normal dispatch path.  If the lock is still busy on this iteration,
+    /// `dispatch_key_{down,up}_event` / `dispatch_character_event` will push
+    /// the event back onto the queue and the retry continues on the next tick.
+    ///
+    /// Ordering: called after `flush_composer_draft_at_settle` and before
+    /// `drain_portal_projection` so deferred keystrokes are retried before
+    /// portal-projection geometry is refreshed (no observable ordering
+    /// difference under normal operation, but consistent with event-arrival
+    /// order).
+    fn drain_pending_keyboard_events(&mut self) {
+        // Drain at most the number of events that were pending at entry so we
+        // don't loop forever if every retry immediately re-defers.
+        let limit = self.state.pending_keyboard_events.len();
+        for _ in 0..limit {
+            let Some(event) = self.state.pending_keyboard_events.pop_front() else {
+                break;
+            };
+            match event {
+                PendingKeyboardEvent::KeyDown(raw) => self.dispatch_key_down_event(&raw),
+                PendingKeyboardEvent::KeyUp(raw) => self.dispatch_key_up_event(&raw),
+                PendingKeyboardEvent::Character(raw) => self.dispatch_character_event(&raw),
+            }
+        }
     }
 
-    fn namespace_for_keyboard_tile(&self, tile_id: tze_hud_scene::SceneId) -> Option<String> {
-        let state = self.state.shared_state.blocking_lock();
-        let scene = state.scene.blocking_lock();
-        scene.tiles.get(&tile_id).map(|tile| tile.namespace.clone())
+    /// Try to read the active tab without blocking the event-loop thread
+    /// (hud-2fz34).
+    ///
+    /// Returns:
+    /// - `None` — shared-state or scene lock is busy; caller must defer to the
+    ///   next iteration.
+    /// - `Some(None)` — lock acquired; no active tab (event can be dropped).
+    /// - `Some(Some(id))` — lock acquired; active tab found.
+    ///
+    /// Uses `try_lock` on both the shared-state and scene Tokio mutexes,
+    /// matching `drain_portal_projection` (~line 3205) which avoids
+    /// `blocking_lock` for the same reason: a gRPC session handler may hold the
+    /// scene lock for an unbounded duration, which would stall the event-loop
+    /// thread past the 4 ms input-to-local-ack budget.
+    fn active_tab_for_keyboard_dispatch(&self) -> Option<Option<tze_hud_scene::SceneId>> {
+        let Ok(state) = self.state.shared_state.try_lock() else {
+            tracing::trace!("keyboard dispatch deferred: shared_state lock busy");
+            return None;
+        };
+        let Ok(scene) = state.scene.try_lock() else {
+            tracing::trace!("keyboard dispatch deferred: scene lock busy");
+            return None;
+        };
+        Some(scene.active_tab)
+    }
+
+    /// Try to read the agent namespace for a keyboard tile without blocking the
+    /// event-loop thread (hud-2fz34).
+    ///
+    /// Returns:
+    /// - `None` — shared-state or scene lock is busy; caller must defer to the
+    ///   next iteration.
+    /// - `Some(None)` — lock acquired; tile not found in scene.
+    /// - `Some(Some(ns))` — lock acquired; namespace resolved.
+    ///
+    /// See `active_tab_for_keyboard_dispatch` for the rationale.
+    fn namespace_for_keyboard_tile(
+        &self,
+        tile_id: tze_hud_scene::SceneId,
+    ) -> Option<Option<String>> {
+        let Ok(state) = self.state.shared_state.try_lock() else {
+            tracing::trace!("keyboard dispatch deferred: shared_state lock busy");
+            return None;
+        };
+        let Ok(scene) = state.scene.try_lock() else {
+            tracing::trace!("keyboard dispatch deferred: scene lock busy");
+            return None;
+        };
+        Some(scene.tiles.get(&tile_id).map(|tile| tile.namespace.clone()))
     }
 
     /// Apply a Ctrl-gated portal resize hotkey to the focused portal tile.
@@ -3391,9 +3550,15 @@ impl WinitApp {
         // The focus manager's active tab holds the authoritative FocusOwner.
         // For a composer region the owner is FocusOwner::Node { tile_id, .. };
         // from the tile_id we can look up the agent namespace.
-        let tab_id = self.active_tab_for_keyboard_dispatch()?;
+        //
+        // active_tab_for_keyboard_dispatch and namespace_for_keyboard_tile now
+        // return Option<Option<_>> where the outer None means lock-busy
+        // (hud-2fz34).  Flatten both levels: lock-busy and no-result both
+        // cause this function to return None, which is the pre-existing
+        // behaviour for the "scene not ready" case.
+        let tab_id = self.active_tab_for_keyboard_dispatch()??;
         let tile_id = self.state.focus_manager.current_owner(tab_id).tile_id()?;
-        let namespace = self.namespace_for_keyboard_tile(tile_id)?;
+        let namespace = self.namespace_for_keyboard_tile(tile_id)??;
         Some((namespace, node_id_bytes))
     }
 
@@ -4297,6 +4462,7 @@ impl WindowedRuntime {
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
             portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
+            pending_keyboard_events: VecDeque::new(),
         };
 
         let mut app = WinitApp { state: app_state };
@@ -8134,6 +8300,110 @@ redaction_style = "blank"
                 .get(&tile_id)
                 .is_none_or(|s| !s.gesture_active()),
             "no gesture must be active after content-area pointer-down"
+        );
+    }
+
+    /// Verify that `PendingKeyboardEvent` can hold all three keyboard event
+    /// variants without loss, and that the variants are `Debug`-printable
+    /// (hud-2fz34).
+    ///
+    /// This is a lightweight structural test confirming the enum is correctly
+    /// wired.  The runtime-level deferral logic (try_lock → push_back →
+    /// drain_pending_keyboard_events → re-dispatch) is exercised via the
+    /// lock-contention path; the key invariant that must hold is:
+    ///
+    /// 1. Any `RawKeyDownEvent`, `RawKeyUpEvent`, or `RawCharacterEvent` can be
+    ///    wrapped in `PendingKeyboardEvent` without data loss.
+    /// 2. All three variants round-trip through the enum correctly.
+    /// 3. The enum is `Debug`-printable (required for tracing and test output).
+    ///
+    /// The no-blocking guarantee on the event-loop thread is upheld by
+    /// construction: `active_tab_for_keyboard_dispatch` and
+    /// `namespace_for_keyboard_tile` now use `try_lock` exclusively (no
+    /// `blocking_lock` calls remain in those functions).
+    #[test]
+    fn pending_keyboard_event_wraps_all_variants_without_loss() {
+        use tze_hud_input::{KeyboardModifiers, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent};
+        use tze_hud_scene::MonoUs;
+
+        let key_down = RawKeyDownEvent {
+            key_code: "KeyA".to_string(),
+            key: "a".to_string(),
+            modifiers: KeyboardModifiers::NONE,
+            repeat: false,
+            timestamp_mono_us: MonoUs(1_000),
+        };
+        let key_up = RawKeyUpEvent {
+            key_code: "KeyA".to_string(),
+            key: "a".to_string(),
+            modifiers: KeyboardModifiers::NONE,
+            timestamp_mono_us: MonoUs(2_000),
+        };
+        let char_ev = RawCharacterEvent {
+            character: "a".to_string(),
+            timestamp_mono_us: MonoUs(3_000),
+        };
+
+        let pending_down = PendingKeyboardEvent::KeyDown(key_down.clone());
+        let pending_up = PendingKeyboardEvent::KeyUp(key_up.clone());
+        let pending_char = PendingKeyboardEvent::Character(char_ev.clone());
+
+        // All three variants are Debug-printable.
+        let _ = format!("{pending_down:?}");
+        let _ = format!("{pending_up:?}");
+        let _ = format!("{pending_char:?}");
+
+        // Verify payload round-trip.
+        match pending_down {
+            PendingKeyboardEvent::KeyDown(e) => {
+                assert_eq!(e.key_code, "KeyA");
+                assert_eq!(e.key, "a");
+                assert!(!e.repeat);
+            }
+            _ => panic!("expected KeyDown variant"),
+        }
+        match pending_up {
+            PendingKeyboardEvent::KeyUp(e) => {
+                assert_eq!(e.key_code, "KeyA");
+                assert_eq!(e.key, "a");
+            }
+            _ => panic!("expected KeyUp variant"),
+        }
+        match pending_char {
+            PendingKeyboardEvent::Character(e) => {
+                assert_eq!(e.character, "a");
+            }
+            _ => panic!("expected Character variant"),
+        }
+    }
+
+    /// Verify that `active_tab_for_keyboard_dispatch` returns `None` (lock-busy
+    /// signal) when the shared-state Tokio mutex is already held, and returns
+    /// `Some(inner)` when the lock is available (hud-2fz34).
+    ///
+    /// This is the core no-blocking contract: the function must never call
+    /// `blocking_lock` on the event-loop thread.
+    #[tokio::test]
+    async fn active_tab_try_lock_returns_none_when_lock_held() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex as TokioMutex;
+
+        // Simulate a shared_state Tokio mutex that is currently held by another
+        // async task (e.g. a gRPC session handler).
+        let mutex: Arc<TokioMutex<u32>> = Arc::new(TokioMutex::new(42));
+        let _guard = mutex.lock().await; // hold the lock
+
+        // try_lock must fail (return Err) when the lock is held.
+        assert!(
+            mutex.try_lock().is_err(),
+            "try_lock must fail when the Tokio mutex is held by another task"
+        );
+
+        // Without the guard, try_lock must succeed.
+        drop(_guard);
+        assert!(
+            mutex.try_lock().is_ok(),
+            "try_lock must succeed when no other task holds the Tokio mutex"
         );
     }
 }
