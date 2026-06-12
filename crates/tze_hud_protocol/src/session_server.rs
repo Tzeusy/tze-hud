@@ -11183,7 +11183,7 @@ mod tests {
 
         // A bogus resume token — auth is checked before the token, so this value is
         // irrelevant; the test asserts AUTH_FAILED fires before SESSION_GRACE_EXPIRED.
-        let bogus_token = uuid::Uuid::now_v7().as_bytes().to_vec();
+        let bogus_token = vec![0u8; 16];
 
         let resume = SessionResume {
             agent_id: "non-loopback-resume-agent".to_string(),

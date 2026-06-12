@@ -4467,7 +4467,11 @@ fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeContext, bool) {
 /// Extracted as a pure function to allow unit-testing of the bind-host
 /// selection without spinning up a Tokio runtime or gRPC server (hud-stl9j).
 fn select_grpc_bind_host(bind_all_interfaces: bool) -> &'static str {
-    if bind_all_interfaces { "0.0.0.0" } else { "127.0.0.1" }
+    if bind_all_interfaces {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    }
 }
 
 /// Start network services (gRPC) on a dedicated Tokio multi-thread runtime.
@@ -6300,8 +6304,9 @@ mod tests {
     // ── start_network_services bind tests ─────────────────────────────────────
     //
     // These tests verify that start_network_services actually succeeds (does not
-    // silently swallow a bind error).  They use ports unlikely to conflict in CI;
-    // if a port is in use the test is skipped via explicit Result handling.
+    // silently swallow a bind error).  Each test allocates an ephemeral port via
+    // TcpListener::bind(":0") so the OS picks a free port, eliminating port-
+    // conflict flakiness in parallel CI runs.
 
     /// When `bind_all_interfaces = false`, `start_network_services` binds to
     /// `127.0.0.1` (loopback only) and must succeed.
@@ -6312,28 +6317,19 @@ mod tests {
     /// that it doesn't error on an early-exit code path.
     #[test]
     fn start_network_services_loopback_default_binds_successfully() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .expect("failed to allocate ephemeral port for loopback bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        // Use a port unlikely to conflict in CI.  If it is already in use we skip
-        // rather than fail — port availability is not what this test pins.
-        match start_network_services(59701, "psk", shared_state, ctx, false, false) {
-            Ok((rt, handles, _, _)) => {
-                assert!(rt.is_some(), "loopback bind must create a NetworkRuntime");
-                assert!(!handles.is_empty(), "loopback bind must spawn task handles");
-                for h in handles {
-                    h.abort();
-                }
-            }
-            Err(e) => {
-                // Port conflict: skip.  Distinguish from a loopback-selection bug
-                // by checking the error message does not mention "127.0.0.1 refused"
-                // in a way that would indicate a wrong bind host.
-                let msg = e.to_string();
-                assert!(
-                    msg.contains("59701") || msg.contains("address"),
-                    "unexpected bind error (expected port-conflict, not a bind-host error): {msg}"
-                );
-            }
+        let (rt, handles, _, _) =
+            start_network_services(port, "psk", shared_state, ctx, false, false)
+                .expect("loopback bind must succeed on a freshly allocated ephemeral port");
+        assert!(rt.is_some(), "loopback bind must create a NetworkRuntime");
+        assert!(!handles.is_empty(), "loopback bind must spawn task handles");
+        for h in handles {
+            h.abort();
         }
     }
 
@@ -6341,30 +6337,25 @@ mod tests {
     /// `0.0.0.0` (explicit opt-in for LAN/remote exposure) and must succeed.
     #[test]
     fn start_network_services_bind_all_interfaces_opt_in_binds_successfully() {
+        let port = std::net::TcpListener::bind("0.0.0.0:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .expect("failed to allocate ephemeral port for all-interfaces bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        match start_network_services(59702, "psk", shared_state, ctx, false, true) {
-            Ok((rt, handles, _, _)) => {
-                assert!(
-                    rt.is_some(),
-                    "all-interfaces bind must create a NetworkRuntime"
-                );
-                assert!(
-                    !handles.is_empty(),
-                    "all-interfaces bind must spawn task handles"
-                );
-                for h in handles {
-                    h.abort();
-                }
-            }
-            Err(e) => {
-                // Port conflict: skip.
-                let msg = e.to_string();
-                assert!(
-                    msg.contains("59702") || msg.contains("address"),
-                    "unexpected bind error (expected port-conflict, not a bind-host error): {msg}"
-                );
-            }
+        let (rt, handles, _, _) =
+            start_network_services(port, "psk", shared_state, ctx, false, true)
+                .expect("all-interfaces bind must succeed on a freshly allocated ephemeral port");
+        assert!(
+            rt.is_some(),
+            "all-interfaces bind must create a NetworkRuntime"
+        );
+        assert!(
+            !handles.is_empty(),
+            "all-interfaces bind must spawn task handles"
+        );
+        for h in handles {
+            h.abort();
         }
     }
 
