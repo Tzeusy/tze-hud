@@ -7692,7 +7692,7 @@ redaction_style = "blank"
         assert!(
             resize_states
                 .get(&tile_id)
-                .map_or(true, |s: &PortalResizeState| !s.gesture_active()),
+                .is_none_or(|s: &PortalResizeState| !s.gesture_active()),
             "gesture must not be active before pointer-down"
         );
 
@@ -7776,7 +7776,7 @@ redaction_style = "blank"
         assert!(
             resize_states
                 .get(&tile_id)
-                .map_or(true, |s| !s.gesture_active()),
+                .is_none_or(|s| !s.gesture_active()),
             "no gesture must be active after content-area pointer-down"
         );
     }
