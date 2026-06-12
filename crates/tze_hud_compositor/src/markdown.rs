@@ -576,8 +576,9 @@ fn process_inline(
 ///
 /// `paren_matches[i]` is `Some(j)` when `chars[i] == '('` and `j` is the
 /// index of the matching `')'` (computed once by the top-level caller).  Same
-/// scope rules as `bracket_matches`: recursive sub-slice calls pass `&[]` and
-/// the fallback O(n) depth scan is used.
+/// scope rules as `bracket_matches`: link-text sub-slice calls rebuild the
+/// paren table for the sub-slice before the recursive call; emphasis sub-slice
+/// calls pass `&[]` (no paren-flood risk inside emphasis spans).
 ///
 /// # Argument count
 ///
@@ -672,6 +673,17 @@ fn process_inline_inner(
                         } else {
                             Vec::new()
                         };
+                        // Build a paren-match table for the inner sub-slice so
+                        // nested link destinations inside link text (e.g.
+                        // `[text with [x](u)](outer)`) are resolved in O(1)
+                        // instead of O(n) per failing `(`.  Without this table,
+                        // inputs like `[` + `[](` × 21841 + `](u)` trigger
+                        // O(n²) fallback scans inside the recursive call.
+                        let inner_pm = if inner_slice.contains(&'(') {
+                            build_paren_matches(inner_slice)
+                        } else {
+                            Vec::new()
+                        };
                         let mut link_attr = base_override.cloned().unwrap_or_else(StyleAttr::plain);
                         if tokens.link_color.is_some() {
                             link_attr.color = tokens.link_color;
@@ -684,7 +696,7 @@ fn process_inline_inner(
                             Some(&link_attr),
                             depth + 1,
                             &inner_bm,
-                            &[], // paren_matches is for the full line; sub-slice uses fallback
+                            &inner_pm,
                         );
                         let end = out.len();
                         // Use fill_gaps_with_base to cover unstyled gaps with the
@@ -737,9 +749,17 @@ fn process_inline_inner(
                 i = close_start + tick_count;
                 continue;
             }
-            // No closing backtick — emit the leading backtick literally.
-            out.push(ch);
-            i += 1;
+            // No closing backtick — emit the entire opening run literally and
+            // advance past all of it.  CommonMark defines a backtick string as
+            // an indivisible token: a run of N backticks preceded by a non-
+            // backtick cannot produce a valid shorter-length match from an
+            // interior position.  Advancing by tick_count (instead of 1)
+            // eliminates the O(n²) re-count of the same run from every internal
+            // position — critical for adversarial inputs like `a` + `` ` ``×65534.
+            for _ in 0..tick_count {
+                out.push('`');
+            }
+            i += tick_count;
             continue;
         }
 
@@ -2123,37 +2143,126 @@ mod tests {
         );
     }
 
-    // ── Backtick-close adversarial tests (hud-xq0uo) ─────────────────────────
+    // ── Backtick-close adversarial tests (hud-xq0uo / hud-t39nw) ────────────
 
-    /// 65534 backticks (unmatched runs) complete in bounded time.
+    /// `a` + `` ` ``×65534 completes in bounded time with a real timing assertion.
     ///
-    /// Before hud-xq0uo, `find_backtick_close` re-scanned the full suffix for
-    /// every unmatched backtick, costing O(n²) — ~696 ms in release on real
-    /// hardware.  The `BacktickCloseMemo` short-circuits repeated failing scans,
-    /// making the whole line amortized O(n).
+    /// Before hud-xq0uo the `BacktickCloseMemo` was introduced to short-circuit
+    /// failing scans, but it only covers tick_count ≤ MAX_TICK (32).  A run of
+    /// 65534 adjacent backticks produces tick_count values 65534, 65533, …, 1 as
+    /// the parser advances from each internal position — all values above 32
+    /// bypassed the memo and fell back to O(n) scans, yielding O(n²) total.
     ///
-    /// This test is NOT `#[ignore]`-gated: O(n²) would make it hang for
-    /// tens of seconds in any build mode; amortized O(n) finishes instantly.
+    /// hud-t39nw fixes this by advancing `i` by `tick_count` (skipping the
+    /// entire run) instead of by 1 on close-failure.  This is correct per
+    /// CommonMark: a backtick string is an indivisible token; no valid code span
+    /// can begin from an interior position of an unmatched run.
     ///
-    /// Pattern: `a` + `` ` ``×65534 — a single letter followed by a flood of
-    /// unmatched backticks.  Each backtick run of length 1 scans the entire
-    /// remaining input before failing; without the memo this is O(n²).
+    /// The timing assertion here uses a 500 ms wall-clock budget, which is orders
+    /// of magnitude above the O(n) cost (~0.1 ms) and well below the O(n²) cost
+    /// (~9.5 s in debug / ~628 ms in release).  It will catch any regression to
+    /// the quadratic path even in slow CI environments.
+    ///
+    /// This test is NOT `#[ignore]`-gated: O(n) finishes instantly in all build
+    /// modes; O(n²) would take seconds and the timing assertion makes that visible.
     #[test]
     fn adversarial_backtick_flood_completes_fast() {
         // "a" + "`" × 65534: a single non-backtick followed by one large run of
-        // 65534 adjacent backticks.  The 65534-backtick run has no matching
-        // closing run anywhere, so no code span is formed and every character is
-        // emitted literally.
+        // 65534 adjacent backticks.  No matching closing run exists, so no code
+        // span is formed and every character is emitted literally.
         let mut input = String::with_capacity(65535);
         input.push('a');
         for _ in 0..65534 {
             input.push('`');
         }
+        let t0 = std::time::Instant::now();
         let md = parse(&input);
+        let elapsed = t0.elapsed();
         // Every source character must be preserved verbatim — no silent drops.
         assert_eq!(
             &*md.plain_text, input,
             "backtick flood must emit all source characters verbatim"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "backtick flood must complete in <500ms (O(n)); took {elapsed:?} — likely O(n²) regression"
+        );
+    }
+
+    /// `[` + `a` + `` ` ``×65528 + `](u)` completes in bounded time.
+    ///
+    /// The outer link `[…](u)` is valid; its inner text is `a` + `` ` ``×65528.
+    /// The recursive call to `process_inline_inner` for the link text operates on
+    /// the sub-slice and must not regress to O(n²) on the backtick run.
+    ///
+    /// Before hud-t39nw, the recursive call advanced by 1 per backtick position
+    /// and all tick_counts above MAX_TICK (32) bypassed the memo, costing ~612 ms
+    /// in release / ~9.5 s in debug.  After the fix the run is skipped in O(1).
+    ///
+    /// This test is NOT `#[ignore]`-gated: O(n) finishes instantly; O(n²) would
+    /// exceed the 500 ms timing assertion even in fast CI environments.
+    #[test]
+    fn adversarial_nested_link_text_backtick_flood_completes_fast() {
+        // "[" + "a" + "`" × 65528 + "](u)": the link text is `a` + 65528 backticks.
+        // No closing backtick run exists inside the link text, so all backticks
+        // are emitted literally within the link span.
+        let mut input = String::with_capacity(65536);
+        input.push('[');
+        input.push('a');
+        for _ in 0..65528 {
+            input.push('`');
+        }
+        input.push_str("](u)");
+        let t0 = std::time::Instant::now();
+        let md = parse(&input);
+        let elapsed = t0.elapsed();
+        // The link text (a + backticks) must be emitted verbatim as plain text.
+        assert!(
+            !md.plain_text.is_empty(),
+            "nested link backtick flood must produce non-empty output"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "nested link-text backtick flood must complete in <500ms (O(n)); took {elapsed:?} — likely O(n²) regression"
+        );
+    }
+
+    /// `[` + `[](` × 21841 + `](u)` completes in bounded time.
+    ///
+    /// The outer link `[…](u)` is valid; its inner text is `[](` × 21841 — a
+    /// flood of opening parens with no closing `)`.  The recursive call for the
+    /// link text receives a precomputed paren-match table (built by hud-t39nw);
+    /// without it, each `(` triggers an O(n) fallback scan, costing O(n²) total.
+    ///
+    /// Before hud-t39nw, the recursive call passed `&[]` for `paren_matches` and
+    /// relied on the O(n) depth scan for every `(`, costing ~518 ms in release.
+    /// After the fix the paren table is rebuilt for the sub-slice, reducing each
+    /// lookup to O(1).
+    ///
+    /// This test is NOT `#[ignore]`-gated: O(n) finishes instantly; O(n²) would
+    /// exceed the 500 ms timing assertion.
+    #[test]
+    fn adversarial_nested_link_text_paren_flood_completes_fast() {
+        // "[" + "[](", × 21841 + "](u)": the link text is a flood of `[](` that
+        // contains 21841 unmatched opening parens.  No valid sub-links are formed
+        // (the `]` of each `[]` closes the `[` of the same token, leaving `(`
+        // unmatched).
+        let mut input = String::with_capacity(65540);
+        input.push('[');
+        for _ in 0..21841 {
+            input.push_str("[](");
+        }
+        input.push_str("](u)");
+        let t0 = std::time::Instant::now();
+        let md = parse(&input);
+        let elapsed = t0.elapsed();
+        assert!(
+            !md.plain_text.is_empty(),
+            "nested link paren flood must produce non-empty output"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "nested link-text paren flood must complete in <500ms (O(n)); took {elapsed:?} — likely O(n²) regression"
         );
     }
 
