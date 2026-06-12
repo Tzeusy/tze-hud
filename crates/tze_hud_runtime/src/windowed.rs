@@ -2695,6 +2695,12 @@ impl WinitApp {
                 outcome.display_w,
                 outcome.display_h,
             );
+            // §6b.4 producer wiring (hud-npq6g): push snapshot into the in-process
+            // projection authority so the drain loop consumer sees live pointer-
+            // affordance geometry (same path as the hotkey resize wiring above).
+            self.state
+                .portal_projection_driver
+                .push_geometry_snapshot_for_tile(outcome.tile_id, outcome.snapshot);
         }
 
         // Post-lock: clear local composer echo if composer focus was lost inside
@@ -3556,6 +3562,15 @@ impl WinitApp {
             self.state.config.window.width as f32,
             self.state.config.window.height as f32,
         );
+
+        // §6b.4 producer wiring (hud-npq6g): push the geometry snapshot into the
+        // in-process projection authority so the drain loop (geometry_batch consumer)
+        // receives the updated bounds on the next about_to_wait cycle.
+        // This gives the producer its first genuine production caller — previously
+        // push_geometry_snapshot was called only from a bin test.
+        self.state
+            .portal_projection_driver
+            .push_geometry_snapshot_for_tile(focused_tile_id, snapshot);
 
         tracing::debug!(
             tile_id = ?focused_tile_id,
