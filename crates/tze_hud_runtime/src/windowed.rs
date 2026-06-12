@@ -2538,6 +2538,66 @@ impl WinitApp {
                     dispatch_focus_event(&self.state.input_event_tx, transition);
                 }
 
+                // ── Composer pointer-selection routing (§4.1 / hud-083az) ─────
+                // On pointer-Down, if a composer region is focused and the hit
+                // landed on that same node, position the draft cursor at the
+                // pointer location.  This satisfies the spec requirement that
+                // selection must be reachable via pointer as well as keyboard.
+                //
+                // Offset approximation: no text-layout engine is available yet
+                // (that is hud-cefll); we use a linear proportion of
+                // (local_x / node_width) * draft_text_byte_len as a
+                // best-effort cursor position.  Pointer-drag (range) selection
+                // is tracked as a follow-up ("unfiled" per hud-083az).
+                if pointer_event.kind == PointerEventKind::Down {
+                    if let Some(focused_node_id) =
+                        self.state.input_processor.composer_focused_node()
+                    {
+                        if let HitResult::NodeHit {
+                            node_id, tile_id, ..
+                        } = &result.hit
+                        {
+                            if *node_id == focused_node_id {
+                                // Compute tile-local x so we can proportion
+                                // against the node's bounds.
+                                let tile_local_x = scene
+                                    .tiles
+                                    .get(tile_id)
+                                    .map(|t| pointer_event.x - t.bounds.x)
+                                    .unwrap_or(pointer_event.x);
+
+                                let byte_offset = if let Some(node) = scene.nodes.get(node_id) {
+                                    if let tze_hud_scene::NodeData::HitRegion(hr) = &node.data {
+                                        let node_w = hr.bounds.width.max(1.0);
+                                        let local_x_clamped =
+                                            (tile_local_x - hr.bounds.x).clamp(0.0, node_w);
+                                        let frac = (local_x_clamped / node_w) as f64;
+                                        let text_len = self
+                                            .state
+                                            .input_processor
+                                            .composer_draft_snapshot()
+                                            .map(|(text, _, _, _)| text.len())
+                                            .unwrap_or(0);
+                                        (frac * text_len as f64).round() as usize
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                };
+
+                                self.state
+                                    .input_processor
+                                    .route_pointer_selection_to_composer(byte_offset, byte_offset);
+                                tracing::debug!(
+                                    byte_offset,
+                                    "composer: pointer-down positioned cursor via set_pointer_selection"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 // ── Zone interaction dispatch (local feedback first) ──────────
                 // On pointer-up, check whether the hit landed on a compositor-
                 // managed zone interaction element (e.g. a notification dismiss
