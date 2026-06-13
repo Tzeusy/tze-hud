@@ -345,6 +345,62 @@ impl ResourceMonitor {
         Ok(ratios)
     }
 
+    /// Assert that no tracked metric grew by more than `tolerance` within any
+    /// sliding window of `window_size` consecutive snapshots.
+    ///
+    /// This is stricter than [`assert_no_monotonic_growth`] because it catches
+    /// monotonic creep that cancels out between the first and last snapshot
+    /// (e.g., a slow but continuous leak that the endpoint comparison misses).
+    ///
+    /// For each window of `window_size` consecutive snapshots the growth ratio
+    /// of the last snapshot vs the first is computed. If any window's maximum
+    /// growth ratio exceeds `tolerance`, the call returns `Err`.
+    ///
+    /// `window_size` must be ≥ 2. If there are fewer than `window_size`
+    /// snapshots the check degrades gracefully to the single-window
+    /// (first-vs-last) comparison.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - Fewer than 2 snapshots have been recorded.
+    /// - Any sliding window shows growth exceeding `tolerance`.
+    pub fn assert_no_windowed_growth(
+        &self,
+        tolerance: f64,
+        window_size: usize,
+    ) -> Result<(), String> {
+        if self.snapshots.len() < 2 {
+            return Err(format!(
+                "not enough snapshots to assess windowed growth: need ≥ 2, got {}",
+                self.snapshots.len()
+            ));
+        }
+        let win = window_size.max(2);
+        let n = self.snapshots.len();
+        // Slide the window across all snapshots.
+        let start_count = if n >= win { n - win + 1 } else { 1 };
+        for start in 0..start_count {
+            let end = (start + win - 1).min(n - 1);
+            let base = &self.snapshots[start];
+            let tip = &self.snapshots[end];
+            let ratios = tip.growth_ratios_vs(base);
+            let max = ratios.max_growth();
+            if max > tolerance {
+                return Err(format!(
+                    "windowed resource growth exceeded {:.1}% tolerance in window [{start}..{end}]: \
+                     {} grew by {:.1}% (@{:.0}s → @{:.0}s)",
+                    tolerance * 100.0,
+                    ratios.worst_metric(),
+                    max * 100.0,
+                    base.elapsed_secs,
+                    tip.elapsed_secs,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Assert that the agent's resource footprint is exactly zero.
     ///
     /// Takes a snapshot captured after the agent disconnected and its leases
@@ -402,6 +458,103 @@ impl ResourceMonitor {
 impl Default for ResourceMonitor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ─── Mutation accounting ──────────────────────────────────────────────────────
+
+/// Tracks accepted / rejected mutation counts across the soak loop.
+///
+/// A soak test that discards all mutation results cannot detect a scenario
+/// where the runtime silently rejects every mutation — tiles would never update,
+/// but the resource counter asserts would still pass.
+///
+/// `MutationAccountant` makes the acceptance rate an explicit, assertable
+/// invariant: after the soak, the caller asserts that the fraction of accepted
+/// mutations is above a minimum threshold.
+///
+/// ## Usage
+///
+/// ```
+/// use tze_hud_telemetry::resource_monitor::MutationAccountant;
+///
+/// let mut acc = MutationAccountant::new();
+/// acc.record(true);   // accepted
+/// acc.record(false);  // rejected
+/// // At least 50 % must be accepted for the soak to be meaningful.
+/// acc.assert_min_acceptance_rate(0.50).unwrap();
+/// ```
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MutationAccountant {
+    /// Total mutations sent during the soak.
+    pub total: u64,
+    /// Mutations the runtime accepted (result.accepted == true).
+    pub accepted: u64,
+    /// Mutations the runtime rejected (result.accepted == false).
+    pub rejected: u64,
+}
+
+impl MutationAccountant {
+    /// Create a new accountant with all counts at zero.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one mutation result.
+    ///
+    /// `was_accepted` should reflect the `MutationResult.accepted` field
+    /// received from the runtime for a single mutation batch.
+    pub fn record(&mut self, was_accepted: bool) {
+        self.total += 1;
+        if was_accepted {
+            self.accepted += 1;
+        } else {
+            self.rejected += 1;
+        }
+    }
+
+    /// Return the fraction of mutations that were accepted, or `None` if no
+    /// mutations have been recorded.
+    pub fn acceptance_rate(&self) -> Option<f64> {
+        if self.total == 0 {
+            None
+        } else {
+            Some(self.accepted as f64 / self.total as f64)
+        }
+    }
+
+    /// Assert that the acceptance rate is at least `min_rate`.
+    ///
+    /// A soak run where the runtime rejects every mutation is equivalent to
+    /// a no-op load test: resource counters cannot grow because nothing was
+    /// applied, so any leak would pass undetected.  This assertion catches
+    /// that degenerate case.
+    ///
+    /// `min_rate` is a fraction in `[0.0, 1.0]`. The typical minimum for
+    /// a meaningful soak is `0.50` (at least half of mutations applied).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - No mutations were recorded.
+    /// - The acceptance rate is below `min_rate`.
+    pub fn assert_min_acceptance_rate(&self, min_rate: f64) -> Result<(), String> {
+        match self.acceptance_rate() {
+            None => Err(
+                "no mutations were recorded: soak loop may have been skipped entirely".to_string(),
+            ),
+            Some(rate) if rate < min_rate => Err(format!(
+                "mutation acceptance rate {:.1}% is below minimum {:.1}%: \
+                 accepted={}, rejected={}, total={} — \
+                 the runtime may be silently rejecting all mutations",
+                rate * 100.0,
+                min_rate * 100.0,
+                self.accepted,
+                self.rejected,
+                self.total,
+            )),
+            Some(_) => Ok(()),
+        }
     }
 }
 
@@ -637,5 +790,178 @@ mod tests {
         assert!(json.contains("snapshot_count"));
         assert!(json.contains("tile_count"));
         assert!(json.contains("1024"));
+    }
+
+    // ── MutationAccountant tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_mutation_accountant_no_records() {
+        let acc = MutationAccountant::new();
+        assert_eq!(acc.total, 0);
+        assert_eq!(acc.acceptance_rate(), None);
+        let result = acc.assert_min_acceptance_rate(0.50);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("no mutations were recorded"),
+            "empty accountant must error with descriptive message"
+        );
+    }
+
+    #[test]
+    fn test_mutation_accountant_all_accepted() {
+        let mut acc = MutationAccountant::new();
+        for _ in 0..10 {
+            acc.record(true);
+        }
+        assert_eq!(acc.total, 10);
+        assert_eq!(acc.accepted, 10);
+        assert_eq!(acc.rejected, 0);
+        assert_eq!(acc.acceptance_rate(), Some(1.0));
+        assert!(acc.assert_min_acceptance_rate(0.50).is_ok());
+        assert!(acc.assert_min_acceptance_rate(1.0).is_ok());
+    }
+
+    #[test]
+    fn test_mutation_accountant_all_rejected() {
+        let mut acc = MutationAccountant::new();
+        for _ in 0..10 {
+            acc.record(false);
+        }
+        assert_eq!(acc.total, 10);
+        assert_eq!(acc.accepted, 0);
+        assert_eq!(acc.rejected, 10);
+        assert_eq!(acc.acceptance_rate(), Some(0.0));
+        let result = acc.assert_min_acceptance_rate(0.50);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("0.0%"),
+            "error should report 0% acceptance rate: {msg}"
+        );
+        assert!(
+            msg.contains("total=10"),
+            "error should report total count: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_mutation_accountant_below_threshold() {
+        let mut acc = MutationAccountant::new();
+        // 3 accepted, 7 rejected → 30% acceptance rate
+        for _ in 0..3 {
+            acc.record(true);
+        }
+        for _ in 0..7 {
+            acc.record(false);
+        }
+        assert!(acc.assert_min_acceptance_rate(0.50).is_err());
+        assert!(acc.assert_min_acceptance_rate(0.30).is_ok());
+    }
+
+    #[test]
+    fn test_mutation_accountant_exactly_at_threshold() {
+        let mut acc = MutationAccountant::new();
+        // 5 accepted, 5 rejected → 50% acceptance rate
+        for _ in 0..5 {
+            acc.record(true);
+        }
+        for _ in 0..5 {
+            acc.record(false);
+        }
+        // Exactly at threshold should pass (rate >= min_rate)
+        assert!(acc.assert_min_acceptance_rate(0.50).is_ok());
+        // Just above threshold should fail
+        assert!(acc.assert_min_acceptance_rate(0.51).is_err());
+    }
+
+    // ── assert_no_windowed_growth tests ──────────────────────────────────────
+
+    #[test]
+    fn test_windowed_growth_requires_two_snapshots() {
+        let mut monitor = ResourceMonitor::new();
+        monitor.record(ResourceSnapshot::full(1.0, 100, 50, 3, 3, 5, 0));
+        let result = monitor.assert_no_windowed_growth(0.05, 3);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not enough snapshots"));
+    }
+
+    #[test]
+    fn test_windowed_growth_passes_with_stable_series() {
+        let mut monitor = ResourceMonitor::new();
+        // All snapshots identical — zero growth in every window
+        for i in 0..5 {
+            monitor.record(ResourceSnapshot::full(i as f64 * 10.0, 100, 50, 3, 3, 5, 0));
+        }
+        assert!(monitor.assert_no_windowed_growth(0.05, 3).is_ok());
+    }
+
+    #[test]
+    fn test_windowed_growth_catches_creep_missed_by_endpoint() {
+        // Scenario: a transient spike that cancels out between first and last
+        // snapshot — i.e. the endpoint (first-vs-last) check passes, but the
+        // consecutive-pair (window_size=2) check catches the spike.
+        //
+        // Snapshots:
+        //   [0] t=0s   tiles=100 (baseline)
+        //   [1] t=10s  tiles=110 (+10% spike)
+        //   [2] t=20s  tiles=100 (back to baseline)
+        //
+        // Endpoint check (snap[0] vs snap[2]): 100 → 100 = 0% growth — passes
+        //   and misses the intermediate spike.
+        //
+        // Windowed check with window_size=2 (adjacent pairs):
+        //   Window [0..1]: 100 → 110 = 10% — exceeds 5% tolerance → fails ✓
+        let mut monitor = ResourceMonitor::new();
+        monitor.record(ResourceSnapshot::full(0.0, 100, 50, 3, 3, 5, 0));
+        monitor.record(ResourceSnapshot::full(10.0, 110, 50, 3, 3, 5, 0)); // +10% tiles
+        monitor.record(ResourceSnapshot::full(20.0, 100, 50, 3, 3, 5, 0)); // back to baseline
+
+        // Endpoint check (first vs last): no growth — passes (and misses the spike)
+        assert!(
+            monitor.assert_no_monotonic_growth(0.05).is_ok(),
+            "endpoint check should pass (first==last)"
+        );
+
+        // Windowed check with window_size=2 catches the adjacent-pair spike
+        let windowed = monitor.assert_no_windowed_growth(0.05, 2);
+        assert!(
+            windowed.is_err(),
+            "windowed check (window=2) should catch the 10% spike between snapshots 0 and 1"
+        );
+        let msg = windowed.unwrap_err();
+        assert!(
+            msg.contains("tile_count"),
+            "error should name tile_count as the culprit: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_windowed_growth_passes_with_acceptable_window_growth() {
+        let mut monitor = ResourceMonitor::new();
+        // 3% growth per window — within 5% tolerance
+        monitor.record(ResourceSnapshot::full(0.0, 100, 50, 3, 3, 5, 0));
+        monitor.record(ResourceSnapshot::full(10.0, 103, 50, 3, 3, 5, 0));
+        monitor.record(ResourceSnapshot::full(20.0, 106, 50, 3, 3, 5, 0));
+        // Window [0..2]: 100→106 = 6% — over the 5% threshold if window=3
+        // but window [0..1] and [1..2] are each only 3%
+        // With window_size=2 (checking pairs), each adjacent pair is 3% — passes
+        assert!(monitor.assert_no_windowed_growth(0.05, 2).is_ok());
+    }
+
+    #[test]
+    fn test_windowed_growth_fails_on_steady_creep() {
+        let mut monitor = ResourceMonitor::new();
+        // 10% growth in each window of 3
+        monitor.record(ResourceSnapshot::full(0.0, 100, 50, 3, 3, 5, 0));
+        monitor.record(ResourceSnapshot::full(10.0, 105, 50, 3, 3, 5, 0));
+        monitor.record(ResourceSnapshot::full(20.0, 110, 50, 3, 3, 5, 0));
+        // Window [0..2]: 100 → 110 = 10% growth — exceeds 5% tolerance
+        let result = monitor.assert_no_windowed_growth(0.05, 3);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("tile_count"),
+            "error should name tile_count: {msg}"
+        );
     }
 }

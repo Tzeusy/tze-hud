@@ -68,7 +68,7 @@ use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_scene::types::*;
 use tze_hud_telemetry::resource_monitor::{
-    AgentFootprint, ResourceMonitor, ResourceSnapshot, SPEC_GROWTH_TOLERANCE,
+    AgentFootprint, MutationAccountant, ResourceMonitor, ResourceSnapshot, SPEC_GROWTH_TOLERANCE,
 };
 
 use serde::{Deserialize, Serialize};
@@ -388,11 +388,16 @@ async fn create_tile(
 /// `tile_id_bytes` is the 16-byte UUIDv7 tile identifier.
 /// The `cycle_idx` parameter is embedded in the content to make each update
 /// distinct and detectable during post-run analysis.
+///
+/// Returns `Ok(true)` if the runtime accepted the mutation, `Ok(false)` if the
+/// runtime rejected it (but sent a well-formed `MutationResult`). The caller
+/// should record this via [`MutationAccountant`] so the acceptance rate can be
+/// asserted after the soak loop ends.
 async fn update_tile_content(
     session: &mut SoakAgentSession,
     tile_id_bytes: Vec<u8>,
     cycle_idx: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let batch_id: Vec<u8> = uuid::Uuid::now_v7().as_bytes().to_vec();
     let seq = session.next_seq();
 
@@ -443,9 +448,16 @@ async fn update_tile_content(
         })
         .await?;
 
-    // Drain the MutationResult — best-effort (ignore failures during soak)
-    let _ = next_non_state_change(&mut session.rx).await?;
-    Ok(())
+    // Read the MutationResult and return whether the runtime accepted it.
+    // Callers record this via MutationAccountant so that a run where the
+    // runtime rejects every mutation is caught as a test failure.
+    let msg = next_non_state_change(&mut session.rx).await?;
+    match &msg.payload {
+        Some(session_proto::server_message::Payload::MutationResult(result)) => Ok(result.accepted),
+        other => {
+            Err(format!("update_tile_content: expected MutationResult, got: {other:?}").into())
+        }
+    }
 }
 
 /// Publish stream text to a zone.
@@ -679,6 +691,12 @@ async fn test_soak_resource_growth() -> Result<(), Box<dyn std::error::Error>> {
     // ── Phase 2: Soak loop ─────────────────────────────────────────────────
 
     let mut monitor = ResourceMonitor::new();
+    // Tracks how many SetTileRoot mutations the runtime accepted vs rejected.
+    // A soak run where the runtime silently rejects all mutations produces
+    // stable (low) resource counters, making leak detection meaningless.
+    // Asserting a minimum acceptance rate ensures the load was actually applied.
+    let mut mutation_acc = MutationAccountant::new();
+
     let soak_start = Instant::now();
     let soak_duration = Duration::from_secs(cfg.soak_secs);
     let epoch_duration = Duration::from_secs(cfg.epoch_secs);
@@ -690,12 +708,19 @@ async fn test_soak_resource_growth() -> Result<(), Box<dyn std::error::Error>> {
         // - Update tile content (SetTileRoot) — exercises mutation pipeline
         // - Publish to the subtitle zone (LatestWins — no accumulation risk)
         for (idx, agent) in agents.iter_mut().enumerate() {
-            // Best-effort content update — ignore per-cycle errors
-            let _ = update_tile_content(agent, agent_tile_ids[idx].clone(), epoch_idx).await;
+            // Record whether the runtime actually applied the mutation so that
+            // an all-rejected run is caught as a test failure below.
+            // Transport errors are tolerated during the soak (transient
+            // congestion); they do not increment accepted/rejected counts.
+            if let Ok(accepted) =
+                update_tile_content(agent, agent_tile_ids[idx].clone(), epoch_idx).await
+            {
+                mutation_acc.record(accepted);
+            }
 
             // Publish to the subtitle zone (LatestWins — no accumulation risk)
             let text = format!("soak-{idx}-epoch-{epoch_idx}");
-            // Best-effort publish — ignore zone errors (zone may be momentarily full)
+            // Best-effort publish — zone ops are fire-and-forget in the soak
             let _ = publish_to_zone(agent, "subtitle", &text).await;
         }
 
@@ -707,13 +732,16 @@ async fn test_soak_resource_growth() -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = soak_start.elapsed();
             let snap = capture_snapshot(&runtime, elapsed).await;
             eprintln!(
-                "[soak] Epoch {}: tiles={} nodes={} leases={} sessions={} zones={}",
+                "[soak] Epoch {}: tiles={} nodes={} leases={} sessions={} zones={} \
+                 mutations(acc={} rej={})",
                 epoch_idx,
                 snap.tile_count,
                 snap.node_count,
                 snap.lease_count,
                 snap.session_count,
                 snap.zone_entry_count,
+                mutation_acc.accepted,
+                mutation_acc.rejected,
             );
             monitor.record(snap);
             epoch_idx += 1;
@@ -727,18 +755,49 @@ async fn test_soak_resource_growth() -> Result<(), Box<dyn std::error::Error>> {
     // Capture final snapshot
     let final_snap = capture_snapshot(&runtime, soak_start.elapsed()).await;
     eprintln!(
-        "[soak] Final: tiles={} nodes={} leases={} sessions={} zones={}",
+        "[soak] Final: tiles={} nodes={} leases={} sessions={} zones={} \
+         mutations(total={} acc={} rej={})",
         final_snap.tile_count,
         final_snap.node_count,
         final_snap.lease_count,
         final_snap.session_count,
         final_snap.zone_entry_count,
+        mutation_acc.total,
+        mutation_acc.accepted,
+        mutation_acc.rejected,
     );
     monitor.record(final_snap);
 
-    // ── Phase 3: Assert no monotonic growth ───────────────────────────────
+    // ── Phase 3: Assert mutation accounting ──────────────────────────────
+    //
+    // At least 50% of SetTileRoot mutations must have been accepted.
+    // If the runtime rejected all mutations the load was a no-op and the
+    // growth assertions below are meaningless.
+    //
+    // Minimum threshold: 50% acceptance rate. This is deliberately lenient
+    // to tolerate transient backpressure while still catching a fully
+    // broken mutation pipeline.
+    const MIN_MUTATION_ACCEPTANCE_RATE: f64 = 0.50;
+    mutation_acc
+        .assert_min_acceptance_rate(MIN_MUTATION_ACCEPTANCE_RATE)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+    // ── Phase 4: Assert no monotonic growth ───────────────────────────────
+    //
+    // Two complementary checks:
+    //  (a) Endpoint comparison: last vs first snapshot — the original check.
+    //  (b) Windowed comparison: sliding window of 3 consecutive snapshots to
+    //      catch slow monotonic creep that cancels between endpoints.
+    //
+    // The windowed check fires on bounded-growth invariant violations that the
+    // endpoint check would miss (e.g., if early growth is offset by later
+    // contraction — a pattern that can occur when snapshots are sparse).
 
     let growth_result = monitor.assert_no_monotonic_growth(SPEC_GROWTH_TOLERANCE);
+    // Windowed check: enforce bounded growth over any 3-snapshot window.
+    // A window of 3 means we check growth between any snapshot[i] and
+    // snapshot[i+2], catching steady per-epoch creep.
+    let windowed_result = monitor.assert_no_windowed_growth(SPEC_GROWTH_TOLERANCE, 3);
 
     // Build and emit artifact
     let (passed, max_growth_pct, worst_metric, error_msg) = match &growth_result {
@@ -770,8 +829,12 @@ async fn test_soak_resource_growth() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_string_pretty(&artifact).unwrap_or_default()
     );
 
-    // Propagate any growth assertion failure
-    growth_result.map(|_| ()).map_err(|e| e.into())
+    // Propagate endpoint growth assertion failure first, then windowed.
+    growth_result
+        .map(|_| ())
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    windowed_result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    Ok(())
 }
 
 // ─── Test 2: Post-disconnect cleanup ─────────────────────────────────────────
