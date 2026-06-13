@@ -17557,15 +17557,20 @@ mod tests {
     }
 
     /// Invariant (g): strict ordering — short < medium < long.
+    ///
+    /// These comparisons are between compile-time constants, so they are
+    /// expressed as `const` assertions (evaluated at compile time) rather than
+    /// `assert!` calls (which clippy correctly flags as `assertions_on_constants`
+    /// when the expression is a known constant `true`).
     #[test]
     fn adaptive_cadence_intervals_are_strictly_ordered() {
-        assert!(
+        const _: () = assert!(
             RESIZE_REPRIME_INTERVAL_SHORT_MS < RESIZE_REPRIME_INTERVAL_MEDIUM_MS,
-            "short interval ({RESIZE_REPRIME_INTERVAL_SHORT_MS}ms) must be < medium ({RESIZE_REPRIME_INTERVAL_MEDIUM_MS}ms)"
+            "short interval must be < medium interval"
         );
-        assert!(
+        const _: () = assert!(
             RESIZE_REPRIME_INTERVAL_MEDIUM_MS < RESIZE_REPRIME_INTERVAL_LONG_MS,
-            "medium interval ({RESIZE_REPRIME_INTERVAL_MEDIUM_MS}ms) must be < long ({RESIZE_REPRIME_INTERVAL_LONG_MS}ms)"
+            "medium interval must be < long interval"
         );
     }
 
