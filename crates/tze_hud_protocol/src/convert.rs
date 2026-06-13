@@ -141,9 +141,17 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 .as_ref()
                 .map(proto_rect_to_scene)
                 .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
-            let fit_mode = match proto::ImageFitModeProto::try_from(si.fit_mode)
-                .unwrap_or(proto::ImageFitModeProto::ImageFitModeUnspecified)
-            {
+            // Unknown wire values are coerced to Unspecified (treated as Contain).
+            // Warn so protocol mismatches surface in logs rather than failing silently.
+            let fit_mode_proto =
+                proto::ImageFitModeProto::try_from(si.fit_mode).unwrap_or_else(|_| {
+                    tracing::warn!(
+                        raw_value = si.fit_mode,
+                        "unknown ImageFitModeProto wire value; defaulting to Unspecified (Contain)"
+                    );
+                    proto::ImageFitModeProto::ImageFitModeUnspecified
+                });
+            let fit_mode = match fit_mode_proto {
                 proto::ImageFitModeProto::ImageFitModeContain
                 | proto::ImageFitModeProto::ImageFitModeUnspecified => ImageFitMode::Contain,
                 proto::ImageFitModeProto::ImageFitModeCover => ImageFitMode::Cover,
@@ -262,9 +270,17 @@ pub fn proto_update_node_content_data_to_scene(
                 .as_ref()
                 .map(proto_rect_to_scene)
                 .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
-            let fit_mode = match proto::ImageFitModeProto::try_from(si.fit_mode)
-                .unwrap_or(proto::ImageFitModeProto::ImageFitModeUnspecified)
-            {
+            // Unknown wire values are coerced to Unspecified (treated as Contain).
+            // Warn so protocol mismatches surface in logs rather than failing silently.
+            let fit_mode_proto =
+                proto::ImageFitModeProto::try_from(si.fit_mode).unwrap_or_else(|_| {
+                    tracing::warn!(
+                        raw_value = si.fit_mode,
+                        "unknown ImageFitModeProto wire value; defaulting to Unspecified (Contain)"
+                    );
+                    proto::ImageFitModeProto::ImageFitModeUnspecified
+                });
+            let fit_mode = match fit_mode_proto {
                 proto::ImageFitModeProto::ImageFitModeContain
                 | proto::ImageFitModeProto::ImageFitModeUnspecified => ImageFitMode::Contain,
                 proto::ImageFitModeProto::ImageFitModeCover => ImageFitMode::Cover,
@@ -332,7 +348,16 @@ fn proto_text_markdown_uses_literal_full_span(
 /// `TruncationCache` path.  Callers that genuinely want clip must send
 /// `TEXT_OVERFLOW_PROTO_CLIP` explicitly.
 pub fn proto_text_overflow_to_scene(v: i32) -> TextOverflow {
-    match proto::TextOverflowProto::try_from(v).unwrap_or(proto::TextOverflowProto::Unspecified) {
+    // Unknown wire values are coerced to Unspecified (treated as Ellipsis).
+    // Warn so protocol mismatches surface in logs rather than failing silently.
+    let overflow_proto = proto::TextOverflowProto::try_from(v).unwrap_or_else(|_| {
+        tracing::warn!(
+            raw_value = v,
+            "unknown TextOverflowProto wire value; defaulting to Unspecified (Ellipsis)"
+        );
+        proto::TextOverflowProto::Unspecified
+    });
+    match overflow_proto {
         proto::TextOverflowProto::Clip => TextOverflow::Clip,
         proto::TextOverflowProto::Ellipsis | proto::TextOverflowProto::Unspecified => {
             TextOverflow::Ellipsis

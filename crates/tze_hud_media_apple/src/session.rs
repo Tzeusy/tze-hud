@@ -179,6 +179,8 @@ impl VtDecodeSession {
         });
         let callback_state_ptr = Box::into_raw(callback_state);
 
+        // SAFETY: `format` is a fully-initialized `VideoFormat` whose SPS/PPS
+        // slices are valid for the duration of this call; no aliasing exists.
         let format_desc = match unsafe { create_format_description(&format) } {
             Ok(desc) => desc,
             Err(err) => {
@@ -304,6 +306,8 @@ impl VtDecodeSession {
         }
 
         let pts_secs = presentation_ts_ns as f64 / 1_000_000_000.0;
+        // SAFETY: `CMTime::with_seconds` and `kCMTimeInvalid` are pure value
+        // constructors that do not dereference pointers or access shared state.
         let timing = CMSampleTimingInfo {
             duration: unsafe { CMTime::with_seconds(0.0, 90_000) },
             presentationTimeStamp: unsafe { CMTime::with_seconds(pts_secs, 90_000) },
@@ -511,6 +515,14 @@ fn cm_time_to_ns(ts: CMTime) -> u64 {
     nanos.min(u64::MAX as u128) as u64
 }
 
+/// Build a `CMFormatDescription` from a `VideoFormat`.
+///
+/// # Safety
+///
+/// The caller must ensure that the slice data inside `format.parameters`
+/// (SPS, PPS, VPS) is valid for the duration of this call.  The function
+/// borrows those slices as C arrays passed to CoreMedia APIs; they must not
+/// be aliased or freed while `create_format_description` is executing.
 unsafe fn create_format_description(
     format: &VideoFormat,
 ) -> Result<CFRetained<CMFormatDescription>, VtError> {

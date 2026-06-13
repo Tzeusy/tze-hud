@@ -815,7 +815,10 @@ impl SceneGraph {
         {
             return Err(ValidationError::DuplicateDisplayOrder { order: new_order });
         }
-        let tab = self.tabs.get_mut(&tab_id).unwrap();
+        let tab = self
+            .tabs
+            .get_mut(&tab_id)
+            .expect("tab_id existence checked above");
         tab.display_order = new_order;
         self.version += 1;
         Ok(())
@@ -1916,7 +1919,10 @@ impl SceneGraph {
             });
         }
 
-        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        let tile = self
+            .tiles
+            .get_mut(&tile_id)
+            .expect("tile_id existence verified by get_tile_lease_checked");
         tile.bounds = bounds;
         self.version += 1;
         Ok(())
@@ -1945,7 +1951,10 @@ impl SceneGraph {
             });
         }
 
-        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        let tile = self
+            .tiles
+            .get_mut(&tile_id)
+            .expect("tile_id existence verified by get_tile_lease_checked");
         tile.z_order = z_order;
         self.version += 1;
         Ok(())
@@ -1971,7 +1980,10 @@ impl SceneGraph {
             });
         }
 
-        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        let tile = self
+            .tiles
+            .get_mut(&tile_id)
+            .expect("tile_id existence verified by get_tile_lease_checked");
         tile.opacity = opacity;
         self.version += 1;
         Ok(())
@@ -1990,7 +2002,10 @@ impl SceneGraph {
         self.require_active_lease(lease_id)?;
         self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
 
-        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        let tile = self
+            .tiles
+            .get_mut(&tile_id)
+            .expect("tile_id existence verified by get_tile_lease_checked");
         tile.input_mode = input_mode;
         self.version += 1;
         Ok(())
@@ -2009,7 +2024,10 @@ impl SceneGraph {
         self.require_active_lease(lease_id)?;
         self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
 
-        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        let tile = self
+            .tiles
+            .get_mut(&tile_id)
+            .expect("tile_id existence verified by get_tile_lease_checked");
         tile.expires_at = expires_at;
         self.version += 1;
         Ok(())
@@ -2140,7 +2158,10 @@ impl SceneGraph {
         self.insert_node_tree(&node);
 
         // Set the new root on the tile
-        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        let tile = self
+            .tiles
+            .get_mut(&tile_id)
+            .expect("tile_id existence verified earlier in set_tile_root_impl");
         tile.root_node = Some(node_id);
 
         self.version += 1;
@@ -2209,7 +2230,11 @@ impl SceneGraph {
         }
 
         // Enforce per-tile node count limit (RFC 0001 §2.1: max 64 nodes)
-        let current_count = self.count_nodes_in_tile(self.tiles.get(&tile_id).unwrap()) as usize;
+        let current_count = self.count_nodes_in_tile(
+            self.tiles
+                .get(&tile_id)
+                .expect("tile_id existence verified above in add_node_to_tile_impl"),
+        ) as usize;
         if current_count >= MAX_NODES_PER_TILE {
             return Err(ValidationError::NodeCountExceeded {
                 tile_id,
@@ -2229,7 +2254,10 @@ impl SceneGraph {
             parent.children.push(node_id);
         } else {
             // Set as root if no root exists
-            let tile = self.tiles.get_mut(&tile_id).unwrap();
+            let tile = self
+                .tiles
+                .get_mut(&tile_id)
+                .expect("tile_id existence verified above in add_node_to_tile_impl");
             if tile.root_node.is_none() {
                 tile.root_node = Some(node_id);
             }
@@ -2297,7 +2325,10 @@ impl SceneGraph {
                 .ok_or(ValidationError::NodeNotFound { id: node_id })?;
 
             // Stage 4: Node must be reachable from this tile's root.
-            let tile = self.tiles.get(&tile_id).unwrap();
+            let tile = self
+                .tiles
+                .get(&tile_id)
+                .expect("tile_id existence verified above in update_node_content_impl");
             let root = tile
                 .root_node
                 .ok_or(ValidationError::NodeNotFound { id: node_id })?;
@@ -2366,7 +2397,10 @@ impl SceneGraph {
         //     populating decoded_bytes from the resource store when the resource
         //     changes.
         {
-            let node = self.nodes.get_mut(&node_id).unwrap();
+            let node = self
+                .nodes
+                .get_mut(&node_id)
+                .expect("node_id existence verified in Stage 4 above");
             if let (NodeData::StaticImage(old_si), NodeData::StaticImage(new_si)) =
                 (&node.data, &mut data)
             {
@@ -2401,7 +2435,10 @@ impl SceneGraph {
         }
 
         // Apply the update — replace data in-place, preserving id and children.
-        let node = self.nodes.get_mut(&node_id).unwrap();
+        let node = self
+            .nodes
+            .get_mut(&node_id)
+            .expect("node_id existence verified in Stage 4 above");
         node.data = data;
         self.version += 1;
         Ok(())
@@ -2513,13 +2550,16 @@ impl SceneGraph {
         }
 
         // Update tile's sync_group reference
-        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        let tile = self
+            .tiles
+            .get_mut(&tile_id)
+            .expect("tile_id existence verified by get_tile_lease_checked");
         tile.sync_group = Some(group_id);
 
         // Add to the group's member set
         self.sync_groups
             .get_mut(&group_id)
-            .unwrap()
+            .expect("group_id existence verified at function entry")
             .members
             .insert(tile_id);
 
@@ -2542,7 +2582,10 @@ impl SceneGraph {
             if let Some(group) = self.sync_groups.get_mut(&group_id) {
                 group.members.remove(&tile_id);
             }
-            let tile = self.tiles.get_mut(&tile_id).unwrap();
+            let tile = self
+                .tiles
+                .get_mut(&tile_id)
+                .expect("tile_id existence checked at function entry");
             tile.sync_group = None;
         }
         self.version += 1;
@@ -2592,7 +2635,10 @@ impl SceneGraph {
         };
 
         // Apply state mutation (deferral_count update) to the group.
-        let group_mut = self.sync_groups.get_mut(&group_id).unwrap();
+        let group_mut = self
+            .sync_groups
+            .get_mut(&group_id)
+            .expect("group_id existence verified by ok_or above");
         apply_decision(group_mut, &decision);
 
         Ok(result)
@@ -3487,7 +3533,7 @@ impl SceneGraph {
                 .widget_registry
                 .instances
                 .get_mut(instance_name)
-                .unwrap(); // safe: we looked it up above
+                .expect("instance_name existence verified above");
             for (k, v) in &validated_params {
                 inst.current_params.insert(k.clone(), v.clone());
             }

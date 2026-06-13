@@ -336,6 +336,9 @@ fn read_windows_clipboard_text() -> Option<String> {
 /// (touch) before activating the drag.  A quick press-release cycle (tap/click)
 /// never reaches the `Activated` phase and therefore does not interfere with the
 /// click-to-focus path wired in [`WinitApp::enqueue_pointer_event`].
+// The input processor, pointer event, hit result, scene, and display dimensions
+// are all separate concerns that cannot be bundled into a context struct without
+// creating an artificial abstraction; the argument count is genuinely necessary.
 #[allow(clippy::too_many_arguments)]
 fn apply_drag_handle_pointer_event(
     input_processor: &mut InputProcessor,
@@ -3055,6 +3058,10 @@ impl WinitApp {
                 )),
                 previous_geometry: None,
             };
+            // Errors (no receivers, channel lagged) are silently ignored —
+            // ElementRepositionedEvent is an ephemeral-realtime notification;
+            // subscribers that are not present at the moment of a drag release
+            // will learn the final geometry on next subscription refresh.
             tx.send(event).unwrap_or_default();
             tracing::debug!(
                 element_id = %released.element_id,
@@ -4484,6 +4491,10 @@ impl WinitApp {
                     &previous_override,
                 )),
             };
+            // Errors (no receivers, channel lagged) are silently ignored —
+            // ElementRepositionedEvent is an ephemeral-realtime notification;
+            // subscribers that are not present at the moment of a geometry reset
+            // will learn the restored geometry on next subscription refresh.
             tx.send(event).unwrap_or_default();
             tracing::debug!(
                 element_id = %element_id,
