@@ -885,9 +885,12 @@ mod tests {
     /// after startup.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_headless_grpc_server_starts() {
-        // Bind to port 0 to get an ephemeral port, then release the listener
-        // before tonic binds. This avoids hardcoded ports that may conflict in CI.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        // Bind to [::1]:0 to get an ephemeral port, then release the listener
+        // before tonic binds.  We use [::1] (IPv6 loopback) rather than
+        // 127.0.0.1 (IPv4) so the probe address matches the gRPC server's
+        // default bind address (bind_all_interfaces=false → [::1]).  An IPv4
+        // probe does not guarantee the same port number is free on IPv6.
+        let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
         let free_port = listener.local_addr().unwrap().port();
         drop(listener);
 
