@@ -184,6 +184,7 @@ impl TruncationCache {
         font_family: FontFamily,
         font_weight: u16,
         viewport: TruncationViewport,
+        line_height_multiplier: f32,
         font_system: &mut FontSystem,
     ) -> &'a TruncationResult {
         self.entries.entry(key).or_insert_with(|| {
@@ -194,10 +195,7 @@ impl TruncationCache {
             };
             let weight = Weight(font_weight.clamp(100, 900));
             let base_attrs = Attrs::new().family(family).weight(weight);
-            // Cross-ref: PORTAL_LINE_HEIGHT_MULTIPLIER in
-            // crates/tze_hud_projection/src/bin/projection_authority.rs mirrors this
-            // value. If you change 1.4 here, update that constant in the same PR.
-            let line_height = font_size_px * 1.4;
+            let line_height = font_size_px * line_height_multiplier;
             // Dispatch to the correct truncation algorithm via TruncationViewport.
             // TailAnchored shows the LAST max_lines runs (newest content visible).
             // HeadAnchored shows the FIRST max_lines runs (default / scrolled-back).
@@ -404,6 +402,7 @@ impl TextRasterizer {
                 meas_family,
                 meas_weight,
                 item.viewport,
+                item.line_height_multiplier,
                 &mut self.font_system,
             );
         }
@@ -487,6 +486,7 @@ impl TextRasterizer {
                     meas_family,
                     meas_weight,
                     item.viewport,
+                    item.line_height_multiplier,
                     &mut self.font_system,
                 );
             }
@@ -509,7 +509,7 @@ impl TextRasterizer {
             .iter()
             .zip(truncated_texts.iter())
             .map(|(item, truncated)| {
-                let line_height = item.font_size_px * 1.4;
+                let line_height = item.font_size_px * item.line_height_multiplier;
                 let mut buf = Buffer::new(
                     &mut self.font_system,
                     Metrics::new(item.font_size_px, line_height),
@@ -570,6 +570,7 @@ impl TextRasterizer {
                                 base_attrs,
                                 item.font_family,
                                 item.font_size_px,
+                                item.line_height_multiplier,
                             );
                             buf.set_rich_text(
                                 &mut self.font_system,
@@ -585,6 +586,7 @@ impl TextRasterizer {
                             base_attrs,
                             item.font_family,
                             item.font_size_px,
+                            item.line_height_multiplier,
                         );
                         buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
                     }
@@ -833,6 +835,15 @@ pub struct TextItem {
     /// Set by `collect_text_items_from_node` / `collect_ellipsis_text_items_from_node`
     /// based on the tile's current `follow_tail_at_tail` state in the scene.
     pub viewport: TruncationViewport,
+    /// Line-height multiplier: `line_height_px = font_size_px × line_height_multiplier`.
+    ///
+    /// Resolved from the `typography.line_height.multiplier` design token via
+    /// [`ParsedMarkdown::line_height_multiplier`].  Default `1.4`.
+    ///
+    /// Cross-ref: `PORTAL_LINE_HEIGHT_MULTIPLIER` in
+    /// `crates/tze_hud_projection/src/bin/projection_authority.rs` mirrors this
+    /// value. If you change the default, update that constant in the same PR.
+    pub line_height_multiplier: f32,
 }
 
 /// A single styled run for Phase-1 markdown rendering, with byte offsets into
@@ -937,8 +948,12 @@ impl TextItem {
 
         // Add a size-aware inset margin so large text boxes get breathing room
         // without collapsing compact HUD labels like Presence Card rows.
+        // Line-height uses the default multiplier (1.4) since this constructor
+        // does not have access to a parsed MarkdownTokens; the multiplier field
+        // is set to the same default value.
         let font_size_px = node.font_size_px.clamp(6.0, 200.0);
-        let line_height = font_size_px * 1.4;
+        let lh_multiplier = crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        let line_height = font_size_px * lh_multiplier;
         let margin_x = (node.bounds.width * 0.08).clamp(1.0, 6.0);
         let target_margin_y = (node.bounds.height * 0.20).clamp(1.0, 6.0);
         let max_margin_y = ((node.bounds.height - line_height).max(0.0) / 2.0).min(6.0);
@@ -999,6 +1014,7 @@ impl TextItem {
             // Viewport defaults to HeadAnchored; callers that know the tile is
             // at-tail (follow-tail streaming tiles) override this after construction.
             viewport: TruncationViewport::HeadAnchored,
+            line_height_multiplier: lh_multiplier,
         }
     }
 
@@ -1052,9 +1068,11 @@ impl TextItem {
         let b = linear_to_srgb_u8(node.color.b);
         let a = (node.color.a * 255.0).clamp(0.0, 255.0) as u8;
 
-        // Geometry: same inset margin logic as `from_text_markdown_node`.
+        // Geometry: same inset margin logic as `from_text_markdown_node`, but
+        // uses the line-height multiplier resolved from design tokens at parse time.
         let font_size_px = node.font_size_px.clamp(6.0, 200.0);
-        let line_height = font_size_px * 1.4;
+        let lh_multiplier = parsed.line_height_multiplier;
+        let line_height = font_size_px * lh_multiplier;
         let margin_x = (node.bounds.width * 0.08).clamp(1.0, 6.0);
         let target_margin_y = (node.bounds.height * 0.20).clamp(1.0, 6.0);
         let max_margin_y = ((node.bounds.height - line_height).max(0.0) / 2.0).min(6.0);
@@ -1117,6 +1135,7 @@ impl TextItem {
             // Viewport defaults to HeadAnchored; callers that know the tile is
             // at-tail (follow-tail streaming tiles) override this after construction.
             viewport: TruncationViewport::HeadAnchored,
+            line_height_multiplier: lh_multiplier,
         }
     }
 
@@ -1192,6 +1211,9 @@ impl TextItem {
             color_runs: Box::default(),
             styled_runs: Box::default(),
             viewport: TruncationViewport::HeadAnchored,
+            // Zone items do not carry MarkdownTokens; use the canonical default.
+            line_height_multiplier: crate::markdown::MarkdownTokens::default()
+                .line_height_multiplier,
         }
     }
 
@@ -1236,6 +1258,8 @@ impl TextItem {
             color_runs: Box::default(),
             styled_runs: Box::default(),
             viewport: TruncationViewport::HeadAnchored,
+            line_height_multiplier: crate::markdown::MarkdownTokens::default()
+                .line_height_multiplier,
         }
     }
 
@@ -1279,6 +1303,8 @@ impl TextItem {
             color_runs: Box::default(),
             styled_runs: Box::default(),
             viewport: TruncationViewport::HeadAnchored,
+            line_height_multiplier: crate::markdown::MarkdownTokens::default()
+                .line_height_multiplier,
         }
     }
 }
@@ -1473,6 +1499,7 @@ pub(crate) fn styled_run_spans<'t, 'a>(
     base_attrs: Attrs<'a>,
     base_family: FontFamily,
     base_font_size_px: f32,
+    line_height_multiplier: f32,
 ) -> Vec<(&'t str, Attrs<'a>)> {
     if runs.is_empty() {
         return vec![(text, base_attrs)];
@@ -1543,7 +1570,7 @@ pub(crate) fn styled_run_spans<'t, 'a>(
         // cosmic-text supports per-span Metrics via Attrs::metrics().
         if let Some(scale) = run.size_scale {
             let scaled_size = (base_font_size_px * scale).clamp(1.0, 500.0);
-            let scaled_line_height = scaled_size * 1.4;
+            let scaled_line_height = scaled_size * line_height_multiplier;
             run_attrs = run_attrs.metrics(Metrics::new(scaled_size, scaled_line_height));
         }
 
@@ -2966,6 +2993,7 @@ mod tests {
                 family,
                 weight,
                 TruncationViewport::HeadAnchored,
+                1.4,
                 &mut fs,
             )
             .clone();
@@ -2981,6 +3009,7 @@ mod tests {
                 family,
                 weight,
                 TruncationViewport::HeadAnchored,
+                1.4,
                 &mut fs,
             )
             .clone();
@@ -3035,6 +3064,7 @@ mod tests {
             family,
             weight,
             TruncationViewport::HeadAnchored,
+            1.4,
             &mut fs,
         );
         cache.prime(
@@ -3046,6 +3076,7 @@ mod tests {
             family,
             weight,
             TruncationViewport::HeadAnchored,
+            1.4,
             &mut fs,
         );
 
@@ -3124,6 +3155,7 @@ mod tests {
                 family,
                 weight,
                 TruncationViewport::HeadAnchored,
+                1.4,
                 &mut fs,
             )
             .clone();
@@ -3141,6 +3173,7 @@ mod tests {
                     family,
                     weight,
                     TruncationViewport::HeadAnchored,
+                    1.4,
                     &mut fs,
                 )
                 .clone();
@@ -3199,6 +3232,7 @@ mod tests {
             family,
             weight,
             TruncationViewport::HeadAnchored,
+            1.4,
             &mut fs,
         );
         cache.prime(
@@ -3210,6 +3244,7 @@ mod tests {
             family,
             weight,
             TruncationViewport::HeadAnchored,
+            1.4,
             &mut fs,
         );
         assert_eq!(cache.len(), 2);
@@ -3257,6 +3292,7 @@ mod tests {
                 family,
                 weight,
                 TruncationViewport::HeadAnchored,
+                1.4,
                 &mut fs,
             );
         }
@@ -3298,6 +3334,7 @@ mod tests {
             FontFamily::SystemSansSerif,
             400,
             TruncationViewport::HeadAnchored,
+            1.4,
             &mut fs,
         );
 
@@ -3367,6 +3404,7 @@ mod tests {
                 family,
                 weight,
                 TruncationViewport::HeadAnchored,
+                1.4,
                 &mut fs,
             )
             .clone();
@@ -3397,6 +3435,7 @@ mod tests {
                 family,
                 weight,
                 TruncationViewport::HeadAnchored,
+                1.4,
                 &mut fs,
             )
             .clone();
@@ -3479,6 +3518,7 @@ mod tests {
                     family,
                     weight,
                     TruncationViewport::HeadAnchored,
+                    1.4,
                     &mut fs,
                 )
                 .clone();
@@ -4317,6 +4357,7 @@ mod tests {
                 size_scale: None,
             }]),
             viewport: TruncationViewport::HeadAnchored,
+            line_height_multiplier: 1.4,
         };
 
         // ── Call through the EXTRACTED CALL-SITE FUNCTION ─────────────────────
@@ -4355,6 +4396,7 @@ mod tests {
             base_attrs,
             FontFamily::SystemSansSerif,
             16.0,
+            1.4,
         );
         let ellipsis_in_bold = spans
             .iter()
@@ -4440,6 +4482,7 @@ mod tests {
                 size_scale: None,
             }]),
             viewport: TruncationViewport::HeadAnchored,
+            line_height_multiplier: 1.4,
         };
 
         // ── Call through the EXTRACTED CALL-SITE FUNCTION ─────────────────────
@@ -4498,6 +4541,7 @@ mod tests {
                 FontFamily::SystemSansSerif,
                 base_weight,
                 TruncationViewport::HeadAnchored,
+                1.4,
                 &mut fs,
             )
             .clone();
@@ -4513,6 +4557,7 @@ mod tests {
                 FontFamily::SystemSansSerif,
                 eff_weight,
                 TruncationViewport::HeadAnchored,
+                1.4,
                 &mut fs,
             )
             .clone();

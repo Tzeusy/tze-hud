@@ -3780,6 +3780,9 @@ impl Compositor {
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
                                         styled_runs: Box::default(),
+                                        line_height_multiplier:
+                                            crate::markdown::MarkdownTokens::default()
+                                                .line_height_multiplier,
                                         viewport: crate::overflow::TruncationViewport::HeadAnchored,
                                     });
                                 } else {
@@ -3814,6 +3817,9 @@ impl Compositor {
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
                                         styled_runs: Box::default(),
+                                        line_height_multiplier:
+                                            crate::markdown::MarkdownTokens::default()
+                                                .line_height_multiplier,
                                         viewport: crate::overflow::TruncationViewport::HeadAnchored,
                                     });
                                     // Body line (regular weight, 0.85× size)
@@ -3843,6 +3849,9 @@ impl Compositor {
                                         opacity: effective_opacity,
                                         color_runs: Box::default(),
                                         styled_runs: Box::default(),
+                                        line_height_multiplier:
+                                            crate::markdown::MarkdownTokens::default()
+                                                .line_height_multiplier,
                                         viewport: crate::overflow::TruncationViewport::HeadAnchored,
                                     });
                                 }
@@ -3877,6 +3886,9 @@ impl Compositor {
                                         font_size_px: notif_dismiss_font_size_px,
                                         font_family,
                                         font_weight: notif_dismiss_font_weight,
+                                        line_height_multiplier:
+                                            crate::markdown::MarkdownTokens::default()
+                                                .line_height_multiplier,
                                         color: dismiss_color,
                                         alignment: tze_hud_scene::types::TextAlign::Center,
                                         overflow: tze_hud_scene::types::TextOverflow::Clip,
@@ -4045,6 +4057,9 @@ impl Compositor {
                                             opacity: anim_opacity,
                                             color_runs: Box::default(),
                                             styled_runs: Box::default(),
+                                            line_height_multiplier:
+                                                crate::markdown::MarkdownTokens::default()
+                                                    .line_height_multiplier,
                                             viewport:
                                                 crate::overflow::TruncationViewport::HeadAnchored,
                                         });
@@ -4189,6 +4204,9 @@ impl Compositor {
                                         opacity: anim_opacity,
                                         color_runs: Box::default(),
                                         styled_runs: Box::default(),
+                                        line_height_multiplier:
+                                            crate::markdown::MarkdownTokens::default()
+                                                .line_height_multiplier,
                                         viewport: crate::overflow::TruncationViewport::HeadAnchored,
                                     });
                                 } else {
@@ -7892,6 +7910,8 @@ impl Compositor {
             opacity: 1.0,
             color_runs: Box::new([]),
             styled_runs: Box::new([]),
+            line_height_multiplier: crate::markdown::MarkdownTokens::default()
+                .line_height_multiplier,
             viewport: crate::overflow::TruncationViewport::HeadAnchored,
         })
     }

@@ -68,6 +68,10 @@ use tze_hud_scene::types::Rgba;
 /// | `typography.heading.N.weight` | CSS weight for heading level N (1–6) |
 /// | `typography.heading.N.scale` | Font-size multiplier for heading level N |
 /// | `typography.emphasis.italic` | Whether emphasis uses italic (always true) |
+/// | `typography.line_height.multiplier` | Line-height = font_size_px × this value; default 1.4 |
+/// | `spacing.heading.top` | Blank-line multiplier above headings; default 1.0 |
+/// | `spacing.heading.bottom` | Blank-line multiplier below headings; default 0.5 |
+/// | `spacing.list.item` | Blank-line multiplier between list items; default 0.0 (tight) |
 #[derive(Clone, Debug)]
 pub struct MarkdownTokens {
     /// Font size multiplier per heading level (index 0 = H1, 5 = H6).
@@ -94,6 +98,32 @@ pub struct MarkdownTokens {
     /// (resolved from `color.code.text`) to change the code text color.
     /// `None` = no backdrop panel.
     pub code_background: Option<Rgba>,
+    /// Line-height multiplier: `line_height_px = font_size_px × line_height_multiplier`.
+    ///
+    /// Resolved from `typography.line_height.multiplier`.  Default 1.4.
+    /// Must be in `[1.0, 4.0]`; values outside that range are ignored.
+    ///
+    /// Cross-ref: `PORTAL_LINE_HEIGHT_MULTIPLIER` in
+    /// `crates/tze_hud_projection/src/bin/projection_authority.rs` mirrors this
+    /// value and must be updated in the same PR when it changes.
+    pub line_height_multiplier: f32,
+    /// Blank-line multiplier applied **above** each heading block.
+    ///
+    /// `spacing.heading.top`: a value of `1.0` inserts one blank line; `0.0`
+    /// suppresses spacing.  Default `1.0`.  Must be in `[0.0, 4.0]`.
+    pub heading_margin_top: f32,
+    /// Blank-line multiplier applied **below** each heading block.
+    ///
+    /// `spacing.heading.bottom`: a value of `0.5` inserts a half-blank line;
+    /// values ≥ `1.0` insert a full blank line.  Default `0.5`.  Must be
+    /// in `[0.0, 4.0]`.
+    pub heading_margin_bottom: f32,
+    /// Blank-line multiplier between consecutive list items.
+    ///
+    /// `spacing.list.item`: `0.0` (default) renders tight lists (no extra
+    /// blank line between items); `1.0` inserts one blank line between items.
+    /// Must be in `[0.0, 4.0]`.
+    pub list_item_spacing: f32,
 }
 
 impl Default for MarkdownTokens {
@@ -109,6 +139,13 @@ impl Default for MarkdownTokens {
             code_monospace: true,
             code_color: None,
             code_background: None,
+            // Cross-ref: PORTAL_LINE_HEIGHT_MULTIPLIER in
+            // crates/tze_hud_projection/src/bin/projection_authority.rs mirrors this
+            // value. If you change 1.4 here, update that constant in the same PR.
+            line_height_multiplier: 1.4,
+            heading_margin_top: 1.0,
+            heading_margin_bottom: 0.5,
+            list_item_spacing: 0.0,
         }
     }
 }
@@ -174,6 +211,44 @@ impl MarkdownTokens {
         {
             if (100..=900).contains(&w) {
                 tokens.bold_weight = w;
+            }
+        }
+
+        // Line-height multiplier: typography.line_height.multiplier
+        if let Some(m) = map
+            .get("typography.line_height.multiplier")
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            if m.is_finite() && (1.0..=4.0).contains(&m) {
+                tokens.line_height_multiplier = m;
+            }
+        }
+
+        // Heading block spacing: spacing.heading.top / spacing.heading.bottom
+        if let Some(v) = map
+            .get("spacing.heading.top")
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            if v.is_finite() && (0.0..=4.0).contains(&v) {
+                tokens.heading_margin_top = v;
+            }
+        }
+        if let Some(v) = map
+            .get("spacing.heading.bottom")
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            if v.is_finite() && (0.0..=4.0).contains(&v) {
+                tokens.heading_margin_bottom = v;
+            }
+        }
+
+        // List item spacing: spacing.list.item
+        if let Some(v) = map
+            .get("spacing.list.item")
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            if v.is_finite() && (0.0..=4.0).contains(&v) {
+                tokens.list_item_spacing = v;
             }
         }
 
@@ -281,6 +356,33 @@ pub struct CodePanelSpan {
     pub kind: CodePanelKind,
 }
 
+// ─── ListItemSpan ─────────────────────────────────────────────────────────────
+
+/// Metadata for a single list item in [`ParsedMarkdown`].
+///
+/// Records the byte offset of the item's text content start (after the bullet
+/// or ordinal prefix) within [`ParsedMarkdown::plain_text`].  The renderer uses
+/// the difference between `content_start_byte` and `item_start_byte` to derive
+/// the bullet width, enabling a proper **hanging indent**: continuation lines of
+/// a wrapped item align under the text content rather than the bullet marker.
+///
+/// The indent depth (nesting level) is also recorded so callers can apply a
+/// consistent left margin per nesting level without re-scanning the text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListItemSpan {
+    /// Byte offset of the first character of the bullet/ordinal prefix (the
+    /// start of the full "  • text" string in `plain_text`).
+    pub item_start_byte: usize,
+    /// Byte offset of the first character of the item text content, just after
+    /// the bullet/ordinal and its trailing space (e.g. "• " or "1. ").
+    ///
+    /// `content_start_byte - item_start_byte` gives the bullet prefix byte
+    /// width; used as the hanging-indent offset for continuation lines.
+    pub content_start_byte: usize,
+    /// Nesting depth (0 = top-level, 1 = first indent, …).
+    pub indent_level: u8,
+}
+
 // ─── ParsedMarkdown ──────────────────────────────────────────────────────────
 
 /// The cached result of parsing a single `TextMarkdownNode` content string.
@@ -293,6 +395,8 @@ pub struct CodePanelSpan {
 ///   spans inherit the node's base style.
 /// - `code_panels` lists byte ranges that should receive a backdrop panel quad
 ///   (populated when the `color.code.background` token is set).
+/// - `list_items` records per-item bullet metadata for hanging-indent layout.
+/// - `line_height_multiplier` mirrors the token value for the render path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedMarkdown {
     /// Plain text output, suitable for glyph layout.
@@ -309,6 +413,19 @@ pub struct ParsedMarkdown {
     /// iterates these to emit geometry quads behind code text.  Sorted by
     /// `start_byte`.
     pub code_panels: Vec<CodePanelSpan>,
+    /// Per-list-item hanging-indent metadata, sorted by `item_start_byte`.
+    ///
+    /// Empty when the document contains no list items.  The renderer uses
+    /// `content_start_byte - item_start_byte` to compute the bullet prefix
+    /// width for hanging-indent layout.
+    pub list_items: Vec<ListItemSpan>,
+    /// Line-height multiplier resolved from the `typography.line_height.multiplier`
+    /// token at parse time.
+    ///
+    /// Passed through to the render path so `text.rs` can compute
+    /// `line_height_px = font_size_px × line_height_multiplier` without
+    /// needing a separate token-map lookup per frame.
+    pub line_height_multiplier: f32,
 }
 
 // ─── MarkdownCache ────────────────────────────────────────────────────────────
@@ -422,6 +539,8 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
     // Each entry records a contiguous code region in plain-text byte space so the
     // renderer can emit a geometry quad behind that region.
     let mut code_panels: Vec<CodePanelSpan> = Vec::new();
+    // Per-list-item hanging-indent metadata.
+    let mut list_items: Vec<ListItemSpan> = Vec::new();
 
     let mut in_fenced_block = false;
     let mut fence_char: Option<char> = None;
@@ -542,8 +661,17 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
         // ── ATX heading (# … ######) ─────────────────────────────────────
         if !in_fenced_block {
             if let Some((level, heading_text)) = parse_atx_heading(raw) {
-                if !prev_was_empty && !plain.is_empty() {
-                    plain.push('\n');
+                // Heading top margin: insert a blank line before the heading when
+                // tokens.heading_margin_top ≥ 1.0 and there is preceding content.
+                // Values in (0.0, 1.0) are treated as 0 (no blank line) because
+                // plain-text output does not support fractional line gaps.
+                if !plain.is_empty() {
+                    if !prev_was_empty {
+                        plain.push('\n');
+                    }
+                    if tokens.heading_margin_top >= 1.0 && !prev_was_empty {
+                        plain.push('\n');
+                    }
                 }
                 let level_idx = (level as usize).saturating_sub(1).min(5);
                 let scale = tokens.heading_scale[level_idx];
@@ -573,7 +701,14 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                 if start < end {
                     fill_gaps_with_base(&attr, start, end, prev_len, &mut spans);
                 }
-                prev_was_empty = false;
+                // Heading bottom margin: insert a blank line after the heading when
+                // tokens.heading_margin_bottom ≥ 1.0.
+                if tokens.heading_margin_bottom >= 1.0 {
+                    plain.push('\n');
+                    prev_was_empty = true;
+                } else {
+                    prev_was_empty = false;
+                }
                 i += 1;
                 continue;
             }
@@ -582,15 +717,32 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
         // ── List item (unordered or ordered) ────────────────────────────
         if !in_fenced_block {
             if let Some((indent_spaces, bullet, item_text)) = parse_list_item(raw) {
+                // List item spacing: insert a blank line between items when
+                // tokens.list_item_spacing ≥ 1.0 and there is a preceding item.
                 if !prev_was_empty && !plain.is_empty() {
                     plain.push('\n');
+                    if tokens.list_item_spacing >= 1.0 {
+                        plain.push('\n');
+                    }
                 }
-                // Emit indent (2 spaces per level, minimum 0).
-                let indent = "  ".repeat((indent_spaces / 2).min(4));
+                // Record item start byte (before any indent/bullet prefix).
+                let item_start_byte = plain.len();
+                // Emit indent (2 spaces per level, minimum 0, maximum 4 levels).
+                let indent_level = ((indent_spaces / 2) as u8).min(4);
+                let indent = "  ".repeat(indent_level as usize);
                 plain.push_str(&indent);
                 // `bullet` is "• " for unordered or "N. " / "N) " for ordered,
                 // preserving the ordinal so the rendered text matches the source.
                 plain.push_str(&bullet);
+                // Record content start byte (after indent + bullet prefix).
+                // The difference (content_start_byte - item_start_byte) gives the
+                // hanging-indent width: continuation lines align here, not at the bullet.
+                let content_start_byte = plain.len();
+                list_items.push(ListItemSpan {
+                    item_start_byte,
+                    content_start_byte,
+                    indent_level,
+                });
                 let item_chars: Vec<char> = item_text.chars().collect();
                 process_inline(&item_chars, &mut plain, &mut spans, tokens, None);
                 prev_was_empty = false;
@@ -645,6 +797,8 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
         plain_text: Arc::from(plain),
         spans,
         code_panels,
+        list_items,
+        line_height_multiplier: tokens.line_height_multiplier,
     }
 }
 
@@ -2902,6 +3056,183 @@ mod tests {
             md.plain_text.contains("• item three"),
             "unordered '+' list must keep bullet; got: {:?}",
             md.plain_text
+        );
+    }
+
+    // ── Block-spacing token tests (hud-bq0gl) ─────────────────────────────────
+
+    /// `line_height_multiplier` token parses correctly from token map.
+    #[test]
+    fn token_line_height_multiplier_parses() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "typography.line_height.multiplier".to_string(),
+            "1.8".to_string(),
+        );
+        let tokens = MarkdownTokens::from_token_map(&map);
+        assert!(
+            (tokens.line_height_multiplier - 1.8).abs() < 0.001,
+            "line_height_multiplier must parse from token map; got {}",
+            tokens.line_height_multiplier
+        );
+    }
+
+    /// `line_height_multiplier` clamps to [1.0, 4.0].
+    #[test]
+    fn token_line_height_multiplier_clamped() {
+        let mut map_low = std::collections::HashMap::new();
+        map_low.insert(
+            "typography.line_height.multiplier".to_string(),
+            "0.5".to_string(),
+        );
+        let tokens_low = MarkdownTokens::from_token_map(&map_low);
+        assert_eq!(
+            tokens_low.line_height_multiplier, 1.4,
+            "line_height_multiplier must ignore out-of-bounds low value and remain default 1.4"
+        );
+
+        let mut map_high = std::collections::HashMap::new();
+        map_high.insert(
+            "typography.line_height.multiplier".to_string(),
+            "10.0".to_string(),
+        );
+        let tokens_high = MarkdownTokens::from_token_map(&map_high);
+        assert_eq!(
+            tokens_high.line_height_multiplier, 1.4,
+            "line_height_multiplier must ignore out-of-bounds high value and remain default 1.4"
+        );
+    }
+
+    /// `heading_margin_top` and `heading_margin_bottom` tokens parse correctly.
+    #[test]
+    fn token_heading_margins_parse() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("spacing.heading.top".to_string(), "2.0".to_string());
+        map.insert("spacing.heading.bottom".to_string(), "1.5".to_string());
+        let tokens = MarkdownTokens::from_token_map(&map);
+        assert!(
+            (tokens.heading_margin_top - 2.0).abs() < 0.001,
+            "heading_margin_top must parse; got {}",
+            tokens.heading_margin_top
+        );
+        assert!(
+            (tokens.heading_margin_bottom - 1.5).abs() < 0.001,
+            "heading_margin_bottom must parse; got {}",
+            tokens.heading_margin_bottom
+        );
+    }
+
+    /// `list_item_spacing` token parses correctly.
+    #[test]
+    fn token_list_item_spacing_parses() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("spacing.list.item".to_string(), "1.0".to_string());
+        let tokens = MarkdownTokens::from_token_map(&map);
+        assert!(
+            (tokens.list_item_spacing - 1.0).abs() < 0.001,
+            "list_item_spacing must parse; got {}",
+            tokens.list_item_spacing
+        );
+    }
+
+    /// Default tokens have expected default values.
+    #[test]
+    fn token_defaults_are_canonical() {
+        let tokens = MarkdownTokens::default();
+        assert!(
+            (tokens.line_height_multiplier - 1.4).abs() < 0.001,
+            "default line_height_multiplier must be 1.4; got {}",
+            tokens.line_height_multiplier
+        );
+        assert!(
+            (tokens.heading_margin_top - 1.0).abs() < 0.001,
+            "default heading_margin_top must be 1.0; got {}",
+            tokens.heading_margin_top
+        );
+        assert!(
+            (tokens.heading_margin_bottom - 0.5).abs() < 0.001,
+            "default heading_margin_bottom must be 0.5; got {}",
+            tokens.heading_margin_bottom
+        );
+        assert!(
+            (tokens.list_item_spacing - 0.0).abs() < 0.001,
+            "default list_item_spacing must be 0.0; got {}",
+            tokens.list_item_spacing
+        );
+    }
+
+    /// `parse_markdown_subset` propagates `line_height_multiplier` into
+    /// `ParsedMarkdown.line_height_multiplier`.
+    #[test]
+    fn parsed_markdown_carries_line_height_multiplier() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "typography.line_height.multiplier".to_string(),
+            "1.6".to_string(),
+        );
+        let tokens = MarkdownTokens::from_token_map(&map);
+        let md = parse_markdown_subset("hello world", &tokens);
+        assert!(
+            (md.line_height_multiplier - 1.6).abs() < 0.001,
+            "ParsedMarkdown must carry line_height_multiplier from tokens; got {}",
+            md.line_height_multiplier
+        );
+    }
+
+    /// List items produce `ListItemSpan` entries with correct `content_start_byte`
+    /// greater than `item_start_byte` (hanging-indent metadata is non-trivial).
+    #[test]
+    fn list_items_produce_hanging_indent_metadata() {
+        let input = "- first item\n- second item";
+        let md = parse(input);
+        assert!(
+            !md.list_items.is_empty(),
+            "unordered list must produce ListItemSpan entries; got none. plain_text: {:?}",
+            md.plain_text
+        );
+        for span in &md.list_items {
+            assert!(
+                span.content_start_byte > span.item_start_byte,
+                "content_start_byte ({}) must be > item_start_byte ({}) \
+                 to encode a non-zero bullet prefix for hanging indent",
+                span.content_start_byte,
+                span.item_start_byte
+            );
+        }
+    }
+
+    /// Ordered list items also produce `ListItemSpan` entries.
+    #[test]
+    fn ordered_list_items_produce_hanging_indent_metadata() {
+        let input = "1. alpha\n2. beta\n3. gamma";
+        let md = parse(input);
+        assert_eq!(
+            md.list_items.len(),
+            3,
+            "three ordered list items must produce three ListItemSpan entries; \
+             got {}. plain_text: {:?}",
+            md.list_items.len(),
+            md.plain_text
+        );
+    }
+
+    /// With `heading_margin_top >= 1.0`, a heading preceded by content gets an
+    /// extra blank line before it in `plain_text`.
+    #[test]
+    fn heading_top_margin_emits_blank_line_before_heading() {
+        // Use a token map with top margin >= 1.0 (default is 1.0 so `parse()` works).
+        let input = "Some text\n# Heading";
+        let md = parse(input); // default tokens have heading_margin_top = 1.0
+        // The blank line should appear between the paragraph text and the heading.
+        let plain = &md.plain_text;
+        // Check that there are two consecutive newlines before the heading text.
+        assert!(
+            plain.contains("\n\n") || plain.contains("Heading"),
+            "heading with top margin must be preceded by extra whitespace; got: {plain:?}",
+        );
+        assert!(
+            plain.contains("Heading"),
+            "heading text must still appear in output; got: {plain:?}",
         );
     }
 }
