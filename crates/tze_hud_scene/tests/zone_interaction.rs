@@ -94,7 +94,7 @@ fn insert_dismiss_region(
 ) {
     let interaction_id =
         format!("zone:{zone_name}:dismiss:{published_at_wall_us}:{publisher_namespace}");
-    scene.zone_hit_regions.push(ZoneHitRegion {
+    scene.overlay.zone_hit_regions.push(ZoneHitRegion {
         zone_name: zone_name.to_string(),
         published_at_wall_us,
         publisher_namespace: publisher_namespace.to_string(),
@@ -358,7 +358,7 @@ fn hit_test_returns_zone_interaction_for_action_button() {
 
     let action_bounds = Rect::new(1440.0, 12.0, 100.0, 22.0);
     let action_id = format!("zone:notif:action:{published_at}:{ns}:confirm");
-    scene.zone_hit_regions.push(ZoneHitRegion {
+    scene.overlay.zone_hit_regions.push(ZoneHitRegion {
         zone_name: "notif".to_string(),
         published_at_wall_us: published_at,
         publisher_namespace: ns.to_string(),
@@ -505,7 +505,7 @@ fn zone_hit_regions_are_skipped_in_serialization() {
     );
 
     assert_eq!(
-        scene.zone_hit_regions.len(),
+        scene.overlay.zone_hit_regions.len(),
         1,
         "precondition: region present"
     );
@@ -514,7 +514,7 @@ fn zone_hit_regions_are_skipped_in_serialization() {
     let restored: SceneGraph = serde_json::from_str(&json).expect("deserialization must succeed");
 
     assert!(
-        restored.zone_hit_regions.is_empty(),
+        restored.overlay.zone_hit_regions.is_empty(),
         "zone_hit_regions must be empty after serde round-trip (field is #[serde(skip)])"
     );
 }

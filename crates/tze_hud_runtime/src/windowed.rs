@@ -838,6 +838,7 @@ fn apply_portal_resize_pointer_event(
 
 fn zone_hit_regions_to_overlay_regions(scene: &SceneGraph) -> Vec<HitRegion> {
     scene
+        .overlay
         .zone_hit_regions
         .iter()
         .map(|region| {
@@ -4344,6 +4345,7 @@ impl WinitApp {
                 return;
             };
             scene
+                .overlay
                 .drag_handle_hit_regions
                 .iter()
                 .find(|r| {
@@ -4379,7 +4381,7 @@ impl WinitApp {
 
         if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(mut scene) = state.scene.try_lock() {
-                scene.drag_handle_context_menu = Some(menu);
+                scene.overlay.drag_handle_context_menu = Some(menu);
                 tracing::debug!(
                     element_id = %element_id,
                     x = cx,
@@ -4409,7 +4411,7 @@ impl WinitApp {
             let Ok(scene) = state.scene.try_lock() else {
                 return;
             };
-            scene.drag_handle_context_menu.clone()
+            scene.overlay.drag_handle_context_menu.clone()
         };
 
         let Some(menu) = menu_state else {
@@ -4424,7 +4426,7 @@ impl WinitApp {
         // Dismiss the menu in all cases.
         if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(mut scene) = state.scene.try_lock() {
-                scene.drag_handle_context_menu = None;
+                scene.overlay.drag_handle_context_menu = None;
             }
         }
 
@@ -4453,6 +4455,7 @@ impl WinitApp {
                 return;
             };
             scene
+                .overlay
                 .drag_handle_context_menu
                 .as_ref()
                 .is_some_and(|m| now_ns.saturating_sub(m.shown_at_ns) >= AUTO_DISMISS_NS)
@@ -4461,7 +4464,7 @@ impl WinitApp {
         if should_dismiss {
             if let Ok(state) = self.state.shared_state.try_lock() {
                 if let Ok(mut scene) = state.scene.try_lock() {
-                    scene.drag_handle_context_menu = None;
+                    scene.overlay.drag_handle_context_menu = None;
                     tracing::debug!("chrome context menu auto-dismissed after 3s");
                 }
             }
@@ -6450,6 +6453,7 @@ mod tests {
         let static_regions = vec![HitRegion::new(10.0, 20.0, 30.0, 40.0)];
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene
+            .overlay
             .zone_hit_regions
             .push(tze_hud_scene::types::ZoneHitRegion {
                 zone_name: "notification-area".to_string(),
@@ -7590,7 +7594,7 @@ redaction_style = "blank"
             scene.zone_registry.active_for_zone("alert-banner")[0].published_at_wall_us;
 
         // Simulate the compositor injecting a dismiss ZoneHitRegion for this publication.
-        scene.zone_hit_regions.push(ZoneHitRegion {
+        scene.overlay.zone_hit_regions.push(ZoneHitRegion {
             zone_name: "alert-banner".to_string(),
             published_at_wall_us: record_published_at,
             publisher_namespace: publisher.to_string(),
@@ -7658,7 +7662,7 @@ redaction_style = "blank"
 
         // The hit region must also be pruned immediately (local feedback first).
         assert!(
-            scene.zone_hit_regions.is_empty(),
+            scene.overlay.zone_hit_regions.is_empty(),
             "stale dismiss hit-region must be pruned after dismiss [local feedback first]"
         );
     }
@@ -7696,7 +7700,7 @@ redaction_style = "blank"
         let record_published_at =
             scene.zone_registry.active_for_zone("alert-banner")[0].published_at_wall_us;
 
-        scene.zone_hit_regions.push(ZoneHitRegion {
+        scene.overlay.zone_hit_regions.push(ZoneHitRegion {
             zone_name: "alert-banner".to_string(),
             published_at_wall_us: record_published_at,
             publisher_namespace: "test-agent".to_string(),
@@ -7769,7 +7773,7 @@ redaction_style = "blank"
             scene.zone_registry.active_for_zone("alert-banner")[0].published_at_wall_us;
 
         // Place an Action hit region (not Dismiss).
-        scene.zone_hit_regions.push(ZoneHitRegion {
+        scene.overlay.zone_hit_regions.push(ZoneHitRegion {
             zone_name: "alert-banner".to_string(),
             published_at_wall_us: record_published_at,
             publisher_namespace: "test-agent".to_string(),
@@ -7881,19 +7885,22 @@ redaction_style = "blank"
             40.0,
             20.0,
         );
-        scene.drag_handle_hit_regions.push(DragHandleHitRegion {
-            element_id,
-            element_kind: DragHandleElementKind::Tile,
-            bounds: handle_bounds,
-            interaction_id: interaction_id.clone(),
-            hit_region: HitRegionNode {
+        scene
+            .overlay
+            .drag_handle_hit_regions
+            .push(DragHandleHitRegion {
+                element_id,
+                element_kind: DragHandleElementKind::Tile,
                 bounds: handle_bounds,
                 interaction_id: interaction_id.clone(),
-                accepts_pointer: true,
-                ..Default::default()
-            },
-            tab_order: 0,
-        });
+                hit_region: HitRegionNode {
+                    bounds: handle_bounds,
+                    interaction_id: interaction_id.clone(),
+                    accepts_pointer: true,
+                    ..Default::default()
+                },
+                tab_order: 0,
+            });
 
         (scene, tile_id, element_id, interaction_id)
     }
