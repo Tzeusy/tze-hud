@@ -219,7 +219,7 @@ impl MarkdownTokens {
             .get("typography.line_height.multiplier")
             .and_then(|v| v.parse::<f32>().ok())
         {
-            if (1.0..=4.0).contains(&m) {
+            if m.is_finite() && (1.0..=4.0).contains(&m) {
                 tokens.line_height_multiplier = m;
             }
         }
@@ -229,7 +229,7 @@ impl MarkdownTokens {
             .get("spacing.heading.top")
             .and_then(|v| v.parse::<f32>().ok())
         {
-            if (0.0..=4.0).contains(&v) {
+            if v.is_finite() && (0.0..=4.0).contains(&v) {
                 tokens.heading_margin_top = v;
             }
         }
@@ -237,7 +237,7 @@ impl MarkdownTokens {
             .get("spacing.heading.bottom")
             .and_then(|v| v.parse::<f32>().ok())
         {
-            if (0.0..=4.0).contains(&v) {
+            if v.is_finite() && (0.0..=4.0).contains(&v) {
                 tokens.heading_margin_bottom = v;
             }
         }
@@ -247,7 +247,7 @@ impl MarkdownTokens {
             .get("spacing.list.item")
             .and_then(|v| v.parse::<f32>().ok())
         {
-            if (0.0..=4.0).contains(&v) {
+            if v.is_finite() && (0.0..=4.0).contains(&v) {
                 tokens.list_item_spacing = v;
             }
         }
@@ -3086,10 +3086,10 @@ mod tests {
             "0.5".to_string(),
         );
         let tokens_low = MarkdownTokens::from_token_map(&map_low);
-        assert!(
-            tokens_low.line_height_multiplier >= 1.0,
-            "line_height_multiplier must clamp to >= 1.0; got {}",
-            tokens_low.line_height_multiplier
+        assert_eq!(
+            tokens_low.line_height_multiplier,
+            1.4,
+            "line_height_multiplier must ignore out-of-bounds low value and remain default 1.4"
         );
 
         let mut map_high = std::collections::HashMap::new();
@@ -3098,10 +3098,10 @@ mod tests {
             "10.0".to_string(),
         );
         let tokens_high = MarkdownTokens::from_token_map(&map_high);
-        assert!(
-            tokens_high.line_height_multiplier <= 4.0,
-            "line_height_multiplier must clamp to <= 4.0; got {}",
-            tokens_high.line_height_multiplier
+        assert_eq!(
+            tokens_high.line_height_multiplier,
+            1.4,
+            "line_height_multiplier must ignore out-of-bounds high value and remain default 1.4"
         );
     }
 
@@ -3230,13 +3230,11 @@ mod tests {
         // Check that there are two consecutive newlines before the heading text.
         assert!(
             plain.contains("\n\n") || plain.contains("Heading"),
-            "heading with top margin must be preceded by extra whitespace; got: {:?}",
-            plain
+            "heading with top margin must be preceded by extra whitespace; got: {plain:?}",
         );
         assert!(
             plain.contains("Heading"),
-            "heading text must still appear in output; got: {:?}",
-            plain
+            "heading text must still appear in output; got: {plain:?}",
         );
     }
 }
