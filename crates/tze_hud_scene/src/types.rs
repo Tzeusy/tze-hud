@@ -326,6 +326,12 @@ pub struct Tab {
 ///
 /// All four dimensions are checked at mutation intake (Stage 3). A mutation batch
 /// that would push any dimension over budget is rejected whole (all-or-nothing).
+///
+/// # Memory layout
+///
+/// The `Tile` struct embeds this type by value. Per RFC 0001 §8, `Tile` must
+/// remain under 200 bytes. Additions to this struct that would push `Tile` past
+/// that limit require a corresponding RFC amendment.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResourceBudget {
     /// Maximum number of tiles this agent may hold simultaneously.
@@ -347,6 +353,24 @@ impl Default for ResourceBudget {
             max_nodes_per_tile: 32,
         }
     }
+}
+
+/// Spatial constraints on a tile's dimensions, enforced at interactive resize time.
+///
+/// Stored on the `Lease` object (see `Lease::spatial_budget`).  Not embedded in
+/// `Tile` — the `Tile` struct size is budgeted at < 200 bytes (RFC 0001 §8) and
+/// spatial limits are not needed on the tile itself.
+///
+/// `0.0` for either dimension means unconstrained; the display boundary is the
+/// hard outer clamp in all cases.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TileSpatialBudget {
+    /// Maximum tile width the lease permits, in logical pixels.
+    /// `0.0` = unconstrained (display boundary is the only clamp).
+    pub max_tile_width_px: f32,
+    /// Maximum tile height the lease permits, in logical pixels.
+    /// `0.0` = unconstrained (display boundary is the only clamp).
+    pub max_tile_height_px: f32,
 }
 
 /// A dimension in which an agent has violated its resource budget.
@@ -1095,6 +1119,11 @@ pub struct Lease {
     pub renewal_policy: RenewalPolicy,
     pub capabilities: Vec<Capability>,
     pub resource_budget: ResourceBudget,
+    /// Spatial constraints on tiles owned by this lease, enforced at
+    /// interactive resize time (gesture + hotkey).  `0.0` for either field
+    /// means unconstrained.
+    #[serde(default)]
+    pub spatial_budget: TileSpatialBudget,
     // Suspension tracking
     /// Timestamp when the lease was suspended (ms since epoch).
     pub suspended_at_ms: Option<u64>,
