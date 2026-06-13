@@ -200,6 +200,19 @@ const NOTIFICATION_DISMISS_BUTTON_SIZE_PX: f32 = 20.0;
 /// Horizontal breathing room between the dismiss affordance and notification text.
 const NOTIFICATION_DISMISS_GAP_PX: f32 = 8.0;
 
+/// Font size in pixels for the dismiss ("X") button label.
+///
+/// Token override: `typography.notification.dismiss.font_size_px` (parsed as f32,
+/// strips a trailing `px` suffix if present).
+/// Fallback: 12.0 px.
+const NOTIFICATION_DISMISS_FONT_SIZE_PX: f32 = 12.0;
+
+/// Font weight for the dismiss ("X") button label.
+///
+/// Token override: `typography.notification.dismiss.font_weight` (parsed as u16).
+/// Fallback: 700 (bold).
+const NOTIFICATION_DISMISS_FONT_WEIGHT: u16 = 700;
+
 /// Fallback color for `color.border.default` when the token is absent.
 ///
 /// Matches the default value in built-in component startup tokens (#444466).
@@ -3548,6 +3561,17 @@ impl Compositor {
                         .get("typography.notification.title.weight")
                         .and_then(|v| v.parse::<u16>().ok())
                         .unwrap_or(NOTIFICATION_TITLE_WEIGHT);
+                    let notif_dismiss_font_size_px = self
+                        .token_map
+                        .get("typography.notification.dismiss.font_size_px")
+                        .and_then(|v| v.trim_end_matches("px").parse::<f32>().ok())
+                        .unwrap_or(NOTIFICATION_DISMISS_FONT_SIZE_PX)
+                        .clamp(6.0, 200.0);
+                    let notif_dismiss_font_weight = self
+                        .token_map
+                        .get("typography.notification.dismiss.font_weight")
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .unwrap_or(NOTIFICATION_DISMISS_FONT_WEIGHT);
 
                     // Compute per-slot heights (variable for two-line notifications).
                     let slot_heights = Self::per_slot_heights(
@@ -3802,9 +3826,9 @@ impl Compositor {
                                         clip_pixel_y: dismiss_bounds.y + 1.0,
                                         clip_bounds_width: dismiss_bounds.width.max(1.0),
                                         clip_bounds_height: dismiss_bounds.height.max(1.0),
-                                        font_size_px: 12.0,
+                                        font_size_px: notif_dismiss_font_size_px,
                                         font_family,
-                                        font_weight: 700,
+                                        font_weight: notif_dismiss_font_weight,
                                         color: dismiss_color,
                                         alignment: tze_hud_scene::types::TextAlign::Center,
                                         overflow: tze_hud_scene::types::TextOverflow::Clip,
@@ -12498,6 +12522,161 @@ mod tests {
             dismiss_item.pixel_x >= 300.0,
             "dismiss label must sit near the right edge, got {}",
             dismiss_item.pixel_x
+        );
+    }
+
+    // ── Dismiss button typography token tests [hud-y08tp] ────────────────────
+    //
+    // Acceptance criteria:
+    //   1. No-token path: dismiss button uses NOTIFICATION_DISMISS_FONT_SIZE_PX
+    //      (12.0 px) and NOTIFICATION_DISMISS_FONT_WEIGHT (700) as defaults.
+    //   2. Token path: typography.notification.dismiss.font_size_px and
+    //      typography.notification.dismiss.font_weight override the defaults.
+
+    /// Dismiss button uses default font_size_px (12.0) and font_weight (700)
+    /// when dismiss typography tokens are absent.
+    ///
+    /// AC 1: no-token path preserves visual defaults.
+    #[tokio::test]
+    async fn test_dismiss_button_uses_default_font_size_and_weight() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "dismiss font default test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: Some(8_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Default dismiss test".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                    title: String::new(),
+                    actions: Vec::new(),
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        let dismiss_item = items
+            .iter()
+            .find(|item| &*item.text == "X")
+            .expect("dismiss text item must exist");
+
+        assert_eq!(
+            dismiss_item.font_size_px, NOTIFICATION_DISMISS_FONT_SIZE_PX,
+            "dismiss button font_size_px must be the default (12.0) when token absent"
+        );
+        assert_eq!(
+            dismiss_item.font_weight, NOTIFICATION_DISMISS_FONT_WEIGHT,
+            "dismiss button font_weight must be the default (700) when token absent"
+        );
+    }
+
+    /// Dismiss button font_size_px and font_weight read from design tokens when
+    /// `typography.notification.dismiss.font_size_px` and
+    /// `typography.notification.dismiss.font_weight` are present.
+    ///
+    /// AC 2: token-override path correctly propagates to the rendered TextItem.
+    #[tokio::test]
+    async fn test_dismiss_button_respects_typography_tokens() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        // Inject dismiss typography tokens.
+        let mut token_map = HashMap::new();
+        token_map.insert(
+            "typography.notification.dismiss.font_size_px".to_string(),
+            "16px".to_string(),
+        );
+        token_map.insert(
+            "typography.notification.dismiss.font_weight".to_string(),
+            "400".to_string(),
+        );
+        compositor.set_token_map(token_map);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "dismiss font token test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: Some(8_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Token override dismiss test".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                    title: String::new(),
+                    actions: Vec::new(),
+                }),
+                "agent-b",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        let dismiss_item = items
+            .iter()
+            .find(|item| &*item.text == "X")
+            .expect("dismiss text item must exist");
+
+        assert_eq!(
+            dismiss_item.font_size_px, 16.0,
+            "dismiss button font_size_px must be 16.0 from token override"
+        );
+        assert_eq!(
+            dismiss_item.font_weight, 400,
+            "dismiss button font_weight must be 400 from token override"
         );
     }
 
