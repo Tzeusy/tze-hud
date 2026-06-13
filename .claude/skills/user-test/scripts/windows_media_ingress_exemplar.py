@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import base64
 import json
+import math
 import os
 import re
 import subprocess
@@ -47,6 +48,118 @@ BANNED_SOURCE_MARKERS = (
     "download",
     "direct media url",
 )
+
+
+# ---------------------------------------------------------------------------
+# Frame-capture validator
+# ---------------------------------------------------------------------------
+# Minimum cross-frame luminance spread required to accept captured frames as
+# real playback rather than a static page (error screen, loading screen, etc.).
+# Chosen to pass real video (large inter-frame swings observed, e.g.
+# [46,32,22]→[7,7,9]) while rejecting a static YouTube Error-153 page
+# (mean_rgb ~[39,41,44] with zero or near-zero frame-to-frame variation).
+_FRAME_LUMINANCE_SPREAD_THRESHOLD = 1.0  # minimum stddev of per-frame luma (0-255 scale)
+# Minimum sum(mean_rgb) for a frame to count as non-blank.
+_FRAME_NONBLANK_SUM_THRESHOLD = 3.0
+
+
+def _frame_luminance(mean_rgb: list[float]) -> float:
+    """Return BT.601 luminance for an [R, G, B] mean_rgb sample (0-255 scale)."""
+    r, g, b = mean_rgb[0], mean_rgb[1], mean_rgb[2]
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def _validate_official_player_frames(
+    frames: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate a list of captured frame descriptors as genuine playback frames.
+
+    Each frame dict must contain:
+      - ``mean_rgb``: list of three floats (R, G, B channel means, 0-255 scale)
+      - ``sha256``:   hex-string hash of the raw frame data
+
+    Returns a dict with:
+      - ``capture_validated``: bool — True only when all three checks pass
+      - ``frame_count``: int
+      - ``distinct_hashes``: int
+      - ``mean_luma``: float (mean luminance across frames)
+      - ``luma_stddev``: float (stddev of per-frame luminance)
+      - ``rejection_reason``: str | None — populated when capture_validated is False
+
+    Validation requires ALL of:
+    1. Non-blank: at least one frame has sum(mean_rgb) > 3.0 (not pure-black).
+    2. Distinct hashes: >= 2 distinct sha256 hashes (not a single frozen frame).
+    3. Content variance: per-frame luminance stddev >= threshold (not a static
+       page — e.g. a YouTube Error-153 dark screen whose frames have near-zero
+       cross-frame luminance variation even though their hashes may differ due
+       to a blinking cursor or spinner).
+    """
+    if not frames:
+        return {
+            "capture_validated": False,
+            "frame_count": 0,
+            "distinct_hashes": 0,
+            "mean_luma": 0.0,
+            "luma_stddev": 0.0,
+            "rejection_reason": "no frames captured",
+        }
+
+    frame_count = len(frames)
+    hashes = {f["sha256"] for f in frames}
+    distinct_hashes = len(hashes)
+    luma_values = [_frame_luminance(f["mean_rgb"]) for f in frames]
+    mean_luma = sum(luma_values) / frame_count
+    variance = sum((luma - mean_luma) ** 2 for luma in luma_values) / frame_count
+    luma_stddev = math.sqrt(variance)
+
+    # Check 1: not pure-black
+    nonblank = any(sum(f["mean_rgb"]) > _FRAME_NONBLANK_SUM_THRESHOLD for f in frames)
+    if not nonblank:
+        return {
+            "capture_validated": False,
+            "frame_count": frame_count,
+            "distinct_hashes": distinct_hashes,
+            "mean_luma": mean_luma,
+            "luma_stddev": luma_stddev,
+            "rejection_reason": (
+                f"all frames appear blank (sum(mean_rgb) <= {_FRAME_NONBLANK_SUM_THRESHOLD})"
+            ),
+        }
+
+    # Check 2: distinct hashes (not a single frozen frame repeated)
+    if distinct_hashes < 2:
+        return {
+            "capture_validated": False,
+            "frame_count": frame_count,
+            "distinct_hashes": distinct_hashes,
+            "mean_luma": mean_luma,
+            "luma_stddev": luma_stddev,
+            "rejection_reason": "fewer than 2 distinct frame hashes — capture appears frozen",
+        }
+
+    # Check 3: meaningful cross-frame luminance variance
+    if luma_stddev < _FRAME_LUMINANCE_SPREAD_THRESHOLD:
+        return {
+            "capture_validated": False,
+            "frame_count": frame_count,
+            "distinct_hashes": distinct_hashes,
+            "mean_luma": mean_luma,
+            "luma_stddev": luma_stddev,
+            "rejection_reason": (
+                f"near-static frame content: luminance stddev {luma_stddev:.4f} "
+                f"< threshold {_FRAME_LUMINANCE_SPREAD_THRESHOLD} — "
+                "likely a static error or loading page rather than real playback"
+            ),
+        }
+
+    return {
+        "capture_validated": True,
+        "frame_count": frame_count,
+        "distinct_hashes": distinct_hashes,
+        "mean_luma": mean_luma,
+        "luma_stddev": luma_stddev,
+        "rejection_reason": None,
+    }
 
 
 def validate_youtube_video_id(video_id: str) -> str:
@@ -91,7 +204,7 @@ def build_video_only_sdp_offer(
     ssrc = int.from_bytes(stream_id.bytes[:4], "big") or 1
     lines = [
         "v=0",
-        f"o=tze-hud-local-producer 0 0 IN IP4 127.0.0.1",
+        "o=tze-hud-local-producer 0 0 IN IP4 127.0.0.1",
         f"s=tze_hud {safe_label}",
         "t=0 0",
         "a=group:BUNDLE 0",
