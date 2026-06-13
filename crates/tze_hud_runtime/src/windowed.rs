@@ -515,10 +515,9 @@ fn apply_drag_handle_pointer_event(
 /// Compute the maximum resize dimensions for a portal tile, combining the
 /// display boundary clamp with the tile's lease-granted spatial budget.
 ///
-/// The display boundary (`display_w - tile_x`, `display_h - tile_y`) is always
-/// the hard outer clamp.  When the tile's lease carries a non-zero
-/// `max_tile_width_px` / `max_tile_height_px`, whichever is smaller wins
-/// (most-restrictive policy).
+/// The display boundary (`display_w`, `display_h`) is always the hard outer
+/// clamp.  When the tile's lease carries a non-zero `max_tile_width_px` /
+/// `max_tile_height_px`, whichever is smaller wins (most-restrictive policy).
 ///
 /// `lease_max_width_px` and `lease_max_height_px` should be sourced from
 /// the `Lease.resource_budget` in `scene.leases` (the authoritative location
@@ -531,8 +530,18 @@ fn apply_drag_handle_pointer_event(
 /// can always be grown to at least the minimum size even if the lease limit is
 /// somehow smaller — the lease limit is not allowed to shrink a portal below the
 /// token minimum, per §6b design intent).
+///
+/// ## Why `display_w`, not `display_w − tile.x`
+///
+/// `PortalRect::clamped` enforces that the portal fits on-screen by adjusting
+/// both the size **and** the origin together: `x.clamp(0, display_w − w)`.
+/// If the portal is at x=500 on a 1000px display, it can still grow to
+/// 1000px wide — `clamped` will shift the origin left to x=0 so the right
+/// edge lands exactly at the screen edge.  Using `display_w − tile.x` as the
+/// max would prevent this shift and cap the portal at half the display width,
+/// which is incorrect.
 fn compute_portal_max_dims(
-    tile_bounds: tze_hud_scene::types::Rect,
+    _tile_bounds: tze_hud_scene::types::Rect,
     lease_max_width_px: f32,
     lease_max_height_px: f32,
     display_w: f32,
@@ -540,9 +549,11 @@ fn compute_portal_max_dims(
     min_width_px: f32,
     min_height_px: f32,
 ) -> (f32, f32) {
-    // Display boundary: the tile cannot extend beyond the screen edge.
-    let display_max_w = (display_w - tile_bounds.x).max(min_width_px);
-    let display_max_h = (display_h - tile_bounds.y).max(min_height_px);
+    // Display boundary: the portal cannot be wider/taller than the display.
+    // The origin is clamped separately by PortalRect::clamped, so we do not
+    // subtract tile.x / tile.y here (that was the pre-fix incorrect bound).
+    let display_max_w = display_w.max(min_width_px);
+    let display_max_h = display_h.max(min_height_px);
 
     // Lease budget: intersect with display boundary (most restrictive wins).
     // A lease value of 0.0 means unconstrained; skip the intersection.
@@ -9425,10 +9436,14 @@ redaction_style = "blank"
         // No panic — test passes.
     }
 
-    // ── Lease-bound maxima (hud-kgu8u) ───────────────────────────────────────
+    // ── Lease-bound maxima (hud-kgu8u / hud-zleu2) ───────────────────────────
 
-    /// `compute_portal_max_dims` with no lease constraint (0.0) uses only the
-    /// display boundary.
+    /// `compute_portal_max_dims` with no lease constraint (0.0) uses the full
+    /// display dimensions, not `display_w - tile_x`.
+    ///
+    /// A portal at (100, 100) on a 1920×1080 display must be allowed to grow
+    /// up to 1920×1080 — `PortalRect::clamped` shifts the origin as needed to
+    /// keep the portal on-screen.
     #[test]
     fn compute_portal_max_dims_unconstrained_uses_display_boundary() {
         use tze_hud_scene::types::Rect;
@@ -9439,14 +9454,40 @@ redaction_style = "blank"
         let (max_w, max_h) =
             compute_portal_max_dims(tile_bounds, 0.0, 0.0, 1920.0, 1080.0, 50.0, 50.0);
 
-        // Display boundary: 1920 - 100 = 1820, 1080 - 100 = 980.
+        // Display boundary: full display width/height, not display - tile.origin.
         assert_eq!(
-            max_w, 1820.0,
-            "unconstrained width must equal display_w - tile_x"
+            max_w, 1920.0,
+            "unconstrained width must equal display_w (not display_w - tile_x)"
         );
         assert_eq!(
-            max_h, 980.0,
-            "unconstrained height must equal display_h - tile_y"
+            max_h, 1080.0,
+            "unconstrained height must equal display_h (not display_h - tile_y)"
+        );
+    }
+
+    /// A portal at x=500 on a 1000px-wide display must be allowed to grow to
+    /// 1000px wide.  `PortalRect::clamped` shifts the origin to x=0 so the
+    /// right edge lands at the screen edge.  The pre-fix code produced 500px
+    /// (display_w - tile.x), capping the portal at half the screen width.
+    #[test]
+    fn compute_portal_max_dims_uses_display_w_not_display_w_minus_tile_x() {
+        use tze_hud_scene::types::Rect;
+
+        // Scenario from PR #691 review: x=500 on a 1000px display.
+        let tile_bounds = Rect::new(500.0, 200.0, 200.0, 200.0);
+
+        let (max_w, max_h) =
+            compute_portal_max_dims(tile_bounds, 0.0, 0.0, 1000.0, 800.0, 50.0, 50.0);
+
+        assert_eq!(
+            max_w, 1000.0,
+            "portal at x=500 on 1000px display must be allowed to reach full display width (1000), \
+             not be capped at display_w - tile.x = 500"
+        );
+        assert_eq!(
+            max_h, 800.0,
+            "portal at y=200 on 800px display must be allowed to reach full display height (800), \
+             not be capped at display_h - tile.y = 600"
         );
     }
 
@@ -9463,11 +9504,11 @@ redaction_style = "blank"
 
         assert_eq!(
             max_w, 500.0,
-            "lease budget (500) must win over display boundary (1820)"
+            "lease budget (500) must win over display boundary (1920)"
         );
         assert_eq!(
             max_h, 400.0,
-            "lease budget (400) must win over display boundary (980)"
+            "lease budget (400) must win over display boundary (1080)"
         );
     }
 
@@ -9477,20 +9518,21 @@ redaction_style = "blank"
     fn compute_portal_max_dims_display_boundary_is_more_restrictive() {
         use tze_hud_scene::types::Rect;
 
-        // Tile origin near the screen edge so the display boundary is tight.
+        // Tile origin near the screen edge; use a lease budget larger than the
+        // display to confirm the display boundary is the binding constraint.
         let tile_bounds = Rect::new(1700.0, 900.0, 100.0, 100.0);
 
         let (max_w, max_h) =
             compute_portal_max_dims(tile_bounds, 5000.0, 5000.0, 1920.0, 1080.0, 50.0, 50.0);
 
-        // Display boundary: 1920 - 1700 = 220, 1080 - 900 = 180.
+        // Display boundary is the full display, not display - tile.origin.
         assert_eq!(
-            max_w, 220.0,
-            "display boundary (220) must win over lease budget (5000)"
+            max_w, 1920.0,
+            "display boundary (1920) must win over lease budget (5000)"
         );
         assert_eq!(
-            max_h, 180.0,
-            "display boundary (180) must win over lease budget (5000)"
+            max_h, 1080.0,
+            "display boundary (1080) must win over lease budget (5000)"
         );
     }
 
