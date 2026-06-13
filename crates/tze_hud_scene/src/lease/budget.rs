@@ -121,7 +121,7 @@ pub fn check_budget_soft(
         idx += 1;
     }
 
-    if usage.texture_bytes_used * 5 >= budget.max_texture_bytes.max(1) * 4 {
+    if (usage.texture_bytes_used as u128) * 5 >= (budget.max_texture_bytes.max(1) as u128) * 4 {
         result[idx] = Some(BudgetDimension::TextureBytes);
         idx += 1;
     }
