@@ -290,7 +290,7 @@ git worktree add .worktrees/agent-hud-XXXX -b agent/hud-XXXX
 
 ## Cooperative HUD Projection
 
-- `openspec/changes/cooperative-hud-projection/` defines `/hud-projection` as cooperative opt-in for already-running LLM sessions: no PTY attachment, no terminal capture, daemon owns durable transcript/inbox/HUD state outside token context, and the LLM session publishes/polls/acks through a provider-neutral contract.
+- The cooperative-hud-projection OpenSpec change (archived at `openspec/changes/archive/2026-05-10-cooperative-hud-projection/`) defines `/hud-projection` as cooperative opt-in for already-running LLM sessions: no PTY attachment, no terminal capture, daemon owns durable transcript/inbox/HUD state outside token context, and the LLM session publishes/polls/acks through a provider-neutral contract.
 - As of `hud-ggntn.8`, `crates/tze_hud_projection` ships `tze_hud_projection_authority`, a daemon-local stdio CLI surface for cooperative HUD projection operations; it retains state only for the process lifetime and emits a bounded `ProjectionResponse` plus newly written audit records for each JSON-line operation.
 - Cooperative HUD projection resident adapter code lives behind the `tze_hud_projection` `resident-grpc` feature (`crates/tze_hud_projection/src/resident_grpc.rs`); it is daemon-side glue that emits existing `HudSession` raw-tile mutations and lease release messages, not a replacement for the authority/control surface.
 - Cooperative HUD projection gen-2 reconciliation lives at `docs/reports/cooperative_hud_projection_gen2_reconciliation_20260510.md`; it records the accepted runtime-native readback substitution for unavailable SSH desktop screenshot capture.
