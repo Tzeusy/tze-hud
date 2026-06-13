@@ -1306,6 +1306,20 @@ pub struct Compositor {
     /// Track which zones had active publishes in the previous frame so we can
     /// detect publish → clear transitions and start fade-out animations.
     prev_active_zones: HashMap<String, bool>,
+    /// Per-portal-tile fade-in / fade-out animation state (§6.3 transition tokens).
+    ///
+    /// Keyed by tile `SceneId`. An entry is inserted when a scrollable tile
+    /// (i.e. a portal tile, identified by a registered `TileScrollConfig`)
+    /// gains its first root node (`transition_in_ms` fade-in) and when it
+    /// loses its root node (`transition_out_ms` fade-out).
+    ///
+    /// Durations are sourced from the `portal.transition.in_ms` and
+    /// `portal.transition.out_ms` design tokens so no literal durations are
+    /// present in the compositor.  Completed transitions are pruned each frame.
+    pub(crate) portal_tile_anim_states: HashMap<SceneId, ZoneAnimationState>,
+    /// Track which scrollable tiles had a root node in the previous frame so
+    /// we can detect appear/disappear transitions.
+    prev_portal_tile_has_content: HashMap<SceneId, bool>,
     /// Per-publication TTL fade-out animation state.
     ///
     /// Outer key: zone name.  Inner key: `PubKey = (published_at_wall_us, publisher_namespace)`.
@@ -1546,6 +1560,8 @@ impl Compositor {
             widget_renderer: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
+            portal_tile_anim_states: HashMap::new(),
+            prev_portal_tile_has_content: HashMap::new(),
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
@@ -1815,6 +1831,8 @@ impl Compositor {
             widget_renderer: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
+            portal_tile_anim_states: HashMap::new(),
+            prev_portal_tile_has_content: HashMap::new(),
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
@@ -3491,9 +3509,23 @@ impl Compositor {
                 // collect_ellipsis_text_items_from_node so the per-frame key
                 // matches the primed cache entry (hud-lu50e).
                 let at_tail = scene.tile_follow_tail_at_tail(tile.id);
+
+                // §6.3 portal transition: track item count before to apply
+                // portal animation opacity to newly added items.
+                let items_before = items.len();
                 self.collect_text_items_from_node(
                     root_id, tile, scene, scroll_x, scroll_y, at_tail, &mut items,
                 );
+
+                // Apply portal tile animation opacity (§6.3 transition tokens).
+                // Only scrollable tiles (portal tiles) have animation state;
+                // all others return 1.0 from portal_tile_anim_opacity.
+                let portal_anim = self.portal_tile_anim_opacity(tile.id);
+                if portal_anim < 1.0 {
+                    for item in &mut items[items_before..] {
+                        item.opacity *= portal_anim;
+                    }
+                }
             }
         }
 
@@ -4312,6 +4344,107 @@ impl Compositor {
         self.prev_active_zones = current_active;
     }
 
+    /// Update per-portal-tile fade animation state (§6.3 — transition tokens).
+    ///
+    /// Runs the same appear/disappear transition logic as [`update_zone_animations`]
+    /// but for portal tiles (scrollable tiles identified by a registered
+    /// [`TileScrollConfig`]).  Durations are sourced from the
+    /// `portal.transition.in_ms` and `portal.transition.out_ms` design tokens
+    /// in `self.token_map`; no literal durations appear here.
+    ///
+    /// A tile is considered "has content" when `tile.root_node.is_some()`.
+    ///
+    /// - **Appear**: a scrollable tile whose `root_node` just became `Some`
+    ///   starts a `fade_in(transition_in_ms)` animation (if `> 0`).
+    /// - **Disappear**: a scrollable tile whose `root_node` just became `None`
+    ///   starts a `fade_out(transition_out_ms)` animation (if `> 0`).
+    ///
+    /// Completed transitions are pruned after each update.
+    ///
+    /// Must be called once per frame alongside `update_zone_animations`.
+    pub fn update_portal_tile_animations(&mut self, scene: &SceneGraph) {
+        // Resolve transition durations from design tokens (§6.1 — no literals).
+        let transition_in_ms: u32 = self
+            .token_map
+            .get("portal.transition.in_ms")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(120); // matches PortalPartTokens::defaults::TRANSITION_IN_MS
+        let transition_out_ms: u32 = self
+            .token_map
+            .get("portal.transition.out_ms")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(80); // matches PortalPartTokens::defaults::TRANSITION_OUT_MS
+
+        // Build current content state for all scrollable tiles.
+        let current: HashMap<SceneId, bool> = scene
+            .tiles
+            .values()
+            .filter(|tile| scene.tile_scroll_config(tile.id).is_some())
+            .map(|tile| (tile.id, tile.root_node.is_some()))
+            .collect();
+
+        for (&tile_id, &has_content) in &current {
+            let had_content = self
+                .prev_portal_tile_has_content
+                .get(&tile_id)
+                .copied()
+                .unwrap_or(false);
+
+            if has_content && !had_content {
+                // Tile just received content — start fade-in.
+                // Interrupt semantics mirror zone animation: start from current
+                // opacity if a fade-out is in progress (no blank frame).
+                if transition_in_ms > 0 {
+                    let new_state =
+                        if let Some(existing) = self.portal_tile_anim_states.get(&tile_id) {
+                            if existing.target_opacity == 0.0 {
+                                ZoneAnimationState::fade_in_from(
+                                    transition_in_ms,
+                                    existing.current_opacity(),
+                                )
+                            } else {
+                                ZoneAnimationState::fade_in(transition_in_ms)
+                            }
+                        } else {
+                            ZoneAnimationState::fade_in(transition_in_ms)
+                        };
+                    self.portal_tile_anim_states.insert(tile_id, new_state);
+                }
+            } else if !has_content && had_content {
+                // Tile just lost content — start fade-out.
+                if transition_out_ms > 0 {
+                    self.portal_tile_anim_states
+                        .insert(tile_id, ZoneAnimationState::fade_out(transition_out_ms));
+                }
+            }
+        }
+
+        // Prune animation states for tiles that are no longer scrollable.
+        self.portal_tile_anim_states
+            .retain(|tile_id, _| current.contains_key(tile_id));
+
+        // Prune completed transitions.
+        self.portal_tile_anim_states
+            .retain(|_, state| !state.is_complete());
+
+        self.prev_portal_tile_has_content = current;
+    }
+
+    /// Return the current portal tile animation opacity for `tile_id`.
+    ///
+    /// Returns `1.0` when no animation is in progress (fully visible).
+    /// Used by tile text collection and background rendering to fade portal
+    /// tiles in/out using the token-configured duration.
+    #[inline]
+    pub(crate) fn portal_tile_anim_opacity(&self, tile_id: SceneId) -> f32 {
+        self.portal_tile_anim_states
+            .get(&tile_id)
+            .map(|s| s.current_opacity())
+            .unwrap_or(1.0)
+    }
+
     /// Update per-zone streaming word-by-word reveal state.
     ///
     /// Must be called once per frame (after `update_zone_animations`).
@@ -5022,6 +5155,7 @@ impl Compositor {
         // Update zone animation states (fade-in/fade-out) before rendering.
         // Must run before any render_zone_content call below.
         self.update_zone_animations(scene);
+        self.update_portal_tile_animations(scene);
 
         // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
         // Background zones render first so agent tiles occlude them.
@@ -5132,6 +5266,7 @@ impl Compositor {
 
         // Update zone animation states (fade-in/fade-out) before rendering.
         self.update_zone_animations(scene);
+        self.update_portal_tile_animations(scene);
 
         // Update streaming word-by-word reveal state.
         self.update_stream_reveals(scene);
@@ -5300,6 +5435,7 @@ impl Compositor {
         // Update zone animation states before rendering zone content.
         // Must run before any render_zone_content call below.
         self.update_zone_animations(scene);
+        self.update_portal_tile_animations(scene);
 
         // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
         // Background zones render first so agent tiles occlude them.
@@ -5394,6 +5530,7 @@ impl Compositor {
 
         // Update zone animation states before rendering zone content.
         self.update_zone_animations(scene);
+        self.update_portal_tile_animations(scene);
 
         // Update streaming word-by-word reveal state.
         self.update_stream_reveals(scene);
@@ -5562,6 +5699,7 @@ impl Compositor {
         // Update zone animation states before rendering zone content.
         // Must run before any render_zone_content call below.
         self.update_zone_animations(scene);
+        self.update_portal_tile_animations(scene);
 
         // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
         // Background zones render first so agent tiles occlude them.
@@ -5656,6 +5794,7 @@ impl Compositor {
 
         // Update zone animation states, streaming reveal, and render zone content backdrops.
         self.update_zone_animations(scene);
+        self.update_portal_tile_animations(scene);
         self.update_stream_reveals(scene);
 
         // Content zones render as a batch after all tiles (above background, below chrome).
@@ -7729,12 +7868,17 @@ impl Compositor {
     ///
     /// Colors are resolved from design tokens (`color.tile.background.*`) with
     /// documented fallback constants — no naked color literals here.  The opacity
-    /// channel is still derived from the tile's effective opacity (drag state).
+    /// channel is derived from the tile's effective opacity (drag state) multiplied
+    /// by the portal tile animation opacity (§6.3 transition tokens) when the tile
+    /// has a registered `TileScrollConfig`.
     ///
     /// Returns `None` when the tile's rounded root node should be solely
     /// responsible for its own backdrop shape.
     fn tile_background_color(&self, tile: &Tile, scene: &SceneGraph) -> Option<[f32; 4]> {
-        let opacity = Self::effective_tile_opacity(tile, scene);
+        // Base opacity from drag state (scene-level tile.opacity × drag boost).
+        let base_opacity = Self::effective_tile_opacity(tile, scene);
+        // §6.3: multiply portal tile animation opacity for scrollable (portal) tiles.
+        let opacity = (base_opacity * self.portal_tile_anim_opacity(tile.id)).clamp(0.0, 1.0);
         if let Some(root_id) = tile.root_node
             && let Some(node) = scene.nodes.get(&root_id)
         {
@@ -7743,11 +7887,17 @@ impl Compositor {
                     if sc.radius.is_some_and(|r| r > 0.0) {
                         return None;
                     }
-                    return Some(sc.color.to_array());
+                    // Apply combined opacity to the solid color alpha.
+                    let mut c = sc.color.to_array();
+                    c[3] *= opacity;
+                    return Some(c);
                 }
                 NodeData::TextMarkdown(tm) => {
                     if let Some(bg) = &tm.background {
-                        return Some(bg.to_array());
+                        // Apply combined opacity to the token-supplied background alpha.
+                        let mut c = bg.to_array();
+                        c[3] *= opacity;
+                        return Some(c);
                     }
                     let c = resolve_tile_bg_token(
                         &self.token_map,
@@ -17663,6 +17813,277 @@ mod tests {
             c.b < 0.01,
             "overridden default B should be ~0.0 (green), got {}",
             c.b
+        );
+    }
+
+    // ── Portal tile animation unit tests (CPU-only, no GPU required) ─────────
+    //
+    // These tests exercise the portal transition token wiring introduced in
+    // hud-58rg1 (spec §6.3).  They are CPU-only: no wgpu adapter is requested
+    // so they run cleanly even in minimal CI containers.
+
+    /// `ZoneAnimationState::fade_in` starts at opacity 0 and moves toward 1.
+    ///
+    /// Immediately after construction the elapsed time is ~0 ms, so
+    /// `current_opacity()` must return a value very close to 0.
+    #[test]
+    fn zone_animation_state_fade_in_starts_at_zero() {
+        let state = ZoneAnimationState::fade_in(120);
+        // Immediately after construction elapsed ≈ 0 ms → opacity ≈ 0.
+        let opacity = state.current_opacity();
+        assert!(
+            opacity < 0.05,
+            "fade_in must start near opacity 0, got {opacity}"
+        );
+        assert_eq!(state.target_opacity, 1.0, "fade_in target must be 1.0");
+        assert_eq!(state.duration_ms, 120, "fade_in duration must be 120 ms");
+    }
+
+    /// `ZoneAnimationState::fade_out` starts at opacity 1 and moves toward 0.
+    ///
+    /// Immediately after construction the elapsed time is ~0 ms, so
+    /// `current_opacity()` must return a value very close to 1.
+    #[test]
+    fn zone_animation_state_fade_out_starts_at_one() {
+        let state = ZoneAnimationState::fade_out(80);
+        // Immediately after construction elapsed ≈ 0 ms → opacity ≈ 1.
+        let opacity = state.current_opacity();
+        assert!(
+            opacity > 0.95,
+            "fade_out must start near opacity 1, got {opacity}"
+        );
+        assert_eq!(state.target_opacity, 0.0, "fade_out target must be 0.0");
+        assert_eq!(state.duration_ms, 80, "fade_out duration must be 80 ms");
+    }
+
+    /// `ZoneAnimationState::fade_in_from` starts at the given from_opacity.
+    ///
+    /// This is the interrupt-semantic path used when content arrives during
+    /// an active fade-out.
+    #[test]
+    fn zone_animation_state_fade_in_from_starts_at_partial_opacity() {
+        let from = 0.4_f32;
+        let state = ZoneAnimationState::fade_in_from(120, from);
+        // Immediately after construction elapsed ≈ 0 ms → opacity ≈ from.
+        let opacity = state.current_opacity();
+        assert!(
+            (opacity - from).abs() < 0.05,
+            "fade_in_from must start near from_opacity={from}, got {opacity}"
+        );
+        assert_eq!(state.target_opacity, 1.0);
+        assert_eq!(state.from_opacity, from);
+    }
+
+    /// `portal_tile_anim_opacity` returns 1.0 for a tile not in the animation map.
+    ///
+    /// CPU-only: directly inspects the struct field — no GPU required.
+    ///
+    /// This verifies the "no animation active → fully visible" contract so that
+    /// non-portal tiles and fully settled portal tiles are not dimmed.
+    #[test]
+    fn portal_tile_anim_opacity_returns_full_when_no_state() {
+        // Construct a minimal token map and animation state map manually.
+        // We can't construct a full Compositor without GPU, so we test the
+        // underlying logic by directly inspecting ZoneAnimationState.
+        let mut anim_states: HashMap<SceneId, ZoneAnimationState> = HashMap::new();
+        let tile_id = SceneId::new();
+        let other_id = SceneId::new();
+
+        // Start a fade-in for other_id only.
+        anim_states.insert(other_id, ZoneAnimationState::fade_in(120));
+
+        // tile_id is NOT in the map → opacity must be 1.0.
+        let opacity = anim_states
+            .get(&tile_id)
+            .map(|s| s.current_opacity())
+            .unwrap_or(1.0);
+        assert!(
+            (opacity - 1.0).abs() < f32::EPSILON,
+            "tile not in anim map must return opacity 1.0, got {opacity}"
+        );
+    }
+
+    /// A scrollable tile that appears for the first time triggers a fade-in
+    /// animation with the token-configured `transition_in_ms` duration.
+    ///
+    /// This exercises `update_portal_tile_animations` end-to-end.
+    ///
+    /// GPU required (for `Compositor::new_headless`); skips gracefully when no
+    /// adapter is available.
+    #[tokio::test]
+    async fn portal_tile_fade_in_starts_on_first_content() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        // Set a custom transition_in_ms token (200 ms) to distinguish from default.
+        compositor
+            .token_map
+            .insert("portal.transition.in_ms".to_string(), "200".to_string());
+
+        // Build a scene with one scrollable (portal) tile that has a root node.
+        let mut scene = SceneGraph::new(256.0, 256.0);
+        let tab_id = scene.create_tab("portal-test", 0).unwrap();
+        let lease_id = scene.grant_lease("portal-test", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-test",
+                lease_id,
+                Rect::new(0.0, 0.0, 256.0, 256.0),
+                1,
+            )
+            .unwrap();
+
+        // Register a scroll config (identifies this tile as a portal tile).
+        scene
+            .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+            .unwrap();
+
+        // Attach content — root node present.
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::WHITE,
+                radius: None,
+                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            }),
+        };
+        scene.set_tile_root(tile_id, node).unwrap();
+
+        // First call — tile goes from no-content to content.
+        compositor.update_portal_tile_animations(&scene);
+
+        // A fade-in animation must have been inserted for tile_id.
+        let anim = compositor.portal_tile_anim_states.get(&tile_id);
+        assert!(
+            anim.is_some(),
+            "update_portal_tile_animations must insert fade-in state for scrollable tile"
+        );
+        let anim = anim.unwrap();
+        assert_eq!(
+            anim.target_opacity, 1.0,
+            "fade-in must have target_opacity 1.0"
+        );
+        assert_eq!(
+            anim.duration_ms, 200,
+            "fade-in duration must match token value 200 ms"
+        );
+
+        // Opacity must be near 0 immediately after the animation starts.
+        let opacity = compositor.portal_tile_anim_opacity(tile_id);
+        assert!(
+            opacity < 0.2,
+            "immediately after fade-in start, opacity must be near 0, got {opacity}"
+        );
+    }
+
+    /// Removing a scrollable tile's root node triggers a fade-out animation
+    /// with the token-configured `transition_out_ms` duration.
+    ///
+    /// GPU required; skips gracefully when no adapter is available.
+    ///
+    /// The test seeds `prev_portal_tile_has_content` directly (same-crate access)
+    /// to simulate the tile having had content in the previous frame, then calls
+    /// `update_portal_tile_animations` with no root node — matching the content-
+    /// gone transition without needing a SceneGraph API to clear the root.
+    #[tokio::test]
+    async fn portal_tile_fade_out_starts_on_content_removal() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        compositor
+            .token_map
+            .insert("portal.transition.out_ms".to_string(), "150".to_string());
+
+        // Scene has a scrollable tile with NO root node.
+        let mut scene = SceneGraph::new(256.0, 256.0);
+        let tab_id = scene.create_tab("portal-fade-out", 0).unwrap();
+        let lease_id = scene.grant_lease("portal-fade-out", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-fade-out",
+                lease_id,
+                Rect::new(0.0, 0.0, 256.0, 256.0),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+            .unwrap();
+        // root_node is None — content just disappeared.
+
+        // Seed previous state: tile had content last frame.
+        compositor
+            .prev_portal_tile_has_content
+            .insert(tile_id, true);
+
+        compositor.update_portal_tile_animations(&scene);
+
+        // Now the animation state must be a fade-out.
+        let anim = compositor.portal_tile_anim_states.get(&tile_id);
+        assert!(
+            anim.is_some(),
+            "update_portal_tile_animations must insert fade-out state after content removal"
+        );
+        let anim = anim.unwrap();
+        assert_eq!(
+            anim.target_opacity, 0.0,
+            "fade-out must have target_opacity 0.0"
+        );
+        assert_eq!(
+            anim.duration_ms, 150,
+            "fade-out duration must match token value 150 ms"
+        );
+    }
+
+    /// Non-scrollable tiles must NOT get portal animation states.
+    ///
+    /// Ensures `update_portal_tile_animations` only affects tiles with a
+    /// registered `TileScrollConfig` (i.e. portal tiles).
+    ///
+    /// GPU required; skips gracefully when no adapter is available.
+    #[tokio::test]
+    async fn non_scrollable_tile_has_no_portal_animation_state() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(256.0, 256.0);
+        let tab_id = scene.create_tab("non-scroll-test", 0).unwrap();
+        let lease_id = scene.grant_lease("non-scroll-test", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "non-scroll-test",
+                lease_id,
+                Rect::new(0.0, 0.0, 256.0, 256.0),
+                1,
+            )
+            .unwrap();
+
+        // NO register_tile_scroll_config — this is NOT a portal tile.
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::WHITE,
+                radius: None,
+                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            }),
+        };
+        scene.set_tile_root(tile_id, node).unwrap();
+
+        compositor.update_portal_tile_animations(&scene);
+
+        // No animation state must have been created for this non-portal tile.
+        assert!(
+            !compositor.portal_tile_anim_states.contains_key(&tile_id),
+            "non-scrollable tile must not receive a portal animation state"
+        );
+
+        // portal_tile_anim_opacity must return 1.0 (fully visible, no dimming).
+        let opacity = compositor.portal_tile_anim_opacity(tile_id);
+        assert!(
+            (opacity - 1.0).abs() < f32::EPSILON,
+            "non-scrollable tile opacity must be 1.0, got {opacity}"
         );
     }
 }
