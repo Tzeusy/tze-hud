@@ -7982,10 +7982,8 @@ impl Compositor {
                                         .chars()
                                         .filter(|&c| c == '\n')
                                         .count();
-                                    let lines_in_panel = plain[clamped_start..clamped_end]
-                                        .lines()
-                                        .count()
-                                        .max(1);
+                                    let lines_in_panel =
+                                        plain[clamped_start..clamped_end].lines().count().max(1);
                                     let panel_y_offset =
                                         lines_before as f32 * line_height - panel_pad_y;
                                     let panel_height =
