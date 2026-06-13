@@ -175,6 +175,42 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "offscreen player window"):
             exemplar.validate_frame_capture_evidence(fixture)
 
+    def test_frame_capture_fixture_rejects_static_error_page(self):
+        # Regression for the Error-153 false-positive observed in live validation:
+        # an error/placeholder screen has distinct sha256 hashes (cursor/spinner
+        # noise) but near-constant mean_rgb. It must not pass as real playback.
+        fixture = valid_frame_capture_fixture()
+        fixture["captured_frames"] = [
+            {"index": 0, "sha256": "a" * 64, "png_bytes": 1200,
+             "sampled_pixels": 64, "mean_rgb": [38.95, 41.52, 44.42]},
+            {"index": 1, "sha256": "b" * 64, "png_bytes": 1210,
+             "sampled_pixels": 64, "mean_rgb": [38.95, 41.52, 44.42]},
+            {"index": 2, "sha256": "c" * 64, "png_bytes": 1190,
+             "sampled_pixels": 64, "mean_rgb": [39.02, 41.58, 44.55]},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "near-constant mean_rgb"):
+            exemplar.validate_frame_capture_evidence(fixture)
+
+    def test_allow_static_bypasses_mean_rgb_variance_check(self):
+        fixture = valid_frame_capture_fixture()
+        fixture["captured_frames"] = [
+            {"index": 0, "sha256": "a" * 64, "png_bytes": 1200,
+             "sampled_pixels": 64, "mean_rgb": [38.95, 41.52, 44.42]},
+            {"index": 1, "sha256": "b" * 64, "png_bytes": 1210,
+             "sampled_pixels": 64, "mean_rgb": [39.02, 41.58, 44.55]},
+        ]
+
+        evidence = exemplar.validate_frame_capture_evidence(
+            fixture, require_distinct=False
+        )
+        self.assertTrue(evidence["capture_validated"])
+
+    def test_frame_capture_records_mean_rgb_channel_spread(self):
+        evidence = exemplar.validate_frame_capture_evidence(valid_frame_capture_fixture())
+        # valid fixture B channel: 30 -> 38 => spread 8.0
+        self.assertGreaterEqual(evidence["mean_rgb_channel_spread"], 5.0)
+
     def test_bridge_dry_run_can_validate_frame_capture_fixture_without_hud(self):
         with tempfile.TemporaryDirectory(dir=".") as tmpdir:
             output_dir = Path(tmpdir) / "bridge"

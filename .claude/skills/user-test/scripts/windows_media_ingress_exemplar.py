@@ -47,6 +47,11 @@ YOUTUBE_BRIDGE_SOURCE_LABEL = "youtube-official-player-frame-bridge"
 YOUTUBE_BRIDGE_PATH = "operator-visible-official-player-window-capture-to-media-ingress-open"
 YOUTUBE_FRAME_CAPTURE_ADAPTER = "windows-visible-player-copyfromscreen-frame-capture"
 RAW_YOUTUBE_BRIDGE_DECISION = "approved_operator_visible_player_frame_bridge"
+# Minimum per-channel mean_rgb spread (0-255 scale) across captured frames that
+# we accept as evidence of real playback. A static error/placeholder screen
+# (e.g. YouTube "Error 153") stays well under this; real playback swings far
+# above it. Bypassable with --allow-static-captured-frames for paused sources.
+MIN_PLAYBACK_MEAN_RGB_SPREAD = 5.0
 WINDOWS_REMOTE_TMP_PATH_RE = re.compile(
     r"^C:\\tze_hud\\tmp\\[A-Za-z0-9_]+_[a-f0-9]{32}(?:\\[A-Za-z0-9_.-]+)?$"
 )
@@ -997,6 +1002,7 @@ def validate_frame_capture_evidence(
     if not isinstance(frames, list) or not frames:
         raise RuntimeError("frame-capture adapter returned no captured frames")
     hashes: list[str] = []
+    means: list[list[float]] = []
     nonblank_samples = 0
     for frame in frames:
         if not isinstance(frame, dict):
@@ -1013,17 +1019,39 @@ def validate_frame_capture_evidence(
             raise RuntimeError("captured frame entry has invalid mean_rgb samples")
         if not all(isinstance(channel, (int, float)) for channel in mean_rgb):
             raise RuntimeError("captured frame entry has invalid mean_rgb samples")
+        means.append([float(channel) for channel in mean_rgb])
         if sum(float(channel) for channel in mean_rgb) > 3.0:
             nonblank_samples += 1
     if nonblank_samples == 0:
         raise RuntimeError("captured frames appear blank")
     distinct_hashes = len(set(hashes))
-    if require_distinct and len(hashes) > 1 and distinct_hashes < 2:
-        raise RuntimeError("captured frames did not change; wait for playback before proof")
+    # Per-channel spread (max-min) across all frames. Real playback moves the
+    # average color noticeably between samples; a static screen (e.g. a YouTube
+    # "Error 153" config-error page) stays flat. Distinct sha256 hashes alone are
+    # NOT sufficient — a blinking cursor or spinner yields different hashes while
+    # the frame content (and mean_rgb) is effectively unchanged, which previously
+    # let an error page pass as "valid official-player frames".
+    channel_spread = 0.0
+    if means:
+        channel_spread = max(
+            max(channel) - min(channel) for channel in zip(*means)
+        )
+    if require_distinct and len(hashes) > 1:
+        if distinct_hashes < 2:
+            raise RuntimeError("captured frames did not change; wait for playback before proof")
+        if channel_spread < MIN_PLAYBACK_MEAN_RGB_SPREAD:
+            raise RuntimeError(
+                "captured frames have distinct hashes but near-constant mean_rgb "
+                f"(spread {channel_spread:.2f} < {MIN_PLAYBACK_MEAN_RGB_SPREAD:.2f}); "
+                "the official player is likely showing a static error/placeholder "
+                "screen rather than playing video. Pass --allow-static-captured-frames "
+                "only for deliberately paused/manual-source diagnostics."
+            )
 
     normalized = dict(evidence)
     normalized["captured_frame_count"] = len(frames)
     normalized["distinct_frame_hashes"] = distinct_hashes
+    normalized["mean_rgb_channel_spread"] = round(channel_spread, 3)
     normalized["capture_validated"] = True
     return normalized
 
