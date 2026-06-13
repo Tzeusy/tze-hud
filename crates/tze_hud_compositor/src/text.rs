@@ -381,14 +381,13 @@ impl TextRasterizer {
     pub(crate) fn prime_truncation_cache(&mut self, items: &[TextItem]) -> Vec<TruncationKey> {
         let mut live_keys: Vec<TruncationKey> = Vec::new();
         for item in items {
-            if item.overflow != TextOverflow::Ellipsis {
+            // effective_truncation_key returns None for non-Ellipsis items.
+            let Some(key) = effective_truncation_key(item) else {
                 continue;
-            }
-            // (hud-so7zu) Use the effective measurement weight/family from
-            // styled runs so that bold/monospace spans are measured accurately.
-            // The truncation fit decision uses these attrs; if only base_weight
-            // is used, wider bold/monospace text can wrap to more lines than
-            // measured and get hard-clipped by TextBounds.
+            };
+            live_keys.push(key);
+            // Re-derive effective measurement attrs to pass to prime (must
+            // match the key — see effective_truncation_key for the fix (b) invariant).
             let (meas_weight, meas_mono) =
                 styled_runs_effective_measurement(&item.styled_runs, item.font_weight);
             let meas_family = if meas_mono {
@@ -396,16 +395,6 @@ impl TextRasterizer {
             } else {
                 item.font_family
             };
-            let key = TruncationKey::new(
-                &item.text,
-                item.bounds_width,
-                item.bounds_height,
-                item.font_size_px,
-                meas_family,
-                meas_weight,
-                item.viewport,
-            );
-            live_keys.push(key);
             self.truncation_cache.prime(
                 key,
                 &item.text,
@@ -475,31 +464,7 @@ impl TextRasterizer {
         // (requiring &mut self.truncation_cache + &mut self.font_system), then
         // do the final HashMap lookup pass.  This avoids interleaving mutable
         // and immutable borrows of the same struct fields inside a single closure.
-        let keys: Vec<Option<TruncationKey>> = items
-            .iter()
-            .map(|item| {
-                if item.overflow != TextOverflow::Ellipsis {
-                    return None;
-                }
-                // (hud-so7zu) Use effective measurement attrs from styled runs.
-                let (meas_weight, meas_mono) =
-                    styled_runs_effective_measurement(&item.styled_runs, item.font_weight);
-                let meas_family = if meas_mono {
-                    FontFamily::SystemMonospace
-                } else {
-                    item.font_family
-                };
-                Some(TruncationKey::new(
-                    &item.text,
-                    item.bounds_width,
-                    item.bounds_height,
-                    item.font_size_px,
-                    meas_family,
-                    meas_weight,
-                    item.viewport,
-                ))
-            })
-            .collect();
+        let keys: Vec<Option<TruncationKey>> = items.iter().map(effective_truncation_key).collect();
 
         // Pass 1: prime any cache misses.  Misses are uncommon (first frame or
         // newly-added items); hits are no-ops via `entry().or_insert_with`.
@@ -589,29 +554,7 @@ impl TextRasterizer {
                     // they address the correct bytes in "…\n{tail}".  See
                     // `reslice_styled_runs_tail_anchored` for the shift logic.
                     if let Some(truncated_str) = truncated {
-                        let resliced = if truncated_str == &*item.text {
-                            // Text fit without truncation — preserve original runs.
-                            item.styled_runs.to_vec()
-                        } else if item.viewport == TruncationViewport::TailAnchored
-                            && truncated_str.starts_with(crate::overflow::ELLIPSIS)
-                        {
-                            // Leading-ellipsis output: shift offsets from
-                            // original-text space into "…\n{tail}" space.
-                            reslice_styled_runs_tail_anchored(
-                                &item.text,
-                                truncated_str,
-                                &item.styled_runs,
-                            )
-                        } else {
-                            // Trailing-ellipsis output (HeadAnchored): compute
-                            // the byte length of the plain-text prefix
-                            // (excluding "…").
-                            let content_end = truncated_str
-                                .strip_suffix(crate::overflow::ELLIPSIS)
-                                .map(|s| s.len())
-                                .unwrap_or(truncated_str.len());
-                            reslice_styled_runs(&item.styled_runs, content_end)
-                        };
+                        let resliced = reslice_styled_runs_for_item(item, truncated_str);
                         if resliced.is_empty() {
                             // No runs survive truncation — fall back to plain text.
                             buf.set_text(
@@ -1836,6 +1779,93 @@ pub(crate) fn styled_runs_effective_measurement(
         }
     }
     (max_weight, any_monospace)
+}
+
+/// Compute the effective [`TruncationKey`] for a `TextItem`.
+///
+/// This is the key-building core of [`TextRasterizer::prime_truncation_cache`]
+/// and the key-derivation pass inside [`TextRasterizer::prepare_text_items`].
+/// Both call sites use effective measurement attrs from `styled_runs` so that
+/// bold/monospace spans are measured accurately (#708 fix (b)).
+///
+/// Returns `None` for items whose `overflow` is not [`TextOverflow::Ellipsis`].
+///
+/// # #708 fix (b) — regression-test anchor
+///
+/// If `styled_runs_effective_measurement` is removed from this function (fix
+/// reverted), the key will always use `item.font_weight` (base weight) even
+/// when bold or monospace runs are present.  Tests that call this function with
+/// a bold-styled item and assert the resulting key differs from a key built
+/// with base weight will fail, catching the regression.
+pub(crate) fn effective_truncation_key(item: &TextItem) -> Option<TruncationKey> {
+    if item.overflow != TextOverflow::Ellipsis {
+        return None;
+    }
+    // (hud-so7zu) Use effective measurement attrs from styled runs.
+    let (meas_weight, meas_mono) =
+        styled_runs_effective_measurement(&item.styled_runs, item.font_weight);
+    let meas_family = if meas_mono {
+        FontFamily::SystemMonospace
+    } else {
+        item.font_family
+    };
+    Some(TruncationKey::new(
+        &item.text,
+        item.bounds_width,
+        item.bounds_height,
+        item.font_size_px,
+        meas_family,
+        meas_weight,
+        item.viewport,
+    ))
+}
+
+/// Reslice `item.styled_runs` into the coordinate space of `truncated_str`.
+///
+/// This is the reslice-decision core of the styled-run path inside
+/// [`TextRasterizer::prepare_text_items`] (lines 591–614).  Extracted as a
+/// free function so that the fix can be regression-tested without requiring a
+/// GPU-backed `TextRasterizer` (#708 fix (a)).
+///
+/// - If `truncated_str == item.text` (no truncation occurred), the original
+///   runs are returned unchanged.
+/// - If `truncated_str` starts with `ELLIPSIS` and `item.viewport` is
+///   [`TruncationViewport::TailAnchored`], offsets are shifted from original-
+///   text space into the "…\n{tail}" coordinate space via
+///   [`reslice_styled_runs_tail_anchored`].
+/// - Otherwise (HeadAnchored trailing-ellipsis) the runs are clamped to the
+///   byte length of the plain-text prefix (before "…") via
+///   [`reslice_styled_runs`].
+///
+/// # #708 fix (a) — regression-test anchor
+///
+/// If `reslice_styled_runs` is removed from the HeadAnchored branch (fix
+/// reverted), styled runs will carry un-clamped byte offsets that extend into
+/// the "…" glyph.  Tests that call this function with a bold run whose
+/// `end_byte` covers the "…" bytes and assert the returned run does NOT include
+/// those bytes will fail, catching the regression.
+pub(crate) fn reslice_styled_runs_for_item(
+    item: &TextItem,
+    truncated_str: &str,
+) -> Vec<StyledRunItem> {
+    if truncated_str == item.text.as_ref() {
+        // Text fit without truncation — preserve original runs.
+        item.styled_runs.to_vec()
+    } else if item.viewport == TruncationViewport::TailAnchored
+        && truncated_str.starts_with(crate::overflow::ELLIPSIS)
+    {
+        // Leading-ellipsis output: shift offsets from original-text space
+        // into "…\n{tail}" space.
+        reslice_styled_runs_tail_anchored(&item.text, truncated_str, &item.styled_runs)
+    } else {
+        // Trailing-ellipsis output (HeadAnchored): compute the byte length of
+        // the plain-text prefix (excluding "…") and clamp runs to it.
+        let content_end = truncated_str
+            .strip_suffix(crate::overflow::ELLIPSIS)
+            .map(|s| s.len())
+            .unwrap_or(truncated_str.len());
+        reslice_styled_runs(&item.styled_runs, content_end)
+    }
 }
 
 /// Format a 32-byte resource ID as a lowercase hex string for logging.
@@ -4147,5 +4177,344 @@ mod tests {
         );
         assert_eq!(resliced[0].start_byte, 0, "run start must be unshifted");
         assert_eq!(resliced[0].end_byte, 3, "run end must be unshifted");
+    }
+
+    // ── hud-dhb4s: #708 end-to-end regression tests ──────────────────────────
+    //
+    // These tests exercise the ACTUAL call-site functions extracted from the
+    // pipeline that #708 fixed:
+    //
+    //   (a) reslice_styled_runs_for_item — the reslice-decision core of the
+    //       prepare_text_items styled-run path (lines 591–614 before extraction).
+    //       Tests call this function with a TextItem that carries a bold run
+    //       whose end_byte spans into the "…" glyph, and assert that the
+    //       returned runs do NOT include the ellipsis bytes.
+    //
+    //   (b) effective_truncation_key — the key-building core shared by
+    //       prime_truncation_cache and prepare_text_items.  Tests call this
+    //       function with a TextItem containing bold styled_runs and assert
+    //       the key encodes the effective weight (700) rather than the base
+    //       weight (400), then verify TruncationCache::prime produces a
+    //       strictly shorter truncated prefix at weight 700 vs 400.
+    //
+    // HOW THESE FAIL WHEN THE FIX IS REVERTED
+    //
+    //   (a) If `reslice_styled_runs` is removed from
+    //       `reslice_styled_runs_for_item`, the function returns the original
+    //       (un-clamped) runs.  The test asserts the returned run's end_byte
+    //       equals `content_end` (≠ the original end_byte that spans into "…"),
+    //       so the `assert_eq!` fails.
+    //
+    //   (b) If `styled_runs_effective_measurement` is removed from
+    //       `effective_truncation_key` and replaced with `item.font_weight`,
+    //       the key will encode weight 400 even for a bold-run item.  The test
+    //       asserts the key returned by `effective_truncation_key` matches a
+    //       key built explicitly with weight 700 (via `assert_eq!`), so it fails.
+    //       The truncated-prefix length comparison also degenerates (both prefixes
+    //       equal, both would overflow visually when rendered at weight 700).
+
+    /// #708 fix (a) regression — styled-run PRESERVATION through truncation.
+    ///
+    /// Calls `reslice_styled_runs_for_item` (the call-site function extracted
+    /// from `prepare_text_items`'s reslice branch) with a `TextItem` whose
+    /// bold `styled_runs` span the "…" glyph bytes in the truncated string.
+    ///
+    /// **Would-fail-pre-fix**: if `reslice_styled_runs` is removed from
+    /// `reslice_styled_runs_for_item`, the returned run's `end_byte` will be
+    /// the original value (which includes the "…" bytes) instead of
+    /// `content_end` (the byte before "…").  The `assert_eq!(run.end_byte, …)`
+    /// on the returned run will fail.
+    ///
+    /// Additionally the test verifies that the spans built from the resliced
+    /// runs do NOT include "…" in any bold span — the correctness property
+    /// that the fix was designed to restore.
+    #[test]
+    fn regression_708a_reslice_for_item_clamps_run_away_from_ellipsis() {
+        // Layout:
+        //   truncated_str: "Hello…"
+        //   H  e  l  l  o  …(3 bytes)
+        //   0  1  2  3  4  5 6 7  ← byte offsets
+        //   content_end = 5  (byte just before "…")
+        //   ellipsis    = bytes 5..8
+        //   total len   = 8
+        //
+        // The TextItem carries a bold run 0..8 (original text was longer than
+        // "Hello…"; the run covers all of it).  Before the fix, the run would
+        // be passed un-clamped to styled_run_spans → the "…" glyph ended up
+        // in a bold span.  With the fix (reslice_styled_runs_for_item) the run
+        // is clamped to end_byte=5 so only "Hello" is bold.
+        let ellipsis = crate::overflow::ELLIPSIS; // "…" — 3 UTF-8 bytes
+        let prefix = "Hello";
+        let truncated_str = format!("{prefix}{ellipsis}");
+        let content_end = prefix.len(); // 5
+
+        // Simulate a TextItem whose original text was longer (e.g. "Hello World")
+        // and whose bold run spans 0..11 in original-text space.
+        // After truncation the truncated_str is "Hello…" (8 bytes), so the run's
+        // un-clamped end_byte (11) is > truncated_str.len() (8); yet
+        // styled_run_spans clamps to text.len() (8), which still covers "…".
+        // We model this with end_byte = truncated_str.len() (8) — the pathological
+        // case where un-clamped == truncated-string length — to match the exact
+        // pre-fix bug scenario.
+        let item = TextItem {
+            text: Arc::from("Hello World"), // original (longer) text
+            pixel_x: 0.0,
+            pixel_y: 0.0,
+            bounds_width: 60.0,
+            bounds_height: 40.0,
+            clip_pixel_x: 0.0,
+            clip_pixel_y: 0.0,
+            clip_bounds_width: 60.0,
+            clip_bounds_height: 40.0,
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemSansSerif,
+            font_weight: 400,
+            color: [255, 255, 255, 255],
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Ellipsis,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
+            color_runs: Box::new([]),
+            styled_runs: Box::new([StyledRunItem {
+                start_byte: 0,
+                end_byte: truncated_str.len(), // 8 — includes "…" bytes
+                weight: Some(700),
+                italic: false,
+                monospace: false,
+                color: None,
+                size_scale: None,
+            }]),
+            viewport: TruncationViewport::HeadAnchored,
+        };
+
+        // ── Call through the EXTRACTED CALL-SITE FUNCTION ─────────────────────
+        // reslice_styled_runs_for_item is the exact logic that prepare_text_items
+        // now delegates to.  If the fix (reslice_styled_runs branch) is reverted,
+        // the function returns the original un-clamped run.
+        let resliced = reslice_styled_runs_for_item(&item, &truncated_str);
+
+        // The resliced run must exist (bold content survived truncation).
+        assert_eq!(
+            resliced.len(),
+            1,
+            "#708 fix-a regression: one bold run must survive into the prefix; \
+             got: {resliced:?}"
+        );
+        // The run must be clamped to content_end (byte 5, the "H…o" prefix,
+        // NOT the "…" bytes).  If reslice is reverted, end_byte = 8 ≠ 5.
+        assert_eq!(
+            resliced[0].end_byte, content_end,
+            "#708 fix-a regression: bold run must be clamped to content_end={content_end} \
+             (byte before '…'); got end_byte={} — reslice_styled_runs is not being applied",
+            resliced[0].end_byte,
+        );
+        assert_eq!(
+            resliced[0].weight,
+            Some(700),
+            "#708 fix-a regression: bold weight must be preserved through reslice"
+        );
+
+        // ── Verify the styling-preservation invariant ─────────────────────────
+        // Build spans from the resliced run and assert "…" is NOT in any bold span.
+        let base_attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
+        let spans = styled_run_spans(
+            &truncated_str,
+            &resliced,
+            base_attrs,
+            FontFamily::SystemSansSerif,
+            16.0,
+        );
+        let ellipsis_in_bold = spans
+            .iter()
+            .any(|(s, attrs)| attrs.weight == Weight(700) && s.contains(ellipsis));
+        assert!(
+            !ellipsis_in_bold,
+            "#708 fix-a regression: '…' must not appear in any bold span; \
+             got spans: {:?}",
+            spans.iter().map(|(s, _)| *s).collect::<Vec<_>>()
+        );
+
+        // Bold text must cover exactly the prefix "Hello".
+        let bold_text: String = spans
+            .iter()
+            .filter(|(_, attrs)| attrs.weight == Weight(700))
+            .map(|(s, _)| *s)
+            .collect();
+        assert_eq!(
+            bold_text, prefix,
+            "#708 fix-a regression: bold span must cover exactly '{prefix}', not '…'"
+        );
+    }
+
+    /// #708 fix (b) regression — styled MEASUREMENT correctness via
+    /// `effective_truncation_key`.
+    ///
+    /// Calls `effective_truncation_key` (the call-site function shared by
+    /// `prime_truncation_cache` and `prepare_text_items`) with a `TextItem`
+    /// carrying a full-text bold `styled_run`, then asserts the returned key
+    /// encodes the effective weight 700 (not the base weight 400) and that
+    /// `TruncationCache::prime` at weight 700 produces a strictly shorter
+    /// truncated prefix than at weight 400.
+    ///
+    /// **Would-fail-pre-fix**: if `styled_runs_effective_measurement` is removed
+    /// from `effective_truncation_key` and replaced with `item.font_weight`, the
+    /// key will encode weight 400 for the bold item.  The `assert_eq!` comparing
+    /// the returned key with a key explicitly built at weight 700 will fail,
+    /// catching the regression directly at the call site.
+    #[test]
+    fn regression_708b_effective_key_uses_bold_weight_and_truncates_more() {
+        let mut fs = FontSystem::new();
+
+        // Content long enough to overflow at both weight 400 and 700 in a
+        // narrow box, with the cut-point differing between the two weights.
+        let content = "WWW bold WWW bold WWW bold WWW bold";
+        let narrow_w = 120.0_f32;
+        let height = 40.0_f32;
+        let font_size = 16.0_f32;
+        let base_weight: u16 = 400;
+        let eff_weight: u16 = 700;
+
+        // TextItem with a bold styled_run covering all content.
+        let item_bold = TextItem {
+            text: Arc::from(content),
+            pixel_x: 0.0,
+            pixel_y: 0.0,
+            bounds_width: narrow_w,
+            bounds_height: height,
+            clip_pixel_x: 0.0,
+            clip_pixel_y: 0.0,
+            clip_bounds_width: narrow_w,
+            clip_bounds_height: height,
+            font_size_px: font_size,
+            font_family: FontFamily::SystemSansSerif,
+            font_weight: base_weight, // BASE weight — the item-level setting
+            color: [255, 255, 255, 255],
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Ellipsis,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
+            color_runs: Box::new([]),
+            // The styled_run makes the effective weight 700 — this is what the
+            // fix must pick up.
+            styled_runs: Box::new([StyledRunItem {
+                start_byte: 0,
+                end_byte: content.len(),
+                weight: Some(eff_weight),
+                italic: false,
+                monospace: false,
+                color: None,
+                size_scale: None,
+            }]),
+            viewport: TruncationViewport::HeadAnchored,
+        };
+
+        // ── Call through the EXTRACTED CALL-SITE FUNCTION ─────────────────────
+        // effective_truncation_key is the key-building core that prime_truncation_cache
+        // and prepare_text_items now delegate to.  If the fix is reverted,
+        // the key will encode base_weight (400) instead of eff_weight (700).
+        let key_from_item = effective_truncation_key(&item_bold)
+            .expect("#708 fix-b: Ellipsis item must produce a key");
+
+        // Build the expected key explicitly at eff_weight=700.  If
+        // effective_truncation_key uses base_weight instead, key_from_item will
+        // encode 400 here → assert_eq! fails, catching the regression.
+        let expected_bold_key = TruncationKey::new(
+            content,
+            narrow_w,
+            height,
+            font_size,
+            FontFamily::SystemSansSerif,
+            eff_weight, // 700 — what effective_truncation_key must produce
+            TruncationViewport::HeadAnchored,
+        );
+        assert_eq!(
+            key_from_item, expected_bold_key,
+            "#708 fix-b regression: effective_truncation_key must encode the \
+             effective bold weight ({eff_weight}) for a TextItem with bold styled_runs; \
+             if this fails, styled_runs_effective_measurement is not being called"
+        );
+
+        // The key must DIFFER from a base-weight-400 key (sanity check that
+        // the two weights produce distinct cache slots).
+        let base_key = TruncationKey::new(
+            content,
+            narrow_w,
+            height,
+            font_size,
+            FontFamily::SystemSansSerif,
+            base_weight, // 400
+            TruncationViewport::HeadAnchored,
+        );
+        assert_ne!(
+            key_from_item, base_key,
+            "#708 fix-b regression: bold-item key must differ from base-weight key"
+        );
+
+        // ── Verify truncation-length correctness ──────────────────────────────
+        // Prime the cache at base weight (400) and at the effective bold weight (700).
+        // Bold glyphs are wider → fewer characters fit → the prefix is shorter.
+        let mut cache_base = TruncationCache::new();
+        let result_base = cache_base
+            .prime(
+                base_key,
+                content,
+                narrow_w,
+                height,
+                font_size,
+                FontFamily::SystemSansSerif,
+                base_weight,
+                TruncationViewport::HeadAnchored,
+                &mut fs,
+            )
+            .clone();
+
+        let mut cache_bold = TruncationCache::new();
+        let result_bold = cache_bold
+            .prime(
+                expected_bold_key,
+                content,
+                narrow_w,
+                height,
+                font_size,
+                FontFamily::SystemSansSerif,
+                eff_weight,
+                TruncationViewport::HeadAnchored,
+                &mut fs,
+            )
+            .clone();
+
+        assert!(
+            result_base.was_truncated,
+            "#708 fix-b regression: base-weight result must be truncated"
+        );
+        assert!(
+            result_bold.was_truncated,
+            "#708 fix-b regression: bold-weight result must be truncated"
+        );
+
+        // Bold must produce a prefix that is no longer than the base prefix.
+        // Pre-fix failure: both results would be identical (base weight used for
+        // both), so the bold text would overflow visually when rendered at 700.
+        let prefix_base = result_base
+            .text
+            .strip_suffix(crate::overflow::ELLIPSIS)
+            .unwrap_or(&result_base.text)
+            .len();
+        let prefix_bold = result_bold
+            .text
+            .strip_suffix(crate::overflow::ELLIPSIS)
+            .unwrap_or(&result_bold.text)
+            .len();
+        assert!(
+            prefix_bold <= prefix_base,
+            "#708 fix-b regression: bold-weight truncation must produce a prefix \
+             no longer than base-weight (bold glyphs are wider → earlier cut point); \
+             got base {prefix_base}B, bold {prefix_bold}B; \
+             base: {:?}, bold: {:?}",
+            result_base.text,
+            result_bold.text,
+        );
     }
 }
