@@ -17,6 +17,8 @@ thiserror = { workspace = true }
 blake3 = { workspace = true }
 getrandom = { workspace = true }
 subtle = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 tze_hud_config = { path = "../tze_hud_config", optional = true }
 tze_hud_protocol = { path = "../tze_hud_protocol", optional = true }
 uuid = { workspace = true, optional = true }

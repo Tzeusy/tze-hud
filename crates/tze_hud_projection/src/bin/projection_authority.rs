@@ -56,6 +56,7 @@ use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{debug, info, warn};
 use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
 use tze_hud_projection::ProjectedPortalPolicy;
 use tze_hud_projection::resident_grpc::{
@@ -429,7 +430,37 @@ fn main() {
     }
 }
 
+/// Initialise the tracing subscriber.
+///
+/// Mirrors the main app's setup (`app/tze_hud_app/src/main.rs`):
+/// - `TZE_HUD_LOG` — env-filter directive (e.g. `tze_hud_projection=debug`).
+/// - `TZE_HUD_LOG_JSON=1` — switch to JSON-formatted output.
+///
+/// To enable debug diagnostics for this daemon, run:
+/// ```sh
+/// TZE_HUD_LOG=debug ./tze_hud_projection_authority --stdio
+/// ```
+/// For structured JSON output (e.g. to pipe into `jq`):
+/// ```sh
+/// TZE_HUD_LOG=info TZE_HUD_LOG_JSON=1 ./tze_hud_projection_authority --stdio
+/// ```
+fn init_tracing() {
+    let log_json = std::env::var("TZE_HUD_LOG_JSON").as_deref() == Ok("1");
+    if log_json {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_env("TZE_HUD_LOG"))
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_env("TZE_HUD_LOG"))
+            .init();
+    }
+}
+
 fn run() -> Result<(), String> {
+    init_tracing();
+
     let config = parse_args(env::args().skip(1))?;
     if config.mode == CliMode::DemoPlan {
         return write_demo_plan(&config);
@@ -443,8 +474,28 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("invalid operator authority: {error}"))?;
     }
 
+    info!(
+        caller_identity = %config.caller_identity,
+        operator_authority_set = config.operator_authority.is_some(),
+        "projection authority starting"
+    );
+
     let mut portal_drive = PortalDriveState::new();
-    serve_stdio(&mut authority, &config, &mut portal_drive)
+    let result = serve_stdio(&mut authority, &config, &mut portal_drive);
+
+    match &result {
+        Ok(()) => info!(
+            caller_identity = %config.caller_identity,
+            "projection authority shut down (EOF)"
+        ),
+        Err(error) => warn!(
+            caller_identity = %config.caller_identity,
+            %error,
+            "projection authority terminated with error"
+        ),
+    }
+
+    result
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliConfig, String> {
@@ -957,18 +1008,27 @@ fn serve_stdio(
                 }
                 dispatch_line(authority, config, portal_drive, &line)
             }
-            StdinLine::TooLong => malformed_response(
-                "unknown",
-                "unknown",
-                now_wall_us(),
-                format!("stdin request line exceeds {MAX_STDIN_LINE_BYTES} bytes"),
-            ),
-            StdinLine::InvalidUtf8 => malformed_response(
-                "unknown",
-                "unknown",
-                now_wall_us(),
-                "stdin request line is not valid UTF-8",
-            ),
+            StdinLine::TooLong => {
+                warn!(
+                    max_bytes = MAX_STDIN_LINE_BYTES,
+                    "stdin request line too long — truncated and rejected"
+                );
+                malformed_response(
+                    "unknown",
+                    "unknown",
+                    now_wall_us(),
+                    format!("stdin request line exceeds {MAX_STDIN_LINE_BYTES} bytes"),
+                )
+            }
+            StdinLine::InvalidUtf8 => {
+                warn!("stdin request line is not valid UTF-8 — rejected");
+                malformed_response(
+                    "unknown",
+                    "unknown",
+                    now_wall_us(),
+                    "stdin request line is not valid UTF-8",
+                )
+            }
             StdinLine::Eof => break,
         };
         write_result(&mut stdout, &result)?;
@@ -1069,6 +1129,7 @@ fn dispatch_line(
     let value = match serde_json::from_str::<Value>(line) {
         Ok(value) => value,
         Err(error) => {
+            warn!(%error, "invalid JSON request — rejected");
             return malformed_response(
                 "unknown",
                 "unknown",
@@ -1120,39 +1181,122 @@ fn dispatch_line(
             // MutationBatch it sends; the placeholder is never sent on the wire.
             // Part (a): adapter hosted here with runtime-resolved tokens.
             let proj_id = request.envelope.projection_id.clone();
+            let provider = format!("{:?}", request.provider_kind);
             let result =
                 authority.handle_attach(request, caller_identity, server_timestamp_wall_us);
             if result.accepted {
                 portal_drive.attach_adapter(&proj_id, Vec::new());
+                info!(
+                    projection_id = %proj_id,
+                    provider_kind = %provider,
+                    "session attached"
+                );
+            } else {
+                warn!(
+                    projection_id = %proj_id,
+                    provider_kind = %provider,
+                    error_code = ?result.error_code,
+                    status_summary = %result.status_summary,
+                    "attach rejected"
+                );
             }
             result
         }),
         ProjectionOperation::PublishOutput => {
             deserialize_then(value, |request: PublishOutputRequest| {
-                authority.handle_publish_output(request, caller_identity, server_timestamp_wall_us)
+                let proj_id = request.envelope.projection_id.clone();
+                let result = authority.handle_publish_output(
+                    request,
+                    caller_identity,
+                    server_timestamp_wall_us,
+                );
+                if result.accepted {
+                    debug!(
+                        projection_id = %proj_id,
+                        coalesced_output_count = result.coalesced_output_count,
+                        portal_update_ready = result.portal_update_ready,
+                        "publish_output accepted"
+                    );
+                } else {
+                    warn!(
+                        projection_id = %proj_id,
+                        error_code = ?result.error_code,
+                        status_summary = %result.status_summary,
+                        "publish_output rejected"
+                    );
+                }
+                result
             })
         }
         ProjectionOperation::PublishStatus => {
             deserialize_then(value, |request: PublishStatusRequest| {
-                authority.handle_publish_status(request, caller_identity, server_timestamp_wall_us)
+                let proj_id = request.envelope.projection_id.clone();
+                let result = authority.handle_publish_status(
+                    request,
+                    caller_identity,
+                    server_timestamp_wall_us,
+                );
+                if result.accepted {
+                    debug!(
+                        projection_id = %proj_id,
+                        "publish_status accepted"
+                    );
+                } else {
+                    warn!(
+                        projection_id = %proj_id,
+                        error_code = ?result.error_code,
+                        status_summary = %result.status_summary,
+                        "publish_status rejected"
+                    );
+                }
+                result
             })
         }
         ProjectionOperation::GetPendingInput => {
             deserialize_then(value, |request: GetPendingInputRequest| {
-                authority.handle_get_pending_input(
+                let proj_id = request.envelope.projection_id.clone();
+                let result = authority.handle_get_pending_input(
                     request,
                     caller_identity,
                     server_timestamp_wall_us,
-                )
+                );
+                if result.accepted {
+                    debug!(
+                        projection_id = %proj_id,
+                        pending_remaining_count = result.pending_remaining_count,
+                        "get_pending_input accepted"
+                    );
+                } else {
+                    warn!(
+                        projection_id = %proj_id,
+                        error_code = ?result.error_code,
+                        "get_pending_input rejected"
+                    );
+                }
+                result
             })
         }
         ProjectionOperation::AcknowledgeInput => {
             deserialize_then(value, |request: AcknowledgeInputRequest| {
-                authority.handle_acknowledge_input(
+                let proj_id = request.envelope.projection_id.clone();
+                let result = authority.handle_acknowledge_input(
                     request,
                     caller_identity,
                     server_timestamp_wall_us,
-                )
+                );
+                if result.accepted {
+                    debug!(
+                        projection_id = %proj_id,
+                        "acknowledge_input accepted"
+                    );
+                } else {
+                    warn!(
+                        projection_id = %proj_id,
+                        error_code = ?result.error_code,
+                        "acknowledge_input rejected"
+                    );
+                }
+                result
             })
         }
         ProjectionOperation::Detach => deserialize_then(value, |request: DetachRequest| {
@@ -1161,6 +1305,17 @@ fn dispatch_line(
                 authority.handle_detach(request, caller_identity, server_timestamp_wall_us);
             if result.accepted {
                 portal_drive.detach_adapter(&proj_id);
+                info!(
+                    projection_id = %proj_id,
+                    "session detached"
+                );
+            } else {
+                warn!(
+                    projection_id = %proj_id,
+                    error_code = ?result.error_code,
+                    status_summary = %result.status_summary,
+                    "detach rejected"
+                );
             }
             result
         }),
@@ -1170,6 +1325,17 @@ fn dispatch_line(
                 authority.handle_cleanup(request, caller_identity, server_timestamp_wall_us);
             if result.accepted {
                 portal_drive.detach_adapter(&proj_id);
+                info!(
+                    projection_id = %proj_id,
+                    "session cleaned up"
+                );
+            } else {
+                warn!(
+                    projection_id = %proj_id,
+                    error_code = ?result.error_code,
+                    status_summary = %result.status_summary,
+                    "cleanup rejected"
+                );
             }
             result
         }),
@@ -1218,6 +1384,7 @@ fn dispatch_set_token_map(
 
     let adapter_count = portal_drive.adapters.len();
     portal_drive.apply_token_map(req.token_overrides);
+    debug!(adapter_count, "token map applied to portal drive adapters");
     // Note: no authority available here so the drain loop cannot run.
     // The caller will drain on the next PublishOutput operation.
     CliOperationResult {
