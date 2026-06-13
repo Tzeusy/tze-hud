@@ -267,7 +267,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             session_proto::SessionInit {
                 agent_id: "vertical-slice-agent".to_string(),
                 agent_display_name: "Vertical Slice Agent".to_string(),
-                pre_shared_key: "vertical-slice-key".to_string(),
+                pre_shared_key: String::new(),
                 // Canonical v1 capability names. The runtime validates these against
                 // the canonical vocabulary; non-canonical names are rejected with a
                 // CONFIG_UNKNOWN_CAPABILITY error and a hint pointing to the canonical
@@ -291,7 +291,13 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: "vertical-slice-key".to_string(),
+                        },
+                    )),
+                }),
             },
         )),
     })
@@ -1418,14 +1424,20 @@ capabilities = ["create_tiles"]
                 session_proto::SessionInit {
                     agent_id: "test-agent".to_string(),
                     agent_display_name: "Test".to_string(),
-                    pre_shared_key: "test-key".to_string(),
+                    pre_shared_key: String::new(),
                     requested_capabilities: vec!["create_tiles".to_string()],
                     initial_subscriptions: vec![],
                     resume_token: Vec::new(),
                     agent_timestamp_wall_us: now_wall_us(),
                     min_protocol_version: 1000,
                     max_protocol_version: 1001,
-                    auth_credential: None,
+                    auth_credential: Some(session_proto::AuthCredential {
+                        credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                            session_proto::PreSharedKeyCredential {
+                                key: "test-key".to_string(),
+                            },
+                        )),
+                    }),
                 },
             )),
         })
@@ -2043,7 +2055,7 @@ capabilities = ["create_tiles", "modify_own_tiles"]
                 session_proto::SessionInit {
                     agent_id: "restricted-agent".to_string(),
                     agent_display_name: "Restricted Agent".to_string(),
-                    pre_shared_key: "test-key".to_string(),
+                    pre_shared_key: String::new(),
                     // Request SCENE_TOPOLOGY and ZONE_EVENTS without the required capabilities.
                     // This demonstrates the subscription gating behaviour: the agent will
                     // receive LEASE_CHANGES (mandatory) but not the gated categories.
@@ -2062,7 +2074,13 @@ capabilities = ["create_tiles", "modify_own_tiles"]
                     agent_timestamp_wall_us: now_wall_us(),
                     min_protocol_version: 1000,
                     max_protocol_version: 1001,
-                    auth_credential: None,
+                    auth_credential: Some(session_proto::AuthCredential {
+                        credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                            session_proto::PreSharedKeyCredential {
+                                key: "test-key".to_string(),
+                            },
+                        )),
+                    }),
                 },
             )),
         })

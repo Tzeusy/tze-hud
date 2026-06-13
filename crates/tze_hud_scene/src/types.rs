@@ -984,8 +984,6 @@ impl HitRegionLocalState {
 /// All 8 canonical states from the spec are present.
 /// Terminal states (no further transitions): `Denied`, `Revoked`, `Expired`, `Released`.
 /// Non-terminal: `Requested`, `Active`, `Suspended`, `Orphaned`.
-///
-/// `Disconnected` is a deprecated alias for `Orphaned`; new code should use `Orphaned`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeaseState {
     /// Lease request received; runtime evaluating. No mutations allowed.
@@ -995,10 +993,7 @@ pub enum LeaseState {
     /// Lease suspended (safe mode) — mutations blocked, state and tiles preserved.
     Suspended,
     /// Session disconnected — within reconnect grace period. Tiles frozen.
-    /// Canonical name per spec. Replaces `Disconnected`.
     Orphaned,
-    /// Agent disconnected — legacy alias for `Orphaned`. Kept for backward compat.
-    Disconnected,
     /// Lease request rejected — terminal; agent must submit a new request.
     Denied,
     /// Lease revoked — state destroyed. Terminal.
@@ -1237,12 +1232,11 @@ impl Lease {
             | LeaseState::Released => true,
             // When suspended, TTL clock is paused — not expired.
             LeaseState::Suspended => false,
-            // When orphaned/disconnected, TTL continues.
+            // When orphaned, TTL continues.
             // (Grace period handles cleanup separately.)
-            LeaseState::Orphaned
-            | LeaseState::Disconnected
-            | LeaseState::Active
-            | LeaseState::Requested => self.effective_remaining_ms(now_ms) == 0,
+            LeaseState::Orphaned | LeaseState::Active | LeaseState::Requested => {
+                self.effective_remaining_ms(now_ms) == 0
+            }
         }
     }
 
@@ -1331,9 +1325,9 @@ impl Lease {
         Ok(())
     }
 
-    /// Transition Orphaned (or legacy Disconnected) -> Active (agent reconnect within grace period).
+    /// Transition Orphaned -> Active (agent reconnect within grace period).
     pub fn reconnect(&mut self, now_ms: u64) -> Result<(), LeaseError> {
-        if self.state != LeaseState::Orphaned && self.state != LeaseState::Disconnected {
+        if self.state != LeaseState::Orphaned {
             return Err(LeaseError::InvalidTransition {
                 from: self.state,
                 to: LeaseState::Active,
@@ -1373,12 +1367,10 @@ impl Lease {
         self.state == LeaseState::Active
     }
 
-    /// Check if the grace period has expired for an orphaned/disconnected lease.
+    /// Check if the grace period has expired for an orphaned lease.
     pub fn check_grace_expired(&self, now_ms: u64) -> bool {
         match (self.state, self.disconnected_at_ms) {
-            (LeaseState::Orphaned, Some(disc_at)) | (LeaseState::Disconnected, Some(disc_at)) => {
-                now_ms >= disc_at + self.grace_period_ms
-            }
+            (LeaseState::Orphaned, Some(disc_at)) => now_ms >= disc_at + self.grace_period_ms,
             _ => false,
         }
     }
@@ -2090,16 +2082,6 @@ pub struct ZonePublishRecord {
     #[serde(default)]
     pub breakpoints: Vec<u64>,
 }
-
-/// Type alias for `ZonePublishRecord` — the canonical name for the publication
-/// level of the four-level zone ontology.
-///
-/// Ontology levels:
-/// 1. `ZoneDefinition` — the zone type (schema, accepted media, contention policy)
-/// 2. `ZoneInstance` — zone type bound to a specific tab
-/// 3. `ZonePublication` (= `ZonePublishRecord`) — a single publish event
-/// 4. `ZoneOccupancy` — resolved state after applying contention policy
-pub type ZonePublication = ZonePublishRecord;
 
 /// A zone instance — zone type bound to a specific tab.
 ///

@@ -180,8 +180,8 @@ pub fn check_zone_publish_allowed(lease_state: crate::lease::LeaseState) -> Zone
     use crate::lease::LeaseState;
     match lease_state {
         LeaseState::Active => ZonePublishResult::Accepted,
-        // Orphaned and its deprecated alias Disconnected: reject new publishes.
-        LeaseState::Orphaned | LeaseState::Disconnected => ZonePublishResult::RejectedLeaseOrphaned,
+        // Orphaned: reject new publishes.
+        LeaseState::Orphaned => ZonePublishResult::RejectedLeaseOrphaned,
         LeaseState::Suspended => ZonePublishResult::RejectedSafeModeActive,
         // All remaining states (Requested, Revoked, Expired, Denied, Released)
         // are either pre-active or terminal — reject as not-active.

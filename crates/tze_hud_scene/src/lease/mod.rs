@@ -995,10 +995,7 @@ pub mod tests {
     // from silently surviving.  The test sets the state directly via a helper that
     // constructs the lease in the target from_state, then probes every to_state.
 
-    /// All non-deprecated non-terminal source states the test drives from.
-    ///
-    /// `Disconnected` is omitted: it is a legacy alias for `Orphaned` tracked in
-    /// the cruft-batch bead (hud-t55vn) and intentionally excluded here.
+    /// All non-terminal source states the test drives from.
     const FROM_STATES: &[LeaseState] = &[
         LeaseState::Requested,
         LeaseState::Active,
@@ -1051,7 +1048,7 @@ pub mod tests {
                 Some(lease)
             }
             // Terminal states are not from-states for this test.
-            Denied | Revoked | Expired | Released | Disconnected => None,
+            Denied | Revoked | Expired | Released => None,
         }
     }
 
@@ -1075,8 +1072,8 @@ pub mod tests {
             Revoked => lease.revoke(RevokeReason::ViewerDismissed).map_err(|_| ()),
             Expired => lease.expire().map_err(|_| ()),
             Released => lease.release().map_err(|_| ()),
-            // Requested and Disconnected are not valid transition targets.
-            Requested | Disconnected => Err(()),
+            // Requested is not a valid transition target.
+            Requested => Err(()),
         }
     }
 

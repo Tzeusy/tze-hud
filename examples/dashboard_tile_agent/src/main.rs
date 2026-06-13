@@ -389,7 +389,7 @@ async fn do_content_update_with_host(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
                 agent_display_name: agent_display_name.to_string(),
-                pre_shared_key: psk.to_string(),
+                pre_shared_key: String::new(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),
@@ -399,7 +399,13 @@ async fn do_content_update_with_host(
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: psk.to_string(),
+                        },
+                    )),
+                }),
             },
         )),
     })
@@ -911,7 +917,7 @@ async fn establish_session_with_host(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
                 agent_display_name: agent_display_name.to_string(),
-                pre_shared_key: psk.to_string(),
+                pre_shared_key: String::new(),
                 // Canonical v1 capability names — non-canonical names are
                 // rejected with CONFIG_UNKNOWN_CAPABILITY.
                 requested_capabilities: vec![
@@ -925,7 +931,13 @@ async fn establish_session_with_host(
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000, // v1.0
                 max_protocol_version: 1001, // v1.1
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: psk.to_string(),
+                        },
+                    )),
+                }),
             },
         )),
     })
@@ -1104,7 +1116,7 @@ async fn request_lease_with_host(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
                 agent_display_name: agent_display_name.to_string(),
-                pre_shared_key: psk.to_string(),
+                pre_shared_key: String::new(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),
@@ -1115,7 +1127,13 @@ async fn request_lease_with_host(
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: psk.to_string(),
+                        },
+                    )),
+                }),
             },
         )),
     })
@@ -1404,7 +1422,7 @@ async fn create_tile_batch_with_host(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
                 agent_display_name: agent_display_name.to_string(),
-                pre_shared_key: psk.to_string(),
+                pre_shared_key: String::new(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),
@@ -1414,7 +1432,13 @@ async fn create_tile_batch_with_host(
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: psk.to_string(),
+                        },
+                    )),
+                }),
             },
         )),
     })
@@ -2104,7 +2128,7 @@ mod tests {
             payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
                 agent_id: "bad-cap-test-agent".to_string(),
                 agent_display_name: "Bad Cap Test".to_string(),
-                pre_shared_key: TEST_PSK.to_string(),
+                pre_shared_key: String::new(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),
@@ -2114,7 +2138,13 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: TEST_PSK.to_string(),
+                        },
+                    )),
+                }),
             })),
         })
         .await
@@ -2491,7 +2521,7 @@ mod tests {
             payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
                 agent_id: "partial-fail-test-agent".to_string(),
                 agent_display_name: "Partial Fail Test".to_string(),
-                pre_shared_key: TEST_PSK.to_string(),
+                pre_shared_key: String::new(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),
@@ -2501,7 +2531,13 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: TEST_PSK.to_string(),
+                        },
+                    )),
+                }),
             })),
         })
         .await
@@ -2745,7 +2781,7 @@ mod tests {
             payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
                 agent_id: "node-atomicity-test-agent".to_string(),
                 agent_display_name: "Node Atomicity Test".to_string(),
-                pre_shared_key: TEST_PSK.to_string(),
+                pre_shared_key: String::new(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),
@@ -2755,7 +2791,13 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: TEST_PSK.to_string(),
+                        },
+                    )),
+                }),
             })),
         })
         .await
@@ -3179,7 +3221,7 @@ mod tests {
             payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
                 agent_id: "expired-lease-update-agent".to_string(),
                 agent_display_name: "Expired Lease Test".to_string(),
-                pre_shared_key: TEST_PSK.to_string(),
+                pre_shared_key: String::new(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),
@@ -3189,7 +3231,13 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: TEST_PSK.to_string(),
+                        },
+                    )),
+                }),
             })),
         })
         .await
@@ -3839,7 +3887,7 @@ mod tests {
             payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
                 agent_id: agent_id.to_string(),
                 agent_display_name: agent_id.to_string(),
-                pre_shared_key: TEST_PSK.to_string(),
+                pre_shared_key: String::new(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),
@@ -3854,7 +3902,13 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: None,
+                auth_credential: Some(session_proto::AuthCredential {
+                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
+                        session_proto::PreSharedKeyCredential {
+                            key: TEST_PSK.to_string(),
+                        },
+                    )),
+                }),
             })),
         })
         .await

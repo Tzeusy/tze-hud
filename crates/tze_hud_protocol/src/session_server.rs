@@ -263,31 +263,19 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
 
 /// Traffic class for an **inbound** `MutationBatch`.
 ///
-/// Used by the per-session freeze queue to implement traffic-class-aware
-/// overflow (system-shell/spec.md §Freeze Scene, source RFC 0007 §4.3):
-///
-/// - **Transactional** — never evicted; gRPC backpressure applied on overflow.
-/// - **StateStream** — coalesced (latest-wins) before eviction.
-/// - **Ephemeral** — dropped oldest-first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InboundTrafficClass {
-    Transactional,
-    StateStream,
-    Ephemeral,
-}
-
 /// Classify an inbound `MutationBatch` by examining its contained mutations.
 ///
 /// Any structural/identity-changing mutation makes the batch Transactional;
 /// otherwise content mutations are StateStream; empty batch is Ephemeral.
-fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
+/// Uses the same `TrafficClass` enum as outbound classification (RFC 0005 §3).
+fn classify_inbound_batch(batch: &MutationBatch) -> TrafficClass {
     for m in &batch.mutations {
         if let Some(ref mutation) = m.mutation {
             use crate::proto::mutation_proto::Mutation;
             match mutation {
-                Mutation::CreateTile(_) => return InboundTrafficClass::Transactional,
+                Mutation::CreateTile(_) => return TrafficClass::Transactional,
                 // AddNode is structural — marks the batch as Transactional.
-                Mutation::AddNode(_) => return InboundTrafficClass::Transactional,
+                Mutation::AddNode(_) => return TrafficClass::Transactional,
                 // SetTileRoot, UpdateTileOpacity, UpdateTileInputMode are StateStream.
                 Mutation::SetTileRoot(_) => {}
                 Mutation::UpdateTileOpacity(_) => {}
@@ -301,7 +289,7 @@ fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
                 // Scroll mutations: config register is Transactional (structural),
                 // offset updates are StateStream (rate-limited local feedback).
                 Mutation::RegisterTileScroll(_) => {
-                    return InboundTrafficClass::Transactional;
+                    return TrafficClass::Transactional;
                 }
                 Mutation::SetScrollOffset(_) => {}
             }
@@ -309,9 +297,9 @@ fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
     }
     // If we found any mutation at all, it's StateStream (content update)
     if batch.mutations.is_empty() {
-        InboundTrafficClass::Ephemeral
+        TrafficClass::Ephemeral
     } else {
-        InboundTrafficClass::StateStream
+        TrafficClass::StateStream
     }
 }
 
@@ -331,7 +319,7 @@ struct FrozenMutation {
     /// The original proto `MutationBatch` to re-apply on unfreeze.
     batch: MutationBatch,
     /// Traffic class inferred at enqueue time.
-    traffic_class: InboundTrafficClass,
+    traffic_class: TrafficClass,
     /// Coalesce key for StateStream mutations: `"<namespace>/<lease_id_hex>"`.
     /// When two entries share the same key, the newer one replaces the older
     /// (latest-wins coalescing per spec).
@@ -367,11 +355,6 @@ impl SessionFreezeQueue {
         }
     }
 
-    #[allow(dead_code)] // reserved for diagnostics/safe-mode drain path
-    fn len(&self) -> usize {
-        self.queue.len()
-    }
-
     fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
@@ -394,7 +377,7 @@ impl SessionFreezeQueue {
         let traffic_class = classify_inbound_batch(&batch);
         // Derive coalesce key for StateStream: "namespace/lease_id_hex".
         // Using the first 8 bytes (64 bits) as a compact key.
-        let coalesce_key = if traffic_class == InboundTrafficClass::StateStream {
+        let coalesce_key = if traffic_class == TrafficClass::StateStream {
             let prefix_len = batch.lease_id.len().min(8);
             let key_hex: String = batch.lease_id[..prefix_len]
                 .iter()
@@ -408,7 +391,7 @@ impl SessionFreezeQueue {
         let before_len = self.queue.len();
 
         match traffic_class {
-            InboundTrafficClass::Transactional => {
+            TrafficClass::Transactional => {
                 if self.is_full() {
                     return FreezeEnqueueResult::BackpressureRequired;
                 }
@@ -423,11 +406,11 @@ impl SessionFreezeQueue {
                 }
             }
 
-            InboundTrafficClass::StateStream => {
+            TrafficClass::StateStream => {
                 // Try coalescing: if an entry with the same key exists, replace it.
                 if let Some(ref key) = coalesce_key {
                     for entry in self.queue.iter_mut() {
-                        if entry.traffic_class == InboundTrafficClass::StateStream
+                        if entry.traffic_class == TrafficClass::StateStream
                             && entry.coalesce_key.as_deref() == Some(key.as_str())
                         {
                             *entry = FrozenMutation {
@@ -445,7 +428,7 @@ impl SessionFreezeQueue {
                     if let Some(idx) = self
                         .queue
                         .iter()
-                        .position(|e| e.traffic_class != InboundTrafficClass::Transactional)
+                        .position(|e| e.traffic_class != TrafficClass::Transactional)
                     {
                         // idx was just returned by position() on this VecDeque,
                         // so remove(idx) is guaranteed to succeed.
@@ -478,13 +461,13 @@ impl SessionFreezeQueue {
                 }
             }
 
-            InboundTrafficClass::Ephemeral => {
+            TrafficClass::Ephemeral => {
                 if self.is_full() {
                     // Evict oldest non-transactional, or drop this one.
                     if let Some(idx) = self
                         .queue
                         .iter()
-                        .position(|e| e.traffic_class != InboundTrafficClass::Transactional)
+                        .position(|e| e.traffic_class != TrafficClass::Transactional)
                     {
                         // idx was just returned by position() on this VecDeque,
                         // so remove(idx) is guaranteed to succeed.
@@ -522,49 +505,6 @@ impl SessionFreezeQueue {
     fn drain(&mut self) -> Vec<MutationBatch> {
         self.queue.drain(..).map(|e| e.batch).collect()
     }
-
-    /// Discard all queued mutations (used on safe mode cancellation).
-    #[allow(dead_code)] // reserved for safe-mode cancellation path
-    fn discard(&mut self) {
-        self.queue.clear();
-    }
-}
-
-// ─── Ephemeral send buffer ────────────────────────────────────────────────────
-
-/// A bounded queue for ephemeral outbound messages.
-///
-/// When the buffer exceeds `capacity`, the oldest message is dropped, retaining
-/// only the latest `capacity` messages (RFC 0005 §2.5: oldest-first eviction).
-#[allow(dead_code)] // reserved for RFC 0005 §2.5 ephemeral eviction path; not yet wired
-struct EphemeralQueue {
-    queue: VecDeque<Result<ServerMessage, Status>>,
-    capacity: usize,
-}
-
-#[allow(dead_code)] // reserved for RFC 0005 §2.5 ephemeral eviction path; not yet wired
-impl EphemeralQueue {
-    fn new(capacity: usize) -> Self {
-        Self {
-            queue: VecDeque::with_capacity(capacity + 1),
-            capacity,
-        }
-    }
-
-    /// Enqueue a message. If at capacity, drops the oldest entry.
-    fn push(&mut self, msg: Result<ServerMessage, Status>) {
-        if self.queue.len() >= self.capacity {
-            self.queue.pop_front(); // oldest-first eviction
-        }
-        self.queue.push_back(msg);
-    }
-
-    /// Drain the queue into the send channel (non-blocking).
-    async fn flush(&mut self, tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>) {
-        while let Some(msg) = self.queue.pop_front() {
-            let _ = tx.try_send(msg);
-        }
-    }
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -581,10 +521,6 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 =
 
 /// Default maximum sequence gap before SEQUENCE_GAP_EXCEEDED (RFC 0005 §2.3).
 const DEFAULT_MAX_SEQUENCE_GAP: u64 = 100;
-
-/// Default per-session ephemeral message buffer quota (RFC 0005 §2.5).
-#[allow(dead_code)] // reserved for ephemeral buffer wiring
-const DEFAULT_EPHEMERAL_BUFFER_MAX: usize = 16;
 
 // ─── Helper ─────────────────────────────────────────────────────────────────
 
@@ -1675,6 +1611,7 @@ impl HudSessionImpl {
     ///
     /// Uses an empty capability registry with `fallback_unrestricted = true`
     /// for backwards compatibility. Prefer `new_with_config` for production.
+    #[cfg(any(test, feature = "dev-mode"))]
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (capability_revocation_tx, _) =
@@ -1699,30 +1636,6 @@ impl HudSessionImpl {
                 media_ingress_active: None,
                 input_capture_tx: None,
             })),
-            psk: psk.to_string(),
-            agent_capabilities: Arc::new(HashMap::new()),
-            fallback_unrestricted: true,
-            degradation_tx,
-            capability_revocation_tx,
-            input_event_tx,
-            element_repositioned_tx,
-            media_ingress_config: Arc::new(tze_hud_scene::config::MediaIngressConfig::default()),
-        }
-    }
-
-    /// Create from existing shared state.
-    ///
-    /// Uses an empty capability registry with `fallback_unrestricted = true`
-    /// for backwards compatibility. Prefer `from_shared_state_with_config` for production.
-    pub fn from_shared_state(state: Arc<Mutex<SharedState>>, psk: &str) -> Self {
-        let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-        let (capability_revocation_tx, _) =
-            tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-        let (input_event_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-        let (element_repositioned_tx, _) =
-            tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-        Self {
-            state,
             psk: psk.to_string(),
             agent_capabilities: Arc::new(HashMap::new()),
             fallback_unrestricted: true,
@@ -10621,73 +10534,6 @@ mod tests {
             classify_server_payload(&ServerPayload::Heartbeat(Heartbeat::default())),
             TrafficClass::Ephemeral,
         );
-    }
-
-    // ─── Ephemeral queue backpressure tests (RFC 0005 §2.5) ──────────────────
-
-    /// Scenario: Ephemeral messages dropped under pressure (RFC 0005 §2.5)
-    /// WHEN 20 ephemeral messages are enqueued (>16 quota),
-    /// THEN oldest are dropped, retaining latest 16.
-    #[test]
-    fn test_ephemeral_queue_drops_oldest() {
-        let mut queue = EphemeralQueue::new(DEFAULT_EPHEMERAL_BUFFER_MAX);
-
-        // Enqueue 20 messages (4 more than the 16-message quota)
-        for i in 0u64..20 {
-            let msg = Ok(ServerMessage {
-                sequence: i + 1,
-                timestamp_wall_us: 0,
-                payload: Some(ServerPayload::Heartbeat(Heartbeat {
-                    timestamp_mono_us: i,
-                })),
-            });
-            queue.push(msg);
-        }
-
-        // Queue should contain exactly 16 messages (quota)
-        assert_eq!(
-            queue.queue.len(),
-            DEFAULT_EPHEMERAL_BUFFER_MAX,
-            "Queue should be capped at ephemeral_buffer_max=16"
-        );
-
-        // First retained message should be sequence 5 (oldest 4 were dropped: 1,2,3,4)
-        if let Some(Ok(msg)) = queue.queue.front() {
-            assert_eq!(
-                msg.sequence, 5,
-                "Oldest 4 should have been evicted (1-4 dropped, 5 is oldest retained)"
-            );
-        }
-
-        // Last retained message should be sequence 20
-        if let Some(Ok(msg)) = queue.queue.back() {
-            assert_eq!(msg.sequence, 20, "Latest message should be 20");
-        }
-    }
-
-    /// Scenario: Ephemeral queue within capacity — no messages dropped.
-    #[test]
-    fn test_ephemeral_queue_within_capacity() {
-        let mut queue = EphemeralQueue::new(DEFAULT_EPHEMERAL_BUFFER_MAX);
-
-        for i in 0u64..16 {
-            queue.push(Ok(ServerMessage {
-                sequence: i + 1,
-                timestamp_wall_us: 0,
-                payload: Some(ServerPayload::Heartbeat(Heartbeat {
-                    timestamp_mono_us: i,
-                })),
-            }));
-        }
-
-        assert_eq!(
-            queue.queue.len(),
-            16,
-            "All 16 messages retained (at capacity)"
-        );
-        if let Some(Ok(msg)) = queue.queue.front() {
-            assert_eq!(msg.sequence, 1, "No eviction: first message is sequence 1");
-        }
     }
 
     // ─── Sequence validation unit tests ─────────────────────────────────────

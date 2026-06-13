@@ -2456,6 +2456,7 @@ impl ProjectionAuthority {
         before - self.sessions.len()
     }
 
+    #[cfg(test)]
     pub fn owner_token_verifier_for_test(&self, projection_id: &str) -> Option<&str> {
         self.sessions
             .get(projection_id)

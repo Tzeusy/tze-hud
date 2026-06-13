@@ -755,10 +755,10 @@ fn disconnect_during_lifecycle_orphans_tile_with_badge() {
         .disconnect_lease(&lease_id, now_ms)
         .expect("disconnect_lease must succeed for an active lease");
 
-    // Lease must be ORPHANED / Disconnected.
+    // Lease must be ORPHANED.
     let lease = scene.leases.get(&lease_id).expect("lease must exist");
     assert!(
-        matches!(lease.state, LeaseState::Orphaned | LeaseState::Disconnected),
+        matches!(lease.state, LeaseState::Orphaned),
         "lease must be ORPHANED after agent disconnect; got {:?}",
         lease.state
     );

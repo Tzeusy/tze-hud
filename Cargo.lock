@@ -4088,6 +4088,7 @@ dependencies = [
  "tonic",
  "tonic-build",
  "tracing",
+ "tze_hud_protocol",
  "tze_hud_resource",
  "tze_hud_scene",
  "tze_hud_telemetry",

@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+## Enables constructors that are only safe in tests or local dev environments.
+## Required by integration tests that build a HudSessionImpl directly from a
+## SceneGraph without going through the production config path.
+dev-mode = []
+
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
 tze_hud_widget = { path = "../tze_hud_widget" }
@@ -28,6 +34,9 @@ uuid = { workspace = true }
 tokio-stream = { workspace = true }
 
 [dev-dependencies]
+# Self-dependency with dev-mode enabled so that integration tests under tests/
+# can call HudSessionImpl::new without going through the production config path.
+tze_hud_protocol = { path = ".", features = ["dev-mode"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 
