@@ -26,8 +26,6 @@ pub mod validation;
 pub mod config;
 pub mod events;
 pub mod lease;
-pub mod policy;
-pub mod resource;
 
 pub use calibration::{
     CalibrationResult, current_calibration, current_calibration_with_gpu, gpu_scaled_budget,
