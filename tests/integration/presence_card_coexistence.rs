@@ -20,11 +20,8 @@
 //! - openspec/changes/exemplar-presence-card/tasks.md tasks 4-5
 //! - scene-graph spec: tile CRUD, V1 node types, atomic batch mutations
 
-use tze_hud_protocol::auth::{RUNTIME_MAX_VERSION, RUNTIME_MIN_VERSION};
 use tze_hud_protocol::proto;
 use tze_hud_protocol::proto::session as session_proto;
-#[allow(deprecated)]
-use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_scene::types::ZoneRegistry;
@@ -38,8 +35,14 @@ use tze_hud_scene::{
     },
 };
 
-use tokio_stream::StreamExt;
 use uuid::Uuid;
+
+// ─── Shared gRPC session harness ─────────────────────────────────────────────
+// Extracted from duplicate copies in multi_agent, v1_thesis, and subtitle_streaming
+// (hud-ls5pz). See common/mod.rs for drift reconciliation notes.
+#[path = "common/mod.rs"]
+mod common;
+use common::*;
 
 // ─── Display constants ────────────────────────────────────────────────────────
 
@@ -772,207 +775,9 @@ fn set_tile_root_is_namespace_isolated() {
     );
 }
 
-// ─── gRPC helper types ────────────────────────────────────────────────────────
-
-fn now_wall_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64
-}
-
-/// Result of establishing a gRPC session and acquiring a lease.
-struct AgentSession {
-    namespace: String,
-    lease_id_bytes: Vec<u8>,
-    tx: tokio::sync::mpsc::Sender<session_proto::ClientMessage>,
-    rx: tonic::codec::Streaming<session_proto::ServerMessage>,
-    sequence: u64,
-}
-
-impl AgentSession {
-    fn next_seq(&mut self) -> u64 {
-        self.sequence += 1;
-        self.sequence
-    }
-
-    /// Receive the next server message that is NOT a `LeaseStateChange`.
-    async fn next_non_state_change(
-        &mut self,
-    ) -> Option<Result<session_proto::ServerMessage, tonic::Status>> {
-        loop {
-            let item = self.rx.next().await?;
-            match &item {
-                Ok(msg) => {
-                    if let Some(session_proto::server_message::Payload::LeaseStateChange(_)) =
-                        &msg.payload
-                    {
-                        continue;
-                    }
-                    return Some(item);
-                }
-                Err(_) => return Some(item),
-            }
-        }
-    }
-}
-
-/// Connect an agent via gRPC, complete the handshake, and acquire a lease.
-async fn connect_agent(
-    agent_id: &str,
-    capabilities: Vec<String>,
-) -> Result<AgentSession, Box<dyn std::error::Error>> {
-    let mut client = HudSessionClient::connect(format!("http://[::1]:{GRPC_PORT}")).await?;
-
-    let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
-
-    let now_us = now_wall_us();
-
-    tx.send(session_proto::ClientMessage {
-        sequence: 1,
-        timestamp_wall_us: now_us,
-        payload: Some(session_proto::client_message::Payload::SessionInit(
-            session_proto::SessionInit {
-                agent_id: agent_id.to_string(),
-                agent_display_name: format!("{agent_id} (coexistence test)"),
-                pre_shared_key: TEST_PSK.to_string(),
-                requested_capabilities: capabilities.clone(),
-                initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
-                resume_token: Vec::new(),
-                agent_timestamp_wall_us: now_us,
-                min_protocol_version: RUNTIME_MIN_VERSION,
-                max_protocol_version: RUNTIME_MAX_VERSION,
-                auth_credential: None,
-            },
-        )),
-    })
-    .await?;
-
-    let mut response_stream = client.session(stream).await?.into_inner();
-
-    // Read SessionEstablished
-    let msg = response_stream
-        .next()
-        .await
-        .ok_or("no message received")??;
-    let namespace = match &msg.payload {
-        Some(session_proto::server_message::Payload::SessionEstablished(est)) => {
-            est.namespace.clone()
-        }
-        other => {
-            return Err(
-                format!("agent {agent_id}: Expected SessionEstablished, got: {other:?}").into(),
-            );
-        }
-    };
-
-    // Read SceneSnapshot
-    let _msg = response_stream.next().await.ok_or("no scene snapshot")??;
-
-    // Request lease
-    tx.send(session_proto::ClientMessage {
-        sequence: 2,
-        timestamp_wall_us: now_wall_us(),
-        payload: Some(session_proto::client_message::Payload::LeaseRequest(
-            session_proto::LeaseRequest {
-                ttl_ms: 120_000,
-                capabilities: capabilities.clone(),
-                lease_priority: 2,
-            },
-        )),
-    })
-    .await?;
-
-    let mut partial_session = AgentSession {
-        namespace: namespace.clone(),
-        lease_id_bytes: vec![],
-        tx: tx.clone(),
-        rx: response_stream,
-        sequence: 2,
-    };
-
-    // Read LeaseResponse — skip any interleaved LeaseStateChange messages.
-    let msg = partial_session
-        .next_non_state_change()
-        .await
-        .ok_or("no lease response")??;
-    let (lease_id_bytes, response_stream) = match &msg.payload {
-        Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {
-            (resp.lease_id.clone(), partial_session.rx)
-        }
-        other => {
-            return Err(format!(
-                "agent {agent_id}: Expected LeaseResponse(granted), got: {other:?}"
-            )
-            .into());
-        }
-    };
-
-    Ok(AgentSession {
-        namespace,
-        lease_id_bytes,
-        tx,
-        rx: response_stream,
-        sequence: 2,
-    })
-}
-
-/// Send a CreateTile mutation via gRPC and return the tile_id bytes.
-async fn create_tile_via_grpc(
-    session: &mut AgentSession,
-    bounds: [f32; 4],
-    z_order: u32,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let batch_id: Vec<u8> = Uuid::now_v7().as_bytes().to_vec();
-    let seq = session.next_seq();
-
-    session
-        .tx
-        .send(session_proto::ClientMessage {
-            sequence: seq,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(session_proto::client_message::Payload::MutationBatch(
-                session_proto::MutationBatch {
-                    batch_id,
-                    lease_id: session.lease_id_bytes.clone(),
-                    mutations: vec![proto::MutationProto {
-                        mutation: Some(proto::mutation_proto::Mutation::CreateTile(
-                            proto::CreateTileMutation {
-                                tab_id: vec![], // empty = server infers active tab
-                                bounds: Some(proto::Rect {
-                                    x: bounds[0],
-                                    y: bounds[1],
-                                    width: bounds[2],
-                                    height: bounds[3],
-                                }),
-                                z_order,
-                            },
-                        )),
-                    }],
-                    timing: None,
-                },
-            )),
-        })
-        .await?;
-
-    let msg = session
-        .next_non_state_change()
-        .await
-        .ok_or("no mutation result")??;
-    match &msg.payload {
-        Some(session_proto::server_message::Payload::MutationResult(result)) if result.accepted => {
-            let tile_id = result.created_ids.first().cloned().unwrap_or_default();
-            Ok(tile_id)
-        }
-        Some(session_proto::server_message::Payload::MutationResult(result)) => Err(format!(
-            "CreateTile rejected: {} — {}",
-            result.error_code, result.error_message
-        )
-        .into()),
-        other => Err(format!("Expected MutationResult, got: {other:?}").into()),
-    }
-}
+// ─── gRPC helper types (file-local) ──────────────────────────────────────────
+// now_wall_us(), AgentSession, connect_agent, create_tile_via_grpc are provided
+// by the shared common harness above. Only set_tile_text_via_grpc is unique here.
 
 /// Send a SetTileRoot mutation via gRPC, setting a TextMarkdownNode as the root.
 ///
@@ -1095,9 +900,30 @@ async fn test_three_agents_presence_card_coexistence() -> Result<(), Box<dyn std
     let caps = vec!["create_tiles".to_string(), "modify_own_tiles".to_string()];
 
     let (mut alpha, mut beta, mut gamma) = tokio::try_join!(
-        connect_agent("agent-alpha", caps.clone()),
-        connect_agent("agent-beta", caps.clone()),
-        connect_agent("agent-gamma", caps.clone()),
+        connect_agent(
+            TEST_PSK,
+            GRPC_PORT,
+            "agent-alpha",
+            "coexistence test",
+            2,
+            caps.clone()
+        ),
+        connect_agent(
+            TEST_PSK,
+            GRPC_PORT,
+            "agent-beta",
+            "coexistence test",
+            2,
+            caps.clone()
+        ),
+        connect_agent(
+            TEST_PSK,
+            GRPC_PORT,
+            "agent-gamma",
+            "coexistence test",
+            2,
+            caps.clone()
+        ),
     )?;
 
     // Verify all three namespaces are distinct (AC 5.1: namespace isolation).
