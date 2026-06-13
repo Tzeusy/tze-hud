@@ -6312,9 +6312,36 @@ mod tests {
         telemetry.input_to_next_present_us = 18_000;
 
         assert!(!state.record(&telemetry));
-        assert_eq!(state.summary.input_to_local_ack.samples, vec![900]);
-        assert_eq!(state.summary.input_to_scene_commit.samples, vec![10_500]);
-        assert_eq!(state.summary.input_to_next_present.samples, vec![18_000]);
+        assert_eq!(
+            state
+                .summary
+                .input_to_local_ack
+                .samples
+                .iter()
+                .copied()
+                .collect::<Vec<u64>>(),
+            vec![900]
+        );
+        assert_eq!(
+            state
+                .summary
+                .input_to_scene_commit
+                .samples
+                .iter()
+                .copied()
+                .collect::<Vec<u64>>(),
+            vec![10_500]
+        );
+        assert_eq!(
+            state
+                .summary
+                .input_to_next_present
+                .samples
+                .iter()
+                .copied()
+                .collect::<Vec<u64>>(),
+            vec![18_000]
+        );
     }
 
     #[test]
