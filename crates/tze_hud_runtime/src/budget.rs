@@ -691,6 +691,7 @@ mod tests {
             max_texture_bytes: 1024,
             max_update_rate_hz: 5.0,
             max_nodes_per_tile: 4,
+            ..ResourceBudget::default()
         }
     }
 

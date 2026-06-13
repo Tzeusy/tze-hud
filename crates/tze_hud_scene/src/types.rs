@@ -324,8 +324,22 @@ pub struct Tab {
 
 /// Per-agent resource envelope enforced by the budget enforcement ladder.
 ///
-/// All four dimensions are checked at mutation intake (Stage 3). A mutation batch
-/// that would push any dimension over budget is rejected whole (all-or-nothing).
+/// This is the single canonical resource budget type for the entire tze_hud
+/// system. It covers both the scene-model dimensions (used in `Tile`/`Lease`
+/// for persistence and wire serialization) and the enforcement dimensions
+/// (used by `tze_hud_scene::lease::budget` and `tze_hud_runtime::budget` for
+/// per-mutation admission checks).
+///
+/// # Defaults (spec §Requirement: Per-Agent Resource Envelope)
+///
+/// | Field               | Default   | Hard max |
+/// |---------------------|-----------|----------|
+/// | max_tiles           | 8         | 64       |
+/// | max_texture_bytes   | 256 MiB   | 2 GiB    |
+/// | max_update_rate_hz  | 30.0      | 120.0    |
+/// | max_nodes_per_tile  | 32        | 64       |
+/// | max_active_leases   | 8         | 64       |
+/// | max_concurrent_streams | 0      | 0 (v1)   |
 ///
 /// # Memory layout
 ///
@@ -335,13 +349,38 @@ pub struct Tab {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResourceBudget {
     /// Maximum number of tiles this agent may hold simultaneously.
+    /// Range [1, 64]. Default: 8.
     pub max_tiles: u32,
     /// Maximum texture memory across all tiles, in bytes.
+    /// Default: 256 MiB (spec §Per-Agent Resource Envelope).
     pub max_texture_bytes: u64,
     /// Maximum scene mutation rate in Hz (sliding window over last 1 second).
+    /// Default: 30.0 Hz.
     pub max_update_rate_hz: f32,
     /// Maximum nodes per individual tile.
+    /// Range [1, 64]. Default: 32.
     pub max_nodes_per_tile: u32,
+    /// Maximum concurrent active leases for this agent.
+    ///
+    /// Checked at lease-grant time and re-verified at mutation intake
+    /// (defence-in-depth). Range [1, 64]. Default: 8.
+    ///
+    /// Serialized with a default of 8 so that scene snapshots serialized
+    /// before this field was added deserialize correctly.
+    #[serde(default = "ResourceBudget::default_max_active_leases")]
+    pub max_active_leases: u8,
+    /// Maximum concurrent media streams.  Always 0 in v1; media deferred.
+    ///
+    /// Serialized with a default of 0 so that existing scene snapshots
+    /// deserialize correctly.
+    #[serde(default)]
+    pub max_concurrent_streams: u8,
+}
+
+impl ResourceBudget {
+    const fn default_max_active_leases() -> u8 {
+        8
+    }
 }
 
 impl Default for ResourceBudget {
@@ -351,6 +390,8 @@ impl Default for ResourceBudget {
             max_texture_bytes: 256 * 1024 * 1024, // 256 MiB
             max_update_rate_hz: 30.0,
             max_nodes_per_tile: 32,
+            max_active_leases: 8,
+            max_concurrent_streams: 0,
         }
     }
 }

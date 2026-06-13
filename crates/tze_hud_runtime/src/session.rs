@@ -136,6 +136,9 @@ impl SessionEnvelope {
         requested_budget: ResourceBudget,
         requested_max_leases: u32,
     ) -> Self {
+        let max_active_leases_u8 = requested_budget
+            .max_active_leases
+            .min(HARD_MAX_ACTIVE_LEASES as u8);
         let budget = ResourceBudget {
             max_tiles: requested_budget.max_tiles.min(HARD_MAX_TILES),
             max_texture_bytes: requested_budget
@@ -147,6 +150,8 @@ impl SessionEnvelope {
             max_nodes_per_tile: requested_budget
                 .max_nodes_per_tile
                 .min(HARD_MAX_NODES_PER_TILE),
+            max_active_leases: max_active_leases_u8,
+            max_concurrent_streams: requested_budget.max_concurrent_streams,
         };
         let max_active_leases = requested_max_leases.min(HARD_MAX_ACTIVE_LEASES);
         Self {
@@ -256,6 +261,7 @@ mod tests {
                 max_texture_bytes: DEFAULT_MAX_TEXTURE_BYTES,
                 max_update_rate_hz: DEFAULT_MAX_UPDATE_RATE_HZ,
                 max_nodes_per_tile: DEFAULT_MAX_NODES_PER_TILE,
+                ..ResourceBudget::default()
             },
             DEFAULT_MAX_ACTIVE_LEASES,
         );
@@ -274,6 +280,7 @@ mod tests {
                 max_texture_bytes: 100 * 1024 * 1024 * 1024, // 100 GiB >> 2 GiB hard max
                 max_update_rate_hz: DEFAULT_MAX_UPDATE_RATE_HZ,
                 max_nodes_per_tile: DEFAULT_MAX_NODES_PER_TILE,
+                ..ResourceBudget::default()
             },
             DEFAULT_MAX_ACTIVE_LEASES,
         );
@@ -292,6 +299,7 @@ mod tests {
                 max_texture_bytes: DEFAULT_MAX_TEXTURE_BYTES,
                 max_update_rate_hz: 9999.0,
                 max_nodes_per_tile: DEFAULT_MAX_NODES_PER_TILE,
+                ..ResourceBudget::default()
             },
             DEFAULT_MAX_ACTIVE_LEASES,
         );
@@ -310,6 +318,7 @@ mod tests {
                 max_texture_bytes: DEFAULT_MAX_TEXTURE_BYTES,
                 max_update_rate_hz: DEFAULT_MAX_UPDATE_RATE_HZ,
                 max_nodes_per_tile: 9999,
+                ..ResourceBudget::default()
             },
             DEFAULT_MAX_ACTIVE_LEASES,
         );
