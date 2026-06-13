@@ -963,7 +963,7 @@ mod tests {
         let lease_id = scene.grant_lease(
             "portal-agent",
             60_000,
-            vec![Capability::CreateTile, Capability::ModifyOwnTiles],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let viewport_h = 200.0_f32;
         let tile_id = scene

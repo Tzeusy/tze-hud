@@ -645,7 +645,11 @@ mod tests {
 
         // Grant a lease on the live graph before snapshotting, so that
         // the initial_scene_json includes the lease.
-        let lease_id = graph.grant_lease("agent-a", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent-a",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let _ = graph.create_tab("Main", 0).unwrap();
 
         let initial_json = serde_json::to_string(&graph).unwrap();

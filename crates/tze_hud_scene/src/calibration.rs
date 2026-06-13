@@ -201,11 +201,7 @@ fn run_scene_workload() -> f64 {
     let lease_id = scene.grant_lease(
         "calibration",
         300_000,
-        vec![
-            Capability::CreateTile,
-            Capability::CreateNode,
-            Capability::UpdateTile,
-        ],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     // Override the budget to allow many tiles
     if let Some(lease) = scene.leases.get_mut(&lease_id) {

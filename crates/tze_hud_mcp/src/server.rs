@@ -880,12 +880,7 @@ mod tests {
             let lease_id = scene.grant_lease(
                 "agent.list-elements",
                 60_000,
-                vec![
-                    Capability::CreateTile,
-                    Capability::UpdateTile,
-                    Capability::CreateNode,
-                    Capability::UpdateNode,
-                ],
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
             );
             scene
                 .create_tile(
@@ -926,12 +921,7 @@ mod tests {
             let lease_id = scene.grant_lease(
                 "agent.publish-element",
                 60_000,
-                vec![
-                    Capability::CreateTile,
-                    Capability::UpdateTile,
-                    Capability::CreateNode,
-                    Capability::UpdateNode,
-                ],
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
             );
             scene
                 .create_tile(

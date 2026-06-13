@@ -175,12 +175,7 @@ pub fn handle_create_tile(params: Value, scene: &mut SceneGraph) -> McpResult<Cr
     let lease_id = scene.grant_lease(
         &p.namespace,
         p.ttl_ms,
-        vec![
-            Capability::CreateTile,
-            Capability::UpdateTile,
-            Capability::CreateNode,
-            Capability::UpdateNode,
-        ],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
 
     let bounds = Rect::new(p.bounds.x, p.bounds.y, p.bounds.width, p.bounds.height);
@@ -3281,7 +3276,11 @@ mod tests {
 
         // Create a raw tile (resident operation — simulated here at SceneGraph level).
         use tze_hud_scene::types::{Capability, Rect};
-        let lease_id = scene.grant_lease("resident-agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "resident-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         scene
             .create_tile(
                 tab_id,
@@ -5105,12 +5104,7 @@ mod tests {
         let lease_id = scene.grant_lease(
             "agent.list-elements",
             60_000,
-            vec![
-                Capability::CreateTile,
-                Capability::UpdateTile,
-                Capability::CreateNode,
-                Capability::UpdateNode,
-            ],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let tile_id = scene
             .create_tile(
@@ -5186,12 +5180,7 @@ mod tests {
         let lease_id = scene.grant_lease(
             "agent.publish-element",
             60_000,
-            vec![
-                Capability::CreateTile,
-                Capability::UpdateTile,
-                Capability::CreateNode,
-                Capability::UpdateNode,
-            ],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let tile_id = scene
             .create_tile(

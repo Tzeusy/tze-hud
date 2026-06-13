@@ -52,7 +52,7 @@ fn solid_color_scene(w: f32, h: f32, color: Rgba) -> SceneGraph {
     let lease = g.grant_lease(
         "agent.test",
         600_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     let tile = g
         .create_tile(tab, "agent.test", lease, Rect::new(0.0, 0.0, w, h), 0)

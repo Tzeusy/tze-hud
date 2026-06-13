@@ -1114,23 +1114,8 @@ pub struct Lease {
 ///
 /// The `String`-bearing variants (`PublishZone`, `EmitSceneEvent`) carry their
 /// parameterized argument (zone name or event name).
-///
-/// Legacy variants (`CreateTile`, `UpdateTile`, …) are retained for backward
-/// compatibility; new code should use the canonical-name variants where available.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Capability {
-    // ── Legacy / backward-compat variants ────────────────────────────────────
-    /// Legacy: equivalent to `CreateTiles`.
-    CreateTile,
-    /// Legacy: equivalent to `ModifyOwnTiles`.
-    UpdateTile,
-    DeleteTile,
-    CreateNode,
-    UpdateNode,
-    DeleteNode,
-    /// Legacy: equivalent to `AccessInputEvents`.
-    ReceiveInput,
-
     // ── Canonical v1 capability vocabulary ────────────────────────────────────
     /// `create_tiles` — agent may create tiles.
     CreateTiles,
@@ -1192,30 +1177,8 @@ impl Lease {
     }
 
     /// Check whether this lease grants the requested capability.
-    ///
-    /// The v1-canonical capabilities (`ManageTabs`, `CreateTiles`, `ModifyOwnTiles`) are
-    /// checked exactly. Legacy broad variants act as aliases:
-    ///
-    /// - `CreateTile` covers `CreateTiles` + `ModifyOwnTiles` (legacy: create implied mutate)
-    /// - `UpdateTile` covers `ModifyOwnTiles`
-    /// - `DeleteTile` covers `ModifyOwnTiles`
-    ///
-    /// This ensures test code using the legacy variant names is not broken by the introduction
-    /// of the v1-canonical names.
     pub fn has_capability(&self, cap: Capability) -> bool {
-        if self.capabilities.contains(&cap) {
-            return true;
-        }
-        // Legacy capability aliases
-        match cap {
-            Capability::CreateTiles => self.capabilities.contains(&Capability::CreateTile),
-            Capability::ModifyOwnTiles => {
-                self.capabilities.contains(&Capability::CreateTile)
-                    || self.capabilities.contains(&Capability::UpdateTile)
-                    || self.capabilities.contains(&Capability::DeleteTile)
-            }
-            _ => false,
-        }
+        self.capabilities.contains(&cap)
     }
 
     /// Remaining TTL in milliseconds (0 if expired).

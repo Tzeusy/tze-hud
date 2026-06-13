@@ -327,7 +327,11 @@ fn proto_zone_content_none_payload_returns_none() {
 #[test]
 fn mutation_batch_nonexistent_tab_id_rejected() {
     let mut scene = clean_scene();
-    let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+    let lease = scene.grant_lease(
+        "agent",
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     let bogus_tab = SceneId::new();
     let batch = make_batch(
@@ -365,7 +369,11 @@ fn mutation_batch_nonexistent_tab_id_rejected() {
 fn mutation_batch_oversized_rejected_with_structured_error() {
     let mut scene = clean_scene();
     let tab = scene.create_tab("Tab", 0).unwrap();
-    let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+    let lease = scene.grant_lease(
+        "agent",
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     let mutations: Vec<SceneMutation> = (0..=MAX_BATCH_SIZE)
         .map(|z| SceneMutation::CreateTile {
@@ -398,7 +406,11 @@ fn mutation_batch_expired_lease_rejected_before_other_checks() {
 
     let mut scene = clean_scene();
     let tab = scene.create_tab("Tab", 0).unwrap();
-    let lease = scene.grant_lease("agent", 1, vec![Capability::CreateTile]);
+    let lease = scene.grant_lease(
+        "agent",
+        1,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     // Force the lease into Expired state.
     scene.leases.get_mut(&lease).unwrap().state = LeaseState::Expired;
@@ -431,7 +443,11 @@ fn mutation_batch_expired_lease_rejected_before_other_checks() {
 fn mutation_batch_nan_bounds_rejected() {
     let mut scene = clean_scene();
     let tab = scene.create_tab("Tab", 0).unwrap();
-    let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+    let lease = scene.grant_lease(
+        "agent",
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     let batch = make_batch(
         "agent",
@@ -462,7 +478,11 @@ fn mutation_batch_nan_bounds_rejected() {
 fn mutation_batch_inf_bounds_rejected() {
     let mut scene = clean_scene();
     let tab = scene.create_tab("Tab", 0).unwrap();
-    let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+    let lease = scene.grant_lease(
+        "agent",
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     let batch = make_batch(
         "agent",
@@ -501,7 +521,11 @@ fn mutation_batch_empty_namespace_invariant() {
     // Note: grant_lease with empty namespace is allowed at the API level but violates
     // Layer 0 invariants. Real sessions always have a non-empty namespace from auth.
     // Here we verify that the batch pipeline handles the resulting state safely.
-    let lease = scene.grant_lease("valid.agent", 300_000, vec![Capability::CreateTile]);
+    let lease = scene.grant_lease(
+        "valid.agent",
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     // An adversarial batch sets agent_namespace to empty but uses a valid lease.
     // The namespace mismatch check should cause rejection.
@@ -537,7 +561,11 @@ fn mutation_batch_empty_namespace_invariant() {
 fn mutation_batch_nonexistent_tile_rejected() {
     let mut scene = clean_scene();
     let _tab = scene.create_tab("Tab", 0).unwrap();
-    let _lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+    let _lease = scene.grant_lease(
+        "agent",
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     let bogus_tile = SceneId::new();
     let batch = MutationBatch {
@@ -567,7 +595,11 @@ fn mutation_batch_zone_reserved_z_order_rejected() {
 
     let mut scene = clean_scene();
     let tab = scene.create_tab("Tab", 0).unwrap();
-    let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+    let lease = scene.grant_lease(
+        "agent",
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     let batch = make_batch(
         "agent",
@@ -600,7 +632,11 @@ fn mutation_batch_zone_reserved_z_order_rejected() {
 fn mutation_batch_create_update_delete_no_leak() {
     let mut scene = clean_scene();
     let tab = scene.create_tab("Tab", 0).unwrap();
-    let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+    let lease = scene.grant_lease(
+        "agent",
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     // Create a tile.
     let create_batch = make_batch(
@@ -728,7 +764,7 @@ proptest! {
     ) {
         let mut scene = clean_scene();
         let _tab = scene.create_tab("Tab", 0).unwrap();
-        let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
 
         let mutations: Vec<SceneMutation> = (0..n_bogus_mutations)
             .map(|_| SceneMutation::DeleteTile { tile_id: SceneId::new() })
@@ -756,7 +792,7 @@ proptest! {
     ) {
         let mut scene = clean_scene();
         let tab = scene.create_tab("Tab", 0).unwrap();
-        let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
 
         // Create a tile in the agent-legal range (z=1).
         let r = scene.apply_batch(&make_batch("agent", Some(lease), vec![
@@ -791,7 +827,7 @@ proptest! {
     ) {
         let mut scene = clean_scene();
         let tab = scene.create_tab("Tab", 0).unwrap();
-        let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
 
         let r = scene.apply_batch(&make_batch("agent", Some(lease), vec![
             SceneMutation::CreateTile {

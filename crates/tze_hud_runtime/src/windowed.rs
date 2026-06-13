@@ -6042,7 +6042,11 @@ mod tests {
         use tze_hud_scene::{Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId};
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,
@@ -6111,7 +6115,11 @@ mod tests {
         use tze_hud_scene::{Capability, HitRegionNode, InputMode, Node, NodeData, Rect, SceneId};
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("overlay", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "overlay",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,
@@ -6155,7 +6163,11 @@ mod tests {
         use tze_hud_scene::{Capability, HitRegionNode, Node, NodeData, Rect, SceneId};
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,
@@ -7397,7 +7409,11 @@ redaction_style = "blank"
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).expect("tab must be created");
-        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,
@@ -8084,7 +8100,11 @@ redaction_style = "blank"
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,

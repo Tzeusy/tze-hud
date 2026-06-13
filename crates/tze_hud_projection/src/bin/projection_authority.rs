@@ -2157,7 +2157,11 @@ mod tests {
         // Scene tile: match the geometry snapshot viewport height.
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,
@@ -2296,7 +2300,11 @@ mod tests {
         // Scene setup.
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let viewport_h = 200.0_f32;
         let tile_id = scene
             .create_tile(
@@ -2489,7 +2497,11 @@ mod tests {
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("portal-agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,

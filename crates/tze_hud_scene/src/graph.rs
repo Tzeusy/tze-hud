@@ -4121,7 +4121,7 @@ mod tests {
         let lease_id = scene.grant_lease(
             "test-agent",
             60_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Create two tiles
@@ -4186,7 +4186,11 @@ mod tests {
     fn test_hit_test() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         let tile_id = scene
             .create_tile(
@@ -4236,7 +4240,11 @@ mod tests {
     fn test_hit_test_applies_tile_scroll_offset() {
         let mut scene = SceneGraph::new(800.0, 600.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("scroll-agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "scroll-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,
@@ -4322,7 +4330,11 @@ mod tests {
     fn test_snapshot_roundtrip() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         scene
             .create_tile(
                 tab_id,
@@ -4358,7 +4370,11 @@ mod tests {
 
         // Grant a lease with a 500 ms TTL.
         // Clock is at t=1000; lease expires at t=1500.
-        let lease_id = scene.grant_lease("test", 500, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            500,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         scene
             .create_tile(
                 tab_id,
@@ -4412,7 +4428,11 @@ mod tests {
     fn test_lease_revocation_cleans_tiles() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         scene
             .create_tile(
@@ -4950,7 +4970,11 @@ mod tests {
     fn make_scene_with_tiles(count: usize) -> (SceneGraph, SceneId, Vec<SceneId>) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let mut tile_ids = Vec::new();
         for i in 0..count {
             let tile_id = scene
@@ -5866,7 +5890,11 @@ mod tests {
     fn test_static_image_node_creation() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateNode]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,
@@ -6063,7 +6091,7 @@ mod tests {
         let lease_id = scene.grant_lease(
             "agent",
             60_000,
-            vec![Capability::CreateTile, Capability::ModifyOwnTiles],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let tile_id = scene
             .create_tile(
@@ -6820,7 +6848,11 @@ mod tests {
     fn test_budget_tile_count_within_limit() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         // Default budget: max_tiles = 8. Create 1 tile — should be fine.
         let batch = crate::mutation::MutationBatch {
@@ -6845,7 +6877,11 @@ mod tests {
     fn test_budget_tile_count_exceeds_limit() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         // Set budget to max 2 tiles
         scene
@@ -6898,7 +6934,11 @@ mod tests {
     fn test_budget_soft_limit_warning() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         // Set budget to max 5 tiles; soft limit at 80% = 4 tiles
         scene
@@ -6953,7 +6993,11 @@ mod tests {
     fn test_suspend_blocks_mutations() {
         let (mut scene, clock) = scene_with_test_clock();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         // Suspend the lease
         clock.advance(1_000);
@@ -6982,7 +7026,11 @@ mod tests {
     fn test_resume_allows_mutations_again() {
         let (mut scene, clock) = scene_with_test_clock();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         // Suspend then resume
         clock.advance(1_000);
@@ -7058,7 +7106,11 @@ mod tests {
     fn test_grace_period_disconnect_and_reconnect() {
         let (mut scene, clock) = scene_with_test_clock();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 120_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            120_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         scene
             .create_tile(
                 tab_id,
@@ -7089,7 +7141,11 @@ mod tests {
     fn test_grace_period_expiry_cleans_up() {
         let (mut scene, clock) = scene_with_test_clock();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 120_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            120_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         scene
             .create_tile(
                 tab_id,
@@ -7210,7 +7266,11 @@ mod tests {
     fn test_suspension_timeout_revokes() {
         let (mut scene, clock) = scene_with_test_clock();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 600_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            600_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         scene
             .create_tile(
                 tab_id,
@@ -7353,7 +7413,11 @@ mod tests {
     fn test_lease_resource_usage() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         scene
             .create_tile(
@@ -7614,7 +7678,11 @@ mod tests {
     fn test_lease_expiry_returns_lease_expiry_struct() {
         let (mut scene, clock) = scene_with_test_clock();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test", 500, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test",
+            500,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,
@@ -7686,7 +7754,11 @@ mod spec_scenarios {
     fn tile_limit_1024_per_tab_enforced() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         // The test scene is 1920×1080; tiles are 1px×1px at unique positions.
         // Use a grid: 32 cols × 32 rows = 1024. We'll use tiny tiles in bounds.
@@ -7748,7 +7820,7 @@ mod spec_scenarios {
         let lease_id = scene.grant_lease(
             "agent",
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let tile_id = scene
             .create_tile(
@@ -7825,7 +7897,11 @@ mod spec_scenarios {
     fn duplicate_node_id_rejected() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,
@@ -8146,7 +8222,11 @@ mod spec_scenarios {
         );
 
         // Use the basic create_tile (no capability check) to also confirm bounds are rejected
-        let lease_unchecked = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let lease_unchecked = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let err2 = scene
             .create_tile(
                 tab_id,
@@ -8170,7 +8250,11 @@ mod spec_scenarios {
     fn bounds_outside_display_rejected() {
         let mut scene = make_scene(); // 1920×1080
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         let err = scene
             .create_tile(
@@ -8195,7 +8279,11 @@ mod spec_scenarios {
     fn z_order_reserved_zone_band_rejected() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         let err = scene
             .create_tile(
@@ -8330,7 +8418,11 @@ mod spec_scenarios {
     fn tab_delete_removes_tiles_too() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         scene
             .create_tile(
                 tab_id,
