@@ -5149,11 +5149,16 @@ impl Compositor {
         };
         // Phase A: prepare glyphon buffers (requires mutable tr borrow).
         // Drop the borrow immediately after so Phase B can call self.gpu_color_raw.
+        //
+        // When text_items is empty we return None — not Some(Ok([])) — so that
+        // Phase C skips render_text_pass entirely.  Calling render_text_pass
+        // without a preceding prepare would replay glyphon's previously prepared
+        // TextAreas from the last non-empty frame, causing stale text to linger.
         let prepare_result: Option<Result<Vec<crate::text::InlineBackdropQuad>, String>> =
             if let Some(ref mut tr) = self.text_rasterizer {
                 tr.update_viewport(&self.queue, surf_w, surf_h);
                 if text_items.is_empty() {
-                    Some(Ok(vec![]))
+                    None
                 } else {
                     Some(tr.prepare_text_items(&self.device, &self.queue, &text_items))
                 }
@@ -6009,8 +6014,12 @@ impl Compositor {
             let (chrome_surf_w, chrome_surf_h) = (self.width, self.height);
             if let Some(ref mut tr) = self.text_rasterizer {
                 tr.update_viewport(&self.queue, chrome_surf_w, chrome_surf_h);
+                // When text_items_chrome is empty we return None — not Some(Ok([])) —
+                // so Phase C skips render_text_pass entirely.  Calling render_text_pass
+                // without a preceding prepare would replay glyphon's previously prepared
+                // TextAreas from the last non-empty frame, causing stale text to linger.
                 if text_items_chrome.is_empty() {
-                    Some(Ok(vec![]))
+                    None
                 } else {
                     Some(tr.prepare_text_items(&self.device, &self.queue, &text_items_chrome))
                 }

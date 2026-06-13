@@ -512,6 +512,15 @@ impl TextRasterizer {
             .collect();
 
         // Phase 1: build one Buffer per item (shared by all outline + fill passes).
+        // Also collect the *effective* styled runs that were actually used for
+        // shaping — these match the glyph byte offsets in the shaped buffer.
+        // For truncated (Ellipsis) items the effective runs are the resliced
+        // versions; for non-truncated items they are item.styled_runs as-is.
+        // compute_inline_backdrop_quads uses these instead of item.styled_runs
+        // so that glyph↔run byte-offset matching is always correct (hud-9ieev).
+        let mut effective_styled_runs_per_item: Vec<Vec<StyledRunItem>> =
+            Vec::with_capacity(items.len());
+
         let buffers: Vec<Buffer> = items
             .iter()
             .zip(truncated_texts.iter())
@@ -586,6 +595,10 @@ impl TextRasterizer {
                                 Shaping::Basic,
                             );
                         }
+                        // Record the effective styled runs (resliced to truncated
+                        // text coordinate space) so compute_inline_backdrop_quads
+                        // matches glyph byte offsets correctly.
+                        effective_styled_runs_per_item.push(resliced);
                     } else {
                         let spans = styled_run_spans(
                             &item.text,
@@ -596,6 +609,8 @@ impl TextRasterizer {
                             item.line_height_multiplier,
                         );
                         buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
+                        // No truncation — original styled_runs byte offsets are correct.
+                        effective_styled_runs_per_item.push(item.styled_runs.to_vec());
                     }
                 } else if item.color_runs.is_empty() {
                     // Fast path: no inline runs — use uniform base color.
@@ -605,6 +620,8 @@ impl TextRasterizer {
                         base_attrs,
                         Shaping::Basic,
                     );
+                    // No styled_runs means no backdrop quads possible.
+                    effective_styled_runs_per_item.push(vec![]);
                 } else {
                     // Single-pass styled path: build (text_slice, Attrs) pairs and
                     // call set_rich_text once.  This avoids the double-shape that
@@ -664,6 +681,8 @@ impl TextRasterizer {
                         let spans = color_run_spans(&item.text, &item.color_runs, base_attrs);
                         buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
                     }
+                    // color_runs don't carry background_color; no backdrop quads.
+                    effective_styled_runs_per_item.push(vec![]);
                 }
 
                 // Apply text alignment to all lines in the buffer.
@@ -684,7 +703,13 @@ impl TextRasterizer {
         // from glyph layout data.  Must happen here, between buffer shaping and
         // the TextArea construction below that borrows from `buffers`.
         // `compute_inline_backdrop_quads` only iterates buffers immutably.
-        let inline_backdrop_quads = compute_inline_backdrop_quads(items, &buffers);
+        //
+        // Pass `effective_styled_runs_per_item` (which uses the resliced styled
+        // runs for truncated items) so that glyph↔byte-offset matching is correct
+        // even when the buffer was shaped with different byte offsets than the
+        // original `item.styled_runs` (hud-9ieev Thread 3 fix).
+        let inline_backdrop_quads =
+            compute_inline_backdrop_quads(items, &buffers, &effective_styled_runs_per_item);
 
         // Phase 2: build TextArea list.
         // For outlined items, we emit 8 outline passes then 1 fill pass.
@@ -819,25 +844,46 @@ pub struct InlineBackdropQuad {
 /// The function is O(G × S) in the number of glyphs G and styled runs S per
 /// item.  In practice inline code spans are short and S is small; the cost is
 /// negligible within the Stage 6 text budget.
+///
+/// # Parameters
+///
+/// `effective_styled_runs` must be parallel to `items`/`buffers`: one
+/// `Vec<StyledRunItem>` per item, containing the styled runs that were actually
+/// used for shaping the corresponding buffer.  For truncated (`Ellipsis`) items
+/// these are the resliced runs; for non-truncated items they are the original
+/// `item.styled_runs`.  Passing `item.styled_runs` directly for truncated items
+/// would cause byte-offset mismatches between the shaped glyph positions and
+/// the styled-run ranges.
+///
+/// Quads are clipped to each item's `clip_pixel_x/y + clip_bounds_width/height`
+/// before being returned, so they never bleed outside the item's `TextBounds`.
 pub fn compute_inline_backdrop_quads(
     items: &[TextItem],
     buffers: &[Buffer],
+    effective_styled_runs: &[Vec<StyledRunItem>],
 ) -> Vec<InlineBackdropQuad> {
     let mut quads: Vec<InlineBackdropQuad> = Vec::new();
 
-    for (item, buf) in items.iter().zip(buffers.iter()) {
-        // Only items with styled runs can have backdrop colors.
-        if item.styled_runs.is_empty() {
+    for ((item, buf), eff_runs) in items
+        .iter()
+        .zip(buffers.iter())
+        .zip(effective_styled_runs.iter())
+    {
+        // Only items with (effective) styled runs can have backdrop colors.
+        if eff_runs.is_empty() {
             continue;
         }
         // Only emit quads when at least one run has a background_color.
-        let has_backdrop = item
-            .styled_runs
-            .iter()
-            .any(|r| r.background_color.is_some());
+        let has_backdrop = eff_runs.iter().any(|r| r.background_color.is_some());
         if !has_backdrop {
             continue;
         }
+
+        // Clip rect for this item — quads must not bleed outside the TextBounds.
+        let clip_x0 = item.clip_pixel_x;
+        let clip_y0 = item.clip_pixel_y;
+        let clip_x1 = item.clip_pixel_x + item.clip_bounds_width;
+        let clip_y1 = item.clip_pixel_y + item.clip_bounds_height;
 
         // Build line_byte_offsets: the flat-text byte offset where each BufferLine begins.
         // BufferLines in the buffer correspond to paragraphs (hard newlines in item.text).
@@ -877,6 +923,10 @@ pub fn compute_inline_backdrop_quads(
         // of each run so the next run picks up where this one left off.
         let mut line_char_cursors: Vec<usize> = vec![0; buf.lines.len()];
 
+        // Record the quads length before this item so we can clip only the
+        // quads appended for this item at the end of the layout-runs pass.
+        let len_before_clip = quads.len();
+
         for run in buf.layout_runs() {
             let line_offset = line_byte_offsets.get(run.line_i).copied().unwrap_or(0);
 
@@ -900,14 +950,18 @@ pub fn compute_inline_backdrop_quads(
                 *cursor += run.glyphs.len();
             }
 
-            // For each StyledRunItem with a background_color, find glyphs that
-            // overlap its byte range and accumulate a quad.
-            for styled_run in item.styled_runs.iter() {
+            // For each StyledRunItem (from the effective/resliced set) with a
+            // background_color, find glyphs that overlap its byte range and
+            // accumulate a quad.  Using `eff_runs` (not `item.styled_runs`) ensures
+            // byte offsets match the buffer that was actually shaped — critical for
+            // truncated (Ellipsis) items where reslicing shifted the offsets.
+            for styled_run in eff_runs.iter() {
                 let bg_color = match styled_run.background_color {
                     Some(c) => c,
                     None => continue,
                 };
-                // styled_run byte range is relative to the full item.text.
+                // styled_run byte range is relative to the effective (possibly
+                // truncated) text that was shaped into `buf`.
                 let sr_start = styled_run.start_byte;
                 let sr_end = styled_run.end_byte;
 
@@ -960,6 +1014,30 @@ pub fn compute_inline_backdrop_quads(
                 if let Some(q) = current_quad.take() {
                     quads.push(q);
                 }
+            }
+        }
+
+        // Clip all quads for this item to its TextBounds (clip_pixel_x/y +
+        // clip_bounds_width/height).  Backdrop rects must not bleed outside the
+        // tile clip region — e.g. for scrolled or partially visible text items.
+        // We retain only quads that have non-zero visible area after clipping.
+        //
+        // Collect clipped quads for this item from `item_quads_buf`, then
+        // drain and re-push into `quads`.
+        let item_quads_buf: Vec<InlineBackdropQuad> = quads.drain(len_before_clip..).collect();
+        for q in item_quads_buf {
+            let x0 = q.x.max(clip_x0);
+            let y0 = q.y.max(clip_y0);
+            let x1 = (q.x + q.w).min(clip_x1);
+            let y1 = (q.y + q.h).min(clip_y1);
+            if x1 > x0 && y1 > y0 {
+                quads.push(InlineBackdropQuad {
+                    x: x0,
+                    y: y0,
+                    w: x1 - x0,
+                    h: y1 - y0,
+                    color: q.color,
+                });
             }
         }
     }
@@ -4897,7 +4975,10 @@ mod tests {
             "hud-9ieev: layout runs exist but contain no glyphs"
         );
 
-        let quads = compute_inline_backdrop_quads(&[item], &[buf]);
+        // Pass effective_styled_runs as the new third argument.  This test uses
+        // a non-truncated item so the effective runs are identical to item.styled_runs.
+        let eff_runs: Vec<Vec<StyledRunItem>> = vec![item.styled_runs.to_vec()];
+        let quads = compute_inline_backdrop_quads(&[item], &[buf], &eff_runs);
 
         // At least one quad must be returned for the "code" span.
         assert!(
