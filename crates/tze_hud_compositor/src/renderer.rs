@@ -8583,6 +8583,7 @@ mod tests {
             .unwrap();
         scene.set_tile_root(tile_id, node).unwrap();
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8666,6 +8667,7 @@ mod tests {
             .unwrap();
 
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8729,6 +8731,8 @@ mod tests {
             color: [0.0, 1.0, 0.0, 1.0], // pure green — distinctive chrome marker
         }];
 
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_with_chrome(&scene, &surface, &chrome_cmds);
         compositor.device.poll(wgpu::Maintain::Wait);
 
@@ -8797,6 +8801,8 @@ mod tests {
             color: [1.0, 0.0, 0.0, 1.0], // pure red
         }];
 
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_with_chrome(&scene, &surface, &chrome_cmds);
         compositor.device.poll(wgpu::Maintain::Wait);
 
@@ -8841,6 +8847,8 @@ mod tests {
             }),
         });
         // Empty chrome cmds — must not panic.
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_with_chrome(&scene, &surface, &[]);
         compositor.device.poll(wgpu::Maintain::Wait);
         let pixels = surface.read_pixels(&compositor.device);
@@ -8857,8 +8865,9 @@ mod tests {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
         let scene = SceneGraph::new(256.0, 256.0);
 
-        // Prime before render per the Stage-4 commit-time prime contract (hud-380dl).
+        // Prime before render per the Stage-4 commit-time prime contract (hud-380dl / hud-v2z6u).
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         // render_frame takes &dyn CompositorSurface — no special headless branch.
         let telemetry =
             compositor.render_frame(&scene, &surface as &dyn crate::surface::CompositorSurface);
@@ -9000,6 +9009,7 @@ mod tests {
         };
         let mut scene = scene_with_node(node);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -9041,6 +9051,7 @@ mod tests {
         };
         let mut scene = scene_with_node(node);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -9092,6 +9103,7 @@ mod tests {
         };
         let mut scene = scene_with_node(node);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -9149,6 +9161,7 @@ mod tests {
         };
         let mut scene = scene_with_node(node);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         // Must not panic.
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
@@ -9210,6 +9223,7 @@ mod tests {
             .unwrap();
 
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -9300,6 +9314,7 @@ mod tests {
             .unwrap();
 
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -9408,6 +9423,7 @@ mod tests {
 
         // Render to pixels and verify bright text appears in the top zone area.
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -9442,6 +9458,7 @@ mod tests {
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut scene = SceneGraph::new(64.0, 64.0);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         // No panic = pass.
     }
@@ -9453,6 +9470,7 @@ mod tests {
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut scene = SceneGraph::new(64.0, 64.0);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
     }
 
@@ -9569,8 +9587,9 @@ mod tests {
         // that does not reflect steady-state Stage 6 performance; excluding it
         // mirrors production behaviour where shaders are pre-compiled.
         // Prime once before the loop — scene does not change in this benchmark,
-        // so subsequent frames are all cache-hit no-ops (hud-380dl).
+        // so subsequent frames are all cache-hit no-ops (hud-380dl / hud-v2z6u).
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         for _ in 0..5 {
             compositor.render_frame_headless(&mut scene, &surface);
         }
@@ -16548,6 +16567,8 @@ mod tests {
         let surface_id = SceneId::new();
         let mut scene = media_pip_scene(surface_id);
 
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let placeholder = surface.read_pixels(&compositor.device);
         let before = pixel_at(&placeholder, 320, 160, 90);
@@ -16673,6 +16694,8 @@ mod tests {
             .unwrap();
 
         assert!(compositor.upload_video_frame(surface_id, &solid_frame([255, 0, 0, 255])));
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         let center = pixel_at(&pixels, 160, 80, 60);
@@ -17143,6 +17166,7 @@ mod tests {
         // ── Commit-time prime (mimics Stage 4 runtime behavior) ───────────────
         // Before render_frame_headless runs, the runtime primes the cache.
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
 
         // After commit-time prime: the cache scene version sentinel must equal
         // scene.version.  This is the invariant that render_frame_headless checks
