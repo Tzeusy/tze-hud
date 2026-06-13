@@ -34,7 +34,7 @@ The `about/craft-and-care/` directory defines **who we are when we build** — t
 1. **Testing.** Every behavior-changing PR ships with tests. Property-based (`proptest`) for state machines and combinatorial domains. Deterministic, diagnostic, honest. See `heart-and-soul/validation.md` for the five-layer architecture.
 2. **Performance.** 19 quantitative budgets consolidated from RFCs. Frame time < 16.6ms. Input to local ack < 4ms. Event classification < 5us. Track trends, not just pass/fail.
 3. **Code.** Clippy clean. Unsafe only for FFI/GPU with `// SAFETY:` comments. `thiserror` for all error types. Stable error codes (append-only).
-4. **Review.** Six-point checklist: correctness, performance, API surface, test coverage, error handling, docs.
+4. **Review.** Ten-point checklist: correctness, performance, API surface, test coverage, error handling, docs, real-decode lane (suspended), device lane, **production call-site coverage** (all callers of a changed shared symbol must be updated and build-clean), **adversarial re-review by bead type** (perf beads: re-run named payloads with timing assertions; wiring beads: grep all production call sites). See `engineering-bar.md §4` for the full checklist and merge mechanics.
 5. **Dependencies.** Minimal policy. GPU stack co-pinned (wgpu 24 + winit 0.30 + glyphon 0.8 + Rust 1.88). Workspace-level declarations only.
 
 ## Relationship to Other Pillars

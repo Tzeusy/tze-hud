@@ -118,8 +118,25 @@ Every code review checks:
 6. **Documentation.** If the PR changes a public API or adds a crate, are docs updated?
 7. **Real-decode lane.** SUSPENDED by owner decision 2026-06-13 (hud-1aswu.4): no self-hosted GPU runner exists or is planned — tzehouse-windows is the owner's machine, not CI infrastructure. The CI lane never produced a real validation (decode step is a stub; GStreamer SDK never installed). When the decode harness lands (hud-ora8.1 phase 1), media-pipeline changes get validated over SSH from the rig via `.claude/skills/user-test/scripts/d18_validation.sh` against D18 thresholds. Until then, reviewers note media-pipeline changes as unvalidated-on-hardware rather than blocking on a lane that cannot run.
 8. **Device lane.** For any change touching device profiles, capability negotiation, or input handling: primary device lane green (1× iPhone, 1× Android, 1× Mac, 1× Windows, 1× Linux) per D19/D20 coverage requirements.
+9. **Production call-site coverage.** When a PR changes a shared symbol — a function signature, enum variant, trait method, or helper used in more than one place — the reviewer must verify that **every production call site** of that symbol has been updated and that the build is clean across the full call graph. Checking only the changed definition is not sufficient. Use `grep -rn` or `cargo check` to enumerate call sites; flag any file that imports or calls the changed symbol but was not touched by the PR. A PR that updates a helper but leaves callers on the old signature, contract, or enum shape is incomplete regardless of whether component tests pass. (Context: multiple landed PRs updated shared helpers while missing 5–8 call-site files; the omission was only caught in follow-up PRs.)
+10. **Adversarial review by bead type.** The reviewer applies bead-type-specific scrutiny beyond the general checklist above:
+    - *Performance beads* — empirically re-run the exact payloads named in the bead description in release mode with timing assertions. A test that does not carry a timing assertion will silently pass on quadratic or regressed behavior.
+    - *Wiring beads* (`wire X`, `integrate X`, `connect X`) — grep for all production call sites of the new API or integration point to confirm the feature is reachable end-to-end. Passing component tests do not prove wiring; live reachability must be demonstrated.
 
-PR merge requires: CI green, no unresolved review threads, approval present, branch up-to-date, no merge conflicts, no `.beads/` divergence. See `development.md` for the full six-condition guard.
+### Merge Mechanics
+
+PR merge requires all of the following conditions:
+
+1. **CI green** — all required status checks pass (currently 10 checks; branch protection enforces this).
+2. **No unresolved review threads** — every opened thread is resolved or explicitly answered.
+3. **No `.beads/` divergence** — the branch does not carry `.beads/` changes that conflict with the main-branch Dolt state.
+4. **Branch up-to-date** — the head branch is rebased or merged onto the current base.
+5. **No merge conflicts.**
+6. **Adversarial re-review** — the reviewer has applied the bead-type-specific checks from items 9–10 above and confirmed no production call sites were missed.
+
+**Note on approval mechanics.** Branch protection for this repository has `required_pull_request_reviews: null`. A formal GitHub approval is not mechanically enforced and cannot be self-granted on a single-account agent fleet. The substantive equivalent is the adversarial re-review in condition 6 above, performed by the PR-reviewer worker on behalf of the coordinator. This is the documented and acknowledged practice (see AGENTS.md). If a second reviewing identity becomes available, formal GitHub approval should be added back as condition 6 and adversarial re-review retained as condition 7.
+
+See `development.md` for the role-level description of merge conditions.
 
 ## 5. Observability
 

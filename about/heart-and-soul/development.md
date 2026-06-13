@@ -39,7 +39,7 @@ The execution machinery turns ready beads into merged code through three roles w
 
 **Worker** — Implements a single bead in an isolated worktree. Four phases: understand (read bead, specs, code), implement (write code within acceptance criteria), verify (tests, linters, quality gates), handoff (PR or direct-merge, report discovered work).
 
-**PR Reviewer** — Reviews PRs, posts comments, iterates, merges when guard conditions pass. Six conditions before merge: CI passing, no unresolved threads, no `.beads/` divergence, approval present, branch up-to-date, no merge conflicts.
+**PR Reviewer** — Reviews PRs, posts comments, iterates, merges when guard conditions pass. Six conditions before merge: CI passing, no unresolved threads, no `.beads/` divergence, adversarial re-review complete (production call-site coverage + bead-type checks), branch up-to-date, no merge conflicts. Formal GitHub approval is not mechanically enforced; adversarial re-review is the substantive equivalent. See `about/craft-and-care/engineering-bar.md §4` for the full merge mechanics and adversarial checklist.
 
 **Cleanup** — State reconciliation at the start of every coordinator loop: orphaned in-progress beads, stale PR-review beads, resolved blockers, orphaned worktrees.
 
