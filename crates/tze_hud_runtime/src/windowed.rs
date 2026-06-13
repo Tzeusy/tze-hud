@@ -9258,19 +9258,17 @@ redaction_style = "blank"
         let safe_mode_active = safe_mode_atomic.load(Ordering::Acquire);
         let pushed_to_queue_inactive = if safe_mode_active {
             false
+        } else if !queue.is_empty() {
+            queue.push_back(PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+                key_code: "KeyB".to_string(),
+                key: "b".to_string(),
+                modifiers: KeyboardModifiers::NONE,
+                repeat: false,
+                timestamp_mono_us: MonoUs(2_000),
+            }));
+            true
         } else {
-            if !queue.is_empty() {
-                queue.push_back(PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
-                    key_code: "KeyB".to_string(),
-                    key: "b".to_string(),
-                    modifiers: KeyboardModifiers::NONE,
-                    repeat: false,
-                    timestamp_mono_us: MonoUs(2_000),
-                }));
-                true
-            } else {
-                false
-            }
+            false
         };
         assert!(
             pushed_to_queue_inactive,
