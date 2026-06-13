@@ -63,9 +63,15 @@ pub struct McpServerConfig {
 ///
 /// # Parameters
 ///
-/// * `scene`    — shared scene graph for MCP tool dispatch.
-/// * `config`   — MCP server configuration (bind address, PSK).
-/// * `shutdown` — token that stops the accept loop when triggered.
+/// * `scene`           — shared scene graph for MCP tool dispatch.
+/// * `config`          — MCP server configuration (bind address, PSK).
+/// * `shutdown`        — token that stops the accept loop when triggered.
+/// * `paste_inject_tx` — optional channel for injecting paste text into the composer.
+/// * `portal_op_tx` — optional channel sender for portal projection operations
+///   (hud-bq0gl.2).  When `Some`, the MCP server forwards
+///   `portal_projection_attach` and `portal_projection_publish`
+///   tool calls through this channel to the winit event-loop
+///   thread where the `InProcessPortalDriver` lives.
 ///
 /// # Errors
 ///
@@ -75,6 +81,7 @@ pub async fn start_mcp_http_server(
     config: McpServerConfig,
     shutdown: ShutdownToken,
     paste_inject_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    portal_op_tx: Option<tokio::sync::mpsc::UnboundedSender<tze_hud_mcp::portal_op::PortalOp>>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -88,6 +95,9 @@ pub async fn start_mcp_http_server(
         McpServer::with_shared_scene(scene).with_config(McpConfig::with_psk(&config.psk));
     if let Some(tx) = paste_inject_tx {
         server_builder = server_builder.with_paste_inject_tx(tx);
+    }
+    if let Some(tx) = portal_op_tx {
+        server_builder = server_builder.with_portal_op_tx(tx);
     }
     let server = Arc::new(server_builder);
 
@@ -311,7 +321,7 @@ mod tests {
         let config = make_config(0, "test-psk");
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
             .await
             .expect("bind should succeed");
 
@@ -339,7 +349,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
             .await
             .expect("bind");
 
@@ -378,7 +388,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
             .await
             .expect("bind");
 
@@ -412,7 +422,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
             .await
             .expect("bind");
 
@@ -479,7 +489,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
             .await
             .expect("bind");
 
@@ -514,7 +524,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
             .await
             .expect("bind");
 

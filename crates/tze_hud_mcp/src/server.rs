@@ -188,9 +188,15 @@ fn classify_tool(method: &str) -> ToolClass {
         | "register_widget_asset"
         | "publish_to_element" => ToolClass::Guest,
         // Resident tools — require resident_mcp capability
-        "create_tab" | "create_tile" | "set_content" | "dismiss" | "inject_composer_paste" => {
-            ToolClass::Resident
-        }
+        "create_tab"
+        | "create_tile"
+        | "set_content"
+        | "dismiss"
+        | "inject_composer_paste"
+        // Portal projection tools (hud-bq0gl.2): resident-only to limit access
+        // to trusted callers that already hold the resident_mcp capability.
+        | "portal_projection_attach"
+        | "portal_projection_publish" => ToolClass::Resident,
         _ => ToolClass::Unknown,
     }
 }
@@ -204,6 +210,13 @@ pub struct McpServer {
     widget_asset_registry: Arc<Mutex<tools::WidgetAssetRegistry>>,
     config: McpConfig,
     paste_inject_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Channel to the in-process portal projection authority (hud-bq0gl.2).
+    ///
+    /// When `Some`, the `portal_projection_attach` and `portal_projection_publish`
+    /// tools are reachable — they forward operations through this channel to the
+    /// winit event-loop thread which owns the `InProcessPortalDriver`.  When
+    /// `None`, those tools return an `Internal` error (authority not wired).
+    portal_op_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
 }
 
 impl McpServer {
@@ -220,6 +233,7 @@ impl McpServer {
             widget_asset_registry: Arc::new(Mutex::new(tools::WidgetAssetRegistry::default())),
             config: McpConfig::default(),
             paste_inject_tx: None,
+            portal_op_tx: None,
         }
     }
 
@@ -234,6 +248,7 @@ impl McpServer {
             widget_asset_registry: Arc::new(Mutex::new(tools::WidgetAssetRegistry::default())),
             config: McpConfig::default(),
             paste_inject_tx: None,
+            portal_op_tx: None,
         }
     }
 
@@ -246,6 +261,20 @@ impl McpServer {
     /// Attach a paste-inject channel sender for `inject_composer_paste` tool.
     pub fn with_paste_inject_tx(mut self, tx: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
         self.paste_inject_tx = Some(tx);
+        self
+    }
+
+    /// Attach the portal-operation channel sender (hud-bq0gl.2).
+    ///
+    /// When set, `portal_projection_attach` and `portal_projection_publish` MCP
+    /// tools forward operations to the in-process `InProcessPortalDriver` on the
+    /// winit event-loop thread via this channel.  Without this, those tools
+    /// return an `Internal` error.
+    pub fn with_portal_op_tx(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>,
+    ) -> Self {
+        self.portal_op_tx = Some(tx);
         self
     }
 
@@ -521,6 +550,18 @@ impl McpServer {
                 let result =
                     tools::handle_inject_composer_paste(params, self.paste_inject_tx.as_ref())?;
                 serde_json::to_value(result).map_err(|e| crate::McpError::Internal(e.to_string()))
+            }
+            // Portal projection tools (hud-bq0gl.2): wire authority/published-content
+            // through the coalescer + InProcessPortalDriver drain path onto the live scene.
+            "portal_projection_attach" => {
+                let r = tools::handle_portal_projection_attach(params, self.portal_op_tx.as_ref())
+                    .await?;
+                serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
+            }
+            "portal_projection_publish" => {
+                let r = tools::handle_portal_projection_publish(params, self.portal_op_tx.as_ref())
+                    .await?;
+                serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             unknown => Err(crate::McpError::MethodNotFound(unknown.to_string())),
         }
