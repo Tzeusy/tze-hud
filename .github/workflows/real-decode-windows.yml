@@ -1,27 +1,31 @@
 # .github/workflows/real-decode-windows.yml
-# Windows D18 real-decode lane — RTX 3080 self-hosted GPU runner
+# Windows D18 real-decode lane — SUSPENDED (owner decision 2026-06-13, hud-1aswu.4)
 #
-# This workflow runs GStreamer-backed real-decode validation on the tzehouse-windows
-# box (D18: NVIDIA GeForce RTX 3080, driver 595.97, CUDA 13.2) at parrot-hen.ts.net.
+# This workflow was designed for a GitHub Actions self-hosted runner on the
+# tzehouse-windows box (D18: NVIDIA GeForce RTX 3080, driver 595.97, CUDA 13.2).
+# NO RUNNER EXISTS AND NONE IS PLANNED: tzehouse-windows is the owner's personal
+# machine, reached over SSH from the Linux rig (user-test skill pattern), not CI
+# infrastructure. The schedule: and pull_request[labeled] triggers were removed —
+# every scheduled run since 2026-06-02 queued 24h on the nonexistent
+# [self-hosted, windows, gpu] label and was cancelled. Only workflow_dispatch
+# remains, in case a runner ever materializes.
 #
-# ACTIVATION PREREQUISITES (all must be met before this workflow produces real results):
-#   1. GStreamer 1.24.12 MSVC SDK installed on D18 runner (one-time; see runbook §3)
-#   2. System-level env vars set on D18 (GSTREAMER_1_0_ROOT_MSVC_X86_64, PKG_CONFIG_PATH, PATH)
-#   3. GitHub Actions self-hosted runner registered with labels [self-hosted, windows, gpu]
-#   4. Repo label 'run-real-decode' created in GitHub (for label-gated PR runs)
-#   5. Smoke-test: `cargo check -p tze_hud_compositor` passes from D18 runner
+# The lane's substantive checks (GPU lock respect, GStreamer SDK verification,
+# hardware-decoder capability report) now run over SSH from the rig instead:
+#   .claude/skills/user-test/scripts/d18_validation.sh
+#
+# ACTIVATION PREREQUISITES preserved for the SSH lane (none are met yet):
+#   1. GStreamer 1.24.12 MSVC SDK installed on tzehouse-windows (verified ABSENT
+#      2026-06-13: no C:\gstreamer, no GSTREAMER_1_0_ROOT_MSVC_X86_64 machine env)
+#   2. System-level env vars set (GSTREAMER_1_0_ROOT_MSVC_X86_64, PKG_CONFIG_PATH, PATH)
+#   3. Real-decode test harness implemented (tze_hud_runtime::real_decode_windows,
+#      hud-ora8.1 phase 1 — the decode step below has always been a stub that exits 0)
 #
 # DUAL-USE SCHEDULING POLICY (implemented — hud-0mo6n):
-#   The tzehouse-windows box is also used for /user-test interactive overlay sessions.
-#   Nightly real-decode jobs MUST NOT race interactive HUD sessions.
-#
-#   Policy: file-based GPU lock at %PROGRAMDATA%\tze_hud\gpu.lock.
-#     - The pre-job "Check GPU lock" step below reads the lock file.
-#     - If a live interactive session holds the lock, the job is skipped (exit 0 + warning).
-#     - If the lock is stale (holding PID is dead), it is removed and the job proceeds.
-#     - A final always-run "Release GPU lock" step cleans up after the job.
-#
-#   The nightly trigger is still set to 02:00 SGT (18:00 UTC) as defence-in-depth.
+#   The tzehouse-windows box hosts /user-test interactive overlay sessions.
+#   Any validation run MUST respect the file-based GPU lock at
+#   %PROGRAMDATA%\tze_hud\gpu.lock (skip if a live session holds it; remove if
+#   the holding PID is dead). The SSH lane implements the same policy.
 #   Design doc: docs/design/tzehouse-windows-gpu-scheduling.md
 #   Runbook:    docs/ci/windows-d18-runner-setup.md §7
 #
@@ -39,7 +43,11 @@
 name: Windows D18 Real-Decode
 
 on:
-  # Manual dispatch — safe fallback; always available regardless of activation state.
+  # Manual dispatch only. The schedule: (nightly 18:00 UTC) and
+  # pull_request[labeled] triggers were removed 2026-06-13 (hud-1aswu.4):
+  # with no registered runner they queued 24h and auto-cancelled daily.
+  # Dispatching this workflow today will queue indefinitely for the same
+  # reason — it is kept solely as the activation skeleton.
   workflow_dispatch:
     inputs:
       gst_version:
@@ -50,18 +58,6 @@ on:
         description: "Decode target: 'all', 'h264', 'vp9', or 'smoke'"
         required: false
         default: "smoke"
-
-  # Label-gated PR trigger: add 'run-real-decode' label to a PR to request D18 validation.
-  # This avoids running the self-hosted GPU runner on every PR — D18 is dual-use.
-  pull_request:
-    types: [labeled]
-
-  # Nightly gate: 02:00 SGT = 18:00 UTC.
-  # Chosen as defence-in-depth to reduce overlap with interactive /user-test sessions
-  # (typically daytime SGT). The pre-job GPU lock check is the primary mutual-exclusion
-  # mechanism; the time window is secondary. See docs/design/tzehouse-windows-gpu-scheduling.md.
-  schedule:
-    - cron: "0 18 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -79,18 +75,8 @@ jobs:
     # See docs/ci/windows-d18-runner-setup.md for provisioning.
     runs-on: [self-hosted, windows, gpu]
 
-    # Trigger conditions:
-    #   - workflow_dispatch: always run (manual override)
-    #   - schedule (nightly): always run
-    #   - pull_request labeled: only run when the label is 'run-real-decode'
-    #
-    # The label guard uses github.event.label.name which is only set for
-    # pull_request[labeled] events; it is empty string for other event types,
-    # so the condition correctly allows dispatch and schedule through.
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request' && github.event.label.name == 'run-real-decode')
+    # Manual dispatch is the only remaining trigger (see header — hud-1aswu.4).
+    if: github.event_name == 'workflow_dispatch'
 
     # Track whether we acquired the GPU lock so the release step knows what to do.
     # Set in the "Check GPU lock" step; read in "Release GPU lock".

@@ -116,7 +116,7 @@ Every code review checks:
 4. **Test coverage.** Does the PR include tests? Do the tests validate the right properties (invariants, not point values)?
 5. **Error handling.** Are new error variants documented with stable codes? Do error messages carry diagnostic context?
 6. **Documentation.** If the PR changes a public API or adds a crate, are docs updated?
-7. **Real-decode lane.** For any change touching the media pipeline: real-decode lane green on the GPU runner per D18 thresholds (label `run-real-decode` on PR or confirm nightly pass).
+7. **Real-decode lane.** SUSPENDED by owner decision 2026-06-13 (hud-1aswu.4): no self-hosted GPU runner exists or is planned — tzehouse-windows is the owner's machine, not CI infrastructure. The CI lane never produced a real validation (decode step is a stub; GStreamer SDK never installed). When the decode harness lands (hud-ora8.1 phase 1), media-pipeline changes get validated over SSH from the rig via `.claude/skills/user-test/scripts/d18_validation.sh` against D18 thresholds. Until then, reviewers note media-pipeline changes as unvalidated-on-hardware rather than blocking on a lane that cannot run.
 8. **Device lane.** For any change touching device profiles, capability negotiation, or input handling: primary device lane green (1× iPhone, 1× Android, 1× Mac, 1× Windows, 1× Linux) per D19/D20 coverage requirements.
 
 PR merge requires: CI green, no unresolved review threads, approval present, branch up-to-date, no merge conflicts, no `.beads/` divergence. See `development.md` for the full six-condition guard.
