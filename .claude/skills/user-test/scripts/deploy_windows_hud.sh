@@ -194,6 +194,19 @@ ssh_win "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Get-Process -N
 echo "[4/5] Copying ${LOCAL_EXE} -> ${WIN_USER}@${WIN_HOST}:${REMOTE_EXE_SCP}"
 scp "${EXTRA_SSH_OPTS[@]}" "${LOCAL_EXE}" "${WIN_USER}@${WIN_HOST}:${REMOTE_EXE_SCP}"
 
+# Record the deployed git SHA on the Windows host so every deployment is
+# traceable: the file at C:\tze_hud\deployed_sha.txt holds the short SHA of the
+# commit that was compiled into the copied .exe.
+#
+# Capture the SHA from the local git checkout (falls back to "unknown" when the
+# deploy is triggered outside a git worktree, e.g. from a CI artifact drop).
+DEPLOYED_GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+DEPLOY_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+DEPLOYED_SHA_FILE="${REMOTE_DIR_WIN}\\deployed_sha.txt"
+DEPLOYED_SHA_CONTENT="${DEPLOYED_GIT_SHA} deployed ${DEPLOY_TIMESTAMP} from ${EXE_BASENAME}"
+echo "[4.5/5] Recording deployed SHA on Windows host: ${DEPLOYED_SHA_FILE}"
+ssh_win "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Set-Content -Path '${DEPLOYED_SHA_FILE}' -Value '${DEPLOYED_SHA_CONTENT}' -Encoding UTF8\""
+
 if [[ "$NO_RUN" -eq 0 ]]; then
   echo "[5/5] Launching HUD (mode=${LAUNCH_MODE})"
   if [[ "$LAUNCH_MODE" == "task" ]]; then
@@ -235,6 +248,7 @@ fi
 echo
 echo "Deploy complete."
 echo "Remote exe: ${REMOTE_EXE_WIN}"
+echo "Deployed SHA: ${DEPLOYED_GIT_SHA} (recorded at ${REMOTE_DIR_WIN}\\deployed_sha.txt)"
 echo "Remote stdout log: ${REMOTE_DIR_WIN}\\logs\\hud.stdout.log"
 echo "Remote stderr log: ${REMOTE_DIR_WIN}\\logs\\hud.stderr.log"
 

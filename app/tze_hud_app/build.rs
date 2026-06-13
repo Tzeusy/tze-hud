@@ -16,8 +16,41 @@
 // 2560×1440 display at 125% DPI reports 2048×1152 to the process).
 //
 // See: hud-22by — Overlay window doesn't cover full display at >100% DPI scaling
+//
+// Git SHA embed:
+// Captures `git rev-parse --short HEAD` at build time and emits it as the
+// TZE_HUD_GIT_SHA cargo env var. The binary's `--version` output appends this
+// so that deployed binaries carry their provenance without requiring a bump to
+// the workspace version field (frozen at 0.1.0 during pre-release).
+//
+// Falls back to "unknown" when:
+//   - The build directory is not inside a git checkout (e.g. vendored builds)
+//   - `git` is not on PATH
+//   - The worktree is in a detached HEAD state with no commit reachable
+
+use std::process::Command;
+
+fn capture_git_sha() -> String {
+    Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
 
 fn main() {
+    // Emit the git SHA so the binary can include it in --version output.
+    // Re-run whenever HEAD changes (the .git/HEAD file is updated on every
+    // commit, checkout, and merge).
+    println!("cargo::rerun-if-changed=../../.git/HEAD");
+    println!("cargo::rerun-if-changed=../../.git/refs");
+    let sha = capture_git_sha();
+    println!("cargo::rustc-env=TZE_HUD_GIT_SHA={sha}");
+
     // On non-Windows targets this block compiles to nothing.
     #[cfg(target_os = "windows")]
     {
