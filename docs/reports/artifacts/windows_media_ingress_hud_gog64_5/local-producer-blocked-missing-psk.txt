@@ -1,0 +1,18 @@
+# live media producer auth preflight 2026-05-11T16:17:24Z
+TZE_HUD_PSK present? no
+MCP_TEST_PSK present? no
+Command:
+python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py local-producer --target tzehouse-windows.parrot-hen.ts.net:50051 --agent-id windows-local-media-producer --zone-name media-pip --source-label synthetic-color-bars --hold-s 30 --evidence-json docs/reports/artifacts/windows_media_ingress_hud_gog64_5/local-producer-evidence.json
+Output:
+Traceback (most recent call last):
+  File "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-gog64.5/.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py", line 351, in <module>
+    raise SystemExit(main())
+  File "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-gog64.5/.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py", line 339, in main
+    evidence = asyncio.run(run_local_producer(args))
+  File "/home/tze/.pyenv/versions/3.10.12/lib/python3.10/asyncio/runners.py", line 44, in run
+    return loop.run_until_complete(main)
+  File "/home/tze/.pyenv/versions/3.10.12/lib/python3.10/asyncio/base_events.py", line 649, in run_until_complete
+    return future.result()
+  File "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-gog64.5/.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py", line 172, in run_local_producer
+    raise RuntimeError(f"set {args.psk_env} or pass --psk")
+RuntimeError: set TZE_HUD_PSK or pass --psk

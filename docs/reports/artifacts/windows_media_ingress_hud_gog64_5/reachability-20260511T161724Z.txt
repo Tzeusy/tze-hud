@@ -1,0 +1,22 @@
+# reachability probe 2026-05-11T16:17:24Z
+## tailscale status peer
+{
+  "HostName": "TzeHouse",
+  "DNSName": "tzehouse-windows.parrot-hen.ts.net.",
+  "Online": true,
+  "LastSeen": "0001-01-01T00:00:00Z",
+  "TailscaleIPs": [
+    "100.87.181.125",
+    "fd7a:115c:a1e0:ab12:4843:cd96:6257:b57d"
+  ]
+}
+## tailscale ping
+pong from tzehouse-windows (100.87.181.125) via [2406:3003:2001:183a:d455:d46c:cc3a:80e3]:41641 in 9ms
+## ssh tzeus
+tzehouse\tzeus
+## ssh hudbot
+tzehouse\hudbot
+## tcp ports
+22 open
+50051 open
+9090 open
