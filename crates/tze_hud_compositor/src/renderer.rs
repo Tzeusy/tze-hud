@@ -15609,7 +15609,11 @@ mod tests {
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab = scene.create_tab("Main", 0).unwrap();
-        let lease = scene.grant_lease("agent-a", 60_000, vec![]);
+        let lease = scene.grant_lease(
+            "agent-a",
+            60_000,
+            vec![Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab,
