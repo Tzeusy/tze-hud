@@ -61,7 +61,7 @@ use tze_hud_scene::types::Rgba;
 /// | Key | Effect |
 /// |-----|--------|
 /// | `typography.code.family` | `"monospace"` enables monospace for code spans |
-/// | `color.code.background` | Background tint behind inline code (propagated as a color modifier in Phase 1) |
+/// | `color.code.background` | Backdrop panel color drawn behind inline/fenced code |
 /// | `color.code.text` | Optional foreground color for code spans and blocks |
 /// | `color.link.text` | Link text color |
 /// | `typography.bold.weight` | CSS weight for bold (`**text**`) spans; default 700 |
@@ -86,11 +86,13 @@ pub struct MarkdownTokens {
     ///
     /// Resolved from `color.code.text`.
     pub code_color: Option<Rgba>,
-    /// Optional background/tint color for inline code and code blocks.
+    /// Optional backdrop panel color drawn behind inline code and fenced/indented
+    /// code blocks.
     ///
-    /// Resolved from `color.code.background`.  Phase 1: propagated as a
-    /// foreground color modifier when no separate `code_color` is provided.
-    /// `None` = no override.
+    /// Resolved from `color.code.background`.  Rendered as a geometry quad behind the
+    /// code text — does **not** affect the text foreground color.  Use `code_color`
+    /// (resolved from `color.code.text`) to change the code text color.
+    /// `None` = no backdrop panel.
     pub code_background: Option<Rgba>,
 }
 
@@ -195,6 +197,12 @@ pub struct StyleAttr {
     pub monospace: bool,
     /// Overrides the text color if `Some`.
     pub color: Option<Rgba>,
+    /// Backdrop panel color drawn behind this span's glyph area if `Some`.
+    ///
+    /// Populated for code spans (inline/fenced/indented) when the
+    /// `color.code.background` design token is set.  Rendered as a geometry
+    /// quad behind the text — does **not** affect the text foreground color.
+    pub background_color: Option<Rgba>,
     /// Font-size multiplier relative to the node's base `font_size_px`.
     ///
     /// `None` means no scaling (uses the node base size).  `Some(1.75)`
@@ -211,6 +219,7 @@ impl StyleAttr {
             italic: false,
             monospace: false,
             color: None,
+            background_color: None,
             size_scale: None,
         }
     }
@@ -221,6 +230,7 @@ impl StyleAttr {
             && !self.italic
             && !self.monospace
             && self.color.is_none()
+            && self.background_color.is_none()
             && self.size_scale.is_none()
     }
 }
@@ -241,6 +251,36 @@ pub struct StyledSpan {
     pub attr: StyleAttr,
 }
 
+// ─── CodePanelSpan ───────────────────────────────────────────────────────────
+
+/// The kind of code region for backdrop-panel rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodePanelKind {
+    /// Fenced code block (`` ``` `` or `~~~`) or indented code block (4-space/tab).
+    Block,
+    /// Inline code span (`` `code` ``).
+    Inline,
+}
+
+/// A contiguous region in [`ParsedMarkdown::plain_text`] that should receive a
+/// code-panel backdrop quad in the geometry pass.
+///
+/// Byte offsets are valid UTF-8 boundaries into [`ParsedMarkdown::plain_text`].
+/// The range is exclusive-end: `[start_byte, end_byte)`.
+///
+/// The renderer uses these records together with the node's `font_size_px` and
+/// `bounds` to approximate per-block backdrop rectangles without needing
+/// per-glyph layout information.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodePanelSpan {
+    /// Inclusive byte offset into `ParsedMarkdown::plain_text`.
+    pub start_byte: usize,
+    /// Exclusive byte offset into `ParsedMarkdown::plain_text`.
+    pub end_byte: usize,
+    /// Whether this is a block-level or inline code region.
+    pub kind: CodePanelKind,
+}
+
 // ─── ParsedMarkdown ──────────────────────────────────────────────────────────
 
 /// The cached result of parsing a single `TextMarkdownNode` content string.
@@ -251,6 +291,8 @@ pub struct StyledSpan {
 ///   preserve literal source text).
 /// - `spans` covers only runs with non-plain styling; unstyled gaps between
 ///   spans inherit the node's base style.
+/// - `code_panels` lists byte ranges that should receive a backdrop panel quad
+///   (populated when the `color.code.background` token is set).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedMarkdown {
     /// Plain text output, suitable for glyph layout.
@@ -261,6 +303,12 @@ pub struct ParsedMarkdown {
     pub plain_text: Arc<str>,
     /// Styled spans, sorted by `start_byte`, non-overlapping.
     pub spans: Vec<StyledSpan>,
+    /// Code-panel backdrop regions, in `plain_text` byte space.
+    ///
+    /// Non-empty only when `tokens.code_background` is `Some`.  The renderer
+    /// iterates these to emit geometry quads behind code text.  Sorted by
+    /// `start_byte`.
+    pub code_panels: Vec<CodePanelSpan>,
 }
 
 // ─── MarkdownCache ────────────────────────────────────────────────────────────
@@ -370,6 +418,10 @@ impl MarkdownCache {
 pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMarkdown {
     let mut plain = String::with_capacity(content.len());
     let mut spans: Vec<StyledSpan> = Vec::new();
+    // Code-panel backdrop regions: populated when tokens.code_background is Some.
+    // Each entry records a contiguous code region in plain-text byte space so the
+    // renderer can emit a geometry quad behind that region.
+    let mut code_panels: Vec<CodePanelSpan> = Vec::new();
 
     let mut in_fenced_block = false;
     let mut fence_char: Option<char> = None;
@@ -396,6 +448,8 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                     plain.push('\n');
                 }
                 i += 1;
+                // Record panel start before collecting the fence body.
+                let panel_start = plain.len();
                 // Collect fence body until closing fence or EOF.
                 while i < n {
                     let body_line = lines[i];
@@ -419,13 +473,26 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                                 weight: None,
                                 italic: false,
                                 monospace: tokens.code_monospace,
-                                color: tokens.code_color.or(tokens.code_background),
+                                // code_color sets the foreground; code_background is a
+                                // backdrop panel (not a text color modifier).
+                                color: tokens.code_color,
+                                background_color: tokens.code_background,
                                 size_scale: None,
                             },
                         });
                     }
                     prev_was_empty = body_line.is_empty();
                     i += 1;
+                }
+                // Emit one panel record for the entire fenced block (even if
+                // it is a multi-line block — the renderer approximates it as a
+                // single rect spanning the block's plain-text byte range).
+                if tokens.code_background.is_some() && plain.len() > panel_start {
+                    code_panels.push(CodePanelSpan {
+                        start_byte: panel_start,
+                        end_byte: plain.len(),
+                        kind: CodePanelKind::Block,
+                    });
                 }
                 continue;
             }
@@ -452,10 +519,20 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                         weight: None,
                         italic: false,
                         monospace: tokens.code_monospace,
-                        color: tokens.code_color.or(tokens.code_background),
+                        // code_color sets the foreground; code_background is a
+                        // backdrop panel (not a text color modifier).
+                        color: tokens.code_color,
+                        background_color: tokens.code_background,
                         size_scale: None,
                     },
                 });
+                if tokens.code_background.is_some() {
+                    code_panels.push(CodePanelSpan {
+                        start_byte: start,
+                        end_byte: end,
+                        kind: CodePanelKind::Block,
+                    });
+                }
             }
             prev_was_empty = body.is_empty();
             i += 1;
@@ -475,6 +552,7 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                     italic: false,
                     monospace: false,
                     color: None,
+                    background_color: None,
                     // Apply heading scale so the font size actually changes at render time.
                     size_scale: if (scale - 1.0).abs() > f32::EPSILON {
                         Some(scale)
@@ -549,9 +627,24 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
     spans.sort_by_key(|s| (s.start_byte, s.end_byte));
     spans.retain(|s| s.start_byte < s.end_byte && s.end_byte <= plain.len());
 
+    // Post-process: build inline code_panels from spans that carry a
+    // background_color (set by the inline-code handler below).  Doing this
+    // as a post-processing step avoids threading a `&mut Vec<CodePanelSpan>`
+    // through all the recursive process_inline_inner calls.
+    for span in &spans {
+        if span.attr.background_color.is_some() && span.attr.monospace {
+            code_panels.push(CodePanelSpan {
+                start_byte: span.start_byte,
+                end_byte: span.end_byte,
+                kind: CodePanelKind::Inline,
+            });
+        }
+    }
+
     ParsedMarkdown {
         plain_text: Arc::from(plain),
         spans,
+        code_panels,
     }
 }
 
@@ -798,13 +891,13 @@ fn process_inline_inner(
                             weight: base_override.and_then(|b| b.weight),
                             italic: false,
                             monospace: tokens.code_monospace,
-                            // code_color (color.code.text) takes priority; fall back to
-                            // code_background (color.code.background) as a color modifier
-                            // per the Phase-1 contract, then to the base override color.
+                            // code_color sets the text foreground; code_background
+                            // is a backdrop panel rendered behind the code text —
+                            // it must NOT bleed into the text color.
                             color: tokens
                                 .code_color
-                                .or(tokens.code_background)
                                 .or_else(|| base_override.and_then(|b| b.color)),
+                            background_color: tokens.code_background,
                             size_scale: base_override.and_then(|b| b.size_scale),
                         },
                     });
@@ -840,6 +933,7 @@ fn process_inline_inner(
                     italic: true,
                     monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                     color: base_override.and_then(|b| b.color),
+                    background_color: None,
                     size_scale: base_override.and_then(|b| b.size_scale),
                 };
                 process_inline_inner(
@@ -876,6 +970,7 @@ fn process_inline_inner(
                     italic: base_override.map(|b| b.italic).unwrap_or(false),
                     monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                     color: base_override.and_then(|b| b.color),
+                    background_color: None,
                     size_scale: base_override.and_then(|b| b.size_scale),
                 };
                 process_inline_inner(
@@ -918,6 +1013,7 @@ fn process_inline_inner(
                         italic: true,
                         monospace: base_override.map(|b| b.monospace).unwrap_or(false),
                         color: base_override.and_then(|b| b.color),
+                        background_color: None,
                         size_scale: base_override.and_then(|b| b.size_scale),
                     };
                     process_inline_inner(
@@ -2563,7 +2659,12 @@ mod tests {
         );
     }
 
-    /// (b) code_background token is read and applied to inline code spans.
+    /// (b) code_background token populates background_color, NOT the text foreground color.
+    ///
+    /// Previously the bug caused code_background to bleed into `StyleAttr::color` (the
+    /// text foreground) when no code_color was set.  The correct behavior is:
+    /// - `background_color` carries the backdrop panel color
+    /// - `color` (text foreground) stays `None` when code_color is unset
     #[test]
     fn code_background_token_applied_to_inline_code() {
         let t = MarkdownTokens {
@@ -2577,20 +2678,36 @@ mod tests {
             code_span.is_some(),
             "inline code must produce a monospace span"
         );
-        let color = code_span.unwrap().attr.color;
+        let span = code_span.unwrap();
+        // code_background must NOT bleed into the text foreground color.
         assert!(
-            color.is_some(),
-            "inline code span must carry color when code_background token is set; got None"
+            span.attr.color.is_none(),
+            "code span text color must be None when only code_background is set (not code_color); \
+             got {:?} — code_background is a backdrop panel, not a text color modifier",
+            span.attr.color
         );
-        // The color applied should match code_background (since code_color is None).
-        let c = color.unwrap();
+        // code_background must populate background_color instead.
+        let bg = span.attr.background_color;
+        assert!(
+            bg.is_some(),
+            "code span background_color must be Some when code_background token is set; got None"
+        );
+        let c = bg.unwrap();
         assert!(
             (c.r - 0.1_f32).abs() < 1e-3,
-            "code span color.r must match code_background.r; got {c:?}"
+            "code span background_color.r must match code_background.r; got {c:?}"
+        );
+        // A CodePanelSpan of kind Inline must also be recorded.
+        assert!(
+            md.code_panels
+                .iter()
+                .any(|p| matches!(p.kind, CodePanelKind::Inline)),
+            "code_panels must contain an Inline entry for the inline code span"
         );
     }
 
-    /// (b) code_color takes priority over code_background.
+    /// (b) code_color takes priority over code_background for the text foreground;
+    /// code_background still goes to background_color regardless.
     #[test]
     fn code_color_takes_priority_over_code_background() {
         let t = MarkdownTokens {
@@ -2604,12 +2721,20 @@ mod tests {
             code_span.is_some(),
             "inline code must produce a monospace span"
         );
-        let c = code_span.unwrap().attr.color.unwrap();
-        // Should use code_color (0.9), not code_background (0.1).
+        let span = code_span.unwrap();
+        // code_color (0.9) must be the text foreground.
+        let c = span.attr.color.unwrap();
         assert!(
             (c.r - 0.9_f32).abs() < 1e-3,
-            "code_color must take priority; got color r={} (expected ~0.9)",
+            "code_color must be the text foreground; got color r={} (expected ~0.9)",
             c.r
+        );
+        // code_background (0.1) must be the backdrop panel, not blended into text color.
+        let bg = span.attr.background_color.unwrap();
+        assert!(
+            (bg.r - 0.1_f32).abs() < 1e-3,
+            "code_background must be background_color; got bg.r={} (expected ~0.1)",
+            bg.r
         );
     }
 
@@ -2622,6 +2747,70 @@ mod tests {
         assert!(
             t.code_background.is_some(),
             "color.code.background token must populate code_background"
+        );
+    }
+
+    /// (b) code_panel spans are emitted for fenced code blocks.
+    #[test]
+    fn code_panel_spans_emitted_for_fenced_block() {
+        let t = MarkdownTokens {
+            code_background: Some(Rgba::new(0.05, 0.05, 0.15, 1.0)),
+            ..MarkdownTokens::default()
+        };
+        let md = parse_markdown_subset("```\nfn foo() {}\n```\n", &t);
+        let block_panel = md
+            .code_panels
+            .iter()
+            .find(|p| matches!(p.kind, CodePanelKind::Block));
+        assert!(
+            block_panel.is_some(),
+            "code_panels must contain a Block entry for a fenced code block; got: {:?}",
+            md.code_panels
+        );
+        // The panel must cover at least the fenced content bytes.
+        let panel = block_panel.unwrap();
+        assert!(
+            panel.start_byte < panel.end_byte,
+            "Block panel must span a non-empty byte range; got [{}, {}]",
+            panel.start_byte,
+            panel.end_byte
+        );
+    }
+
+    /// (b) code_panel spans are emitted for inline code spans.
+    #[test]
+    fn code_panel_spans_emitted_for_inline_code() {
+        let t = MarkdownTokens {
+            code_background: Some(Rgba::new(0.05, 0.05, 0.15, 1.0)),
+            ..MarkdownTokens::default()
+        };
+        let md = parse_markdown_subset("Use `fmt` and `clippy`.", &t);
+        let inline_panels: Vec<_> = md
+            .code_panels
+            .iter()
+            .filter(|p| matches!(p.kind, CodePanelKind::Inline))
+            .collect();
+        assert_eq!(
+            inline_panels.len(),
+            2,
+            "two inline code spans must produce two Inline code_panels; got: {:?}",
+            md.code_panels
+        );
+    }
+
+    /// (b) No code_panels emitted when code_background token is absent.
+    #[test]
+    fn no_code_panels_without_code_background_token() {
+        let t = MarkdownTokens {
+            code_background: None,
+            code_color: Some(Rgba::new(0.8, 0.8, 0.8, 1.0)),
+            ..MarkdownTokens::default()
+        };
+        let md = parse_markdown_subset("Use `fmt` here.\n```\ncode\n```\n", &t);
+        assert!(
+            md.code_panels.is_empty(),
+            "code_panels must be empty when code_background token is None; got: {:?}",
+            md.code_panels
         );
     }
 

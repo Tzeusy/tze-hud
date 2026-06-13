@@ -855,6 +855,14 @@ pub struct StyledRunItem {
     pub monospace: bool,
     /// Optional color override (linear sRGB); `None` = use `TextItem::color`.
     pub color: Option<[u8; 4]>,
+    /// Optional backdrop panel color (sRGB u8); `None` = no backdrop.
+    ///
+    /// Populated from `StyleAttr::background_color` (the `color.code.background`
+    /// design token) for inline code and code block spans.  Used by the text
+    /// rasterizer to draw a backdrop quad behind the glyph run before the glyphs
+    /// are composited — enabling per-span highlight/background rendering without
+    /// a separate geometry pass for inline elements.
+    pub background_color: Option<[u8; 4]>,
     /// Font-size multiplier relative to `TextItem::font_size_px`.
     ///
     /// `None` = no scaling (use base size).  Applied by setting per-span
@@ -1070,6 +1078,7 @@ impl TextItem {
                     return None;
                 }
                 let color = span.attr.color.map(rgba_to_srgb_u8);
+                let background_color = span.attr.background_color.map(rgba_to_srgb_u8);
                 Some(StyledRunItem {
                     start_byte: start,
                     end_byte: end,
@@ -1077,6 +1086,7 @@ impl TextItem {
                     italic: span.attr.italic,
                     monospace: span.attr.monospace,
                     color,
+                    background_color,
                     size_scale: span.attr.size_scale,
                 })
             })
@@ -1584,6 +1594,7 @@ pub(crate) fn reslice_styled_runs(
                 italic: run.italic,
                 monospace: run.monospace,
                 color: run.color,
+                background_color: run.background_color,
                 size_scale: run.size_scale,
             })
         })
@@ -1694,6 +1705,7 @@ pub(crate) fn reslice_styled_runs_tail_anchored(
                 italic: run.italic,
                 monospace: run.monospace,
                 color: run.color,
+                background_color: run.background_color,
                 size_scale: run.size_scale,
             })
         })
@@ -3583,6 +3595,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
             StyledRunItem {
@@ -3592,6 +3605,7 @@ mod tests {
                 italic: true,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
         ];
@@ -3615,6 +3629,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
             StyledRunItem {
@@ -3624,6 +3639,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
         ];
@@ -3644,6 +3660,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            background_color: None,
             size_scale: None,
         }];
         // content_end = 8: run 3..12 overlaps; should become 3..8
@@ -3741,6 +3758,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            background_color: None,
             size_scale: None,
         }];
         let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
@@ -3758,6 +3776,7 @@ mod tests {
             italic: false,
             monospace: true,
             color: None,
+            background_color: None,
             size_scale: None,
         }];
         let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
@@ -3779,6 +3798,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
             StyledRunItem {
@@ -3788,6 +3808,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
             StyledRunItem {
@@ -3797,6 +3818,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
         ];
@@ -3853,6 +3875,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            background_color: None,
             size_scale: None,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
@@ -3891,6 +3914,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            background_color: None,
             size_scale: None,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
@@ -3916,6 +3940,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            background_color: None,
             size_scale: None,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
@@ -3959,6 +3984,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
             // Run on visible tail ("line2") → should map to [4..9] in effective_text
@@ -3969,6 +3995,7 @@ mod tests {
                 italic: true,
                 monospace: false,
                 color: Some([255, 0, 0, 255]),
+                background_color: None,
                 size_scale: None,
             },
         ];
@@ -4059,6 +4086,7 @@ mod tests {
             italic: false,
             monospace: false,
             color: None,
+            background_color: None,
             size_scale: None,
         }];
         // original.ends_with("this_is_a_very…\nline3") is false, so empty is returned.
@@ -4096,6 +4124,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
             StyledRunItem {
@@ -4105,6 +4134,7 @@ mod tests {
                 italic: true,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             },
         ];
@@ -4283,6 +4313,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             }]),
             viewport: TruncationViewport::HeadAnchored,
@@ -4405,6 +4436,7 @@ mod tests {
                 italic: false,
                 monospace: false,
                 color: None,
+                background_color: None,
                 size_scale: None,
             }]),
             viewport: TruncationViewport::HeadAnchored,

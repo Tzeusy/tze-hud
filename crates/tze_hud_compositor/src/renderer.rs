@@ -229,7 +229,10 @@ const BORDER_DEFAULT_FALLBACK: Rgba = Rgba {
 /// when the `color.tile.background.text_markdown` design token is absent.
 ///
 /// Per spec §Canonical Token Schema:
-///   color.tile.background.text_markdown → #636380 → (0.15, 0.15, 0.25)
+///   color.tile.background.text_markdown → #6C6C88 → (0.15, 0.15, 0.25) linear
+///
+/// Note: the sRGB hex for linear (0.15, 0.15, 0.25) is #6C6C88, not #636380.
+/// (#636380 linearises to ≈(0.125, 0.125, 0.216); #262640 to ≈(0.019, 0.019, 0.051).)
 const TILE_BG_TEXT_MARKDOWN: Rgba = Rgba {
     r: 0.15,
     g: 0.15,
@@ -7940,10 +7943,76 @@ impl Compositor {
                         );
                         vertices.extend_from_slice(&verts);
                     }
+                    // Code panel backdrop quads: emitted behind fenced/indented code
+                    // blocks when the `color.code.background` design token is set.
+                    //
+                    // Phase-1 geometry approximation: glyph pixel positions are not
+                    // available in `render_node` (the geometry pass runs before the
+                    // text rasterizer), so block panels are positioned by counting
+                    // lines in the parsed plain text up to the panel byte range.
+                    // Inline panel pixel-exact geometry is deferred to Phase 2.
+                    if let Some(code_bg) = self.markdown_tokens.code_background {
+                        if let Some(key) = self.node_key_cache.get(&node_id) {
+                            if let Some(parsed) = self.markdown_cache.get_by_key(key) {
+                                let line_height = tm.font_size_px * 1.4;
+                                let panel_margin_x = 4.0_f32;
+                                let panel_pad_y = 2.0_f32;
+                                let plain = parsed.plain_text.as_ref();
+                                for panel in &parsed.code_panels {
+                                    use crate::markdown::CodePanelKind;
+                                    if !matches!(panel.kind, CodePanelKind::Block) {
+                                        // Inline panels require glyph-level layout;
+                                        // deferred to Phase 2.
+                                        continue;
+                                    }
+                                    let clamped_start = panel.start_byte.min(plain.len());
+                                    let clamped_end = panel.end_byte.min(plain.len());
+                                    if clamped_start >= clamped_end
+                                        || !plain.is_char_boundary(clamped_start)
+                                        || !plain.is_char_boundary(clamped_end)
+                                    {
+                                        continue;
+                                    }
+                                    // Count lines before the panel to get y-offset,
+                                    // and lines within the panel to get height.
+                                    // Use `.lines().count()` (not newline counting) so that a
+                                    // code block without a trailing newline (e.g. "a\nb") is
+                                    // correctly measured as 2 lines rather than 1.
+                                    let lines_before = plain[..clamped_start]
+                                        .chars()
+                                        .filter(|&c| c == '\n')
+                                        .count();
+                                    let lines_in_panel =
+                                        plain[clamped_start..clamped_end].lines().count().max(1);
+                                    let panel_y_offset =
+                                        lines_before as f32 * line_height - panel_pad_y;
+                                    let panel_height =
+                                        lines_in_panel as f32 * line_height + panel_pad_y * 2.0;
+                                    let panel_x =
+                                        tile.bounds.x + tm.bounds.x + panel_margin_x - scroll_x;
+                                    let panel_y =
+                                        tile.bounds.y + tm.bounds.y + panel_y_offset - scroll_y;
+                                    let panel_w = (tm.bounds.width - panel_margin_x * 2.0).max(0.0);
+                                    if panel_w > 0.0 && panel_height > 0.0 {
+                                        let verts = rect_vertices(
+                                            panel_x,
+                                            panel_y,
+                                            panel_w,
+                                            panel_height,
+                                            sw,
+                                            sh,
+                                            self.gpu_color(code_bg),
+                                        );
+                                        vertices.extend_from_slice(&verts);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else {
                     // Fallback when glyphon is unavailable: preserve the old
                     // placeholder treatment so text tiles remain visible.
-                    let bg = tm.background.unwrap_or(Rgba::new(0.15, 0.15, 0.25, 1.0));
+                    let bg = tm.background.unwrap_or(TILE_BG_TEXT_MARKDOWN);
                     let verts = rect_vertices(
                         tile.bounds.x + tm.bounds.x - scroll_x,
                         tile.bounds.y + tm.bounds.y - scroll_y,
