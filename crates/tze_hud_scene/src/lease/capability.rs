@@ -257,6 +257,7 @@ mod tests {
             renewal_policy: RenewalPolicy::default(),
             capabilities,
             resource_budget: ResourceBudget::default(),
+            spatial_budget: Default::default(),
             suspended_at_ms: None,
             ttl_remaining_at_suspend_ms: None,
             disconnected_at_ms: None,

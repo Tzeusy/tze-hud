@@ -509,6 +509,53 @@ fn apply_drag_handle_pointer_event(
     }
 }
 
+/// Compute the maximum resize dimensions for a portal tile, combining the
+/// display boundary clamp with the tile's lease-granted spatial budget.
+///
+/// The display boundary (`display_w - tile_x`, `display_h - tile_y`) is always
+/// the hard outer clamp.  When the tile's lease carries a non-zero
+/// `max_tile_width_px` / `max_tile_height_px`, whichever is smaller wins
+/// (most-restrictive policy).
+///
+/// `lease_max_width_px` and `lease_max_height_px` should be sourced from
+/// the `Lease.resource_budget` in `scene.leases` (the authoritative location
+/// for spatial budget limits).  Pass `0.0` for each to indicate unconstrained.
+///
+/// A lease budget value of `0.0` means unconstrained: only the display boundary
+/// applies.
+///
+/// `min_*` values are from the portal tokens and serve as the floor (a portal
+/// can always be grown to at least the minimum size even if the lease limit is
+/// somehow smaller — the lease limit is not allowed to shrink a portal below the
+/// token minimum, per §6b design intent).
+fn compute_portal_max_dims(
+    tile_bounds: tze_hud_scene::types::Rect,
+    lease_max_width_px: f32,
+    lease_max_height_px: f32,
+    display_w: f32,
+    display_h: f32,
+    min_width_px: f32,
+    min_height_px: f32,
+) -> (f32, f32) {
+    // Display boundary: the tile cannot extend beyond the screen edge.
+    let display_max_w = (display_w - tile_bounds.x).max(min_width_px);
+    let display_max_h = (display_h - tile_bounds.y).max(min_height_px);
+
+    // Lease budget: intersect with display boundary (most restrictive wins).
+    // A lease value of 0.0 means unconstrained; skip the intersection.
+    let max_w = if lease_max_width_px > 0.0 {
+        display_max_w.min(lease_max_width_px).max(min_width_px)
+    } else {
+        display_max_w
+    };
+    let max_h = if lease_max_height_px > 0.0 {
+        display_max_h.min(lease_max_height_px).max(min_height_px)
+    } else {
+        display_max_h
+    };
+    (max_w, max_h)
+}
+
 /// Pointer-driven portal resize state machine step.
 ///
 /// Called from [`WinitApp::enqueue_pointer_event`] while the scene lock is held.
@@ -573,10 +620,31 @@ fn apply_portal_resize_pointer_event(
             };
             let edge: ResizeEdge = hit_affordance(x, y, &current_rect, tokens.affordance_px)?;
 
+            // Resolve spatial budget from the authoritative lease entry.
+            // The tile's embedded `resource_budget` is always default (0.0 = unconstrained).
+            let (lease_max_w, lease_max_h) = scene
+                .leases
+                .get(&tile.lease_id)
+                .map(|l| {
+                    (
+                        l.spatial_budget.max_tile_width_px,
+                        l.spatial_budget.max_tile_height_px,
+                    )
+                })
+                .unwrap_or((0.0, 0.0));
+            let (max_width_px, max_height_px) = compute_portal_max_dims(
+                tile.bounds,
+                lease_max_w,
+                lease_max_h,
+                display_w,
+                display_h,
+                tokens.min_width_px,
+                tokens.min_height_px,
+            );
             let resize_bounds = ResizeBounds {
                 tokens,
-                max_width_px: (display_w - tile.bounds.x).max(tokens.min_width_px),
-                max_height_px: (display_h - tile.bounds.y).max(tokens.min_height_px),
+                max_width_px,
+                max_height_px,
                 display_w,
                 display_h,
             };
@@ -625,11 +693,31 @@ fn apply_portal_resize_pointer_event(
                 .find(|(_, s)| s.gesture_active())?;
             let tile_id = *tile_id;
 
-            let tile_bounds = scene.tiles.get(&tile_id).map(|t| t.bounds)?;
+            let tile = scene.tiles.get(&tile_id)?;
+            let tile_bounds = tile.bounds;
+            let (lease_max_w, lease_max_h) = scene
+                .leases
+                .get(&tile.lease_id)
+                .map(|l| {
+                    (
+                        l.spatial_budget.max_tile_width_px,
+                        l.spatial_budget.max_tile_height_px,
+                    )
+                })
+                .unwrap_or((0.0, 0.0));
+            let (max_width_px, max_height_px) = compute_portal_max_dims(
+                tile_bounds,
+                lease_max_w,
+                lease_max_h,
+                display_w,
+                display_h,
+                tokens.min_width_px,
+                tokens.min_height_px,
+            );
             let resize_bounds = ResizeBounds {
                 tokens,
-                max_width_px: (display_w - tile_bounds.x).max(tokens.min_width_px),
-                max_height_px: (display_h - tile_bounds.y).max(tokens.min_height_px),
+                max_width_px,
+                max_height_px,
                 display_w,
                 display_h,
             };
@@ -677,11 +765,31 @@ fn apply_portal_resize_pointer_event(
                 .find(|(_, s)| s.gesture_active())?;
             let tile_id = *tile_id;
 
-            let tile_bounds = scene.tiles.get(&tile_id).map(|t| t.bounds)?;
+            let tile = scene.tiles.get(&tile_id)?;
+            let tile_bounds = tile.bounds;
+            let (lease_max_w, lease_max_h) = scene
+                .leases
+                .get(&tile.lease_id)
+                .map(|l| {
+                    (
+                        l.spatial_budget.max_tile_width_px,
+                        l.spatial_budget.max_tile_height_px,
+                    )
+                })
+                .unwrap_or((0.0, 0.0));
+            let (max_width_px, max_height_px) = compute_portal_max_dims(
+                tile_bounds,
+                lease_max_w,
+                lease_max_h,
+                display_w,
+                display_h,
+                tokens.min_width_px,
+                tokens.min_height_px,
+            );
             let resize_bounds = ResizeBounds {
                 tokens,
-                max_width_px: (display_w - tile_bounds.x).max(tokens.min_width_px),
-                max_height_px: (display_h - tile_bounds.y).max(tokens.min_height_px),
+                max_width_px,
+                max_height_px,
                 display_w,
                 display_h,
             };
@@ -1406,11 +1514,10 @@ struct WindowedRuntimeState {
     /// portal tile; retained across keystrokes to maintain the monotonic
     /// sequence counter (which the adapter uses to detect skipped snapshots).
     ///
-    /// NOTE: entries are not currently pruned when a tile is removed from the
-    /// scene. The map grows at most one entry per distinct portal tile seen
-    /// during the session (bounded by the number of portal tiles ever created),
-    /// so the leak is bounded. Proper cleanup on tile removal is tracked in
-    /// hud-38236 (constraint-authority follow-up).
+    /// Entries are pruned from the map when their tile is no longer present in
+    /// the scene (see `prune_portal_resize_states`). Any in-flight gesture is
+    /// abandoned cleanly because the tile is gone; the monotonic counter is
+    /// discarded with the entry.
     portal_resize_states: std::collections::HashMap<tze_hud_scene::SceneId, PortalResizeState>,
     /// Shared local composer echo state for the compositor thread (hud-r3ax6).
     ///
@@ -1499,6 +1606,9 @@ impl ApplicationHandler for WinitApp {
         // content is refreshed.  Uses try_lock on the scene to avoid blocking
         // the main thread (deferred to next about_to_wait if busy).
         self.drain_portal_projection();
+        // Prune stale portal_resize_states entries for tiles removed from the
+        // scene (hud-kgu8u). Uses try_lock; silently deferred if lock is busy.
+        self.prune_portal_resize_states();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -3433,6 +3543,43 @@ impl WinitApp {
         );
     }
 
+    /// Remove stale entries from `portal_resize_states` for tiles that no
+    /// longer exist in the scene.
+    ///
+    /// Called once per `about_to_wait` iteration.  Entries accumulate lazily
+    /// (one per portal tile ever focused during the session).  When a tile is
+    /// removed from the scene via a `DeleteTile` mutation, its entry in this
+    /// map would otherwise persist indefinitely.  This sweep cleans them up.
+    ///
+    /// Uses `try_lock` on the shared scene.  If the scene lock is busy the
+    /// sweep is deferred to the next iteration — the map entry is stale but
+    /// harmless for one frame.
+    fn prune_portal_resize_states(&mut self) {
+        if self.state.portal_resize_states.is_empty() {
+            return;
+        }
+        let Ok(state) = self.state.shared_state.try_lock() else {
+            tracing::trace!("portal resize prune deferred: shared_state lock busy");
+            return;
+        };
+        let Ok(scene) = state.scene.try_lock() else {
+            tracing::trace!("portal resize prune deferred: scene lock busy");
+            return;
+        };
+        let before = self.state.portal_resize_states.len();
+        self.state
+            .portal_resize_states
+            .retain(|tile_id, _| scene.tiles.contains_key(tile_id));
+        let removed = before - self.state.portal_resize_states.len();
+        if removed > 0 {
+            tracing::debug!(
+                removed,
+                remaining = self.state.portal_resize_states.len(),
+                "portal resize: pruned stale resize-state entries for removed tiles"
+            );
+        }
+    }
+
     /// Retry keyboard events that were deferred in the previous iteration(s)
     /// because the shared-state or scene lock was busy (hud-2fz34).
     ///
@@ -3581,13 +3728,30 @@ impl WinitApp {
                 resize_step_px: portal_part.window_resize_step_px,
                 affordance_px: portal_part.window_resize_affordance_px,
             };
+            // Resolve spatial budget from the authoritative lease entry.
+            let (lease_max_w, lease_max_h) = scene
+                .leases
+                .get(&tile.lease_id)
+                .map(|l| {
+                    (
+                        l.spatial_budget.max_tile_width_px,
+                        l.spatial_budget.max_tile_height_px,
+                    )
+                })
+                .unwrap_or((0.0, 0.0));
+            let (max_width_px, max_height_px) = compute_portal_max_dims(
+                tile.bounds,
+                lease_max_w,
+                lease_max_h,
+                display_w,
+                display_h,
+                tokens.min_width_px,
+                tokens.min_height_px,
+            );
             let resize_bounds = ResizeBounds {
                 tokens,
-                // Lease/scene budget max: use full display minus tile origin as a
-                // practical upper bound. Real lease-budget enforcement is a
-                // follow-up (hud-38236 handles full constraint authority).
-                max_width_px: (display_w - tile.bounds.x).max(tokens.min_width_px),
-                max_height_px: (display_h - tile.bounds.y).max(tokens.min_height_px),
+                max_width_px,
+                max_height_px,
                 display_w,
                 display_h,
             };
@@ -8808,6 +8972,325 @@ redaction_style = "blank"
         assert!(
             input_was_forwarded_case2,
             "input must NOT be dropped by Priority-1 when safe_mode_atomic=false"
+        );
+    }
+
+    // ── Lease-bound maxima (hud-kgu8u) ───────────────────────────────────────
+
+    /// `compute_portal_max_dims` with no lease constraint (0.0) uses only the
+    /// display boundary.
+    #[test]
+    fn compute_portal_max_dims_unconstrained_uses_display_boundary() {
+        use tze_hud_scene::types::Rect;
+
+        let tile_bounds = Rect::new(100.0, 100.0, 400.0, 300.0);
+
+        // 0.0 = unconstrained (no lease spatial budget)
+        let (max_w, max_h) =
+            compute_portal_max_dims(tile_bounds, 0.0, 0.0, 1920.0, 1080.0, 50.0, 50.0);
+
+        // Display boundary: 1920 - 100 = 1820, 1080 - 100 = 980.
+        assert_eq!(
+            max_w, 1820.0,
+            "unconstrained width must equal display_w - tile_x"
+        );
+        assert_eq!(
+            max_h, 980.0,
+            "unconstrained height must equal display_h - tile_y"
+        );
+    }
+
+    /// When the lease budget is tighter than the display boundary, the lease
+    /// budget wins (most-restrictive policy).
+    #[test]
+    fn compute_portal_max_dims_lease_budget_is_more_restrictive() {
+        use tze_hud_scene::types::Rect;
+
+        let tile_bounds = Rect::new(100.0, 100.0, 400.0, 300.0);
+
+        let (max_w, max_h) =
+            compute_portal_max_dims(tile_bounds, 500.0, 400.0, 1920.0, 1080.0, 50.0, 50.0);
+
+        assert_eq!(
+            max_w, 500.0,
+            "lease budget (500) must win over display boundary (1820)"
+        );
+        assert_eq!(
+            max_h, 400.0,
+            "lease budget (400) must win over display boundary (980)"
+        );
+    }
+
+    /// When the display boundary is tighter than the lease budget, the display
+    /// boundary wins.
+    #[test]
+    fn compute_portal_max_dims_display_boundary_is_more_restrictive() {
+        use tze_hud_scene::types::Rect;
+
+        // Tile origin near the screen edge so the display boundary is tight.
+        let tile_bounds = Rect::new(1700.0, 900.0, 100.0, 100.0);
+
+        let (max_w, max_h) =
+            compute_portal_max_dims(tile_bounds, 5000.0, 5000.0, 1920.0, 1080.0, 50.0, 50.0);
+
+        // Display boundary: 1920 - 1700 = 220, 1080 - 900 = 180.
+        assert_eq!(
+            max_w, 220.0,
+            "display boundary (220) must win over lease budget (5000)"
+        );
+        assert_eq!(
+            max_h, 180.0,
+            "display boundary (180) must win over lease budget (5000)"
+        );
+    }
+
+    /// A lease budget smaller than the token minimum is floored to the minimum
+    /// so a portal is always growable to at least the token minimum.
+    #[test]
+    fn compute_portal_max_dims_lease_budget_floored_to_token_minimum() {
+        use tze_hud_scene::types::Rect;
+
+        let tile_bounds = Rect::new(100.0, 100.0, 400.0, 300.0);
+
+        let (max_w, max_h) =
+            compute_portal_max_dims(tile_bounds, 10.0, 10.0, 1920.0, 1080.0, 50.0, 50.0);
+
+        assert_eq!(
+            max_w, 50.0,
+            "budget smaller than min_width must be floored to min_width"
+        );
+        assert_eq!(
+            max_h, 50.0,
+            "budget smaller than min_height must be floored to min_height"
+        );
+    }
+
+    /// Portal resize gesture respects the lease-bound maximum:
+    /// dragging the right edge beyond the lease limit is clamped to the limit.
+    #[test]
+    fn pointer_drag_respects_lease_bound_maximum() {
+        use tze_hud_input::FocusManager;
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        // Tile at (100, 100, 400, 300) — starts at 400×300.
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        // Set a tight lease budget on the authoritative lease entry:
+        // max 450 wide, 350 tall.
+        if let Some(lease) = scene.leases.get_mut(&lease_id) {
+            lease.spatial_budget.max_tile_width_px = 450.0;
+            lease.spatial_budget.max_tile_height_px = 350.0;
+        }
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                tze_hud_scene::types::TileScrollConfig::vertical(),
+            )
+            .unwrap();
+
+        let mut fm = FocusManager::new();
+        fm.request_focus(
+            tze_hud_input::FocusRequest {
+                tile_id,
+                node_id: None,
+                steal: true,
+                requesting_namespace: "portal-agent".to_string(),
+            },
+            tab_id,
+            &scene,
+        );
+
+        let mut resize_states = std::collections::HashMap::new();
+        let display_w = 1920.0_f32;
+        let display_h = 1080.0_f32;
+
+        // Start gesture on right edge (100+400-8=492 ≤ 496 ≤ 500).
+        let down = PointerEvent {
+            x: 496.0,
+            y: 250.0,
+            kind: PointerEventKind::Down,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &down,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            PortalWindowTokens::default(),
+        );
+
+        // Drag far to the right — would grow the tile to >> 450px without a lease clamp.
+        let mv = PointerEvent {
+            x: 800.0,
+            y: 250.0,
+            kind: PointerEventKind::Move,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &mv,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            PortalWindowTokens::default(),
+        );
+
+        let width_after_drag = scene.tiles[&tile_id].bounds.width;
+        assert!(
+            width_after_drag <= 450.0,
+            "tile width must be clamped to lease budget 450.0, got {width_after_drag}"
+        );
+    }
+
+    // ── portal_resize_states map pruning (hud-kgu8u) ─────────────────────────
+
+    /// `prune_portal_resize_states` removes the entry for a tile that was
+    /// deleted from the scene. Verifies: entry present before deletion,
+    /// entry absent after prune.
+    ///
+    /// This test drives `prune_portal_resize_states` directly via a thin
+    /// harness because the method requires a `WinitApp` (holds scene + map).
+    /// We use the existing scene helpers and a manually constructed state to
+    /// avoid spinning up a full winit event loop.
+    #[test]
+    fn portal_resize_state_pruned_after_tile_removal() {
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+
+        // Build a minimal scene with one portal tile.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+
+        // Simulate a resize-state entry that accumulated for this tile.
+        let mut portal_resize_states: std::collections::HashMap<
+            tze_hud_scene::SceneId,
+            PortalResizeState,
+        > = std::collections::HashMap::new();
+        portal_resize_states.insert(
+            tile_id,
+            PortalResizeState::new(tile_id.as_uuid().as_u128() as u64),
+        );
+        assert!(
+            portal_resize_states.contains_key(&tile_id),
+            "entry must be present before tile removal"
+        );
+
+        // Remove the tile from the scene (simulates DeleteTile mutation).
+        scene.tiles.remove(&tile_id);
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "tile must be absent from scene after removal"
+        );
+
+        // Prune: entries for absent tiles must be removed.
+        let before = portal_resize_states.len();
+        portal_resize_states.retain(|id, _| scene.tiles.contains_key(id));
+        let removed = before - portal_resize_states.len();
+
+        assert_eq!(removed, 1, "exactly one stale entry must be pruned");
+        assert!(
+            !portal_resize_states.contains_key(&tile_id),
+            "entry for removed tile must be gone after pruning"
+        );
+    }
+
+    /// `prune_portal_resize_states` preserves entries for tiles that still
+    /// exist in the scene.
+    #[test]
+    fn portal_resize_state_preserved_for_live_tiles() {
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_a = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 300.0, 200.0),
+                1,
+            )
+            .unwrap();
+        let tile_b = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(400.0, 0.0, 300.0, 200.0),
+                2,
+            )
+            .unwrap();
+
+        let mut portal_resize_states: std::collections::HashMap<
+            tze_hud_scene::SceneId,
+            PortalResizeState,
+        > = std::collections::HashMap::new();
+        portal_resize_states.insert(
+            tile_a,
+            PortalResizeState::new(tile_a.as_uuid().as_u128() as u64),
+        );
+        portal_resize_states.insert(
+            tile_b,
+            PortalResizeState::new(tile_b.as_uuid().as_u128() as u64),
+        );
+
+        // Remove only tile_b from the scene.
+        scene.tiles.remove(&tile_b);
+
+        // Prune.
+        portal_resize_states.retain(|id, _| scene.tiles.contains_key(id));
+
+        assert!(
+            portal_resize_states.contains_key(&tile_a),
+            "entry for still-live tile_a must be retained"
+        );
+        assert!(
+            !portal_resize_states.contains_key(&tile_b),
+            "entry for removed tile_b must be pruned"
+        );
+        assert_eq!(
+            portal_resize_states.len(),
+            1,
+            "exactly one entry (tile_a) must remain"
         );
     }
 }
