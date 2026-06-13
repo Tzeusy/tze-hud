@@ -2,25 +2,29 @@
 //!
 //! Measures [`truncate_for_ellipsis`] across three representative input sizes:
 //!
-//! | Size  | Content                     | Expected p99 (release) |
-//! |-------|-----------------------------|-------------------------|
-//! | Small | ~540 B / 5-visible-line box | < 1 ms (Stage-5 budget) |
-//! | Med   | ~8 KiB paragraph            | < 1 ms (Stage-5 budget) |
-//! | Large | ~64 KiB (module ceiling)    | < 1 ms (Stage-5 budget) |
+//! | Size  | Content                     | Measured p99 (release, warm) |
+//! |-------|-----------------------------|-------------------------------|
+//! | Small | ~540 B / 5-visible-line box | < 1 ms                        |
+//! | Med   | ~8 KiB paragraph            | ~10 ms                        |
+//! | Large | ~64 KiB (module ceiling)    | ~94 ms                        |
 //!
 //! ## Performance contract
 //!
-//! Stage-5 (Layout Resolve) budget: **< 1 ms p99** per RFC 0003 §5.1 and
-//! `about/craft-and-care/engineering-bar.md` §2.
+//! These are the raw per-call costs of `truncate_for_ellipsis` (uncached).
+//! In production the Stage-5 (Layout Resolve) budget of **< 1 ms p99** per
+//! RFC 0003 §5.1 / `about/craft-and-care/engineering-bar.md` §2 is met
+//! because `TruncationCache` (hud-wgq7j) ensures that `truncate_for_ellipsis`
+//! is called **at most once per content/geometry change** (at commit time, off
+//! the render path).  The per-frame cost is then a single O(1) cache lookup.
 //!
-//! The old O(n²) implementation exceeded this budget dramatically:
+//! The old O(n²) implementation exceeded even these raw-call figures dramatically:
 //!   - 540 B / 5-line box: ~10.4 ms (measured release mode)
 //!   - 8 KiB paragraph:    ~4,522 ms
 //!   - 64 KiB:             did not finish in 12 minutes
 //!
-//! The new O(n log n) binary-search implementation must stay under 1 ms for
-//! all three sizes on reference hardware.  CI uses a lenient ceiling of 500 ms
-//! to tolerate debug builds, software rasterisers, and headless VMs.
+//! The current O(n log n) binary-search implementation is measured above.
+//! CI uses a lenient ceiling of 500 ms to tolerate debug builds, software
+//! rasterisers, and headless VMs.  [hud-v2z6u]
 //!
 //! ## Benchmark groups
 //!

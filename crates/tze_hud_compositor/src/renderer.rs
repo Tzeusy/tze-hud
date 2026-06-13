@@ -2426,9 +2426,31 @@ impl Compositor {
     /// Silently skips if the text renderer is not yet initialized (e.g. if
     /// `init_text_renderer` has not been called).  Callers in the runtime may
     /// defer font uploads until the compositor is ready.
+    ///
+    /// # Truncation cache invalidation
+    ///
+    /// Loading a new font changes shaping metrics (advance widths, kerning),
+    /// which invalidates any cached truncation results computed with the old
+    /// font.  This method therefore resets `truncation_cache_scene_version` to
+    /// `u64::MAX` — the forced-re-prime sentinel — so the next call to
+    /// `prime_truncation_cache` recomputes all entries regardless of whether
+    /// the scene version has changed.  The cadence gate is bypassed for
+    /// forced primes (see `prime_truncation_cache`), ensuring the new font is
+    /// reflected immediately on the next commit.  [hud-v2z6u]
     pub fn load_font_bytes(&mut self, resource_id: [u8; 32], data: &[u8]) {
         if let Some(rasterizer) = &mut self.text_rasterizer {
+            let was_new = !rasterizer.has_font(&resource_id);
             rasterizer.load_font_bytes(resource_id, data);
+            if was_new {
+                // A new font changes shaping widths — cached truncation points
+                // are now stale.  Reset to the forced-prime sentinel so the
+                // next prime_truncation_cache call re-resolves all entries.
+                self.truncation_cache_scene_version = u64::MAX;
+                tracing::debug!(
+                    resource_id = %crate::text::format_resource_id(&resource_id),
+                    "load_font_bytes: new font loaded — truncation cache invalidated [hud-v2z6u]"
+                );
+            }
         } else {
             tracing::debug!("load_font_bytes called before text renderer is initialized — skipped");
         }
@@ -5365,11 +5387,36 @@ impl Compositor {
             // as a correctness fallback, not the normal commit-time path).
         }
 
-        // ── Phase-1 truncation cache prime (hud-wgq7j) ────────────────────────
-        // Must run after prime_markdown_cache (so markdown plain-text is cached
-        // and TextItem geometry is stable) and before render-encode stages.
-        // Gated on scene.version — no work on unchanged scenes.
-        self.prime_truncation_cache(scene);
+        // ── Phase-1 truncation cache prime (hud-wgq7j / hud-v2z6u) ─────────────
+        // The truncation cache MUST be primed at commit time (before render_frame
+        // is called) by an explicit `prime_truncation_cache` call at the
+        // scene-commit site, mirroring the markdown cache contract.  By the time
+        // render_frame executes, the cache is already populated and this block is
+        // a no-op.
+        //
+        // Safety fallback: if we reach this path with a stale cache (e.g. the
+        // very first frame before any commit-time prime, or a call site that
+        // omitted the prime), we fall back here to preserve correctness.  In
+        // steady state this path is never taken; the cost is absorbed into Stage 6.
+        //
+        // Unlike the markdown cache, a version mismatch here is NOT necessarily a
+        // contract violation: `prime_truncation_cache` carries a mid-drag cadence
+        // gate (hud-ghhxa) that intentionally DEFERS a re-prime — leaving the
+        // sentinel behind `scene.version` — when geometry changes faster than
+        // RESIZE_REPRIME_INTERVAL_MS.  During a fast resize drag (or the headless
+        // benchmark's tight 180-frame loop), the cache legitimately lags the scene
+        // for one or more frames.  We therefore trace rather than debug_assert; the
+        // call to prime_truncation_cache below is itself cadence-gated and will be
+        // a no-op defer when appropriate, preserving the per-frame budget [hud-v2z6u].
+        if scene.version != self.truncation_cache_scene_version {
+            tracing::trace!(
+                scene_version = scene.version,
+                cache_version = self.truncation_cache_scene_version,
+                "render_frame: truncation cache lags scene (commit-prime not yet \
+                 applied or cadence-deferred); applying cadence-gated in-render prime"
+            );
+            self.prime_truncation_cache(scene);
+        }
 
         // Build the shared per-frame geometry (Background → tiles → Content →
         // Chrome zones). `build_frame_vertices` is the single source of truth for
@@ -5499,8 +5546,24 @@ impl Compositor {
             // Note: markdown_prime_us stays 0 (correctness fallback, not normal path).
         }
 
-        // ── Phase-1 truncation cache prime (hud-wgq7j) ────────────────────────
-        self.prime_truncation_cache(scene);
+        // ── Phase-1 truncation cache prime (hud-wgq7j / hud-v2z6u) ─────────────
+        // Same commit-time prime contract as the markdown cache — see render_frame
+        // for the full correctness rationale.  In steady state this block is a
+        // no-op because the caller already primed at commit time.
+        if scene.version != self.truncation_cache_scene_version {
+            // A version mismatch is an EXPECTED state: prime_truncation_cache's
+            // mid-drag cadence gate (hud-ghhxa) defers re-primes during fast
+            // geometry changes, so the sentinel legitimately lags scene.version
+            // for one or more frames.  Trace (not debug_assert) and apply the
+            // cadence-gated in-render prime to preserve correctness [hud-v2z6u].
+            tracing::trace!(
+                scene_version = scene.version,
+                cache_version = self.truncation_cache_scene_version,
+                "render_frame_headless: truncation cache lags scene; applying \
+                 cadence-gated in-render prime"
+            );
+            self.prime_truncation_cache(scene);
+        }
 
         // Build the shared per-frame geometry (Background → tiles → Content →
         // Chrome zones) via the single source of truth shared with the windowed
@@ -5632,6 +5695,36 @@ impl Compositor {
         self.drain_local_composer_state();
 
         let mut telemetry = FrameTelemetry::new(self.frame_number);
+
+        // ── Phase-1 markdown cache prime (hud-380dl) ──────────────────────────
+        // Safety fallback — mirrors render_frame / render_frame_headless.
+        // In steady state the cache is already primed at commit time and this
+        // block is a no-op.
+        if scene.version != self.markdown_cache_scene_version {
+            debug_assert!(
+                false,
+                "render_frame_with_chrome: markdown cache was not commit-primed for scene \
+                 version {} (cache version {}); falling back to in-render prime [hud-380dl]",
+                scene.version, self.markdown_cache_scene_version,
+            );
+            self.prime_markdown_cache(scene);
+        }
+
+        // ── Phase-1 truncation cache prime (hud-wgq7j / hud-v2z6u) ─────────────
+        // Safety fallback — mirrors render_frame / render_frame_headless.
+        // In steady state the cache is primed at commit time; this is a no-op.
+        // A version mismatch is an EXPECTED state because prime_truncation_cache's
+        // mid-drag cadence gate (hud-ghhxa) defers re-primes during fast geometry
+        // changes — so we trace rather than debug_assert [hud-v2z6u].
+        if scene.version != self.truncation_cache_scene_version {
+            tracing::trace!(
+                scene_version = scene.version,
+                cache_version = self.truncation_cache_scene_version,
+                "render_frame_with_chrome: truncation cache lags scene; applying \
+                 cadence-gated in-render prime"
+            );
+            self.prime_truncation_cache(scene);
+        }
 
         // ── Widget texture sync before encoding (avoids surface-texture race).
         self.sync_widget_textures(scene, self.degradation_level);
@@ -8505,6 +8598,7 @@ mod tests {
             .unwrap();
         scene.set_tile_root(tile_id, node).unwrap();
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8588,6 +8682,7 @@ mod tests {
             .unwrap();
 
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8651,6 +8746,8 @@ mod tests {
             color: [0.0, 1.0, 0.0, 1.0], // pure green — distinctive chrome marker
         }];
 
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_with_chrome(&scene, &surface, &chrome_cmds);
         compositor.device.poll(wgpu::Maintain::Wait);
 
@@ -8719,6 +8816,8 @@ mod tests {
             color: [1.0, 0.0, 0.0, 1.0], // pure red
         }];
 
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_with_chrome(&scene, &surface, &chrome_cmds);
         compositor.device.poll(wgpu::Maintain::Wait);
 
@@ -8763,6 +8862,8 @@ mod tests {
             }),
         });
         // Empty chrome cmds — must not panic.
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_with_chrome(&scene, &surface, &[]);
         compositor.device.poll(wgpu::Maintain::Wait);
         let pixels = surface.read_pixels(&compositor.device);
@@ -8779,8 +8880,9 @@ mod tests {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
         let scene = SceneGraph::new(256.0, 256.0);
 
-        // Prime before render per the Stage-4 commit-time prime contract (hud-380dl).
+        // Prime before render per the Stage-4 commit-time prime contract (hud-380dl / hud-v2z6u).
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         // render_frame takes &dyn CompositorSurface — no special headless branch.
         let telemetry =
             compositor.render_frame(&scene, &surface as &dyn crate::surface::CompositorSurface);
@@ -8922,6 +9024,7 @@ mod tests {
         };
         let mut scene = scene_with_node(node);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -8963,6 +9066,7 @@ mod tests {
         };
         let mut scene = scene_with_node(node);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -9014,6 +9118,7 @@ mod tests {
         };
         let mut scene = scene_with_node(node);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -9071,6 +9176,7 @@ mod tests {
         };
         let mut scene = scene_with_node(node);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         // Must not panic.
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
@@ -9132,6 +9238,7 @@ mod tests {
             .unwrap();
 
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -9222,6 +9329,7 @@ mod tests {
             .unwrap();
 
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -9330,6 +9438,7 @@ mod tests {
 
         // Render to pixels and verify bright text appears in the top zone area.
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
@@ -9364,6 +9473,7 @@ mod tests {
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut scene = SceneGraph::new(64.0, 64.0);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         // No panic = pass.
     }
@@ -9375,6 +9485,7 @@ mod tests {
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut scene = SceneGraph::new(64.0, 64.0);
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
     }
 
@@ -9491,8 +9602,9 @@ mod tests {
         // that does not reflect steady-state Stage 6 performance; excluding it
         // mirrors production behaviour where shaders are pre-compiled.
         // Prime once before the loop — scene does not change in this benchmark,
-        // so subsequent frames are all cache-hit no-ops (hud-380dl).
+        // so subsequent frames are all cache-hit no-ops (hud-380dl / hud-v2z6u).
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         for _ in 0..5 {
             compositor.render_frame_headless(&mut scene, &surface);
         }
@@ -16470,6 +16582,8 @@ mod tests {
         let surface_id = SceneId::new();
         let mut scene = media_pip_scene(surface_id);
 
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let placeholder = surface.read_pixels(&compositor.device);
         let before = pixel_at(&placeholder, 320, 160, 90);
@@ -16595,6 +16709,8 @@ mod tests {
             .unwrap();
 
         assert!(compositor.upload_video_frame(surface_id, &solid_frame([255, 0, 0, 255])));
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         let center = pixel_at(&pixels, 160, 80, 60);
@@ -17065,6 +17181,7 @@ mod tests {
         // ── Commit-time prime (mimics Stage 4 runtime behavior) ───────────────
         // Before render_frame_headless runs, the runtime primes the cache.
         compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
 
         // After commit-time prime: the cache scene version sentinel must equal
         // scene.version.  This is the invariant that render_frame_headless checks
@@ -18189,6 +18306,166 @@ mod tests {
         assert!(
             (opacity - 1.0).abs() < f32::EPSILON,
             "non-scrollable tile opacity must be 1.0, got {opacity}"
+        );
+    }
+
+    /// Verify the commit-time truncation cache prime contract (hud-v2z6u):
+    ///
+    /// When `prime_truncation_cache` is called BEFORE `render_frame_headless`
+    /// (as the runtime now does at Stage 4 commit time), the render-frame path
+    /// finds the cache already populated and `truncation_cache_scene_version`
+    /// equals `scene.version`, so the safety-fallback branch is NOT triggered.
+    ///
+    /// After rendering the frame, the sentinel must still equal `scene.version`
+    /// — confirming that `render_frame_headless` did not re-prime the cache.
+    ///
+    /// GPU required; skips gracefully when no adapter is available.
+    #[tokio::test]
+    async fn prime_truncation_cache_is_commit_primed_before_render_frame_headless() {
+        use tze_hud_scene::types::{
+            FontFamily, NodeData, Rect, TextAlign, TextMarkdownNode, TextOverflow,
+        };
+
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let content = "The quick brown fox jumps over the lazy dog.".repeat(4);
+
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.clone(),
+                bounds: Rect::new(0.0, 0.0, 64.0, 16.0),
+                font_size_px: 12.0,
+                font_family: FontFamily::SystemMonospace,
+                color: tze_hud_scene::types::Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Ellipsis,
+                color_runs: Box::default(),
+            }),
+        };
+
+        let mut scene = scene_with_node(node);
+
+        // ── Commit-time prime (mimics Stage 4 runtime behavior) ──────────────
+        // Also prime markdown cache so render_frame_headless doesn't hit its
+        // own safety-fallback for markdown (orthogonal to this test).
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
+
+        // After commit-time prime: sentinel must equal scene.version.
+        assert_eq!(
+            compositor.truncation_cache_scene_version, scene.version,
+            "after commit-time prime, truncation_cache_scene_version must match scene.version \
+             [hud-v2z6u]"
+        );
+
+        // ── Render frame — must not re-prime truncation cache ─────────────────
+        // render_frame_headless checks `scene.version != truncation_cache_scene_version`
+        // and finds them equal → no re-prime occurs → sentinel unchanged.
+        let _telemetry = compositor.render_frame_headless(&mut scene, &surface);
+
+        // After render: sentinel must still equal scene.version (render_frame_headless
+        // must NOT have altered truncation_cache_scene_version when cache was commit-primed).
+        assert_eq!(
+            compositor.truncation_cache_scene_version, scene.version,
+            "render_frame_headless must not alter truncation_cache_scene_version \
+             when cache was already commit-primed [hud-v2z6u]"
+        );
+    }
+
+    /// Verify that `load_font_bytes` resets the truncation cache sentinel to
+    /// `u64::MAX` when a NEW font is loaded, forcing a re-prime on the next
+    /// `prime_truncation_cache` call (hud-v2z6u item b).
+    ///
+    /// A new font can change shaping advance widths, so all truncation points
+    /// cached under the old font metrics are stale.  The sentinel reset ensures
+    /// the next `prime_truncation_cache` call re-resolves all entries with the
+    /// updated `FontSystem`.
+    ///
+    /// GPU required; skips gracefully when no adapter is available.
+    #[tokio::test]
+    async fn load_font_bytes_new_font_resets_truncation_cache_scene_version() {
+        use tze_hud_scene::types::{
+            FontFamily, NodeData, Rect, TextAlign, TextMarkdownNode, TextOverflow,
+        };
+
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "The quick brown fox jumps over the lazy dog.".to_string(),
+                bounds: Rect::new(0.0, 0.0, 64.0, 16.0),
+                font_size_px: 12.0,
+                font_family: FontFamily::SystemMonospace,
+                color: tze_hud_scene::types::Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Ellipsis,
+                color_runs: Box::default(),
+            }),
+        };
+
+        let scene = scene_with_node(node);
+
+        // ── Stage 4: commit-time prime sets sentinel to scene.version ─────────
+        compositor.prime_truncation_cache(&scene);
+        assert_eq!(
+            compositor.truncation_cache_scene_version, scene.version,
+            "after commit-time prime, sentinel must equal scene.version"
+        );
+
+        // ── Load a new font: sentinel must be reset to u64::MAX ───────────────
+        // Use a minimal valid TTF/OTF-like byte slice.  The font loader may
+        // reject invalid data, but `load_font_bytes` is required to reset the
+        // sentinel regardless — the guard is on `was_new`, not parse success.
+        // We use a unique resource_id that the compositor has never seen.
+        let new_resource_id: [u8; 32] = [0xAB; 32]; // never-before-seen id
+        // A minimal placeholder payload; glyphon/fontdb will silently skip invalid
+        // font bytes, but the resource_id deduplication check (`has_font`) must
+        // return false for this novel id — triggering the sentinel reset.
+        let dummy_font_bytes: &[u8] = b"OTTO"; // not a real font, but triggers the path
+        compositor.load_font_bytes(new_resource_id, dummy_font_bytes);
+
+        // After loading a new (unknown) resource_id, the sentinel must be u64::MAX,
+        // signaling that the next prime_truncation_cache must re-resolve all entries.
+        assert_eq!(
+            compositor.truncation_cache_scene_version,
+            u64::MAX,
+            "load_font_bytes with a new resource_id must reset truncation_cache_scene_version \
+             to u64::MAX so the next prime re-resolves all entries [hud-v2z6u]"
+        );
+
+        // ── Loading the SAME resource_id again must NOT reset the sentinel ─────
+        // Re-prime first so sentinel is back to a known scene version.
+        compositor.prime_truncation_cache(&scene);
+        assert_eq!(
+            compositor.truncation_cache_scene_version, scene.version,
+            "re-prime must restore sentinel to scene.version"
+        );
+
+        // Now load the same resource_id again — dedup guard returns early, sentinel
+        // must remain at scene.version (not u64::MAX).
+        compositor.load_font_bytes(new_resource_id, dummy_font_bytes);
+        assert_eq!(
+            compositor.truncation_cache_scene_version, scene.version,
+            "load_font_bytes with an already-loaded resource_id must NOT reset the sentinel \
+             — dedup guard prevents spurious cache invalidation [hud-v2z6u]"
         );
     }
 }

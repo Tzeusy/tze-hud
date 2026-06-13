@@ -2085,6 +2085,13 @@ impl ApplicationHandler for WinitApp {
                         compositor.prime_markdown_cache(&scene);
                         let markdown_prime_us = markdown_prime_start.elapsed().as_micros() as u64;
 
+                        // ── Commit-time truncation cache prime (hud-v2z6u) ─
+                        // Prime the truncation cache here — at commit time,
+                        // after prime_markdown_cache — so that render_frame
+                        // never performs shaping in the frame loop.  Gated
+                        // internally on scene.version; no-op when unchanged.
+                        compositor.prime_truncation_cache(&scene);
+
                         // ── Stage 5–7: Render Encode + GPU Submit ─────────
                         let scene_commit_at = Instant::now();
                         let compositor_telemetry =
