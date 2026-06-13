@@ -5147,31 +5147,102 @@ impl Compositor {
         } else {
             vec![]
         };
-        // If a text rasterizer is present, prepare glyphon buffers and run a
-        // LoadOp::Load text pass on top of the geometry written above.
-        if let Some(ref mut tr) = self.text_rasterizer {
-            tr.update_viewport(&self.queue, surf_w, surf_h);
-            if !text_items.is_empty() {
-                if let Err(e) = tr.prepare_text_items(&self.device, &self.queue, &text_items) {
-                    tracing::warn!(error = %e, "text prepare failed — frame continues without text");
+        // Phase A: prepare glyphon buffers (requires mutable tr borrow).
+        // Drop the borrow immediately after so Phase B can call self.gpu_color_raw.
+        let prepare_result: Option<Result<Vec<crate::text::InlineBackdropQuad>, String>> =
+            if let Some(ref mut tr) = self.text_rasterizer {
+                tr.update_viewport(&self.queue, surf_w, surf_h);
+                if text_items.is_empty() {
+                    Some(Ok(vec![]))
                 } else {
-                    let mut text_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("text_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: frame_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                // LoadOp::Load: preserve geometry pixels under the text.
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                    if let Err(e) = tr.render_text_pass(&mut text_pass) {
-                        tracing::warn!(error = %e, "text render failed — frame continues without text");
+                    Some(tr.prepare_text_items(&self.device, &self.queue, &text_items))
+                }
+            } else {
+                None
+            };
+        // Phase B: convert inline backdrop quads to GPU vertices.
+        // `self` is no longer mutably borrowed here, so gpu_color_raw is available.
+        let inline_verts: Vec<crate::pipeline::RectVertex> =
+            if let Some(Ok(ref inline_quads)) = prepare_result {
+                inline_quads
+                    .iter()
+                    .flat_map(|q| {
+                        let color = self.gpu_color_raw([
+                            q.color[0] as f32 / 255.0,
+                            q.color[1] as f32 / 255.0,
+                            q.color[2] as f32 / 255.0,
+                            q.color[3] as f32 / 255.0,
+                        ]);
+                        rect_vertices(q.x, q.y, q.w, q.h, sw, sh, color)
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+        // Phase C: render passes (re-takes tr mutable borrow).
+        if let Some(ref mut tr) = self.text_rasterizer {
+            if let Some(ref result) = prepare_result {
+                match result {
+                    Err(e) => {
+                        tracing::warn!(error = %e, "text prepare failed — frame continues without text");
+                    }
+                    Ok(_) => {
+                        // ── Inline backdrop pass (Phase 2, hud-9ieev) ────────────
+                        // Render pixel-exact backdrop quads for inline code spans
+                        // BEFORE the glyphon glyph pass so backdrops appear behind
+                        // the glyphs.  Uses LoadOp::Load to preserve geometry pixels.
+                        if !inline_verts.is_empty() {
+                            let inline_buf =
+                                self.device
+                                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("inline_backdrop_verts"),
+                                        contents: bytemuck::cast_slice(&inline_verts),
+                                        usage: wgpu::BufferUsages::VERTEX,
+                                    });
+                            let mut inline_pass =
+                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("inline_backdrop_pass"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: frame_view,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Load,
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                });
+                            if use_overlay_pipeline {
+                                inline_pass.set_pipeline(&self.clear_pipeline);
+                            } else {
+                                inline_pass.set_pipeline(&self.pipeline);
+                            }
+                            inline_pass.set_vertex_buffer(0, inline_buf.slice(..));
+                            inline_pass.draw(0..inline_verts.len() as u32, 0..1);
+                        }
+
+                        // ── Glyphon text pass ─────────────────────────────────────
+                        let mut text_pass =
+                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("text_pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: frame_view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        // LoadOp::Load: preserve geometry pixels under the text.
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                        if let Err(e) = tr.render_text_pass(&mut text_pass) {
+                            tracing::warn!(error = %e, "text render failed — frame continues without text");
+                        }
                     }
                 }
             }
@@ -5932,30 +6003,96 @@ impl Compositor {
         } else {
             vec![]
         };
-        if let Some(ref mut tr) = self.text_rasterizer {
-            let (surf_w, surf_h) = (self.width, self.height);
-            tr.update_viewport(&self.queue, surf_w, surf_h);
-            if !text_items_chrome.is_empty() {
-                if let Err(e) = tr.prepare_text_items(&self.device, &self.queue, &text_items_chrome)
-                {
-                    tracing::warn!(error = %e, "text prepare failed in chrome path");
+        // Phase A: prepare glyphon buffers (requires mutable tr borrow).
+        // Drop the borrow immediately so Phase B can call self.gpu_color_raw.
+        let chrome_prepare_result: Option<Result<Vec<crate::text::InlineBackdropQuad>, String>> = {
+            let (chrome_surf_w, chrome_surf_h) = (self.width, self.height);
+            if let Some(ref mut tr) = self.text_rasterizer {
+                tr.update_viewport(&self.queue, chrome_surf_w, chrome_surf_h);
+                if text_items_chrome.is_empty() {
+                    Some(Ok(vec![]))
                 } else {
-                    let mut text_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("text_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &surface.view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                    if let Err(e) = tr.render_text_pass(&mut text_pass) {
-                        tracing::warn!(error = %e, "text render failed in chrome path");
+                    Some(tr.prepare_text_items(&self.device, &self.queue, &text_items_chrome))
+                }
+            } else {
+                None
+            }
+        };
+        // Phase B: convert inline backdrop quads to GPU vertices.
+        // `self` is no longer mutably borrowed here.
+        let chrome_inline_verts: Vec<crate::pipeline::RectVertex> =
+            if let Some(Ok(ref inline_quads)) = chrome_prepare_result {
+                inline_quads
+                    .iter()
+                    .flat_map(|q| {
+                        let color = self.gpu_color_raw([
+                            q.color[0] as f32 / 255.0,
+                            q.color[1] as f32 / 255.0,
+                            q.color[2] as f32 / 255.0,
+                            q.color[3] as f32 / 255.0,
+                        ]);
+                        rect_vertices(q.x, q.y, q.w, q.h, sw, sh, color)
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+        // Phase C: render passes (re-takes tr mutable borrow).
+        if let Some(ref mut tr) = self.text_rasterizer {
+            if let Some(ref result) = chrome_prepare_result {
+                match result {
+                    Err(e) => {
+                        tracing::warn!(error = %e, "text prepare failed in chrome path");
+                    }
+                    Ok(_) => {
+                        // ── Inline backdrop pass (Phase 2, hud-9ieev) ────────────
+                        if !chrome_inline_verts.is_empty() {
+                            let inline_buf =
+                                self.device
+                                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("inline_backdrop_verts"),
+                                        contents: bytemuck::cast_slice(&chrome_inline_verts),
+                                        usage: wgpu::BufferUsages::VERTEX,
+                                    });
+                            let mut inline_pass =
+                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("inline_backdrop_pass"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &surface.view,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Load,
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                });
+                            inline_pass.set_pipeline(&self.pipeline);
+                            inline_pass.set_vertex_buffer(0, inline_buf.slice(..));
+                            inline_pass.draw(0..chrome_inline_verts.len() as u32, 0..1);
+                        }
+
+                        // ── Glyphon text pass ─────────────────────────────────────
+                        let mut text_pass =
+                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("text_pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &surface.view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                        if let Err(e) = tr.render_text_pass(&mut text_pass) {
+                            tracing::warn!(error = %e, "text render failed in chrome path");
+                        }
                     }
                 }
             }
