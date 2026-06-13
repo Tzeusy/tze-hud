@@ -4785,14 +4785,21 @@ impl WindowedRuntime {
         // drained via `drain_portal_ops` on each `about_to_wait` iteration.
         // If MCP is disabled or fails to bind, both halves are dropped and
         // `portal_op_rx` in state is `None`.
-        let (portal_op_tx, portal_op_rx) =
-            tokio::sync::mpsc::unbounded_channel::<tze_hud_mcp::portal_op::PortalOp>();
-        let mut portal_op_tx_opt: Option<
-            tokio::sync::mpsc::UnboundedSender<tze_hud_mcp::portal_op::PortalOp>,
-        > = Some(portal_op_tx);
-        let mut portal_op_rx_opt: Option<
-            tokio::sync::mpsc::UnboundedReceiver<tze_hud_mcp::portal_op::PortalOp>,
-        > = Some(portal_op_rx);
+        // Only create the channel when MCP is enabled. If we created it
+        // unconditionally and MCP is disabled, the sender half would be dropped
+        // immediately while the receiver lived on in `WindowedRuntimeState`,
+        // making the first `drain_portal_ops` tick observe `Disconnected` and
+        // log a misleading "MCP portal tools will no longer function" warning.
+        let (mut portal_op_tx_opt, mut portal_op_rx_opt): (
+            Option<tokio::sync::mpsc::UnboundedSender<tze_hud_mcp::portal_op::PortalOp>>,
+            Option<tokio::sync::mpsc::UnboundedReceiver<tze_hud_mcp::portal_op::PortalOp>>,
+        ) = if cfg.mcp_port > 0 {
+            let (tx, rx) =
+                tokio::sync::mpsc::unbounded_channel::<tze_hud_mcp::portal_op::PortalOp>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         if cfg.mcp_port > 0 {
             // Ensure we have a network runtime to host the MCP task. If gRPC
             // was disabled (grpc_port == 0), network_rt is None and we need

@@ -341,10 +341,21 @@ impl InProcessPortalDriver {
                 let resp = self.authority.handle_attach(req, "mcp-portal", now_us);
                 if resp.accepted {
                     // Wire the drive state so the drain loop can materialise tiles.
-                    self.attach_projection(&projection_id, Vec::new());
+                    //
+                    // Guard against idempotent re-attach: `handle_attach` returns
+                    // `accepted=true` for a replay (same projection_id + matching
+                    // idempotency_key) without re-creating the session. Re-running
+                    // `attach_projection` here would `insert` a fresh `DriveEntry`
+                    // (adapter with `tile_id() == None`, `tile_scene_id == None`),
+                    // so the next drain would treat the portal as new and create a
+                    // duplicate tile — orphaning/leaking the existing one. Only wire
+                    // a drive entry the first time we see this projection_id.
+                    if !self.drive.entries.contains_key(&projection_id) {
+                        self.attach_projection(&projection_id, Vec::new());
+                    }
                     tracing::info!(
                         proj_id = %projection_id,
-                        "portal_op: Attach accepted — drive entry created"
+                        "portal_op: Attach accepted — drive entry ensured"
                     );
                     let token = resp.owner_token.unwrap_or_default();
                     let _ = reply.send(Ok(token));
@@ -1707,6 +1718,125 @@ mod tests {
             "hud-bq0gl.2 regression: portal content published via dispatch_portal_op \
              must flow through drain_inner and set tile_follow_tail_at_tail (spec §3.2); \
              removing the dispatch_portal_op → authority wiring causes this to fail"
+        );
+    }
+
+    /// Regression guard: an idempotent re-attach (same `projection_id` +
+    /// matching `idempotency_key`) must NOT reset the drive entry, otherwise
+    /// the next drain creates a duplicate tile and orphans the original
+    /// (gemini PR #765 HIGH finding).
+    ///
+    /// The authority returns `accepted=true` for the replay without recreating
+    /// the session; `dispatch_portal_op` must therefore preserve the existing
+    /// `DriveEntry` (with its live `tile_scene_id`) instead of inserting a
+    /// fresh one.
+    #[test]
+    fn idempotent_reattach_does_not_duplicate_tile() {
+        use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_reattach"),
+        };
+
+        // ── Step 1: First attach (with an idempotency key) ─────────────────────
+        let (attach_tx, mut attach_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "reattach-proj".to_string(),
+            display_name: "Reattach Projection".to_string(),
+            idempotency_key: Some("key-1".to_string()),
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("first Attach must be accepted");
+
+        // ── Step 2: Publish + drain so a tile is materialised ──────────────────
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "reattach-proj".to_string(),
+            owner_token: owner_token.clone(),
+            output_text: "first line".to_string(),
+            logical_unit_id: None,
+            reply: pub_tx,
+        });
+        pub_rx
+            .try_recv()
+            .expect("publish reply must be sent synchronously")
+            .expect("PublishOutput must be accepted");
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.authority_mut().push_geometry_snapshot(
+            "reattach-proj",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: 200,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let original_tile = driver
+            .drive
+            .entries
+            .get("reattach-proj")
+            .expect("drive entry must exist after first attach+drain")
+            .tile_scene_id
+            .expect("first drain must create a portal tile");
+        let tile_count_after_first = scene.tile_count();
+
+        // ── Step 3: Idempotent re-attach (same id + same key) ──────────────────
+        let (re_tx, mut re_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "reattach-proj".to_string(),
+            display_name: "Reattach Projection".to_string(),
+            idempotency_key: Some("key-1".to_string()),
+            reply: re_tx,
+        });
+        re_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("idempotent re-attach must be accepted");
+
+        // The drive entry must still point at the SAME tile — not reset to None.
+        let tile_after_reattach = driver
+            .drive
+            .entries
+            .get("reattach-proj")
+            .expect("drive entry must survive idempotent re-attach")
+            .tile_scene_id
+            .expect("idempotent re-attach must preserve the existing tile_scene_id");
+        assert_eq!(
+            tile_after_reattach, original_tile,
+            "idempotent re-attach must NOT reset tile_scene_id; resetting it makes \
+             the next drain create a duplicate tile and orphan the original"
+        );
+
+        // ── Step 4: Another drain must NOT create a second tile ────────────────
+        driver.drain_inner(
+            &mut scene,
+            &mut processor,
+            Some(tab_id),
+            PORTAL_UPDATE_RATE_WINDOW_WALL_US * 2 + 1,
+        );
+        assert_eq!(
+            scene.tile_count(),
+            tile_count_after_first,
+            "idempotent re-attach + drain must not create a duplicate portal tile"
         );
     }
 }
