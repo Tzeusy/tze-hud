@@ -1875,6 +1875,25 @@ impl ApplicationHandler for WinitApp {
             "windowed: compositor token map applied"
         );
 
+        // Propagate the startup design-token map to the in-process portal
+        // projection driver (hud-be6ee).  This satisfies the acceptance criterion
+        // that token wiring reaches live adapters: any projection session that
+        // attaches after startup inherits the resolved visual tokens from the
+        // runtime config rather than the driver's empty default map.
+        //
+        // The driver stores the map in `InProcessPortalDriveState::token_overrides`
+        // and re-resolves `PortalVisualTokens` for every new adapter at attach
+        // time, so this call is the only site needed for a single-startup-token
+        // profile.  A hot-reload path would call `apply_token_map` again here
+        // after updating `self.state.global_tokens`.
+        self.state
+            .portal_projection_driver
+            .apply_token_map(self.state.global_tokens.clone());
+        tracing::debug!(
+            token_count = self.state.global_tokens.len(),
+            "windowed: portal projection driver token map applied"
+        );
+
         let window_surface = Arc::new(window_surface);
         self.state.window_surface = Some(window_surface.clone());
 
