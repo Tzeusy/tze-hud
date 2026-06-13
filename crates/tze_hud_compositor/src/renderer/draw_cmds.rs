@@ -248,7 +248,7 @@ impl ZoneAnimationState {
 /// Composed of `(published_at_wall_us, publisher_namespace)`.  Because the
 /// scene graph assigns `published_at_wall_us` from a monotonic wall clock, the
 /// combination is unique per-zone across all practical usage.
-pub(super) type PubKey = (u64, String);
+pub(crate) type PubKey = (u64, String);
 
 /// Per-publication opacity animation state for TTL-based fade-out.
 ///
@@ -285,11 +285,11 @@ pub struct PublicationAnimationState {
 }
 
 /// Duration of the per-notification fade-out transition (ms).
-pub(super) const NOTIFICATION_FADE_OUT_MS: u32 = 150;
+pub(crate) const NOTIFICATION_FADE_OUT_MS: u32 = 150;
 
 /// Default TTL used when no per-publication TTL is set and the zone has no
 /// `auto_clear_ms`.  Matches the notification-area zone default (8 000 ms).
-pub(super) const NOTIFICATION_DEFAULT_TTL_MS: u64 = 8_000;
+pub(crate) const NOTIFICATION_DEFAULT_TTL_MS: u64 = 8_000;
 
 impl PublicationAnimationState {
     /// Create a new state for a freshly-seen publication.
