@@ -3734,36 +3734,64 @@ impl WinitApp {
     /// Remove stale entries from `portal_resize_states` for tiles that no
     /// longer exist in the scene.
     ///
-    /// Called once per `about_to_wait` iteration.  Entries accumulate lazily
-    /// (one per portal tile ever focused during the session).  When a tile is
-    /// removed from the scene via a `DeleteTile` mutation, its entry in this
-    /// map would otherwise persist indefinitely.  This sweep cleans them up.
+    /// Called once per `about_to_wait` iteration.  Uses a two-phase approach:
     ///
-    /// Uses `try_lock` on the shared scene.  If the scene lock is busy the
-    /// sweep is deferred to the next iteration — the map entry is stale but
-    /// harmless for one frame.
+    /// 1. **Eager drain** — drains `SceneGraph::recently_removed_tile_ids`
+    ///    (populated by `remove_tile_and_nodes` on every `DeleteTile` mutation)
+    ///    and removes each returned ID from `portal_resize_states` immediately.
+    ///    This is O(removed) and requires only the scene lock.
+    ///
+    /// 2. **Fallback sweep** — if `portal_resize_states` is still non-empty
+    ///    after the drain (e.g. entries that predated the drain queue, or
+    ///    entries whose tiles were removed while the lock was busy), a full
+    ///    `retain` sweep validates all remaining entries against the live tile
+    ///    set.  Uses `try_lock`; deferred to next iteration if lock is busy.
+    ///
+    /// The eager path handles the common case (each `DeleteTile` generates
+    /// exactly one removal notification).  The fallback prevents unbounded
+    /// accumulation in pathological cases.
     fn prune_portal_resize_states(&mut self) {
-        if self.state.portal_resize_states.is_empty() {
-            return;
-        }
         let Ok(state) = self.state.shared_state.try_lock() else {
             tracing::trace!("portal resize prune deferred: shared_state lock busy");
             return;
         };
-        let Ok(scene) = state.scene.try_lock() else {
+        let Ok(mut scene) = state.scene.try_lock() else {
             tracing::trace!("portal resize prune deferred: scene lock busy");
             return;
         };
+
+        // Phase 1: eager drain — O(removed), handles the common `DeleteTile` path.
+        let removed_ids = scene.drain_removed_tile_ids();
+        let mut eagerly_removed = 0usize;
+        for tile_id in removed_ids {
+            if self.state.portal_resize_states.remove(&tile_id).is_some() {
+                eagerly_removed += 1;
+            }
+        }
+        if eagerly_removed > 0 {
+            tracing::debug!(
+                removed = eagerly_removed,
+                remaining = self.state.portal_resize_states.len(),
+                "portal resize: eagerly pruned resize-state entries for removed tiles"
+            );
+        }
+
+        // Phase 2: fallback sweep — catches any entries that slipped through
+        // (e.g. tiles removed before the drain queue existed, or during a
+        // prior lock-busy deferral).
+        if self.state.portal_resize_states.is_empty() {
+            return;
+        }
         let before = self.state.portal_resize_states.len();
         self.state
             .portal_resize_states
             .retain(|tile_id, _| scene.tiles.contains_key(tile_id));
-        let removed = before - self.state.portal_resize_states.len();
-        if removed > 0 {
+        let swept = before - self.state.portal_resize_states.len();
+        if swept > 0 {
             tracing::debug!(
-                removed,
+                removed = swept,
                 remaining = self.state.portal_resize_states.len(),
-                "portal resize: pruned stale resize-state entries for removed tiles"
+                "portal resize: sweep-pruned stale resize-state entries for removed tiles"
             );
         }
     }
@@ -9757,6 +9785,95 @@ redaction_style = "blank"
             portal_resize_states.len(),
             1,
             "exactly one entry (tile_a) must remain"
+        );
+    }
+
+    /// Verifies the eager drain-based `portal_resize_states` cleanup path
+    /// introduced by hud-4tuw5.
+    ///
+    /// `SceneGraph::drain_removed_tile_ids` yields the IDs of tiles removed via
+    /// `remove_tile_and_nodes`; `prune_portal_resize_states` then removes each
+    /// returned ID from the map.  This test drives that contract directly
+    /// without the windowed event loop, matching the style of the existing
+    /// sweep-based prune tests above.
+    ///
+    /// The `remove_tile_and_nodes` → drain queue half of the contract is
+    /// exercised by `portal_resize_drain_queue_populated_by_remove_tile` in
+    /// `tze_hud_scene` (where the function is visible).
+    #[test]
+    fn portal_resize_state_pruned_via_drain_queue_on_tile_removal() {
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+
+        // Build a minimal scene with one portal tile.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+
+        // Simulate a resize-state entry accumulated for this portal tile.
+        let mut portal_resize_states: std::collections::HashMap<
+            tze_hud_scene::SceneId,
+            PortalResizeState,
+        > = std::collections::HashMap::new();
+        portal_resize_states.insert(
+            tile_id,
+            PortalResizeState::new(tile_id.as_uuid().as_u128() as u64),
+        );
+        assert!(
+            portal_resize_states.contains_key(&tile_id),
+            "entry must be present before tile removal"
+        );
+
+        // Sanity: drain queue is empty before any removal.
+        assert!(
+            scene.drain_removed_tile_ids().is_empty(),
+            "drain queue must be empty before any tile removal"
+        );
+
+        // Simulate what remove_tile_and_nodes does: remove from tiles map and
+        // enqueue in recently_removed_tile_ids.  (remove_tile_and_nodes is
+        // pub(crate) in tze_hud_scene; we cannot call it directly here.)
+        scene.tiles.remove(&tile_id);
+        scene.overlay.recently_removed_tile_ids.push(tile_id);
+
+        // Drain the removal queue — this mirrors what prune_portal_resize_states does.
+        let removed_ids = scene.drain_removed_tile_ids();
+        assert_eq!(
+            removed_ids,
+            vec![tile_id],
+            "drain queue must yield exactly the removed tile ID"
+        );
+
+        // Apply the drain to the portal_resize_states map.
+        for id in &removed_ids {
+            portal_resize_states.remove(id);
+        }
+
+        assert!(
+            !portal_resize_states.contains_key(&tile_id),
+            "portal_resize_states entry must be gone after drain-based pruning (hud-4tuw5)"
+        );
+        assert!(
+            portal_resize_states.is_empty(),
+            "no stale entries must remain after drain"
+        );
+
+        // Confirm the drain queue is now empty (idempotent).
+        assert!(
+            scene.drain_removed_tile_ids().is_empty(),
+            "drain queue must be empty after drain"
         );
     }
 

@@ -409,6 +409,13 @@ impl HeadlessRuntime {
         scene_guard.drain_expired_zone_publications();
         scene_guard.drain_expired_widget_publications();
 
+        // Drain the removal notification queue populated by remove_tile_and_nodes.
+        // Without this, the queue grows unboundedly in headless / server runtimes
+        // that delete tiles but have no windowed event loop to consume it.
+        // The windowed path drains this in prune_portal_resize_states; headless
+        // has no portal_resize_states consumer, so we simply discard here.
+        let _ = scene_guard.drain_removed_tile_ids();
+
         // Per-publication TTL fade-out sweep: seed/tick animation states and
         // prune publications whose 150ms fade-out has completed.
         self.compositor.update_publication_animations(&scene_guard);
