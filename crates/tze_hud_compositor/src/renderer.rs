@@ -7967,18 +7967,23 @@ impl Compositor {
                                     }
                                     let clamped_start = panel.start_byte.min(plain.len());
                                     let clamped_end = panel.end_byte.min(plain.len());
-                                    if clamped_start >= clamped_end {
+                                    if clamped_start >= clamped_end
+                                        || !plain.is_char_boundary(clamped_start)
+                                        || !plain.is_char_boundary(clamped_end)
+                                    {
                                         continue;
                                     }
                                     // Count lines before the panel to get y-offset,
                                     // and lines within the panel to get height.
+                                    // Use `.lines().count()` (not newline counting) so that a
+                                    // code block without a trailing newline (e.g. "a\nb") is
+                                    // correctly measured as 2 lines rather than 1.
                                     let lines_before = plain[..clamped_start]
                                         .chars()
                                         .filter(|&c| c == '\n')
                                         .count();
                                     let lines_in_panel = plain[clamped_start..clamped_end]
-                                        .chars()
-                                        .filter(|&c| c == '\n')
+                                        .lines()
                                         .count()
                                         .max(1);
                                     let panel_y_offset =
