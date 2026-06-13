@@ -440,7 +440,21 @@ impl SafeModeController {
     /// budget are preserved across the ACTIVE → SUSPENDED → ACTIVE cycle.
     pub async fn exit_safe_mode(&mut self) -> SafeModeExitResult {
         // Guard: idempotent — not active is a no-op.
-        if !self.override_state.safe_mode_active {
+        //
+        // AUTHORITATIVE CHECK: read `SharedState.safe_mode_active` rather than
+        // `self.override_state.safe_mode_active`.  A freshly-constructed
+        // `SafeModeController` (e.g. the one created per-signal in the keyboard
+        // exit bridge) has `override_state.safe_mode_active = false` even when
+        // safe mode is genuinely active, because it never went through
+        // `enter_safe_mode()`.  `SharedState.safe_mode_active` is the canonical
+        // source of truth written by the controller that called
+        // `enter_safe_mode()`, so it correctly reflects the current runtime
+        // state regardless of which controller instance calls `exit_safe_mode()`.
+        let shared_active = {
+            let st = self.shared_state.lock().await;
+            st.safe_mode_active
+        };
+        if !shared_active {
             return SafeModeExitResult {
                 leases_resumed: 0,
                 lease_resumes: Vec::new(),
@@ -451,11 +465,20 @@ impl SafeModeController {
 
         let now_ms = now_wall_ms();
         let now_us = now_ms.saturating_mul(1_000);
+        // `safe_mode_entered_at_ms` is only accurate on a long-lived controller
+        // that called `enter_safe_mode()`.  On a freshly-constructed controller
+        // (keyboard bridge case) it is 0; in that case, per-lease
+        // `suspended_at_ms` still provides accurate per-lease suspension
+        // accounting, and the controller-level duration reports 0 (best-effort).
         let entered_at_us = self
             .override_state
             .safe_mode_entered_at_ms
             .saturating_mul(1_000);
-        let suspension_duration_us = now_us.saturating_sub(entered_at_us);
+        let suspension_duration_us = if entered_at_us == 0 {
+            0 // fresh controller — per-lease timestamps are authoritative
+        } else {
+            now_us.saturating_sub(entered_at_us)
+        };
 
         // Step 1: Dismiss overlay immediately so the next compositor frame has no overlay.
         {
@@ -1602,6 +1625,114 @@ mod tests {
             atomic.load(Ordering::Acquire),
             "safe_mode_atomic must be readable (Acquire) even while SharedState lock is held by \
              another task — this is the lock-free property that prevents try_lock key-drops"
+        );
+    }
+
+    // ── 14. Keyboard bridge regression: fresh-controller exit works (hud-hpudo) ──
+
+    /// Regression test for hud-hpudo: a freshly-constructed `SafeModeController`
+    /// called via the keyboard exit bridge must genuinely exit safe mode.
+    ///
+    /// # Scenario
+    ///
+    /// The Ctrl+Shift+Escape async listener constructs a NEW `SafeModeController`
+    /// per signal rather than reusing the one that called `enter_safe_mode()`.
+    /// Before the fix, `exit_safe_mode()` guarded on
+    /// `self.override_state.safe_mode_active`, which is always `false` on a
+    /// fresh controller → the call was a silent no-op.
+    ///
+    /// After the fix, the guard reads `SharedState.safe_mode_active` (the
+    /// authoritative source), so any controller sharing the same `shared_state`
+    /// and `chrome_state` can correctly exit safe mode.
+    ///
+    /// # Why this must fail on the pre-fix code
+    ///
+    /// Pre-fix `exit_safe_mode()` immediately returns the no-op result because
+    /// `self.override_state.safe_mode_active == false` on the fresh controller.
+    /// `SharedState.safe_mode_active` remains `true` after the call.
+    /// The final assertion catches this: `st.safe_mode_active` is still `true`.
+    #[tokio::test]
+    async fn test_fresh_controller_exit_safe_mode_via_shared_state() {
+        use std::sync::atomic::Ordering;
+
+        // --- Arrange: enter safe mode with controller A ---
+        let shared = make_shared_state();
+        let chrome = Arc::new(RwLock::new(ChromeState::new()));
+
+        let mut ctrl_a = SafeModeController::new_headless(Arc::clone(&shared), Arc::clone(&chrome));
+        let lease_id = grant_active_lease(&ctrl_a, "agent.alpha").await;
+
+        ctrl_a.enter_safe_mode_viewer_action().await;
+
+        // Verify safe mode is actually active in the authoritative shared state.
+        {
+            let st = shared.lock().await;
+            assert!(
+                st.safe_mode_active,
+                "SharedState.safe_mode_active must be true after enter_safe_mode"
+            );
+            assert_eq!(
+                st.scene.lock().await.leases[&lease_id].state,
+                LeaseState::Suspended,
+                "lease must be SUSPENDED after entering safe mode"
+            );
+        }
+        assert!(
+            chrome.read().unwrap().safe_mode_active,
+            "ChromeState.safe_mode_active must be true after entering safe mode"
+        );
+
+        // --- Act: exit via a FRESH controller (simulates the keyboard bridge) ---
+        // This is the bug scenario: the keyboard listener constructs a new
+        // SafeModeController with the same shared_state and chrome_state but
+        // with override_state.safe_mode_active = false (the default).
+        let mut ctrl_fresh =
+            SafeModeController::new_headless(Arc::clone(&shared), Arc::clone(&chrome));
+
+        // Confirm the fresh controller's local state is wrong (the pre-fix condition).
+        assert!(
+            !ctrl_fresh.is_safe_mode_active(),
+            "fresh controller's local override_state must show safe_mode_active=false \
+             (this is the pre-fix bug: the guard would return early here)"
+        );
+
+        // Call exit_safe_mode on the fresh controller.
+        // Pre-fix: returns a no-op result (leases_resumed=0, SharedState unchanged).
+        // Post-fix: reads SharedState.safe_mode_active=true and proceeds with exit.
+        let result = ctrl_fresh.exit_safe_mode().await;
+
+        // --- Assert: safe mode must be fully exited ---
+
+        // Authoritative SharedState flag must be cleared.
+        {
+            let st = shared.lock().await;
+            assert!(
+                !st.safe_mode_active,
+                "SharedState.safe_mode_active must be false after fresh-controller exit — \
+                 this fails on pre-fix code where exit_safe_mode() is a silent no-op"
+            );
+            assert!(
+                !st.safe_mode_atomic.load(Ordering::Acquire),
+                "safe_mode_atomic must be false after exit"
+            );
+            // Lease must be resumed — if exit was a no-op the lease stays SUSPENDED.
+            assert_eq!(
+                st.scene.lock().await.leases[&lease_id].state,
+                LeaseState::Active,
+                "lease must return to ACTIVE after exit — fails pre-fix (stays SUSPENDED)"
+            );
+        }
+
+        // Chrome overlay must be dismissed.
+        assert!(
+            !chrome.read().unwrap().safe_mode_active,
+            "ChromeState.safe_mode_active must be false after exit"
+        );
+
+        // The exit result must show genuine work done.
+        assert_eq!(
+            result.leases_resumed, 1,
+            "exit result must report 1 lease resumed (not the no-op 0)"
         );
     }
 }
