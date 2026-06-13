@@ -38,16 +38,6 @@
 
 // ─── Tolerance constants ─────────────────────────────────────────────────────
 
-/// Ideal tolerance for solid-fill pixels (spec: ±1/channel).
-/// Use when targeting real GPU validation.
-#[allow(dead_code)]
-pub const IDEAL_SOLID_TOLERANCE: u8 = 1;
-
-/// Ideal tolerance for alpha-blended pixels (spec: ±2/channel).
-/// Use when targeting real GPU validation.
-#[allow(dead_code)]
-pub const IDEAL_BLEND_TOLERANCE: u8 = 2;
-
 /// CI tolerance for solid-fill pixels on llvmpipe / SwiftShader (±6/channel).
 /// All pixel assertions in `pixel_readback.rs` use this constant.
 pub const CI_SOLID_TOLERANCE: u8 = 6;
@@ -78,102 +68,6 @@ pub const SCENE_W: u32 = 1920;
 pub const SCENE_H: u32 = 1080;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Return `true` if the pixel at `(x, y)` differs from `bg` by more than
-/// `min_diff` on any channel.  Useful for asserting that *something* was
-/// rendered without knowing the exact colour.
-pub fn pixel_differs_from_bg(pixels: &[u8], width: u32, x: u32, y: u32, min_diff: u8) -> bool {
-    let idx = ((y * width + x) * 4) as usize;
-    let p = [
-        pixels[idx],
-        pixels[idx + 1],
-        pixels[idx + 2],
-        pixels[idx + 3],
-    ];
-    BG_SRGB
-        .iter()
-        .zip(p.iter())
-        .any(|(&expected, &actual)| actual.abs_diff(expected) > min_diff)
-}
-
-/// Assert that at least one sampled pixel in `[x0..x1) × [y0..y1)` differs
-/// from the background by more than `min_diff` on at least one channel.
-///
-/// Samples every 10th pixel in both dimensions. Fails only when *all* sampled
-/// pixels match the background — i.e. no rendered content is detected at all.
-///
-/// Used for scenes where we know tiles should cover a region but cannot
-/// predict exact colours (e.g. text rendering, alpha blending output).
-// too_many_arguments: flat (buffer, geometry, tolerance, label) signature keeps
-// call sites in pixel tests readable; a params struct would add noise here.
-#[allow(dead_code, clippy::too_many_arguments)]
-pub fn assert_region_has_content(
-    pixels: &[u8],
-    width: u32,
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    y1: u32,
-    min_diff: u8,
-    label: &str,
-) {
-    // Sample every 10th pixel in both dimensions to keep test runtime low.
-    let xs: Vec<u32> = (x0..x1).step_by(10).collect();
-    let ys: Vec<u32> = (y0..y1).step_by(10).collect();
-
-    let all_bg = xs
-        .iter()
-        .flat_map(|&x| {
-            ys.iter()
-                .map(move |&y| !pixel_differs_from_bg(pixels, width, x, y, min_diff))
-        })
-        .all(|b| b);
-
-    assert!(
-        !all_bg,
-        "{label}: expected content but all sampled pixels match background"
-    );
-}
-
-/// Assert that every sampled pixel in `[x0..x1) × [y0..y1)` matches `bg`
-/// within `CI_SOLID_TOLERANCE`.
-///
-/// Used for regions that must be background (e.g. inactive-tab tile regions).
-#[allow(dead_code)]
-pub fn assert_region_is_background(
-    pixels: &[u8],
-    width: u32,
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    y1: u32,
-    label: &str,
-) {
-    let step = 20usize;
-    for y in (y0..y1).step_by(step) {
-        for x in (x0..x1).step_by(step) {
-            let idx = ((y * width + x) * 4) as usize;
-            let actual = [
-                pixels[idx],
-                pixels[idx + 1],
-                pixels[idx + 2],
-                pixels[idx + 3],
-            ];
-            for ch in 0..4 {
-                let diff = actual[ch].abs_diff(BG_SRGB[ch]);
-                assert!(
-                    diff <= CI_SOLID_TOLERANCE,
-                    "{label}: expected background at ({x},{y}) channel {ch}: \
-                     actual={} expected={} diff={} tolerance={}",
-                    actual[ch],
-                    BG_SRGB[ch],
-                    diff,
-                    CI_SOLID_TOLERANCE
-                );
-            }
-        }
-    }
-}
 
 /// Build a [`HeadlessRuntime`] sized for the 25-scene tests (1920×1080).
 ///

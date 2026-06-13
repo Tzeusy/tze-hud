@@ -152,25 +152,6 @@ pub fn tick_hover_trackers(
     out
 }
 
-/// Merge externally-supplied hit regions with widget hover hit regions.
-#[allow(dead_code)]
-pub fn merged_hit_regions(
-    static_regions: &[HitRegion],
-    trackers: &HashMap<String, WidgetHoverTracker>,
-) -> Vec<HitRegion> {
-    let mut out = Vec::with_capacity(static_regions.len() + trackers.len());
-    out.extend_from_slice(static_regions);
-
-    let mut names: Vec<&str> = trackers.keys().map(String::as_str).collect();
-    names.sort_unstable();
-    for name in names {
-        if let Some(tracker) = trackers.get(name) {
-            out.push(tracker.region.clone());
-        }
-    }
-    out
-}
-
 fn resolve_widget_geometry(
     instance: &WidgetInstance,
     definition: &WidgetDefinition,
@@ -325,28 +306,6 @@ mod tests {
         );
         assert_eq!(third.len(), 1, "must hide on leave");
         assert_eq!(third[0].value, 0.0);
-    }
-
-    #[test]
-    fn merged_hit_regions_appends_hover_regions_after_static_regions() {
-        let static_regions = vec![HitRegion::new(1.0, 1.0, 5.0, 5.0)];
-        let mut trackers = HashMap::new();
-        trackers.insert(
-            "b".to_string(),
-            WidgetHoverTracker {
-                instance_name: "b".to_string(),
-                region: HitRegion::new(20.0, 20.0, 2.0, 2.0),
-                delay: Duration::from_millis(1),
-                visibility_param: "x".to_string(),
-                hidden_value: 0.0,
-                visible_value: 1.0,
-                hover_started_at: None,
-                currently_visible: false,
-            },
-        );
-        let merged = merged_hit_regions(&static_regions, &trackers);
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0], static_regions[0]);
     }
 
     #[test]

@@ -54,8 +54,6 @@ pub use graph::{
     // Node data validation
     validate_text_markdown_node_data,
 };
-/// Backward-compatible re-export alias for [`BatchTimingHints`].
-pub use mutation::BatchTimingHints as MutationTimingHints;
 pub use mutation::{
     BatchTimingHints, MAX_BATCH_SIZE, MutationBatch, MutationResult, SceneMutation,
 };

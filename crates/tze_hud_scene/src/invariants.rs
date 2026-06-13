@@ -99,7 +99,6 @@ pub fn check_all(graph: &SceneGraph) -> Vec<InvariantViolation> {
 
     // ── Area 3: Lease state machine ───────────────────────────────────────────
     v.extend(check_lease_namespace_nonempty(graph));
-    v.extend(check_lease_terminal_state_consistency(graph));
     v.extend(check_lease_priority_range(graph));
     v.extend(check_lease_ttl_nonzero_if_not_terminal(graph));
     v.extend(check_lease_granted_at_nonzero_if_not_requested(graph));
@@ -661,26 +660,6 @@ pub fn check_lease_namespace_nonempty(graph: &SceneGraph) -> Vec<InvariantViolat
             )
         })
         .collect()
-}
-
-/// Terminal leases must use a valid terminal `LeaseState` variant.
-///
-/// The `Disconnected` variant is a deprecated alias for `Orphaned`; it must not
-/// appear in freshly-constructed graphs.
-pub fn check_lease_terminal_state_consistency(graph: &SceneGraph) -> Vec<InvariantViolation> {
-    let mut violations = Vec::new();
-    for lease in graph.leases.values() {
-        if lease.state == LeaseState::Disconnected {
-            violations.push(InvariantViolation::new(
-                "lease_uses_deprecated_disconnected_state",
-                format!(
-                    "lease {} uses deprecated Disconnected state (use Orphaned instead)",
-                    lease.id
-                ),
-            ));
-        }
-    }
-    violations
 }
 
 /// Lease priority must be in [0, 4].
@@ -1932,17 +1911,6 @@ mod tests {
         let v = check_lease_namespace_nonempty(&graph);
         assert!(!v.is_empty());
         assert_eq!(v[0].code, "empty_lease_namespace");
-    }
-
-    /// WHEN lease uses deprecated Disconnected state THEN warning fires.
-    #[test]
-    fn deprecated_disconnected_state_detected() {
-        let mut graph = make_graph();
-        let lease_id = graph.grant_lease("test", 60_000, vec![]);
-        graph.leases.get_mut(&lease_id).unwrap().state = LeaseState::Disconnected;
-        let v = check_lease_terminal_state_consistency(&graph);
-        assert!(!v.is_empty());
-        assert_eq!(v[0].code, "lease_uses_deprecated_disconnected_state");
     }
 
     /// WHEN lease has priority > 4 THEN lease_priority_out_of_range fires.

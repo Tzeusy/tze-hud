@@ -37,10 +37,10 @@
 //! ## Runtime mode switching
 //!
 //! Mode switching is supported but disruptive (requires surface recreation, spec
-//! line 173). Call `WinitApp::request_mode_switch()` — the event loop stores a
-//! pending mode switch, tears down the existing window and compositor, and
-//! re-initialises with the new mode on the next `RedrawRequested` event (where
-//! the pending switch is detected before the frame is presented).
+//! line 173). The event loop stores a pending mode switch, tears down the existing
+//! window and compositor, and re-initialises with the new mode on the next
+//! `RedrawRequested` event (where the pending switch is detected before the frame
+//! is presented).
 //!
 //! ## Main thread event loop
 //!
@@ -4142,51 +4142,6 @@ impl WinitApp {
         if let Ok(mut guard) = self.state.local_composer_state.lock() {
             *guard = Some(None);
         }
-        if let Some(window) = &self.state.window {
-            window.request_redraw();
-        }
-    }
-
-    /// Update the active hit-regions for overlay input passthrough.
-    ///
-    /// Replaces the current hit-region set.  The new regions take effect on the
-    /// next `CursorMoved` event.
-    ///
-    /// No-op in fullscreen mode (all events are always captured; hit-regions
-    /// are not consulted).
-    #[allow(dead_code)] // public API; callers will be added as overlay integration lands
-    pub fn set_hit_regions(&mut self, regions: Vec<HitRegion>) {
-        if self.state.effective_mode == WindowMode::Fullscreen {
-            return; // Hit-regions unused in fullscreen mode.
-        }
-        self.state.static_hit_regions = regions;
-        // Capture regions are explicit interactive regions only; hover trackers
-        // are visual-only and must not block clicks to underlying windows.
-        self.state.hit_regions = self.state.static_hit_regions.clone();
-    }
-
-    /// Request a runtime mode switch (disruptive — triggers surface recreation).
-    ///
-    /// The switch is deferred to the next `about_to_wait` callback, where
-    /// `apply_pending_mode_switch()` tears down the current window/compositor
-    /// and `resumed()` re-creates them with the new mode.
-    ///
-    /// Per spec §Window Modes (line 173): "Runtime mode switching MUST be
-    /// supported but is a disruptive operation requiring surface recreation."
-    #[allow(dead_code)] // public API; callers will be added as mode-switching UI lands
-    pub fn request_mode_switch(&mut self, new_mode: WindowMode) {
-        if new_mode == self.state.effective_mode {
-            tracing::debug!(mode = %new_mode, "mode switch no-op: already in requested mode");
-            return;
-        }
-        tracing::info!(
-            current = %self.state.effective_mode,
-            requested = %new_mode,
-            "runtime mode switch requested — surface recreation will occur on next about_to_wait"
-        );
-        self.state.pending_mode_switch = Some(new_mode);
-        // request_redraw() ensures the event loop stays active (Poll mode),
-        // so about_to_wait fires promptly after the current event batch.
         if let Some(window) = &self.state.window {
             window.request_redraw();
         }

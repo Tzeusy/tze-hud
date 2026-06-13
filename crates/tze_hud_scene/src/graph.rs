@@ -921,7 +921,7 @@ impl SceneGraph {
         if lease.is_expired(now) {
             return Err(ValidationError::LeaseExpired { id: lease_id });
         }
-        // Check lease state allows mutations (Active only; Suspended/Disconnected block mutations)
+        // Check lease state allows mutations (Active only; Suspended/Orphaned block mutations)
         if !lease.is_mutations_allowed() {
             return Err(ValidationError::InvalidField {
                 field: "lease_state".into(),
@@ -1426,18 +1426,14 @@ impl SceneGraph {
             .leases
             .values()
             .filter_map(|l| {
-                // TTL-expired active/orphaned/disconnected leases
-                if (l.state == LeaseState::Active
-                    || l.state == LeaseState::Orphaned
-                    || l.state == LeaseState::Disconnected)
+                // TTL-expired active/orphaned leases
+                if (l.state == LeaseState::Active || l.state == LeaseState::Orphaned)
                     && l.is_expired(now)
                 {
                     return Some((l.id, LeaseState::Expired));
                 }
-                // Grace-period-expired orphaned/disconnected leases
-                if (l.state == LeaseState::Orphaned || l.state == LeaseState::Disconnected)
-                    && l.check_grace_expired(now)
-                {
+                // Grace-period-expired orphaned leases
+                if l.state == LeaseState::Orphaned && l.check_grace_expired(now) {
                     return Some((l.id, LeaseState::Expired));
                 }
                 // Suspension-timeout leases
@@ -3287,9 +3283,7 @@ impl SceneGraph {
             Some(state) => {
                 let result = match state {
                     LeaseState::Active => ZonePublishResult::Accepted,
-                    LeaseState::Orphaned | LeaseState::Disconnected => {
-                        ZonePublishResult::RejectedLeaseOrphaned
-                    }
+                    LeaseState::Orphaned => ZonePublishResult::RejectedLeaseOrphaned,
                     LeaseState::Suspended => ZonePublishResult::RejectedSafeModeActive,
                     _ => ZonePublishResult::RejectedLeaseTerminal,
                 };
@@ -3359,9 +3353,7 @@ impl SceneGraph {
             Some(state) => {
                 let result = match state {
                     LeaseState::Active => ZonePublishResult::Accepted,
-                    LeaseState::Orphaned | LeaseState::Disconnected => {
-                        ZonePublishResult::RejectedLeaseOrphaned
-                    }
+                    LeaseState::Orphaned => ZonePublishResult::RejectedLeaseOrphaned,
                     LeaseState::Suspended => ZonePublishResult::RejectedSafeModeActive,
                     _ => ZonePublishResult::RejectedLeaseTerminal,
                 };
@@ -6900,7 +6892,7 @@ mod tests {
         scene.leases.get_mut(&l2).unwrap().revoke().unwrap();
         assert_eq!(scene.leases[&l2].state, LeaseState::Revoked);
 
-        // Revoke from Disconnected
+        // Revoke from Orphaned
         let l3 = scene.grant_lease("t3", 60_000, vec![]);
         scene.leases.get_mut(&l3).unwrap().disconnect(1000).unwrap();
         scene.leases.get_mut(&l3).unwrap().revoke().unwrap();
@@ -7338,7 +7330,7 @@ mod tests {
         scene.suspend_all_leases(clock.now_millis());
 
         assert_eq!(scene.leases[&l1].state, LeaseState::Suspended);
-        assert_eq!(scene.leases[&l2].state, LeaseState::Orphaned); // Unchanged (was Disconnected)
+        assert_eq!(scene.leases[&l2].state, LeaseState::Orphaned); // Unchanged (not suspended)
     }
 
     #[test]
@@ -7360,7 +7352,7 @@ mod tests {
         scene.resume_all_leases(clock.now_millis());
 
         assert_eq!(scene.leases[&l1].state, LeaseState::Active);
-        assert_eq!(scene.leases[&l2].state, LeaseState::Orphaned); // Unchanged (was Disconnected)
+        assert_eq!(scene.leases[&l2].state, LeaseState::Orphaned); // Unchanged (not suspended)
     }
 
     #[test]

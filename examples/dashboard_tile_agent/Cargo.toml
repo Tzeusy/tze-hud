@@ -30,10 +30,12 @@ blake3 = { workspace = true }
 [dev-dependencies]
 tze_hud_input = { path = "../../crates/tze_hud_input" }
 # dev-mode activated for test builds: inline #[cfg(test)] mod tests calls
-# HeadlessRuntime::new with config_toml: None (unrestricted capabilities).
+# HeadlessRuntime::new with config_toml: None (unrestricted capabilities), and
+# HudSessionImpl::new directly from a SceneGraph without the production config path.
 # The released binary does NOT carry dev-mode; activate with `--features dev-mode`
 # when running tests manually, or `cargo test` which picks up dev-dependencies.
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["dev-mode"] }
+tze_hud_protocol = { path = "../../crates/tze_hud_protocol", features = ["dev-mode"] }
 
 [lints]
 workspace = true
