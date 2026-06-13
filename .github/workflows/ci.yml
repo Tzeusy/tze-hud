@@ -586,8 +586,13 @@ jobs:
   # Test filters:
   #   `video_surface::` — 17 pure unit tests in tze_hud_compositor::video_surface
   #   `media_ingress::` — 61 pure unit tests in tze_hud_runtime::media_ingress
-  #   `headless::tests::synthetic_media_surface` — 2 tokio tests that exercise
-  #       the v2_preview HeadlessRuntime.publish_synthetic_media_surface path
+  #
+  # Excluded (GPU required, tracked separately):
+  #   `headless::tests::synthetic_media_surface` — 2 tokio tests exercising
+  #       HeadlessRuntime.publish_synthetic_media_surface require a GPU adapter
+  #       (HeadlessRuntime::new() calls wgpu::Instance::request_adapter); they
+  #       are NOT available on ubuntu-latest without Mesa/llvmpipe.
+  #       Tracked by bead hud-ckvd6 for a dedicated GPU runner lane.
   #
   # No GPU or Mesa required: all selected tests are pure Rust logic.
 
@@ -648,12 +653,11 @@ jobs:
             -p tze_hud_runtime \
             --features v2_preview \
             -- 'media_ingress::'
-      - name: cargo test -p tze_hud_runtime synthetic_media_surface tests (v2_preview)
-        run: |
-          cargo test \
-            -p tze_hud_runtime \
-            --features v2_preview \
-            -- 'headless::tests::synthetic_media_surface'
+      # headless::tests::synthetic_media_surface is intentionally excluded here.
+      # Those 2 tokio tests call HeadlessRuntime::new() which requires a GPU
+      # adapter (wgpu::Instance::request_adapter); HEADLESS_FORCE_SOFTWARE=1 is
+      # insufficient on ubuntu-latest without Mesa/llvmpipe.  They belong in a
+      # dedicated GPU runner lane.  Tracked by bead hud-ckvd6.
 
   test-gpu-pixel-readback:
     name: pixel readback (GPU / llvmpipe, informational)
