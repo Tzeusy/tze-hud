@@ -5399,14 +5399,21 @@ impl Compositor {
         // omitted the prime), we fall back here to preserve correctness.  In
         // steady state this path is never taken; the cost is absorbed into Stage 6.
         //
-        // A debug assertion fires in test/dev builds to catch regressions where
-        // a call site forgot to call prime_truncation_cache before render_frame.
+        // Unlike the markdown cache, a version mismatch here is NOT necessarily a
+        // contract violation: `prime_truncation_cache` carries a mid-drag cadence
+        // gate (hud-ghhxa) that intentionally DEFERS a re-prime — leaving the
+        // sentinel behind `scene.version` — when geometry changes faster than
+        // RESIZE_REPRIME_INTERVAL_MS.  During a fast resize drag (or the headless
+        // benchmark's tight 180-frame loop), the cache legitimately lags the scene
+        // for one or more frames.  We therefore trace rather than debug_assert; the
+        // call to prime_truncation_cache below is itself cadence-gated and will be
+        // a no-op defer when appropriate, preserving the per-frame budget [hud-v2z6u].
         if scene.version != self.truncation_cache_scene_version {
-            debug_assert!(
-                false,
-                "render_frame: truncation cache was not commit-primed for scene version {} \
-                 (cache version {}); falling back to in-render prime [hud-v2z6u]",
-                scene.version, self.truncation_cache_scene_version,
+            tracing::trace!(
+                scene_version = scene.version,
+                cache_version = self.truncation_cache_scene_version,
+                "render_frame: truncation cache lags scene (commit-prime not yet \
+                 applied or cadence-deferred); applying cadence-gated in-render prime"
             );
             self.prime_truncation_cache(scene);
         }
@@ -5544,11 +5551,16 @@ impl Compositor {
         // for the full correctness rationale.  In steady state this block is a
         // no-op because the caller already primed at commit time.
         if scene.version != self.truncation_cache_scene_version {
-            debug_assert!(
-                false,
-                "render_frame_headless: truncation cache was not commit-primed for scene \
-                 version {} (cache version {}); falling back to in-render prime [hud-v2z6u]",
-                scene.version, self.truncation_cache_scene_version,
+            // A version mismatch is an EXPECTED state: prime_truncation_cache's
+            // mid-drag cadence gate (hud-ghhxa) defers re-primes during fast
+            // geometry changes, so the sentinel legitimately lags scene.version
+            // for one or more frames.  Trace (not debug_assert) and apply the
+            // cadence-gated in-render prime to preserve correctness [hud-v2z6u].
+            tracing::trace!(
+                scene_version = scene.version,
+                cache_version = self.truncation_cache_scene_version,
+                "render_frame_headless: truncation cache lags scene; applying \
+                 cadence-gated in-render prime"
             );
             self.prime_truncation_cache(scene);
         }
@@ -5701,12 +5713,15 @@ impl Compositor {
         // ── Phase-1 truncation cache prime (hud-wgq7j / hud-v2z6u) ─────────────
         // Safety fallback — mirrors render_frame / render_frame_headless.
         // In steady state the cache is primed at commit time; this is a no-op.
+        // A version mismatch is an EXPECTED state because prime_truncation_cache's
+        // mid-drag cadence gate (hud-ghhxa) defers re-primes during fast geometry
+        // changes — so we trace rather than debug_assert [hud-v2z6u].
         if scene.version != self.truncation_cache_scene_version {
-            debug_assert!(
-                false,
-                "render_frame_with_chrome: truncation cache was not commit-primed for scene \
-                 version {} (cache version {}); falling back to in-render prime [hud-v2z6u]",
-                scene.version, self.truncation_cache_scene_version,
+            tracing::trace!(
+                scene_version = scene.version,
+                cache_version = self.truncation_cache_scene_version,
+                "render_frame_with_chrome: truncation cache lags scene; applying \
+                 cadence-gated in-render prime"
             );
             self.prime_truncation_cache(scene);
         }
