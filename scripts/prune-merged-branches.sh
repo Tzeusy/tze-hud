@@ -98,10 +98,19 @@ for branch in "${MERGED_REMOTE[@]}"; do
   fi
 
   if [[ "$EXECUTE" == "true" ]]; then
-    echo "[prune-merged-branches] DELETE: origin/$branch"
-    git push origin --delete "$branch" 2>&1 | sed 's/^/  /' || {
-      echo "[prune-merged-branches] WARNING: failed to delete $branch (may already be gone)"
-    }
+    # Capture the SHA we observed during the merged check so the delete is
+    # guarded by a ref lease.  If an agent pushes new commits to this branch
+    # between the fetch and here, the remote ref will have moved and git will
+    # refuse to delete it — protecting the in-flight work.
+    EXPECTED_SHA=$(git rev-parse "origin/$branch" 2>/dev/null || true)
+    echo "[prune-merged-branches] DELETE: origin/$branch (lease=$EXPECTED_SHA)"
+    if [[ -n "$EXPECTED_SHA" ]]; then
+      git push origin --force-with-lease="$branch:$EXPECTED_SHA" --delete "$branch" 2>&1 | sed 's/^/  /' || {
+        echo "[prune-merged-branches] WARNING: failed to delete $branch (ref moved or already gone — skipping)"
+      }
+    else
+      echo "[prune-merged-branches] WARNING: could not resolve origin/$branch SHA — skipping delete"
+    fi
     ((DELETED++)) || true
   else
     echo "[prune-merged-branches] WOULD DELETE: origin/$branch"
