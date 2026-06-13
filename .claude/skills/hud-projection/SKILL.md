@@ -8,7 +8,7 @@ metadata:
     - tze
     - OpenAI Codex
   status: active
-  last_reviewed: "2026-06-13"
+  last_reviewed: "2026-06-14"
 ---
 
 # HUD Projection
