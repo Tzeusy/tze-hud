@@ -338,7 +338,7 @@ pub struct VideoSurface;
 /// `#[statig::state_machine]` attribute. All variants are unit variants.
 #[cfg(feature = "v2_preview")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum State {
+pub(crate) enum State {
     Admitted,
     Streaming,
     Degraded,
