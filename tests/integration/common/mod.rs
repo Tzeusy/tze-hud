@@ -187,7 +187,7 @@ pub async fn connect_agent(
         payload: Some(session_proto::client_message::Payload::LeaseRequest(
             session_proto::LeaseRequest {
                 ttl_ms: 120_000,
-                capabilities: capabilities.clone(),
+                capabilities,
                 lease_priority,
             },
         )),
@@ -197,7 +197,7 @@ pub async fn connect_agent(
     // Wrap the stream in a temporary AgentSession so we can use next_non_state_change.
     // (LeaseStateChange can arrive between the LeaseRequest and its LeaseResponse.)
     let mut partial_session = AgentSession {
-        namespace: namespace.clone(),
+        namespace,
         lease_id_bytes: vec![],
         tx: tx.clone(),
         rx: response_stream,
@@ -222,7 +222,7 @@ pub async fn connect_agent(
     };
 
     Ok(AgentSession {
-        namespace,
+        namespace: partial_session.namespace,
         lease_id_bytes,
         tx,
         rx: response_stream,
