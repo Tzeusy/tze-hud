@@ -3512,9 +3512,25 @@ impl WinitApp {
                     );
                 }
             }
+            // Truncate for debug logs: raw.character carries clipboard text and
+            // can be arbitrarily large.  Formatting is lazy (tracing skips it
+            // below info in production), but defensive truncation avoids
+            // surprises in debug builds with large paste payloads.
+            let char_log_preview = {
+                const MAX: usize = 64;
+                if raw.character.len() <= MAX {
+                    std::borrow::Cow::Borrowed(raw.character.as_str())
+                } else {
+                    let mut end = MAX;
+                    while end > 0 && !raw.character.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    std::borrow::Cow::Owned(format!("{}…", &raw.character[..end]))
+                }
+            };
             if outcome != tze_hud_input::EditOutcome::Unchanged {
                 tracing::debug!(
-                    character = %raw.character,
+                    character = %char_log_preview,
                     outcome = ?outcome,
                     "composer: Character consumed by draft manager"
                 );
@@ -3533,7 +3549,7 @@ impl WinitApp {
                 // Unconditional early-return below ensures the event still
                 // never reaches the agent path (§4.4).
                 tracing::debug!(
-                    character = %raw.character,
+                    character = %char_log_preview,
                     "composer: Character absorbed (Unchanged — all-control or no-op paste); not forwarded to agent (§4.4)"
                 );
             }
