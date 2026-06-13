@@ -1,0 +1,772 @@
+//! Severity / urgency / tile-background color constants and free color helpers.
+//!
+//! Moved from `renderer.rs` banners 1–3 by Step R-1 of the renderer module split
+//! (hud-fgryk).  No logic was changed; only visibility modifiers were added where
+//! Rust's module-privacy rules require them.
+
+use std::collections::HashMap;
+
+use tze_hud_scene::types::*;
+
+// ─── Severity token fallback colors ─────────────────────────────────────────
+
+/// Default severity colors (linear sRGB) used when design tokens are absent.
+///
+/// Per spec §Canonical Token Schema:
+///   color.severity.info     → #4A9EFF → (0.078, 0.384, 1.0)
+///   color.severity.warning  → #FFB800 → (1.0, 0.722, 0.0)
+///   color.severity.critical → #FF0000 → (1.0, 0.0, 0.0)
+pub(super) const SEVERITY_INFO: Rgba = Rgba {
+    r: 0.078,
+    g: 0.384,
+    b: 1.0,
+    a: 1.0,
+};
+pub(super) const SEVERITY_WARNING: Rgba = Rgba {
+    r: 1.0,
+    g: 0.722,
+    b: 0.0,
+    a: 1.0,
+};
+pub(super) const SEVERITY_CRITICAL: Rgba = Rgba {
+    r: 1.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
+
+// ─── Notification urgency token fallback colors ───────────────────────────────
+
+/// Default notification urgency backdrop colors (linear sRGB) used when
+/// `color.notification.urgency.*` design tokens are absent.
+///
+/// Per spec §Notification Urgency Backdrop Token Schema:
+///   color.notification.urgency.low      → #000000 → (0.0, 0.0, 0.0)
+///   color.notification.urgency.normal   → #0C1426 → (0.0037, 0.007, 0.0194)
+///   color.notification.urgency.urgent   → #2A1E08 → (0.0232, 0.013, 0.0024)
+///   color.notification.urgency.critical → #450612 → (0.0595, 0.0018, 0.006)
+///
+/// These tokens are for notification-area (and non-alert-banner notification zones)
+/// only. Alert-banner continues to use `color.severity.*` tokens.
+pub(super) const NOTIFICATION_URGENCY_LOW: Rgba = Rgba {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
+pub(super) const NOTIFICATION_URGENCY_NORMAL: Rgba = Rgba {
+    r: 0.0037,
+    g: 0.007,
+    b: 0.0194,
+    a: 1.0,
+};
+pub(super) const NOTIFICATION_URGENCY_URGENT: Rgba = Rgba {
+    r: 0.0232,
+    g: 0.013,
+    b: 0.0024,
+    a: 1.0,
+};
+pub(super) const NOTIFICATION_URGENCY_CRITICAL: Rgba = Rgba {
+    r: 0.0595,
+    g: 0.0018,
+    b: 0.006,
+    a: 1.0,
+};
+
+/// Per-notification backdrop opacity applied to urgency-tinted backdrop quads.
+///
+/// This is the fixed 0.8 opacity specified for notification zone backdrop rendering.
+/// It overrides the token color's alpha channel.
+pub(super) const NOTIFICATION_BACKDROP_OPACITY: f32 = 0.8;
+
+/// Scale factor for the body line font size in two-line notification layout.
+///
+/// When a `NotificationPayload.title` is non-empty, the body text (`text` field)
+/// is rendered at `title_font_size * NOTIFICATION_BODY_SCALE`.
+///
+/// Token override path: `typography.notification.body.scale` (parsed as f32).
+/// Fallback: 0.85.
+pub(super) const NOTIFICATION_BODY_SCALE: f32 = 0.85;
+
+/// Bold font weight used for the title line in two-line notification layout.
+///
+/// Token override: `typography.notification.title.weight` (parsed as u16).
+/// Fallback: 700 (bold).
+pub(super) const NOTIFICATION_TITLE_WEIGHT: u16 = 700;
+
+/// Adaptive mid-drag re-truncation cadence thresholds (hud-3to8i).
+///
+/// # Cadence contract (hud-ghhxa — spec §6b.3)
+///
+/// When a portal tile's bounds change rapidly (resize hotkey repeat, or
+/// pointer-drag resize gesture), the scene version increments on every change
+/// and `prime_truncation_cache` would otherwise re-prime every frame —
+/// O(n) per prime in text content length, which can exceed the Stage 5 / Stage 6
+/// frame budget on large content.
+///
+/// The cadence gate in `Compositor::prime_truncation_cache` ensures at most one
+/// re-prime per the adaptive interval during a continuous geometry change, while
+/// guaranteeing that every distinct intermediate geometry *is* eventually
+/// reflected in the truncation output — not only at drag-end.
+///
+/// The interval is derived from the total byte count of Ellipsis text content
+/// visible in the scene at the time of the last successful prime:
+///
+/// - **Short content** (< 1 KiB): 16 ms ≈ 60 Hz — cheap re-prime keeps
+///   truncation visually responsive during resize.
+/// - **Medium content** (1 KiB – 16 KiB): 50 ms ≈ 20 Hz — the former fixed
+///   default; good balance for typical transcript panes.
+/// - **Long content** (≥ 16 KiB): 100 ms ≈ 10 Hz — throttled to protect the
+///   frame budget when O(n) shaping cost is highest.
+///
+/// The adaptive decision is O(1) (a single `usize` comparison against constants
+/// using the last-prime byte count) and must never allocate or block on the hot
+/// path.
+///
+/// The gate is bypassed when the sentinel is `u64::MAX` (a forced re-prime
+/// requested by `set_token_map` or initialisation) so that token/font-metric
+/// changes are always reflected immediately regardless of resize cadence.
+pub(super) const RESIZE_REPRIME_SHORT_THRESHOLD_BYTES: usize = 1_024; // < 1 KiB → fast cadence
+pub(super) const RESIZE_REPRIME_LONG_THRESHOLD_BYTES: usize = 16_384; // ≥ 16 KiB → slow cadence
+
+/// Re-prime interval for short content (< 1 KiB): ≈60 Hz.
+pub(super) const RESIZE_REPRIME_INTERVAL_SHORT_MS: u64 = 16;
+/// Re-prime interval for medium content (1 KiB – 16 KiB): ≈20 Hz.
+pub(super) const RESIZE_REPRIME_INTERVAL_MEDIUM_MS: u64 = 50;
+/// Re-prime interval for long content (≥ 16 KiB): ≈10 Hz.
+pub(super) const RESIZE_REPRIME_INTERVAL_LONG_MS: u64 = 100;
+
+/// Compute the adaptive re-prime interval in milliseconds from the total byte
+/// count of Ellipsis text content in the scene.
+///
+/// This is O(1) — a single `usize` comparison — and must never allocate.
+/// See the [`RESIZE_REPRIME_SHORT_THRESHOLD_BYTES`] /
+/// [`RESIZE_REPRIME_LONG_THRESHOLD_BYTES`] constants for the threshold values.
+pub(crate) fn adaptive_reprime_interval_ms(total_content_bytes: usize) -> u64 {
+    if total_content_bytes < RESIZE_REPRIME_SHORT_THRESHOLD_BYTES {
+        RESIZE_REPRIME_INTERVAL_SHORT_MS
+    } else if total_content_bytes < RESIZE_REPRIME_LONG_THRESHOLD_BYTES {
+        RESIZE_REPRIME_INTERVAL_MEDIUM_MS
+    } else {
+        RESIZE_REPRIME_INTERVAL_LONG_MS
+    }
+}
+
+/// Vertical gap (px) between the title line and the body line in two-line layout.
+pub(super) const NOTIFICATION_INTER_LINE_GAP: f32 = 2.0;
+
+/// Warm-gray placeholder color rendered for `ZoneContent::StaticImage` zones.
+///
+/// Full GPU texture upload (wgpu sampler pipeline) is deferred to a follow-up
+/// iteration. This constant is intentionally shared between the Stack and
+/// non-Stack contention-policy branches so both render the same placeholder.
+pub(super) const STATIC_IMAGE_PLACEHOLDER_COLOR: Rgba = Rgba {
+    r: 0.3,
+    g: 0.3,
+    b: 0.3,
+    a: 1.0,
+};
+
+/// Dark placeholder color rendered for `ZoneContent::VideoSurfaceRef` zones.
+///
+/// Rendered when the video surface is in `Admitted`, `Placeholder`, or
+/// `Closed`/`Revoked` state (no frame available).  Distinct from
+/// `STATIC_IMAGE_PLACEHOLDER_COLOR` so video zones are visually identifiable
+/// (dark/off vs warm-gray/loading).
+///
+/// In `Streaming` state the compositor will eventually draw the decoded
+/// frame texture; until real GStreamer → GPU upload lands (a follow-up task),
+/// this placeholder is always shown.  When in `LastFrameWithBadge` state
+/// (B11 media drop), the same placeholder is shown with a disconnection-badge
+/// overlay emitted by the chrome layer.
+///
+/// Per engineering-bar.md §1: placeholder behavior is tested in
+/// `video_surface.rs` unit tests; frame-timing budget (Stage 6 < 4 ms) is
+/// not materially affected by the color quad.
+pub(super) const VIDEO_SURFACE_PLACEHOLDER_COLOR: Rgba = Rgba {
+    r: 0.05,
+    g: 0.05,
+    b: 0.05,
+    a: 1.0,
+};
+
+/// Size of a notification icon in pixels (square, 24×24).
+///
+/// Icons are rendered left-aligned within the notification backdrop, at the
+/// same horizontal inset as the text, and vertically centred in the slot.
+pub(super) const NOTIFICATION_ICON_SIZE_PX: f32 = 24.0;
+
+/// Horizontal gap between the icon and the notification text (pixels).
+pub(super) const NOTIFICATION_ICON_GAP_PX: f32 = 6.0;
+
+/// Side length of the notification dismiss affordance (square, top-right).
+pub(super) const NOTIFICATION_DISMISS_BUTTON_SIZE_PX: f32 = 20.0;
+
+/// Horizontal breathing room between the dismiss affordance and notification text.
+pub(super) const NOTIFICATION_DISMISS_GAP_PX: f32 = 8.0;
+
+/// Font size in pixels for the dismiss ("X") button label.
+///
+/// Token override: `typography.notification.dismiss.font_size_px` (parsed as f32,
+/// strips a trailing `px` suffix if present).
+/// Fallback: 12.0 px.
+pub(super) const NOTIFICATION_DISMISS_FONT_SIZE_PX: f32 = 12.0;
+
+/// Font weight for the dismiss ("X") button label.
+///
+/// Token override: `typography.notification.dismiss.font_weight` (parsed as u16).
+/// Fallback: 700 (bold).
+pub(super) const NOTIFICATION_DISMISS_FONT_WEIGHT: u16 = 700;
+
+/// Fallback color for `color.border.default` when the token is absent.
+///
+/// Matches the default value in built-in component startup tokens (#444466).
+pub(super) const BORDER_DEFAULT_FALLBACK: Rgba = Rgba {
+    r: 0.267,
+    g: 0.267,
+    b: 0.400,
+    a: 1.0,
+};
+
+// ─── Tile background token fallback colors ────────────────────────────────────
+
+/// Default tile background color for `TextMarkdown` tiles (linear sRGB) used
+/// when the `color.tile.background.text_markdown` design token is absent.
+///
+/// Per spec §Canonical Token Schema:
+///   color.tile.background.text_markdown → #6C6C88 → (0.15, 0.15, 0.25) linear
+///
+/// Note: the sRGB hex for linear (0.15, 0.15, 0.25) is #6C6C88, not #636380.
+/// (#636380 linearises to ≈(0.125, 0.125, 0.216); #262640 to ≈(0.019, 0.019, 0.051).)
+pub(super) const TILE_BG_TEXT_MARKDOWN: Rgba = Rgba {
+    r: 0.15,
+    g: 0.15,
+    b: 0.25,
+    a: 1.0,
+};
+
+/// Default tile background color for `StaticImage` tiles (linear sRGB) used
+/// when the `color.tile.background.static_image` design token is absent.
+///
+/// Per spec §Canonical Token Schema:
+///   color.tile.background.static_image → #373737 → (0.05, 0.05, 0.05)
+pub(super) const TILE_BG_STATIC_IMAGE: Rgba = Rgba {
+    r: 0.05,
+    g: 0.05,
+    b: 0.05,
+    a: 1.0,
+};
+
+/// Default tile background color for tiles with unknown/default content type
+/// (linear sRGB) used when the `color.tile.background.default` design token
+/// is absent.
+///
+/// Per spec §Canonical Token Schema:
+///   color.tile.background.default → #505073 → (0.1, 0.1, 0.2)
+pub(super) const TILE_BG_DEFAULT: Rgba = Rgba {
+    r: 0.1,
+    g: 0.1,
+    b: 0.2,
+    a: 1.0,
+};
+
+/// Icon size in pixels for status-bar entry icons.
+///
+/// Icons from `RenderingPolicy::key_icon_map` are rasterized at this size
+/// (square) and rendered to the left of each mapped entry's text value.
+pub(super) const ICON_SIZE_PX: f32 = 24.0;
+
+/// Gap in pixels between the icon and the text value for status-bar entries.
+pub(super) const ICON_TEXT_GAP_PX: f32 = 6.0;
+
+/// sRGB transfer: linear → sRGB (matches GPU hardware encoding on `*Srgb` surfaces).
+#[inline]
+pub(super) fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// sRGB transfer: sRGB → linear.
+#[inline]
+pub(super) fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Returns `true` if the zone name is an alert-banner zone.
+///
+/// Per spec §V1 Component Type Definitions: the alert-banner zone name is
+/// `"alert-banner"`.  notification-area uses urgency-tinted notification
+/// backdrop tokens, not severity tokens.
+#[inline]
+pub(super) fn is_alert_banner_zone(zone_name: &str) -> bool {
+    zone_name == "alert-banner"
+}
+
+/// Extract the urgency from a `ZonePublishRecord` if it carries `Notification` content.
+///
+/// Returns `0` for non-Notification content (treated as lowest severity for sort).
+#[inline]
+pub(super) fn publish_urgency(record: &ZonePublishRecord) -> u32 {
+    match &record.content {
+        ZoneContent::Notification(n) => n.urgency,
+        _ => 0,
+    }
+}
+
+/// Sort alert-banner publications into display order: severity-descending (critical first),
+/// then recency-descending (newer first) within the same severity level.
+///
+/// Returns indices into `publishes` in the order they should occupy slots 0, 1, 2, …
+/// (slot 0 = topmost = highest severity / newest).
+///
+/// This is a pure helper so both `collect_text_items` and `render_zone_content` use
+/// the same ordering without duplicating logic.
+pub(super) fn sort_alert_banner_indices(publishes: &[ZonePublishRecord]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..publishes.len()).collect();
+    // Primary key: urgency descending (3=critical at top).
+    // Secondary key: published_at_wall_us descending (newer above older).
+    // Tertiary key: original index descending (newer inserts above older on exact timestamp ties).
+    indices.sort_by(|&a, &b| {
+        let ua = publish_urgency(&publishes[a]);
+        let ub = publish_urgency(&publishes[b]);
+        ub.cmp(&ua)
+            .then_with(|| {
+                publishes[b]
+                    .published_at_wall_us
+                    .cmp(&publishes[a].published_at_wall_us)
+            })
+            .then_with(|| b.cmp(&a))
+    });
+    indices
+}
+
+/// Parse a `#RRGGBB` or `#RRGGBBAA` hex string into `Rgba`.
+///
+/// This is a minimal, allocation-free parser used to resolve token color
+/// values at render time without depending on `tze_hud_config`.
+/// Hex channels are interpreted as sRGB design-token values and converted to
+/// linear RGB for the compositor pipeline.
+/// Returns `None` if the string does not match either form.
+pub(super) fn parse_hex_color(s: &str) -> Option<Rgba> {
+    let s = s.trim();
+    if !s.starts_with('#') || !s.is_ascii() {
+        return None;
+    }
+    let hex = &s[1..];
+    match hex.len() {
+        6 | 8 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            let a = if hex.len() == 8 {
+                u8::from_str_radix(&hex[6..8], 16).ok()?
+            } else {
+                255
+            };
+            Some(Rgba::new(
+                srgb_to_linear(r as f32 / 255.0),
+                srgb_to_linear(g as f32 / 255.0),
+                srgb_to_linear(b as f32 / 255.0),
+                a as f32 / 255.0,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Look up a token key in the resolved token map and parse it as a color.
+/// Returns `None` if the key is absent or the value is not a valid hex color.
+#[inline]
+pub(super) fn resolve_token_color(token_map: &HashMap<String, String>, key: &str) -> Option<Rgba> {
+    token_map.get(key).and_then(|v| parse_hex_color(v))
+}
+
+/// Look up a severity token key in the resolved token map and parse it as a
+/// color.  Returns `None` if the key is absent or the value is not a valid
+/// hex color.
+#[inline]
+pub(super) fn resolve_severity_token(
+    token_map: &HashMap<String, String>,
+    key: &str,
+) -> Option<Rgba> {
+    resolve_token_color(token_map, key)
+}
+
+/// Map a `NotificationPayload.urgency` level to a severity backdrop color.
+///
+/// Looks up `color.severity.{info,warning,critical}` in `token_map` first;
+/// falls back to hardcoded SEVERITY_* constants when the key is absent or
+/// cannot be parsed as a hex color.
+///
+/// Per spec §Notification Urgency-to-Severity Token Mapping:
+///   urgency 0, 1 → color.severity.info   (fallback: #4A9EFF)
+///   urgency 2    → color.severity.warning (fallback: #FFB800)
+///   urgency 3    → color.severity.critical (fallback: #FF0000)
+///
+/// The returned `Rgba` alpha is 1.0 (unless the token itself carries an alpha
+/// via `#RRGGBBAA`); `backdrop_opacity` from the policy is applied by the
+/// caller after this lookup.
+///
+/// MUST NOT be used for notification-area zones. Only for alert-banner zones.
+pub(super) fn urgency_to_severity_color(urgency: u32, token_map: &HashMap<String, String>) -> Rgba {
+    match urgency {
+        3 => resolve_severity_token(token_map, "color.severity.critical")
+            .unwrap_or(SEVERITY_CRITICAL),
+        2 => {
+            resolve_severity_token(token_map, "color.severity.warning").unwrap_or(SEVERITY_WARNING)
+        }
+        _ => resolve_severity_token(token_map, "color.severity.info").unwrap_or(SEVERITY_INFO),
+    }
+}
+
+/// Map a `NotificationPayload.urgency` level to a notification urgency backdrop color.
+///
+/// Looks up `color.notification.urgency.{low,normal,urgent,critical}` in `token_map`
+/// first; falls back to hardcoded NOTIFICATION_URGENCY_* constants when the key is
+/// absent or cannot be parsed as a hex color.
+///
+/// Per spec §Notification Urgency Backdrop Token Schema:
+///   urgency 0     → color.notification.urgency.low      (fallback: #000000)
+///   urgency 1     → color.notification.urgency.normal   (fallback: #0C1426)
+///   urgency 2     → color.notification.urgency.urgent   (fallback: #2A1E08)
+///   urgency 3+    → color.notification.urgency.critical (fallback: #450612)
+///
+/// Urgency values greater than 3 are clamped to 3 (critical).
+///
+/// MUST NOT use `color.severity.*` tokens — those are for alert-banner only.
+pub(super) fn urgency_to_notification_color(
+    urgency: u32,
+    token_map: &HashMap<String, String>,
+) -> Rgba {
+    // Clamp urgency >3 to critical (3).
+    let level = urgency.min(3);
+    match level {
+        0 => resolve_token_color(token_map, "color.notification.urgency.low")
+            .unwrap_or(NOTIFICATION_URGENCY_LOW),
+        1 => resolve_token_color(token_map, "color.notification.urgency.normal")
+            .unwrap_or(NOTIFICATION_URGENCY_NORMAL),
+        2 => resolve_token_color(token_map, "color.notification.urgency.urgent")
+            .unwrap_or(NOTIFICATION_URGENCY_URGENT),
+        _ => resolve_token_color(token_map, "color.notification.urgency.critical")
+            .unwrap_or(NOTIFICATION_URGENCY_CRITICAL),
+    }
+}
+
+/// Resolve the `color.border.default` token from the map.
+///
+/// Falls back to `BORDER_DEFAULT_FALLBACK` (#444466) when the token is absent
+/// or cannot be parsed as a valid hex color.
+#[inline]
+pub(super) fn resolve_border_default_color(token_map: &HashMap<String, String>) -> Rgba {
+    resolve_token_color(token_map, "color.border.default").unwrap_or(BORDER_DEFAULT_FALLBACK)
+}
+
+/// Resolve the tile background color for a given content-type key.
+///
+/// Looks up `color.tile.background.{key}` in `token_map` first; falls back to
+/// the provided `fallback` constant when the key is absent or cannot be parsed
+/// as a valid hex color.
+///
+/// Accepted keys (per §Canonical Token Schema):
+///   - `"text_markdown"` → fallback `TILE_BG_TEXT_MARKDOWN` (#636380)
+///   - `"static_image"`  → fallback `TILE_BG_STATIC_IMAGE`  (#373737)
+///   - `"default"`       → fallback `TILE_BG_DEFAULT`        (#505073)
+///
+/// The caller supplies the `fallback` value so this function does not need
+/// to know the full token namespace; callers should prefer the typed wrapper
+/// `resolve_tile_bg_*` helpers below.
+#[inline]
+pub(super) fn resolve_tile_bg_token(
+    token_map: &HashMap<String, String>,
+    key: &str,
+    fallback: Rgba,
+) -> Rgba {
+    resolve_token_color(token_map, key).unwrap_or(fallback)
+}
+
+#[inline]
+pub(super) fn resolve_notification_control_color(
+    policy: &RenderingPolicy,
+    token_map: &HashMap<String, String>,
+) -> Rgba {
+    policy.text_color.unwrap_or_else(|| {
+        resolve_token_color(token_map, "color.text.primary")
+            .unwrap_or(Rgba::new(1.0, 1.0, 1.0, 0.875))
+    })
+}
+
+/// Resolve `ScrollIndicatorTokens` from the compositor token map.
+///
+/// Keys follow the portal token namespace (`portal.scroll_indicator.*`).
+/// Falls back to `ScrollIndicatorTokens::default()` for any missing or
+/// unparsable token — token defaults in both crates must stay in sync per
+/// the module-level contract in `tze_hud_input::scroll_indicator`.
+#[inline]
+pub(super) fn resolve_scroll_indicator_tokens(
+    token_map: &HashMap<String, String>,
+) -> tze_hud_input::ScrollIndicatorTokens {
+    let defaults = tze_hud_input::ScrollIndicatorTokens::default();
+
+    // Color: "portal.scroll_indicator.color" as #RRGGBB[AA].
+    let (color_r, color_g, color_b, color_a) =
+        if let Some(c) = resolve_token_color(token_map, "portal.scroll_indicator.color") {
+            (c.r, c.g, c.b, c.a)
+        } else {
+            (
+                defaults.color_r,
+                defaults.color_g,
+                defaults.color_b,
+                defaults.color_a,
+            )
+        };
+
+    let width_px = token_map
+        .get("portal.scroll_indicator.width_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(defaults.width_px);
+
+    let min_thumb_height_px = token_map
+        .get("portal.scroll_indicator.min_height_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(defaults.min_thumb_height_px);
+
+    tze_hud_input::ScrollIndicatorTokens {
+        color_r,
+        color_g,
+        color_b,
+        color_a,
+        width_px,
+        min_thumb_height_px,
+    }
+}
+
+#[inline]
+pub(super) fn notification_dismiss_bounds(
+    x: f32,
+    slot_y: f32,
+    w: f32,
+    effective_slot_h: f32,
+) -> Rect {
+    Rect::new(
+        x + w - NOTIFICATION_DISMISS_BUTTON_SIZE_PX,
+        slot_y,
+        NOTIFICATION_DISMISS_BUTTON_SIZE_PX,
+        NOTIFICATION_DISMISS_BUTTON_SIZE_PX.min(effective_slot_h),
+    )
+}
+
+/// Resolved visual tokens for the local composer echo overlay.
+///
+/// Populated from the compositor token map in
+/// [`resolve_composer_overlay_tokens`].  All colors are **linear sRGB**
+/// (converted from sRGB hex by `parse_hex_color`).
+pub(super) struct ComposerOverlayTokens {
+    /// Background fill for the composer strip (linear sRGB).
+    pub(super) bg_r: f32,
+    pub(super) bg_g: f32,
+    pub(super) bg_b: f32,
+    pub(super) bg_a: f32,
+    /// Text / caret color (linear sRGB).
+    pub(super) text_r: f32,
+    pub(super) text_g: f32,
+    pub(super) text_b: f32,
+    pub(super) text_a: f32,
+    /// At-capacity indicator color (linear sRGB).
+    pub(super) at_capacity_r: f32,
+    pub(super) at_capacity_g: f32,
+    pub(super) at_capacity_b: f32,
+    pub(super) at_capacity_a: f32,
+    /// Font size in pixels.
+    pub(super) font_size_px: f32,
+}
+
+pub(super) fn resolve_composer_overlay_tokens(
+    token_map: &HashMap<String, String>,
+) -> ComposerOverlayTokens {
+    // Background (default: #0F1418 @ 1.0 alpha)
+    let (bg_r, bg_g, bg_b, bg_a) = resolve_token_color(token_map, "portal.composer.background")
+        .map(|c| (c.r, c.g, c.b, c.a))
+        .unwrap_or((0.059, 0.078, 0.094, 1.0));
+
+    // Text color (default: #E0E8F4)
+    let (text_r, text_g, text_b, text_a) =
+        resolve_token_color(token_map, "portal.composer.text_color")
+            .map(|c| (c.r, c.g, c.b, c.a))
+            .unwrap_or((0.878, 0.910, 0.957, 1.0));
+
+    // At-capacity indicator color (default: #B87333, muted amber)
+    let (at_capacity_r, at_capacity_g, at_capacity_b, at_capacity_a) =
+        resolve_token_color(token_map, "portal.composer.at_capacity_color")
+            .map(|c| (c.r, c.g, c.b, c.a))
+            .unwrap_or((0.722, 0.451, 0.200, 1.0));
+
+    // Font size (default: 13)
+    let font_size_px = token_map
+        .get("portal.composer.font_size")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|&v| v.is_finite() && v > 0.0)
+        .unwrap_or(13.0);
+
+    ComposerOverlayTokens {
+        bg_r,
+        bg_g,
+        bg_b,
+        bg_a,
+        text_r,
+        text_g,
+        text_b,
+        text_a,
+        at_capacity_r,
+        at_capacity_g,
+        at_capacity_b,
+        at_capacity_a,
+        font_size_px,
+    }
+}
+
+/// Emit 4 thin 1px border quads positioned inside the given backdrop rectangle.
+///
+/// Produces a 1px inset border using four axis-aligned rectangles:
+///   - top:    (x, y, w, 1)
+///   - bottom: (x, y+h-1, w, 1)
+///   - left:   (x, y+1, 1, h-2)
+///   - right:  (x+w-1, y+1, 1, h-2)
+///
+/// The border is drawn inside the backdrop bounds (does not extend outside).
+/// When `h < 2` or `w < 1`, the degenerate dimension quads are skipped (size ≤ 0
+/// after the inset). Top/bottom edges require `w >= 1` to avoid degenerate quads
+/// with zero or negative width.
+///
+/// `sw`/`sh` are the screen dimensions passed through to `rect_vertices`.
+// All arguments are required primitive geometry inputs (x, y, w, h, sw, sh) plus
+// a color; grouping them into a struct would create an arbitrary named bundle
+// with no semantic benefit over the flat list already documented above.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_border_quads(
+    vertices: &mut Vec<crate::pipeline::RectVertex>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    sw: f32,
+    sh: f32,
+    border_color: [f32; 4],
+) {
+    use crate::pipeline::rect_vertices;
+    const BORDER_PX: f32 = 1.0;
+    // Top edge.
+    if h >= BORDER_PX && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(x, y, w, BORDER_PX, sw, sh, border_color));
+    }
+    // Bottom edge.
+    if h >= BORDER_PX * 2.0 && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(
+            x,
+            y + h - BORDER_PX,
+            w,
+            BORDER_PX,
+            sw,
+            sh,
+            border_color,
+        ));
+    }
+    // Left edge (inset 1px top and bottom to avoid corner overlap).
+    if h > BORDER_PX * 2.0 && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(
+            x,
+            y + BORDER_PX,
+            BORDER_PX,
+            h - BORDER_PX * 2.0,
+            sw,
+            sh,
+            border_color,
+        ));
+    }
+    // Right edge (inset 1px top and bottom to avoid corner overlap).
+    if h > BORDER_PX * 2.0 && w >= BORDER_PX * 2.0 {
+        vertices.extend_from_slice(&rect_vertices(
+            x + w - BORDER_PX,
+            y + BORDER_PX,
+            BORDER_PX,
+            h - BORDER_PX * 2.0,
+            sw,
+            sh,
+            border_color,
+        ));
+    }
+}
+
+/// Emit a 2px inset highlight border around the given rectangle.
+///
+/// Used for v1-compatible drag visual feedback: a 2px border on the element
+/// being dragged. Two quads are emitted per edge (stacked 1px each) to achieve
+/// the 2px width.
+///
+/// Per the drag-to-reposition spec: MUST NOT require drop shadows, scale
+/// pulses, or animated transitions.
+// All arguments are required primitive geometry inputs (x, y, w, h, sw, sh) plus
+// a color; same rationale as emit_border_quads — a struct would be a name-only
+// wrapper with no cohesion beyond this single call site.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_drag_highlight_border(
+    vertices: &mut Vec<crate::pipeline::RectVertex>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    sw: f32,
+    sh: f32,
+    color: [f32; 4],
+) {
+    use crate::pipeline::rect_vertices;
+    const BORDER_PX: f32 = 2.0;
+    // Top edge.
+    if h >= BORDER_PX && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(x, y, w, BORDER_PX, sw, sh, color));
+    }
+    // Bottom edge.
+    if h >= BORDER_PX * 2.0 && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(
+            x,
+            y + h - BORDER_PX,
+            w,
+            BORDER_PX,
+            sw,
+            sh,
+            color,
+        ));
+    }
+    // Left edge (inset by BORDER_PX top and bottom to avoid corner overlap).
+    if h > BORDER_PX * 2.0 && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(
+            x,
+            y + BORDER_PX,
+            BORDER_PX,
+            h - BORDER_PX * 2.0,
+            sw,
+            sh,
+            color,
+        ));
+    }
+    // Right edge (inset by BORDER_PX top and bottom to avoid corner overlap).
+    if h > BORDER_PX * 2.0 && w >= BORDER_PX * 2.0 {
+        vertices.extend_from_slice(&rect_vertices(
+            x + w - BORDER_PX,
+            y + BORDER_PX,
+            BORDER_PX,
+            h - BORDER_PX * 2.0,
+            sw,
+            sh,
+            color,
+        ));
+    }
+}
