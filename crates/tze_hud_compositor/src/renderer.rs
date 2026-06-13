@@ -3626,6 +3626,7 @@ impl Compositor {
                         .token_map
                         .get("typography.notification.body.scale")
                         .and_then(|v| v.parse::<f32>().ok())
+                        .filter(|v| v.is_finite())
                         .unwrap_or(NOTIFICATION_BODY_SCALE)
                         .clamp(0.5, 1.0);
                     let notif_title_weight = self
@@ -7033,6 +7034,7 @@ impl Compositor {
             .token_map
             .get("typography.notification.body.scale")
             .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
             .unwrap_or(NOTIFICATION_BODY_SCALE)
             .clamp(0.5, 1.0);
 
