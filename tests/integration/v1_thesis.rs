@@ -43,11 +43,14 @@ use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_scene::test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants};
 use tze_hud_scene::types::*;
-use tze_hud_telemetry::{FrameTelemetry, HardwareFactors, SessionSummary, ValidationReport};
+use tze_hud_telemetry::{
+    AssertionOutcome, FrameTelemetry, HardwareFactors, SessionSummary, ValidationReport,
+};
 use tze_hud_validation::layer4::{
     ArtifactBuilder, ArtifactOptions, SceneArtifactInput, SceneDescription, SceneMetrics,
     SceneStatus,
 };
+use tze_hud_validation::ssim::compute_ssim;
 
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -446,6 +449,24 @@ async fn publish_stream_text_to_zone_via_grpc(
 /// Thesis 1: An LLM can hold a tile on a screen (60fps).
 ///
 /// Evidence: Create tiles via gRPC, render frames, verify tile count and frame completion.
+///
+/// ## What makes this assertion non-vacuous
+///
+/// `all_frames_completed` was previously just `frame_time_us > 0`, which is trivially
+/// true (any non-zero render time passes). We now additionally require:
+/// - `max_tile_count > 0`: the compositor actually _saw_ tiles during rendering, not
+///   just an empty scene.  A zero tile count would indicate tiles were created but not
+///   visible to the renderer — a real regression.
+/// - The 60fps claim requires frame_time_us to be within a software-GPU-multiplied
+///   budget.  On headless llvmpipe the budget is ×10 vs. reference (60fps = 16.6ms
+///   → 166ms effective).  Any frame consistently exceeding this on software GPU
+///   indicates a render-path regression, not scheduler noise.
+///
+/// The `max_frame_time_within_budget` flag is informational (logged but does not
+/// block the unconditional `passed` outcome) because frame time is wall-clock
+/// sensitive and is properly gated behind `TZE_HUD_PERF_ASSERT` in the Layer 3
+/// budget assertions.  What IS unconditional here is `max_tile_count > 0` — that is
+/// a structural correctness check (tiles are visible), not a latency measurement.
 async fn collect_thesis1_evidence(
     _runtime: &mut HeadlessRuntime,
     agents: &[String],
@@ -454,36 +475,54 @@ async fn collect_thesis1_evidence(
 ) -> ThesisPointEvidence {
     let frames_rendered = frame_telemetry.len();
     let has_tiles = tile_count > 0;
-    let all_frames_completed = frame_telemetry.iter().all(|f| f.frame_time_us > 0);
 
-    // Check that at least one frame has the expected tile count
+    // `frame_time_us > 0` is trivially true (even a failed render emits non-zero wall
+    // time).  Use `tile_count > 0` as the actual "compositor saw tiles" check — this
+    // exercises the gRPC→scene-graph→renderer pipeline end-to-end, not just that the
+    // render loop ran.
     let max_tile_count = frame_telemetry
         .iter()
         .map(|f| f.tile_count)
         .max()
         .unwrap_or(0);
 
-    let passed = has_tiles && frames_rendered > 0 && all_frames_completed;
+    // Require the compositor to have observed tiles on at least one frame.
+    let compositor_saw_tiles = max_tile_count > 0;
+
+    // Informational: check frame time is within a software-GPU-friendly bound.
+    // 166ms = 16.6ms nominal × 10× llvmpipe headroom.  Not a blocking assertion —
+    // the hard budget is enforced by Layer 3 behind TZE_HUD_PERF_ASSERT.
+    const SOFTWARE_GPU_FRAME_BUDGET_US: u64 = 166_000;
+    let all_frames_within_budget = frame_telemetry
+        .iter()
+        .all(|f| f.frame_time_us <= SOFTWARE_GPU_FRAME_BUDGET_US);
+
+    // `passed` requires real tile presence on screen — not just that render ran.
+    let passed = has_tiles && frames_rendered > 0 && compositor_saw_tiles;
 
     ThesisPointEvidence {
         thesis_number: 1,
         title: "An LLM can hold a tile on a screen".to_string(),
         passed,
         evidence_summary: format!(
-            "{} agents held {} tiles across {} rendered frames. Max tile count observed: {}. \
-             All frames completed: {}.",
+            "{} agents held {} tiles across {} rendered frames. \
+             Max tile count observed by compositor: {} (must be > 0). \
+             All frames within software-GPU budget ({}ms): {}.",
             agents.len(),
             tile_count,
             frames_rendered,
             max_tile_count,
-            all_frames_completed,
+            SOFTWARE_GPU_FRAME_BUDGET_US / 1_000,
+            all_frames_within_budget,
         ),
         details: serde_json::json!({
             "agents": agents,
             "tile_count": tile_count,
             "frames_rendered": frames_rendered,
             "max_tile_count_observed": max_tile_count,
-            "all_frames_completed": all_frames_completed,
+            "compositor_saw_tiles": compositor_saw_tiles,
+            "all_frames_within_software_gpu_budget": all_frames_within_budget,
+            "software_gpu_frame_budget_us": SOFTWARE_GPU_FRAME_BUDGET_US,
         }),
         spec_refs: vec![
             "v1.md line 9".to_string(),
@@ -1030,6 +1069,45 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         render_elapsed.as_millis() as f64 / frame_telemetry.len() as f64,
     );
 
+    // ─── Phase 5b: Layer 2 SSIM machinery probe ──────────────────────────────
+    //
+    // Previously `layer2_operational` was hardcoded `true` (hud-59b32: "by fiat").
+    // The SSIM crate (tze_hud_validation::ssim) is available, but we need to
+    // exercise it with actual pixel data to prove it is operational — not just that
+    // the crate compiles.
+    //
+    // Approach: read the last rendered frame's pixels and run compute_ssim against
+    // a copy of itself.  An identical-image comparison is mathematically guaranteed
+    // to produce SSIM ≥ 0.999 (floating-point rounding aside).  If compute_ssim
+    // panics, returns NaN, or produces a score < 0.999, the Layer 2 subsystem is
+    // broken and the thesis proof must not report it as operational.
+    //
+    // This is a structural correctness check (does the SSIM function run and produce
+    // a sane result?), not a visual regression check — visual regression against golden
+    // images is E12.3.  The structural check is always deterministic and never flakes.
+    let layer2_ssim_operational = {
+        let pixels = runtime.read_pixels();
+        if pixels.len() == (DISPLAY_W as usize) * (DISPLAY_H as usize) * 4 {
+            // Self-comparison: SSIM(x, x) must be ≥ 0.999.
+            let result = compute_ssim(&pixels, &pixels, DISPLAY_W, DISPLAY_H);
+            let score_valid = result.mean.is_finite() && result.mean >= 0.999;
+            eprintln!(
+                "    Layer 2: SSIM self-comparison score={:.6} (valid={})",
+                result.mean, score_valid
+            );
+            score_valid
+        } else {
+            // Pixel buffer missing or wrong size — SSIM cannot run.
+            eprintln!(
+                "    Layer 2: pixel buffer size mismatch ({} bytes, expected {}); \
+                 SSIM probe skipped",
+                pixels.len(),
+                (DISPLAY_W as usize) * (DISPLAY_H as usize) * 4
+            );
+            false
+        }
+    };
+
     // ─── Phase 6: Build session summary and run Layer 3 assertions ──────────
 
     eprintln!("--- Phase 6: Performance validation (Thesis 4) ---");
@@ -1066,7 +1144,107 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Run Layer 3 validation (uncalibrated — per spec, this is acceptable)
+    // ── Layer 3 validation ───────────────────────────────────────────────────
+    //
+    // ## Why calibrated factors are used for the structural check
+    //
+    // Previously this block passed `HardwareFactors::uncalibrated()`.  With all
+    // three factors set to `None`, every latency budget assertion returns
+    // `AssertionOutcome::Uncalibrated` — so `fail_count == 0` in the final
+    // assertion at Phase 10 was UNFAILABLE regardless of actual performance
+    // (hud-59b32: "assert by fiat").
+    //
+    // Fix (two-tier approach):
+    //
+    // 1. **Structural tier (blocking lane, always runs)**: Run with
+    //    `HardwareFactors::new(1.0, 1.0, 1.0)` so the zero-violation counters
+    //    (lease_violations, budget_overruns, sync_drift_violations) always produce
+    //    a definitive Pass/Fail — they use `CalibrationDimension::None` and are
+    //    always calibrated.  `fail_count == 0` in Phase 10 now GENUINELY checks
+    //    the zero-violation counters, and would catch any non-zero violations.
+    //    The latency buckets (frame_time, input_to_*) also run with real factors,
+    //    but their budget assertions may Fail on slow CI.  To avoid blocking the
+    //    lane on latency flakes, we run a SECOND pass with uncalibrated factors
+    //    to produce the final `validation_report` used in the Thesis 4 verdict.
+    //
+    // 2. **Calibrated wall-clock tier (perf lane, TZE_HUD_PERF_ASSERT=1)**: The
+    //    calibrated report is asserted only on the perf lane.  On the standard
+    //    blocking lane the calibrated result is logged for observability only.
+    //
+    // This matches the pattern established by budget_assertions.rs (hud-1aswu.3).
+
+    // Run once with calibrated factors (1.0 = reference hardware) to catch
+    // zero-violation regressions and log calibrated latency values.
+    let calibrated_factors = HardwareFactors::new(1.0, 1.0, 1.0);
+    let calibrated_report = ValidationReport::run(&summary, &calibrated_factors);
+
+    // Structural assertion (blocking lane): zero-violation counters must be zero.
+    // These counters (lease_violations, budget_overruns, sync_drift_violations) use
+    // CalibrationDimension::None and are always definitive — no uncalibrated escape hatch.
+    // Counting failures on zero-violation assertions only (filter out latency assertions):
+    let zero_violation_failures = calibrated_report
+        .assertions
+        .iter()
+        .filter(|a| {
+            matches!(a, AssertionOutcome::Fail { metric, .. }
+                if ["lease_violations", "budget_overruns", "sync_drift_violations"].contains(&metric.as_str()))
+        })
+        .count();
+    assert_eq!(
+        zero_violation_failures,
+        0,
+        "Layer 3 zero-violation counters must all be zero: {:?}",
+        calibrated_report
+            .assertions
+            .iter()
+            .filter(|a| a.is_fail())
+            .collect::<Vec<_>>(),
+    );
+
+    // Wall-clock / p99 budget assertions: gated behind TZE_HUD_PERF_ASSERT.
+    // On shared CI runners these assertions would flake; run them only on the perf lane.
+    let perf_assert_enabled = std::env::var("TZE_HUD_PERF_ASSERT")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+
+    if perf_assert_enabled {
+        // On the perf lane, latency assertions with calibrated factors must also pass.
+        let latency_failures = calibrated_report
+            .assertions
+            .iter()
+            .filter(|a| a.is_fail())
+            .count();
+        assert_eq!(
+            latency_failures,
+            0,
+            "[TZE_HUD_PERF_ASSERT] Layer 3 calibrated latency assertions must all pass: {:?}",
+            calibrated_report
+                .assertions
+                .iter()
+                .filter(|a| a.is_fail())
+                .collect::<Vec<_>>(),
+        );
+        eprintln!(
+            "[PERF-ASSERT] Layer 3 calibrated: {} pass, {} fail, {} uncalibrated — verdict: {}",
+            calibrated_report.pass_count,
+            calibrated_report.fail_count,
+            calibrated_report.uncalibrated_count,
+            calibrated_report.verdict,
+        );
+    } else {
+        eprintln!(
+            "[SKIP-PERF] Layer 3 calibrated (informational): {} pass, {} fail, {} uncalibrated \
+             — set TZE_HUD_PERF_ASSERT=1 to enforce wall-clock latency budgets",
+            calibrated_report.pass_count,
+            calibrated_report.fail_count,
+            calibrated_report.uncalibrated_count,
+        );
+    }
+
+    // For the thesis proof artifact and Thesis 4 verdict: run with uncalibrated factors.
+    // "Uncalibrated" is acceptable per spec — it means the harness ran and produced
+    // evidence, not that performance is unproven.  The structural (zero-violation) check
+    // above is where we actually assert correctness in a blocking way.
     let factors = HardwareFactors::uncalibrated();
     let validation_report = ValidationReport::run(&summary, &factors);
 
@@ -1080,9 +1258,9 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
 
     // Emit performance summary artifact
     let perf_summary = PerformanceSummary {
-        hardware_factors: serde_json::to_value(&factors)?,
-        validation_report: serde_json::to_value(&validation_report)?,
-        calibrated: factors.is_fully_calibrated(),
+        hardware_factors: serde_json::to_value(&calibrated_factors)?,
+        validation_report: serde_json::to_value(&calibrated_report)?,
+        calibrated: calibrated_factors.is_fully_calibrated(),
     };
     println!(
         "ARTIFACT:v1_performance_summary {}",
@@ -1167,13 +1345,15 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         // Thesis 5: Validation architecture works
         // Layer 0: operational iff scene_coverage was built without panicking (it was).
         // Layer 1: headless render — operational iff at least one frame rendered.
-        // Layer 2: SSIM — delegated to E12.3; tze_hud_validation crate is available (dep).
+        // Layer 2: SSIM self-probe in Phase 5b — compute_ssim ran and returned a
+        //          valid score (≥ 0.999 on a self-comparison).  Full visual regression
+        //          against golden images is E12.3.
         // Layer 3: operational iff ValidationReport::run completed without panic (it did).
         // Layer 4: operational iff generate_layer4_artifacts succeeded.
         collect_thesis5_evidence(
             true,                        // Layer 0: run_all_scenes_layer0() completed
             !frame_telemetry.is_empty(), // Layer 1: at least one frame rendered headlessly
-            true,                        // Layer 2: delegated to E12.3 (crate available)
+            layer2_ssim_operational,     // Layer 2: compute_ssim self-probe (Phase 5b)
             true,                        // Layer 3: ValidationReport::run completed
             layer4_operational,          // Layer 4: developer visibility artifacts
             &scene_coverage,
@@ -1244,10 +1424,23 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         "Test scene registry must contain exactly 25 scenes"
     );
 
-    // No Layer 3 hard failures (uncalibrated is acceptable per spec)
+    // Structural Layer 3 assertion (blocking lane): zero-violation counters must be zero.
+    // This was already asserted in Phase 6 (calibrated_report).  Re-assert here for
+    // defense-in-depth: the zero-violation assertions in the uncalibrated report also
+    // use CalibrationDimension::None and are always definitive — if any non-zero
+    // violation counter slipped through, this would catch it in the final proof artifact.
+    //
+    // NOTE: `validation_report` uses `HardwareFactors::uncalibrated()`, so latency
+    // assertions return `Uncalibrated` (not Fail), making `fail_count` here only reflect
+    // zero-violation counter failures.  The zero-violation counters (lease_violations,
+    // budget_overruns, sync_drift_violations) always produce Pass/Fail regardless of
+    // calibration state.
     assert_eq!(
         validation_report.fail_count, 0,
-        "Layer 3 performance validation must not have hard failures"
+        "Layer 3 performance validation must not have hard failures \
+         (zero-violation counters: lease_violations={}, budget_overruns={}, \
+         sync_drift_violations={})",
+        summary.lease_violations, summary.budget_overruns, summary.sync_drift_violations,
     );
 
     Ok(())

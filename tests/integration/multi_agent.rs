@@ -750,23 +750,118 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
         tiles
     };
 
-    // Agent A has 2 tiles (priority 1 or 2); they should be shed last.
-    // Agent B and C have no tiles, so only agent A tiles appear.
-    // Verify all visible tiles belong to agent-weather and are sorted correctly
-    // (lower z_order sheds first within the same priority class).
-    if shed_order.len() >= 2 {
-        assert_eq!(
-            shed_order[0].0, agent_a.namespace,
-            "first tile to shed must be from agent-weather (it's the only tile owner)"
-        );
-        // Within agent-weather: z=9 sheds before z=10
-        assert!(
-            shed_order[0].1 < shed_order[1].1,
-            "within agent-weather, lower z-order tile ({}) must shed before higher z-order tile ({})",
-            shed_order[0].1,
-            shed_order[1].1
-        );
-    }
+    // Agent A has 2 tiles (priority 1 or 2); agents B and C have no tiles.
+    // This tests INTRA-NAMESPACE z-order shedding for agent-weather's two tiles.
+    // (Cross-namespace shedding order — where tiles from agents at different
+    // priorities compete — is validated in the dedicated scene-registry test
+    // `test_three_agents_contention_scene_registry` which uses three namespaces.)
+    //
+    // We assert unconditionally (no silent guard): the test scenario guarantees
+    // exactly 2 agent-A tiles exist by this point.  A guard that silently no-ops
+    // when shed_order.len() < 2 would make the assertion vacuous if tile creation
+    // ever regressed to 0 or 1 tiles.
+    assert_eq!(
+        shed_order.len(),
+        2,
+        "shed_order must contain exactly 2 tiles (agent-weather's two tiles); \
+         agents B and C are zone-only in this scenario"
+    );
+    assert_eq!(
+        shed_order[0].0, agent_a.namespace,
+        "shed_order[0] must belong to agent-weather (sole tile owner in this scenario)"
+    );
+    assert_eq!(
+        shed_order[1].0, agent_a.namespace,
+        "shed_order[1] must also belong to agent-weather (sole tile owner in this scenario)"
+    );
+    // Within agent-weather: tile with lower z_order (z=9) sheds before tile with higher
+    // z_order (z=10).  Sort key: (lease_priority DESC, z_order ASC) = shed-first order.
+    assert!(
+        shed_order[0].1 < shed_order[1].1,
+        "within agent-weather, lower z-order tile ({}) must shed before higher z-order tile ({})",
+        shed_order[0].1,
+        shed_order[1].1
+    );
+
+    // ── Phase 6b: Adversarial cross-agent namespace security check ──────────
+    //
+    // Verify that the session server rejects a mutation from agent B (notifications)
+    // that targets a tile owned by agent A (weather).  This exercises the
+    // namespace-isolation enforcement path end-to-end via gRPC — not just the
+    // scene-graph layer in isolation.
+    //
+    // Agent B attempts to change the opacity of agent A's tile (tile_a1_id).  The
+    // session server fills `agent_namespace` from the authenticated session context
+    // (agent B's namespace), NOT from the client payload.  The scene graph's
+    // `update_tile_opacity` call then rejects the mutation because the tile's
+    // namespace does not match agent B's namespace.
+    //
+    // This replaces the previous `passed: true` hardcoded fiat (hud-59b32).
+    let cross_agent_mutation_rejected = {
+        let seq = agent_b.next_seq();
+        agent_b
+            .tx
+            .send(session_proto::ClientMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(session_proto::client_message::Payload::MutationBatch(
+                    session_proto::MutationBatch {
+                        batch_id: uuid::Uuid::now_v7().as_bytes().to_vec(),
+                        lease_id: agent_b.lease_id_bytes.clone(),
+                        mutations: vec![proto::MutationProto {
+                            mutation: Some(proto::mutation_proto::Mutation::UpdateTileOpacity(
+                                proto::UpdateTileOpacityMutation {
+                                    // tile_a1_id belongs to agent A — agent B must not be allowed
+                                    // to mutate it.
+                                    tile_id: tile_a1_id.clone(),
+                                    opacity: 0.5,
+                                },
+                            )),
+                        }],
+                        timing: None,
+                    },
+                )),
+            })
+            .await
+            .is_ok()
+            && {
+                // Receive the MutationResult, skipping any interleaved LeaseStateChange events.
+                match agent_b.next_non_state_change().await {
+                    Some(Ok(msg)) => {
+                        match &msg.payload {
+                            Some(session_proto::server_message::Payload::MutationResult(
+                                result,
+                            )) => {
+                                // The mutation must be rejected (not accepted).
+                                let rejected = !result.accepted;
+                                eprintln!(
+                                    "    Cross-agent mutation rejected={rejected} \
+                                     (error_code='{}', error_message='{}')",
+                                    result.error_code, result.error_message
+                                );
+                                rejected
+                            }
+                            other => {
+                                eprintln!(
+                                    "    Cross-agent security check: unexpected payload: {other:?}"
+                                );
+                                false
+                            }
+                        }
+                    }
+                    other => {
+                        eprintln!("    Cross-agent security check: stream error: {other:?}");
+                        false
+                    }
+                }
+            }
+    };
+
+    assert!(
+        cross_agent_mutation_rejected,
+        "Cross-agent mutation must be rejected: agent-notifications must NOT be allowed to \
+         mutate tiles belonging to agent-weather (namespace isolation enforcement)"
+    );
 
     // ── Phase 7: Compositor frame rendering ─────────────────────────────────
 
@@ -936,13 +1031,18 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
             detail: "All subtitle publishes must originate from agent-media".to_string(),
         },
         NamespaceIsolationCheck {
-            description: "Session server derives namespace from auth, not client payload"
+            description: "Cross-agent mutation rejected: session server derives namespace \
+                          from auth credential, not from client payload"
                 .to_string(),
-            passed: true,
-            detail: "Verified: session.namespace is set during SessionInit handshake and \
-                     used for all tile creations; client cannot supply a different namespace \
-                     in MutationBatch."
-                .to_string(),
+            // Driven by the adversarial test in Phase 6b: agent-notifications sent an
+            // UpdateTileOpacity targeting a tile owned by agent-weather.  The server must
+            // reject it — if it accepted, namespace isolation is broken.
+            passed: cross_agent_mutation_rejected,
+            detail: format!(
+                "Agent-notifications attempted to mutate a tile owned by agent-weather. \
+                 Mutation rejected by session server: {}",
+                cross_agent_mutation_rejected,
+            ),
         },
     ];
     let all_passed = isolation_checks.iter().all(|c| c.passed);
@@ -1262,5 +1362,121 @@ fn test_zone_publish_subtitle_scene_registry() {
     assert!(
         violations.is_empty(),
         "Layer 0 invariants must hold for zone_publish_subtitle: {violations:?}"
+    );
+}
+
+/// Verify LatestWins contention resolution with TWO DISTINCT publishers.
+///
+/// The `test_three_agents_contention` integration test exercises LatestWins via a
+/// single agent (agent-media) publishing twice — which proves the single-publisher
+/// replacement path, but does NOT exercise the cross-publisher eviction path.
+///
+/// This test drives LatestWins with two agents from distinct namespaces publishing
+/// to the same subtitle zone.  The second publisher's content must win, and the
+/// first publisher's content must be evicted — even though the first publisher is
+/// different from the second.
+///
+/// This is the behavioral assertion that was absent prior to hud-59b32.
+#[test]
+fn test_latest_wins_two_distinct_publishers() {
+    use tze_hud_scene::graph::SceneGraph;
+    use tze_hud_scene::mutation::{MutationBatch, SceneMutation};
+    use tze_hud_scene::types::{SceneId, ZoneContent, ZonePublishToken, ZoneRegistry};
+
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    scene.zone_registry = ZoneRegistry::with_defaults();
+
+    let _tab = scene.create_tab("main", 0).unwrap();
+    // Note: PublishToZone at the apply_batch level does not check lease capabilities
+    // (token validation happens at the gRPC layer).  No leases needed here.
+
+    // Dummy token: publish_token is validated by the gRPC layer (not apply_batch).
+    let dummy_token = ZonePublishToken {
+        token: vec![0xDE, 0xAD, 0xBE, 0xEF],
+    };
+
+    // Agent-alpha publishes to subtitle zone (LatestWins policy).
+    let batch_a = MutationBatch {
+        batch_id: SceneId::new(),
+        agent_namespace: "agent-alpha".to_string(),
+        mutations: vec![SceneMutation::PublishToZone {
+            zone_name: "subtitle".to_string(),
+            content: ZoneContent::StreamText("Alpha subtitle content".to_string()),
+            publish_token: dummy_token.clone(),
+            merge_key: None,
+            expires_at_wall_us: None,
+            content_classification: None,
+            breakpoints: Vec::new(),
+        }],
+        timing_hints: None,
+        lease_id: None,
+    };
+    let result_a = scene.apply_batch(&batch_a);
+    assert!(
+        result_a.applied,
+        "agent-alpha zone publish must succeed: {:?}",
+        result_a.error
+    );
+
+    // Verify alpha's content is the sole active entry.
+    let after_alpha = scene.zone_registry.active_for_zone("subtitle");
+    assert_eq!(
+        after_alpha.len(),
+        1,
+        "subtitle zone must have exactly 1 entry after agent-alpha publishes"
+    );
+    assert_eq!(
+        after_alpha[0].publisher_namespace, "agent-alpha",
+        "sole entry must belong to agent-alpha"
+    );
+
+    // Agent-beta publishes to the same zone — must evict agent-alpha (LatestWins).
+    // This is the key assertion: a DIFFERENT namespace takes over the slot.
+    let batch_b = MutationBatch {
+        batch_id: SceneId::new(),
+        agent_namespace: "agent-beta".to_string(),
+        mutations: vec![SceneMutation::PublishToZone {
+            zone_name: "subtitle".to_string(),
+            content: ZoneContent::StreamText("Beta subtitle content (wins)".to_string()),
+            publish_token: dummy_token,
+            merge_key: None,
+            expires_at_wall_us: None,
+            content_classification: None,
+            breakpoints: Vec::new(),
+        }],
+        timing_hints: None,
+        lease_id: None,
+    };
+    let result_b = scene.apply_batch(&batch_b);
+    assert!(
+        result_b.applied,
+        "agent-beta zone publish must succeed: {:?}",
+        result_b.error
+    );
+
+    // After beta publishes, only beta's content must remain (LatestWins evicts alpha).
+    let after_beta = scene.zone_registry.active_for_zone("subtitle");
+    assert_eq!(
+        after_beta.len(),
+        1,
+        "subtitle zone must have exactly 1 entry after agent-beta publishes (LatestWins)"
+    );
+    assert_eq!(
+        after_beta[0].publisher_namespace, "agent-beta",
+        "LatestWins must retain agent-beta's content and evict agent-alpha's content"
+    );
+
+    // Confirm the content text is beta's (not alpha's).
+    let content_text = match &after_beta[0].content {
+        ZoneContent::StreamText(t) => t.clone(),
+        other => panic!("expected StreamText content, got: {:?}", other),
+    };
+    assert!(
+        content_text.contains("Beta"),
+        "surviving content must be agent-beta's ('{content_text}')"
+    );
+    assert!(
+        !content_text.contains("Alpha"),
+        "agent-alpha's content must have been evicted by LatestWins ('{content_text}')"
     );
 }
