@@ -270,7 +270,11 @@ fn trace_with_lease_and_create_tile_replays() {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
 
     // Grant a lease and create a tab before starting the trace.
-    let lease_id = scene.grant_lease("agent-a", 60_000, vec![Capability::CreateTile]);
+    let lease_id = scene.grant_lease(
+        "agent-a",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
     let tab_id = scene.create_tab("Main", 0).unwrap();
 
     // Start recording with the current (non-empty) scene state.

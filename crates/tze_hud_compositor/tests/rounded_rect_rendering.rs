@@ -414,7 +414,7 @@ async fn test_tile_solid_color_radius_rounds_corners() {
         "test-agent",
         300_000,
         vec![
-            tze_hud_scene::types::Capability::CreateTile,
+            tze_hud_scene::types::Capability::CreateTiles,
             tze_hud_scene::types::Capability::ModifyOwnTiles,
         ],
     );

@@ -48,7 +48,7 @@ fn build_scene_grid(tile_count: usize) -> (SceneGraph, f32, f32) {
     let lease_id = scene.grant_lease(
         "agent.bench",
         86_400_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
 
     let cols = 10usize;
@@ -103,7 +103,7 @@ fn build_passthrough_scene(tile_count: usize) -> SceneGraph {
     let lease_id = scene.grant_lease(
         "agent.bench",
         86_400_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
 
     for i in 0..tile_count {
@@ -130,7 +130,7 @@ fn build_chrome_scene(content_tile_count: usize) -> SceneGraph {
     let chrome_lease = scene.grant_lease(
         "chrome.ui",
         86_400_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     scene.leases.get_mut(&chrome_lease).unwrap().priority = 0;
 
@@ -165,7 +165,7 @@ fn build_chrome_scene(content_tile_count: usize) -> SceneGraph {
     let content_lease = scene.grant_lease(
         "agent.bench",
         86_400_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     let cols = 10usize;
     let tile_w = 192.0f32;

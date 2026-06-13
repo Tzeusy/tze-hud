@@ -1739,7 +1739,11 @@ mod tests {
     fn duplicate_z_order_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         graph
             .create_tile(
                 tab_id,
@@ -1780,7 +1784,11 @@ mod tests {
     #[test]
     fn orphan_tile_tab_detected() {
         let mut graph = make_graph();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let real_tab = graph.create_tab("Temp", 0).unwrap();
         graph
             .create_tile(
@@ -1802,7 +1810,11 @@ mod tests {
     fn orphan_tile_lease_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         graph
             .create_tile(
                 tab_id,
@@ -1823,7 +1835,11 @@ mod tests {
     fn tile_opacity_out_of_range_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -1976,7 +1992,11 @@ mod tests {
     fn terminal_lease_tile_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         graph
             .create_tile(
                 tab_id,
@@ -1998,7 +2018,11 @@ mod tests {
     fn tile_namespace_mismatch_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent-a", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent-a",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2056,7 +2080,11 @@ mod tests {
     fn multiple_focused_nodes_in_tab_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2112,7 +2140,11 @@ mod tests {
     fn focused_node_does_not_accept_focus_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2270,7 +2302,11 @@ mod tests {
     fn tile_expires_before_present_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2295,7 +2331,11 @@ mod tests {
     fn version_not_incremented_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         graph
             .create_tile(
                 tab_id,
@@ -2441,7 +2481,11 @@ mod tests {
         // Build a scene with MAX_NODES_PER_TILE+1 nodes in a tile via raw insertion.
         let mut graph = SceneGraph::new(1920.0, 1080.0);
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2526,7 +2570,11 @@ mod tests {
     fn tile_id_key_mismatch_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         graph
             .create_tile(
                 tab_id,
@@ -2608,7 +2656,11 @@ mod tests {
     fn tile_count_exceeds_lease_budget_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         // Set max_tiles = 1 so the second tile triggers a budget violation
         graph
             .leases
@@ -2652,7 +2704,11 @@ mod tests {
     fn tile_node_count_within_budget_passes() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2683,7 +2739,11 @@ mod tests {
     fn valid_expires_at_passes() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2775,7 +2835,11 @@ mod tests {
     fn passthrough_tile_focused_node_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2835,7 +2899,11 @@ mod tests {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
         // Normal lease (priority 2 = default)
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2859,7 +2927,11 @@ mod tests {
     fn missing_root_node_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
@@ -2884,7 +2956,11 @@ mod tests {
     fn tile_out_of_display_detected() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,

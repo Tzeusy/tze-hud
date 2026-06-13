@@ -1120,7 +1120,11 @@ async fn test_color_runs_red_error_text_rendered() {
     // Build a minimal scene: one tab, one tile, one TextMarkdownNode.
     let mut scene = SceneGraph::new(SCENE_W as f32, SCENE_H as f32);
     let tab_id = scene.create_tab("main", 0).expect("create_tab");
-    let lease_id = scene.grant_lease("agent", 120_000, vec![Capability::CreateTile]);
+    let lease_id = scene.grant_lease(
+        "agent",
+        120_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     // Place the tile to the left-center of the canvas so glyphs are well within
     // the pixel readback area.  Use a large tile so text is easily sampled.

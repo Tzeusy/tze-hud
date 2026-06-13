@@ -46,7 +46,7 @@ fn single_tile_scene(
     let lease_id = scene.grant_lease(
         "agent.test",
         60_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     let tile_id = scene
         .create_tile(tab_id, "agent.test", lease_id, tile_bounds, 10)
@@ -84,7 +84,7 @@ fn add_chrome_tile(
     let chrome_lease = scene.grant_lease(
         "chrome.ui",
         86_400_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     // Set lease priority to 0 (system/chrome).
     scene.leases.get_mut(&chrome_lease).unwrap().priority = 0;
@@ -244,9 +244,13 @@ fn widget_passthrough_skips_to_agent_tile_below() {
     let agent_lease = scene.grant_lease(
         "agent.test",
         60_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
-    let widget_lease = scene.grant_lease("widget.renderer", 60_000, vec![Capability::CreateTile]);
+    let widget_lease = scene.grant_lease(
+        "widget.renderer",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     // Agent-owned content tile: covers central region, z=10, Capture (default).
     // Bounds: (300, 200, 600×400).
@@ -329,7 +333,7 @@ fn passthrough_tile_skipped_reveals_tile_below() {
     let lease_id = scene.grant_lease(
         "agent.test",
         60_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
 
     // Low-z capture tile covering full screen.
@@ -392,7 +396,7 @@ fn all_tiles_passthrough_returns_passthrough() {
     let lease_id = scene.grant_lease(
         "agent.test",
         60_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
 
     for z in [1u32, 2, 3] {
@@ -425,7 +429,7 @@ fn highest_z_tile_wins_in_overlap() {
     let lease_id = scene.grant_lease(
         "agent.test",
         60_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
 
     // Two overlapping tiles.
@@ -520,7 +524,7 @@ fn last_sibling_wins_in_reverse_tree_order() {
     let lease_id = scene.grant_lease(
         "agent.test",
         60_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
 
     let tile_id = scene
@@ -916,7 +920,7 @@ proptest! {
         let lease_id = scene.grant_lease(
             "agent.test",
             60_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Two tiles overlapping at (400..800, 300..700).
@@ -974,7 +978,7 @@ proptest! {
         let lease_id = scene.grant_lease(
             "agent.test",
             60_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Full-screen passthrough tile.

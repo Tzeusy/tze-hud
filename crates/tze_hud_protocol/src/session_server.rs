@@ -7373,8 +7373,8 @@ mod tests {
             "capture-agent",
             60_000,
             vec![
-                tze_hud_scene::Capability::CreateTile,
-                tze_hud_scene::Capability::CreateNode,
+                tze_hud_scene::Capability::CreateTiles,
+                tze_hud_scene::Capability::ModifyOwnTiles,
             ],
         );
         let tile_id = scene
@@ -8503,10 +8503,8 @@ mod tests {
                 "agent-list",
                 60_000,
                 vec![
-                    Capability::CreateTile,
-                    Capability::UpdateTile,
-                    Capability::CreateNode,
-                    Capability::UpdateNode,
+                    Capability::CreateTiles,
+                    Capability::ModifyOwnTiles,
                     Capability::PublishZone("list-zone".to_string()),
                 ],
             );
@@ -8728,12 +8726,7 @@ mod tests {
             let bootstrap_lease = scene.grant_lease(
                 "tile-publisher",
                 60_000,
-                vec![
-                    Capability::CreateTile,
-                    Capability::UpdateTile,
-                    Capability::CreateNode,
-                    Capability::UpdateNode,
-                ],
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
             );
             tile_id = scene
                 .create_tile(
@@ -8894,12 +8887,7 @@ mod tests {
             let bootstrap_lease = scene.grant_lease(
                 "tile-publisher-invalid-node",
                 60_000,
-                vec![
-                    Capability::CreateTile,
-                    Capability::UpdateTile,
-                    Capability::CreateNode,
-                    Capability::UpdateNode,
-                ],
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
             );
             tile_id = scene
                 .create_tile(

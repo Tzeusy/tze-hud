@@ -49,11 +49,7 @@ fn build_dense_scene(tile_count: usize, nodes_per_tile: usize) -> SceneGraph {
     let lease_id = scene.grant_lease(
         "agent.bench",
         600_000,
-        vec![
-            Capability::CreateTile,
-            Capability::CreateNode,
-            Capability::UpdateNode,
-        ],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
 
     let cols = 10usize;

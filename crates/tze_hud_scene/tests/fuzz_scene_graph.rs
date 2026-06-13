@@ -207,10 +207,9 @@ fn run_fuzz_sequence(ops: &[FuzzOp]) {
         AGENT,
         300_000,
         vec![
-            Capability::CreateTile,
-            Capability::CreateNode,
-            Capability::ManageTabs,
+            Capability::CreateTiles,
             Capability::ModifyOwnTiles,
+            Capability::ManageTabs,
         ],
     );
     oracle.lease_ids.push(initial_lease);
@@ -366,11 +365,7 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
                 let id = graph.grant_lease(
                     AGENT,
                     300_000,
-                    vec![
-                        Capability::CreateTile,
-                        Capability::CreateNode,
-                        Capability::ModifyOwnTiles,
-                    ],
+                    vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
                 );
                 oracle.lease_ids.push(id);
             }
@@ -468,7 +463,7 @@ proptest! {
     ) {
         let mut graph = SceneGraph::new(1920.0, 1080.0);
         let lease = graph.grant_lease(AGENT, 300_000, vec![
-            Capability::CreateTile,
+            Capability::CreateTiles,
             Capability::ModifyOwnTiles,
         ]);
         let tab = graph.create_tab("Tab", 0).unwrap();
@@ -507,7 +502,7 @@ proptest! {
         excess in 1usize..=10usize,
     ) {
         let mut graph = SceneGraph::new(1920.0, 1080.0);
-        let lease = graph.grant_lease(AGENT, 300_000, vec![Capability::CreateTile]);
+        let lease = graph.grant_lease(AGENT, 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
         let tab = graph.create_tab("Tab", 0).unwrap();
 
         let n = MAX_BATCH_SIZE + excess;
@@ -587,7 +582,7 @@ proptest! {
         n_valid_after in 0usize..=5usize,
     ) {
         let mut graph = SceneGraph::new(1920.0, 1080.0);
-        let lease = graph.grant_lease(AGENT, 300_000, vec![Capability::CreateTile]);
+        let lease = graph.grant_lease(AGENT, 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
         let tab = graph.create_tab("Tab", 0).unwrap();
 
         let mut mutations: Vec<SceneMutation> = Vec::new();
@@ -652,8 +647,7 @@ proptest! {
         let mut graph = SceneGraph::new(1920.0, 1080.0);
         let tab = graph.create_tab("Tab", 0).unwrap();
         let lease = graph.grant_lease(AGENT, 300_000, vec![
-            Capability::CreateTile,
-            Capability::CreateNode,
+            Capability::CreateTiles,
             Capability::ModifyOwnTiles,
         ]);
 
@@ -715,11 +709,7 @@ fn test_100k_deterministic_tile_mutations() {
     let lease = graph.grant_lease(
         "load.agent",
         300_000,
-        vec![
-            Capability::CreateTile,
-            Capability::CreateNode,
-            Capability::ModifyOwnTiles,
-        ],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
 
     // Use a fixed pool of tile IDs — create 8 tiles then rotate through updates/deletes.
@@ -812,7 +802,7 @@ fn test_invalid_opacity_rejected() {
     let lease = graph.grant_lease(
         AGENT,
         300_000,
-        vec![Capability::CreateTile, Capability::ModifyOwnTiles],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     let tile_id = graph
         .create_tile(tab, AGENT, lease, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
@@ -867,7 +857,7 @@ fn test_oversized_markdown_content_rejected() {
     let lease = graph.grant_lease(
         AGENT,
         300_000,
-        vec![Capability::CreateTile, Capability::CreateNode],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     let tile_id = graph
         .create_tile(tab, AGENT, lease, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
@@ -929,7 +919,11 @@ fn test_zone_reserved_z_order_rejected() {
     use tze_hud_scene::graph::ZONE_TILE_Z_MIN;
     let mut graph = SceneGraph::new(1920.0, 1080.0);
     let tab = graph.create_tab("Tab", 0).unwrap();
-    let lease = graph.grant_lease(AGENT, 300_000, vec![Capability::CreateTile]);
+    let lease = graph.grant_lease(
+        AGENT,
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     let result = graph.create_tile(
         tab,

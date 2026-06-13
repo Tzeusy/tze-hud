@@ -251,7 +251,11 @@ mod tests {
     fn setup_scene_with_focused_node() -> (SceneGraph, SceneId, SceneId, SceneId) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("test-agent", 60_000, vec![Capability::CreateTile]);
+        let lease_id = scene.grant_lease(
+            "test-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
             .create_tile(
                 tab_id,

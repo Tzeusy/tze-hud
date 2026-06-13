@@ -27,7 +27,11 @@ use tze_hud_scene::{
 fn make_scene(tiles: usize) -> (SceneGraph, SceneId, Vec<SceneId>) {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
     let tab_id = scene.create_tab("Test", 0).unwrap();
-    let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+    let lease_id = scene.grant_lease(
+        "agent",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
     let tiles: Vec<SceneId> = (0..tiles)
         .map(|i| {
             scene
@@ -47,7 +51,11 @@ fn make_scene(tiles: usize) -> (SceneGraph, SceneId, Vec<SceneId>) {
 fn make_scene_ns(namespace: &str, tiles: usize) -> (SceneGraph, SceneId, Vec<SceneId>) {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
     let tab_id = scene.create_tab("Test", 0).unwrap();
-    let lease_id = scene.grant_lease(namespace, 60_000, vec![Capability::CreateTile]);
+    let lease_id = scene.grant_lease(
+        namespace,
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
     let tiles: Vec<SceneId> = (0..tiles)
         .map(|i| {
             scene
@@ -389,7 +397,11 @@ fn sync_group_member_limit_is_64() {
     // Create 65 tiles on a large canvas (each tile is 10x10, stacked in a column).
     let mut scene = SceneGraph::new(1920.0, 1080.0);
     let tab_id = scene.create_tab("Limit Test", 0).unwrap();
-    let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+    let lease_id = scene.grant_lease(
+        "agent",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
     let tiles: Vec<SceneId> = (0..65_usize)
         .map(|i| {
             // Stack tiles vertically: each 10px tall with 1px gap, stays within 1080px for 65 tiles.
@@ -435,7 +447,11 @@ fn ownership_check_rejects_cross_namespace_join() {
     let tab_id = scene.create_tab("Test", 0).unwrap();
 
     // agent-a creates a tile
-    let lease_a = scene.grant_lease("agent-a", 60_000, vec![Capability::CreateTile]);
+    let lease_a = scene.grant_lease(
+        "agent-a",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
     let tile_a = scene
         .create_tile(
             tab_id,
@@ -447,7 +463,11 @@ fn ownership_check_rejects_cross_namespace_join() {
         .unwrap();
 
     // agent-b creates a group
-    scene.grant_lease("agent-b", 60_000, vec![Capability::CreateTile]);
+    scene.grant_lease(
+        "agent-b",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
     let group_id = scene
         .create_sync_group(None, "agent-b", SyncCommitPolicy::AllOrDefer, 3)
         .unwrap();

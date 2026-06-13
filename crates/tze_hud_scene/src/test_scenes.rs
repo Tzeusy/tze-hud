@@ -229,11 +229,7 @@ impl TestSceneRegistry {
             "agent.single",
             clock.0,
             300_000, // 5-minute TTL
-            vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::UpdateTile,
-            ],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Tile starts at 10% inset from each edge, occupying 80% of display width and
@@ -292,10 +288,9 @@ impl TestSceneRegistry {
             clock.0,
             300_000,
             vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::UpdateTile,
-                Capability::ReceiveInput,
+                Capability::CreateTiles,
+                Capability::ModifyOwnTiles,
+                Capability::AccessInputEvents,
             ],
         );
 
@@ -404,7 +399,7 @@ impl TestSceneRegistry {
             "agent.stress",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // 10 columns × 6 rows = 60 tiles
@@ -495,7 +490,7 @@ impl TestSceneRegistry {
             "agent.overlap",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Three overlapping tiles placed so that at (display_w/2, display_h*0.42)
@@ -576,14 +571,14 @@ impl TestSceneRegistry {
             "agent.base",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         let chrome_lease = graph.grant_lease_at(
             "chrome.overlay",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Base agent tile — full background
@@ -660,13 +655,13 @@ impl TestSceneRegistry {
             "agent.tabA",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let lease_b = graph.grant_lease_at(
             "agent.tabB",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Tab A: 1 tile — 5% inset, 90% wide, 67% tall (display-relative)
@@ -780,7 +775,7 @@ impl TestSceneRegistry {
             "agent.expiry",
             clock.0,
             1, // TTL = 1 ms — already logically past if now > clock+1
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         let tile_id = graph
@@ -850,7 +845,7 @@ impl TestSceneRegistry {
             "agent.mobile",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Single full-width tile within mobile bounds
@@ -910,7 +905,7 @@ impl TestSceneRegistry {
             "agent.sync",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Create sync group with AllOrDefer policy (both tiles must be ready before commit)
@@ -1026,9 +1021,9 @@ impl TestSceneRegistry {
             clock.0,
             300_000,
             vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::ReceiveInput,
+                Capability::CreateTiles,
+                Capability::ModifyOwnTiles,
+                Capability::AccessInputEvents,
             ],
         );
 
@@ -1110,11 +1105,7 @@ impl TestSceneRegistry {
             "agent.dashboard",
             clock.0,
             300_000,
-            vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::UpdateTile,
-            ],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // 4 columns × 3 rows = 12 tiles representing a live dashboard layout
@@ -1237,7 +1228,7 @@ impl TestSceneRegistry {
                         granted_at_ms: clock.0,
                         ttl_ms: 300_000,
                         renewal_policy: RenewalPolicy::default(),
-                        capabilities: vec![Capability::CreateTile, Capability::CreateNode],
+                        capabilities: vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
                         resource_budget: ResourceBudget::default(),
                         suspended_at_ms: None,
                         ttl_remaining_at_suspend_ms: None,
@@ -1341,9 +1332,9 @@ impl TestSceneRegistry {
             clock.0,
             300_000,
             vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::ReceiveInput,
+                Capability::CreateTiles,
+                Capability::ModifyOwnTiles,
+                Capability::AccessInputEvents,
             ],
         );
         let chrome_lease = graph.grant_lease_at(
@@ -1351,9 +1342,9 @@ impl TestSceneRegistry {
             clock.0,
             300_000,
             vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::ReceiveInput,
+                Capability::CreateTiles,
+                Capability::ModifyOwnTiles,
+                Capability::AccessInputEvents,
             ],
         );
 
@@ -1493,23 +1484,19 @@ impl TestSceneRegistry {
             "agent.one",
             clock.0,
             300_000,
-            vec![
-                Capability::CreateTile,
-                Capability::UpdateTile,
-                Capability::DeleteTile,
-            ],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let lease_two = graph.grant_lease_at(
             "agent.two",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::UpdateTile],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let lease_three = graph.grant_lease_at(
             "agent.three",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::UpdateTile],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Layout: left third (agent.one × 2 tiles) | middle third (agent.two) | right third (agent.three)
@@ -1641,7 +1628,7 @@ impl TestSceneRegistry {
             "agent.privacy",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Two tiles side-by-side (left: public, right: sensitive).
@@ -1742,9 +1729,9 @@ impl TestSceneRegistry {
             clock.0,
             300_000,
             vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::ReceiveInput,
+                Capability::CreateTiles,
+                Capability::ModifyOwnTiles,
+                Capability::AccessInputEvents,
             ],
         );
 
@@ -1815,7 +1802,7 @@ impl TestSceneRegistry {
             "agent.subtitle",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Register subtitle zone
@@ -1903,7 +1890,7 @@ impl TestSceneRegistry {
             "agent.typed",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Zone accepts ONLY StreamText
@@ -1989,13 +1976,13 @@ impl TestSceneRegistry {
             "agent.pub_a",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let lease_b = graph.grant_lease_at(
             "agent.pub_b",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Shared zone with LatestWins — second publish replaces first
@@ -2089,7 +2076,7 @@ impl TestSceneRegistry {
             "agent.orchestrate",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Three zones registered in orchestration order
@@ -2238,7 +2225,7 @@ impl TestSceneRegistry {
             "agent.adaptive",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // pip zone: relative geometry — adapts to display size
@@ -2345,13 +2332,13 @@ impl TestSceneRegistry {
             "agent.zone_pub",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let stable_lease = graph.grant_lease_at(
             "agent.stable",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Subtitle zone
@@ -2470,21 +2457,21 @@ impl TestSceneRegistry {
             "system.chrome",
             clock.0,
             86_400_000, // 24h — system chrome stays up
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         let agent_lease = graph.grant_lease_at(
             "agent.content",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         let sensitive_lease = graph.grant_lease_at(
             "agent.sensitive",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // Set system lease to priority 0 (system/chrome tier)
@@ -2678,7 +2665,7 @@ impl TestSceneRegistry {
             "system.safety",
             clock.0,
             86_400_000, // 24h
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         if let Some(lease) = graph.leases.get_mut(&system_lease) {
             lease.priority = 0;
@@ -2689,7 +2676,7 @@ impl TestSceneRegistry {
             "agent.privacy",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         if let Some(lease) = graph.leases.get_mut(&privacy_lease) {
             lease.priority = 1;
@@ -2700,11 +2687,7 @@ impl TestSceneRegistry {
             "agent.content",
             clock.0,
             300_000,
-            vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::UpdateTile,
-            ],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
 
         // L1: system safety overlay — full-width banner at top (z_order 100)
@@ -4537,7 +4520,11 @@ mod tests {
         let mut graph = SceneGraph::new(1920.0, 1080.0);
         // We can't create a tile with a non-existent tab via the safe API, so simulate by
         // creating a valid tile and then removing the tab to orphan it.
-        let lease_id = graph.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let real_tab = graph.create_tab("Temp", 0).unwrap();
         let _tile_id = graph
             .create_tile(
@@ -4559,7 +4546,11 @@ mod tests {
     fn invariant_detects_orphan_tile_lease() {
         let mut graph = SceneGraph::new(1920.0, 1080.0);
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         graph
             .create_tile(
                 tab_id,
@@ -4584,7 +4575,11 @@ mod tests {
     fn invariant_detects_duplicate_z_order() {
         let mut graph = SceneGraph::new(1920.0, 1080.0);
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         graph
             .create_tile(
                 tab_id,
@@ -4667,7 +4662,11 @@ mod tests {
     fn invariant_detects_missing_hit_region_state() {
         let mut graph = SceneGraph::new(1920.0, 1080.0);
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let lease_id = graph.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+        let lease_id = graph.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = graph
             .create_tile(
                 tab_id,
