@@ -42,10 +42,9 @@ serde_json = "1"
 
 # Async / networking
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tonic = "0.13"
 prost = "0.13"
-prost-types = "0.13"
 
 # GPU / windowing
 # NOTE: glyphon version is pinned to 0.8.x to match wgpu 24.x and Rust 1.88.
@@ -90,6 +89,26 @@ getrandom = "0.3"
 arc-swap = "1"
 # State machines (v2 media plane)
 statig = "0.4"
+# Image decode for resource validation and integration test helpers.
+# default-features = false: crates opt in to the specific codec features they need.
+image = { version = "0.25", default-features = false }
+# Temporary directories in tests and dev-mode tools.
+tempfile = "3"
+# Windows platform APIs.
+# Features are the union of all consuming crates; each crate uses { workspace = true }
+# and may rely on a subset — Cargo's feature union guarantees it compiles correctly.
+windows = { version = "0.58", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Time",
+    "Win32_System_SystemInformation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
 
 # GStreamer bindings — declared here so crates can reference them via
 # `{ workspace = true, optional = true }`.

@@ -17,21 +17,20 @@ dev-mode = ["tze_hud_runtime/dev-mode"]
 
 [dependencies]
 tze_hud_scene = { path = "../../crates/tze_hud_scene" }
-# dev-mode is enabled here to support inline #[cfg(test)] tests that call
-# establish_session_with with config_toml: None (unrestricted capabilities).
-# The production binary path always loads production.toml and never passes
-# config_toml: None; dev-mode is a test-infrastructure concern here, not a
-# runtime behaviour change for the released binary.
-# NEVER ship a production binary without replacing this with a restricted config.
-tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["dev-mode"] }
+tze_hud_runtime = { path = "../../crates/tze_hud_runtime" }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
 tze_hud_resource = { path = "../../crates/tze_hud_resource" }
 tokio = { workspace = true }
 tonic = { workspace = true }
-tokio-stream = { version = "0.1", features = ["sync"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+tokio-stream = { workspace = true }
+image = { workspace = true, features = ["png"] }
 uuid = { workspace = true }
 blake3 = { workspace = true }
 
 [dev-dependencies]
 tze_hud_input = { path = "../../crates/tze_hud_input" }
+# dev-mode activated for test builds: inline #[cfg(test)] mod tests calls
+# HeadlessRuntime::new with config_toml: None (unrestricted capabilities).
+# The released binary does NOT carry dev-mode; activate with `--features dev-mode`
+# when running tests manually, or `cargo test` which picks up dev-dependencies.
+tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["dev-mode"] }
