@@ -1040,8 +1040,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
             passed: cross_agent_mutation_rejected,
             detail: format!(
                 "Agent-notifications attempted to mutate a tile owned by agent-weather. \
-                 Mutation rejected by session server: {}",
-                cross_agent_mutation_rejected,
+                 Mutation rejected by session server: {cross_agent_mutation_rejected}",
             ),
         },
     ];
@@ -1469,7 +1468,7 @@ fn test_latest_wins_two_distinct_publishers() {
     // Confirm the content text is beta's (not alpha's).
     let content_text = match &after_beta[0].content {
         ZoneContent::StreamText(t) => t.clone(),
-        other => panic!("expected StreamText content, got: {:?}", other),
+        other => panic!("expected StreamText content, got: {other:?}"),
     };
     assert!(
         content_text.contains("Beta"),
