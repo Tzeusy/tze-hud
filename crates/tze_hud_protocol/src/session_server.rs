@@ -39,7 +39,9 @@ use crate::proto::session::*;
 use crate::proto::{ElementInfo, ListElementsRequest, ListElementsResponse};
 use crate::session::{MediaIngressSharedState, SESSION_EVENT_CHANNEL_CAPACITY, SharedState};
 use crate::subscriptions;
-use crate::token::{DEFAULT_GRACE_PERIOD_MS, TokenStore};
+use crate::token::DEFAULT_GRACE_PERIOD_MS;
+#[cfg(any(test, feature = "dev-mode"))]
+use crate::token::TokenStore;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use std::collections::HashMap;
@@ -49,11 +51,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tze_hud_resource::{
-    AgentBudget, ResourceError as StoreResourceError, ResourceStore, ResourceStoreConfig,
-    ResourceStored as StoreResourceStored, ResourceType as StoreResourceType,
-    RuntimeWidgetStoreError, RuntimeWidgetStorePutOutcome as DurablePutOutcome, UploadId,
-    UploadStartRequest,
+    AgentBudget, ResourceError as StoreResourceError, ResourceStored as StoreResourceStored,
+    ResourceType as StoreResourceType, RuntimeWidgetStoreError,
+    RuntimeWidgetStorePutOutcome as DurablePutOutcome, UploadId, UploadStartRequest,
 };
+#[cfg(any(test, feature = "dev-mode"))]
+use tze_hud_resource::{ResourceStore, ResourceStoreConfig};
 use tze_hud_scene::element_store::{ElementStore, ElementStoreEntry, ElementType};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
