@@ -44,7 +44,7 @@ Without these contracts, every implementation must make local decisions that wil
 | DR-RS2 | Upload protocol for agent-sourced assets | v1.md §"Scene model" (static_image node type) |
 | DR-RS3 | Formal reference counting with GC trigger rules | architecture.md §"Resource lifecycle" |
 | DR-RS4 | Cross-agent sharing policy with capability checks | RFC 0001 §1.2, security.md §"Agent isolation" |
-| DR-RS5 | Font asset lifecycle: system fonts, bundled fonts, fallback chains | RFC 0001 §2.3 (`FontFamily`), RFC 0006 (Configuration) |
+| DR-RS5 | Font asset lifecycle: bundled fonts (mandatory), system fonts (opt-in, see §7 amendment), fallback chains | RFC 0001 §2.3 (`FontFamily`), RFC 0006 (Configuration) |
 | DR-RS6 | Per-resource and per-agent size limits tied to lease budgets | RFC 0008 §6.1, security.md §"Resource governance" |
 | DR-RS7 | GC must not run during frame render; deterministic deallocation | architecture.md §"Resource lifecycle" |
 | DR-RS8 | Scene-node resources are ephemeral in v1; runtime widget SVG asset store is durable in v1 | v1.md + component-shape-language direction |
@@ -438,49 +438,71 @@ Memory deallocation (freeing decoded textures) runs exclusively in the GC phase.
 
 ## 7. Font Asset Management
 
+**Amendment (2026-06-13, bundled-first FontSystem — PR #802, hud-bq0gl.11):** The v1 `FontSystem` shipped in PR #802 uses a bundled-first design. System-font discovery (platform directory scan) is **not performed by default** and is intentionally absent from the initial implementation; it is opt-in via `resources.fonts.system_discovery = true` in the display profile and deferred to a future `FontRegistry` layer. This amendment reconciles §7.1–7.4 to reflect the shipped design. §7.5 and all other sections are unchanged. Agent-uploaded fonts continue to work via `load_font_bytes` and are unaffected by this change.
+
 ### 7.1 Font Sources
 
-Fonts enter the resource store from three sources:
+Fonts enter the resource store from two mandatory sources and one opt-in source:
 
-| Source | ResourceId | Lifecycle |
-|--------|------------|-----------|
-| **System fonts** | Computed from file bytes at startup | Always available; synthetic `ResourceId` from system font bytes |
-| **Bundled fonts** | Compiled into binary; `ResourceId` computed from embedded bytes | Always available; included in compositor binary |
-| **Agent-uploaded fonts** | Computed from upload bytes (same as image upload) | Same lifecycle as images: reference-counted, GC-eligible |
+| Source | ResourceId | Lifecycle | Default |
+|--------|------------|-----------|---------|
+| **Bundled fonts** | Compiled into binary; `ResourceId` computed from embedded bytes | Always available; permanent implicit holds, never GC'd | Enabled |
+| **Agent-uploaded fonts** | Computed from upload bytes (same as image upload) | Reference-counted, GC-eligible | Enabled |
+| **System fonts** | Computed from file bytes at discovery time | Permanent implicit holds when loaded, never GC'd | **Opt-in** (`resources.fonts.system_discovery = true`) |
 
-System and bundled fonts are available to all agents without upload. Their `ResourceId` values are stable across sessions (same binary + same system font installation = same IDs).
+Bundled fonts are available to all agents without upload. Their `ResourceId` values are stable across sessions (same binary = same IDs). System fonts, when opt-in discovery is enabled, are similarly stable across sessions with the same platform font installation.
 
 ### 7.2 Font Discovery at Startup
 
-On startup, the runtime:
+On startup, the runtime **always**:
+
+1. Registers bundled fonts (compiled into the binary); computes `ResourceId = BLAKE3(embedded_bytes)` for each face.
+2. Bundled fonts have permanent implicit holds — they are never GC'd.
+
+**Additionally**, if `resources.fonts.system_discovery = true` is set in the display profile, the runtime also:
 
 1. Scans platform font directories (e.g., `/usr/share/fonts/` on Linux, `~/Library/Fonts/` on macOS, `C:\Windows\Fonts\` on Windows).
 2. For each font file: computes `ResourceId = BLAKE3(file_bytes)` and registers it with the resource store.
-3. Registers bundled fonts (compiled into the binary) the same way.
-4. System and bundled fonts have permanent implicit holds — they are never GC'd.
+3. System fonts discovered this way have permanent implicit holds — they are never GC'd.
+
+System-font discovery is **disabled by default** in v1. The bundled-first default is intentional: it eliminates fragility on minimal/kiosk hosts where system fonts are absent or inconsistent. A future `FontRegistry` layer will provide structured system-font integration; until then, operator deployments requiring specific system fonts must enable `system_discovery` explicitly.
 
 ### 7.3 FontFamily Resolution
 
 RFC 0001 §2.3 defines `FontFamily` with named variants (`SystemSansSerif`, `SystemMonospace`, `SystemSerif`). Resolution:
 
 1. Named variants are resolved against the font resolution table configured in the display profile (RFC 0006).
-2. If a custom font `ResourceId` is specified: look up in the resource store. If found: use it. If not found: fall back to `SystemSansSerif`.
+2. If a custom font `ResourceId` is specified: look up in the resource store. If found: use it. If not found: fall back to the bundled SansSerif default.
 3. If resolution fails: use bundled default (Noto Sans for SansSerif/Serif; bundled monospace for Monospace).
+
+When system-font discovery is disabled (the default), the `SystemSansSerif`, `SystemMonospace`, and `SystemSerif` named variants resolve to their bundled equivalents. When system-font discovery is enabled and a system face is configured, it resolves to that system face before falling back to bundled.
 
 **Fallback is transparent.** Agents are not notified when a font fallback occurs. Telemetry tracks font fallback events per frame for debugging.
 
 ### 7.4 Font Fallback Chain
 
-The font fallback chain is configurable per display profile (RFC 0006):
+The font fallback chain is configurable per display profile (RFC 0006). When using the bundled-first default:
 
 ```toml
 [resources.fonts]
+# No system: prefix needed — bundled faces are the default.
+# Omitting these keys uses built-in bundled face selection.
+sans_serif    = "bundled:NotoSans"
+monospace     = "bundled:NotoSansMono"
+serif         = "bundled:NotoSerif"
+```
+
+When system-font discovery is enabled, the `system:` prefix may be used:
+
+```toml
+[resources.fonts]
+system_discovery = true
 sans_serif    = "system:Noto Sans"
 monospace     = "system:JetBrains Mono"
 serif         = "system:Noto Serif"
 ```
 
-If a configured font is not found, the bundled default is used without error.
+If a configured font is not found (system font missing, or bundled face not available), the built-in bundled default is used without error.
 
 ### 7.5 Font Cache
 
@@ -493,7 +515,7 @@ Font cache eviction is separate from texture GC:
 
 - Font glyph caches are evicted LRU when the font memory budget is exceeded.
 - A font face with `refcount == 0` (agent-uploaded, no nodes referencing it) is eligible for full eviction.
-- System and bundled fonts are never evicted (permanent implicit holds).
+- Bundled fonts are never evicted (permanent implicit holds). System fonts loaded via opt-in discovery are also never evicted.
 
 **Font rendering is always on the compositor thread.** Font layout and rasterization happen in stage 5 (Layout Resolve) of the frame pipeline (RFC 0002). Font cache access is serialized by the compositor thread — no thread-safety concerns.
 
@@ -788,9 +810,12 @@ max_texture_dimension      = 8192   # Maximum pixel dimension (width or height)
 
 [resources.fonts]
 max_font_cache_mib         = 64     # Font cache memory limit (LRU)
-sans_serif                 = "system:Noto Sans"
-monospace                  = "system:monospace"
-serif                      = "system:serif"
+# Bundled-first default (v1): omit or use "bundled:" prefix. The system: prefix
+# requires system_discovery = true; see §7 amendment note (PR #802, hud-bq0gl.11).
+system_discovery           = false  # Set true to enable platform font directory scan
+sans_serif                 = "bundled:NotoSans"
+monospace                  = "bundled:NotoSansMono"
+serif                      = "bundled:NotoSerif"
 min_size_px                = 8.0    # Minimum rendered font size
 max_size_px                = 256.0  # Maximum rendered font size
 ```
@@ -842,7 +867,7 @@ tze_resource/
 ├── store.rs              — In-memory resource index, refcount table, dedup lookup
 ├── upload.rs             — Upload pipeline: receive, hash, validate, decode, store
 ├── gc.rs                 — GC phase: candidacy tracking, eviction logic, grace period
-├── font.rs               — FontRegistry: resolution table, system/bundled/uploaded fonts
+├── font.rs               — FontRegistry: resolution table, bundled/uploaded fonts (system-font discovery: opt-in)
 ├── budget.rs             — Budget integration with RFC 0008 AgentResourceState
 └── proto/
     └── resource.proto    — Canonical proto schema from §10
@@ -877,7 +902,7 @@ These test scenes verify the resource lifecycle contract:
 
 2. **Persistent resource store.** The storage model supports persistence (§9.2) but v1 does not implement it. The persistence format (flat-file shard directory vs. embedded database), cleanup policy, and cache directory structure are deferred to the post-v1 persistence RFC.
 
-3. **Font preloading.** Should the runtime preload all configured system fonts at startup, or lazy-load on first use? Lazy-load keeps startup time low but causes a first-use latency spike. Recommended: lazy-load with a configurable preload list.
+3. **Font preloading (opt-in system discovery only).** When `resources.fonts.system_discovery = true` is enabled, should the runtime preload all discovered system fonts at startup, or lazy-load on first use? Lazy-load keeps startup time low but causes a first-use latency spike. Recommended: lazy-load with a configurable preload list. This question is moot for the default bundled-first configuration (bundled faces are already in-binary; no disk scan occurs). Deferred to the `FontRegistry` layer (post-v1 for system-font discovery path).
 
 4. **WebP/AVIF support.** V1 supports PNG and JPEG. WebP and AVIF are valuable for smaller file sizes but add decode dependencies. Candidates for a v1.1 addition.
 
