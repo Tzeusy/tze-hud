@@ -1331,4 +1331,101 @@ mod tests {
              {drain2_now_us} − {submitted_at_us} = 5_000 µs"
         );
     }
+
+    /// Regression guard for the `apply_token_map` → drive state propagation
+    /// wiring (hud-be6ee acceptance criterion: token wiring reaches live adapters).
+    ///
+    /// The test verifies that:
+    /// 1. A token map applied *before* an adapter attaches is inherited by the
+    ///    new adapter's `PortalVisualTokens` at attach time.
+    /// 2. A token map applied *after* an adapter attaches propagates immediately
+    ///    to all live adapters' `PortalVisualTokens`.
+    ///
+    /// Removing the `self.drive.apply_token_map(overrides)` call in
+    /// `InProcessPortalDriver::apply_token_map` causes the post-attach assertion
+    /// to fail because `entry.adapter.visual_tokens()` still reflects the
+    /// default (empty) token map rather than the overridden values.
+    #[test]
+    fn apply_token_map_propagates_to_drive_state() {
+        let mut driver = InProcessPortalDriver::new();
+
+        // Build a token map with a clearly non-default transcript font size.
+        // The canonical key is `portal.transcript.font_size` (no `_px` suffix)
+        // as declared by `PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE` in portal_tokens.rs.
+        let mut tokens = DesignTokenMap::new();
+        tokens.insert("portal.transcript.font_size".to_string(), "32".to_string());
+
+        // --- Part 1: pre-attach token map propagates to new adapters -------
+        driver.apply_token_map(tokens.clone());
+
+        // Attach *after* the token map is applied.
+        attach_and_get_token(&mut driver, "proj-token-pre");
+        driver.attach_projection("proj-token-pre", Vec::new());
+
+        let font_size_pre = driver
+            .drive
+            .entries
+            .get("proj-token-pre")
+            .expect("drive entry must exist after attach")
+            .adapter
+            .visual_tokens()
+            .transcript_font_size_px;
+
+        // The driver's `token_overrides` map was set before attach, so
+        // `InProcessPortalDriveState::attach` calls `resolve_visual_tokens()`
+        // using those overrides. The adapter must reflect the exact custom value
+        // rather than the default (13.0).  Using `assert_eq!` here ensures the
+        // test fails if the wrong key is looked up or the map is not propagated.
+        assert_eq!(
+            font_size_pre, 32.0,
+            "adapter font size must match the pre-attach overridden value (32.0)"
+        );
+
+        // --- Part 2: post-attach token map propagates to live adapters -----
+        // Reset to empty map so we can observe the change clearly.
+        driver.apply_token_map(DesignTokenMap::new());
+
+        // Attach a second adapter before applying the custom map.
+        attach_and_get_token(&mut driver, "proj-token-post");
+        driver.attach_projection("proj-token-post", Vec::new());
+
+        // Now apply a custom token map — must propagate to *both* live adapters.
+        let mut tokens2 = DesignTokenMap::new();
+        tokens2.insert("portal.transcript.font_size".to_string(), "48".to_string());
+        driver.apply_token_map(tokens2.clone());
+
+        // Removing the `set_visual_tokens` loop inside `apply_token_map`
+        // causes the post-apply assertion to fail (value stays at the default,
+        // 13.0, rather than the overridden 48.0).
+        let font_size_post = driver
+            .drive
+            .entries
+            .get("proj-token-post")
+            .expect("second drive entry must exist")
+            .adapter
+            .visual_tokens()
+            .transcript_font_size_px;
+
+        assert_eq!(
+            font_size_post, 48.0,
+            "adapter font size must match the post-attach overridden value (48.0); \
+             removing the set_visual_tokens loop in apply_token_map causes this to fail"
+        );
+
+        // Both entries must have been updated (not just the most recently attached).
+        let font_size_pre_after = driver
+            .drive
+            .entries
+            .get("proj-token-pre")
+            .expect("first drive entry must still exist")
+            .adapter
+            .visual_tokens()
+            .transcript_font_size_px;
+
+        assert_eq!(
+            font_size_pre_after, 48.0,
+            "pre-existing adapter must also be updated to 48.0 by apply_token_map; \
+             only the new-entry path in attach() being correct is not sufficient"
+        );
+    }
 }
