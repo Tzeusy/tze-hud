@@ -44,17 +44,17 @@ pub(super) struct TexturedDrawCmd {
 /// [`tze_hud_scene::types::SceneId`] (not `ResourceId`) and come from a
 /// different cache (`video_frame_cache` vs `image_texture_cache`).
 #[cfg(feature = "v2_preview")]
-pub(super) struct VideoFrameDrawCmd {
+pub(crate) struct VideoFrameDrawCmd {
     /// The `SceneId` of the `ZoneContent::VideoSurfaceRef` surface.
-    pub(super) surface_id: tze_hud_scene::types::SceneId,
+    pub(crate) surface_id: tze_hud_scene::types::SceneId,
     /// Pixel-space destination rectangle.
-    pub(super) x: f32,
-    pub(super) y: f32,
-    pub(super) w: f32,
-    pub(super) h: f32,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) w: f32,
+    pub(crate) h: f32,
     /// Per-vertex tint (currently always opaque white — no fade animation
     /// on the video frame itself; badge is rendered by the chrome pass).
-    pub(super) tint: [f32; 4],
+    pub(crate) tint: [f32; 4],
 }
 
 /// Collected runtime drag handle geometry + style for one visible element.
