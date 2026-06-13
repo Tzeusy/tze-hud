@@ -3,6 +3,8 @@
 ## Purpose
 Defines the interaction contract for tze_hud v1: focus tree structure and management, pointer capture protocol, hit-test pipeline and HitRegionNode primitive, gesture recognition (v1 tier), local feedback guarantee (< 4ms p99), event dispatch and routing (five-stage pipeline), command input model (seven abstract actions), and accessibility structure. Source: RFC 0004, presence.md.
 
+Implementation: crates/tze_hud_input/
+
 ## Requirements
 
 ### Requirement: Focus Tree Structure

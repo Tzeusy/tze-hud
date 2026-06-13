@@ -10,6 +10,8 @@ Define the viewer/privacy constraints, human/operator overrides, observability
 requirements, and explicit enablement policy for bounded media ingress on a
 household-facing display.
 
+Implementation: (deferred)
+
 This specification is normative for governance and admission policy only. It
 does not define signaling shape, schema/snapshot semantics, compositor render
 behavior, or validation harness details.

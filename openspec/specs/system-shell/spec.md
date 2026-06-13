@@ -12,6 +12,8 @@ privacy-safe capture architecture, disconnection and budget badges, backpressure
 signals, and the v1 minimal CLI diagnostic surface. Also defines the boundary
 between the chrome layer and text stream portal surfaces.
 
+Implementation: crates/tze_hud_runtime/src/shell/
+
 ---
 
 ## Requirements

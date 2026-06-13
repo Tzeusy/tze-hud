@@ -7,6 +7,8 @@ Domain: GOVERNANCE
 
 The configuration capability defines how tze_hud reads, validates, and hot-reloads its TOML configuration file. It governs file format and resolution order, profile selection and budget enforcement, tab and zone layout, agent registration and capability grants, privacy and quiet-hours policy, degradation ladder ordering, and schema export. The configuration system is the governance entry point for the entire runtime: all structural and policy decisions are validated at startup before any port is bound or frame is rendered.
 
+Implementation: crates/tze_hud_config/
+
 ## Requirements
 
 ### Requirement: TOML Configuration Format

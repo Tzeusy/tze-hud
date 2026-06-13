@@ -3,6 +3,8 @@
 ## Purpose
 Defines the HUD publish skill packaging and behavior for LLM-facing MCP zone publishing, discovery, configuration templates, and no-dependency publish tooling.
 
+Implementation: .claude/skills/th-hud-publish/
+
 ## Requirements
 ### Requirement: Skill artifact directory structure
 

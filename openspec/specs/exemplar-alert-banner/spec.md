@@ -3,6 +3,8 @@
 ## Purpose
 Defines the alert-banner exemplar component profile and visual contract for severity-colored, chrome-layer alert rendering using the component shape language.
 
+Implementation: profiles/exemplar-alert-banner/; crates/tze_hud_compositor/
+
 ## Requirements
 ### Requirement: Alert-Banner Exemplar Component Profile
 The exemplar-alert-banner component profile MUST be a valid component profile directory containing a `profile.toml` manifest and a `zones/alert-banner.toml` rendering override. The profile MUST declare `component_type = "alert-banner"` and MUST pass OpaqueBackdrop readability validation at startup.

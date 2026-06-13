@@ -6,6 +6,8 @@ Defines the compositor's timing architecture: the four clock domains (display/vs
 
 Source RFC: 0003 (Timing Model)
 
+Implementation: crates/tze_hud_scene/src/timing/
+
 ---
 
 ## Requirements

@@ -8,6 +8,8 @@
 
 Define the smallest admissible media/WebRTC capability slice after v1: one-way inbound visual media ingress into runtime-owned surfaces, with deterministic timing, explicit governance, and default-off safety.
 
+Implementation: (deferred)
+
 This specification is normative for the contract envelope only. It does not replace downstream detailed specs for signaling shape, schema/snapshot deltas, zone contract details, runtime activation budgets, privacy/operator policy, compositor rendering semantics, or validation harness specifics.
 
 Current downstream contract artifacts in this tranche:

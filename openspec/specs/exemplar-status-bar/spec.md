@@ -3,6 +3,8 @@
 ## Purpose
 Defines the status-bar exemplar zone contract for chrome-layer key/value status rendering and merge-by-key coexistence across agents.
 
+Implementation: profiles/exemplar-status-bar/; .claude/skills/user-test/scripts/status_bar_exemplar.py
+
 ## Requirements
 ### Requirement: Status Bar Visual Specification
 The status-bar zone exemplar SHALL render as a vertical stack positioned at the right edge of the display, attached to the chrome layer (above all content tiles). The visual treatment SHALL be defined by a component profile with the following effective rendering policy:

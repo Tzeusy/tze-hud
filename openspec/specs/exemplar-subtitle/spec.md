@@ -3,6 +3,8 @@
 ## Purpose
 Defines the subtitle exemplar zone contract for readable bottom-of-screen text, dual-layer readability, backdrop/outline policy, and transition behavior.
 
+Implementation: profiles/exemplar-subtitle/; tests/integration/subtitle_streaming.rs; .claude/skills/user-test/scripts/subtitle_exemplar.py
+
 ## Requirements
 ### Requirement: Subtitle Visual Contract
 The subtitle zone exemplar MUST render with the following visual properties when using default canonical design tokens (no component profile active). These properties constitute the reference rendering target for all subtitle implementations.

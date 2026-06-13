@@ -2,6 +2,9 @@
 
 ## Purpose
 Defines the five-layer validation architecture for the tze_hud runtime: scene graph assertions (Layer 0), headless render and pixel readback (Layer 1), visual regression via SSIM (Layer 2), compositor telemetry and performance validation (Layer 3), and developer visibility artifacts (Layer 4). Establishes the test scene registry, design requirements, hardware-normalized calibration harness, latency and performance budgets, protocol conformance tests, record/replay traces, soak and leak tests, and the autonomous LLM development loop that allows models to iterate on implementation without human intervention.
+
+Implementation: crates/tze_hud_validation/; tests/integration/
+
 ## Requirements
 ### Requirement: Five Validation Layers
 The validation architecture SHALL implement five ordered layers, from cheapest/most deterministic to richest/most human-oriented: Layer 0 (scene graph assertions), Layer 1 (headless render and pixel readback), Layer 2 (visual regression via SSIM), Layer 3 (compositor telemetry and performance validation), and Layer 4 (developer visibility artifacts). Each layer SHALL catch a different class of problem.

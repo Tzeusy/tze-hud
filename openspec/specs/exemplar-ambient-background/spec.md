@@ -3,6 +3,8 @@
 ## Purpose
 Defines the ambient-background exemplar zone contract for full-display background-layer content, latest-wins publication behavior, and transparent/clear fallback rendering.
 
+Implementation: .claude/skills/user-test/scripts/ambient_background_exemplar.py
+
 ## Requirements
 ### Requirement: Ambient Background Zone Visual Contract
 

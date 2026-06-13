@@ -15,6 +15,8 @@ scene event emission, telemetry, input control transport, MCP guest bridge, and 
 resident scene-resource upload handshake. This spec is the normative source of truth
 for all wire-level session behaviour in v1.
 
+Implementation: crates/tze_hud_protocol/; crates/tze_hud_runtime/src/session.rs
+
 ---
 ## Requirements
 ### Requirement: Session Authorization Authority Boundary (v1)
