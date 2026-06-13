@@ -1471,6 +1471,55 @@ pub(crate) struct LayerPartitionedRoundedRectCmds {
     pub(crate) chrome: Vec<RoundedRectDrawCmd>,
 }
 
+/// Per-zone Stack slot layout, computed once per zone per frame by
+/// [`Compositor::zone_slot_layout`] and consumed by all zone-rendering call
+/// sites that need slot geometry: `collect_text_items`, `render_zone_content`,
+/// and `collect_all_rounded_rect_cmds`.
+///
+/// Centralising this computation eliminates the hand-mirrored duplication that
+/// was previously guarded by a "must-mirror" comment (hud-lu50e / hud-qlerb).
+#[derive(Debug)]
+pub(crate) struct ZoneSlotLayout {
+    /// Publication indices sorted by the zone's ordering rule (alert-banner:
+    /// severity-descending, then recency; others: newest-first / reverse order).
+    pub(crate) ordered_indices: Vec<usize>,
+    /// Per-slot heights in the same order as `ordered_indices`.
+    /// Two-line notifications produce a taller slot; all others use
+    /// `stack_slot_height`.
+    pub(crate) slot_heights: Vec<f32>,
+    /// Cumulative y-offsets from the zone origin, one per slot.
+    /// `slot_offsets[i]` is the y-start of slot `i` relative to `zy`.
+    pub(crate) slot_offsets: Vec<f32>,
+    /// Effective zone height in pixels.
+    /// For alert-banner zones this equals `sum(slot_heights)` (dynamic growth).
+    /// For all other Stack zones this equals the configured zone height `zh`.
+    pub(crate) effective_h: f32,
+}
+
+impl ZoneSlotLayout {
+    /// Iterate `(pub_idx, slot_offset, slot_h)` triples for the slots that
+    /// fall inside the zone.  Slots whose top edge is at or beyond `zy +
+    /// effective_h` are excluded (the iterator stops early).
+    pub(crate) fn iter_visible(&self, zy: f32) -> impl Iterator<Item = (usize, f32, f32)> + '_ {
+        let zone_bottom = zy + self.effective_h;
+        self.ordered_indices
+            .iter()
+            .copied()
+            .zip(
+                self.slot_offsets
+                    .iter()
+                    .copied()
+                    .zip(self.slot_heights.iter().copied()),
+            )
+            .take_while(move |(_, (offset, _))| zy + offset < zone_bottom)
+            .map(move |(pub_idx, (offset, slot_h))| {
+                let slot_y = zy + offset;
+                let effective_slot_h = slot_h.min(zone_bottom - slot_y);
+                (pub_idx, slot_y, effective_slot_h)
+            })
+    }
+}
+
 impl Compositor {
     /// Create a new headless compositor.
     ///
@@ -3567,21 +3616,12 @@ impl Compositor {
             // LatestWins / Replace: render only the most-recent publication.
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
-                    // Build an ordered reference slice: alert-banner uses severity sort
-                    // (critical first, then recency); other Stack zones use newest-first.
-                    let ordered: Vec<&ZonePublishRecord> = if is_alert_banner_zone(zone_name) {
-                        sort_alert_banner_indices(publishes)
-                            .into_iter()
-                            .map(|idx| &publishes[idx])
-                            .collect()
-                    } else {
-                        publishes.iter().rev().collect()
-                    };
+                    // Slot geometry is computed once by zone_slot_layout and shared
+                    // with render_zone_content / collect_all_rounded_rect_cmds (hud-qlerb).
+                    let layout = self.zone_slot_layout(zone_name, publishes, policy, zh);
 
-                    // Resolve notification typography tokens once per zone so that both
-                    // slot-height calculation and per-item rendering use the same values.
-                    // (Token lookups are cheap, but resolving outside the per-item loop
-                    // also avoids redundant HashMap lookups on zones with many items.)
+                    // Resolve notification typography tokens needed for text rendering
+                    // (not slot geometry — those live in zone_slot_layout).
                     let notif_body_scale = self
                         .token_map
                         .get("typography.notification.body.scale")
@@ -3605,35 +3645,8 @@ impl Compositor {
                         .and_then(|v| v.parse::<u16>().ok())
                         .unwrap_or(NOTIFICATION_DISMISS_FONT_WEIGHT);
 
-                    // Compute per-slot heights (variable for two-line notifications).
-                    let slot_heights = Self::per_slot_heights(
-                        &ordered,
-                        policy,
-                        notif_body_scale,
-                        NOTIFICATION_INTER_LINE_GAP,
-                    );
-                    let slot_offsets = Self::slot_offsets(&slot_heights);
-                    let total_slots_h: f32 = slot_heights.iter().sum();
-
-                    // For alert-banner: dynamic zone height = sum of per-slot heights.
-                    // Height grows with each active banner; no cap at the configured
-                    // height_pct.  (Zero banners → zero height via the is_empty guard.)
-                    // For other Stack zones: use the configured zone height (zh).
-                    let effective_zh = if is_alert_banner_zone(zone_name) {
-                        total_slots_h
-                    } else {
-                        zh
-                    };
-
-                    for (record, (slot_offset, slot_h)) in ordered
-                        .into_iter()
-                        .zip(slot_offsets.iter().zip(slot_heights.iter()))
-                    {
-                        let slot_y = zy + slot_offset;
-                        if slot_y >= zy + effective_zh {
-                            break;
-                        }
-                        let effective_slot_h = slot_h.min((zy + effective_zh) - slot_y);
+                    for (pub_idx, slot_y, effective_slot_h) in layout.iter_visible(zy) {
+                        let record = &publishes[pub_idx];
 
                         // Per-publication fade-out opacity (1.0 when no fade active).
                         let pub_opacity = self.pub_opacity(zone_name, record);
@@ -6091,48 +6104,12 @@ impl Compositor {
             // Resolve backdrop color using the same logic as render_zone_content.
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
-                    let ordered_indices: Vec<usize> = if is_alert_banner_zone(zone_name) {
-                        sort_alert_banner_indices(publishes)
-                    } else {
-                        (0..publishes.len()).rev().collect()
-                    };
+                    // Slot geometry is computed once by zone_slot_layout and shared
+                    // with collect_text_items / render_zone_content (hud-qlerb).
+                    let layout = self.zone_slot_layout(zone_name, publishes, policy, h);
 
-                    // Match per-slot sizing used by text/backdrop layout so rounded
-                    // rect bounds always contain two-line notification text.
-                    let ordered_records: Vec<&ZonePublishRecord> =
-                        ordered_indices.iter().map(|&idx| &publishes[idx]).collect();
-                    let notif_body_scale = self
-                        .token_map
-                        .get("typography.notification.body.scale")
-                        .and_then(|s| s.trim().parse::<f32>().ok())
-                        .filter(|s| *s > 0.0)
-                        .unwrap_or(NOTIFICATION_BODY_SCALE);
-                    let slot_heights = Self::per_slot_heights(
-                        &ordered_records,
-                        policy,
-                        notif_body_scale,
-                        NOTIFICATION_INTER_LINE_GAP,
-                    );
-                    let slot_offsets = Self::slot_offsets(&slot_heights);
-                    let total_slots_h: f32 = slot_heights.iter().sum();
-
-                    let effective_h = if is_alert_banner_zone(zone_name) {
-                        total_slots_h
-                    } else {
-                        h
-                    };
-
-                    for ((&pub_idx, slot_offset), slot_h) in ordered_indices
-                        .iter()
-                        .zip(slot_offsets.iter())
-                        .zip(slot_heights.iter())
-                    {
+                    for (pub_idx, slot_y, effective_slot_h) in layout.iter_visible(y) {
                         let record = &publishes[pub_idx];
-                        let slot_y = y + *slot_offset;
-                        if slot_y >= y + effective_h {
-                            break;
-                        }
-                        let effective_slot_h = (*slot_h).min((y + effective_h) - slot_y);
 
                         let pub_opacity = self.pub_opacity(zone_name, record);
                         let combined_opacity = (anim_opacity * pub_opacity).clamp(0.0, 1.0);
@@ -6453,57 +6430,12 @@ impl Compositor {
             // LatestWins / Replace: single backdrop from the most-recent publish only.
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
-                    // Build an ordered reference slice: alert-banner uses severity sort
-                    // (critical first, then recency); other Stack zones use newest-first.
-                    let ordered_indices: Vec<usize> = if is_alert_banner_zone(zone_name) {
-                        sort_alert_banner_indices(publishes)
-                    } else {
-                        (0..publishes.len()).rev().collect()
-                    };
+                    // Slot geometry is computed once by zone_slot_layout and shared
+                    // with collect_text_items / collect_all_rounded_rect_cmds (hud-qlerb).
+                    let layout = self.zone_slot_layout(zone_name, publishes, policy, h);
 
-                    // Ordered references for per_slot_heights.
-                    let ordered_refs: Vec<&ZonePublishRecord> =
-                        ordered_indices.iter().map(|&i| &publishes[i]).collect();
-
-                    // Resolve notification typography tokens once per zone so that
-                    // slot-height calculation matches what collect_text_items renders.
-                    let notif_body_scale = self
-                        .token_map
-                        .get("typography.notification.body.scale")
-                        .and_then(|v| v.parse::<f32>().ok())
-                        .unwrap_or(NOTIFICATION_BODY_SCALE)
-                        .clamp(0.5, 1.0);
-
-                    // Compute per-slot heights (variable for two-line notifications).
-                    let slot_heights = Self::per_slot_heights(
-                        &ordered_refs,
-                        policy,
-                        notif_body_scale,
-                        NOTIFICATION_INTER_LINE_GAP,
-                    );
-                    let slot_offsets = Self::slot_offsets(&slot_heights);
-                    let total_slots_h: f32 = slot_heights.iter().sum();
-
-                    // alert-banner: dynamic height = sum of per-slot heights.
-                    // Height grows with each active banner; no cap at the configured
-                    // height_pct.  (Zero banners → zero height via the is_empty guard.)
-                    // For other Stack zones: use the configured zone height (h).
-                    let effective_h = if is_alert_banner_zone(zone_name) {
-                        total_slots_h
-                    } else {
-                        h
-                    };
-
-                    for (&pub_idx, (slot_offset, slot_h)) in ordered_indices
-                        .iter()
-                        .zip(slot_offsets.iter().zip(slot_heights.iter()))
-                    {
+                    for (pub_idx, slot_y, effective_slot_h) in layout.iter_visible(y) {
                         let record = &publishes[pub_idx];
-                        let slot_y = y + slot_offset;
-                        if slot_y >= y + effective_h {
-                            break;
-                        }
-                        let effective_slot_h = slot_h.min((y + effective_h) - slot_y);
 
                         // Per-publication fade-out opacity (1.0 when no fade active).
                         let pub_opacity = self.pub_opacity(zone_name, record);
@@ -7068,6 +7000,65 @@ impl Compositor {
                 _ => Self::stack_slot_height(policy),
             })
             .collect()
+    }
+
+    /// Compute the [`ZoneSlotLayout`] for a Stack zone.
+    ///
+    /// This is the single authoritative computation for zone slot geometry.
+    /// All frame-path consumers (`collect_text_items`, `render_zone_content`,
+    /// `collect_all_rounded_rect_cmds`) call this method instead of duplicating
+    /// the slot-height/offset/ordering logic inline (hud-qlerb).
+    ///
+    /// # Parameters
+    /// - `zone_name` — used to distinguish alert-banner zones (severity sort
+    ///   + dynamic height) from regular Stack zones (newest-first, fixed height).
+    /// - `publishes` — the ordered publish list for this zone.
+    /// - `policy` — the zone's `RenderingPolicy` (font metrics, margins).
+    /// - `zh` — the configured zone height in pixels, used as `effective_h` for
+    ///   non-alert-banner zones.
+    fn zone_slot_layout(
+        &self,
+        zone_name: &str,
+        publishes: &[ZonePublishRecord],
+        policy: &RenderingPolicy,
+        zh: f32,
+    ) -> ZoneSlotLayout {
+        let ordered_indices: Vec<usize> = if is_alert_banner_zone(zone_name) {
+            sort_alert_banner_indices(publishes)
+        } else {
+            (0..publishes.len()).rev().collect()
+        };
+
+        let notif_body_scale = self
+            .token_map
+            .get("typography.notification.body.scale")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(NOTIFICATION_BODY_SCALE)
+            .clamp(0.5, 1.0);
+
+        let ordered_refs: Vec<&ZonePublishRecord> =
+            ordered_indices.iter().map(|&i| &publishes[i]).collect();
+        let slot_heights = Self::per_slot_heights(
+            &ordered_refs,
+            policy,
+            notif_body_scale,
+            NOTIFICATION_INTER_LINE_GAP,
+        );
+        let slot_offsets = Self::slot_offsets(&slot_heights);
+        let total_slots_h: f32 = slot_heights.iter().sum();
+
+        let effective_h = if is_alert_banner_zone(zone_name) {
+            total_slots_h
+        } else {
+            zh
+        };
+
+        ZoneSlotLayout {
+            ordered_indices,
+            slot_heights,
+            slot_offsets,
+            effective_h,
+        }
     }
 
     /// Compute the cumulative slot y-offsets from a list of per-slot heights.
@@ -11177,6 +11168,68 @@ mod tests {
                 &items[0].text
             }
         );
+    }
+
+    /// ZoneSlotLayout::iter_visible: slots whose top-left y is at or beyond
+    /// zone_bottom are excluded; partial slots are emitted with clamped height.
+    ///
+    /// This is a GPU-free unit test pinning the shared slot-geometry computation
+    /// introduced in hud-qlerb. Geometry correctness is guaranteed by
+    /// test_stack_slot_clips_at_zone_boundary (integration) and this test (unit).
+    #[test]
+    fn test_zone_slot_layout_iter_visible_clips_and_clamps() {
+        // Build a ZoneSlotLayout directly with known values.
+        // Three equal-height slots of 30px each (offsets: 0, 30, 60).
+        // Zone origin zy = 10.0; effective_h = 70.0 → zone_bottom = 80.0.
+        //
+        // slot 0: slot_y = 10+0  = 10  < 80 → emitted (effective_slot_h = min(30, 70) = 30)
+        // slot 1: slot_y = 10+30 = 40  < 80 → emitted (effective_slot_h = min(30, 40) = 30)
+        // slot 2: slot_y = 10+60 = 70  < 80 → emitted (effective_slot_h = min(30, 10) = 10)
+        // slot 3 would be at 100 ≥ 80 → excluded (not in this layout, but cull verified)
+        let layout = ZoneSlotLayout {
+            ordered_indices: vec![0, 1, 2],
+            slot_heights: vec![30.0, 30.0, 30.0],
+            slot_offsets: vec![0.0, 30.0, 60.0],
+            effective_h: 70.0,
+        };
+
+        let zy = 10.0_f32;
+        let visible: Vec<(usize, f32, f32)> = layout.iter_visible(zy).collect();
+
+        assert_eq!(
+            visible.len(),
+            3,
+            "all 3 slots start before zone_bottom → all emitted"
+        );
+
+        // slot 0: full slot
+        assert_eq!(visible[0], (0, 10.0, 30.0), "slot 0: full height");
+        // slot 1: full slot
+        assert_eq!(visible[1], (1, 40.0, 30.0), "slot 1: full height");
+        // slot 2: clamped to remaining zone height (80 - 70 = 10)
+        assert!(
+            (visible[2].0 == 2)
+                && (visible[2].1 - 70.0).abs() < 0.01
+                && (visible[2].2 - 10.0).abs() < 0.01,
+            "slot 2: clamped to 10px; got {:?}",
+            visible[2]
+        );
+
+        // Verify that a slot starting exactly at zone_bottom is excluded.
+        let layout_tight = ZoneSlotLayout {
+            ordered_indices: vec![0, 1],
+            slot_heights: vec![30.0, 30.0],
+            slot_offsets: vec![0.0, 30.0],
+            effective_h: 30.0, // zone_bottom = zy + 30 = 40
+        };
+        let tight: Vec<(usize, f32, f32)> = layout_tight.iter_visible(10.0).collect();
+        // slot 0: slot_y = 10 < 40 → emitted; slot 1: slot_y = 40 ≥ 40 → excluded
+        assert_eq!(
+            tight.len(),
+            1,
+            "slot starting at zone_bottom must be excluded"
+        );
+        assert_eq!(tight[0].0, 0, "only slot 0 is emitted");
     }
 
     /// MergeByKey zone: collect_text_items must merge ALL StatusBar publications'
