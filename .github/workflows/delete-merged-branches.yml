@@ -7,8 +7,11 @@
 # ───────────────
 # - Only branches matching `agent/*` are candidates.
 # - Only branches reachable from main (i.e. merged) are deleted.
-# - Deletion uses `git push origin --delete` (never --force); git refuses to
-#   delete an unmerged branch via that path.
+# - `git push origin --delete` is unconditional — it does NOT refuse unmerged
+#   branches. Safety comes from: (1) the --merged reachability filter above,
+#   which selects only branches already in main, and (2) the --force-with-lease
+#   ref lease in the script, which aborts if a branch moves between fetch and
+#   delete.
 # - Worktree-active branch protection is handled by the script but does not
 #   apply in CI (no local worktrees on GitHub runners); the merged-reachability
 #   check is the primary guard.

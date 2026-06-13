@@ -25,7 +25,10 @@
 # ─────
 # - Run from the repo root (or any git worktree of this repo).
 # - Requires push access to origin (only needed for --execute).
-# - Never force-deletes; only deletes via --delete (safe, fails on unmerged).
+# - Only deletes branches selected by --merged (reachability check above); the
+#   `git push --delete` call itself is unconditional — the safety comes from
+#   the --merged filter and the --force-with-lease ref lease, not from the
+#   delete verb having any refusal behaviour.
 
 set -euo pipefail
 
