@@ -541,7 +541,6 @@ fn apply_drag_handle_pointer_event(
 /// max would prevent this shift and cap the portal at half the display width,
 /// which is incorrect.
 fn compute_portal_max_dims(
-    _tile_bounds: tze_hud_scene::types::Rect,
     lease_max_width_px: f32,
     lease_max_height_px: f32,
     display_w: f32,
@@ -647,7 +646,6 @@ fn apply_portal_resize_pointer_event(
                 })
                 .unwrap_or((0.0, 0.0));
             let (max_width_px, max_height_px) = compute_portal_max_dims(
-                tile.bounds,
                 lease_max_w,
                 lease_max_h,
                 display_w,
@@ -708,7 +706,6 @@ fn apply_portal_resize_pointer_event(
             let tile_id = *tile_id;
 
             let tile = scene.tiles.get(&tile_id)?;
-            let tile_bounds = tile.bounds;
             let (lease_max_w, lease_max_h) = scene
                 .leases
                 .get(&tile.lease_id)
@@ -720,7 +717,6 @@ fn apply_portal_resize_pointer_event(
                 })
                 .unwrap_or((0.0, 0.0));
             let (max_width_px, max_height_px) = compute_portal_max_dims(
-                tile_bounds,
                 lease_max_w,
                 lease_max_h,
                 display_w,
@@ -780,7 +776,6 @@ fn apply_portal_resize_pointer_event(
             let tile_id = *tile_id;
 
             let tile = scene.tiles.get(&tile_id)?;
-            let tile_bounds = tile.bounds;
             let (lease_max_w, lease_max_h) = scene
                 .leases
                 .get(&tile.lease_id)
@@ -792,7 +787,6 @@ fn apply_portal_resize_pointer_event(
                 })
                 .unwrap_or((0.0, 0.0));
             let (max_width_px, max_height_px) = compute_portal_max_dims(
-                tile_bounds,
                 lease_max_w,
                 lease_max_h,
                 display_w,
@@ -3967,7 +3961,6 @@ impl WinitApp {
                 })
                 .unwrap_or((0.0, 0.0));
             let (max_width_px, max_height_px) = compute_portal_max_dims(
-                tile.bounds,
                 lease_max_w,
                 lease_max_h,
                 display_w,
@@ -9446,13 +9439,8 @@ redaction_style = "blank"
     /// keep the portal on-screen.
     #[test]
     fn compute_portal_max_dims_unconstrained_uses_display_boundary() {
-        use tze_hud_scene::types::Rect;
-
-        let tile_bounds = Rect::new(100.0, 100.0, 400.0, 300.0);
-
         // 0.0 = unconstrained (no lease spatial budget)
-        let (max_w, max_h) =
-            compute_portal_max_dims(tile_bounds, 0.0, 0.0, 1920.0, 1080.0, 50.0, 50.0);
+        let (max_w, max_h) = compute_portal_max_dims(0.0, 0.0, 1920.0, 1080.0, 50.0, 50.0);
 
         // Display boundary: full display width/height, not display - tile.origin.
         assert_eq!(
@@ -9471,13 +9459,9 @@ redaction_style = "blank"
     /// (display_w - tile.x), capping the portal at half the screen width.
     #[test]
     fn compute_portal_max_dims_uses_display_w_not_display_w_minus_tile_x() {
-        use tze_hud_scene::types::Rect;
-
-        // Scenario from PR #691 review: x=500 on a 1000px display.
-        let tile_bounds = Rect::new(500.0, 200.0, 200.0, 200.0);
-
-        let (max_w, max_h) =
-            compute_portal_max_dims(tile_bounds, 0.0, 0.0, 1000.0, 800.0, 50.0, 50.0);
+        // Scenario from PR #691 review: 1000px-wide display; the function must
+        // return the full display width, not display_w - tile.x.
+        let (max_w, max_h) = compute_portal_max_dims(0.0, 0.0, 1000.0, 800.0, 50.0, 50.0);
 
         assert_eq!(
             max_w, 1000.0,
@@ -9495,12 +9479,7 @@ redaction_style = "blank"
     /// budget wins (most-restrictive policy).
     #[test]
     fn compute_portal_max_dims_lease_budget_is_more_restrictive() {
-        use tze_hud_scene::types::Rect;
-
-        let tile_bounds = Rect::new(100.0, 100.0, 400.0, 300.0);
-
-        let (max_w, max_h) =
-            compute_portal_max_dims(tile_bounds, 500.0, 400.0, 1920.0, 1080.0, 50.0, 50.0);
+        let (max_w, max_h) = compute_portal_max_dims(500.0, 400.0, 1920.0, 1080.0, 50.0, 50.0);
 
         assert_eq!(
             max_w, 500.0,
@@ -9516,14 +9495,9 @@ redaction_style = "blank"
     /// boundary wins.
     #[test]
     fn compute_portal_max_dims_display_boundary_is_more_restrictive() {
-        use tze_hud_scene::types::Rect;
-
-        // Tile origin near the screen edge; use a lease budget larger than the
-        // display to confirm the display boundary is the binding constraint.
-        let tile_bounds = Rect::new(1700.0, 900.0, 100.0, 100.0);
-
-        let (max_w, max_h) =
-            compute_portal_max_dims(tile_bounds, 5000.0, 5000.0, 1920.0, 1080.0, 50.0, 50.0);
+        // Lease budget larger than the display; display boundary must be the
+        // binding constraint.
+        let (max_w, max_h) = compute_portal_max_dims(5000.0, 5000.0, 1920.0, 1080.0, 50.0, 50.0);
 
         // Display boundary is the full display, not display - tile.origin.
         assert_eq!(
@@ -9540,12 +9514,7 @@ redaction_style = "blank"
     /// so a portal is always growable to at least the token minimum.
     #[test]
     fn compute_portal_max_dims_lease_budget_floored_to_token_minimum() {
-        use tze_hud_scene::types::Rect;
-
-        let tile_bounds = Rect::new(100.0, 100.0, 400.0, 300.0);
-
-        let (max_w, max_h) =
-            compute_portal_max_dims(tile_bounds, 10.0, 10.0, 1920.0, 1080.0, 50.0, 50.0);
+        let (max_w, max_h) = compute_portal_max_dims(10.0, 10.0, 1920.0, 1080.0, 50.0, 50.0);
 
         assert_eq!(
             max_w, 50.0,
