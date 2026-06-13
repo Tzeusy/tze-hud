@@ -1,11 +1,147 @@
-//! Runtime bootstrap and reconciliation for persistent element IDs.
+//! Runtime bootstrap, reconciliation, and TOML persistence for element IDs.
+//!
+//! This module owns all I/O for the element-store: TOML serialization, atomic
+//! file writes, and platform-specific file-replace helpers.  The pure data
+//! model lives in `tze_hud_scene::element_store`; the bootstrap/reconcile
+//! logic and all disk operations live here.
 
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tze_hud_scene::element_store::{ElementStore, ElementStoreEntry, ElementType};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::SceneId;
+
+// ── TOML serialization ────────────────────────────────────────────────────────
+
+/// Parse a TOML-encoded element store.
+pub fn from_toml_str(input: &str) -> Result<ElementStore, toml::de::Error> {
+    toml::from_str(input)
+}
+
+/// Serialize the store to TOML.
+pub fn to_toml_string(store: &ElementStore) -> Result<String, toml::ser::Error> {
+    toml::to_string_pretty(store)
+}
+
+// ── File I/O ──────────────────────────────────────────────────────────────────
+
+/// Load an element store from disk.
+///
+/// Missing files are treated as first boot and return an empty store.
+pub fn load_element_store(path: &Path) -> io::Result<ElementStore> {
+    match fs::read_to_string(path) {
+        Ok(content) => from_toml_str(&content).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid element_store TOML: {err}"),
+            )
+        }),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(ElementStore::default()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Persist an element store atomically using write-to-temp + replace.
+pub fn persist_element_store_to_path(store: &ElementStore, path: &Path) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+
+    let temp_path = unique_temp_path(path);
+    let toml_text = to_toml_string(store).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to serialize element_store TOML: {err}"),
+        )
+    })?;
+
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)?;
+    file.write_all(toml_text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    if let Err(err) = replace_file_atomically(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    sync_parent_dir(parent)?;
+
+    Ok(())
+}
+
+fn unique_temp_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("element_store.toml");
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(
+        ".{stem}.tmp.{}.{}.{}",
+        std::process::id(),
+        now_ns,
+        SceneId::new()
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_file_atomically(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::rename(src, dst)
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file_atomically(src: &Path, dst: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    fn to_wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let src_w = to_wide(src);
+    let dst_w = to_wide(dst);
+
+    // SAFETY: pointers are valid NUL-terminated UTF-16 buffers for the duration
+    // of the call and reference local immutable vectors.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(src_w.as_ptr()),
+            PCWSTR(dst_w.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{err}")))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    OpenOptions::new().read(true).open(path)?.sync_all()
+}
+
+#[cfg(target_os = "windows")]
+fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+    // Windows path replacement uses MoveFileExW with MOVEFILE_WRITE_THROUGH.
+    Ok(())
+}
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 /// Result of element-store startup bootstrap.
 #[derive(Clone, Debug)]
@@ -52,7 +188,7 @@ pub fn bootstrap_scene_element_store_with_path(
     path: PathBuf,
 ) -> ElementStoreBootstrap {
     let existed = path.exists();
-    let mut store = match ElementStore::load_or_default(&path) {
+    let mut store = match load_element_store(&path) {
         Ok(store) => store,
         Err(err) => {
             tracing::warn!(
@@ -67,7 +203,7 @@ pub fn bootstrap_scene_element_store_with_path(
     let now_ms = now_wall_ms();
     let changed = reconcile_scene_ids(scene, &mut store, now_ms);
     if changed || !existed {
-        if let Err(err) = store.persist_to_path_atomic(&path) {
+        if let Err(err) = persist_element_store_to_path(&store, &path) {
             tracing::warn!(
                 path = %path.display(),
                 error = %err,
@@ -286,6 +422,89 @@ mod tests {
             SceneId::new()
         ))
     }
+
+    // ── TOML and I/O tests ────────────────────────────────────────────────
+
+    fn sample_store() -> ElementStore {
+        use tze_hud_scene::element_store::ElementStoreEntry;
+        use tze_hud_scene::types::GeometryPolicy;
+
+        let now = 1_710_000_000_000u64;
+        let mut entries = std::collections::HashMap::new();
+        entries.insert(
+            SceneId::new(),
+            ElementStoreEntry {
+                element_type: ElementType::Zone,
+                namespace: "subtitle".to_string(),
+                created_at: now,
+                last_published_at: now,
+                geometry_override: None,
+            },
+        );
+        entries.insert(
+            SceneId::new(),
+            ElementStoreEntry {
+                element_type: ElementType::Widget,
+                namespace: "gauge-main".to_string(),
+                created_at: now + 1,
+                last_published_at: now + 1,
+                geometry_override: Some(GeometryPolicy::Relative {
+                    x_pct: 0.1,
+                    y_pct: 0.2,
+                    width_pct: 0.3,
+                    height_pct: 0.4,
+                }),
+            },
+        );
+        ElementStore { entries }
+    }
+
+    #[test]
+    fn toml_round_trip_preserves_entries() {
+        let store = sample_store();
+        let text = to_toml_string(&store).expect("serialize");
+        let restored = from_toml_str(&text).expect("deserialize");
+        assert_eq!(restored, store);
+    }
+
+    #[test]
+    fn missing_file_loads_empty_store() {
+        let path = test_path("missing-load");
+        let _ = std::fs::remove_file(&path);
+        let store = load_element_store(&path).expect("load default");
+        assert!(store.entries.is_empty());
+    }
+
+    #[test]
+    fn persist_atomic_replaces_existing_file() {
+        use tze_hud_scene::element_store::ElementStoreEntry;
+
+        let path = test_path("atomic-replace");
+        let _ = std::fs::remove_file(&path);
+
+        let first = sample_store();
+        persist_element_store_to_path(&first, &path).expect("first persist");
+
+        let mut second = ElementStore::default();
+        second.entries.insert(
+            SceneId::new(),
+            ElementStoreEntry {
+                element_type: ElementType::Tile,
+                namespace: "agent.weather".to_string(),
+                created_at: 7,
+                last_published_at: 8,
+                geometry_override: None,
+            },
+        );
+        persist_element_store_to_path(&second, &path).expect("second persist");
+
+        let restored = load_element_store(&path).expect("reload");
+        assert_eq!(restored, second);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Path resolution tests ─────────────────────────────────────────────
 
     #[test]
     fn windows_path_uses_localappdata() {

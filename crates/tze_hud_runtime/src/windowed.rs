@@ -3017,7 +3017,9 @@ impl WinitApp {
         // winit event loop with sync disk I/O).
         if let Some(path) = persist_path {
             std::thread::spawn(move || {
-                if let Err(e) = store_snapshot.persist_to_path_atomic(&path) {
+                if let Err(e) =
+                    crate::element_store::persist_element_store_to_path(&store_snapshot, &path)
+                {
                     tracing::warn!(
                         error = %e,
                         "persist_drag_release: element store persist failed"
@@ -4414,7 +4416,9 @@ impl WinitApp {
         // Winit event loop with sync disk I/O (atomic write + fsync).
         if let Some(path) = persist_path {
             std::thread::spawn(move || {
-                if let Err(e) = store_snapshot.persist_to_path_atomic(&path) {
+                if let Err(e) =
+                    crate::element_store::persist_element_store_to_path(&store_snapshot, &path)
+                {
                     tracing::warn!(error = %e, "perform_reset_element_geometry: persist failed");
                 }
             });

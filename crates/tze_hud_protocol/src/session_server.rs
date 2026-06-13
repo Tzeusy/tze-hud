@@ -789,6 +789,70 @@ async fn persist_created_tile_entries(
         })
 }
 
+/// Serialize and atomically write an [`ElementStore`] to disk.
+///
+/// This is the protocol-layer counterpart of
+/// `tze_hud_runtime::element_store::persist_element_store_to_path`.  It is
+/// intentionally a local copy so that `tze_hud_protocol` does not need to
+/// depend on `tze_hud_runtime` (which would create a circular dependency since
+/// `tze_hud_runtime` already depends on `tze_hud_protocol`).
+fn write_element_store_to_path(
+    store: &ElementStore,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let toml_text = toml::to_string_pretty(store).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to serialize element_store TOML: {err}"),
+        )
+    })?;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+
+    let stem = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("element_store.toml");
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_path = parent.join(format!(
+        ".{stem}.tmp.{}.{}.{}",
+        std::process::id(),
+        now_ns,
+        tze_hud_scene::types::SceneId::new()
+    ));
+
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)?;
+    file.write_all(toml_text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    if let Err(err) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    // On Unix, sync the parent directory so the rename is durable.
+    // On Windows, the rename itself is sufficient.
+    #[cfg(not(target_os = "windows"))]
+    {
+        OpenOptions::new().read(true).open(parent)?.sync_all()?;
+    }
+
+    Ok(())
+}
+
 /// Persist the element store without blocking the async executor worker thread.
 async fn persist_element_store(request: Option<ElementStorePersistRequest>) {
     let Some(request) = request else {
@@ -796,8 +860,10 @@ async fn persist_element_store(request: Option<ElementStorePersistRequest>) {
     };
 
     let path_for_log = request.path.clone();
-    match tokio::task::spawn_blocking(move || request.store.persist_to_path_atomic(&request.path))
-        .await
+    match tokio::task::spawn_blocking(move || {
+        write_element_store_to_path(&request.store, &request.path)
+    })
+    .await
     {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
@@ -7200,6 +7266,27 @@ mod tests {
     use tokio_stream::StreamExt;
     use tze_hud_scene::graph::SceneGraph;
 
+    /// Load an [`ElementStore`] from a TOML file on disk.
+    ///
+    /// Test-only helper that replaces the former `ElementStore::load_or_default`
+    /// method.  Missing files are treated as first boot and return an empty store.
+    fn load_element_store_for_test(
+        path: &std::path::Path,
+    ) -> std::io::Result<tze_hud_scene::element_store::ElementStore> {
+        match std::fs::read_to_string(path) {
+            Ok(content) => toml::from_str(&content).map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid element_store TOML: {err}"),
+                )
+            }),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Ok(tze_hud_scene::element_store::ElementStore::default())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// Consume the next non-LeaseStateChange message from a stream.
     ///
     /// Some test scenarios interleave LeaseStateChange events (e.g.,
@@ -8356,8 +8443,7 @@ mod tests {
             other => panic!("Expected MutationResult, got: {other:?}"),
         };
 
-        let store = tze_hud_scene::element_store::ElementStore::load_or_default(&path)
-            .expect("load persisted element store");
+        let store = load_element_store_for_test(&path).expect("load persisted element store");
         let entry = store
             .entries
             .get(&created_tile_id)
@@ -8450,8 +8536,8 @@ mod tests {
             other => panic!("Expected MutationResult, got: {other:?}"),
         };
 
-        let baseline_store = tze_hud_scene::element_store::ElementStore::load_or_default(&path)
-            .expect("load baseline element store");
+        let baseline_store =
+            load_element_store_for_test(&path).expect("load baseline element store");
         let baseline_entry = baseline_store
             .entries
             .get(&created_tile_id)
@@ -8472,8 +8558,7 @@ mod tests {
         };
         persist_element_store(persist_request).await;
 
-        let updated_store = tze_hud_scene::element_store::ElementStore::load_or_default(&path)
-            .expect("reload element store");
+        let updated_store = load_element_store_for_test(&path).expect("reload element store");
         let updated_entry = updated_store
             .entries
             .get(&created_tile_id)

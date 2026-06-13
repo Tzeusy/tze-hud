@@ -37,6 +37,8 @@ pub use element_store::{
     ElementStore, ElementStoreEntry, ElementType, ZERO_GEOMETRY_POLICY,
     fallback_geometry_for_element,
 };
+// TOML serialization and file persistence for `ElementStore` live in
+// `tze_hud_runtime::element_store` to keep this crate I/O-free.
 pub use graph::{
     MAX_MARKDOWN_BYTES,
     MAX_NODES_PER_TILE,
