@@ -1350,10 +1350,11 @@ mod tests {
         let mut driver = InProcessPortalDriver::new();
 
         // Build a token map with a clearly non-default transcript font size.
-        // The key is the flat token string used by the portal token resolver.
+        // The canonical key is `portal.transcript.font_size` (no `_px` suffix)
+        // as declared by `PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE` in portal_tokens.rs.
         let mut tokens = DesignTokenMap::new();
         tokens.insert(
-            "portal.transcript.font_size_px".to_string(),
+            "portal.transcript.font_size".to_string(),
             "32".to_string(),
         );
 
@@ -1375,10 +1376,13 @@ mod tests {
 
         // The driver's `token_overrides` map was set before attach, so
         // `InProcessPortalDriveState::attach` calls `resolve_visual_tokens()`
-        // using those overrides. The adapter must reflect the custom token.
-        assert!(
-            font_size_pre > 0.0,
-            "adapter font size must be positive after attach with token map applied"
+        // using those overrides. The adapter must reflect the exact custom value
+        // rather than the default (13.0).  Using `assert_eq!` here ensures the
+        // test fails if the wrong key is looked up or the map is not propagated.
+        assert_eq!(
+            font_size_pre,
+            32.0,
+            "adapter font size must match the pre-attach overridden value (32.0)"
         );
 
         // --- Part 2: post-attach token map propagates to live adapters -----
@@ -1392,13 +1396,14 @@ mod tests {
         // Now apply a custom token map — must propagate to *both* live adapters.
         let mut tokens2 = DesignTokenMap::new();
         tokens2.insert(
-            "portal.transcript.font_size_px".to_string(),
+            "portal.transcript.font_size".to_string(),
             "48".to_string(),
         );
         driver.apply_token_map(tokens2.clone());
 
         // Removing the `set_visual_tokens` loop inside `apply_token_map`
-        // causes the post-apply assertion to fail.
+        // causes the post-apply assertion to fail (value stays at the default,
+        // 13.0, rather than the overridden 48.0).
         let font_size_post = driver
             .drive
             .entries
@@ -1408,9 +1413,10 @@ mod tests {
             .visual_tokens()
             .transcript_font_size_px;
 
-        assert!(
-            font_size_post > 0.0,
-            "adapter font size must be positive after post-attach apply_token_map; \
+        assert_eq!(
+            font_size_post,
+            48.0,
+            "adapter font size must match the post-attach overridden value (48.0); \
              removing the set_visual_tokens loop in apply_token_map causes this to fail"
         );
 
@@ -1424,9 +1430,10 @@ mod tests {
             .visual_tokens()
             .transcript_font_size_px;
 
-        assert!(
-            font_size_pre_after > 0.0,
-            "pre-existing adapter must also be updated by apply_token_map; \
+        assert_eq!(
+            font_size_pre_after,
+            48.0,
+            "pre-existing adapter must also be updated to 48.0 by apply_token_map; \
              only the new-entry path in attach() being correct is not sufficient"
         );
     }
