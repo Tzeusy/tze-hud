@@ -237,8 +237,7 @@ mod tests {
                 .sum();
             assert!(
                 run_count >= 1,
-                "expected at least one layout run for family {:?}, got 0",
-                family
+                "expected at least one layout run for family {family:?}, got 0"
             );
         }
     }
