@@ -2689,6 +2689,7 @@ impl SceneGraph {
         self.overlay.tile_scroll_configs.remove(&tile_id);
         self.overlay.tile_scroll_offsets.remove(&tile_id);
         self.overlay.tile_follow_tail_at_tail.remove(&tile_id);
+        self.overlay.drag_active_elements.remove(&tile_id);
     }
 
     // ─── Queries ─────────────────────────────────────────────────────────
