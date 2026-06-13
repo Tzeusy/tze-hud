@@ -2450,10 +2450,7 @@ impl Compositor {
         // the *next* call.  Summing item lengths is O(n) in item count here, but
         // this only runs when a prime is allowed (not on every deferred frame),
         // so it stays within the prime-time O(n) budget.
-        self.resize_reprime_content_bytes = live_items
-            .iter()
-            .map(|item| item.text.len())
-            .sum();
+        self.resize_reprime_content_bytes = live_items.iter().map(|item| item.text.len()).sum();
 
         let mut live_keys = rasterizer.prime_truncation_cache(&live_items);
 
