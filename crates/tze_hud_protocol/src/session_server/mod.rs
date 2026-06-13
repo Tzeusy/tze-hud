@@ -63,17 +63,20 @@ use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation
 use tze_hud_scene::types::*;
 use tze_hud_widget::{RuntimeWidgetAssetError, register_runtime_widget_svg_asset};
 
-// ─── Submodules (SS-1: leaf types; SS-2: freeze queue; SS-3: upload worker) ──
+// ─── Submodules (SS-1..SS-4) ─────────────────────────────────────────────────
 
 pub mod config;
 pub mod freeze_queue;
 pub mod lifecycle;
+pub mod stream_session;
 pub mod traffic;
 pub mod upload;
 
 pub use config::SessionConfig;
 use freeze_queue::{FREEZE_QUEUE_CAPACITY, FreezeEnqueueResult, SessionFreezeQueue};
 pub use lifecycle::SessionState;
+pub use stream_session::CapabilityRevocationEvent;
+use stream_session::{ActiveMediaIngressStream, StreamSession};
 pub use traffic::{TrafficClass, classify_server_payload};
 use upload::{UploadByteRateLimiter, UploadWorkerCommand, UploadWorkerEvent, run_upload_worker};
 
@@ -472,181 +475,12 @@ use tze_hud_scene::events::emission::{
     AgentEventRateLimiter, DEFAULT_MAX_EVENTS_PER_SECOND, MAX_PAYLOAD_BYTES,
 };
 
-// ─── Session state ──────────────────────────────────────────────────────────
-
-/// Per-session state tracked by the streaming server.
-struct StreamSession {
-    session_id: String,
-    namespace: String,
-    agent_name: String,
-    /// Capabilities explicitly granted at handshake (from `requested_capabilities`).
-    capabilities: Vec<String>,
-    /// Authorization scope for subscription and capability-request checks.
-    /// For unrestricted PSK sessions this is `vec!["*"]`; for restricted agents
-    /// it mirrors `capabilities`. Used for gating subscriptions and mid-session
-    /// CapabilityRequest evaluation.
-    policy_capabilities: Vec<String>,
-    lease_ids: Vec<tze_hud_scene::SceneId>,
-    subscriptions: Vec<String>,
-    /// Fine-grained event type prefix filters per subscription category (RFC 0010 §7.2).
-    ///
-    /// When an agent subscribes with a `filter_prefix` (via `SubscriptionChange.subscribe_filter`),
-    /// the filter is stored here keyed by category name. Categories not present in this map
-    /// use the category's default prefix. Filters are removed when the category is unsubscribed.
-    subscription_filters: std::collections::HashMap<String, String>,
-    server_sequence: u64,
-    resume_token: Vec<u8>,
-    last_heartbeat_ms: u64,
-
-    /// Current lifecycle state (RFC 0005 §1.1).
-    state: SessionState,
-
-    /// Last validated client-side sequence number (RFC 0005 §2.3).
-    /// Initialized to 1 during session init/resume (treating the handshake message as
-    /// sequence 1). Each subsequent validated message must carry a strictly greater
-    /// sequence number within `max_sequence_gap` of the previous.
-    last_client_sequence: u64,
-
-    /// Whether safe mode is active for this session (RFC 0005 §3.7).
-    /// When true, MutationBatch messages are rejected with SAFE_MODE_ACTIVE.
-    safe_mode_active: bool,
-
-    /// Whether the agent indicated `expect_resume=true` in SessionClose (RFC 0005 §1.5).
-    /// When true, leases are held for the full reconnect grace period.
-    expect_resume: bool,
-
-    /// Sliding-window rate limiter for agent scene event emission.
-    ///
-    /// Tracks per-session event timestamps for the 1-second sliding window.
-    /// Default limit: [`DEFAULT_MAX_EVENTS_PER_SECOND`] events/second
-    /// (spec: scene-events/spec.md §5.4).
-    agent_event_rate_limiter: AgentEventRateLimiter,
-
-    /// Per-session mutation queue for freeze semantics (system-shell/spec.md §Freeze Scene).
-    ///
-    /// When `SharedState.freeze_active` is true, incoming MutationBatch messages
-    /// are enqueued here rather than applied to the scene. On unfreeze, all queued
-    /// mutations are applied in submission order.
-    ///
-    /// The shell owns freeze state transitions; the session server owns the queue.
-    freeze_queue: SessionFreezeQueue,
-
-    /// Wall-clock time (UTC µs since epoch) at which this session was opened.
-    /// Used for TIMESTAMP_TOO_OLD validation of TimingHints (RFC 0003 §3.5).
-    session_open_at_wall_us: u64,
-
-    /// Per-session MutationBatch deduplication window (RFC 0005 §5.2).
-    dedup_window: DedupWindow,
-
-    /// Per-session lease-operation correlation cache (RFC 0005 §5.3).
-    ///
-    /// Maps client sequence number → cached `LeaseResponse` payload.  On
-    /// retransmit the server replays the cached response without re-applying
-    /// the lease operation, preserving at-least-once semantics with
-    /// idempotent handling.
-    lease_correlation_cache: LeaseCorrelationCache,
-
-    /// Per-session upload-byte limiter for resident resource transport.
-    resource_upload_rate_limiter: UploadByteRateLimiter,
-
-    /// Active Windows media ingress stream for the one-stream exemplar slice.
-    media_ingress: Option<ActiveMediaIngressStream>,
-
-    /// Next non-zero stream epoch assigned by this session.
-    next_media_stream_epoch: u64,
-}
-
-#[derive(Clone, Debug)]
-struct ActiveMediaIngressStream {
-    stream_epoch: u64,
-    zone_name: String,
-    surface_id: tze_hud_scene::SceneId,
-}
-
-impl StreamSession {
-    fn next_server_seq(&mut self) -> u64 {
-        self.server_sequence += 1;
-        self.server_sequence
-    }
-
-    /// Transition to a new state. Returns the previous state.
-    fn transition(&mut self, new_state: SessionState) -> SessionState {
-        let prev = self.state.clone();
-        self.state = new_state;
-        prev
-    }
-
-    /// Validate an inbound client sequence number per RFC 0005 §2.3.
-    ///
-    /// Returns `Ok(())` if valid, or an error string with the appropriate
-    /// SessionError code if the sequence is regressed or the gap is too large.
-    fn validate_client_sequence(
-        &mut self,
-        seq: u64,
-        max_gap: u64,
-    ) -> Result<(), (&'static str, String)> {
-        if seq <= self.last_client_sequence {
-            return Err((
-                "SEQUENCE_REGRESSION",
-                format!(
-                    "sequence regression: received {seq}, last was {}",
-                    self.last_client_sequence
-                ),
-            ));
-        }
-        // "gap" per spec (RFC 0005 §2.3) = seq − last_seq.
-        // Reject if gap > max_sequence_gap (default 100).
-        // Example: last=5, seq=105 → gap=100 = max_gap → accepted (not strictly greater).
-        //          last=5, seq=106 → gap=101 > max_gap=100 → rejected.
-        //          last=5, seq=150 (spec example) → gap=145 > 100 → rejected.
-        let gap = seq - self.last_client_sequence;
-        if gap > max_gap {
-            return Err((
-                "SEQUENCE_GAP_EXCEEDED",
-                format!(
-                    "sequence gap {gap} exceeds max {max_gap}: received {seq}, last was {}",
-                    self.last_client_sequence
-                ),
-            ));
-        }
-        self.last_client_sequence = seq;
-        Ok(())
-    }
-
-    fn next_media_epoch(&mut self) -> u64 {
-        let epoch = self.next_media_stream_epoch.max(1);
-        self.next_media_stream_epoch = epoch.saturating_add(1).max(1);
-        epoch
-    }
-}
-
 /// Broadcast channel capacity for transactional server-push messages.
 ///
 /// Runtime-injected input events use this channel as well as degradation and
 /// revocation notices. Keep enough headroom for short key/pointer bursts while
 /// a session handler is also processing mutation responses.
 const BROADCAST_CHANNEL_CAPACITY: usize = 1024;
-
-// ─── Capability Revocation Event ─────────────────────────────────────────────
-
-/// A runtime-initiated capability revocation command broadcast to all session handlers.
-///
-/// When the runtime calls [`HudSessionImpl::revoke_capability_on_lease`], it broadcasts
-/// this event. Each session handler checks whether any of its leases match `lease_id`
-/// and, if so, applies the revocation to the scene graph and notifies the agent via
-/// `CapabilityNotice(revoked=[capability_name])` and a `LeaseStateChange` audit event.
-/// A null `lease_id` is reserved for runtime-global session capabilities that
-/// are not represented in scene-graph leases, currently only `media_ingress`.
-///
-/// RFC 0001 §3.3: capability checks are enforced at mutation time against the live scope,
-/// not merely at grant time.
-#[derive(Clone, Debug)]
-pub struct CapabilityRevocationEvent {
-    /// The lease to narrow, or null for an explicit runtime-global session-capability revocation.
-    pub lease_id: tze_hud_scene::SceneId,
-    /// Canonical name of the capability to remove (e.g. `"create_tiles"`, `"publish_zone:subtitle"`).
-    pub capability_name: String,
-}
 
 // ─── Service implementation ─────────────────────────────────────────────────
 
