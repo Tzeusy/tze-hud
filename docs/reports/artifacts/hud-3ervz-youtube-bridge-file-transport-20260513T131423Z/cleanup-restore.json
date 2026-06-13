@@ -1,0 +1,28 @@
+{
+    "stopped_isolated_pids":  [
+                                  27312
+                              ],
+    "deleted_temp_tasks":  [
+                               "TzeHudI1nrqRetry012749",
+                               "TzeHud3ervzCapture",
+                               "TzeHud3ervzSidecar"
+                           ],
+    "benchmark_ports_ready":  true,
+    "listeners":  [
+                      {
+                          "LocalAddress":  "0.0.0.0",
+                          "LocalPort":  50051,
+                          "OwningProcess":  31444
+                      },
+                      {
+                          "LocalAddress":  "0.0.0.0",
+                          "LocalPort":  9090,
+                          "OwningProcess":  31444
+                      }
+                  ],
+    "processes":  {
+                      "ProcessId":  31444,
+                      "ExecutablePath":  "C:\\tze_hud\\tze_hud.exe",
+                      "CommandLine":  "\"C:\\tze_hud\\tze_hud.exe\" --config C:\\tze_hud\\benchmark.toml --window-mode overlay --grpc-port 50051 --mcp-port 9090 "
+                  }
+}

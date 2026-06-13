@@ -1,0 +1,147 @@
+{
+  "agent_id": "windows-youtube-frame-bridge",
+  "assigned_surface_id_hex": "019e217d12127320ab6588717896baa0",
+  "audio_route_to_hud": "none",
+  "blocked_reason": "MediaIngressOpen admitted the bridge lane and official-player frames were captured, but HUD pixel/readback proof still requires an exclusive Windows validation window",
+  "bridge_path_name": "operator-visible-official-player-window-capture-to-media-ingress-open",
+  "bridge_sink": "HUD media ingress approved zone",
+  "bridge_source": "operator-visible official YouTube player sidecar",
+  "cache_or_offline_copy": "not_used",
+  "client_stream_id": "64c6cd5b29de4b5bb426574c2f653e72",
+  "close_reason": "AGENT_CLOSED",
+  "download_or_extraction": "not_used",
+  "frame_capture": {
+    "adapter": "windows-visible-player-copyfromscreen-frame-capture",
+    "audio_route_to_hud": "none",
+    "cache_or_offline_copy": "not_used",
+    "capture_api": "System.Drawing.Graphics.CopyFromScreen",
+    "capture_surface": "operator-visible official YouTube player window",
+    "capture_validated": true,
+    "captured_frame_count": 5,
+    "captured_frames": [
+      {
+        "index": 0,
+        "mean_rgb": [
+          46.3,
+          32.45,
+          22.28
+        ],
+        "png_bytes": 1683618,
+        "sampled_pixels": 64,
+        "sha256": "3005611ec134d34132d6addc7a8cedc16843f9bb255acd68586a4675ecc8c586"
+      },
+      {
+        "index": 1,
+        "mean_rgb": [
+          46.3,
+          32.45,
+          22.28
+        ],
+        "png_bytes": 1683618,
+        "sampled_pixels": 64,
+        "sha256": "3005611ec134d34132d6addc7a8cedc16843f9bb255acd68586a4675ecc8c586"
+      },
+      {
+        "index": 2,
+        "mean_rgb": [
+          23.95,
+          16.38,
+          15.03
+        ],
+        "png_bytes": 1134671,
+        "sampled_pixels": 64,
+        "sha256": "1e556547a0e9d30a69bda78761b2f78bfad422b1027c10fd3a27916dc104f7e5"
+      },
+      {
+        "index": 3,
+        "mean_rgb": [
+          7.22,
+          7.69,
+          9.73
+        ],
+        "png_bytes": 109167,
+        "sampled_pixels": 64,
+        "sha256": "435d3bcda0ecc5180e44b1ad82939f9a08ea7494fd07b407cee6b9695fb386d4"
+      },
+      {
+        "index": 4,
+        "mean_rgb": [
+          6.53,
+          6.86,
+          8.69
+        ],
+        "png_bytes": 92317,
+        "sampled_pixels": 64,
+        "sha256": "92bbb584800bbd35071117e339d79afd068b44316aa1b4404279ae8566536804"
+      }
+    ],
+    "distinct_frame_hashes": 4,
+    "download_or_extraction": "not_used",
+    "fixture_json": "docs/reports/artifacts/hud-3ervz-youtube-bridge-file-transport-20260513T131423Z/frame-capture-live.json",
+    "official_player_url": "https://www.youtube.com/embed/O0FGCxkHM-U",
+    "operator_visible_player_controls": true,
+    "playback_click_sent": true,
+    "saved_frame_files": [],
+    "selected_window_moved_to_primary": true,
+    "selected_window_visible_area": 2956800,
+    "video_id": "O0FGCxkHM-U",
+    "window": {
+      "height": 1232,
+      "left": 80,
+      "title": "tze_hud YouTube source evidence O0FGCxkHM-U - Google Chrome",
+      "top": 80,
+      "width": 2400
+    }
+  },
+  "held_seconds": 5.0,
+  "hud_runtime_receives_youtube_frames": false,
+  "lane": "youtube-official-player-frame-bridge",
+  "live_pixel_proof_required": true,
+  "media_ingress_entrypoint": "MediaIngressOpen",
+  "media_ingress_open_admitted": true,
+  "media_ingress_open_attempted": true,
+  "official_player_url": "https://www.youtube.com/embed/O0FGCxkHM-U",
+  "operator_visible_player_controls": true,
+  "policy_review": {
+    "audio_route_to_hud": "none",
+    "bridge_path_name": "operator-visible-official-player-window-capture-to-media-ingress-open",
+    "hud_ingress_source": "official-player raw-frame bridge or self-owned/local fallback; both enter through MediaIngressOpen",
+    "official_player_url": "https://www.youtube.com/embed/O0FGCxkHM-U",
+    "operator_visible_player_controls": "required",
+    "prohibited_paths": [
+      "yt-dlp",
+      "youtube-dl",
+      "googlevideo.com",
+      "videoplayback",
+      "download",
+      "cache",
+      "direct media url",
+      "audio route"
+    ],
+    "rationale": "Operator/maintainer approval recorded on 2026-05-12 permits a narrow Windows-only raw-frame bridge from an operator-visible official YouTube player sidecar into the HUD media ingress path. The bridge remains video-only and does not download, extract, cache, route audio, or embed a browser in the compositor.",
+    "raw_youtube_frame_bridge": "approved_operator_visible_player_frame_bridge",
+    "youtube_video_id": "O0FGCxkHM-U"
+  },
+  "sdp_offer_bytes": 743,
+  "selected_codec": "VIDEO_H264_BASELINE",
+  "sidecar": {
+    "audio_route_to_hud": "none",
+    "cache_or_offline_copy": "not_used",
+    "download_or_extraction": "not_used",
+    "html_evidence_path": "docs/reports/artifacts/hud-3ervz-youtube-bridge-file-transport-20260513T131423Z/youtube_source_evidence.html",
+    "hud_runtime_receives_youtube_frames": false,
+    "lane": "youtube-source-evidence",
+    "launched_by": "ssh:tzeus@tzehouse-windows.parrot-hen.ts.net",
+    "official_player_url": "https://www.youtube.com/embed/O0FGCxkHM-U",
+    "operator_visible_player_controls": true,
+    "raw_youtube_frame_bridge": "approved_operator_visible_player_frame_bridge",
+    "video_id": "O0FGCxkHM-U"
+  },
+  "source_label": "youtube-official-player-frame-bridge",
+  "started_at_unix": 1778678305,
+  "stream_epoch": 1,
+  "target": "tzehouse-windows.parrot-hen.ts.net:50052",
+  "video_id": "O0FGCxkHM-U",
+  "video_only": true,
+  "zone_name": "media-pip"
+}

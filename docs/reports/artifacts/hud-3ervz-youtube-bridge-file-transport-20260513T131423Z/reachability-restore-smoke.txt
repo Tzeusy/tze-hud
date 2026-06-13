@@ -1,0 +1,6 @@
+pong from tzehouse-windows (100.87.181.125) via [2406:3003:2001:183a:a520:9eff:6175:c960]:41641 in 4ms
+tzehouse\tzeus
+tzehouse\hudbot
+22 open
+50051 open
+9090 open

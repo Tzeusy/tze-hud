@@ -1,8 +1,11 @@
 import unittest
 import asyncio
+import base64
 import json
+import subprocess
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import windows_media_ingress_exemplar as exemplar
 
@@ -219,6 +222,149 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
             evidence = exemplar.load_frame_capture_fixture(str(fixture_path), args)
 
             self.assertTrue(evidence["capture_validated"])
+
+    def test_remote_frame_capture_uses_script_file_transport(self):
+        args = exemplar.build_parser().parse_args(
+            [
+                "youtube-bridge",
+                "--windows-host",
+                "tzehouse-windows.parrot-hen.ts.net",
+                "--windows-user",
+                "tzeus",
+                "--ssh-key",
+                "~/.ssh/ecdsa_home",
+                "--allow-static-captured-frames",
+            ]
+        )
+
+        commands = []
+
+        def fake_run(cmd, **_kwargs):
+            commands.append(cmd)
+            if cmd[0] == "scp" and len(cmd) >= 3 and cmd[-2].endswith("/stdout.txt"):
+                Path(cmd[-1]).write_bytes(
+                    json.dumps(valid_frame_capture_fixture()).encode("utf-16")
+                )
+            elif cmd[0] == "scp" and len(cmd) >= 3 and cmd[-2].endswith("/stderr.txt"):
+                Path(cmd[-1]).write_text("", encoding="utf-8")
+            elif cmd[0] == "scp" and len(cmd) >= 3 and cmd[-2].endswith("/rc.txt"):
+                Path(cmd[-1]).write_text("0", encoding="ascii")
+            stdout = "0\n" if "-EncodedCommand" in cmd else ""
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+            )
+
+        with mock.patch.object(
+            exemplar.subprocess,
+            "run",
+            side_effect=fake_run,
+        ), mock.patch.object(exemplar.time, "sleep"):
+            evidence = exemplar.run_windows_frame_capture(args)
+
+        upload_commands = [
+            cmd for cmd in commands if cmd[0] == "scp" and cmd[-1].endswith(".ps1")
+        ]
+        create_commands = [
+            cmd for cmd in commands if cmd[:1] == ["ssh"] and "/Create" in cmd
+        ]
+        self.assertEqual(len(upload_commands), 2)
+        self.assertTrue(create_commands)
+        create_command = create_commands[0]
+        self.assertIn("/IT", create_command)
+        self.assertIn("/TR", create_command)
+        task_index = create_command.index("/TR") + 1
+        task_command = create_command[task_index]
+        self.assertTrue(task_command.startswith('"'))
+        self.assertTrue(task_command.endswith('"'))
+        task_command = task_command.strip('"')
+        self.assertIn("-NonInteractive", task_command)
+        self.assertIn("-File", task_command)
+        self.assertIn("C:\\tze_hud\\tmp\\tze_hud_frame_capture_", task_command)
+        self.assertTrue(
+            any(cmd[0] == "scp" and cmd[-2].endswith("/stdout.txt") for cmd in commands)
+        )
+        self.assertTrue(evidence["capture_validated"])
+
+        encoded_commands = [
+            cmd for cmd in commands if cmd[:1] == ["ssh"] and "-EncodedCommand" in cmd
+        ]
+        self.assertTrue(encoded_commands)
+        mkdir_command = encoded_commands[0]
+        mkdir_encoded = mkdir_command[mkdir_command.index("-EncodedCommand") + 1]
+        mkdir_decoded = base64.b64decode(mkdir_encoded).decode("utf-16le")
+        self.assertIn("New-Item -ItemType Directory -Force -Path", mkdir_decoded)
+        self.assertNotIn("-LiteralPath", mkdir_decoded)
+        for cmd in encoded_commands:
+            self.assertIn("-NonInteractive", cmd)
+
+    def test_remote_youtube_sidecar_uses_short_visible_task_action(self):
+        args = exemplar.build_parser().parse_args(
+            [
+                "youtube-sidecar",
+                "--windows-host",
+                "tzehouse-windows.parrot-hen.ts.net",
+                "--windows-user",
+                "tzeus",
+                "--ssh-key",
+                "~/.ssh/ecdsa_home",
+            ]
+        )
+
+        commands = []
+
+        def fake_run(cmd, **_kwargs):
+            commands.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory(dir=".") as tmpdir, mock.patch.object(
+            exemplar.subprocess,
+            "run",
+            side_effect=fake_run,
+        ):
+            args.output_dir = tmpdir
+            evidence = exemplar.launch_youtube_sidecar(args)
+
+        create_commands = [
+            cmd for cmd in commands if cmd[:1] == ["ssh"] and "/Create" in cmd
+        ]
+        self.assertTrue(create_commands)
+        create_command = create_commands[0]
+        task_command = create_command[create_command.index("/TR") + 1]
+        self.assertTrue(task_command.startswith('"'))
+        self.assertTrue(task_command.endswith('"'))
+        task_command = task_command.strip('"')
+        self.assertIn("-Command Start-Process", task_command)
+        self.assertIn("C:\\tze_hud\\tmp\\tze_hud_youtube_sidecar_", task_command)
+        self.assertLess(len(task_command), 261)
+        self.assertEqual(
+            evidence["launched_by"],
+            "ssh:tzeus@tzehouse-windows.parrot-hen.ts.net",
+        )
+
+    def test_windows_text_fallback_accepts_bomless_utf16le(self):
+        with tempfile.TemporaryDirectory(dir=".") as tmpdir:
+            output_path = Path(tmpdir) / "stdout.txt"
+            output_path.write_bytes("tze_hud\n".encode("utf-16-le"))
+
+            self.assertEqual(
+                exemplar._read_text_with_windows_fallback(output_path),
+                "tze_hud\n",
+            )
+
+    def test_generated_remote_paths_are_strictly_validated(self):
+        with self.assertRaisesRegex(ValueError, "approved remote temp path"):
+            exemplar.validate_windows_remote_tmp_path(
+                "remote_dir",
+                "C:\\tze_hud\\tmp\\bad;Remove-Item",
+            )
 
     def test_youtube_bridge_parser_defaults_to_bridge_agent(self):
         args = exemplar.build_parser().parse_args(

@@ -1,0 +1,8 @@
+﻿No visible official YouTube player window found for O0FGCxkHM-U
+At C:\tze_hud\tmp\hud-3ervz\frame-capture.ps1:109 char:5
++     throw "No visible official YouTube player window found for $Video ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (No visible offi...for O0FGCxkHM-U:String) [], RuntimeException
+    + FullyQualifiedErrorId : No visible official YouTube player window found for O0FGCxkHM-U
+ 
+

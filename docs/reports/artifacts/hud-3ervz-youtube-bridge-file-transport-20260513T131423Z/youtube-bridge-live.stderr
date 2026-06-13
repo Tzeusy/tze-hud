@@ -1,0 +1,19 @@
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>Traceback (most recent call last):
+  File "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-i1nrq/.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py", line 1050, in <module>
+    raise SystemExit(main())
+  File "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-i1nrq/.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py", line 1040, in main
+    evidence = asyncio.run(run_youtube_bridge(args))
+  File "/home/tze/.pyenv/versions/3.10.12/lib/python3.10/asyncio/runners.py", line 44, in run
+    return loop.run_until_complete(main)
+  File "/home/tze/.pyenv/versions/3.10.12/lib/python3.10/asyncio/base_events.py", line 649, in run_until_complete
+    return future.result()
+  File "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-i1nrq/.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py", line 857, in run_youtube_bridge
+    frame_capture_evidence = run_windows_frame_capture(args)
+  File "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-i1nrq/.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py", line 761, in run_windows_frame_capture
+    proc = _run_remote_powershell_script_file(
+  File "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-i1nrq/.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py", line 378, in _run_remote_powershell_script_file
+    return subprocess.run(
+  File "/home/tze/.pyenv/versions/3.10.12/lib/python3.10/subprocess.py", line 526, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-l', 'tzeus', '-i', '/home/tze/.ssh/ecdsa_home', 'tzehouse-windows.parrot-hen.ts.net', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\tze_hud\\tmp\\tze_hud_frame_capture_dff5dcd56b1b45698238f2a519aff9a4.ps1']' returned non-zero exit status 1.
