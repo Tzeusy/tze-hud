@@ -2127,6 +2127,62 @@ fn parse_scene_id(s: &str) -> McpResult<SceneId> {
         .map_err(|e| McpError::InvalidId(format!("invalid UUID '{s}': {e}")))
 }
 
+// ─── inject_composer_paste ────────────────────────────────────────────────────
+
+/// Parameters for `inject_composer_paste`.
+#[derive(Debug, Deserialize)]
+pub struct InjectComposerPasteParams {
+    /// Text to inject into the active composer draft buffer.
+    ///
+    /// CR, LF, and control characters are stripped by the runtime before
+    /// insertion (spec §4.4). The runtime paste path enforces the draft cap
+    /// (DEFAULT_DRAFT_CAP = 4096 bytes); excess is silently truncated at a
+    /// grapheme-cluster boundary.
+    pub text: String,
+}
+
+/// Response from `inject_composer_paste`.
+#[derive(Debug, Serialize)]
+pub struct InjectComposerPasteResult {
+    /// Whether the text was injected into an active composer.
+    /// `false` when no composer region is currently focused.
+    pub injected: bool,
+    /// Number of UTF-8 bytes in the text as received (before sanitisation).
+    pub text_len: usize,
+}
+
+/// Inject text into the active composer draft buffer.
+///
+/// Forwards the text over the `paste_inject_tx` channel. The windowed runtime
+/// drains the channel on each event-loop iteration and calls
+/// `InputProcessor::inject_paste_to_composer`. If no channel is wired
+/// (headless or channel not configured), returns `injected: false`.
+///
+/// # Errors
+/// - `invalid_params` if `text` is empty.
+pub fn handle_inject_composer_paste(
+    params: serde_json::Value,
+    paste_inject_tx: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+) -> crate::types::McpResult<InjectComposerPasteResult> {
+    let p: InjectComposerPasteParams = parse_params(params)?;
+
+    if p.text.is_empty() {
+        return Err(crate::error::McpError::InvalidParams(
+            "text must be non-empty".to_string(),
+        ));
+    }
+
+    let text_len = p.text.len();
+
+    let injected = if let Some(tx) = paste_inject_tx {
+        tx.send(p.text).is_ok()
+    } else {
+        false
+    };
+
+    Ok(InjectComposerPasteResult { injected, text_len })
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

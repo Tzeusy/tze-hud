@@ -1290,6 +1290,11 @@ struct WindowedRuntimeState {
         tokio::sync::mpsc::UnboundedReceiver<tze_hud_protocol::session::InputCaptureCommand>,
     pending_input_capture_commands:
         std::collections::VecDeque<tze_hud_protocol::session::InputCaptureCommand>,
+    /// Runtime paste-injection channel from MCP `inject_composer_paste` tool.
+    ///
+    /// Drained on each `about_to_wait` iteration, matching the
+    /// `drain_input_capture_commands` sibling pattern.
+    paste_inject_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     /// Focus manager — tracks which node / tile has keyboard focus per tab.
     ///
     /// Updated on every pointer-down via `InputProcessor::process_with_focus`.
@@ -1475,6 +1480,7 @@ impl ApplicationHandler for WinitApp {
         }
         self.refresh_cursor_position_from_os();
         self.drain_input_capture_commands();
+        self.drain_paste_inject();
         self.synthesize_left_release_if_physically_up();
         self.refresh_widget_hover_tracking();
         self.update_overlay_cursor_hittest();
@@ -2377,6 +2383,23 @@ impl WinitApp {
                         dispatch_capture_released_event(&self.state.input_event_tx, dispatch);
                     }
                 }
+                // ComposerPasteInject is handled by drain_paste_inject via the
+                // paste_inject_rx channel; it does not travel through
+                // input_capture_rx and should never appear here.
+                tze_hud_protocol::session::InputCaptureCommand::ComposerPasteInject { .. } => {
+                    tracing::warn!("ComposerPasteInject arrived on input_capture_rx — ignored");
+                }
+            }
+        }
+    }
+
+    fn drain_paste_inject(&mut self) {
+        while let Ok(text) = self.state.paste_inject_rx.try_recv() {
+            let input_started = std::time::Instant::now();
+            let (outcome, _batch) = self.state.input_processor.inject_paste_to_composer(&text);
+            if outcome != tze_hud_input::EditOutcome::Unchanged {
+                tracing::debug!(outcome = ?outcome, "composer: paste injected via runtime API");
+                self.push_local_composer_echo(input_started);
             }
         }
     }
@@ -4480,6 +4503,7 @@ impl WindowedRuntime {
         // Scene coherence: the MCP server and gRPC session server share the
         // same `Arc<Mutex<SceneGraph>>` (`shared_scene`).  Mutations applied
         // over gRPC are immediately visible to MCP queries and vice versa.
+        let (paste_inject_tx, paste_inject_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         if cfg.mcp_port > 0 {
             // Ensure we have a network runtime to host the MCP task. If gRPC
             // was disabled (grpc_port == 0), network_rt is None and we need
@@ -4523,6 +4547,7 @@ impl WindowedRuntime {
                     Arc::clone(&shared_scene),
                     mcp_config,
                     mcp_shutdown,
+                    Some(paste_inject_tx),
                 )) {
                     Ok(handle) => {
                         network_handles.push(handle);
@@ -4563,6 +4588,7 @@ impl WindowedRuntime {
             input_processor: InputProcessor::new(),
             input_capture_rx,
             pending_input_capture_commands: std::collections::VecDeque::new(),
+            paste_inject_rx,
             focus_manager: FocusManager::new(),
             keyboard_processor: KeyboardProcessor::new(),
             telemetry: TelemetryCollector::new(),

@@ -74,6 +74,7 @@ pub async fn start_mcp_http_server(
     scene: Arc<Mutex<SceneGraph>>,
     config: McpServerConfig,
     shutdown: ShutdownToken,
+    paste_inject_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -83,8 +84,12 @@ pub async fn start_mcp_http_server(
         "MCP HTTP listener bound"
     );
 
-    let server =
-        Arc::new(McpServer::with_shared_scene(scene).with_config(McpConfig::with_psk(&config.psk)));
+    let mut server_builder =
+        McpServer::with_shared_scene(scene).with_config(McpConfig::with_psk(&config.psk));
+    if let Some(tx) = paste_inject_tx {
+        server_builder = server_builder.with_paste_inject_tx(tx);
+    }
+    let server = Arc::new(server_builder);
 
     let handle = tokio::spawn(async move {
         run_accept_loop(listener, server, shutdown, local_addr).await;
@@ -306,7 +311,7 @@ mod tests {
         let config = make_config(0, "test-psk");
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone())
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
             .await
             .expect("bind should succeed");
 
@@ -334,7 +339,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone())
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
             .await
             .expect("bind");
 
@@ -373,7 +378,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone())
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
             .await
             .expect("bind");
 
@@ -407,7 +412,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone())
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
             .await
             .expect("bind");
 
@@ -474,7 +479,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone())
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
             .await
             .expect("bind");
 
@@ -509,7 +514,7 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone())
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None)
             .await
             .expect("bind");
 
