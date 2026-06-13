@@ -1237,7 +1237,7 @@ default_tab = true
         let record_published_at =
             scene.zone_registry.active_for_zone("alert-banner")[0].published_at_wall_us;
 
-        scene.zone_hit_regions.push(ZoneHitRegion {
+        scene.overlay.zone_hit_regions.push(ZoneHitRegion {
             zone_name: "alert-banner".to_string(),
             published_at_wall_us: record_published_at,
             publisher_namespace: "test-agent".to_string(),
@@ -1306,7 +1306,7 @@ default_tab = true
             "notification must be removed after dismiss pointer-up [hud-ltgk.6 regression]"
         );
         assert!(
-            scene.zone_hit_regions.is_empty(),
+            scene.overlay.zone_hit_regions.is_empty(),
             "stale hit-region must be pruned after dismiss [local feedback first]"
         );
 

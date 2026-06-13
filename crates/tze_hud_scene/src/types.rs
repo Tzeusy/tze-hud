@@ -1894,7 +1894,7 @@ pub enum DragHandleElementKind {
 /// Zone content (e.g. notification slots) is rendered by the compositor, which
 /// also computes the pixel-space bounds of interactive affordances such as
 /// dismiss buttons and action buttons.  These bounds are written back into
-/// `SceneGraph::zone_hit_regions` each frame so that the hit-test pipeline can
+/// `SceneGraph::overlay.zone_hit_regions` each frame so that the hit-test pipeline can
 /// route pointer and keyboard events to zone interactions without requiring
 /// agent-owned tiles.
 ///
@@ -1970,7 +1970,7 @@ pub struct DragHandleLocalState {
 /// Contains a single "Reset to default" action.  Auto-dismisses after 3 s or
 /// on click-outside.
 ///
-/// Stored in `SceneGraph::drag_handle_context_menu` (ephemerally; never
+/// Stored in `SceneGraph::overlay.drag_handle_context_menu` (ephemerally; never
 /// serialised).  The compositor renders it as a chrome-layer overlay and
 /// registers its pixel bounds in `context_menu_hit_rect` so the input path
 /// can route a left-click to the reset action.

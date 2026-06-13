@@ -16,6 +16,97 @@ fn default_clock() -> Arc<dyn Clock> {
     Arc::new(SystemClock::new())
 }
 
+/// Transient per-frame state owned by the runtime and compositor layers.
+///
+/// These fields are all `#[serde(skip)]` — they are never serialized and carry
+/// no durable scene-model semantics.  They are grouped here so that
+/// [`SceneGraph`]'s public surface is not polluted with render-scratch details.
+///
+/// Owned by the [`SceneGraph`] as `pub overlay: RuntimeOverlayState`.  The
+/// compositor populates hit regions each frame; the input processor reads and
+/// clears them; the runtime drains pending SVG assets before the render loop.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RuntimeOverlayState {
+    /// Runtime-managed zone interaction hit regions.
+    ///
+    /// Populated by the compositor each frame during `render_zone_content`.
+    /// Contains the display-space bounds of dismiss (×) buttons and action
+    /// buttons for visible notification slots.
+    ///
+    /// The hit-test pipeline checks this list after tile testing when the
+    /// result would otherwise be `Passthrough`, producing a
+    /// [`HitResult::ZoneInteraction`] result for zone-owned affordances.
+    ///
+    /// Ephemeral: skipped during serialization.  Cleared by the compositor
+    /// at the start of each frame before zone geometry is recomputed.
+    #[serde(skip, default)]
+    pub zone_hit_regions: Vec<ZoneHitRegion>,
+    /// Runtime-managed chrome drag-handle hit regions.
+    ///
+    /// Populated by the compositor each frame from currently visible tiles,
+    /// active zones, and active widgets. These are runtime-internal affordances
+    /// and are never serialized or exposed over agent-facing scene mutations.
+    #[serde(skip, default)]
+    pub drag_handle_hit_regions: Vec<DragHandleHitRegion>,
+    /// Local-first hover/press state keyed by drag-handle interaction id.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub drag_handle_states: HashMap<String, DragHandleLocalState>,
+    /// Set of element_ids that are currently being actively dragged.
+    ///
+    /// Written by the input processor on DragActivated and cleared on
+    /// DragReleased / DragCancelled. Read by the compositor to apply v1-
+    /// compatible visual feedback (z-order boost, opacity, 2px highlight border).
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub drag_active_elements: HashSet<SceneId>,
+    /// Chrome-layer context menu shown on right-click / short-tap of a drag handle.
+    ///
+    /// `Some` while the menu is visible; `None` otherwise.  The compositor
+    /// renders this overlay and populates `reset_button_rect` for hit-testing.
+    /// Auto-dismissed by the windowed runtime after 3 s, or on click-outside.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub drag_handle_context_menu: Option<crate::types::DragHandleContextMenuState>,
+    /// Runtime-registered widget SVG assets awaiting compositor registration.
+    ///
+    /// Producers (session/MCP runtime registration paths) enqueue validated SVGs
+    /// here. Consumers (windowed/headless render loops) drain and register them
+    /// with the compositor-side widget renderer before rendering.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub pending_widget_svg_assets: Vec<(String, String, Vec<u8>)>,
+    /// Runtime-owned scroll configs for tiles that opt into local-first scroll.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_scroll_configs: HashMap<SceneId, TileScrollConfig>,
+    /// Runtime-owned local scroll offsets per tile.
+    ///
+    /// Offsets are absolute from the tile content origin and are applied by
+    /// the compositor and hit-testing paths for immediate local feedback.
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_scroll_offsets: HashMap<SceneId, (f32, f32)>,
+    /// Follow-tail anchor state per tile (used by truncation-mode selection).
+    ///
+    /// `true` = tile viewport is at the tail of its content stream (use
+    /// tail-anchored truncation); `false` = scrolled-back (use head-anchored
+    /// truncation, spec task 3.3 append-stability guarantee).
+    ///
+    /// Defaults to `true` for newly registered tiles (new tiles start at tail).
+    /// Set by the runtime layer when `FollowTailAnchor` transitions; read by
+    /// the compositor's truncation-mode selection in `prime_truncation_cache`.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_follow_tail_at_tail: HashMap<SceneId, bool>,
+}
+
 /// The root scene graph.
 ///
 /// Time-dependent operations (lease grant, tab creation timestamps, expiry
@@ -76,84 +167,13 @@ pub struct SceneGraph {
     #[serde(skip, default)]
     pub registered_resources: HashMap<ResourceId, u32>,
 
-    /// Runtime-managed zone interaction hit regions.
+    /// Transient per-frame state owned by the runtime and compositor layers.
     ///
-    /// Populated by the compositor each frame during `render_zone_content`.
-    /// Contains the display-space bounds of dismiss (×) buttons and action
-    /// buttons for visible notification slots.
-    ///
-    /// The hit-test pipeline checks this list after tile testing when the
-    /// result would otherwise be `Passthrough`, producing a
-    /// [`HitResult::ZoneInteraction`] result for zone-owned affordances.
-    ///
-    /// Ephemeral: skipped during serialization.  Cleared by the compositor
-    /// at the start of each frame before zone geometry is recomputed.
+    /// Groups all render-scratch and input-feedback fields that must not pollute
+    /// the pure scene-model public surface.  See [`RuntimeOverlayState`] for the
+    /// full field inventory and lifetime semantics.
     #[serde(skip, default)]
-    pub zone_hit_regions: Vec<ZoneHitRegion>,
-    /// Runtime-managed chrome drag-handle hit regions.
-    ///
-    /// Populated by the compositor each frame from currently visible tiles,
-    /// active zones, and active widgets. These are runtime-internal affordances
-    /// and are never serialized or exposed over agent-facing scene mutations.
-    #[serde(skip, default)]
-    pub drag_handle_hit_regions: Vec<DragHandleHitRegion>,
-    /// Local-first hover/press state keyed by drag-handle interaction id.
-    ///
-    /// Ephemeral: skipped during serialization.
-    #[serde(skip, default)]
-    pub drag_handle_states: HashMap<String, DragHandleLocalState>,
-    /// Set of element_ids that are currently being actively dragged.
-    ///
-    /// Written by the input processor on DragActivated and cleared on
-    /// DragReleased / DragCancelled. Read by the compositor to apply v1-
-    /// compatible visual feedback (z-order boost, opacity, 2px highlight border).
-    ///
-    /// Ephemeral: skipped during serialization.
-    #[serde(skip, default)]
-    pub drag_active_elements: std::collections::HashSet<SceneId>,
-    /// Chrome-layer context menu shown on right-click / short-tap of a drag handle.
-    ///
-    /// `Some` while the menu is visible; `None` otherwise.  The compositor
-    /// renders this overlay and populates `reset_button_rect` for hit-testing.
-    /// Auto-dismissed by the windowed runtime after 3 s, or on click-outside.
-    ///
-    /// Ephemeral: skipped during serialization.
-    #[serde(skip, default)]
-    pub drag_handle_context_menu: Option<crate::types::DragHandleContextMenuState>,
-    /// Runtime-registered widget SVG assets awaiting compositor registration.
-    ///
-    /// Producers (session/MCP runtime registration paths) enqueue validated SVGs
-    /// here. Consumers (windowed/headless render loops) drain and register them
-    /// with the compositor-side widget renderer before rendering.
-    ///
-    /// Ephemeral: skipped during serialization.
-    #[serde(skip, default)]
-    pub pending_widget_svg_assets: Vec<(String, String, Vec<u8>)>,
-    /// Runtime-owned scroll configs for tiles that opt into local-first scroll.
-    ///
-    /// Ephemeral: skipped during serialization.
-    #[serde(skip, default)]
-    pub tile_scroll_configs: HashMap<SceneId, TileScrollConfig>,
-    /// Runtime-owned local scroll offsets per tile.
-    ///
-    /// Offsets are absolute from the tile content origin and are applied by
-    /// the compositor and hit-testing paths for immediate local feedback.
-    /// Ephemeral: skipped during serialization.
-    #[serde(skip, default)]
-    pub tile_scroll_offsets: HashMap<SceneId, (f32, f32)>,
-    /// Follow-tail anchor state per tile (used by truncation-mode selection).
-    ///
-    /// `true` = tile viewport is at the tail of its content stream (use
-    /// tail-anchored truncation); `false` = scrolled-back (use head-anchored
-    /// truncation, spec task 3.3 append-stability guarantee).
-    ///
-    /// Defaults to `true` for newly registered tiles (new tiles start at tail).
-    /// Set by the runtime layer when `FollowTailAnchor` transitions; read by
-    /// the compositor's truncation-mode selection in `prime_truncation_cache`.
-    ///
-    /// Ephemeral: skipped during serialization.
-    #[serde(skip, default)]
-    pub tile_follow_tail_at_tail: HashMap<SceneId, bool>,
+    pub overlay: RuntimeOverlayState,
 }
 
 /// Maximum number of tabs in a scene. RFC 0001 §2.1.
@@ -414,15 +434,7 @@ impl SceneGraph {
             version: 0,
             sequence_number: 0,
             registered_resources: HashMap::new(),
-            zone_hit_regions: Vec::new(),
-            drag_handle_hit_regions: Vec::new(),
-            drag_handle_states: HashMap::new(),
-            drag_active_elements: std::collections::HashSet::new(),
-            drag_handle_context_menu: None,
-            pending_widget_svg_assets: Vec::new(),
-            tile_scroll_configs: HashMap::new(),
-            tile_scroll_offsets: HashMap::new(),
-            tile_follow_tail_at_tail: HashMap::new(),
+            overlay: RuntimeOverlayState::default(),
         }
     }
 
@@ -433,7 +445,7 @@ impl SceneGraph {
         svg_filename: &str,
         svg_bytes: Vec<u8>,
     ) {
-        self.pending_widget_svg_assets.push((
+        self.overlay.pending_widget_svg_assets.push((
             widget_type_id.to_string(),
             svg_filename.to_string(),
             svg_bytes,
@@ -442,7 +454,7 @@ impl SceneGraph {
 
     /// Drain pending runtime widget SVG assets.
     pub fn drain_pending_widget_svg_assets(&mut self) -> Vec<(String, String, Vec<u8>)> {
-        self.pending_widget_svg_assets.drain(..).collect()
+        self.overlay.pending_widget_svg_assets.drain(..).collect()
     }
 
     /// Register local-first scroll config for a tile.
@@ -454,8 +466,9 @@ impl SceneGraph {
         if !self.tiles.contains_key(&tile_id) {
             return Err(ValidationError::TileNotFound { id: tile_id });
         }
-        self.tile_scroll_configs.insert(tile_id, config);
-        self.tile_scroll_offsets
+        self.overlay.tile_scroll_configs.insert(tile_id, config);
+        self.overlay
+            .tile_scroll_offsets
             .entry(tile_id)
             .or_insert((0.0, 0.0));
         Ok(())
@@ -463,13 +476,13 @@ impl SceneGraph {
 
     /// Remove local-first scroll config and offset state for a tile.
     pub fn clear_tile_scroll_config(&mut self, tile_id: SceneId) {
-        self.tile_scroll_configs.remove(&tile_id);
-        self.tile_scroll_offsets.remove(&tile_id);
+        self.overlay.tile_scroll_configs.remove(&tile_id);
+        self.overlay.tile_scroll_offsets.remove(&tile_id);
     }
 
     /// Get the registered local-first scroll config for a tile.
     pub fn tile_scroll_config(&self, tile_id: SceneId) -> Option<TileScrollConfig> {
-        self.tile_scroll_configs.get(&tile_id).copied()
+        self.overlay.tile_scroll_configs.get(&tile_id).copied()
     }
 
     /// Set the tile-local scroll offset used by runtime local feedback.
@@ -482,14 +495,16 @@ impl SceneGraph {
         if !self.tiles.contains_key(&tile_id) {
             return Err(ValidationError::TileNotFound { id: tile_id });
         }
-        self.tile_scroll_offsets
+        self.overlay
+            .tile_scroll_offsets
             .insert(tile_id, (offset_x, offset_y));
         Ok(())
     }
 
     /// Get the current runtime-local scroll offset for a tile.
     pub fn tile_scroll_offset_local(&self, tile_id: SceneId) -> (f32, f32) {
-        self.tile_scroll_offsets
+        self.overlay
+            .tile_scroll_offsets
             .get(&tile_id)
             .copied()
             .unwrap_or((0.0, 0.0))
@@ -512,7 +527,9 @@ impl SceneGraph {
     /// behave as head-anchored by default).
     pub fn set_tile_follow_tail_at_tail(&mut self, tile_id: SceneId, at_tail: bool) {
         if self.tiles.contains_key(&tile_id) {
-            self.tile_follow_tail_at_tail.insert(tile_id, at_tail);
+            self.overlay
+                .tile_follow_tail_at_tail
+                .insert(tile_id, at_tail);
         }
     }
 
@@ -529,7 +546,8 @@ impl SceneGraph {
     /// Non-scrollable static-text tiles must default to `false` so that
     /// `TextOverflow::Ellipsis` shows the beginning of the text, not the end.
     pub fn tile_follow_tail_at_tail(&self, tile_id: SceneId) -> bool {
-        self.tile_follow_tail_at_tail
+        self.overlay
+            .tile_follow_tail_at_tail
             .get(&tile_id)
             .copied()
             .unwrap_or(false)
@@ -2668,9 +2686,9 @@ impl SceneGraph {
         {
             self.remove_node_tree(root_id);
         }
-        self.tile_scroll_configs.remove(&tile_id);
-        self.tile_scroll_offsets.remove(&tile_id);
-        self.tile_follow_tail_at_tail.remove(&tile_id);
+        self.overlay.tile_scroll_configs.remove(&tile_id);
+        self.overlay.tile_scroll_offsets.remove(&tile_id);
+        self.overlay.tile_follow_tail_at_tail.remove(&tile_id);
     }
 
     // ─── Queries ─────────────────────────────────────────────────────────
@@ -2714,7 +2732,7 @@ impl SceneGraph {
     /// (scene-graph/spec.md line 267, RFC 0001 §10).
     pub fn hit_test(&self, x: f32, y: f32) -> HitResult {
         // ── Chrome drag-handle hit regions (global, chrome-priority) ────────
-        for region in &self.drag_handle_hit_regions {
+        for region in &self.overlay.drag_handle_hit_regions {
             if region.hit_region.accepts_pointer && region.bounds.contains_point(x, y) {
                 return HitResult::ZoneInteraction {
                     zone_name: "__chrome_drag_handle__".to_string(),
@@ -2734,7 +2752,7 @@ impl SceneGraph {
         // notification slots). They are populated by the compositor each frame and
         // do not require agent-owned tiles or an active tab. Check them first so
         // they are always available regardless of active_tab state.
-        for region in &self.zone_hit_regions {
+        for region in &self.overlay.zone_hit_regions {
             if region.bounds.contains_point(x, y) {
                 return HitResult::ZoneInteraction {
                     zone_name: region.zone_name.clone(),
@@ -2897,6 +2915,7 @@ impl SceneGraph {
     /// Set hover state for a chrome drag handle interaction id.
     pub fn set_drag_handle_hovered(&mut self, interaction_id: &str, hovered: bool) {
         let state = self
+            .overlay
             .drag_handle_states
             .entry(interaction_id.to_string())
             .or_default();
@@ -2905,22 +2924,23 @@ impl SceneGraph {
 
     /// Mark an element as actively being dragged (show visual feedback).
     pub fn set_drag_active(&mut self, element_id: SceneId) {
-        self.drag_active_elements.insert(element_id);
+        self.overlay.drag_active_elements.insert(element_id);
     }
 
     /// Clear the active drag mark for an element.
     pub fn clear_drag_active(&mut self, element_id: SceneId) {
-        self.drag_active_elements.remove(&element_id);
+        self.overlay.drag_active_elements.remove(&element_id);
     }
 
     /// Returns `true` if the element is currently being dragged.
     pub fn is_drag_active(&self, element_id: SceneId) -> bool {
-        self.drag_active_elements.contains(&element_id)
+        self.overlay.drag_active_elements.contains(&element_id)
     }
 
     /// Set pressed state for a chrome drag handle interaction id.
     pub fn set_drag_handle_pressed(&mut self, interaction_id: &str, pressed: bool) {
         let state = self
+            .overlay
             .drag_handle_states
             .entry(interaction_id.to_string())
             .or_default();
@@ -3730,7 +3750,7 @@ impl SceneGraph {
             }
             // Remove stale hit regions for this publication immediately so
             // pointer/keyboard events can no longer land on them this frame.
-            self.zone_hit_regions.retain(|r| {
+            self.overlay.zone_hit_regions.retain(|r| {
                 !(r.zone_name == zone_name
                     && r.published_at_wall_us == published_at_wall_us
                     && r.publisher_namespace == publisher_namespace)
@@ -4294,7 +4314,7 @@ mod tests {
         // Intentionally do not create/activate a tab
 
         // Add a zone hit region (as the compositor would do each frame)
-        scene.zone_hit_regions.push(ZoneHitRegion {
+        scene.overlay.zone_hit_regions.push(ZoneHitRegion {
             zone_name: "notifications".to_string(),
             published_at_wall_us: 123456,
             publisher_namespace: "test".to_string(),

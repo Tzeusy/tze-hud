@@ -7258,6 +7258,7 @@ impl Compositor {
     ) {
         for entry in handles {
             let local_state = scene
+                .overlay
                 .drag_handle_states
                 .get(&entry.interaction_id)
                 .copied()
@@ -7358,7 +7359,7 @@ impl Compositor {
         scene: &mut SceneGraph,
         handles: Vec<DragHandleEntry>,
     ) {
-        scene.drag_handle_hit_regions.clear();
+        scene.overlay.drag_handle_hit_regions.clear();
         for (tab_order, entry) in (0_u32..).zip(handles.into_iter()) {
             let hit_region = HitRegionNode {
                 bounds: entry.bounds,
@@ -7368,22 +7369,29 @@ impl Compositor {
                 auto_capture: false,
                 ..Default::default()
             };
-            scene.drag_handle_hit_regions.push(DragHandleHitRegion {
-                element_id: entry.element_id,
-                element_kind: entry.element_kind,
-                bounds: entry.bounds,
-                interaction_id: entry.interaction_id,
-                hit_region,
-                tab_order,
-            });
+            scene
+                .overlay
+                .drag_handle_hit_regions
+                .push(DragHandleHitRegion {
+                    element_id: entry.element_id,
+                    element_kind: entry.element_kind,
+                    bounds: entry.bounds,
+                    interaction_id: entry.interaction_id,
+                    hit_region,
+                    tab_order,
+                });
         }
 
         let live: HashSet<String> = scene
+            .overlay
             .drag_handle_hit_regions
             .iter()
             .map(|r| r.interaction_id.clone())
             .collect();
-        scene.drag_handle_states.retain(|k, _| live.contains(k));
+        scene
+            .overlay
+            .drag_handle_states
+            .retain(|k, _| live.contains(k));
     }
 
     // ── Chrome context menu rendering (hud-zc7f) ─────────────────────────────
@@ -7395,7 +7403,7 @@ impl Compositor {
 
     /// Build vertices for the drag-handle reset context menu, if one is showing.
     ///
-    /// Returns an empty `Vec` when `scene.drag_handle_context_menu` is `None`.
+    /// Returns an empty `Vec` when `scene.overlay.drag_handle_context_menu` is `None`.
     /// The menu is rendered as two rects:
     /// - A semi-transparent dark background (the popup container).
     /// - A lighter "Reset to default" button inside it.
@@ -7405,7 +7413,7 @@ impl Compositor {
         sw: f32,
         sh: f32,
     ) -> Vec<RectVertex> {
-        let Some(ref menu) = scene.drag_handle_context_menu else {
+        let Some(ref menu) = scene.overlay.drag_handle_context_menu else {
             return Vec::new();
         };
 
@@ -7445,7 +7453,7 @@ impl Compositor {
 
     /// Recompute the zone interaction hit regions for the current frame.
     ///
-    /// Clears `scene.zone_hit_regions` then repopulates it with dismiss (×)
+    /// Clears `scene.overlay.zone_hit_regions` then repopulates it with dismiss (×)
     /// buttons and action buttons for every visible notification slot in every
     /// Stack zone that contains `ZoneContent::Notification` publications.
     ///
@@ -7467,7 +7475,7 @@ impl Compositor {
     ///
     /// # Called by
     ///
-    /// Called after a frame render completes to refresh `scene.zone_hit_regions`
+    /// Called after a frame render completes to refresh `scene.overlay.zone_hit_regions`
     /// for the next frame's hit-testing.  This prepares `SceneGraph::hit_test` to
     /// return `ZoneInteraction` for zone affordances based on the most recently
     /// rendered layout.
@@ -7479,7 +7487,7 @@ impl Compositor {
         /// Horizontal inset used to position action buttons (matches notification inset).
         const ACTION_INSET: f32 = 9.0;
 
-        scene.zone_hit_regions.clear();
+        scene.overlay.zone_hit_regions.clear();
         let mut tab_order: u32 = 0;
 
         // Sort zone names for deterministic tab-order assignment across frames.
@@ -7551,7 +7559,7 @@ impl Compositor {
                     "zone:{}:dismiss:{}:{}",
                     zone_name, record.published_at_wall_us, record.publisher_namespace,
                 );
-                scene.zone_hit_regions.push(ZoneHitRegion {
+                scene.overlay.zone_hit_regions.push(ZoneHitRegion {
                     zone_name: zone_name.clone(),
                     published_at_wall_us: record.published_at_wall_us,
                     publisher_namespace: record.publisher_namespace.clone(),
@@ -7584,7 +7592,7 @@ impl Compositor {
                             record.publisher_namespace,
                             action.callback_id,
                         );
-                        scene.zone_hit_regions.push(ZoneHitRegion {
+                        scene.overlay.zone_hit_regions.push(ZoneHitRegion {
                             zone_name: zone_name.clone(),
                             published_at_wall_us: record.published_at_wall_us,
                             publisher_namespace: record.publisher_namespace.clone(),
@@ -14899,19 +14907,21 @@ mod tests {
         compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
 
         assert_eq!(
-            scene.zone_hit_regions.len(),
+            scene.overlay.zone_hit_regions.len(),
             1,
             "single notification with no actions must produce exactly 1 hit region"
         );
         assert_eq!(
-            scene.zone_hit_regions[0].kind,
+            scene.overlay.zone_hit_regions[0].kind,
             tze_hud_scene::types::ZoneInteractionKind::Dismiss,
             "single region must be a Dismiss button"
         );
         assert!(
-            scene.zone_hit_regions[0].interaction_id.contains("dismiss"),
+            scene.overlay.zone_hit_regions[0]
+                .interaction_id
+                .contains("dismiss"),
             "interaction_id must contain 'dismiss': {}",
-            scene.zone_hit_regions[0].interaction_id
+            scene.overlay.zone_hit_regions[0].interaction_id
         );
     }
 
@@ -14970,11 +14980,11 @@ mod tests {
         compositor.populate_zone_hit_regions(&mut scene, sw, sh);
 
         assert_eq!(
-            scene.zone_hit_regions.len(),
+            scene.overlay.zone_hit_regions.len(),
             1,
             "must have exactly 1 region"
         );
-        let region = &scene.zone_hit_regions[0];
+        let region = &scene.overlay.zone_hit_regions[0];
 
         // Dismiss should be at the top-right of the slot.
         // Zone geometry: zx = 1920*0.75 = 1440, zw = 1920*0.24 = 460.8.
@@ -15052,19 +15062,19 @@ mod tests {
         compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
 
         assert_eq!(
-            scene.zone_hit_regions.len(),
+            scene.overlay.zone_hit_regions.len(),
             3,
             "1 dismiss + 2 action buttons = 3 regions"
         );
 
         assert_eq!(
-            scene.zone_hit_regions[0].kind,
+            scene.overlay.zone_hit_regions[0].kind,
             tze_hud_scene::types::ZoneInteractionKind::Dismiss,
             "first region must be Dismiss"
         );
         assert!(
             matches!(
-                &scene.zone_hit_regions[1].kind,
+                &scene.overlay.zone_hit_regions[1].kind,
                 tze_hud_scene::types::ZoneInteractionKind::Action { callback_id }
                     if callback_id == "yes"
             ),
@@ -15072,7 +15082,7 @@ mod tests {
         );
         assert!(
             matches!(
-                &scene.zone_hit_regions[2].kind,
+                &scene.overlay.zone_hit_regions[2].kind,
                 tze_hud_scene::types::ZoneInteractionKind::Action { callback_id }
                     if callback_id == "no"
             ),
@@ -15139,17 +15149,21 @@ mod tests {
 
         compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
 
-        assert_eq!(scene.zone_hit_regions.len(), 3, "must produce 3 regions");
         assert_eq!(
-            scene.zone_hit_regions[0].tab_order, 0,
+            scene.overlay.zone_hit_regions.len(),
+            3,
+            "must produce 3 regions"
+        );
+        assert_eq!(
+            scene.overlay.zone_hit_regions[0].tab_order, 0,
             "dismiss tab_order must be 0"
         );
         assert_eq!(
-            scene.zone_hit_regions[1].tab_order, 1,
+            scene.overlay.zone_hit_regions[1].tab_order, 1,
             "action[0] tab_order must be 1"
         );
         assert_eq!(
-            scene.zone_hit_regions[2].tab_order, 2,
+            scene.overlay.zone_hit_regions[2].tab_order, 2,
             "action[1] tab_order must be 2"
         );
     }
@@ -15200,12 +15214,12 @@ mod tests {
             .unwrap();
 
         compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
-        let first_count = scene.zone_hit_regions.len();
+        let first_count = scene.overlay.zone_hit_regions.len();
         assert_eq!(first_count, 1, "first call must produce 1 region");
 
         compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
         assert_eq!(
-            scene.zone_hit_regions.len(),
+            scene.overlay.zone_hit_regions.len(),
             1,
             "second call must still produce 1 (not accumulate to 2)"
         );
@@ -15366,7 +15380,7 @@ mod tests {
                 .any(|r| r.element_id == empty_zone_id),
             "empty zones must not produce drag handles"
         );
-        for region in &scene.drag_handle_hit_regions {
+        for region in &scene.overlay.drag_handle_hit_regions {
             assert!(
                 region.interaction_id.starts_with("drag-handle:"),
                 "interaction id must use drag-handle scheme"
