@@ -273,11 +273,7 @@ async fn frame_budgets_hold_under_sustained_portal_stream() {
         let lease_id = scene.grant_lease(
             "cadence_test",
             300_000,
-            vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::UpdateTile,
-            ],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         if let Some(lease) = scene.leases.get_mut(&lease_id) {
             lease.resource_budget.max_tiles = 5;
@@ -447,11 +443,7 @@ async fn frame_budgets_hold_under_burst() {
         let lease_id = scene.grant_lease(
             "burst_test",
             300_000,
-            vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::UpdateTile,
-            ],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         if let Some(lease) = scene.leases.get_mut(&lease_id) {
             lease.resource_budget.max_tiles = 5;
@@ -751,11 +743,7 @@ async fn input_latency_not_degraded_under_portal_stream() {
         let lease_id = scene.grant_lease(
             "latency_test",
             300_000,
-            vec![
-                Capability::CreateTile,
-                Capability::CreateNode,
-                Capability::UpdateTile,
-            ],
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         if let Some(lease) = scene.leases.get_mut(&lease_id) {
             lease.resource_budget.max_tiles = 5;

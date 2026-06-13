@@ -80,7 +80,11 @@ fn dismiss_center_display() -> (f32, f32) {
 fn setup_dashboard_tile_scene() -> (SceneGraph, SceneId, SceneId, SceneId, SceneId) {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
     let tab_id = scene.create_tab("Main", 0).unwrap();
-    let lease_id = scene.grant_lease("dashboard-agent", 60_000, vec![Capability::CreateTile]);
+    let lease_id = scene.grant_lease(
+        "dashboard-agent",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
 
     let tile_id = scene
         .create_tile(
@@ -1065,7 +1069,11 @@ fn tab_from_dismiss_crosses_to_next_tile() {
     let (mut scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
 
     // Add a second tile with one focusable node (higher z-order)
-    let lease_id2 = scene.grant_lease("other-agent", 60_000, vec![Capability::CreateTile]);
+    let lease_id2 = scene.grant_lease(
+        "other-agent",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
     let tile_id2 = scene
         .create_tile(
             tab_id,

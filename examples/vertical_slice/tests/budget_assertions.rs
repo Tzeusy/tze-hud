@@ -751,7 +751,7 @@ fn test_transaction_validation_p99_within_budget() {
     let lease = scene.grant_lease(
         "agent",
         60_000,
-        vec![Capability::CreateTile, Capability::ModifyOwnTiles],
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
     );
     // Raise tile budget so budget enforcement doesn't reject batches in this timing test
     if let Some(l) = scene.leases.get_mut(&lease) {

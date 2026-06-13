@@ -300,11 +300,7 @@ mod headless_impl {
             let lease_id = scene.grant_lease(
                 "gpu_calibration",
                 300_000,
-                vec![
-                    Capability::CreateTile,
-                    Capability::CreateNode,
-                    Capability::UpdateTile,
-                ],
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
             );
             if let Some(lease) = scene.leases.get_mut(&lease_id) {
                 lease.resource_budget.max_tiles = (GPU_CALIBRATION_TILES + 5) as u32;
@@ -404,11 +400,7 @@ mod headless_impl {
             lease_id = scene.grant_lease(
                 "upload_calibration",
                 300_000,
-                vec![
-                    Capability::CreateTile,
-                    Capability::CreateNode,
-                    Capability::UpdateTile,
-                ],
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
             );
             if let Some(lease) = scene.leases.get_mut(&lease_id) {
                 lease.resource_budget.max_tiles = (UPLOAD_TILES_PER_CYCLE + 5) as u32;
@@ -523,11 +515,7 @@ mod headless_impl {
             let lease_id = scene.grant_lease(
                 "bench",
                 300_000,
-                vec![
-                    Capability::CreateTile,
-                    Capability::CreateNode,
-                    Capability::UpdateTile,
-                ],
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
             );
             if let Some(lease) = scene.leases.get_mut(&lease_id) {
                 lease.resource_budget.max_tiles = 15;
@@ -615,11 +603,7 @@ mod headless_impl {
             lease_id = scene.grant_lease(
                 "mutation_bench",
                 300_000,
-                vec![
-                    Capability::CreateTile,
-                    Capability::CreateNode,
-                    Capability::UpdateTile,
-                ],
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
             );
             if let Some(lease) = scene.leases.get_mut(&lease_id) {
                 lease.resource_budget.max_tiles = 15;
