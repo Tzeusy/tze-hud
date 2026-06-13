@@ -167,6 +167,26 @@ python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
 
 The media exemplar must not introduce `yt-dlp`, direct YouTube media URL extraction, downloads, a browser/WebView node inside the compositor, raw YouTube frame bridging, or a YouTube audio route into the HUD runtime.
 
+## D18 Validation Lane (SSH)
+
+`scripts/d18_validation.sh` replaces the suspended GitHub Actions
+`real-decode-windows.yml` lane (owner decision 2026-06-13, hud-1aswu.4: no
+self-hosted runner exists or is planned). It runs the lane's substantive
+checks against tzehouse-windows over SSH from the rig: connectivity gate,
+GPU-lock respect (read-only — never removes a lock), GStreamer MSVC SDK
+verification, hardware-decoder capability report, and the real-decode
+harness step (activation-gated until `tze_hud_runtime::real_decode_windows`
+lands — hud-ora8.1 phase 1).
+
+```bash
+.claude/skills/user-test/scripts/d18_validation.sh --allow-missing-sdk
+```
+
+Exit codes: `0` pass/gated, `1` check failed, `2` GPU busy (live interactive
+session holds the lock), `3` SDK not installed (strict mode). The host
+defaults to `tailscale ip -4 tzehouse-windows` because MagicDNS is not in
+the rig resolver; override with `--win-host`.
+
 ## Workflow
 
 ### Step 0: SSH Connectivity Gate
