@@ -18075,7 +18075,7 @@ mod tests {
 
         // No animation state must have been created for this non-portal tile.
         assert!(
-            compositor.portal_tile_anim_states.get(&tile_id).is_none(),
+            !compositor.portal_tile_anim_states.contains_key(&tile_id),
             "non-scrollable tile must not receive a portal animation state"
         );
 
