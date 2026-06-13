@@ -337,11 +337,42 @@ pub async fn do_content_update(
     resource_id_bytes: Vec<u8>,
     cycle: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The server in run_headless uses bind_all_interfaces: true (dual-stack [::]),
+    // which accepts IPv4-mapped connections on 127.0.0.1.
+    do_content_update_with_host(
+        "127.0.0.1",
+        port,
+        psk,
+        agent_id,
+        agent_display_name,
+        tile_id_bytes,
+        resource_id_bytes,
+        cycle,
+    )
+    .await
+}
+
+/// Like [`do_content_update`] but accepts an explicit `host` address.
+///
+/// Tests that spin up a server with `bind_all_interfaces = false` (which binds
+/// `[::1]` not `[::]`) must pass `host = "[::1]"` so the client connects on
+/// the same interface as the server.
+#[allow(clippy::too_many_arguments)]
+async fn do_content_update_with_host(
+    host: &str,
+    port: u16,
+    psk: &str,
+    agent_id: &str,
+    agent_display_name: &str,
+    tile_id_bytes: Vec<u8>,
+    resource_id_bytes: Vec<u8>,
+    cycle: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
     use tokio_stream::StreamExt as _;
 
     #[allow(deprecated)]
     let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
-        "http://127.0.0.1:{port}"
+        "http://{host}:{port}"
     ))
     .await?;
 
@@ -814,7 +845,8 @@ pub async fn establish_session() -> Result<SessionState, Box<dyn std::error::Err
 /// Accepts connection parameters so tests can spin up isolated runtimes on
 /// ephemeral ports without conflicting with production constants.
 ///
-/// The gRPC endpoint is `http://127.0.0.1:{port}`.  For tests that start a
+/// Connects to `http://127.0.0.1:{port}` — suitable for dual-stack servers
+/// (`bind_all_interfaces = true`, which binds `[::]`).  For tests that start a
 /// loopback-only server (`bind_all_interfaces = false`, which binds `[::1]`),
 /// call [`establish_session_with_host`] and pass `"[::1]"` explicitly.
 async fn establish_session_with(
@@ -1030,6 +1062,23 @@ pub async fn request_lease(
     agent_id: &str,
     agent_display_name: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // The server in run_headless uses bind_all_interfaces: true (dual-stack [::]),
+    // which accepts IPv4-mapped connections on 127.0.0.1.
+    request_lease_with_host("127.0.0.1", port, psk, agent_id, agent_display_name).await
+}
+
+/// Like [`request_lease`] but accepts an explicit `host` address.
+///
+/// Tests that spin up a server with `bind_all_interfaces = false` (which binds
+/// `[::1]` not `[::]`) must pass `host = "[::1]"` so the client connects on
+/// the same interface as the server.
+async fn request_lease_with_host(
+    host: &str,
+    port: u16,
+    psk: &str,
+    agent_id: &str,
+    agent_display_name: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use tokio_stream::StreamExt as _;
 
     // ── 1. Establish a fresh gRPC session ──────────────────────────────────
@@ -1038,7 +1087,7 @@ pub async fn request_lease(
     // each phase is independently testable in unit tests without coupling.
     #[allow(deprecated)]
     let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
-        "http://127.0.0.1:{port}"
+        "http://{host}:{port}"
     ))
     .await?;
 
@@ -1307,12 +1356,38 @@ pub async fn create_tile_batch(
     agent_display_name: &str,
     resource_id_bytes: Vec<u8>,
 ) -> Result<TileCreationState, Box<dyn std::error::Error>> {
+    // The server in run_headless uses bind_all_interfaces: true (dual-stack [::]),
+    // which accepts IPv4-mapped connections on 127.0.0.1.
+    create_tile_batch_with_host(
+        "127.0.0.1",
+        port,
+        psk,
+        agent_id,
+        agent_display_name,
+        resource_id_bytes,
+    )
+    .await
+}
+
+/// Like [`create_tile_batch`] but accepts an explicit `host` address.
+///
+/// Tests that spin up a server with `bind_all_interfaces = false` (which binds
+/// `[::1]` not `[::]`) must pass `host = "[::1]"` so the client connects on
+/// the same interface as the server.
+async fn create_tile_batch_with_host(
+    host: &str,
+    port: u16,
+    psk: &str,
+    agent_id: &str,
+    agent_display_name: &str,
+    resource_id_bytes: Vec<u8>,
+) -> Result<TileCreationState, Box<dyn std::error::Error>> {
     use tokio_stream::StreamExt as _;
 
     // ── 1. Open a new gRPC session ─────────────────────────────────────────
     #[allow(deprecated)]
     let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
-        "http://127.0.0.1:{port}"
+        "http://{host}:{port}"
     ))
     .await?;
 
@@ -1856,11 +1931,8 @@ mod tests {
             width: 800,
             height: 600,
             grpc_port: port,
-            // Test helpers connect via 127.0.0.1 (IPv4); use the dual-stack
-            // wildcard so the server accepts both IPv4 and IPv6 loopback clients.
-            // Tests that specifically validate the loopback default live in
-            // crates/tze_hud_runtime/src/headless.rs::tests.
-            bind_all_interfaces: true,
+            // Loopback-only ([::1]) — tests connect via "[::1]" to match.
+            bind_all_interfaces: false,
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
@@ -1966,10 +2038,15 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let lease_id_bytes =
-            crate::request_lease(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
-                .await
-                .expect("request_lease");
+        let lease_id_bytes = crate::request_lease_with_host(
+            "[::1]",
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+        )
+        .await
+        .expect("request_lease_with_host");
 
         // tasks.md §2.2: lease_id MUST be exactly 16 bytes (UUIDv7 SceneId).
         assert_eq!(
@@ -2147,9 +2224,8 @@ mod tests {
             width: 1920,
             height: 1080,
             grpc_port: port,
-            // Test helpers connect via 127.0.0.1 (IPv4); use the dual-stack
-            // wildcard so the server accepts both IPv4 and IPv6 loopback clients.
-            bind_all_interfaces: true,
+            // Loopback-only ([::1]) — tests connect via "[::1]" to match.
+            bind_all_interfaces: false,
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
@@ -2199,7 +2275,8 @@ mod tests {
             .expect("upload_icon");
         setup_scene_with_resource(&state, &resource_id_bytes).await;
 
-        let tile_state = crate::create_tile_batch(
+        let tile_state = crate::create_tile_batch_with_host(
+            "[::1]",
             port,
             TEST_PSK,
             TEST_AGENT_ID,
@@ -2207,7 +2284,7 @@ mod tests {
             resource_id_bytes,
         )
         .await
-        .expect("create_tile_batch");
+        .expect("create_tile_batch_with_host");
 
         // tasks.md §4.2: tile_id must be a 16-byte UUIDv7 SceneId.
         assert_eq!(
@@ -2253,7 +2330,8 @@ mod tests {
             .expect("upload_icon");
         setup_scene_with_resource(&state, &resource_id_bytes).await;
 
-        let tile_state = crate::create_tile_batch(
+        let tile_state = crate::create_tile_batch_with_host(
+            "[::1]",
             port,
             TEST_PSK,
             TEST_AGENT_ID,
@@ -2261,7 +2339,7 @@ mod tests {
             resource_id_bytes,
         )
         .await
-        .expect("create_tile_batch");
+        .expect("create_tile_batch_with_host");
 
         // Inspect the scene graph.
         let st = state.lock().await;
@@ -2960,7 +3038,8 @@ mod tests {
         setup_scene_with_resource(&state, &resource_id_bytes).await;
 
         // Phase 4: create the tile.
-        let tile_state = crate::create_tile_batch(
+        let tile_state = crate::create_tile_batch_with_host(
+            "[::1]",
             port,
             TEST_PSK,
             TEST_AGENT_ID,
@@ -2968,10 +3047,11 @@ mod tests {
             resource_id_bytes.clone(),
         )
         .await
-        .expect("create_tile_batch");
+        .expect("create_tile_batch_with_host");
 
         // Phase 6.2: submit a content update (cycle 42).
-        let update_result = crate::do_content_update(
+        let update_result = crate::do_content_update_with_host(
+            "[::1]",
             port,
             TEST_PSK,
             TEST_AGENT_ID,
@@ -3064,7 +3144,8 @@ mod tests {
         setup_scene_with_resource(&state, &resource_id_bytes).await;
 
         // ── 1. Create tile on session A (gets lease). ─────────────────────
-        let tile_state = crate::create_tile_batch(
+        let tile_state = crate::create_tile_batch_with_host(
+            "[::1]",
             port,
             TEST_PSK,
             TEST_AGENT_ID,
@@ -3072,7 +3153,7 @@ mod tests {
             resource_id_bytes.clone(),
         )
         .await
-        .expect("create_tile_batch");
+        .expect("create_tile_batch_with_host");
 
         // ── 2. Open session B and try to update with a fabricated lease id.
         //       No valid lease exists on session B, so the update must be
@@ -4911,8 +4992,9 @@ mod tests {
 
         // ── Step 3: Session connect + lease + tile creation ───────────────────
         // §12.1(1): session connect, §12.1(2): lease request, §12.1(4): atomic tile creation.
-        // These are combined in create_tile_batch which opens a fresh session.
-        let tile_state = crate::create_tile_batch(
+        // These are combined in create_tile_batch_with_host which opens a fresh session.
+        let tile_state = crate::create_tile_batch_with_host(
+            "[::1]",
             port,
             TEST_PSK,
             TEST_AGENT_ID,
@@ -4920,7 +5002,7 @@ mod tests {
             resource_id_bytes.clone(),
         )
         .await
-        .expect("create_tile_batch — §12.1 steps 1-4");
+        .expect("create_tile_batch_with_host — §12.1 steps 1-4");
 
         // Verify tile exists in scene after creation.
         {
@@ -4941,7 +5023,8 @@ mod tests {
 
         // ── Step 4: Content update ────────────────────────────────────────────
         // §12.1(5): periodic content update.
-        crate::do_content_update(
+        crate::do_content_update_with_host(
+            "[::1]",
             port,
             TEST_PSK,
             TEST_AGENT_ID,
@@ -4979,7 +5062,8 @@ mod tests {
         );
 
         // Agent performs the refresh: submit a content update (cycle 2).
-        crate::do_content_update(
+        crate::do_content_update_with_host(
+            "[::1]",
             port,
             TEST_PSK,
             TEST_AGENT_ID,
