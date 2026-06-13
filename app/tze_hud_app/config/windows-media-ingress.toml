@@ -38,3 +38,10 @@ capabilities = [
     "publish_zone:media-pip",
     "read_telemetry",
 ]
+
+[agents.registered.windows-youtube-frame-bridge]
+capabilities = [
+    "media_ingress",
+    "publish_zone:media-pip",
+    "read_telemetry",
+]
