@@ -188,7 +188,9 @@ fn classify_tool(method: &str) -> ToolClass {
         | "register_widget_asset"
         | "publish_to_element" => ToolClass::Guest,
         // Resident tools — require resident_mcp capability
-        "create_tab" | "create_tile" | "set_content" | "dismiss" => ToolClass::Resident,
+        "create_tab" | "create_tile" | "set_content" | "dismiss" | "inject_composer_paste" => {
+            ToolClass::Resident
+        }
         _ => ToolClass::Unknown,
     }
 }
@@ -201,6 +203,7 @@ pub struct McpServer {
     scene: Arc<Mutex<SceneGraph>>,
     widget_asset_registry: Arc<Mutex<tools::WidgetAssetRegistry>>,
     config: McpConfig,
+    paste_inject_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl McpServer {
@@ -216,6 +219,7 @@ impl McpServer {
             scene: Arc::new(Mutex::new(scene)),
             widget_asset_registry: Arc::new(Mutex::new(tools::WidgetAssetRegistry::default())),
             config: McpConfig::default(),
+            paste_inject_tx: None,
         }
     }
 
@@ -229,12 +233,19 @@ impl McpServer {
             scene,
             widget_asset_registry: Arc::new(Mutex::new(tools::WidgetAssetRegistry::default())),
             config: McpConfig::default(),
+            paste_inject_tx: None,
         }
     }
 
     /// Attach server configuration (auth settings, etc.).
     pub fn with_config(mut self, config: McpConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Attach a paste-inject channel sender for `inject_composer_paste` tool.
+    pub fn with_paste_inject_tx(mut self, tx: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
+        self.paste_inject_tx = Some(tx);
         self
     }
 
@@ -505,6 +516,11 @@ impl McpServer {
                     serde_json::to_value(r)
                         .map_err(|e| crate::McpError::Internal(e.to_string()))?,
                 )
+            }
+            "inject_composer_paste" => {
+                let result =
+                    tools::handle_inject_composer_paste(params, self.paste_inject_tx.as_ref())?;
+                serde_json::to_value(result).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             unknown => Err(crate::McpError::MethodNotFound(unknown.to_string())),
         }

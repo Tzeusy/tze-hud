@@ -33,6 +33,11 @@ pub enum InputCaptureCommand {
     Release {
         device_id: u32,
     },
+    /// Inject text into the active composer draft buffer, as if pasted from
+    /// the clipboard. Delivered from the MCP plane via `inject_composer_paste`.
+    ComposerPasteInject {
+        text: String,
+    },
 }
 
 /// Current degradation level of the runtime (RFC 0005 §3.4).
