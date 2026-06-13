@@ -1978,6 +1978,13 @@ impl ApplicationHandler for WinitApp {
                 let frame_interval =
                     std::time::Duration::from_micros(1_000_000 / cfg.target_fps.max(1) as u64);
                 let mut shutdown_rx = shutdown_tok.subscribe();
+                // Running total of compositor scene try_lock misses (hud-3qpgv.2).
+                // Incremented on each frame-loop Stage 4 try_lock failure and
+                // snapshotted into FrameTelemetry::scene_lock_miss_count on every
+                // successful (lock-acquired) frame so contention is observable in
+                // telemetry.  Plain u64 — accessed only on this thread; no atomics
+                // needed on the success path.
+                let mut scene_lock_miss_count: u64 = 0;
 
                 tracing::info!(
                     "compositor thread: starting frame loop at {}fps",
@@ -2123,6 +2130,11 @@ impl ApplicationHandler for WinitApp {
                         // Non-zero only on frames where scene.version changed;
                         // zero on steady-state frames (cache hit, no parse work).
                         telem.markdown_prime_us = markdown_prime_us;
+                        // Snapshot the cumulative scene-lock miss count so this
+                        // frame's telemetry record carries contention history
+                        // (hud-3qpgv.2). No extra cost on the success path: plain
+                        // u64 read, no atomics, no cross-thread access.
+                        telem.scene_lock_miss_count = scene_lock_miss_count;
                         if let Some((local_ack_us, scene_commit_us, next_present_us)) =
                             drain_pending_input_latency(
                                 &pending_input_latency,
@@ -2169,6 +2181,13 @@ impl ApplicationHandler for WinitApp {
                                 }
                             }
                         }
+                    } else {
+                        // Stage 4 try_lock missed: the scene lock was held by a
+                        // concurrent gRPC/MCP handler.  Record the miss so it is
+                        // visible in the next successful frame's telemetry
+                        // (hud-3qpgv.2).  This branch has zero cost on the
+                        // success path.
+                        scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
                     }
 
                     // Frame rate control.
