@@ -105,6 +105,19 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub tile_follow_tail_at_tail: HashMap<SceneId, bool>,
+    /// Tile IDs removed since the last runtime drain.
+    ///
+    /// Populated by [`SceneGraph::remove_tile_and_nodes`] on every tile
+    /// deletion; drained by the windowed runtime in `about_to_wait` via
+    /// [`SceneGraph::drain_removed_tile_ids`].  Allows the runtime to eagerly
+    /// prune per-tile state that cannot live inside the scene graph due to
+    /// crate-layer constraints (e.g. `portal_resize_states` in `windowed.rs`,
+    /// which holds a `tze_hud_input` type and would create a circular
+    /// dependency if moved here).
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub recently_removed_tile_ids: Vec<SceneId>,
 }
 
 /// The root scene graph.
@@ -455,6 +468,16 @@ impl SceneGraph {
     /// Drain pending runtime widget SVG assets.
     pub fn drain_pending_widget_svg_assets(&mut self) -> Vec<(String, String, Vec<u8>)> {
         self.overlay.pending_widget_svg_assets.drain(..).collect()
+    }
+
+    /// Drain the list of tile IDs removed since the last call.
+    ///
+    /// Populated by [`SceneGraph::remove_tile_and_nodes`].  The windowed
+    /// runtime calls this in `about_to_wait` (inside
+    /// `prune_portal_resize_states`) to eagerly prune per-tile state held
+    /// outside the scene graph (e.g. `portal_resize_states`).
+    pub fn drain_removed_tile_ids(&mut self) -> Vec<SceneId> {
+        self.overlay.recently_removed_tile_ids.drain(..).collect()
     }
 
     /// Register local-first scroll config for a tile.
@@ -2736,6 +2759,10 @@ impl SceneGraph {
         self.overlay.tile_scroll_offsets.remove(&tile_id);
         self.overlay.tile_follow_tail_at_tail.remove(&tile_id);
         self.overlay.drag_active_elements.remove(&tile_id);
+        // Notify the windowed runtime so it can eagerly prune per-tile state
+        // that cannot live in the scene graph (e.g. `portal_resize_states`).
+        // Drained by `SceneGraph::drain_removed_tile_ids` in `about_to_wait`.
+        self.overlay.recently_removed_tile_ids.push(tile_id);
     }
 
     // ─── Queries ─────────────────────────────────────────────────────────
@@ -9021,6 +9048,121 @@ mod spec_scenarios {
                 .widget_registry
                 .runtime_svg_handle("gauge", "fill.svg"),
             Some("asset:runtime-handle")
+        );
+    }
+
+    /// `remove_tile_and_nodes` populates `recently_removed_tile_ids`; draining
+    /// that queue via `drain_removed_tile_ids` yields the removed tile ID.
+    ///
+    /// This is the scene-layer half of the hud-4tuw5 contract.  The windowed
+    /// runtime drains this queue in `prune_portal_resize_states` to eagerly
+    /// remove the tile's entry from `portal_resize_states`.
+    #[test]
+    fn portal_resize_drain_queue_populated_by_remove_tile() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![
+                crate::Capability::CreateTiles,
+                crate::Capability::ModifyOwnTiles,
+            ],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                crate::Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+
+        // Drain queue must be empty before any removal.
+        assert!(
+            scene.drain_removed_tile_ids().is_empty(),
+            "drain queue must be empty before any tile removal"
+        );
+
+        // Remove the tile via the canonical path.
+        scene.remove_tile_and_nodes(tile_id);
+
+        // The tile must no longer be in the tiles map.
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "tile must be absent from scene after remove_tile_and_nodes"
+        );
+
+        // Drain the queue — must yield exactly the removed tile ID.
+        let removed_ids = scene.drain_removed_tile_ids();
+        assert_eq!(
+            removed_ids,
+            vec![tile_id],
+            "drain queue must contain exactly the removed tile ID (hud-4tuw5)"
+        );
+
+        // Queue must be empty after drain (idempotent).
+        assert!(
+            scene.drain_removed_tile_ids().is_empty(),
+            "drain queue must be empty after drain"
+        );
+    }
+
+    /// Multiple successive tile removals each append to the drain queue;
+    /// a single `drain_removed_tile_ids` call returns all of them.
+    #[test]
+    fn portal_resize_drain_queue_accumulates_multiple_removals() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![
+                crate::Capability::CreateTiles,
+                crate::Capability::ModifyOwnTiles,
+            ],
+        );
+        let tile_a = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                crate::Rect::new(0.0, 0.0, 300.0, 200.0),
+                1,
+            )
+            .unwrap();
+        let tile_b = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                crate::Rect::new(400.0, 0.0, 300.0, 200.0),
+                2,
+            )
+            .unwrap();
+
+        scene.remove_tile_and_nodes(tile_a);
+        scene.remove_tile_and_nodes(tile_b);
+
+        let removed_ids = scene.drain_removed_tile_ids();
+        assert_eq!(
+            removed_ids.len(),
+            2,
+            "both removed tile IDs must be in queue"
+        );
+        assert!(
+            removed_ids.contains(&tile_a),
+            "tile_a must be in the drain queue"
+        );
+        assert!(
+            removed_ids.contains(&tile_b),
+            "tile_b must be in the drain queue"
+        );
+
+        assert!(
+            scene.drain_removed_tile_ids().is_empty(),
+            "drain queue must be empty after drain"
         );
     }
 
