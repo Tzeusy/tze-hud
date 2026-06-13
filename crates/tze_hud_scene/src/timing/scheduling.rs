@@ -240,6 +240,56 @@ mod tests {
         assert_eq!(err, TimingError::ClockSkewExcessive);
     }
 
+    // ── Boundary: CLOCK_SKEW_EXCESSIVE_THRESHOLD_US = 1_000_000 (1 s) ──────
+    //
+    // Condition: `abs_skew > CLOCK_SKEW_EXCESSIVE_THRESHOLD_US` (strictly >).
+    // So:
+    //   - abs_skew = 999_999 (threshold-1): no excessive error (may still be high)
+    //   - abs_skew = 1_000_000 (threshold): NOT excessive (> is strict)
+    //   - abs_skew = 1_000_001 (threshold+1): excessive error
+
+    /// WHEN skew is exactly CLOCK_SKEW_EXCESSIVE_THRESHOLD_US (1 s) THEN NOT rejected.
+    ///
+    /// The condition is strictly `> 1_000_000`, so exactly 1_000_000 µs is accepted
+    /// (but emits CLOCK_SKEW_HIGH since 1_000_000 > 100_000).
+    /// Guards against an off-by-one where `>= 1_000_000` would reject the exact boundary.
+    #[test]
+    fn clock_skew_at_exactly_excessive_threshold_not_rejected() {
+        let hints = TimingHints::new();
+        let mut ctx = ctx_at(1_000_000_000);
+        ctx.estimated_skew_us = CLOCK_SKEW_EXCESSIVE_THRESHOLD_US as i64; // exactly 1 s
+        // Must NOT return ClockSkewExcessive (condition is >).
+        let result = validate_timing_hints(&hints, &ctx);
+        assert!(
+            result.is_ok(),
+            "exactly 1_000_000 µs skew must not be rejected (threshold is >, not >=)"
+        );
+        // It should emit CLOCK_SKEW_HIGH (since 1_000_000 > 100_000).
+        let warnings = result.unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, TimingWarning::ClockSkewHigh { .. })),
+            "exactly 1_000_000 µs skew must still emit CLOCK_SKEW_HIGH"
+        );
+    }
+
+    /// WHEN skew is exactly CLOCK_SKEW_EXCESSIVE_THRESHOLD_US + 1 (1_000_001 µs) THEN rejected.
+    ///
+    /// Guards the one-above-threshold case to confirm the `>` semantics are correct.
+    #[test]
+    fn clock_skew_one_above_excessive_threshold_rejected() {
+        let hints = TimingHints::new();
+        let mut ctx = ctx_at(1_000_000_000);
+        ctx.estimated_skew_us = (CLOCK_SKEW_EXCESSIVE_THRESHOLD_US + 1) as i64;
+        let err = validate_timing_hints(&hints, &ctx).unwrap_err();
+        assert_eq!(
+            err,
+            TimingError::ClockSkewExcessive,
+            "1_000_001 µs skew (threshold+1) must be rejected"
+        );
+    }
+
     /// WHEN skew = 200ms THEN warn with CLOCK_SKEW_HIGH, continue.
     #[test]
     fn clock_skew_high_emits_warning() {
@@ -252,6 +302,47 @@ mod tests {
                 .iter()
                 .any(|w| matches!(w, TimingWarning::ClockSkewHigh { .. })),
             "expected CLOCK_SKEW_HIGH warning"
+        );
+    }
+
+    // ── Boundary: CLOCK_SKEW_HIGH_THRESHOLD_US = 100_000 (100 ms) ──────────
+    //
+    // Condition: `abs_skew > CLOCK_SKEW_HIGH_THRESHOLD_US` (strictly >).
+    // So:
+    //   - abs_skew =  99_999 (threshold-1): no CLOCK_SKEW_HIGH
+    //   - abs_skew = 100_000 (threshold):   no CLOCK_SKEW_HIGH (condition is >)
+    //   - abs_skew = 100_001 (threshold+1): emits CLOCK_SKEW_HIGH
+
+    /// WHEN skew is exactly CLOCK_SKEW_HIGH_THRESHOLD_US (100 ms) THEN no CLOCK_SKEW_HIGH warning.
+    ///
+    /// The condition is strictly `> 100_000`, so exactly 100_000 µs must NOT emit the warning.
+    /// Guards against an off-by-one where `>= 100_000` would warn at the exact boundary.
+    #[test]
+    fn clock_skew_at_exactly_high_threshold_no_warning() {
+        let hints = TimingHints::new();
+        let mut ctx = ctx_at(1_000_000_000);
+        ctx.estimated_skew_us = CLOCK_SKEW_HIGH_THRESHOLD_US as i64; // exactly 100 ms
+        let warnings = validate_timing_hints(&hints, &ctx).unwrap();
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| matches!(w, TimingWarning::ClockSkewHigh { .. })),
+            "exactly 100_000 µs skew must NOT emit CLOCK_SKEW_HIGH (threshold is >, not >=)"
+        );
+    }
+
+    /// WHEN skew is CLOCK_SKEW_HIGH_THRESHOLD_US + 1 (100_001 µs) THEN emits CLOCK_SKEW_HIGH.
+    #[test]
+    fn clock_skew_one_above_high_threshold_emits_warning() {
+        let hints = TimingHints::new();
+        let mut ctx = ctx_at(1_000_000_000);
+        ctx.estimated_skew_us = (CLOCK_SKEW_HIGH_THRESHOLD_US + 1) as i64;
+        let warnings = validate_timing_hints(&hints, &ctx).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, TimingWarning::ClockSkewHigh { .. })),
+            "100_001 µs skew (threshold+1) must emit CLOCK_SKEW_HIGH"
         );
     }
 
@@ -292,6 +383,58 @@ mod tests {
         assert!(validate_timing_hints(&hints, &ctx).is_ok());
     }
 
+    // ── Boundary: TIMESTAMP_TOO_OLD_THRESHOLD_US = 60_000_000 (60 s) ────────
+    //
+    // Condition: `present_at < session_open - TIMESTAMP_TOO_OLD_THRESHOLD_US` (strictly <).
+    // stale_threshold = session_open - 60_000_000.
+    // So:
+    //   - present_at = stale_threshold - 1 (threshold+1 µs old):   rejected (too old)
+    //   - present_at = stale_threshold     (exactly 60 s old):      accepted (condition is <)
+    //   - present_at = stale_threshold + 1 (threshold-1 µs old):    accepted
+    //
+    // The 59s case (accepted) and 61s case (rejected) are covered above.
+    // This test covers the exact boundary (present_at = session_open - 60_000_000).
+
+    /// WHEN present_at is exactly TIMESTAMP_TOO_OLD_THRESHOLD_US (60 s) before session_open THEN accepted.
+    ///
+    /// The condition is `present_at < stale_threshold` (strictly less than), so exactly 60 s
+    /// before session_open must be accepted.
+    /// Guards against an off-by-one where `<=` would reject the exact boundary.
+    #[test]
+    fn timestamp_exactly_60s_old_accepted() {
+        let mut hints = TimingHints::new();
+        let session_open = 1_000_000_000_u64;
+        // Exactly at the stale threshold: session_open - 60_000_000.
+        let present_at = session_open - TIMESTAMP_TOO_OLD_THRESHOLD_US;
+        hints.schedule = Some(Schedule::PresentAt(WallUs(present_at)));
+        let mut ctx = ctx_at(session_open);
+        ctx.session_open_wall_us = WallUs(session_open);
+        assert!(
+            validate_timing_hints(&hints, &ctx).is_ok(),
+            "present_at exactly 60 s before session_open must be accepted (condition is <, not <=)"
+        );
+    }
+
+    /// WHEN present_at is TIMESTAMP_TOO_OLD_THRESHOLD_US + 1 µs (60s + 1µs) before session_open THEN rejected.
+    ///
+    /// One µs past the exact threshold must trigger TIMESTAMP_TOO_OLD.
+    #[test]
+    fn timestamp_one_us_past_60s_boundary_rejected() {
+        let mut hints = TimingHints::new();
+        let session_open = 1_000_000_000_u64;
+        // One µs past the stale threshold (further into the past).
+        let present_at = session_open - TIMESTAMP_TOO_OLD_THRESHOLD_US - 1;
+        hints.schedule = Some(Schedule::PresentAt(WallUs(present_at)));
+        let mut ctx = ctx_at(session_open);
+        ctx.session_open_wall_us = WallUs(session_open);
+        let err = validate_timing_hints(&hints, &ctx).unwrap_err();
+        assert_eq!(
+            err,
+            TimingError::TimestampTooOld,
+            "60s + 1µs before session_open must be rejected (past the exact stale boundary)"
+        );
+    }
+
     // ── Timestamp too future ──
 
     /// WHEN present_at > 5min in future THEN reject with TIMESTAMP_TOO_FUTURE.
@@ -318,6 +461,18 @@ mod tests {
         let ctx = ctx_at(now);
         assert!(validate_timing_hints(&hints, &ctx).is_ok());
     }
+
+    // ── Boundary: DEFAULT_MAX_FUTURE_SCHEDULE_US = 300_000_000 (5 min) ──────
+    //
+    // Condition: `present_at > now + max_future_schedule_us` (strictly >).
+    // So:
+    //   - present_at = now + max - 1: accepted (already tested implicitly by at_max_future)
+    //   - present_at = now + max:     accepted (covered by timestamp_at_max_future_accepted)
+    //   - present_at = now + max + 1: rejected (covered by timestamp_too_future_rejected)
+    //
+    // The existing tests already exercise the exact boundary (now + max = accepted) and
+    // threshold+1 (now + max + 1 = rejected), so no additional tests are needed here.
+    // Documenting this explicitly so future readers understand the coverage is intentional.
 
     // ── Expiry before present ──
 
