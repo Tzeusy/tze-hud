@@ -91,19 +91,15 @@ struct DriveEntry {
     tile_scene_id: Option<SceneId>,
     /// Estimated total content height (px) from the last `RenderPortal` drain.
     ///
-    /// Used to detect head-trim: when `new_content_height_px` on the next
-    /// drain is less than this value while `visible_transcript_bytes` also
-    /// decreased, the coalescer (64 KiB cap) or visible-window (16 KiB cap)
-    /// trimmed head content.  `notify_head_content_removed` is called with the
-    /// difference so a scrolled-back viewport stays stable (spec §3.3 / hud-pkg2g).
-    prev_content_height_px: f32,
-    /// Visible-transcript byte count from the last `RenderPortal` drain.
+    /// A decrease in this value between consecutive drains is the authoritative
+    /// signal that content was removed from the head of the visible transcript
+    /// (head-trim event).  `notify_head_content_removed` is called with the
+    /// difference so a scrolled-back viewport stays stable (spec §3.3 /
+    /// hud-pkg2g, hud-66i1s).
     ///
-    /// A decrease in this value on the next drain is the observable signal that
-    /// a head-trim occurred (either the 64 KiB coalescer cap in
-    /// `PortalCadenceCoalescer::record_append` or the 16 KiB visible-window cap
-    /// in `visible_transcript_window`).
-    prev_visible_bytes: usize,
+    /// This is the height-only condition, mirroring the fix in
+    /// `projection_authority.rs` (hud-hkaw2 / PR #779).
+    prev_content_height_px: f32,
 }
 
 /// In-process state for the portal projection drive loop.
@@ -142,7 +138,6 @@ impl InProcessPortalDriveState {
                 adapter,
                 tile_scene_id: None,
                 prev_content_height_px: 0.0,
-                prev_visible_bytes: 0,
             },
         );
     }
@@ -692,26 +687,35 @@ impl InProcessPortalDriver {
                         );
                     }
 
-                    // hud-pkg2g: detect head-trim and call notify_head_content_removed.
+                    // hud-pkg2g / hud-66i1s: detect head-trim and call
+                    // notify_head_content_removed.
                     //
-                    // A head-trim has occurred when visible_transcript_bytes decreased
-                    // AND new_content_height_px is less than the previous value.
-                    // Two trim sites surface this signal:
+                    // A content-height decrease between consecutive `RenderPortal`
+                    // drains indicates that content was removed from the head of the
+                    // visible transcript.  Two trim sites produce this:
                     //   1. PortalCadenceCoalescer::record_append (64 KiB cap): drops
                     //      oldest bytes from the payload before storing the snapshot.
                     //   2. visible_transcript_window (16 KiB cap): slices the retained
-                    //      transcript to the newest max_visible_transcript_bytes.
-                    // In both cases the observable effect is a reduction in
-                    // visible_transcript_bytes + a reduction in new_content_height_px.
+                    //      transcript to the newest max_visible_transcript_bytes bytes.
                     //
-                    // We adjust the scroll offset BEFORE calling notify_tile_content_appended
-                    // so that the content-height fields inside ScrollTileState are up to
-                    // date when notify_content_appended recomputes the follow-tail bound.
+                    // Detection criterion: new_content_height_px < prev_content_height_px.
+                    // The height is the authoritative signal because the runtime caller
+                    // uses new_content_height_px (from append_geometry) as the total
+                    // content height for scroll accounting.  Any decrease — regardless
+                    // of whether the byte count also decreased — means the caller must
+                    // receive a notify_head_content_removed call BEFORE
+                    // notify_tile_content_appended, so that
+                    // ScrollTileState::total_content_height_px is correct when the
+                    // follow-tail bound is recomputed (spec §3.3, hud-66i1s fix).
+                    //
+                    // The previous dual-condition (bytes_shrank && height_shrank) was
+                    // overly restrictive: it would miss a height shrink that occurred
+                    // without a corresponding byte-count decrease (e.g., a many-newline
+                    // unit evicted by a flat unit of equal or greater byte count).  This
+                    // mirrors the fix applied to projection_authority.rs in PR #779
+                    // (hud-hkaw2).
                     let prev_height = entry.prev_content_height_px;
-                    let prev_bytes = entry.prev_visible_bytes;
-                    if update.visible_transcript_bytes < prev_bytes
-                        && new_content_height_px < prev_height
-                    {
+                    if new_content_height_px < prev_height {
                         let removed_px = prev_height - new_content_height_px;
                         let trim_changed =
                             input_processor.notify_head_content_removed(tile_scene_id, removed_px);
@@ -719,15 +723,14 @@ impl InProcessPortalDriver {
                             proj_id = %proj_id,
                             tile_id = ?tile_scene_id,
                             removed_px,
-                            prev_bytes,
-                            new_bytes = update.visible_transcript_bytes,
+                            prev_height_px = prev_height,
+                            new_height_px = new_content_height_px,
                             scroll_adjusted = trim_changed,
                             "portal drain: head-trim detected — notify_head_content_removed"
                         );
                     }
-                    // Update per-portal tracking for the next drain cycle.
+                    // Update per-portal height tracking for the next drain cycle.
                     entry.prev_content_height_px = new_content_height_px;
-                    entry.prev_visible_bytes = update.visible_transcript_bytes;
 
                     // spec §3.2 / §3.3: call notify_tile_content_appended.
                     // - AtTail  → InputProcessor advances follow-tail (§3.2).
@@ -1837,6 +1840,198 @@ mod tests {
             scene.tile_count(),
             tile_count_after_first,
             "idempotent re-attach + drain must not create a duplicate portal tile"
+        );
+    }
+
+    // ── hud-66i1s: height-only head-trim condition (runtime parity) ───────────
+
+    /// Regression test for hud-66i1s: the in-process runtime drain must call
+    /// `notify_head_content_removed` when `new_content_height_px` shrinks between
+    /// consecutive `RenderPortal` drains, even when `visible_transcript_bytes` does
+    /// NOT shrink (or grows).
+    ///
+    /// This is the runtime-path counterpart to the CLI-path test
+    /// `head_trim_geometry_emitted_when_height_shrinks_without_byte_shrink` in
+    /// `projection_authority.rs` (PR #779 / hud-hkaw2).
+    ///
+    /// The old dual-condition (`bytes_shrank && height_shrank`) would miss the
+    /// case where a many-newline unit is evicted by a flat unit of equal or
+    /// greater byte count.  The fixed height-only condition fires correctly.
+    ///
+    /// Byte/line layout (max_vis=30B, 1-line viewport):
+    ///
+    ///   drain1 (CreatePortalTile): publish seed unit "S" (1B, 1 line).
+    ///   drain2 (RenderPortal): publish "\n" × 24 = 24B, 25 lines.
+    ///     Visible window: 1B + 24B = 25B ≤ 30B → both visible.
+    ///     Total height: 26 lines × line_h. Tile is AtTail; scroll_y = 25 × line_h.
+    ///   [user scrolls back 1 px: tile becomes ScrolledBack, scroll_y = 25*line_h - 1]
+    ///   drain3 (RenderPortal): publish flat "B" × 30 = 30B, 1 line.
+    ///     Visible window from tail: 30B ≤ 30B → fits; + 24B = 54B > 30 → evicted.
+    ///     visible_bytes = 30 (GREW from 25), height = 1 × line_h (SHRANK from 26).
+    ///     height-only condition: height_shrank → notify_head_content_removed fires.
+    ///     Removed height = (26-1)*line_h; ScrolledBack offset decreases to 0 (clamped).
+    ///     Old dual-condition: bytes_shrank=(30<25)=false → would NOT fire (bug).
+    #[test]
+    fn head_trim_fires_on_height_shrink_without_byte_shrink_runtime_path() {
+        use tze_hud_input::ScrollEvent;
+        use tze_hud_scene::TileScrollConfig;
+
+        // max_vis = 30B so that:
+        //   seed(1B) + many-lines(24B) = 25B ≤ 30B → both fit in drain2;
+        //   flat(30B) alone ≤ 30B → fits; flat + many-lines = 54B > 30 → evicts many-lines.
+        let max_vis: usize = 30;
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                max_visible_transcript_bytes: max_vis,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_htrim_runtime"),
+        };
+
+        let token = attach_and_get_token(&mut driver, "proj-htrim");
+        driver.attach_projection("proj-htrim", Vec::new());
+
+        // Derive line height from the adapter's font token.
+        let font_size_px = driver
+            .drive
+            .entries
+            .get("proj-htrim")
+            .unwrap()
+            .adapter
+            .visual_tokens()
+            .transcript_font_size_px;
+        let line_h = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
+
+        // Viewport = 1 line so that after drain2 (26 lines) there is real overflow
+        // and the tile is AtTail with scroll_y = 25 × line_h.
+        let viewport_h = (1.0_f32 * line_h).ceil();
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // drain1 (CreatePortalTile): seed unit "S" = 1B, 1 line.
+        publish(&mut driver, "proj-htrim", &token, "S", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let tile_id = driver
+            .drive
+            .entries
+            .get("proj-htrim")
+            .expect("drive entry must exist after drain1")
+            .tile_scene_id
+            .expect("tile must be created after drain1 (CreatePortalTile)");
+
+        // Register scroll config for hit-test (needed for process_scroll_event).
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                TileScrollConfig {
+                    scrollable_x: false,
+                    scrollable_y: true,
+                    content_width: None,
+                    content_height: None,
+                },
+            )
+            .unwrap();
+
+        // Resize tile to the 1-line viewport so overflow and follow-tail are
+        // detectable.
+        let _ = scene.update_tile_bounds(
+            tile_id,
+            Rect::new(0.0, 0.0, 600.0, viewport_h),
+            PORTAL_DRIVER_NAMESPACE,
+        );
+
+        // drain2 (RenderPortal): many-lines unit "\n" × 24 = 24B, 25 lines.
+        // After drain2: visible = [seed(1B) + many-lines(24B)] = 25B ≤ 30B;
+        // total height = 26 × line_h; tile is AtTail with scroll_y = 25 × line_h.
+        let many_lines = "\n".repeat(24);
+        assert_eq!(many_lines.len(), 24, "many_lines must be exactly 24B");
+
+        let ts2 = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 25;
+        publish(&mut driver, "proj-htrim", &token, &many_lines, ts2);
+        let drain2_now = ts2 + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain2_now);
+
+        // After drain2 the tile must be at-tail (26 lines in 1-line viewport).
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "tile must be at-tail after drain2 (26-line content in 1-line viewport)"
+        );
+
+        // Scroll back by 1 px to make the tile ScrolledBack.
+        // The tile occupies (0,0)→(600, viewport_h); use the tile centre for hit-testing.
+        let centre_y = viewport_h / 2.0;
+        let scroll_ev = ScrollEvent {
+            x: 300.0,
+            y: centre_y,
+            delta_x: 0.0,
+            delta_y: -1.0, // negative = scroll up (move content down = scroll back toward head)
+        };
+        processor.process_scroll_event(&scroll_ev, &mut scene);
+
+        // Tile must now be ScrolledBack (no longer at-tail).
+        assert!(
+            !scene.tile_follow_tail_at_tail(tile_id),
+            "tile must be ScrolledBack after user scroll-back event"
+        );
+
+        // Record pre-drain3 scroll offset.
+        let (_, pre_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            pre_y > 0.0,
+            "scroll offset must be positive before drain3 (got {pre_y})"
+        );
+
+        // drain3 (RenderPortal): flat unit "B" × 30 = 30B, 1 line.
+        // Visible from tail: flat(30B) ≤ 30B → fits; flat + many-lines = 54B > 30 → evicted.
+        // visible_bytes = 30 (GREW from 25); total height = 1 × line_h (SHRANK from 26×line_h).
+        //
+        // KEY: visible_transcript_bytes grew (25 → 30), so the old dual-condition
+        // (bytes_shrank && height_shrank) would NOT fire — the bug.
+        // The fixed height-only condition (height_shrank) MUST fire.
+        let flat_unit = "B".repeat(30);
+        assert_eq!(flat_unit.len(), 30, "flat_unit must be exactly 30B");
+
+        let ts3 = drain2_now + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1;
+        publish(&mut driver, "proj-htrim", &token, &flat_unit, ts3);
+        let drain3_now = ts3 + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain3_now);
+
+        // Flush the dirty scroll state to the scene (notify_head_content_removed
+        // marks the tile dirty for ScrolledBack tiles; commit_scroll_updates
+        // applies the updated offset to the scene graph).
+        processor.commit_scroll_updates(&mut scene);
+
+        // KEY ASSERTION (hud-66i1s fix):
+        // The scroll offset must have decreased because head-trim fired.
+        // notify_head_content_removed(removed_px = 25 × line_h) shifts the
+        // ScrolledBack offset down by 25 × line_h → clamped to 0 (since
+        // new max_scroll_offset = 1×line_h - 1×line_h = 0).
+        //
+        // If the old dual-condition were still in place:
+        //   bytes_shrank = (30 < 25) = false → no head-trim call → offset unchanged → BUG.
+        // With the height-only fix:
+        //   height_shrank = (1×line_h < 26×line_h) = true → head-trim fires → offset = 0.
+        let (_, post_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            post_y < pre_y,
+            "hud-66i1s regression: scroll offset must decrease after height-only head-trim; \
+             pre_y={pre_y} post_y={post_y} line_h={line_h}. \
+             If this fails, notify_head_content_removed was not called — the old dual-condition \
+             (bytes_shrank && height_shrank) is still in place at the runtime drain site."
+        );
+        // The new content has the same height as the viewport so max_scroll = 0.
+        // After head-trim adjustment the offset must reach 0.
+        assert!(
+            post_y <= f32::EPSILON,
+            "hud-66i1s: after head-trim the max scroll offset is 0 (1-line content in 1-line \
+             viewport); offset must clamp to 0, got post_y={post_y}"
         );
     }
 }
