@@ -2359,11 +2359,9 @@ impl Compositor {
             let tile_x = tile.bounds.x;
             let tile_y = tile.bounds.y;
             // Determine whether this tile is currently following its tail.
-            // Tiles in follow-tail/at-tail mode use TailAnchored truncation so that
-            // the most-recently-appended lines are always visible (spec §3.2).
-            // Tiles that the user has scrolled back (or that have no follow-tail
-            // configured) use HeadAnchored (spec §3.3 — viewport stability).
-            let at_tail = scene.tile_follow_tail_at_tail(tile.id);
+            // Use the shared helper so this computation is identical to
+            // collect_text_items_from_node (hud-plz8q / hud-lu50e).
+            let at_tail = tile_at_tail_for_ellipsis(tile.id, scene);
             if let Some(root_id) = tile.root_node {
                 collect_ellipsis_text_items_from_node(
                     root_id,
@@ -3554,10 +3552,11 @@ impl Compositor {
                 let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
                 // Determine follow-tail state so Ellipsis TextItems receive the
                 // correct TruncationViewport (TailAnchored vs HeadAnchored).
-                // This must mirror the logic in prime_truncation_cache /
-                // collect_ellipsis_text_items_from_node so the per-frame key
-                // matches the primed cache entry (hud-lu50e).
-                let at_tail = scene.tile_follow_tail_at_tail(tile.id);
+                // Uses the shared helper that prime_truncation_cache /
+                // collect_ellipsis_text_items_from_node also calls, so the
+                // per-frame key always matches the primed cache entry (hud-lu50e,
+                // hud-plz8q).
+                let at_tail = tile_at_tail_for_ellipsis(tile.id, scene);
 
                 // §6.3 portal transition: track item count before to apply
                 // portal animation opacity to newly added items.
@@ -8103,10 +8102,43 @@ pub(crate) fn should_defer_reprime(last_at: Option<std::time::Instant>, interval
     }
 }
 
+/// Return whether a tile is currently in follow-tail/at-tail mode for the
+/// purpose of ellipsis truncation geometry.
+///
+/// This is the single authoritative computation shared by
+/// [`Compositor::prime_truncation_cache`] (via [`collect_ellipsis_text_items_from_node`])
+/// and [`Compositor::collect_text_items`] (via [`Compositor::collect_text_items_from_node`]).
+/// Both callers must resolve `at_tail` identically so the per-frame
+/// [`crate::text::TruncationKey`] matches the primed cache entry (hud-lu50e).
+///
+/// Returns `true` (TailAnchored — spec §3.2: newest lines visible) when the
+/// tile has been registered at-tail by the follow-tail driver.  Returns `false`
+/// (HeadAnchored — spec §3.3: viewport stability) when the tile has been
+/// scrolled back or has never been registered (e.g., non-scrollable tiles).
+///
+/// Extracting this as a named helper eliminates the hand-mirrored
+/// `must-mirror` comment that previously guarded the two call sites (hud-plz8q).
+pub(crate) fn tile_at_tail_for_ellipsis(tile_id: SceneId, scene: &SceneGraph) -> bool {
+    scene.tile_follow_tail_at_tail(tile_id)
+}
+
+/// Collect [`TextItem`]s for all `TextOverflow::Ellipsis` nodes reachable from
+/// `node_id`, without scroll offset (prime-time geometry).
+///
+/// This is a free function (not a method) to avoid a split-borrow conflict in
+/// [`Compositor::prime_truncation_cache`], where `self.text_rasterizer` is
+/// borrowed mutably while `self.markdown_cache` is borrowed immutably.
+///
+/// The geometry produced here is identical to what `collect_text_items_from_node`
+/// produces at scroll_x=0, scroll_y=0 (valid because truncation is geometry-
 /// dependent only on `bounds_width` / `bounds_height`, which are scroll-invariant).
+///
 /// `at_tail`: whether the tile owning these nodes is currently in follow-tail/at-tail
-/// mode.  `true` → `TailAnchored` truncation (spec §3.2 — newest lines visible);
+/// mode.  Callers must obtain this value via [`tile_at_tail_for_ellipsis`] to
+/// guarantee alignment with the per-frame key built by `collect_text_items_from_node`.
+/// `true` → `TailAnchored` truncation (spec §3.2 — newest lines visible);
 /// `false` → `HeadAnchored` (spec §3.3 — viewport stability after user scroll-back).
+///
 /// `markdown_tokens`: used for the cache-miss non-lossy inline parse fallback
 /// (hud-xcp9b); in steady-state this argument is never consumed.
 #[allow(clippy::too_many_arguments)]
@@ -17072,6 +17104,113 @@ mod tests {
             !should_defer_reprime(Some(past), interval_ms),
             "should_defer_reprime must return false once the interval has elapsed \
              (final/settled geometry must be primed)"
+        );
+    }
+
+    // ── tile_at_tail_for_ellipsis tests (hud-plz8q) ───────────────────────────
+    //
+    // These tests verify the shared `tile_at_tail_for_ellipsis` helper that
+    // eliminates the hand-mirrored must-mirror guard between
+    // `prime_truncation_cache` and `collect_text_items` (hud-lu50e / hud-plz8q).
+    //
+    // All tests are GPU-free: they operate directly on `SceneGraph` and the
+    // extracted helper, following the same pattern as the cadence-gate tests
+    // for `should_defer_reprime`.
+    //
+    // Key invariants:
+    //   a) An unregistered tile (never set) returns false (HeadAnchored default).
+    //   b) A tile explicitly set at-tail returns true (TailAnchored).
+    //   c) A tile set at-tail then scrolled back (set false) returns false.
+    //   d) A tile from a different scene (unknown id) returns false.
+
+    /// Invariant (a): a tile that has never been registered returns false.
+    ///
+    /// Non-scrollable and newly-created tiles must default to HeadAnchored so
+    /// `TextOverflow::Ellipsis` shows the beginning of content, not the tail.
+    #[test]
+    fn tile_at_tail_for_ellipsis_unregistered_tile_returns_false() {
+        let mut scene = SceneGraph::new(720.0, 360.0);
+        let tab = scene.create_tab("test", 0).unwrap();
+        let lease = scene.grant_lease("lease", 120_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab,
+                "tile",
+                lease,
+                tze_hud_scene::types::Rect::new(0.0, 0.0, 400.0, 200.0),
+                1,
+            )
+            .unwrap();
+        // Never set_tile_follow_tail_at_tail → must default to false.
+        assert!(
+            !tile_at_tail_for_ellipsis(tile_id, &scene),
+            "tile_at_tail_for_ellipsis must return false for an unregistered tile (HeadAnchored default)"
+        );
+    }
+
+    /// Invariant (b): a tile explicitly set at-tail returns true.
+    ///
+    /// Confirms the shared helper reflects live follow-tail state, matching
+    /// what prime_truncation_cache and collect_text_items both require.
+    #[test]
+    fn tile_at_tail_for_ellipsis_at_tail_tile_returns_true() {
+        let mut scene = SceneGraph::new(720.0, 360.0);
+        let tab = scene.create_tab("test", 0).unwrap();
+        let lease = scene.grant_lease("lease", 120_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab,
+                "tile",
+                lease,
+                tze_hud_scene::types::Rect::new(0.0, 0.0, 400.0, 200.0),
+                1,
+            )
+            .unwrap();
+        scene.set_tile_follow_tail_at_tail(tile_id, true);
+        assert!(
+            tile_at_tail_for_ellipsis(tile_id, &scene),
+            "tile_at_tail_for_ellipsis must return true after set_tile_follow_tail_at_tail(true)"
+        );
+    }
+
+    /// Invariant (c): a tile set at-tail then scrolled back returns false.
+    ///
+    /// Simulates the user scrolling back from the tail: the shared helper must
+    /// reflect the updated scene state immediately, keeping both consumers aligned.
+    #[test]
+    fn tile_at_tail_for_ellipsis_scrolled_back_returns_false() {
+        let mut scene = SceneGraph::new(720.0, 360.0);
+        let tab = scene.create_tab("test", 0).unwrap();
+        let lease = scene.grant_lease("lease", 120_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab,
+                "tile",
+                lease,
+                tze_hud_scene::types::Rect::new(0.0, 0.0, 400.0, 200.0),
+                1,
+            )
+            .unwrap();
+        scene.set_tile_follow_tail_at_tail(tile_id, true);
+        // User scrolls back — at_tail transitions to false.
+        scene.set_tile_follow_tail_at_tail(tile_id, false);
+        assert!(
+            !tile_at_tail_for_ellipsis(tile_id, &scene),
+            "tile_at_tail_for_ellipsis must return false after scrolling back from tail"
+        );
+    }
+
+    /// Invariant (d): an unknown SceneId (not a tile in the scene) returns false.
+    ///
+    /// Matches the SceneGraph contract: tile_follow_tail_at_tail returns false
+    /// for any unregistered id.  Callers must not panic on stale ids.
+    #[test]
+    fn tile_at_tail_for_ellipsis_unknown_id_returns_false() {
+        let scene = SceneGraph::new(720.0, 360.0);
+        let unknown_id = tze_hud_scene::types::SceneId::new();
+        assert!(
+            !tile_at_tail_for_ellipsis(unknown_id, &scene),
+            "tile_at_tail_for_ellipsis must return false for an unknown SceneId"
         );
     }
 
