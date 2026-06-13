@@ -294,6 +294,29 @@ mod tests {
         assert_eq!(action, EnforcementAction::None);
     }
 
+    // ── Boundary: 80% usage threshold (Normal→Warning) ───────────────────
+    //
+    // Condition: `usage_fraction >= 0.80` (inclusive).
+    // Exact-threshold value (0.80) is already covered by test_warning_triggered_at_80pct.
+    // These tests pin the just-below (threshold - epsilon) behavior.
+
+    /// WHEN usage is just below 80% (0.7999) THEN tier stays Normal.
+    ///
+    /// Documents that the condition is >= 0.80 (inclusive), so 0.7999 must NOT
+    /// trigger Warning.  Guards against a > vs >= mutant.
+    #[test]
+    fn test_normal_tier_just_below_80pct_boundary() {
+        let (mut ladder, _) = make_ladder(0);
+        // Use the closest f64 below 0.80 that is unambiguously distinct.
+        let action = ladder.tick(0.7999);
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Normal,
+            "0.7999 is below 80% threshold — must stay Normal"
+        );
+        assert_eq!(action, EnforcementAction::None);
+    }
+
     // ── 2. Warning tier ───────────────────────────────────────────────────
 
     /// WHEN usage reaches 80% THEN tier transitions to Warning and action is Warn.
@@ -305,6 +328,39 @@ mod tests {
             ladder.tier(),
             BudgetTier::Warning,
             "should enter Warning at 80%"
+        );
+        assert_eq!(action, EnforcementAction::Warn);
+    }
+
+    /// WHEN usage drops to exactly 79.99% while in Warning THEN tier returns to Normal.
+    ///
+    /// The exit condition is `usage_fraction < 0.80`; this pins that 0.7999 (< 0.80)
+    /// triggers the exit while 0.80 keeps the ladder in Warning.
+    #[test]
+    fn test_warning_exits_on_just_below_80pct() {
+        let (mut ladder, _) = make_ladder(0);
+        ladder.tick(0.85); // enter Warning
+        let action = ladder.tick(0.7999); // just below exit threshold
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Normal,
+            "0.7999 < 0.80 must exit Warning back to Normal"
+        );
+        assert_eq!(action, EnforcementAction::None);
+    }
+
+    /// WHEN usage is exactly 80% while in Warning THEN tier stays in Warning (does not exit).
+    ///
+    /// The exit condition is strictly `< 0.80`; exactly 0.80 must NOT exit.
+    #[test]
+    fn test_warning_stays_at_exactly_80pct() {
+        let (mut ladder, _) = make_ladder(0);
+        ladder.tick(0.85); // enter Warning
+        let action = ladder.tick(0.80); // at threshold — should stay Warning
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Warning,
+            "exactly 80% must not exit Warning (exit requires < 0.80)"
         );
         assert_eq!(action, EnforcementAction::Warn);
     }
@@ -333,6 +389,31 @@ mod tests {
         let action = ladder.tick(0.85);
         assert_eq!(ladder.tier(), BudgetTier::Warning);
         assert_eq!(action, EnforcementAction::Warn);
+    }
+
+    // ── Boundary: WARNING_GRACE_MS = 5_000 (Warning→Throttle) ───────────
+    //
+    // Condition: `elapsed >= WARNING_GRACE_MS` (>= 5000 ms, inclusive).
+    // threshold-1 (4999 ms) → stays Warning (covered by test_warning_sustained_under_5s_stays_warning).
+    // threshold+1 (5001 ms) → Throttle (covered by test_throttle_after_5s_warning).
+    // threshold exactly (5000 ms) → must also Throttle (this test).
+
+    /// WHEN warning sustained for exactly WARNING_GRACE_MS (5000 ms) THEN tier transitions to Throttle.
+    ///
+    /// The grace condition is `elapsed >= 5000`; exactly 5000 ms must be inclusive.
+    /// Guards against off-by-one where `> 5000` would miss the exact boundary.
+    #[test]
+    fn test_throttle_at_exactly_warning_grace_boundary() {
+        let (mut ladder, clock) = make_ladder(0);
+        ladder.tick(0.85); // enter Warning at t=0
+        clock.advance(WARNING_GRACE_MS); // exactly 5000 ms
+        let action = ladder.tick(0.85);
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Throttle,
+            "exactly 5000 ms in Warning must escalate to Throttle (>= boundary, not >)"
+        );
+        assert_eq!(action, EnforcementAction::Throttle);
     }
 
     // ── 3. Throttle tier ──────────────────────────────────────────────────
@@ -385,6 +466,34 @@ mod tests {
         assert_eq!(action, EnforcementAction::Throttle);
     }
 
+    // ── Boundary: Throttle 80% exit condition ────────────────────────────
+    //
+    // The Throttle exit condition (for sticky check) is `usage_fraction < 0.80`.
+    // Even though Throttle is sticky (the tier does NOT change), the code path
+    // still checks the threshold to decide which branch to take.  These tests
+    // pin that `0.80` keeps the `>= 30s` escalation path active while `0.7999`
+    // takes the early-return sticky path — both are Throttle actions.
+
+    /// WHEN in Throttle and usage drops to exactly 80% THEN stays Throttle (sticky, no escalation check short-circuit).
+    ///
+    /// At 0.80, the `< 0.80` branch is NOT taken, so the `>= 30s` escalation
+    /// check runs.  If time is short, Throttle action is returned.
+    #[test]
+    fn test_throttle_stays_at_exactly_80pct() {
+        let (mut ladder, clock) = make_ladder(0);
+        ladder.tick(0.85); // Warning
+        clock.advance(5_001);
+        ladder.tick(0.85); // Throttle, t_throttle = 5_001
+        // Under 30s, so no escalation — but at exactly 80%, the >= 30s check still runs.
+        let action = ladder.tick(0.80);
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Throttle,
+            "exactly 80% in Throttle must stay Throttle (< 0.80 branch not taken)"
+        );
+        assert_eq!(action, EnforcementAction::Throttle);
+    }
+
     // ── 4. Revocation tier ────────────────────────────────────────────────
 
     /// WHEN throttle sustained for 30s THEN tier becomes Revocation.
@@ -401,6 +510,33 @@ mod tests {
             ladder.tier(),
             BudgetTier::Revocation,
             "should revoke after 30s throttle"
+        );
+        assert_eq!(action, EnforcementAction::Revoke);
+    }
+
+    // ── Boundary: THROTTLE_GRACE_MS = 30_000 (Throttle→Revocation) ───────
+    //
+    // Condition: `elapsed >= THROTTLE_GRACE_MS` (>= 30000 ms, inclusive).
+    // threshold-1 (29999 ms) → stays Throttle (covered by test_full_ladder_progression Phase 5).
+    // threshold+1 (30001 ms) → Revocation (covered by test_revocation_after_30s_throttle).
+    // threshold exactly (30000 ms) → must also Revocation (this test).
+
+    /// WHEN throttle sustained for exactly THROTTLE_GRACE_MS (30000 ms) THEN tier becomes Revocation.
+    ///
+    /// The grace condition is `elapsed >= 30000`; exactly 30000 ms must be inclusive.
+    /// Guards against off-by-one where `> 30000` would silently pass the exact boundary.
+    #[test]
+    fn test_revocation_at_exactly_throttle_grace_boundary() {
+        let (mut ladder, clock) = make_ladder(0);
+        ladder.tick(0.85); // Warning at t=0
+        clock.advance(WARNING_GRACE_MS); // exactly 5000 ms → Throttle entry tick
+        ladder.tick(0.85); // enter Throttle at t=5000
+        clock.advance(THROTTLE_GRACE_MS); // exactly 30000 ms more
+        let action = ladder.tick(0.85);
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Revocation,
+            "exactly 30000 ms in Throttle must escalate to Revocation (>= boundary, not >)"
         );
         assert_eq!(action, EnforcementAction::Revoke);
     }
@@ -481,6 +617,70 @@ mod tests {
             ladder.tier(),
             BudgetTier::Revocation,
             "exactly 10 violations must NOT trigger revocation (threshold is >10)"
+        );
+    }
+
+    // ── Boundary: MAX_INVARIANT_VIOLATIONS = 10 (invariant violation threshold) ──
+    //
+    // Condition: `self.invariant_violation_count > MAX_INVARIANT_VIOLATIONS` (strictly > 10).
+    // So:
+    //   - count =  9 (threshold-1): not critical
+    //   - count = 10 (threshold):   not critical (already covered above)
+    //   - count = 11 (threshold+1): critical (already covered above)
+    //
+    // The test below covers the threshold-1 case explicitly (9th violation = not critical).
+
+    /// WHEN invariant violation count is 9 (MAX-1) THEN not critical.
+    ///
+    /// Documents that `count > 10` is strict: neither 9 nor 10 trigger revocation.
+    /// Guards against an off-by-one where `count >= 10` would fire too early.
+    #[test]
+    fn test_invariant_violations_at_max_minus_1_not_critical() {
+        let (mut ladder, _) = make_ladder(0);
+        // Record 9 violations (one below MAX_INVARIANT_VIOLATIONS = 10).
+        for n in 0..9u32 {
+            let is_critical = ladder.record_invariant_violation();
+            assert!(
+                !is_critical,
+                "violation {} (< MAX) must not be critical",
+                n + 1
+            );
+        }
+        assert_eq!(ladder.invariant_violation_count(), 9);
+        assert_ne!(
+            ladder.tier(),
+            BudgetTier::Revocation,
+            "9 violations (MAX-1) must NOT trigger revocation"
+        );
+    }
+
+    /// WHEN the 11th (MAX+1) violation is recorded THEN exactly that call returns true (critical).
+    ///
+    /// Documents the exact transition call — the *11th* `record_invariant_violation()` is the
+    /// one that crosses `> 10` and must return `true`.
+    #[test]
+    fn test_invariant_violation_11th_call_is_the_first_critical() {
+        let (mut ladder, _) = make_ladder(0);
+        // First 10 calls must return false.
+        for n in 0..10u32 {
+            let is_critical = ladder.record_invariant_violation();
+            assert!(
+                !is_critical,
+                "call {} must not be critical (threshold is >10)",
+                n + 1
+            );
+        }
+        assert_eq!(ladder.invariant_violation_count(), 10);
+        // The 11th call crosses the threshold.
+        let is_critical = ladder.record_invariant_violation();
+        assert!(
+            is_critical,
+            "11th call (count becomes 11 > 10) must be critical"
+        );
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Revocation,
+            "tier must be Revocation after 11th violation"
         );
     }
 

@@ -247,6 +247,108 @@ mod tests {
         assert!(alerts.is_empty());
     }
 
+    // ── Boundary: DEFAULT_SYNC_DRIFT_BUDGET_US = 500 µs ──────────────────────
+    //
+    // `evaluate_frame_drift` uses `spread > budget_us` (strictly greater than).
+    // So:
+    //   - spread = 499 µs (threshold-1): within budget, no alert
+    //   - spread = 500 µs (threshold):   within budget (condition is >, NOT >=)
+    //   - spread = 501 µs (threshold+1): exceeds budget, alert emitted
+
+    /// WHEN drift spread is exactly the budget (500 µs) THEN NOT exceeded.
+    ///
+    /// The condition is strictly `spread > budget_us`, so at exactly 500 µs
+    /// the budget is NOT exceeded.
+    /// Guards against an off-by-one where `>=` would incorrectly flag the exact boundary.
+    #[test]
+    fn drift_exactly_at_budget_threshold_not_exceeded() {
+        let gid = SceneId::new();
+        let t1 = SceneId::new();
+        let t2 = SceneId::new();
+
+        // spread = exactly 500 µs = DEFAULT_SYNC_DRIFT_BUDGET_US
+        let group = SyncGroupArrival {
+            group_id: gid,
+            tile_arrivals: vec![
+                arrival(t1, 1_000_000),
+                arrival(t2, 1_000_000 + DEFAULT_SYNC_DRIFT_BUDGET_US.0),
+            ],
+        };
+
+        let (record, alerts) = evaluate_frame_drift(&[group], DEFAULT_SYNC_DRIFT_BUDGET_US);
+
+        assert_eq!(
+            record.sync_group_max_drift_us, DEFAULT_SYNC_DRIFT_BUDGET_US,
+            "spread should equal budget"
+        );
+        assert!(
+            !record.sync_drift_budget_exceeded,
+            "spread == budget must NOT set exceeded flag (condition is >, not >=)"
+        );
+        assert!(
+            record.stale_tiles.is_empty(),
+            "no stale tiles when spread == budget"
+        );
+        assert!(alerts.is_empty(), "no alerts when spread == budget");
+    }
+
+    /// WHEN drift spread is budget + 1 µs (501 µs) THEN exceeded.
+    ///
+    /// One µs past the exact threshold must trigger the exceeded flag and alert.
+    #[test]
+    fn drift_one_us_above_budget_threshold_exceeded() {
+        let gid = SceneId::new();
+        let t1 = SceneId::new();
+        let t2 = SceneId::new();
+
+        // spread = 501 µs = budget + 1 µs
+        let group = SyncGroupArrival {
+            group_id: gid,
+            tile_arrivals: vec![
+                arrival(t1, 1_000_000),
+                arrival(t2, 1_000_000 + DEFAULT_SYNC_DRIFT_BUDGET_US.0 + 1),
+            ],
+        };
+
+        let (record, alerts) = evaluate_frame_drift(&[group], DEFAULT_SYNC_DRIFT_BUDGET_US);
+
+        assert!(
+            record.sync_drift_budget_exceeded,
+            "budget+1 µs must set exceeded flag"
+        );
+        assert!(
+            record.stale_tiles.contains(&t2),
+            "t2 (slow tile) must be in stale_tiles when budget exceeded"
+        );
+        assert_eq!(alerts.len(), 1, "one alert expected when budget exceeded");
+    }
+
+    /// WHEN drift spread is budget - 1 µs (499 µs) THEN NOT exceeded.
+    #[test]
+    fn drift_one_us_below_budget_threshold_not_exceeded() {
+        let gid = SceneId::new();
+        let t1 = SceneId::new();
+        let t2 = SceneId::new();
+
+        // spread = 499 µs = budget - 1 µs
+        let group = SyncGroupArrival {
+            group_id: gid,
+            tile_arrivals: vec![
+                arrival(t1, 1_000_000),
+                arrival(t2, 1_000_000 + DEFAULT_SYNC_DRIFT_BUDGET_US.0 - 1),
+            ],
+        };
+
+        let (record, alerts) = evaluate_frame_drift(&[group], DEFAULT_SYNC_DRIFT_BUDGET_US);
+
+        assert!(
+            !record.sync_drift_budget_exceeded,
+            "budget-1 µs must NOT set exceeded flag"
+        );
+        assert!(record.stale_tiles.is_empty());
+        assert!(alerts.is_empty());
+    }
+
     // ── evaluate_frame_drift: exceeds budget ─────────────────────────────────────
 
     #[test]

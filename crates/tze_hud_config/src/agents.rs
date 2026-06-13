@@ -309,6 +309,88 @@ mod tests {
         );
     }
 
+    // ── Budget ceiling boundary (agent_val > profile_ceiling is strict >) ────
+
+    // Boundary: agent budget at EXACTLY the profile ceiling is accepted.
+    //
+    // The condition is `agent_val > profile_ceiling` (strict greater-than).
+    // At exactly the ceiling value the condition is false → no error.
+    // full_display() has max_tiles = 1024.
+    #[test]
+    fn test_agent_max_tiles_at_exactly_profile_ceiling_accepted() {
+        let mut registered = HashMap::new();
+        registered.insert(
+            "agent_boundary".to_string(),
+            RawRegisteredAgent {
+                max_tiles: Some(1024), // exactly equal to full_display() ceiling
+                ..Default::default()
+            },
+        );
+        let agents = RawAgents {
+            registered: Some(registered),
+            ..Default::default()
+        };
+        let mut errors = Vec::new();
+        validate_agents(&agents, &full_display_profile(), &mut errors);
+        assert!(
+            errors.is_empty(),
+            "max_tiles exactly at profile ceiling (1024) must be accepted (condition is strict >)"
+        );
+    }
+
+    // Boundary: agent budget one above the profile ceiling is rejected.
+    //
+    // At ceiling + 1 = 1025, `agent_val > profile_ceiling` is true → error.
+    #[test]
+    fn test_agent_max_tiles_one_above_ceiling_rejected() {
+        let mut registered = HashMap::new();
+        registered.insert(
+            "agent_over".to_string(),
+            RawRegisteredAgent {
+                max_tiles: Some(1025), // exactly one above full_display() ceiling
+                ..Default::default()
+            },
+        );
+        let agents = RawAgents {
+            registered: Some(registered),
+            ..Default::default()
+        };
+        let mut errors = Vec::new();
+        validate_agents(&agents, &full_display_profile(), &mut errors);
+        assert!(
+            errors.iter().any(
+                |e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
+                    && e.field_path.contains("max_tiles")
+            ),
+            "max_tiles one above ceiling (1025 > 1024) must be rejected"
+        );
+    }
+
+    // Boundary: max_texture_mb at EXACTLY the profile ceiling is accepted.
+    //
+    // full_display() has max_texture_mb = 2048.
+    #[test]
+    fn test_agent_max_texture_mb_at_exactly_profile_ceiling_accepted() {
+        let mut registered = HashMap::new();
+        registered.insert(
+            "agent_texture_boundary".to_string(),
+            RawRegisteredAgent {
+                max_texture_mb: Some(2048), // exactly equal to full_display() ceiling
+                ..Default::default()
+            },
+        );
+        let agents = RawAgents {
+            registered: Some(registered),
+            ..Default::default()
+        };
+        let mut errors = Vec::new();
+        validate_agents(&agents, &full_display_profile(), &mut errors);
+        assert!(
+            errors.is_empty(),
+            "max_texture_mb exactly at profile ceiling (2048) must be accepted (condition is strict >)"
+        );
+    }
+
     #[test]
     fn test_no_agents_section_no_errors() {
         let agents = RawAgents::default();

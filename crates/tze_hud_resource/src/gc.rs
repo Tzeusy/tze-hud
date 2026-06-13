@@ -552,6 +552,70 @@ mod tests {
         assert_eq!(config.cycle_budget_ms, 1);
     }
 
+    // ── Grace period boundary (age_ms < grace is strict <) ───────────────────
+
+    // Boundary: resource at EXACTLY the grace threshold is eligible for eviction.
+    //
+    // The condition is `age_ms < grace` (strict less-than).  At exactly
+    // `age_ms == grace_period_ms` the condition is false, so the resource IS
+    // eligible — it must be evicted.
+    #[test]
+    fn resource_evicted_at_exactly_grace_boundary() {
+        let clock = TestClockMs::new(0);
+        let (layer, mut gc, dedup, _) = setup(clock.clone());
+        let id = ResourceId::from_content(b"grace-boundary-exact");
+        insert_resource(&dedup, id);
+
+        layer.inc_ref(id).unwrap();
+        layer.dec_ref(id, 0).unwrap(); // enters candidacy at t=0
+
+        // Advance exactly to the grace boundary (60_000 ms).
+        // age_ms == grace_period_ms → `age_ms < grace` is false → eligible.
+        clock.advance(60_000);
+
+        let result = gc.run_cycle();
+        assert_eq!(
+            result.evicted, 1,
+            "resource at exactly grace_period_ms must be evicted (age_ms < grace is strict)"
+        );
+        assert!(
+            !dedup.contains(&id),
+            "evicted resource must not be in store"
+        );
+    }
+
+    // Boundary: resource one millisecond BEFORE the grace boundary is still in grace.
+    //
+    // At `age_ms = grace_period_ms - 1` (59_999 ms), `age_ms < grace` is true
+    // so the resource must remain in the store.
+    #[test]
+    fn resource_survives_one_ms_before_grace_boundary() {
+        let clock = TestClockMs::new(0);
+        let (layer, mut gc, dedup, _) = setup(clock.clone());
+        let id = ResourceId::from_content(b"grace-boundary-minus-1");
+        insert_resource(&dedup, id);
+
+        layer.inc_ref(id).unwrap();
+        layer.dec_ref(id, 0).unwrap(); // enters candidacy at t=0
+
+        // 59_999 ms = grace_period_ms - 1 — still inside grace period.
+        clock.advance(59_999);
+
+        let result = gc.run_cycle();
+        assert_eq!(
+            result.evicted, 0,
+            "resource one ms before grace boundary must not be evicted"
+        );
+        assert_eq!(
+            result.still_in_grace, 1,
+            "resource must be counted as still_in_grace"
+        );
+        assert!(
+            dedup.contains(&id),
+            "resource one ms before grace boundary must still be in store"
+        );
+    }
+
     // Acceptance: post-revocation resource footprint is zero after grace + cycle [spec line 346-347].
     #[test]
     fn post_revocation_footprint_zero() {
