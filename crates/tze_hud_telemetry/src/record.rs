@@ -175,8 +175,8 @@ pub struct FrameTelemetry {
     /// diff successive records.
     ///
     /// Zero-initialized; `#[serde(default)]` ensures old records deserialize
-    /// without error.  On the success path the counter is read with
-    /// `Ordering::Relaxed` — no cross-thread synchronization cost.
+    /// without error.  The counter is a plain thread-local `u64` owned by the
+    /// compositor thread — no atomics or cross-thread synchronization cost.
     #[serde(default)]
     pub scene_lock_miss_count: u64,
 }
