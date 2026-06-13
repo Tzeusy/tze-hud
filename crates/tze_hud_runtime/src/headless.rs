@@ -449,6 +449,12 @@ impl HeadlessRuntime {
         self.compositor.prime_markdown_cache(&scene_guard);
         let markdown_prime_us = markdown_prime_start.elapsed().as_micros() as u64;
 
+        // ── Commit-time truncation cache prime (hud-v2z6u) ───────────────────
+        // Prime the truncation cache after markdown, at the end of Stage 4,
+        // so render_frame_headless never does shaping work in the frame loop.
+        // Gated internally on scene.version; no-op when unchanged.
+        self.compositor.prime_truncation_cache(&scene_guard);
+
         let stage4_us = s4_start.elapsed().as_micros() as u64;
         // input_to_scene_commit: wall time from frame_start to end of Stage 4.
         // Measured as elapsed since frame_start (not a sum of stage durations)
