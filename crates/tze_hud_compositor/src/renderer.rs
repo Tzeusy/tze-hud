@@ -126,8 +126,7 @@ const NOTIFICATION_BODY_SCALE: f32 = 0.85;
 /// Fallback: 700 (bold).
 const NOTIFICATION_TITLE_WEIGHT: u16 = 700;
 
-/// Minimum interval between truncation cache re-primes during rapid geometry
-/// changes (e.g. mid-drag resize of a portal tile).
+/// Adaptive mid-drag re-truncation cadence thresholds (hud-3to8i).
 ///
 /// # Cadence contract (hud-ghhxa — spec §6b.3)
 ///
@@ -138,14 +137,52 @@ const NOTIFICATION_TITLE_WEIGHT: u16 = 700;
 /// frame budget on large content.
 ///
 /// The cadence gate in `Compositor::prime_truncation_cache` ensures at most one
-/// re-prime per `RESIZE_REPRIME_INTERVAL_MS` during a continuous geometry
-/// change, while guaranteeing that every distinct intermediate geometry *is*
-/// eventually reflected in the truncation output — not only at drag-end.
+/// re-prime per the adaptive interval during a continuous geometry change, while
+/// guaranteeing that every distinct intermediate geometry *is* eventually
+/// reflected in the truncation output — not only at drag-end.
 ///
-/// 50 ms ≈ 20 Hz gives smooth visual reflow during resize without per-frame
-/// shaping cost.  The gate is purely time-based; the first geometry change in
-/// each interval is always re-primed immediately.
-const RESIZE_REPRIME_INTERVAL_MS: u64 = 50;
+/// The interval is derived from the total byte count of Ellipsis text content
+/// visible in the scene at the time of the last successful prime:
+///
+/// - **Short content** (< 1 KiB): 16 ms ≈ 60 Hz — cheap re-prime keeps
+///   truncation visually responsive during resize.
+/// - **Medium content** (1 KiB – 16 KiB): 50 ms ≈ 20 Hz — the former fixed
+///   default; good balance for typical transcript panes.
+/// - **Long content** (≥ 16 KiB): 100 ms ≈ 10 Hz — throttled to protect the
+///   frame budget when O(n) shaping cost is highest.
+///
+/// The adaptive decision is O(1) (a single `usize` comparison against constants
+/// using the last-prime byte count) and must never allocate or block on the hot
+/// path.
+///
+/// The gate is bypassed when the sentinel is `u64::MAX` (a forced re-prime
+/// requested by `set_token_map` or initialisation) so that token/font-metric
+/// changes are always reflected immediately regardless of resize cadence.
+const RESIZE_REPRIME_SHORT_THRESHOLD_BYTES: usize = 1_024; // < 1 KiB → fast cadence
+const RESIZE_REPRIME_LONG_THRESHOLD_BYTES: usize = 16_384; // ≥ 16 KiB → slow cadence
+
+/// Re-prime interval for short content (< 1 KiB): ≈60 Hz.
+const RESIZE_REPRIME_INTERVAL_SHORT_MS: u64 = 16;
+/// Re-prime interval for medium content (1 KiB – 16 KiB): ≈20 Hz.
+const RESIZE_REPRIME_INTERVAL_MEDIUM_MS: u64 = 50;
+/// Re-prime interval for long content (≥ 16 KiB): ≈10 Hz.
+const RESIZE_REPRIME_INTERVAL_LONG_MS: u64 = 100;
+
+/// Compute the adaptive re-prime interval in milliseconds from the total byte
+/// count of Ellipsis text content in the scene.
+///
+/// This is O(1) — a single `usize` comparison — and must never allocate.
+/// See the [`RESIZE_REPRIME_SHORT_THRESHOLD_BYTES`] /
+/// [`RESIZE_REPRIME_LONG_THRESHOLD_BYTES`] constants for the threshold values.
+pub(crate) fn adaptive_reprime_interval_ms(total_content_bytes: usize) -> u64 {
+    if total_content_bytes < RESIZE_REPRIME_SHORT_THRESHOLD_BYTES {
+        RESIZE_REPRIME_INTERVAL_SHORT_MS
+    } else if total_content_bytes < RESIZE_REPRIME_LONG_THRESHOLD_BYTES {
+        RESIZE_REPRIME_INTERVAL_MEDIUM_MS
+    } else {
+        RESIZE_REPRIME_INTERVAL_LONG_MS
+    }
+}
 
 /// Vertical gap (px) between the title line and the body line in two-line layout.
 const NOTIFICATION_INTER_LINE_GAP: f32 = 2.0;
@@ -1427,15 +1464,27 @@ pub struct Compositor {
     truncation_cache_scene_version: u64,
     /// Instant of the last completed `prime_truncation_cache` run.
     ///
-    /// Used by the mid-drag re-truncation cadence gate (hud-ghhxa): when the
-    /// scene version changes rapidly (e.g. per-frame bounds updates during a
-    /// resize drag), we cap the re-prime rate to at most once per
-    /// [`RESIZE_REPRIME_INTERVAL_MS`] so we never re-prime every frame.
+    /// Used by the adaptive mid-drag re-truncation cadence gate (hud-ghhxa,
+    /// hud-3to8i): when the scene version changes rapidly (e.g. per-frame
+    /// bounds updates during a resize drag), we cap the re-prime rate to at
+    /// most once per the adaptive interval so we never re-prime every frame.
     ///
     /// `None` means no prime has run yet (the first frame always primes).
-    /// When `Some`, a new prime is only allowed when at least
-    /// `RESIZE_REPRIME_INTERVAL_MS` has elapsed since this instant.
+    /// When `Some`, a new prime is only allowed when at least the adaptive
+    /// interval (derived from [`resize_reprime_content_bytes`]) has elapsed.
     resize_reprime_last_at: Option<std::time::Instant>,
+    /// Total byte count of Ellipsis text content across all visible tiles at
+    /// the time of the last successful `prime_truncation_cache` run.
+    ///
+    /// Used as the input to [`adaptive_reprime_interval_ms`] on the *next*
+    /// cadence-gate check.  Using the last-prime byte count (rather than
+    /// recomputing from the scene on every deferred frame) keeps the gate
+    /// decision O(1) with no scene traversal on deferred frames.
+    ///
+    /// Initialized to 0 so the first prime always uses the short interval
+    /// (which is effectively bypassed because `resize_reprime_last_at` is
+    /// `None` and the gate never defers on the first call).
+    resize_reprime_content_bytes: usize,
     /// Per-surface video state machines (v2 media plane, E26 / B11).
     ///
     /// Keyed by the `SceneId` carried in `ZoneContent::VideoSurfaceRef`.
@@ -1629,6 +1678,7 @@ impl Compositor {
             markdown_cache_scene_version: u64::MAX,
             truncation_cache_scene_version: u64::MAX,
             resize_reprime_last_at: None,
+            resize_reprime_content_bytes: 0,
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -1900,6 +1950,7 @@ impl Compositor {
             markdown_cache_scene_version: u64::MAX,
             truncation_cache_scene_version: u64::MAX,
             resize_reprime_last_at: None,
+            resize_reprime_content_bytes: 0,
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
@@ -2295,25 +2346,34 @@ impl Compositor {
     /// is O(n) in content length, re-priming every frame during a fast drag
     /// would blow the Stage 5 / Stage 6 frame budget on large content.
     ///
-    /// The cadence gate caps re-primes to at most once per
-    /// [`RESIZE_REPRIME_INTERVAL_MS`] while guaranteeing that every distinct
-    /// intermediate geometry is *eventually* reflected — not only at drag-end.
-    /// When the geometry settles (scene.version stops changing), the last
-    /// geometry is primed on the next frame after the interval elapses.
+    /// The adaptive cadence gate caps re-primes to at most once per the
+    /// content-length-derived interval (see [`adaptive_reprime_interval_ms`])
+    /// while guaranteeing that every distinct intermediate geometry is
+    /// *eventually* reflected — not only at drag-end.  When the geometry
+    /// settles (scene.version stops changing), the last geometry is primed on
+    /// the next frame after the interval elapses.
     pub fn prime_truncation_cache(&mut self, scene: &SceneGraph) {
         // Skip if the scene has not changed since we last primed.
         if scene.version == self.truncation_cache_scene_version {
             return;
         }
 
-        // ── Mid-drag cadence gate (hud-ghhxa) ────────────────────────────────
+        // ── Adaptive mid-drag cadence gate (hud-ghhxa, hud-3to8i) ───────────
         // When geometry changes rapidly (bounds updates from resize), cap the
-        // re-prime rate to RESIZE_REPRIME_INTERVAL_MS to avoid per-frame shaping
-        // cost on large content.
+        // re-prime rate to an adaptive interval derived from the total byte
+        // count of Ellipsis text content visible in the scene.  This avoids
+        // per-frame O(n) shaping cost on large content while keeping truncation
+        // visually responsive for short/cheap content.
         //
-        // Strategy: if a prime ran within the interval, defer — leave the sentinel
-        // unchanged so the next frame will retry.  When the interval has elapsed
-        // (or this is the very first prime), proceed unconditionally.
+        // Strategy: if a prime ran within the adaptive interval, defer — leave
+        // the sentinel unchanged so the next frame will retry.  When the
+        // interval has elapsed (or this is the very first prime), proceed.
+        //
+        // The adaptive interval is derived from `resize_reprime_content_bytes`,
+        // which holds the total content bytes from the *last* successful prime.
+        // Using the cached value keeps this check O(1) with no scene traversal
+        // on deferred frames (frame-loop contract: the adaptive decision itself
+        // must be cheap).
         //
         // This guarantees:
         //  a) The first geometry change in each interval triggers an immediate
@@ -2331,14 +2391,14 @@ impl Compositor {
         // font-metric changes are always reflected immediately regardless of resize
         // cadence.
         let forced_prime = self.truncation_cache_scene_version == u64::MAX;
-        if !forced_prime
-            && should_defer_reprime(self.resize_reprime_last_at, RESIZE_REPRIME_INTERVAL_MS)
-        {
+        let interval_ms = adaptive_reprime_interval_ms(self.resize_reprime_content_bytes);
+        if !forced_prime && should_defer_reprime(self.resize_reprime_last_at, interval_ms) {
             // Within the debounce window: defer, do not update the sentinel.
             tracing::trace!(
                 scene_version = scene.version,
-                interval_ms = RESIZE_REPRIME_INTERVAL_MS,
-                "prime_truncation_cache: mid-drag cadence defer (within interval)"
+                interval_ms,
+                content_bytes = self.resize_reprime_content_bytes,
+                "prime_truncation_cache: mid-drag cadence defer (within adaptive interval)"
             );
             return;
         }
@@ -2385,6 +2445,12 @@ impl Compositor {
                 );
             }
         }
+
+        // Update the cached content byte count for the adaptive cadence gate on
+        // the *next* call.  Summing item lengths is O(n) in item count here, but
+        // this only runs when a prime is allowed (not on every deferred frame),
+        // so it stays within the prime-time O(n) budget.
+        self.resize_reprime_content_bytes = live_items.iter().map(|item| item.text.len()).sum();
 
         let mut live_keys = rasterizer.prime_truncation_cache(&live_items);
 
@@ -8287,7 +8353,7 @@ impl Compositor {
 /// - `last_at`: timestamp of the last successful truncation cache prime, or
 ///   `None` if no prime has ever run.
 /// - `interval_ms`: minimum interval between primes in milliseconds
-///   (typically [`RESIZE_REPRIME_INTERVAL_MS`]).
+///   (derived from content length via [`adaptive_reprime_interval_ms`]).
 ///
 /// Returns `true` (defer) only when `last_at` is `Some` and the elapsed time
 /// is less than `interval_ms`.  Returns `false` (allow) when `last_at` is
@@ -17335,7 +17401,7 @@ mod tests {
     #[test]
     fn cadence_gate_first_call_no_prior_timestamp_allows_prime() {
         assert!(
-            !should_defer_reprime(None, RESIZE_REPRIME_INTERVAL_MS),
+            !should_defer_reprime(None, RESIZE_REPRIME_INTERVAL_MEDIUM_MS),
             "cadence gate must not defer on the first call (no prior timestamp)"
         );
     }
@@ -17347,9 +17413,10 @@ mod tests {
     fn cadence_gate_within_interval_defers_reprime() {
         // last prime ran "just now" — well within any reasonable interval.
         let last_at = Some(std::time::Instant::now());
+        let interval_ms = RESIZE_REPRIME_INTERVAL_MEDIUM_MS;
         assert!(
-            should_defer_reprime(last_at, RESIZE_REPRIME_INTERVAL_MS),
-            "cadence gate must defer when within RESIZE_REPRIME_INTERVAL_MS ({RESIZE_REPRIME_INTERVAL_MS}ms)"
+            should_defer_reprime(last_at, interval_ms),
+            "cadence gate must defer when within interval ({interval_ms}ms)"
         );
     }
 
@@ -17359,11 +17426,11 @@ mod tests {
     /// Uses a back-dated Instant to avoid sleeping.
     #[test]
     fn cadence_gate_after_interval_allows_reprime() {
-        let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
+        let interval_ms = RESIZE_REPRIME_INTERVAL_MEDIUM_MS;
         let past = std::time::Instant::now() - std::time::Duration::from_millis(interval_ms + 10);
         assert!(
             !should_defer_reprime(Some(past), interval_ms),
-            "cadence gate must allow prime when RESIZE_REPRIME_INTERVAL_MS has elapsed"
+            "cadence gate must allow prime when the interval ({interval_ms}ms) has elapsed"
         );
     }
 
@@ -17373,13 +17440,13 @@ mod tests {
     /// Duration comparison is strict less-than.
     #[test]
     fn cadence_gate_at_exact_interval_boundary_allows_reprime() {
-        let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
+        let interval_ms = RESIZE_REPRIME_INTERVAL_MEDIUM_MS;
         // Back-date by exactly the interval: elapsed >= interval_ms.
         let past = std::time::Instant::now() - std::time::Duration::from_millis(interval_ms);
         // elapsed() is at least interval_ms so should_defer_reprime must return false.
         assert!(
             !should_defer_reprime(Some(past), interval_ms),
-            "cadence gate must allow prime when elapsed >= RESIZE_REPRIME_INTERVAL_MS"
+            "cadence gate must allow prime when elapsed >= interval ({interval_ms}ms)"
         );
     }
 
@@ -17390,7 +17457,7 @@ mod tests {
     /// after interval" property end-to-end through the helper.
     #[test]
     fn cadence_gate_deferred_sentinel_unchanged_enables_settle_prime() {
-        let interval_ms = RESIZE_REPRIME_INTERVAL_MS;
+        let interval_ms = RESIZE_REPRIME_INTERVAL_MEDIUM_MS;
 
         // All calls within the interval must defer.
         let last_at = Some(std::time::Instant::now());
@@ -17407,6 +17474,103 @@ mod tests {
             !should_defer_reprime(Some(past), interval_ms),
             "should_defer_reprime must return false once the interval has elapsed \
              (final/settled geometry must be primed)"
+        );
+    }
+
+    // ── Adaptive cadence threshold tests (hud-3to8i) ──────────────────────────
+    //
+    // These tests verify `adaptive_reprime_interval_ms`, which selects the
+    // re-prime interval based on total Ellipsis content byte count.
+    //
+    // Key invariants:
+    //   a) Zero bytes (empty scene) → short interval (≈60 Hz).
+    //   b) Content just below the short threshold → short interval.
+    //   c) Content at the short threshold → medium interval.
+    //   d) Content just below the long threshold → medium interval.
+    //   e) Content at the long threshold → long interval.
+    //   f) Large content → long interval.
+    //   g) The short interval < medium interval < long interval (strict ordering).
+
+    /// Invariant (a): empty scene → short interval (≈60 Hz).
+    #[test]
+    fn adaptive_cadence_empty_scene_uses_short_interval() {
+        assert_eq!(
+            adaptive_reprime_interval_ms(0),
+            RESIZE_REPRIME_INTERVAL_SHORT_MS,
+            "empty scene (0 bytes) must use the short re-prime interval (≈60 Hz)"
+        );
+    }
+
+    /// Invariant (b): content just below the short threshold → short interval.
+    #[test]
+    fn adaptive_cadence_below_short_threshold_uses_short_interval() {
+        let bytes = RESIZE_REPRIME_SHORT_THRESHOLD_BYTES - 1;
+        assert_eq!(
+            adaptive_reprime_interval_ms(bytes),
+            RESIZE_REPRIME_INTERVAL_SHORT_MS,
+            "content just below short threshold ({bytes} bytes) must use short interval"
+        );
+    }
+
+    /// Invariant (c): content at the short threshold → medium interval.
+    #[test]
+    fn adaptive_cadence_at_short_threshold_uses_medium_interval() {
+        let bytes = RESIZE_REPRIME_SHORT_THRESHOLD_BYTES;
+        assert_eq!(
+            adaptive_reprime_interval_ms(bytes),
+            RESIZE_REPRIME_INTERVAL_MEDIUM_MS,
+            "content at short threshold ({bytes} bytes) must use medium interval"
+        );
+    }
+
+    /// Invariant (d): content just below the long threshold → medium interval.
+    #[test]
+    fn adaptive_cadence_below_long_threshold_uses_medium_interval() {
+        let bytes = RESIZE_REPRIME_LONG_THRESHOLD_BYTES - 1;
+        assert_eq!(
+            adaptive_reprime_interval_ms(bytes),
+            RESIZE_REPRIME_INTERVAL_MEDIUM_MS,
+            "content just below long threshold ({bytes} bytes) must use medium interval"
+        );
+    }
+
+    /// Invariant (e): content at the long threshold → long interval.
+    #[test]
+    fn adaptive_cadence_at_long_threshold_uses_long_interval() {
+        let bytes = RESIZE_REPRIME_LONG_THRESHOLD_BYTES;
+        assert_eq!(
+            adaptive_reprime_interval_ms(bytes),
+            RESIZE_REPRIME_INTERVAL_LONG_MS,
+            "content at long threshold ({bytes} bytes) must use long interval (≈10 Hz)"
+        );
+    }
+
+    /// Invariant (f): large content (1 MiB transcript) → long interval.
+    #[test]
+    fn adaptive_cadence_large_content_uses_long_interval() {
+        let bytes = 1_048_576; // 1 MiB
+        assert_eq!(
+            adaptive_reprime_interval_ms(bytes),
+            RESIZE_REPRIME_INTERVAL_LONG_MS,
+            "large content ({bytes} bytes / 1 MiB) must use the long re-prime interval (≈10 Hz)"
+        );
+    }
+
+    /// Invariant (g): strict ordering — short < medium < long.
+    ///
+    /// These comparisons are between compile-time constants, so they are
+    /// expressed as `const` assertions (evaluated at compile time) rather than
+    /// `assert!` calls (which clippy correctly flags as `assertions_on_constants`
+    /// when the expression is a known constant `true`).
+    #[test]
+    fn adaptive_cadence_intervals_are_strictly_ordered() {
+        const _: () = assert!(
+            RESIZE_REPRIME_INTERVAL_SHORT_MS < RESIZE_REPRIME_INTERVAL_MEDIUM_MS,
+            "short interval must be < medium interval"
+        );
+        const _: () = assert!(
+            RESIZE_REPRIME_INTERVAL_MEDIUM_MS < RESIZE_REPRIME_INTERVAL_LONG_MS,
+            "medium interval must be < long interval"
         );
     }
 
