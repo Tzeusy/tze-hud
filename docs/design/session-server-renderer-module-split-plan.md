@@ -24,7 +24,13 @@ This is **planning only** — no Rust code is changed in this document.
 
 1. **Move-only commits**: no logic changes in any split commit. Reviewers should
    be able to verify with `diff -u old.rs submodule/*.rs` that nothing was added
-   or deleted.
+   or deleted — with the explicit exception of **visibility modifiers**. Items
+   that were implicitly private to a single file become `pub(super)` (visible to
+   the parent module and its children) or `pub(crate)` when moved into a child
+   module and called from a sibling or the parent `mod.rs`. These are the minimal
+   mechanical additions required by Rust's module privacy rules and are expected
+   in every split commit. Execution PRs must list which items gained
+   `pub(super)`/`pub(crate)` in their PR description.
 2. **API preservation via `pub use`**: callers must not need to update import
    paths. The parent module re-exports everything from each submodule.
 3. **One submodule per commit** (or tightly coupled pair): keeps each PR
@@ -416,7 +422,7 @@ Per hud-se14n:
 - [x] Split plan with module boundaries and migration order written and reviewed (this document)
 - [ ] `session_server.rs` production lines ≤ 4 k post-split (target ~1,100 in `mod.rs`, rest distributed)
 - [ ] `renderer.rs` production lines ≤ 4 k post-split (target ~1,350 in `mod.rs`, rest distributed)
-- [ ] All splits are mechanical move-only commits (verifiable by diff)
+- [ ] All splits are mechanical move-only commits (verifiable by diff); each PR description lists items that gained `pub(super)` or `pub(crate)` visibility as part of the move
 - [ ] Test suite green after each step (no behavior change)
 - [ ] Churn hotspot concentration measurably reduced (each submodule sees commits only when its domain changes)
 
