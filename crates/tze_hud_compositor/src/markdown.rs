@@ -3087,8 +3087,7 @@ mod tests {
         );
         let tokens_low = MarkdownTokens::from_token_map(&map_low);
         assert_eq!(
-            tokens_low.line_height_multiplier,
-            1.4,
+            tokens_low.line_height_multiplier, 1.4,
             "line_height_multiplier must ignore out-of-bounds low value and remain default 1.4"
         );
 
@@ -3099,8 +3098,7 @@ mod tests {
         );
         let tokens_high = MarkdownTokens::from_token_map(&map_high);
         assert_eq!(
-            tokens_high.line_height_multiplier,
-            1.4,
+            tokens_high.line_height_multiplier, 1.4,
             "line_height_multiplier must ignore out-of-bounds high value and remain default 1.4"
         );
     }
