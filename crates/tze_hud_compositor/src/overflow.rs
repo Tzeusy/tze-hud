@@ -201,7 +201,7 @@ pub fn truncate_for_ellipsis<'a>(
     let mut full_buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
     full_buf.set_size(font_system, Some(bounds_width), None);
     full_buf.set_wrap(font_system, Wrap::Word);
-    full_buf.set_text(font_system, text, base_attrs, Shaping::Basic);
+    full_buf.set_text(font_system, text, base_attrs, Shaping::Advanced);
     full_buf.shape_until_scroll(font_system, false);
 
     // ── Step 4: collect rendered lines and their widths ───────────────────────
@@ -285,23 +285,50 @@ pub fn truncate_for_ellipsis<'a>(
     }
 
     // More runs than fit: take only the first `max_lines` runs.
-    // The last visible run is runs[max_lines - 1].
-    let last_visible_run = &runs[max_lines - 1];
-    let last_line_i = last_visible_run.0;
-    let last_line_text = if let Some(line) = full_buf.lines.get(last_line_i) {
-        line.text().to_owned()
-    } else {
-        return TruncationResult {
-            text: text.to_owned(),
-            was_truncated: true,
-        };
-    };
+    // Before truncating the last visible run, check whether any visible run
+    // overflows horizontally.  With Shaping::Advanced, an unbreakable word
+    // (e.g. "Mk0") can measure wider than bounds_width even in the visible
+    // prefix.  In that case, treat it the same as the horizontal-overflow path:
+    // truncate at the first overflowing run and drop everything after it.
+    let visible_runs = &runs[..max_lines];
+    let first_overflow_in_visible = visible_runs.iter().position(|run| run.1 > bounds_width);
 
-    let prefix = text_prefix_up_to_run(&runs, max_lines - 1, text, &full_buf);
+    let (truncation_run_idx, _truncation_line_i, truncation_line_text) =
+        if let Some(overflow_idx) = first_overflow_in_visible {
+            // A run in the visible window overflows — truncate there.
+            let overflow_run = &runs[overflow_idx];
+            let line_i = overflow_run.0;
+            let line_text = if let Some(line) = full_buf.lines.get(line_i) {
+                line.text().to_owned()
+            } else {
+                return TruncationResult {
+                    text: text.to_owned(),
+                    was_truncated: true,
+                };
+            };
+            (overflow_idx, line_i, line_text)
+        } else {
+            // No horizontal overflow in the visible window — truncate the last
+            // visible run with an ellipsis (the standard vertical-truncation path).
+            let last_visible_run = &runs[max_lines - 1];
+            let line_i = last_visible_run.0;
+            let line_text = if let Some(line) = full_buf.lines.get(line_i) {
+                line.text().to_owned()
+            } else {
+                return TruncationResult {
+                    text: text.to_owned(),
+                    was_truncated: true,
+                };
+            };
+            (max_lines - 1, line_i, line_text)
+        };
+
+    let prefix = text_prefix_up_to_run(&runs, truncation_run_idx, text, &full_buf);
     // Use min(g.start) so RTL runs resolve to the logical start, not the
     // visual-first (logical-last) glyph that glyphs[0] gives for RTL text.
-    let run_start = run_logical_start(&last_visible_run.2);
-    let run_slice = run_start_slice(&last_line_text, run_start);
+    let truncation_run = &runs[truncation_run_idx];
+    let run_start = run_logical_start(&truncation_run.2);
+    let run_slice = run_start_slice(&truncation_line_text, run_start);
     let truncated_last = truncate_line_to_ellipsis(
         run_slice,
         base_attrs,
@@ -403,7 +430,7 @@ pub fn truncate_tail_anchored<'a>(
     let mut full_buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
     full_buf.set_size(font_system, Some(bounds_width), None);
     full_buf.set_wrap(font_system, Wrap::Word);
-    full_buf.set_text(font_system, text, base_attrs, Shaping::Basic);
+    full_buf.set_text(font_system, text, base_attrs, Shaping::Advanced);
     full_buf.shape_until_scroll(font_system, false);
 
     // ── Step 4: collect rendered lines and their widths ───────────────────────
@@ -616,7 +643,7 @@ fn measure_single_line<'a>(
     let mut buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
     buf.set_size(font_system, Some(max_width), None);
     buf.set_wrap(font_system, Wrap::None);
-    buf.set_text(font_system, text, base_attrs, Shaping::Basic);
+    buf.set_text(font_system, text, base_attrs, Shaping::Advanced);
     buf.shape_until_scroll(font_system, false);
     buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0)
 }
@@ -713,10 +740,12 @@ fn run_start_slice(paragraph_text: &str, run_start_byte: usize) -> &str {
 /// shape calls from O(W) to O(log W):
 ///
 /// 1. Collect word-boundary byte offsets into a sorted slice.
-/// 2. Binary-search for the largest boundary whose prefix width + ellipsis_w ≤
-///    bounds_width.  The predicate `fits(b)` (prefix width ≤ budget) is
-///    monotone: once a prefix is too wide, all longer prefixes are also too
-///    wide.  Binary search therefore issues O(log W) shape calls.
+/// 2. Binary-search for the largest boundary where `measure("prefix…") ≤
+///    bounds_width`.  The combined shape is measured as a single unit so that
+///    any kerning/ligature between the last glyph of the prefix and `"…"` is
+///    accounted for (critical with `Shaping::Advanced`).  The predicate is
+///    monotone: once a prefix+ellipsis is too wide, all longer prefixes also
+///    produce a wider result.  Binary search issues O(log W) shape calls.
 /// 3. If no non-empty word boundary fits, repeat the binary search over
 ///    grapheme-cluster boundaries (O(log G) shapes, G = grapheme count).
 /// 4. If even a single grapheme + ellipsis does not fit, return just `"…"`.
@@ -749,15 +778,32 @@ fn truncate_line_to_ellipsis<'a>(
         return ELLIPSIS.to_owned();
     }
 
-    // ── Helper: measure prefix width ─────────────────────────────────────────
-    // Returns the shaped advance width of `line[..boundary]`.
-    let mut measure_prefix = |boundary: usize| -> f32 {
+    // ── Helper: measure prefix+ellipsis width as a unit ─────────────────────
+    // With Shaping::Advanced, kerning between the final glyph of the prefix and
+    // the ellipsis character means the combined width can differ from
+    // measure(prefix) + measure(ELLIPSIS).  Measuring the full candidate string
+    // as one shaped unit is the only way to guarantee the result fits within
+    // bounds_width.  We therefore use bounds_width as the fitting budget rather
+    // than the pre-subtracted `budget`.
+    let mut measure_with_ellipsis = |boundary: usize| -> f32 {
         if boundary == 0 {
-            return 0.0;
+            // Zero-length prefix: the result is just ELLIPSIS.
+            return measure_single_line(
+                ELLIPSIS,
+                base_attrs,
+                bounds_width * 2.0,
+                font_size_px,
+                line_height,
+                font_system,
+            );
         }
         let candidate = &line[..boundary];
+        let trimmed = candidate.trim_end();
+        // Shape "prefix…" as a single unit so kerning/ligatures between the
+        // last glyph of the prefix and "…" are accounted for.
+        let with_ellipsis = format!("{trimmed}{ELLIPSIS}");
         measure_single_line(
-            candidate,
+            &with_ellipsis,
             base_attrs,
             bounds_width * 2.0,
             font_size_px,
@@ -779,14 +825,13 @@ fn truncate_line_to_ellipsis<'a>(
         .filter(|&b| line.is_char_boundary(b))
         .collect();
 
-    // Binary search: find the rightmost index `hi` such that
-    // `word_boundaries[hi]` prefix fits within budget.
+    // Binary search: find the rightmost word boundary such that
+    // `measure_with_ellipsis(boundary) ≤ bounds_width`.
     //
-    // Predicate: `fits(i)` ≡ measure_prefix(word_boundaries[i]) ≤ budget.
-    // `fits` is monotone-decreasing: if index i fits, all j < i also fit.
-    // We want the largest i where fits(i) is true.
+    // We compare against bounds_width (not budget) because measure_with_ellipsis
+    // already includes the ellipsis in the shaped measurement.
     if let Some(boundary) =
-        binary_search_largest_fitting(&word_boundaries, budget, &mut measure_prefix)
+        binary_search_largest_fitting(&word_boundaries, bounds_width, &mut measure_with_ellipsis)
     {
         let candidate = &line[..boundary];
         let trimmed = candidate.trim_end();
@@ -803,9 +848,11 @@ fn truncate_line_to_ellipsis<'a>(
         .filter(|&b| line.is_char_boundary(b))
         .collect();
 
-    if let Some(boundary) =
-        binary_search_largest_fitting(&grapheme_boundaries, budget, &mut measure_prefix)
-    {
+    if let Some(boundary) = binary_search_largest_fitting(
+        &grapheme_boundaries,
+        bounds_width,
+        &mut measure_with_ellipsis,
+    ) {
         let candidate = &line[..boundary];
         let trimmed = candidate.trim_end();
         return format!("{trimmed}{ELLIPSIS}");
@@ -1338,8 +1385,16 @@ mod tests {
             }
         }
 
-        /// Invariant: truncated text, when shaped at bounds_width, measures ≤ bounds_width.
-        /// This is the "no clipped glyphs" contract: the rendered result fits in the box.
+        /// Invariant: truncated text, when rendered at bounds_width with word-wrap,
+        /// has every layout run fitting within bounds_width.  This is the "no clipped
+        /// glyphs" contract: no run is wider than the content box.
+        ///
+        /// Note: the result text may be multi-line (when a word-wrapped paragraph has
+        /// a non-final line that overflows horizontally, the preceding whole lines are
+        /// preserved and the overflow line is truncated).  In that case
+        /// `measure_single_line(result)` can legitimately exceed `bounds_width`, but
+        /// every individual layout run must still fit.  We therefore shape the result
+        /// at `bounds_width` with `Wrap::Word` and assert each run's `line_w ≤ bounds_width`.
         #[test]
         fn proptest_truncated_result_fits_within_bounds(
             text in "[a-zA-Z0-9 ]{1,80}",
@@ -1352,15 +1407,21 @@ mod tests {
                 &text, base_attrs(), width_px, 200.0, font_size, line_h, &mut fs,
             );
             if result.was_truncated && !result.text.is_empty() {
-                let measured = measure_single_line(
-                    &result.text, base_attrs(), width_px * 4.0, font_size, line_h, &mut fs,
-                );
-                prop_assert!(
-                    measured <= width_px + 2.0, // 2px tolerance for fp rounding
-                    "truncated text measured {measured:.2}px > bounds {width_px}px; \
-                     text={text:?} result={:?}",
-                    result.text,
-                );
+                // Shape the result at bounds_width with word-wrap — the same
+                // geometry used by the renderer — and check every run's width.
+                let mut check = Buffer::new(&mut fs, Metrics::new(font_size, line_h));
+                check.set_size(&mut fs, Some(width_px), None);
+                check.set_wrap(&mut fs, Wrap::Word);
+                check.set_text(&mut fs, &result.text, base_attrs(), Shaping::Advanced);
+                check.shape_until_scroll(&mut fs, false);
+                for run in check.layout_runs() {
+                    prop_assert!(
+                        run.line_w <= width_px + 2.0, // 2px tolerance for fp rounding
+                        "layout run measured {:.2}px > bounds {width_px}px; \
+                         text={text:?} result={:?} run_line_i={}",
+                        run.line_w, result.text, run.line_i,
+                    );
+                }
             }
         }
 
@@ -1390,7 +1451,7 @@ mod tests {
             let mut check_buf = Buffer::new(&mut fs, Metrics::new(font_size, line_h));
             check_buf.set_size(&mut fs, Some(bounds_w), None);
             check_buf.set_wrap(&mut fs, Wrap::Word);
-            check_buf.set_text(&mut fs, &result.text, base_attrs(), Shaping::Basic);
+            check_buf.set_text(&mut fs, &result.text, base_attrs(), Shaping::Advanced);
             check_buf.shape_until_scroll(&mut fs, false);
             let run_count = check_buf.layout_runs().count();
             let max_allowed = max_whole_lines(height, line_h);
