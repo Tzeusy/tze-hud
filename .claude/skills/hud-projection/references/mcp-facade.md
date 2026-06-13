@@ -1,22 +1,28 @@
-# External Projection-Daemon Control Facades
+# Projection Control Facade Requirements
 
-Projection control facades belong to the projection daemon. They are not the runtime v1 MCP bridge and should not expose raw scene state, zone publishing shortcuts, PTY attachment, terminal capture, or process lifecycle controls.
+The production projection ingress routes cooperative projection operations into the runtime's in-process `ProjectionAuthority`. It is **not** a standalone external daemon and **not** the runtime v1 MCP bridge.
+
+**Current status:** The production ingress (MCP or gRPC surface) has not shipped. It is tracked as hud-bq0gl.1. The architecture below describes the requirements that surface must meet when it lands.
 
 ## Required Boundary
 
+The production ingress must:
 - Accept only the cooperative operation contract from `operation-examples.md`.
-- Authenticate callers through daemon-local authority, an MCP bearer token, OS-protected IPC, or another unguessable credential.
+- Authenticate callers through an MCP bearer token, OS-protected IPC, or another unguessable credential.
 - Bind owner-scoped non-attach operations to `projection_id` plus `owner_token`; bind operator cleanup to separate explicit operator authority.
 - Return bounded operation responses only: no unbounded transcript, unbounded inbox history, `owner_token` outside a successful `attach` response, owner-token verifier, or raw runtime scene graph.
 - Emit audit records without transcript text, HUD input text, or owner tokens.
+- Route operations to the in-process `ProjectionAuthority` in `tze_hud_runtime`, not to a separate projection process.
 
-## In-Repo Stdio Daemon CLI
+## Component Harness (Development / Testing Only)
 
-The repo ships a daemon-local stdio control surface in `crates/tze_hud_projection`:
+The repo ships a stdio component harness in `crates/tze_hud_projection` for local protocol development and unit testing:
 
 ```bash
 cargo run -p tze_hud_projection --bin tze_hud_projection_authority -- --stdio --caller-identity codex-local
 ```
+
+**This binary is not the production ingress.** It runs `ProjectionAuthority` in an isolated process with no connection to the live runtime, compositor, or display. It is useful for testing the operation contract and inspecting audit records, but output sent to it never reaches the screen.
 
 Send one operation JSON object per stdin line. The process writes one JSON result per stdout line:
 
@@ -24,7 +30,7 @@ Send one operation JSON object per stdin line. The process writes one JSON resul
 {"response":{"request_id":"req-attach","projection_id":"codex-rig","accepted":true,"server_timestamp_wall_us":1777400000000000,"status_summary":"projection attached","owner_token":"<attach-only>","lifecycle_state":"attached","pending_remaining_count":0,"pending_remaining_bytes":0,"portal_update_ready":false,"coalesced_output_count":0},"audit_records":[{"timestamp_wall_us":1777400000000000,"operation":"attach","projection_id":"codex-rig","caller_identity":"codex-local","request_id":"req-attach","accepted":true,"reason":"attach accepted","category":"attach"}]}
 ```
 
-The CLI keeps projection state in memory only for the lifetime of that process. Restarting it purges transcript text, pending input text, owner tokens, and cached lease identity, so sessions must attach again after restart. Operator cleanup can be enabled with `--operator-authority-env HUD_PROJECTION_OPERATOR_AUTHORITY`; owner operations still require the owner token issued by `attach`.
+The harness keeps projection state in memory only for the lifetime of that process. Restarting it purges transcript text, pending input text, owner tokens, and cached lease identity. Operator cleanup can be enabled with `--operator-authority-env HUD_PROJECTION_OPERATOR_AUTHORITY`; owner operations still require the owner token issued by `attach`.
 
 ## Tool Shape
 
@@ -35,22 +41,22 @@ Either shape is acceptable if the payload schema remains the same:
 
 The skill examples use operation JSON payloads so they work with either facade shape.
 
-## Claude-Style MCP Configuration
+## Claude-Style MCP Configuration (Future)
 
-Use `settings.template.json` as a starting point:
+When the production MCP ingress ships (hud-bq0gl.1), adapt `settings.template.json` to point at it:
 
 ```json
 {
   "mcpServers": {
     "hud-projection-daemon": {
       "type": "url",
-      "url": "http://<PROJECTION_DAEMON_HOST>:<PORT>/mcp",
+      "url": "http://<PROJECTION_INGRESS_HOST>:<PORT>/mcp",
       "headers": {
-        "Authorization": "Bearer ${HUD_PROJECTION_DAEMON_TOKEN}"
+        "Authorization": "Bearer ${HUD_PROJECTION_INGRESS_TOKEN}"
       }
     }
   }
 }
 ```
 
-Keep the server name explicit. Avoid names such as `tze-hud` that can be confused with the runtime v1 MCP zone publishing bridge.
+Keep the server name explicit (e.g. `hud-projection-daemon`). Avoid names such as `tze-hud` that can be confused with the runtime v1 MCP zone publishing bridge.
