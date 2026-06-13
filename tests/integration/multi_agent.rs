@@ -37,27 +37,23 @@
 //! - Epic 6  (session protocol): multi-agent gRPC connections
 //! - Epic 9  (zone system):    zone contention resolution policies
 
-use tze_hud_protocol::auth::{RUNTIME_MAX_VERSION, RUNTIME_MIN_VERSION};
 use tze_hud_protocol::proto;
 use tze_hud_protocol::proto::session as session_proto;
-#[allow(deprecated)]
-use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_scene::types::*;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio_stream::StreamExt;
 
-// ─── Test helpers ────────────────────────────────────────────────────────────
+// ─── Shared gRPC session harness ─────────────────────────────────────────────
+// Extracted from duplicate copies in v1_thesis, presence_card_coexistence, and
+// subtitle_streaming (hud-ls5pz). See common/mod.rs for drift reconciliation notes.
+#[path = "common/mod.rs"]
+mod common;
+use common::*;
 
-fn now_wall_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64
-}
+// ─── Test-local constants ─────────────────────────────────────────────────────
 
 const TEST_PSK: &str = "multi-agent-test-key";
 const GRPC_PORT: u16 = 50052; // use a different port from vertical_slice to avoid conflicts
@@ -140,306 +136,6 @@ struct FrameRateMeasurements {
     note: String,
 }
 
-// ─── Agent session helper ────────────────────────────────────────────────────
-
-/// Result of establishing a gRPC session and acquiring a lease.
-struct AgentSession {
-    namespace: String,
-    lease_id_bytes: Vec<u8>,
-    tx: tokio::sync::mpsc::Sender<session_proto::ClientMessage>,
-    rx: tonic::codec::Streaming<session_proto::ServerMessage>,
-    sequence: u64,
-}
-
-impl AgentSession {
-    fn next_seq(&mut self) -> u64 {
-        self.sequence += 1;
-        self.sequence
-    }
-
-    /// Receive the next server message that is NOT a `LeaseStateChange`.
-    ///
-    /// `LeaseStateChange` notifications are server-initiated and can arrive at
-    /// any time — including between a client request and the server's
-    /// `MutationResult`/`ZonePublishResult`/`LeaseResponse` reply.  Draining
-    /// these here prevents the race condition where the test sees a
-    /// `LeaseStateChange` where it expected a transactional response.
-    async fn next_non_state_change(
-        &mut self,
-    ) -> Option<Result<session_proto::ServerMessage, tonic::Status>> {
-        loop {
-            let item = self.rx.next().await?;
-            match &item {
-                Ok(msg) => {
-                    if let Some(session_proto::server_message::Payload::LeaseStateChange(_)) =
-                        &msg.payload
-                    {
-                        // Discard and loop — this is a server-push notification,
-                        // not the transactional reply we are waiting for.
-                        continue;
-                    }
-                    return Some(item);
-                }
-                Err(_) => return Some(item),
-            }
-        }
-    }
-}
-
-/// Connect an agent, complete the handshake, and acquire a lease.
-/// Returns the established session with the lease_id.
-async fn connect_agent(
-    agent_id: &str,
-    lease_priority: u32,
-    capabilities: Vec<String>,
-) -> Result<AgentSession, Box<dyn std::error::Error>> {
-    let mut client = HudSessionClient::connect(format!("http://[::1]:{GRPC_PORT}")).await?;
-
-    let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
-
-    let now_us = now_wall_us();
-
-    // Send SessionInit
-    tx.send(session_proto::ClientMessage {
-        sequence: 1,
-        timestamp_wall_us: now_us,
-        payload: Some(session_proto::client_message::Payload::SessionInit(
-            session_proto::SessionInit {
-                agent_id: agent_id.to_string(),
-                agent_display_name: format!("{agent_id} (integration test)"),
-                pre_shared_key: TEST_PSK.to_string(),
-                requested_capabilities: capabilities.clone(),
-                initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
-                resume_token: Vec::new(),
-                agent_timestamp_wall_us: now_us,
-                min_protocol_version: RUNTIME_MIN_VERSION,
-                max_protocol_version: RUNTIME_MAX_VERSION,
-                auth_credential: None,
-            },
-        )),
-    })
-    .await?;
-
-    let mut response_stream = client.session(stream).await?.into_inner();
-
-    // Read SessionEstablished
-    let msg = response_stream
-        .next()
-        .await
-        .ok_or("no message received")??;
-    let namespace = match &msg.payload {
-        Some(session_proto::server_message::Payload::SessionEstablished(est)) => {
-            est.namespace.clone()
-        }
-        other => {
-            return Err(
-                format!("agent {agent_id}: Expected SessionEstablished, got: {other:?}").into(),
-            );
-        }
-    };
-
-    // Read SceneSnapshot
-    let _msg = response_stream.next().await.ok_or("no scene snapshot")??;
-
-    // Request lease
-    tx.send(session_proto::ClientMessage {
-        sequence: 2,
-        timestamp_wall_us: now_wall_us(),
-        payload: Some(session_proto::client_message::Payload::LeaseRequest(
-            session_proto::LeaseRequest {
-                ttl_ms: 120_000,
-                capabilities,
-                lease_priority,
-            },
-        )),
-    })
-    .await?;
-
-    // Wrap the stream in a temporary AgentSession so we can use next_non_state_change.
-    // (LeaseStateChange can arrive between the LeaseRequest and its LeaseResponse.)
-    let mut partial_session = AgentSession {
-        namespace: namespace.clone(),
-        lease_id_bytes: vec![],
-        tx: tx.clone(),
-        rx: response_stream,
-        sequence: 2,
-    };
-
-    // Read LeaseResponse — skip any interleaved LeaseStateChange messages.
-    let msg = partial_session
-        .next_non_state_change()
-        .await
-        .ok_or("no lease response")??;
-    let (lease_id_bytes, response_stream) = match &msg.payload {
-        Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {
-            (resp.lease_id.clone(), partial_session.rx)
-        }
-        other => {
-            return Err(format!(
-                "agent {agent_id}: Expected LeaseResponse(granted), got: {other:?}"
-            )
-            .into());
-        }
-    };
-
-    Ok(AgentSession {
-        namespace,
-        lease_id_bytes,
-        tx,
-        rx: response_stream,
-        sequence: 2,
-    })
-}
-
-/// Send a CreateTile mutation and return the created tile ID bytes from the response.
-async fn create_tile_via_grpc(
-    session: &mut AgentSession,
-    bounds: [f32; 4],
-    z_order: u32,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let batch_id: Vec<u8> = uuid::Uuid::now_v7().as_bytes().to_vec();
-    let seq = session.next_seq();
-
-    session
-        .tx
-        .send(session_proto::ClientMessage {
-            sequence: seq,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(session_proto::client_message::Payload::MutationBatch(
-                session_proto::MutationBatch {
-                    batch_id,
-                    lease_id: session.lease_id_bytes.clone(),
-                    mutations: vec![proto::MutationProto {
-                        mutation: Some(proto::mutation_proto::Mutation::CreateTile(
-                            proto::CreateTileMutation {
-                                tab_id: vec![], // empty = server infers active tab
-                                bounds: Some(proto::Rect {
-                                    x: bounds[0],
-                                    y: bounds[1],
-                                    width: bounds[2],
-                                    height: bounds[3],
-                                }),
-                                z_order,
-                            },
-                        )),
-                    }],
-                    timing: None,
-                },
-            )),
-        })
-        .await?;
-
-    // Read MutationResult — skip any interleaved LeaseStateChange messages.
-    let msg = session
-        .next_non_state_change()
-        .await
-        .ok_or("no mutation result")??;
-    match &msg.payload {
-        Some(session_proto::server_message::Payload::MutationResult(result)) if result.accepted => {
-            let tile_id = result.created_ids.first().cloned().unwrap_or_default();
-            Ok(tile_id)
-        }
-        Some(session_proto::server_message::Payload::MutationResult(result)) => Err(format!(
-            "CreateTile rejected: {} — {}",
-            result.error_code, result.error_message
-        )
-        .into()),
-        other => Err(format!("Expected MutationResult, got: {other:?}").into()),
-    }
-}
-
-/// Publish stream text to a zone (e.g., subtitle zone which accepts ZoneMediaType::StreamText).
-async fn publish_stream_text_to_zone_via_grpc(
-    session: &mut AgentSession,
-    zone_name: &str,
-    text: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    publish_zone_content_via_grpc(
-        session,
-        zone_name,
-        proto::ZoneContent {
-            payload: Some(proto::zone_content::Payload::StreamText(text.to_string())),
-        },
-    )
-    .await
-}
-
-/// Publish a notification to a zone (e.g., notification-area which accepts ShortTextWithIcon).
-async fn publish_notification_to_zone_via_grpc(
-    session: &mut AgentSession,
-    zone_name: &str,
-    text: &str,
-    urgency: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
-    publish_zone_content_via_grpc(
-        session,
-        zone_name,
-        proto::ZoneContent {
-            payload: Some(proto::zone_content::Payload::Notification(
-                proto::NotificationPayload {
-                    text: text.to_string(),
-                    icon: String::new(),
-                    urgency,
-                    title: String::new(),
-                    actions: Vec::new(),
-                },
-            )),
-        },
-    )
-    .await
-}
-
-/// Low-level zone publish via a ZonePublish message.
-async fn publish_zone_content_via_grpc(
-    session: &mut AgentSession,
-    zone_name: &str,
-    content: proto::ZoneContent,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let seq = session.next_seq();
-
-    session
-        .tx
-        .send(session_proto::ClientMessage {
-            sequence: seq,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(session_proto::client_message::Payload::ZonePublish(
-                session_proto::ZonePublish {
-                    zone_name: zone_name.to_string(),
-                    content: Some(content),
-                    ttl_us: 0,
-                    element_id: Vec::new(),
-                    merge_key: String::new(),
-                    breakpoints: Vec::new(),
-                    // Snapshot parity fields (WM-S2b session.proto delta §fields 7-9); 0/empty = no constraint.
-                    present_at_wall_us: 0,
-                    expires_at_wall_us: 0,
-                    content_classification: String::new(),
-                },
-            )),
-        })
-        .await?;
-
-    // Read ZonePublishResult — skip any interleaved LeaseStateChange messages.
-    let msg = session
-        .next_non_state_change()
-        .await
-        .ok_or("no zone publish result")??;
-    match &msg.payload {
-        Some(session_proto::server_message::Payload::ZonePublishResult(result))
-            if result.accepted =>
-        {
-            Ok(())
-        }
-        Some(session_proto::server_message::Payload::ZonePublishResult(result)) => Err(format!(
-            "ZonePublish to '{}' rejected: {} — {}",
-            zone_name, result.error_code, result.error_message
-        )
-        .into()),
-        other => Err(format!("Expected ZonePublishResult, got: {other:?}").into()),
-    }
-}
-
 // ─── Main integration test ───────────────────────────────────────────────────
 
 #[tokio::test]
@@ -476,9 +172,30 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
 
     // All three connect concurrently.
     let (mut agent_a, mut agent_b, mut agent_c) = tokio::try_join!(
-        connect_agent("agent-weather", 1, standard_caps.clone()),
-        connect_agent("agent-notifications", 2, standard_caps.clone()),
-        connect_agent("agent-media", 3, standard_caps.clone()),
+        connect_agent(
+            TEST_PSK,
+            GRPC_PORT,
+            "agent-weather",
+            "integration test",
+            1,
+            standard_caps.clone()
+        ),
+        connect_agent(
+            TEST_PSK,
+            GRPC_PORT,
+            "agent-notifications",
+            "integration test",
+            2,
+            standard_caps.clone()
+        ),
+        connect_agent(
+            TEST_PSK,
+            GRPC_PORT,
+            "agent-media",
+            "integration test",
+            3,
+            standard_caps.clone()
+        ),
     )?;
 
     // Verify all three namespaces are distinct

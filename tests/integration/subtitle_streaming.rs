@@ -44,6 +44,15 @@ use tze_hud_scene::types::ZoneRegistry;
 
 use tokio_stream::StreamExt;
 
+// ─── Shared gRPC session harness ─────────────────────────────────────────────
+// Selectively re-uses now_wall_us() from the shared harness (hud-ls5pz).
+// The AgentSession in this file is intentionally minimal (no namespace /
+// lease_id_bytes) because zone-publish-only tests don't need those fields.
+// The shared connect_agent() requires full-session semantics; this file keeps
+// its own connect_agent_with_zone_publish_cap() instead.
+#[path = "common/mod.rs"]
+mod common;
+
 // ─── Port assignments (must not conflict with other integration tests) ────────
 //
 // Other tests use:
@@ -67,13 +76,7 @@ const PORT_MCP_PARITY: u16 = 50059;
 const PORT_LIST_ZONES_METADATA: u16 = 50060;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-fn now_wall_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64
-}
+// now_wall_us() is provided by the shared common harness (common::now_wall_us).
 
 /// Minimal agent session (tx + rx + sequence counter).
 struct AgentSession {
@@ -146,7 +149,7 @@ async fn connect_agent_with_zone_publish_cap(
     let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
 
-    let now_us = now_wall_us();
+    let now_us = common::now_wall_us();
     let cap = format!("publish_zone:{zone_name}");
 
     tx.send(session_proto::ClientMessage {
@@ -179,7 +182,7 @@ async fn connect_agent_with_zone_publish_cap(
     // Request a lease with publish_zone capability
     tx.send(session_proto::ClientMessage {
         sequence: 2,
-        timestamp_wall_us: now_wall_us(),
+        timestamp_wall_us: common::now_wall_us(),
         payload: Some(session_proto::client_message::Payload::LeaseRequest(
             session_proto::LeaseRequest {
                 ttl_ms: 120_000,
@@ -224,7 +227,7 @@ async fn zone_publish_stream_text(
         .tx
         .send(session_proto::ClientMessage {
             sequence: seq,
-            timestamp_wall_us: now_wall_us(),
+            timestamp_wall_us: common::now_wall_us(),
             payload: Some(session_proto::client_message::Payload::ZonePublish(
                 session_proto::ZonePublish {
                     zone_name: zone_name.to_string(),
