@@ -413,10 +413,10 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
         # 1. Picks a free port on the Windows host.
         # 2. Generates the HTML with the correct ?origin= param baked in.
         # 3. Writes it under a temp sidecar directory.
-        # 4. Starts an HttpListener serving that directory.
+        # 4. Starts an HttpListener on a .NET Thread (same process — HttpListener
+        #    is not serializable across Start-Job process boundaries).
         # 5. Opens Chrome (or the default browser) at the http:// URL.
-        # The script keeps running until the process exits; the listener serves
-        # requests in a background thread.
+        # 6. Sleeps 5 s to serve the initial request, then stops the listener.
         ps_script = r"""
 $port = (Get-NetTCPConnection -State Listen | Where-Object { $_.LocalAddress -eq '0.0.0.0' } | Measure-Object).Count
 # Pick a free ephemeral port via TcpListener
@@ -459,16 +459,18 @@ Set-Content -LiteralPath $htmlPath -Value $html -Encoding UTF8
 $http = [System.Net.HttpListener]::new()
 $http.Prefixes.Add("http://127.0.0.1:$port/")
 $http.Start()
-$job = Start-Job -ScriptBlock {
-    param($h, $d)
-    while ($h.IsListening) {
+# Use a .NET Thread (same process) rather than Start-Job (separate process):
+# HttpListener is not serializable across job process boundaries, so Start-Job
+# receives a dead deserialized copy and cannot serve requests.
+$serveDir = $dir
+$t = [System.Threading.Thread]::new({
+    while ($http.IsListening) {
         try {
-            $ctx = $h.GetContext()
-            $req = $ctx.Request
+            $ctx = $http.GetContext()
             $resp = $ctx.Response
-            $rel = $req.Url.AbsolutePath.TrimStart('/')
+            $rel = $ctx.Request.Url.AbsolutePath.TrimStart('/')
             if ($rel -eq '') { $rel = 'youtube_source_evidence.html' }
-            $file = Join-Path $d $rel
+            $file = Join-Path $serveDir $rel
             if (Test-Path $file) {
                 $bytes = [System.IO.File]::ReadAllBytes($file)
                 $resp.ContentLength64 = $bytes.Length
@@ -479,10 +481,13 @@ $job = Start-Job -ScriptBlock {
             $resp.OutputStream.Close()
         } catch { }
     }
-} -ArgumentList $http, $dir
+})
+$t.IsBackground = $true
+$t.Start()
 
 Start-Process "http://127.0.0.1:$port/youtube_source_evidence.html"
 Start-Sleep -Seconds 5
+$http.Stop()
 """
         cmd = [
             "ssh",
