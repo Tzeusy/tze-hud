@@ -917,15 +917,6 @@ Scope: v1-mandatory
 
 ---
 
-## Spec-First Handoff Notes
-
-- `hud-iq2x.8`: finalize source-of-truth semantics for mid-session escalation (session grant set vs lease scope vs operator/dynamic policy path), then promote any deferred escalation language from this spec into executable requirements.
-- `hud-iq2x.7`: align this session authority boundary with the runtime-policy-scene ownership matrix so policy-wiring work does not duplicate stateful enforcement already owned by runtime/session modules.
-
----
-
-## Deferred Requirements
-
 ### Requirement: Incremental Delta Replay (Post-v1)
 Incremental delta replay on reconnect (WAL-based event replay using last_seen_server_sequence) is explicitly deferred to post-v1. V1 SHALL use full SceneSnapshot on all reconnects. Field 38 (StateDeltaComplete) in ServerMessage SHALL be reserved for future delta replay.
 Source: RFC 0005 §6.4
@@ -967,3 +958,10 @@ Scope: post-v1
 #### Scenario: Deferred marker
 - **WHEN** v1 ships
 - **THEN** MCP guest sessions SHALL NOT be promotable to resident-level; guests requiring tile management MUST use a full gRPC agent session
+
+---
+
+## Spec-First Handoff Notes
+
+- `hud-iq2x.8`: finalize source-of-truth semantics for mid-session escalation (session grant set vs lease scope vs operator/dynamic policy path), then promote any deferred escalation language from this spec into executable requirements.
+- `hud-iq2x.7`: align this session authority boundary with the runtime-policy-scene ownership matrix so policy-wiring work does not duplicate stateful enforcement already owned by runtime/session modules.

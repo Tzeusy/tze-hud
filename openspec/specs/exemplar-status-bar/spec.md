@@ -131,7 +131,7 @@ The status-bar zone SHALL support simultaneous publishing from multiple independ
 ---
 
 ### Requirement: Coalesced Update Delivery
-Status-bar publications use the state-stream delivery class. Coalescing is achieved through the MergeByKey contention policy at the scene graph level — when multiple publishes for the same key arrive between compositor frames, the scene graph retains only the latest value per key. This is not a separate coalescing mechanism; it is an inherent property of MergeByKey replacement semantics. The compositor reads the zone's resolved occupancy (post-contention) at render time, not individual publish events.
+Status-bar publications SHALL use the state-stream delivery class. Coalescing is achieved through the MergeByKey contention policy at the scene graph level — when multiple publishes for the same key arrive between compositor frames, the scene graph retains only the latest value per key. This is not a separate coalescing mechanism; it is an inherent property of MergeByKey replacement semantics. The compositor reads the zone's resolved occupancy (post-contention) at render time, not individual publish events.
 
 #### Scenario: Rapid updates within one frame coalesce
 - **WHEN** agent A publishes `merge_key: "weather"` with value `"70F"` then `"71F"` then `"72F"` within the same compositor frame

@@ -768,7 +768,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Zone Name Reconciliation
-The codebase has a pre-existing inconsistency between zone names in the zone registry (`with_defaults()`) and the config validation constants (`BUILTIN_ZONE_TYPES`):
+Profile authors MUST use zone registry names (not config constant names) when naming zone override files. The codebase has a pre-existing inconsistency between zone names in the zone registry (`with_defaults()`) and the config validation constants (`BUILTIN_ZONE_TYPES`):
 
 | Zone Registry Name | Config Constant | Component Type Name |
 |---|---|---|
