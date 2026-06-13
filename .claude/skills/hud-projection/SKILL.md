@@ -1,6 +1,6 @@
 ---
 name: hud-projection
-description: Use when an already-running Codex, Claude, opencode, or other LLM session should cooperatively project itself into tze_hud, publish status/output, poll HUD-originated input, acknowledge input, detach, or clean up. Do not use for terminal capture, PTY attachment, tmux scraping, process hosting, or direct runtime v1 MCP zone publishing.
+description: Use when an already-running Codex, Claude, opencode, or other LLM session should project itself onto the HUD, show its output or status on screen, attach to a text-stream portal, publish live transcript, poll HUD-originated operator input, acknowledge input, detach, or clean up. Trigger phrases — "project this session to the HUD", "attach this agent to HUD", "show this LLM session in a text-stream portal", "check HUD input". Do not use for terminal capture, PTY attachment, tmux scraping, process hosting, or direct runtime v1 MCP zone publishing; for one-shot zone publishing use th-hud-publish instead.
 compatibility: Requires a production projection ingress surface (MCP or gRPC) that exposes the in-process ProjectionAuthority to external sessions. The production ingress is not yet shipped (tracked as hud-bq0gl.1). Until it lands, use the stdio component harness for local development only — it does not connect to the live runtime.
 metadata:
   owner: tze

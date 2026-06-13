@@ -40,6 +40,14 @@ bd update <id> --claim  # Claim work atomically
 bd close <id>         # Complete work
 ```
 
+## LLM Self-Projection
+
+If you are an LLM session that wants to project itself onto the HUD — to show your output, status, or live transcript on screen — use the **`hud-projection`** skill (`.claude/skills/hud-projection/SKILL.md` / `.codex/skills/hud-projection/SKILL.md`).
+
+Trigger phrases: "project this session to the HUD", "attach this agent to HUD", "show this LLM session in a text-stream portal", "check HUD input", "publish status to screen".
+
+This is cooperative opt-in projection, not PTY capture or terminal scraping. The `ProjectionAuthority` runs in-process inside the tze_hud runtime; you reach it via MCP tools (`portal_projection_attach`, `portal_projection_publish`). For one-shot zone publishing (no session lifecycle), use the **`th-hud-publish`** skill instead.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
