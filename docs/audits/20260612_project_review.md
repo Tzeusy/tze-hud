@@ -54,7 +54,7 @@ Biggest strengths: spec-to-code traceability culture, the five-pillar knowledge 
 
 **Average**: 4.0/5
 
-Notes on conservative merging: Category 9 was assessed at 3.5 and rounded down (no CVE/license automation blocks a 4). Category 15 carries a recorded caveat: a strict craft-and-care reading of the engineering-bar §4 "approval present" requirement vs `required_pull_request_reviews: null` would cap it at 2; scored 4 because the divergence is acknowledged in writing (AGENTS.md:310) and substantively mitigated by 10 required status checks — but the contradiction must be resolved in writing.
+Notes on conservative merging: Category 9 was assessed at 3.5 and rounded down (no CVE/license automation blocks a 4). Category 15 carries a recorded caveat: a strict craft-and-care reading of the engineering-bar §4 "approval present" requirement vs `required_pull_request_reviews: null` would cap it at 2; scored 4 because the divergence is acknowledged in writing (AGENTS.md:310) and substantively mitigated by 10 required status checks — but the contradiction must be resolved in writing. **RESOLVED (PR #754, 2026-06-13):** "approval present" was replaced in engineering-bar §4 with "adversarial re-review complete" as merge condition 6, with an explicit note on the departure and path back to formal approval; `development.md` was updated to match.
 
 ---
 
