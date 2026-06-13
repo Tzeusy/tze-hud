@@ -1,6 +1,6 @@
 ## 1. Planning and Contract
 
-- [x] 1.1 Create centralized `docs/20260511_goals.md` and keep it updated as work progresses.
+- [x] 1.1 Create centralized `docs/reports/20260511_goals.md` and keep it updated as work progresses.
 - [x] 1.2 Inspect current cooperative projection, session protocol, lease governance, zone/widget, attention/privacy, and Windows runtime scope docs.
 - [x] 1.3 Add OpenSpec proposal, design, and delta specs for the external agent projection authority.
 
@@ -25,5 +25,5 @@
 ## 4. Follow-Up Tracking and Closeout
 
 - [x] 4.1 Create beads for remaining work that cannot be completed in this slice; `hud-dl3ys` remains open for successful live Windows replay, and `hud-opmuj` was closed after provider process launch supervision landed.
-- [x] 4.2 Update `docs/20260511_goals.md` with validation evidence and residual gaps.
+- [x] 4.2 Update `docs/reports/20260511_goals.md` with validation evidence and residual gaps.
 - [x] 4.3 Perform prompt-to-artifact completion audit and record that the overall goal remains incomplete until 3.5 passes.

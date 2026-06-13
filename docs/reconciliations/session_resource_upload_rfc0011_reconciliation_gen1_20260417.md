@@ -21,7 +21,7 @@ Epic: `hud-ooj1` (Expose RFC 0011 scene-resource upload on resident session stre
 - `crates/tze_hud_protocol/tests/resource_upload_integration.rs`
 - `.claude/skills/user-test/scripts/hud_grpc_client.py`
 - `.claude/skills/user-test/scripts/presence_card_exemplar.py`
-- `docs/exemplar-presence-card-user-test.md`
+- `docs/reports/exemplar-presence-card-user-test.md`
 - `crates/tze_hud_resource/src/types.rs`
 - `crates/tze_hud_resource/src/upload.rs`
 
@@ -39,7 +39,7 @@ Epic: `hud-ooj1` (Expose RFC 0011 scene-resource upload on resident session stre
 | `resource-store` delta :: Upload validation, capability checks, and concurrent-upload rejection | `hud-ooj1.3`, `hud-ooj1.4` | Covered | Capability denial and error code assertion: `crates/tze_hud_protocol/src/session_server.rs:11723`; concurrent upload limit rejection coverage: `crates/tze_hud_protocol/src/session_server.rs:11898`. |
 | `resource-store` delta :: Scene-resource budget charging at reference time (not upload-storage admission) | `hud-ooj1.1`, `hud-ooj1.3`, `hud-ooj1.4` | Covered | Session upload path bypasses texture budget admission checks intentionally: `crates/tze_hud_protocol/src/session_server.rs:4308`; mutation-time budget ownership model remains authoritative: `crates/tze_hud_resource/src/budget.rs:33`; integration proves upload + later scene reference path: `crates/tze_hud_protocol/src/session_server.rs:12231`. |
 | `resource-store` delta :: Upload start acknowledgement + response correlation | `hud-ooj1.2`, `hud-ooj1.3`, `hud-ooj1.4` | Covered | Ack payload schema: `crates/tze_hud_protocol/proto/session.proto:641`; runtime ties chunk/complete results back to originating start: `crates/tze_hud_protocol/src/session_server.rs:4344`; correlation tests validate `request_sequence`/`upload_id`: `crates/tze_hud_protocol/src/session_server.rs:11955`. |
-| Consumer repair (`/user-test`, Presence Card) uses real resident upload flow | `hud-ooj1.5` | Covered | Helper uploads PNG via `ResourceUploadStart` and waits for correlated `ResourceStored`: `.claude/skills/user-test/scripts/hud_grpc_client.py:874`; Presence Card scenario uses uploaded `avatar_resource_id` in `StaticImageNode`: `.claude/skills/user-test/scripts/presence_card_exemplar.py:539`; operator doc now states real upload path: `docs/exemplar-presence-card-user-test.md:67`. |
+| Consumer repair (`/user-test`, Presence Card) uses real resident upload flow | `hud-ooj1.5` | Covered | Helper uploads PNG via `ResourceUploadStart` and waits for correlated `ResourceStored`: `.claude/skills/user-test/scripts/hud_grpc_client.py:874`; Presence Card scenario uses uploaded `avatar_resource_id` in `StaticImageNode`: `.claude/skills/user-test/scripts/presence_card_exemplar.py:539`; operator doc now states real upload path: `docs/reports/exemplar-presence-card-user-test.md:67`. |
 | Authoritative main-spec sync after tranche signoff (`v1-mvp-standards`) | `hud-ooj1.1` follow-on | **Partially covered (GAP-2)** | Delta spec exists, but authoritative `v1-mvp-standards` envelope text still reflects pre-upload field map (ops 20-35 only): `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:230`; task checklist still leaves sync step pending: `openspec/changes/session-resource-upload-rfc0011/tasks.md:8`. |
 
 ## Gaps Requiring Follow-On Beads

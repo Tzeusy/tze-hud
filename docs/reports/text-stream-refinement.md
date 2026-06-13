@@ -142,7 +142,7 @@ pixel_readback --features "headless dev-mode" -- test_color_14 test_color_17`
   HUD alongside the remaining drag/resize/minimize polish.
 - **Drag persistence**: header drag repositions the live portal, but position
   persistence across sessions is not implemented.
-- **`docs/exemplar-manual-review-checklist.md` row 11** — records the focused
+- **`docs/reports/exemplar-manual-review-checklist.md` row 11** — records the focused
   caret/Space sign-off, but still tracks the broader Text Stream Portal visual
   review as `live-refinement`.
 - **`.claude/skills/user-test/SKILL.md`** — now documents the unified
@@ -214,7 +214,7 @@ right thing (no background rect emitted).
    rebuild needed — only the Python client changes.
 4. If iterating the scroll contract, use the portal exemplar's `scroll`
    phase; it covers the four Transcript Interaction phases.
-5. Remaining housekeeping: update `docs/exemplar-manual-review-checklist.md`
+5. Remaining housekeeping: update `docs/reports/exemplar-manual-review-checklist.md`
    row 11 and `.claude/skills/user-test/SKILL.md` Text Stream Portals
    section once you're happy with the render.
 
@@ -235,7 +235,7 @@ python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_str
   --target tzehouse-windows.parrot-hen.ts.net:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
-  --doc /home/tze/gt/tze_hud/mayor/rig/docs/exemplar-manual-review-checklist.md \
+  --doc /home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-manual-review-checklist.md \
   --tab-width 1920 \
   --phases baseline,scroll \
   --baseline-hold-s 30 \
@@ -246,7 +246,7 @@ python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_str
   --target tzehouse-windows.parrot-hen.ts.net:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
-  --doc /home/tze/gt/tze_hud/mayor/rig/docs/exemplar-manual-review-checklist.md \
+  --doc /home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-manual-review-checklist.md \
   --tab-width 1920 \
   --phases diagnostic-input \
   --diagnostic-input-connect-timeout-s 5 \

@@ -97,38 +97,12 @@ These subdirectories contain artifacts produced during specific work episodes. T
 
 Investigation reports, direction documents, validation records, and coverage reports produced during feature and bug work. Files are named by bead ID or date to aid traceability.
 
-~45 files. Examples:
+~59 files. Examples:
 
 | File | Subject |
 |------|---------|
+| `20260511_goals.md` | Goals doc from 2026-05-11 |
 | `20260612_project_direction.md` | Project direction from 2026-06-12 audit |
-| `windows_perf_baseline_2026-05.md` | First Windows reference-hardware perf baseline |
-| `cooperative_hud_projection_gen2_reconciliation_20260510.md` | Gen-2 reconciliation: runtime-native readback substitution |
-| `validation_operations_extraction_decision_20260425.md` | Decision to extract v1 validation-operations backlog into standalone OpenSpec |
-
-### `reconciliations/`
-
-Spec-to-code and spec-to-spec reconciliation documents. Produced after major feature epics; record gap analysis, coverage maps, and follow-up beads.
-
-~47 files. The canonical seam artifact for policy wiring is `policy_wiring_seam_contract.md`.
-
-### `evidence/`
-
-Raw test artifacts, screenshots, JSON payloads, and benchmark outputs tied to specific validation runs. Organized by bead or feature name.
-
-Total size: ~11 MB. Subdirectories: `cooperative-hud-projection/`, `external-agent-projection-authority/`, `hud-9m47l/`, `text-stream-portals/`. Contains committed evidence for specific bead validation runs.
-
-> Note: `test_results/` at the repo root is gitignored. Artifacts that must be committed are moved to `docs/evidence/` and force-added with `git add -f`.
-
----
-
-## Other Standalone Docs
-
-A few standalone documents live directly under `docs/` rather than a subdirectory. These are typically feature-scoped design notes or one-off coverage analyses that predate the current directory structure.
-
-| File | Subject |
-|------|---------|
-| `text-stream-refinement.md` | Text-stream portal design notes (the "no bottom-chat input" decision lives here) |
 | `component-profile-authoring.md` | Component profile authoring guide |
 | `component-shape-language-coverage.md` | Shape language coverage analysis |
 | `dynamic-svg-implementation-report.md` | Dynamic SVG implementation report |
@@ -140,8 +114,24 @@ A few standalone documents live directly under `docs/` rather than a subdirector
 | `exemplar-presence-card-coverage.md` | Presence Card exemplar coverage |
 | `exemplar-presence-card-user-test.md` | Presence Card user-test record |
 | `exemplar-progress-bar-coverage.md` | Progress bar exemplar coverage |
-| `hud-ltgk-reconciliation.md` | hud-ltgk bead reconciliation |
-| `20260511_goals.md` | Goals doc from 2026-05-11 |
+| `text-stream-refinement.md` | Text-stream portal design notes (the "no bottom-chat input" decision lives here) |
+| `windows_perf_baseline_2026-05.md` | First Windows reference-hardware perf baseline |
+| `cooperative_hud_projection_gen2_reconciliation_20260510.md` | Gen-2 reconciliation: runtime-native readback substitution |
+| `validation_operations_extraction_decision_20260425.md` | Decision to extract v1 validation-operations backlog into standalone OpenSpec |
+
+### `reconciliations/`
+
+Spec-to-code and spec-to-spec reconciliation documents. Produced after major feature epics; record gap analysis, coverage maps, and follow-up beads.
+
+~48 files. The canonical seam artifact for policy wiring is `policy_wiring_seam_contract.md`. Also includes `hud-ltgk-reconciliation.md` (hud-ltgk bead reconciliation).
+
+### `evidence/`
+
+Raw test artifacts, screenshots, JSON payloads, and benchmark outputs tied to specific validation runs. Organized by bead or feature name.
+
+Total size: ~11 MB. Subdirectories: `cooperative-hud-projection/`, `external-agent-projection-authority/`, `hud-9m47l/`, `text-stream-portals/`. Contains committed evidence for specific bead validation runs.
+
+> Note: `test_results/` at the repo root is gitignored. Artifacts that must be committed are moved to `docs/evidence/` and force-added with `git add -f`.
 
 ---
 

@@ -36,7 +36,7 @@ Coverage categories:
 | OpaqueBackdrop readability validation passes | COVERED | `component_profiles.rs`: `exemplar_alert_banner_opaque_backdrop_readability_passes` test (line 2017); backdrop_opacity=0.9 >= 0.8 |
 | component_type matches v1 component type registry | COVERED | `ComponentType::AlertBanner` enum variant; asserted in test at line 2005 |
 | Zone override file uses registry name (hyphen form `alert-banner.toml`) | COVERED | `profiles/exemplar-alert-banner/zones/alert-banner.toml` — filename is hyphen form; zone_overrides keyed `"alert-banner"` asserted in test at line 2007 |
-| Profile added to `[component_profile_bundles].paths` | PARTIAL/DEFERRED | No production config file references `profiles/exemplar-alert-banner/`. The profile loads correctly (verified by tests) and the path convention is documented in `docs/component-profile-authoring.md`. Adding the path to an example/production config was task 1.3 and appears to not have been wired into `examples/vertical_slice/config/production.toml`. See GAP-1. |
+| Profile added to `[component_profile_bundles].paths` | PARTIAL/DEFERRED | No production config file references `profiles/exemplar-alert-banner/`. The profile loads correctly (verified by tests) and the path convention is documented in `docs/reports/component-profile-authoring.md`. Adding the path to an example/production config was task 1.3 and appears to not have been wired into `examples/vertical_slice/config/production.toml`. See GAP-1. |
 
 ### REQ: Alert-Banner Severity-Colored Backdrop Rendering
 

@@ -10,9 +10,9 @@
     "depends_on_bead_ids": [],
     "spec_refs": [
       "openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md",
-      "docs/exemplar-presence-card-coverage.md",
-      "docs/exemplar-presence-card-user-test.md",
-      "docs/exemplar-manual-review-checklist.md"
+      "docs/reports/exemplar-presence-card-coverage.md",
+      "docs/reports/exemplar-presence-card-user-test.md",
+      "docs/reports/exemplar-manual-review-checklist.md"
     ]
   },
   {
@@ -41,7 +41,7 @@
     "depends_on_bead_ids": ["hud-sx7q.2"],
     "spec_refs": [
       "openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md",
-      "docs/exemplar-presence-card-user-test.md",
+      "docs/reports/exemplar-presence-card-user-test.md",
       ".claude/skills/user-test/SKILL.md"
     ]
   },
@@ -56,8 +56,8 @@
     "depends_on_bead_ids": ["hud-sx7q.3"],
     "spec_refs": [
       "openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md",
-      "docs/exemplar-presence-card-user-test.md",
-      "docs/exemplar-manual-review-checklist.md"
+      "docs/reports/exemplar-presence-card-user-test.md",
+      "docs/reports/exemplar-manual-review-checklist.md"
     ]
   },
   {

@@ -41,7 +41,7 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --target tzehouse-windows.parrot-hen.ts.net:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
-  --doc docs/exemplar-manual-review-checklist.md \
+  --doc docs/reports/exemplar-manual-review-checklist.md \
   --phases diagnostic-input \
   --diagnostic-input-connect-timeout-s 5 \
   --transcript-out test_results/text-stream-portal-diagnostic-input.json

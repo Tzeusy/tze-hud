@@ -288,7 +288,7 @@ non-goals ("explicitly deferred"). This gap bead lifts the remaining half of tha
 
 ## Pre-existing Gaps (not from hud-ltgk, previously noted)
 
-These were identified in the gen-1 CSL coverage report (`docs/component-shape-language-coverage.md`)
+These were identified in the gen-1 CSL coverage report (`docs/reports/component-shape-language-coverage.md`)
 and are NOT from this epic. They remain open:
 
 | Gap | Location | Severity |

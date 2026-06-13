@@ -546,7 +546,7 @@ Verify the visible sequence in order:
 | Final state | `agent-alpha` and `agent-beta` remain at original positions with no reflow |
 
 This scenario is the repo-native execution surface for
-`docs/exemplar-presence-card-user-test.md`.
+`docs/reports/exemplar-presence-card-user-test.md`.
 
 Use `scripts/subtitle_exemplar.py` to exercise the subtitle zone on a live HUD.
 The script validates streaming breakpoint reveal, single-line baseline rendering,
@@ -951,7 +951,7 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --target tzehouse-windows.parrot-hen.ts.net:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
-  --doc docs/exemplar-manual-review-checklist.md \
+  --doc docs/reports/exemplar-manual-review-checklist.md \
   --tab-width 1920 \
   --phases baseline,scroll \
   --baseline-hold-s 30 \
@@ -1018,7 +1018,7 @@ cannot validate alone:
   against the live overlay, so failures are runtime/input-path evidence rather
   than synthetic transcript success.
 - Manual review notes and any UX tweaks are recorded in
-  `docs/exemplar-manual-review-checklist.md` row 11.
+  `docs/reports/exemplar-manual-review-checklist.md` row 11.
 
 ## Behavior Rules
 
