@@ -1,0 +1,20 @@
+{
+  "attempt": "hud-i1nrq media-ingress exclusive-window launch",
+  "timestamp_utc": "2026-05-12T17:52:37Z",
+  "remote_host": "tzehouse-windows.parrot-hen.ts.net",
+  "isolated_path": "C:\\tze_hud\\hud-s0pit-rerun",
+  "isolated_task": "TzeHudS0pitRerun",
+  "intended_ports": [50052, 9091],
+  "deployed_binary_sha256": "0b6a9caf6586c3216f7d5a8cb0142c6c838ceeb26868883089962b1dc4ee8aae",
+  "pre_exclusive_state_artifact": "pre-exclusive-state.json",
+  "result": "blocked_before_isolated_launch",
+  "native_command_failure": "schtasks /Delete returned ERROR: The system cannot find the file specified for the absent temporary task while the PowerShell script was running with ErrorActionPreference=Stop.",
+  "observed_after_failure": {
+    "tailscale_ping": "timed out/no reply",
+    "ssh_tzeus": "timed out on port 22",
+    "ssh_hudbot": "timed out on port 22",
+    "tailscale_status": "offline, last seen about 2 minutes before final probe"
+  },
+  "restore_status": "not verified because Windows host was offline before SSH recovery could run",
+  "secret_handling": "PSK stayed in process memory or DPAPI-protected Windows storage and was not written to artifacts"
+}

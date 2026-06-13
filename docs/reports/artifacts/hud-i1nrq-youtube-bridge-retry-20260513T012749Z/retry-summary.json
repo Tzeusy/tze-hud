@@ -1,0 +1,30 @@
+{
+  "attempt": "hud-i1nrq media-ingress retry after host recovery",
+  "timestamp_local": "2026-05-13T01:27:49+08:00",
+  "remote_host": "tzehouse-windows.parrot-hen.ts.net",
+  "isolated_task": "TzeHudI1nrqRetry012749",
+  "isolated_process_id": 27312,
+  "isolated_ports_ready": true,
+  "isolated_ports": [50052, 9091],
+  "stopped_benchmark_pid": 51712,
+  "media_ingress_open": {
+    "agent_id": "windows-local-media-producer",
+    "admitted": true,
+    "stream_epoch": 1,
+    "selected_codec": "VIDEO_H264_BASELINE",
+    "assigned_surface_id_hex": "019e1ef2ddfa71008e405261d1d3f559",
+    "close_reason": "AGENT_CLOSED"
+  },
+  "youtube_bridge": {
+    "attempted": true,
+    "result": "blocked_before_media_ingress_open",
+    "failure": "direct SSH PowerShell -EncodedCommand frame-capture transport exceeded the Windows/OpenSSH command-line length limit",
+    "stderr_marker": "The command line is too long."
+  },
+  "post_attempt_reachability": {
+    "tailscale_ping": "timed out/no reply",
+    "ssh_tzeus": "timed out on port 22"
+  },
+  "restore_status": "not verified because SSH timed out after the retry",
+  "secret_handling": "PSK stayed in process memory or DPAPI-protected Windows storage and was not written to artifacts"
+}

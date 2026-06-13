@@ -1,0 +1,81 @@
+{
+  "adapter": "windows-visible-player-copyfromscreen-frame-capture",
+  "audio_route_to_hud": "none",
+  "cache_or_offline_copy": "not_used",
+  "capture_api": "System.Drawing.Graphics.CopyFromScreen",
+  "capture_surface": "operator-visible official YouTube player window",
+  "captured_frame_count": 5,
+  "captured_frames": [
+    {
+      "index": 0,
+      "mean_rgb": [
+        46.3,
+        32.45,
+        22.28
+      ],
+      "png_bytes": 1683618,
+      "sampled_pixels": 64,
+      "sha256": "3005611ec134d34132d6addc7a8cedc16843f9bb255acd68586a4675ecc8c586"
+    },
+    {
+      "index": 1,
+      "mean_rgb": [
+        46.3,
+        32.45,
+        22.28
+      ],
+      "png_bytes": 1683618,
+      "sampled_pixels": 64,
+      "sha256": "3005611ec134d34132d6addc7a8cedc16843f9bb255acd68586a4675ecc8c586"
+    },
+    {
+      "index": 2,
+      "mean_rgb": [
+        23.95,
+        16.38,
+        15.03
+      ],
+      "png_bytes": 1134671,
+      "sampled_pixels": 64,
+      "sha256": "1e556547a0e9d30a69bda78761b2f78bfad422b1027c10fd3a27916dc104f7e5"
+    },
+    {
+      "index": 3,
+      "mean_rgb": [
+        7.22,
+        7.69,
+        9.73
+      ],
+      "png_bytes": 109167,
+      "sampled_pixels": 64,
+      "sha256": "435d3bcda0ecc5180e44b1ad82939f9a08ea7494fd07b407cee6b9695fb386d4"
+    },
+    {
+      "index": 4,
+      "mean_rgb": [
+        6.53,
+        6.86,
+        8.69
+      ],
+      "png_bytes": 92317,
+      "sampled_pixels": 64,
+      "sha256": "92bbb584800bbd35071117e339d79afd068b44316aa1b4404279ae8566536804"
+    }
+  ],
+  "distinct_frame_hashes": 4,
+  "download_or_extraction": "not_used",
+  "official_player_url": "https://www.youtube.com/embed/O0FGCxkHM-U",
+  "operator_visible_player_controls": true,
+  "playback_click_sent": true,
+  "saved_frame_files": [],
+  "selected_window_moved_to_primary": true,
+  "selected_window_visible_area": 2956800,
+  "video_id": "O0FGCxkHM-U",
+  "window": {
+    "height": 1232,
+    "left": 80,
+    "title": "tze_hud YouTube source evidence O0FGCxkHM-U - Google Chrome",
+    "top": 80,
+    "width": 2400
+  }
+}
