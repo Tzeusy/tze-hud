@@ -15343,6 +15343,7 @@ mod tests {
         compositor.populate_drag_handle_hit_regions(&mut scene, 1920.0, 1080.0);
 
         let kinds: Vec<_> = scene
+            .overlay
             .drag_handle_hit_regions
             .iter()
             .map(|r| r.element_kind)
@@ -15361,6 +15362,7 @@ mod tests {
         );
         assert!(
             scene
+                .overlay
                 .drag_handle_hit_regions
                 .iter()
                 .any(|r| r.element_id == tile_id),
@@ -15368,6 +15370,7 @@ mod tests {
         );
         assert!(
             scene
+                .overlay
                 .drag_handle_hit_regions
                 .iter()
                 .any(|r| r.element_id == visible_zone_id),
@@ -15375,6 +15378,7 @@ mod tests {
         );
         assert!(
             !scene
+                .overlay
                 .drag_handle_hit_regions
                 .iter()
                 .any(|r| r.element_id == empty_zone_id),
@@ -15422,6 +15426,7 @@ mod tests {
 
         compositor.populate_drag_handle_hit_regions(&mut scene, 1920.0, 1080.0);
         let handle = scene
+            .overlay
             .drag_handle_hit_regions
             .iter()
             .find(|r| r.element_id == tile_id)
@@ -15479,6 +15484,7 @@ mod tests {
         let idle_alpha = idle_vertices[0].color[3];
 
         scene
+            .overlay
             .drag_handle_states
             .entry(handle.interaction_id.clone())
             .or_default()
