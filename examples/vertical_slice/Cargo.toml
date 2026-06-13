@@ -17,12 +17,12 @@ headless = ["tze_hud_runtime/headless"]
 dev-mode = ["tze_hud_runtime/dev-mode"]
 
 [dependencies]
-tze_hud_scene = { path = "../../crates/tze_hud_scene" }
-tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
-tze_hud_runtime = { path = "../../crates/tze_hud_runtime" }
-tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
-tze_hud_input = { path = "../../crates/tze_hud_input" }
-tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
+tze_hud_scene = { path = "../../crates/tze_hud_scene", version = "0.1.0" }
+tze_hud_compositor = { path = "../../crates/tze_hud_compositor", version = "0.1.0" }
+tze_hud_runtime = { path = "../../crates/tze_hud_runtime", version = "0.1.0" }
+tze_hud_protocol = { path = "../../crates/tze_hud_protocol", version = "0.1.0" }
+tze_hud_input = { path = "../../crates/tze_hud_input", version = "0.1.0" }
+tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry", version = "0.1.0" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tokio-stream = { workspace = true }
@@ -34,7 +34,7 @@ serde_json = { workspace = true }
 # dev-mode activated for test builds: tests/budget_assertions.rs uses config_toml: None
 # (unrestricted capabilities). The released binary does NOT carry dev-mode; use
 # `--features dev-mode` or `cargo test` to enable it for development.
-tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["dev-mode"] }
+tze_hud_runtime = { path = "../../crates/tze_hud_runtime", version = "0.1.0", features = ["dev-mode"] }
 
 [lints]
 workspace = true
