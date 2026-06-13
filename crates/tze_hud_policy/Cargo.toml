@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
-thiserror = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

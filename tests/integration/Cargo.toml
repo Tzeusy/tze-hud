@@ -190,9 +190,9 @@ tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
 tze_hud_validation = { path = "../../crates/tze_hud_validation" }
 tokio = { workspace = true }
 tonic = { workspace = true }
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { workspace = true, features = ["png"] }
 blake3 = { workspace = true }

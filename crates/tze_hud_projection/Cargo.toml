@@ -23,6 +23,10 @@ uuid = { workspace = true, optional = true }
 
 [features]
 default = []
+# Enable the resident gRPC projection driver (tze_hud_protocol + tze_hud_config + uuid).
+# Note: tze_hud_runtime always enables this feature (`features = ["resident-grpc"]`)
+# so in practice it is unconditionally active whenever the runtime is linked.
+# Also required by the `tze_hud_projection_authority` binary.
 resident-grpc = ["dep:tze_hud_config", "dep:tze_hud_protocol", "dep:uuid"]
 
 [dev-dependencies]

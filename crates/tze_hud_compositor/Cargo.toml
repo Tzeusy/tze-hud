@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Deliberate API-surface marker: callers use `features = ["headless"]` to signal
+# that they need the headless (offscreen) code paths. No cfg(feature="headless")
+# gates exist inside this crate — the compositor always compiles all paths — but
+# the marker lets consumers and CI jobs opt-in by name rather than relying on
+# implicit availability.
 headless = []
 # v2 media plane — video surface render path (E26, B11).
 # Code landing waits until v1 tagged v1.0.0 per F27 (signoff-packet.md).

@@ -3939,7 +3939,6 @@ name = "tze_hud_a11y"
 version = "0.1.0"
 dependencies = [
  "serde",
- "thiserror 2.0.18",
  "tracing",
  "tze_hud_scene",
 ]
@@ -3992,7 +3991,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
  "toml 0.8.23",
  "tracing",
  "tze_hud_scene",
@@ -4007,7 +4005,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tze_hud_scene",
- "tze_hud_telemetry",
  "unicode-segmentation",
 ]
 
@@ -4035,7 +4032,6 @@ version = "0.1.0"
 name = "tze_hud_media_apple"
 version = "0.1.0"
 dependencies = [
- "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-core-media",
  "objc2-core-video",
@@ -4052,7 +4048,6 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "serde",
- "thiserror 2.0.18",
  "tze_hud_scene",
 ]
 
@@ -4083,10 +4078,8 @@ dependencies = [
  "proptest",
  "prost",
  "quick-xml 0.37.5",
- "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tonic",
