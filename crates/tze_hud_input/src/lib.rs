@@ -1539,6 +1539,10 @@ impl InputProcessor {
     ///
     /// `device_id == 0` (primary pointer / mouse) uses the 250 ms threshold.
     /// Any other `device_id` is treated as a touch contact and uses 1000 ms.
+    // All arguments are required: pointer event, hit zone, element identity,
+    // element kind, element bounds, and display dimensions.  They cannot be
+    // collapsed into fewer parameters without losing information or creating a
+    // purpose-built context struct for this single call site.
     #[allow(clippy::too_many_arguments)]
     pub fn process_drag_handle_pointer(
         &mut self,
@@ -1695,6 +1699,9 @@ impl InputProcessor {
     /// The caller (windowed/headless runtime) MUST call this on
     /// [`DragEventOutcome::Released`], then atomically save the element store
     /// to disk.
+    // All arguments are required geometry primitives (final position, dimensions,
+    // display dimensions) along with the element store, type, and interaction key.
+    // No natural grouping reduces the count without inventing a single-use struct.
     #[allow(clippy::too_many_arguments)]
     pub fn persist_drag_geometry(
         store: &mut ElementStore,

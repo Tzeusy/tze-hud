@@ -625,6 +625,9 @@ fn resolve_composer_overlay_tokens(token_map: &HashMap<String, String>) -> Compo
 /// with zero or negative width.
 ///
 /// `sw`/`sh` are the screen dimensions passed through to `rect_vertices`.
+// All arguments are required primitive geometry inputs (x, y, w, h, sw, sh) plus
+// a color; grouping them into a struct would create an arbitrary named bundle
+// with no semantic benefit over the flat list already documented above.
 #[allow(clippy::too_many_arguments)]
 fn emit_border_quads(
     vertices: &mut Vec<crate::pipeline::RectVertex>,
@@ -687,6 +690,9 @@ fn emit_border_quads(
 ///
 /// Per the drag-to-reposition spec: MUST NOT require drop shadows, scale
 /// pulses, or animated transitions.
+// All arguments are required primitive geometry inputs (x, y, w, h, sw, sh) plus
+// a color; same rationale as emit_border_quads — a struct would be a name-only
+// wrapper with no cohesion beyond this single call site.
 #[allow(clippy::too_many_arguments)]
 fn emit_drag_highlight_border(
     vertices: &mut Vec<crate::pipeline::RectVertex>,
@@ -4907,6 +4913,10 @@ impl Compositor {
     /// only when the initial Background slice is empty (i.e. no Background
     /// flat-rect vertices and no overlay-mode clear quad); the Background
     /// SDF pass still runs before the tile/content/chrome pass.
+    // All arguments serve distinct roles in the GPU encode pass: vertex data,
+    // frame target, scene snapshot, surface dimensions, pipeline selector, and
+    // the Background vertex split index.  No natural grouping exists that would
+    // reduce the count without creating an ad-hoc context struct.
     #[allow(clippy::too_many_arguments)]
     fn encode_frame(
         &mut self,
@@ -8230,6 +8240,10 @@ pub(crate) fn tile_at_tail_for_ellipsis(tile_id: SceneId, scene: &SceneGraph) ->
 ///
 /// `markdown_tokens`: used for the cache-miss non-lossy inline parse fallback
 /// (hud-xcp9b); in steady-state this argument is never consumed.
+// All arguments are required: node identity, scene reference, tile position,
+// tail-follow state, markdown cache, node key cache, token store, and the output
+// accumulator.  The parameter set mirrors the sibling method
+// `collect_text_items_from_node`; no subset can be omitted.
 #[allow(clippy::too_many_arguments)]
 fn collect_ellipsis_text_items_from_node(
     node_id: SceneId,

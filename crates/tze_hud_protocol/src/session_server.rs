@@ -447,7 +447,12 @@ impl SessionFreezeQueue {
                         .iter()
                         .position(|e| e.traffic_class != InboundTrafficClass::Transactional)
                     {
-                        let evicted = self.queue.remove(idx).unwrap();
+                        // idx was just returned by position() on this VecDeque,
+                        // so remove(idx) is guaranteed to succeed.
+                        let evicted = self
+                            .queue
+                            .remove(idx)
+                            .expect("idx is a valid VecDeque index from position()");
                         self.queue.push_back(FrozenMutation {
                             batch,
                             traffic_class,
@@ -481,7 +486,12 @@ impl SessionFreezeQueue {
                         .iter()
                         .position(|e| e.traffic_class != InboundTrafficClass::Transactional)
                     {
-                        let evicted = self.queue.remove(idx).unwrap();
+                        // idx was just returned by position() on this VecDeque,
+                        // so remove(idx) is guaranteed to succeed.
+                        let evicted = self
+                            .queue
+                            .remove(idx)
+                            .expect("idx is a valid VecDeque index from position()");
                         self.queue.push_back(FrozenMutation {
                             batch,
                             traffic_class,
@@ -624,7 +634,10 @@ fn bytes_to_scene_id(bytes: &[u8]) -> Result<tze_hud_scene::SceneId, Status> {
             bytes.len()
         )));
     }
-    let arr: [u8; 16] = bytes.try_into().unwrap();
+    // Length is checked to be exactly 16 above; the conversion cannot fail.
+    let arr: [u8; 16] = bytes
+        .try_into()
+        .expect("bytes length is exactly 16, checked above");
     let uuid = uuid::Uuid::from_bytes(arr);
     Ok(tze_hud_scene::SceneId::from_uuid(uuid))
 }
@@ -2746,7 +2759,8 @@ async fn handle_session_init(
     let sub_result =
         subscriptions::filter_subscriptions(&init.initial_subscriptions, &granted_capabilities);
 
-    let session_id = uuid::Uuid::now_v7().to_string();
+    let session_uuid = uuid::Uuid::now_v7();
+    let session_id = session_uuid.to_string();
     let namespace = init.agent_id.clone();
     let resume_token = uuid::Uuid::now_v7().as_bytes().to_vec();
 
@@ -2804,10 +2818,9 @@ async fn handle_session_init(
             sequence: seq,
             timestamp_wall_us: compositor_ts,
             payload: Some(ServerPayload::SessionEstablished(SessionEstablished {
-                session_id: uuid::Uuid::parse_str(&session_id)
-                    .unwrap()
-                    .as_bytes()
-                    .to_vec(),
+                // Reuse the already-created UUID bytes directly; no need to
+                // re-parse the string we just formatted.
+                session_id: session_uuid.as_bytes().to_vec(),
                 namespace,
                 granted_capabilities,
                 resume_token,
