@@ -12,3 +12,6 @@ license.workspace = true
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+
+[lints]
+workspace = true

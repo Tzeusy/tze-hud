@@ -23,3 +23,6 @@ harness = false
 [[bench]]
 name = "snapshot"
 harness = false
+
+[lints]
+workspace = true

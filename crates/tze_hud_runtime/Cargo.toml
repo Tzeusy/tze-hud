@@ -74,3 +74,6 @@ path = "tests/pixel_readback.rs"
 # Integration tests are separate binaries; cfg(test) is set in them but NOT
 # in the library they link, so the dev-mode feature must be explicit here.
 required-features = ["headless", "dev-mode"]
+
+[lints]
+workspace = true

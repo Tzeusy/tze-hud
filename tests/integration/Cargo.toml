@@ -196,3 +196,6 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 image = { workspace = true, features = ["png"] }
 blake3 = { workspace = true }
+
+[lints]
+workspace = true

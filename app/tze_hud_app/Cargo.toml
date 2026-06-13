@@ -27,3 +27,6 @@ toml = { workspace = true }
 # Only active on Windows; ignored on other platforms.
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
+
+[lints]
+workspace = true

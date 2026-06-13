@@ -116,6 +116,28 @@ windows = { version = "0.58", features = [
 gstreamer = "0.23"
 gstreamer-app = "0.23"
 
+# ── Workspace-wide lint policy ────────────────────────────────────────────────
+#
+# Mirrors the CI clippy gate: `cargo clippy --workspace --all-targets -D warnings`.
+# All workspace members opt in via `lints.workspace = true` in their Cargo.toml.
+#
+# Lint level legend:
+#   deny  — must not appear; CI fails on any violation.
+#   warn  — surfaced in clippy output but does not fail CI; use for lints that
+#           need broad code changes beyond the immediate bead scope.
+#
+# When adding a new deny-level lint, verify it produces zero new violations with
+# `cargo clippy --workspace --all-targets -- -D warnings` before committing.
+[workspace.lints.rust]
+# Treat all rustc warnings as errors, consistent with the -D warnings clippy flag.
+warnings = "deny"
+
+[workspace.lints.clippy]
+# Deny the same lint set that -D warnings activates for clippy.
+# These map to the effective policy already enforced by CI; declaring them here
+# makes the policy explicit and IDE-visible without changing CI behaviour.
+all = "deny"
+
 [profile.release]
 lto = true
 codegen-units = 1

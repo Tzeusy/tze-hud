@@ -27,3 +27,6 @@ tze_hud_runtime = { path = "../../crates/tze_hud_runtime", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+
+[lints]
+workspace = true
