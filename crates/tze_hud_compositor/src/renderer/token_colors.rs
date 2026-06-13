@@ -274,7 +274,7 @@ pub(super) const TILE_BG_DEFAULT: Rgba = Rgba {
 ///
 /// Icons from `RenderingPolicy::key_icon_map` are rasterized at this size
 /// (square) and rendered to the left of each mapped entry's text value.
-pub(super) const ICON_SIZE_PX: f32 = 24.0;
+pub(crate) const ICON_SIZE_PX: f32 = 24.0;
 
 /// Gap in pixels between the icon and the text value for status-bar entries.
 pub(super) const ICON_TEXT_GAP_PX: f32 = 6.0;
