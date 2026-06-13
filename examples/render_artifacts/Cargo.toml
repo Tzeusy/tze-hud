@@ -4,6 +4,7 @@ description = "Layer 4 render-artifacts binary — generates developer visibilit
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+lints.workspace = true
 
 [[bin]]
 name = "render-artifacts"

@@ -4,6 +4,7 @@ description = "gRPC protocol layer for tze_hud agent communication"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+lints.workspace = true
 
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }

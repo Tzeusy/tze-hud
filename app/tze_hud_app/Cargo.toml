@@ -4,6 +4,7 @@ description = "Canonical tze_hud runtime application binary — production entry
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+lints.workspace = true
 
 [[bin]]
 name = "tze_hud"

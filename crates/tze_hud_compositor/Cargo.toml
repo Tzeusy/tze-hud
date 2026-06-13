@@ -4,6 +4,7 @@ description = "wgpu compositor for tze_hud — renders scene graph to screen or 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+lints.workspace = true
 
 [features]
 # Deliberate API-surface marker: callers use `features = ["headless"]` to signal

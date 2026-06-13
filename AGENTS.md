@@ -2,6 +2,35 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
+## Local Dev Harness
+
+The repo ships a `justfile` that reproduces CI gates locally. Requires [just](https://github.com/casey/just).
+
+```bash
+just check           # cargo check (fast compilation gate)
+just fmt             # cargo fmt --check
+just fmt-fix         # cargo fmt (apply formatting)
+just clippy          # cargo clippy --workspace --all-targets -D warnings
+just test            # cargo test --workspace --all-targets --exclude integration
+just test-integration # integration headless suites
+just test-trace      # trace regression suite
+just test-v1-thesis  # v1 thesis proof
+just production-boot # vertical_slice production config boot
+just canonical-app-boot # canonical app production config boot
+just vocabulary-lint # scripts/check_canonical_vocabulary.sh
+just dev-mode-guard  # verify dev-mode not in release default features
+just ci              # full CI sweep (all of the above in order)
+```
+
+The toolchain is pinned in `rust-toolchain.toml` (Rust 1.88, matching CI and the
+`glyphon 0.8.x` / `wgpu 24.x` co-pin). Workspace lint policy is declared in
+`[workspace.lints]` in the root `Cargo.toml` and inherited via `lints.workspace = true`
+in every member crate.
+
+WARNING: do NOT run `cargo test -p tze_hud_compositor` bare — the pixel_readback GPU
+test deadlocks headless without Mesa llvmpipe. Use `just test` which excludes it, or
+the explicit `just test-gpu-pixel-readback` recipe.
+
 ## Quick Reference
 
 ```bash

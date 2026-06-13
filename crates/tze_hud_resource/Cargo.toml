@@ -4,6 +4,7 @@ description = "Content-addressed resource store for tze_hud — upload, deduplic
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+lints.workspace = true
 
 [dependencies]
 # BLAKE3 content addressing (RFC 0011 §1.1, §12)

@@ -4,6 +4,7 @@ description = "Layer 2 SSIM visual regression and Layer 4 developer visibility a
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+lints.workspace = true
 
 [[test]]
 name = "layer2_headless"

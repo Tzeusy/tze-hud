@@ -4,6 +4,7 @@ description = "Widget asset bundle loader and IMAGE_SVG resource support for tze
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+lints.workspace = true
 
 [dependencies]
 # Scene types: WidgetDefinition, WidgetParameterDeclaration, WidgetSvgLayer, etc.

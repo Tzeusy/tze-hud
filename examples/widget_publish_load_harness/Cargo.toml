@@ -4,6 +4,7 @@ description = "Resident gRPC widget publish load harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+lints.workspace = true
 
 [[bin]]
 name = "widget_publish_load_harness"

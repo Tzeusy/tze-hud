@@ -1,0 +1,8 @@
+# Pin the Rust toolchain to the version used in CI.
+#
+# glyphon 0.8.x pins us to wgpu 24.x and Rust 1.88 — match workspace rust-version
+# and the CI toolchain (see .github/workflows/ci.yml, all jobs use toolchain: "1.88").
+# When bumping rust-version in Cargo.toml [workspace.package], update this file in sync.
+[toolchain]
+channel = "1.88"
+components = ["rustfmt", "clippy"]
