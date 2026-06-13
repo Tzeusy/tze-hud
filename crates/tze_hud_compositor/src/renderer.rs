@@ -7503,16 +7503,13 @@ impl Compositor {
                 });
         }
 
-        let live: HashSet<String> = scene
-            .overlay
-            .drag_handle_hit_regions
-            .iter()
-            .map(|r| r.interaction_id.clone())
-            .collect();
-        scene
-            .overlay
-            .drag_handle_states
-            .retain(|k, _| live.contains(k));
+        scene.overlay.drag_handle_states.retain(|k, _| {
+            scene
+                .overlay
+                .drag_handle_hit_regions
+                .iter()
+                .any(|r| &r.interaction_id == k)
+        });
     }
 
     // ── Chrome context menu rendering (hud-zc7f) ─────────────────────────────
@@ -15597,6 +15594,72 @@ mod tests {
             }
             other => panic!("expected drag-handle hit, got {other:?}"),
         }
+    }
+
+    /// Stale entries in `drag_handle_states` must be pruned when the
+    /// corresponding element is removed from the scene.
+    ///
+    /// Verifies that `populate_drag_handle_hit_regions` retains only the keys
+    /// that are still present in the current `drag_handle_hit_regions` set —
+    /// the zero-allocation `iter().any()` retain used after [hud-tdtr7] must
+    /// have identical semantics to the previous `HashSet`-based approach.
+    #[tokio::test]
+    async fn drag_handle_states_stale_entries_pruned_on_repopulate() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("agent-a", 60_000, vec![Capability::ModifyOwnTiles]);
+        let tile_id = scene
+            .create_tile(
+                tab,
+                "agent-a",
+                lease,
+                Rect::new(100.0, 100.0, 300.0, 180.0),
+                10,
+            )
+            .unwrap();
+
+        // First populate: tile present → one drag handle and a live state entry.
+        compositor.populate_drag_handle_hit_regions(&mut scene, 1920.0, 1080.0);
+        assert_eq!(
+            scene.overlay.drag_handle_hit_regions.len(),
+            1,
+            "expected one drag handle before tile removal"
+        );
+        let live_id = scene.overlay.drag_handle_hit_regions[0]
+            .interaction_id
+            .clone();
+
+        // Seed drag_handle_states: one live entry + one stale phantom that
+        // never had a corresponding hit region.
+        scene
+            .overlay
+            .drag_handle_states
+            .entry(live_id.clone())
+            .or_default()
+            .hovered = true;
+        scene.overlay.drag_handle_states.insert(
+            "drag-handle:tile:ghost-never-existed".to_string(),
+            Default::default(),
+        );
+        assert_eq!(scene.overlay.drag_handle_states.len(), 2);
+
+        // Remove the tile so it no longer produces a drag handle.
+        scene.delete_tile(tile_id, "agent-a").unwrap();
+
+        // Second populate: no tiles → no drag handles.  Both state entries
+        // (previously-live and phantom) must be pruned.
+        compositor.populate_drag_handle_hit_regions(&mut scene, 1920.0, 1080.0);
+        assert!(
+            scene.overlay.drag_handle_hit_regions.is_empty(),
+            "no hit regions expected after tile removal"
+        );
+        assert!(
+            scene.overlay.drag_handle_states.is_empty(),
+            "stale drag_handle_states must be pruned by populate_drag_handle_hit_regions; \
+             previously-live id={live_id:?} and phantom must both be removed"
+        );
     }
 
     #[tokio::test]
