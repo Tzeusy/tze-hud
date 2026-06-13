@@ -2,6 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change external-agent-projection-authority. Update Purpose after archive.
+
+Implementation: crates/tze_hud_projection/src/bin/projection_authority.rs
+
 ## Requirements
 ### Requirement: External Session Authority Boundary
 An external agent projection authority SHALL manage provider-neutral LLM session launch and attach records outside the compositor and outside runtime core. The authority MAY supervise launched provider processes or attach already-running sessions, but it MUST NOT rely on terminal capture, PTY injection, raw stdin/stdout interception, provider-specific RPCs in the runtime, or an LLM inside the frame loop.

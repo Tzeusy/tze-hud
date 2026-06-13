@@ -16,6 +16,8 @@ pipelines; ArbitrationOutcome types; freeze semantics; capability registry
 naming; latency budgets; and telemetry. Source: RFC 0009 (Policy and
 Arbitration), RFC 0010 (Interruption and Attention Management).
 
+Implementation: crates/tze_hud_policy/
+
 ---
 
 ## Requirements

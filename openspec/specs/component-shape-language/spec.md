@@ -3,6 +3,8 @@
 ## Purpose
 Defines the v1 component shape language for token-driven visual identity, rendering-policy resolution, component profile loading, readability validation, and SVG token substitution used by zones and widgets.
 
+Implementation: crates/tze_hud_config/src/tokens.rs; crates/tze_hud_config/src/component_profiles.rs; crates/tze_hud_config/src/readability.rs; crates/tze_hud_scene/src/svg_tokens.rs; crates/tze_hud_widget/src/svg_readability.rs; crates/tze_hud_runtime/src/component_startup.rs
+
 ## Requirements
 ### Requirement: Design Token System
 The runtime MUST support a design token system — a flat key-value map of named visual primitives loaded from the `[design_tokens]` configuration section. Each token MUST have a dotted namespace key (e.g., `color.text.primary`) and a string value representing a concrete visual primitive. Token keys MUST match the pattern `[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)*` (lowercase ASCII, dot-separated segments, underscores permitted after the first character of each segment). Token values are stored as raw strings; typed interpretation is deferred to consumption time (see Token Value Parsing requirement). Tokens MUST be resolved at startup into concrete values. Token values MUST NOT reference other tokens (no aliases or computed values in v1). The token map MUST be immutable after startup. An empty or absent `[design_tokens]` section MUST be valid — the runtime SHALL use hardcoded fallback values for all canonical tokens.

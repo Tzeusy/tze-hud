@@ -3,6 +3,8 @@
 ## Purpose
 Defines the gauge widget exemplar bundle, parameter schema, SVG layer bindings, and token-driven vertical fill rendering used by the widget publishing path.
 
+Implementation: assets/widgets/gauge/; tests/user-test/gauge-5step-scenario.json
+
 ## Requirements
 ### Requirement: Gauge Widget Visual Contract
 The exemplar gauge widget MUST be a vertical fill gauge consisting of exactly two SVG layers: a static background layer (`background.svg`) providing the frame and track, and a dynamic fill layer (`fill.svg`) containing the fill bar, label text, and severity indicator. The gauge MUST use a 100x240 viewBox for both layers. The background layer MUST contain a rounded outer frame rectangle and an inner track rectangle. The fill layer MUST contain a fill bar rectangle (bound to `level`), a text label element (bound to `label`), and a severity indicator circle (bound to `severity`). The fill bar MUST fill upward from the bottom of the track: the bar is positioned at the track bottom with `height` driven by the `level` parameter via linear binding, and a `clipPath` constraining the fill to the track area. All visible colors in both SVG layers MUST use `{{token.key}}` design token placeholders — no hardcoded hex color values in the SVG markup.

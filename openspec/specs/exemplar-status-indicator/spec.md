@@ -3,6 +3,8 @@
 ## Purpose
 Defines the status-indicator widget exemplar bundle and parameter contract for token-driven status/severity display.
 
+Implementation: assets/widget_bundles/status-indicator/
+
 ## Requirements
 ### Requirement: Status Indicator Visual Contract
 The status indicator widget SHALL render as a filled circle with a border ring and an optional text label below. The circle MUST be centered horizontally within the widget's viewport. The default viewport SHALL be 48x48 pixels (configurable per widget instance). The circle diameter MUST be 32 pixels at default viewport size. The border ring MUST use a 1.5px stroke in the color resolved from the `{{token.color.border.default}}` design token placeholder at bundle load time. The fill color MUST be determined by the discrete binding on the `status` enum parameter. The optional label text MUST be rendered below the circle, centered horizontally, at 10px font size in the color resolved from `{{token.color.text.secondary}}`.

@@ -3,6 +3,8 @@
 ## Purpose
 Defines resident scene-resource upload over the existing HudSession stream, including resource start/chunk/complete correlation, deduplication, error surfaces, and separation from widget asset registration.
 
+Implementation: crates/tze_hud_resource/src/upload.rs; crates/tze_hud_protocol/src/session.rs
+
 ## Requirements
 ### Requirement: Resident Scene-Resource Upload via Session Stream
 Resident agents SHALL upload scene-node image and font resources on the existing `HudSession` bidirectional stream. This flow SHALL remain distinct from widget SVG asset registration. `ClientMessage` SHALL carry `ResourceUploadStart`, `ResourceUploadChunk`, and `ResourceUploadComplete` as dedicated payload variants, and `ServerMessage` SHALL carry dedicated resident upload acknowledgement, success, and upload-specific error payloads. There SHALL be no separate upload RPC or side-channel service for this v1 path.

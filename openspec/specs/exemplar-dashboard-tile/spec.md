@@ -3,6 +3,8 @@
 ## Purpose
 Defines the dashboard tile exemplar used to prove raw resident tile composition, atomic node-tree mutation, uploaded resource references, and hit-region interaction structure.
 
+Implementation: examples/dashboard_tile_agent/; tests/integration/dashboard_tile_creation.rs
+
 ## Requirements
 ### Requirement: Dashboard Tile Composition
 The exemplar dashboard tile SHALL be a single agent-owned tile of 400x300 logical pixels positioned at (50, 50) within the active tab's content layer with z_order = 100 and opacity = 1.0. The tile SHALL contain exactly 6 nodes arranged as a flat tree (all children of the root) composited in tree order (painter's model, first child rendered first):

@@ -6,6 +6,8 @@ Defines how the runtime governs agent screen territory through a lease system: t
 
 Source RFC: 0008 (Lease and Resource Governance)
 
+Implementation: crates/tze_hud_scene/src/lease/
+
 ---
 
 ## Requirements

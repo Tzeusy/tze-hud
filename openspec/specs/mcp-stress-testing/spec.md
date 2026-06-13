@@ -3,6 +3,8 @@
 ## Purpose
 External load testing capability for the MCP HTTP `publish_to_zone` endpoint. Exercises zone publishing at configurable load levels while collecting latency and host resource telemetry. Provides network-facing latency and throughput characterization complementary to internal compositor telemetry.
 
+Implementation: .claude/skills/user-test/scripts/stress_test_zones.py; .claude/skills/user-test-performance/scripts/mcp_publish_perf.py
+
 ## Requirements
 
 ### Requirement: Baseline Phases

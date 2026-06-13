@@ -13,6 +13,8 @@ category filtering, the four-stage event bus pipeline, `tab_switch_on_event`
 contract, self-event suppression, event ordering and sequence numbers, audit event
 visibility restrictions, and aggregate rate caps.
 
+Implementation: crates/tze_hud_scene/src/events/; crates/tze_hud_runtime/src/event_bus.rs; crates/tze_hud_runtime/src/agent_events/; crates/tze_hud_runtime/src/subscriptions.rs
+
 ---
 
 ## Requirements

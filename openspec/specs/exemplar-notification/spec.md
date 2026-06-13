@@ -4,6 +4,8 @@
 
 Defines the behavioral requirements for the notification-area zone exemplar — the multi-agent stress test for Stack contention. Three agents publishing simultaneously, urgency-tinted stacking, auto-dismiss with fade-out. This proves the Stack contention policy works visually and that multiple agents can coexist on the same zone without interference.
 
+Implementation: profiles/notification-stack-exemplar/; tests/scenes/three_agents_contention.json; .claude/skills/user-test/scripts/notification_exemplar.py
+
 Implementation prerequisites (resolved in hud-s5dr.1 and hud-s5dr.2):
 - `render_zone_content()` multi-publication iteration for Stack contention zones
 - Per-publication urgency backdrop colors resolved from the profile's scoped token map
