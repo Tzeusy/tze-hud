@@ -1551,6 +1551,19 @@ struct WindowedRuntimeState {
     /// `InputProcessor::notify_tile_content_appended` so follow-tail advances
     /// (spec §3.2) and scrolled-back stability is preserved (spec §3.3).
     portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver,
+    /// Receiver for [`PortalOp`] messages sent from the MCP HTTP task (hud-bq0gl.2).
+    ///
+    /// The MCP async task sends `PortalOp::Attach` / `PortalOp::PublishOutput`
+    /// values through this channel.  The winit event-loop thread drains it via
+    /// `drain_portal_ops()` on each `about_to_wait` iteration, before the normal
+    /// `drain_portal_projection()` call, so content published in the same
+    /// event-loop tick is also coalesced by the cadence coalescer and materialised
+    /// into the scene within the same frame.  The sender end is threaded to
+    /// `McpServer` via `start_mcp_http_server`.
+    ///
+    /// `None` when the MCP server is disabled (`mcp_port == 0`) or when the
+    /// network runtime could not be created.
+    portal_op_rx: Option<tokio::sync::mpsc::UnboundedReceiver<tze_hud_mcp::portal_op::PortalOp>>,
     /// Keyboard events deferred because the shared-state or scene lock was busy
     /// at dispatch time (hud-2fz34).
     ///
@@ -1617,6 +1630,11 @@ impl ApplicationHandler for WinitApp {
         // was busy during dispatch (hud-2fz34).  Runs after composer flush so
         // deferred keystrokes re-enter the same path as fresh ones.
         self.drain_pending_keyboard_events();
+        // Drain any PortalOp messages from the MCP channel (hud-bq0gl.2).
+        // Must run BEFORE drain_portal_projection so that Attach/PublishOutput
+        // ops enqueued in the same event-loop tick are fed into the cadence
+        // coalescer and materialised by the immediately-following drain call.
+        self.drain_portal_ops();
         // Drain the in-process portal projection authority (hud-2iup7).
         // Must run AFTER composer flush so draft state is settled before portal
         // content is refreshed.  Uses try_lock on the scene to avoid blocking
@@ -3577,6 +3595,36 @@ impl WinitApp {
 
     /// Run the in-process portal projection drain loop (hud-2iup7).
     ///
+    /// Drain pending [`PortalOp`] messages from the MCP channel (hud-bq0gl.2).
+    ///
+    /// Called from `about_to_wait` BEFORE `drain_portal_projection` so that
+    /// content published in the same event-loop tick is fed into the cadence
+    /// coalescer and materialised by the immediately-following drain call.
+    ///
+    /// Uses `try_recv` in a non-blocking loop — never blocks the event-loop
+    /// thread.  Each dispatched op calls `InProcessPortalDriver::dispatch_portal_op`
+    /// which synchronously feeds the operation into `ProjectionAuthority`.
+    fn drain_portal_ops(&mut self) {
+        let Some(ref mut rx) = self.state.portal_op_rx else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(op) => {
+                    self.state.portal_projection_driver.dispatch_portal_op(op);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    tracing::warn!(
+                        "portal_op channel disconnected — MCP portal tools will no longer function"
+                    );
+                    self.state.portal_op_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
     /// Called from `about_to_wait` after composer-draft flush.  Drives
     /// `InProcessPortalDriver::drain` which calls
     /// `InputProcessor::notify_tile_content_appended` for every `RenderPortal`
@@ -4731,6 +4779,20 @@ impl WindowedRuntime {
         // same `Arc<Mutex<SceneGraph>>` (`shared_scene`).  Mutations applied
         // over gRPC are immediately visible to MCP queries and vice versa.
         let (paste_inject_tx, paste_inject_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        // Portal-op channel: bridges MCP async task → winit event-loop thread
+        // (hud-bq0gl.2).  When the MCP server starts successfully the sender is
+        // moved into it; the receiver is stored in `WindowedRuntimeState` and
+        // drained via `drain_portal_ops` on each `about_to_wait` iteration.
+        // If MCP is disabled or fails to bind, both halves are dropped and
+        // `portal_op_rx` in state is `None`.
+        let (portal_op_tx, portal_op_rx) =
+            tokio::sync::mpsc::unbounded_channel::<tze_hud_mcp::portal_op::PortalOp>();
+        let mut portal_op_tx_opt: Option<
+            tokio::sync::mpsc::UnboundedSender<tze_hud_mcp::portal_op::PortalOp>,
+        > = Some(portal_op_tx);
+        let mut portal_op_rx_opt: Option<
+            tokio::sync::mpsc::UnboundedReceiver<tze_hud_mcp::portal_op::PortalOp>,
+        > = Some(portal_op_rx);
         if cfg.mcp_port > 0 {
             // Ensure we have a network runtime to host the MCP task. If gRPC
             // was disabled (grpc_port == 0), network_rt is None and we need
@@ -4775,6 +4837,7 @@ impl WindowedRuntime {
                     mcp_config,
                     mcp_shutdown,
                     Some(paste_inject_tx),
+                    portal_op_tx_opt.take(),
                 )) {
                     Ok(handle) => {
                         network_handles.push(handle);
@@ -4902,6 +4965,7 @@ impl WindowedRuntime {
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
             portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
+            portal_op_rx: portal_op_rx_opt.take(),
             pending_keyboard_events: VecDeque::new(),
         };
 

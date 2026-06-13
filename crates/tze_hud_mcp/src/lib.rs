@@ -27,10 +27,12 @@
 //! | `register_widget_asset` | Register runtime widget SVG assets |
 
 pub mod error;
+pub mod portal_op;
 pub mod server;
 pub mod tools;
 pub mod types;
 
 pub use error::McpError;
+pub use portal_op::PortalOp;
 pub use server::{CallerContext, McpConfig, McpServer};
 pub use types::{McpRequest, McpResponse, McpResult};

@@ -51,9 +51,11 @@ use std::collections::HashMap;
 
 use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
 use tze_hud_input::InputProcessor;
+pub use tze_hud_mcp::portal_op::PortalOp;
 use tze_hud_projection::{
-    AdapterGeometrySnapshot, AdapterPortalRect, ProjectedPortalPolicy, ProjectionAuthority,
-    ProjectionBounds,
+    AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest, ContentClassification,
+    OperationEnvelope, OutputKind, ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds,
+    ProjectionOperation, ProviderKind, PublishOutputRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -287,6 +289,131 @@ impl InProcessPortalDriver {
     /// Apply a new design-token override map, propagating to all live adapters.
     pub fn apply_token_map(&mut self, overrides: DesignTokenMap) {
         self.drive.apply_token_map(overrides);
+    }
+
+    /// Dispatch one [`PortalOp`] message received from the MCP channel.
+    ///
+    /// Called from `windowed.rs::drain_portal_ops()` on the event-loop thread,
+    /// once per message before the normal `drain()` call.  Replies are sent
+    /// back through the one-shot channel embedded in each variant.
+    ///
+    /// ## `Attach` behaviour
+    ///
+    /// 1. Calls `ProjectionAuthority::handle_attach` with a generated envelope.
+    /// 2. On success, calls `self.attach_projection` so the drive state is ready
+    ///    for the upcoming `drain()` iteration.
+    /// 3. Returns the owner token through the reply channel.
+    ///
+    /// ## `PublishOutput` behaviour
+    ///
+    /// 1. Calls `ProjectionAuthority::handle_publish_output` with a generated
+    ///    envelope and the caller-supplied owner token.
+    /// 2. Forwards accept/reject through the reply channel.
+    ///    The cadence coalescer inside the authority accumulates the update; the
+    ///    normal `drain()` call in the same `about_to_wait` iteration (or the
+    ///    next one) materialises it into the scene.
+    pub fn dispatch_portal_op(&mut self, op: PortalOp) {
+        let now_us = now_wall_us();
+        match op {
+            PortalOp::Attach {
+                projection_id,
+                display_name,
+                idempotency_key,
+                reply,
+            } => {
+                let request_id = uuid::Uuid::now_v7().to_string();
+                let req = AttachRequest {
+                    envelope: OperationEnvelope {
+                        operation: ProjectionOperation::Attach,
+                        projection_id: projection_id.clone(),
+                        request_id,
+                        client_timestamp_wall_us: now_us.max(1),
+                    },
+                    provider_kind: ProviderKind::Other,
+                    display_name,
+                    workspace_hint: None,
+                    repository_hint: None,
+                    icon_profile_hint: None,
+                    content_classification: ContentClassification::Private,
+                    hud_target: None,
+                    idempotency_key,
+                };
+                let resp = self.authority.handle_attach(req, "mcp-portal", now_us);
+                if resp.accepted {
+                    // Wire the drive state so the drain loop can materialise tiles.
+                    self.attach_projection(&projection_id, Vec::new());
+                    tracing::info!(
+                        proj_id = %projection_id,
+                        "portal_op: Attach accepted — drive entry created"
+                    );
+                    let token = resp.owner_token.unwrap_or_default();
+                    let _ = reply.send(Ok(token));
+                } else {
+                    let code = resp
+                        .error_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    tracing::warn!(
+                        proj_id = %projection_id,
+                        error_code = %code,
+                        "portal_op: Attach denied"
+                    );
+                    let _ = reply.send(Err(format!(
+                        "attach denied: {}: {}",
+                        code, resp.status_summary
+                    )));
+                }
+            }
+
+            PortalOp::PublishOutput {
+                projection_id,
+                owner_token,
+                output_text,
+                logical_unit_id,
+                reply,
+            } => {
+                let request_id = uuid::Uuid::now_v7().to_string();
+                let req = PublishOutputRequest {
+                    envelope: OperationEnvelope {
+                        operation: ProjectionOperation::PublishOutput,
+                        projection_id: projection_id.clone(),
+                        request_id,
+                        client_timestamp_wall_us: now_us.max(1),
+                    },
+                    owner_token,
+                    output_text,
+                    output_kind: OutputKind::Assistant,
+                    content_classification: ContentClassification::Private,
+                    logical_unit_id,
+                    coalesce_key: None,
+                };
+                let resp = self
+                    .authority
+                    .handle_publish_output(req, "mcp-portal", now_us);
+                if resp.accepted {
+                    tracing::debug!(
+                        proj_id = %projection_id,
+                        coalesced = resp.coalesced_output_count,
+                        "portal_op: PublishOutput accepted"
+                    );
+                    let _ = reply.send(Ok(()));
+                } else {
+                    let code = resp
+                        .error_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    tracing::warn!(
+                        proj_id = %projection_id,
+                        error_code = %code,
+                        "portal_op: PublishOutput denied"
+                    );
+                    let _ = reply.send(Err(format!(
+                        "publish_output denied: {}: {}",
+                        code, resp.status_summary
+                    )));
+                }
+            }
+        }
     }
 
     /// Run the work-conserving portal drain loop and apply results to the scene.
@@ -1426,6 +1553,160 @@ mod tests {
             font_size_pre_after, 48.0,
             "pre-existing adapter must also be updated to 48.0 by apply_token_map; \
              only the new-entry path in attach() being correct is not sufficient"
+        );
+    }
+
+    /// Regression guard for the `dispatch_portal_op` → `drain_inner` wiring
+    /// introduced by hud-bq0gl.2.
+    ///
+    /// Exercises the full MCP channel path:
+    ///
+    /// 1. `dispatch_portal_op(PortalOp::Attach)` — must create a drive entry
+    ///    and return an owner token through the one-shot reply channel.
+    /// 2. `dispatch_portal_op(PortalOp::PublishOutput)` — must feed content into
+    ///    the cadence coalescer.
+    /// 3. `drain_inner` — must materialise the coalesced update into the scene and
+    ///    call `notify_tile_content_appended` so `tile_follow_tail_at_tail` is
+    ///    true (spec §3.2).
+    ///
+    /// If `dispatch_portal_op` is removed or the authority calls are deleted, the
+    /// drive entry is never created, `drain_inner` finds nothing to do, and the
+    /// `tile_follow_tail_at_tail` assertion fails.
+    #[test]
+    fn dispatch_portal_op_attach_publish_drain_wiring() {
+        use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_dispatch_portal_op"),
+        };
+
+        // ── Step 1: Attach via dispatch_portal_op ──────────────────────────────
+        let (attach_tx, mut attach_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "test-proj".to_string(),
+            display_name: "Test Projection".to_string(),
+            idempotency_key: None,
+            reply: attach_tx,
+        });
+
+        // The reply channel must carry the owner token — no async runtime needed
+        // because dispatch_portal_op is synchronous.
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("Attach must be accepted");
+        assert!(
+            !owner_token.is_empty(),
+            "owner token must be non-empty on successful attach"
+        );
+
+        // Drive entry must exist after Attach.
+        assert!(
+            driver.drive.entries.contains_key("test-proj"),
+            "dispatch_portal_op(Attach) must create a drive entry; \
+             removing the attach_projection call causes this to fail"
+        );
+
+        // ── Step 2: PublishOutput via dispatch_portal_op ───────────────────────
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "test-proj".to_string(),
+            owner_token: owner_token.clone(),
+            output_text: "Hello from MCP portal".to_string(),
+            logical_unit_id: None,
+            reply: pub_tx,
+        });
+
+        pub_rx
+            .try_recv()
+            .expect("publish reply must be sent synchronously")
+            .expect("PublishOutput must be accepted");
+
+        // ── Step 3: drain_inner materialises content into scene ────────────────
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Supply a geometry snapshot so the adapter has valid bounds.
+        driver.authority_mut().push_geometry_snapshot(
+            "test-proj",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: 200,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        // First drain: CreatePortalTile.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let tile_id = driver
+            .drive
+            .entries
+            .get("test-proj")
+            .expect("drive entry must still exist after drain")
+            .tile_scene_id
+            .expect("drain must create a portal tile in the scene");
+
+        assert!(
+            scene.tile_scroll_config(tile_id).is_some(),
+            "portal tile must have a scroll config after CreatePortalTile drain"
+        );
+
+        // Resize the tile to a 1-line viewport so overflow and follow-tail are
+        // detectable.
+        let font_size_px = driver
+            .drive
+            .entries
+            .get("test-proj")
+            .unwrap()
+            .adapter
+            .visual_tokens()
+            .transcript_font_size_px;
+        let line_h = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
+        let viewport_h = (1.0 * line_h).ceil();
+        let _ = scene.update_tile_bounds(
+            tile_id,
+            Rect::new(0.0, 0.0, 600.0, viewport_h),
+            PORTAL_DRIVER_NAMESPACE,
+        );
+
+        // Publish 9 more lines, then drain past the rate window.
+        for i in 1..=9_u64 {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            driver.dispatch_portal_op(PortalOp::PublishOutput {
+                projection_id: "test-proj".to_string(),
+                owner_token: owner_token.clone(),
+                output_text: format!("line {i}"),
+                logical_unit_id: Some(format!("u{i}")),
+                reply: tx,
+            });
+        }
+
+        let drain2_now_us = PORTAL_UPDATE_RATE_WINDOW_WALL_US * 2 + 1;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain2_now_us);
+
+        // Primary regression assertion (hud-bq0gl.2):
+        // The MCP-channel wiring must result in notify_tile_content_appended
+        // being called for overflowing content, setting tile_follow_tail_at_tail.
+        // Removing dispatch_portal_op or the drain_inner call causes this to fail.
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "hud-bq0gl.2 regression: portal content published via dispatch_portal_op \
+             must flow through drain_inner and set tile_follow_tail_at_tail (spec §3.2); \
+             removing the dispatch_portal_op → authority wiring causes this to fail"
         );
     }
 }

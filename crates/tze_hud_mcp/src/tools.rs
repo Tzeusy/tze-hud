@@ -2183,6 +2183,185 @@ pub fn handle_inject_composer_paste(
     Ok(InjectComposerPasteResult { injected, text_len })
 }
 
+// ─── portal_projection_attach ────────────────────────────────────────────────
+
+/// Parameters for `portal_projection_attach`.
+#[derive(Debug, Deserialize)]
+pub struct PortalProjectionAttachParams {
+    /// Caller-assigned identifier for this projection session (max 128 bytes).
+    ///
+    /// Must be unique among active projections in the authority.  Re-attaching
+    /// with the same `projection_id` is rejected unless an `idempotency_key`
+    /// matches a prior accepted attach.
+    pub projection_id: String,
+    /// Human-readable label for this projection session (max 128 bytes).
+    pub display_name: String,
+    /// Optional idempotency key — supply the same key to replay-safely re-attach
+    /// after a network interruption.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+/// Response from `portal_projection_attach`.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionAttachResult {
+    /// `true` when the authority accepted the attach.
+    pub accepted: bool,
+    /// Owner token (only present on success). Required for
+    /// subsequent `portal_projection_publish` calls.
+    pub owner_token: Option<String>,
+    /// Human-readable status summary.
+    pub status_summary: String,
+}
+
+/// Attach a new projection session to the in-process authority (hud-bq0gl.2).
+///
+/// Forwards the request through the portal-op channel to the winit
+/// event-loop thread.  On the next `about_to_wait` iteration the driver
+/// calls `handle_attach` + `attach_projection` so the session is ready for
+/// subsequent `portal_projection_publish` calls and drain-loop tile creation.
+///
+/// # Errors
+///
+/// - `invalid_params` if `projection_id` or `display_name` is empty.
+/// - `internal` if the portal authority is not wired (runtime started without
+///   the portal channel — call `McpServer::with_portal_op_tx` to enable this).
+/// - `internal` if the authority rejected the attach (e.g., duplicate id).
+pub async fn handle_portal_projection_attach(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+) -> McpResult<PortalProjectionAttachResult> {
+    let p: PortalProjectionAttachParams = parse_params(params)?;
+
+    if p.projection_id.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "projection_id must be non-empty".to_string(),
+        ));
+    }
+    if p.display_name.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "display_name must be non-empty".to_string(),
+        ));
+    }
+
+    let tx = portal_op_tx.ok_or_else(|| {
+        McpError::Internal(
+            "portal authority not wired — runtime must enable portal_op channel".to_string(),
+        )
+    })?;
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::portal_op::PortalOp::Attach {
+        projection_id: p.projection_id,
+        display_name: p.display_name,
+        idempotency_key: p.idempotency_key,
+        reply: reply_tx,
+    })
+    .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+    match reply_rx.await {
+        Ok(Ok(token)) => Ok(PortalProjectionAttachResult {
+            accepted: true,
+            owner_token: Some(token),
+            status_summary: "projection attached".to_string(),
+        }),
+        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Err(_) => Err(McpError::Internal(
+            "portal authority did not respond (channel dropped)".to_string(),
+        )),
+    }
+}
+
+// ─── portal_projection_publish ───────────────────────────────────────────────
+
+/// Parameters for `portal_projection_publish`.
+#[derive(Debug, Deserialize)]
+pub struct PortalProjectionPublishParams {
+    /// Projection identifier from a prior `portal_projection_attach` call.
+    pub projection_id: String,
+    /// Owner token returned by the successful `portal_projection_attach` response.
+    pub owner_token: String,
+    /// Text to append to the projection transcript.
+    pub output_text: String,
+    /// Optional logical-unit ID for idempotent deduplication (max 128 bytes).
+    #[serde(default)]
+    pub logical_unit_id: Option<String>,
+}
+
+/// Response from `portal_projection_publish`.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionPublishResult {
+    /// `true` when the authority accepted and queued the output for rendering.
+    pub accepted: bool,
+    /// Human-readable status summary.
+    pub status_summary: String,
+}
+
+/// Publish output text to an existing projection session (hud-bq0gl.2).
+///
+/// Forwards the request through the portal-op channel to the winit
+/// event-loop thread.  On the next `about_to_wait` iteration the driver
+/// calls `handle_publish_output`, which routes the content through the
+/// cadence coalescer.  The drain loop then materialises the coalesced update
+/// into the live scene, advancing follow-tail (spec §3.2) and preserving
+/// scrolled-back stability (spec §3.3).
+///
+/// # Errors
+///
+/// - `invalid_params` if `projection_id`, `owner_token`, or `output_text` is empty.
+/// - `internal` if the portal authority is not wired.
+/// - `internal` if the authority rejected the publish (invalid token, rate limit,
+///   oversized payload, etc.).
+pub async fn handle_portal_projection_publish(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+) -> McpResult<PortalProjectionPublishResult> {
+    let p: PortalProjectionPublishParams = parse_params(params)?;
+
+    if p.projection_id.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "projection_id must be non-empty".to_string(),
+        ));
+    }
+    if p.owner_token.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "owner_token must be non-empty".to_string(),
+        ));
+    }
+    if p.output_text.is_empty() {
+        return Err(McpError::InvalidParams(
+            "output_text must be non-empty".to_string(),
+        ));
+    }
+
+    let tx = portal_op_tx.ok_or_else(|| {
+        McpError::Internal(
+            "portal authority not wired — runtime must enable portal_op channel".to_string(),
+        )
+    })?;
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::portal_op::PortalOp::PublishOutput {
+        projection_id: p.projection_id,
+        owner_token: p.owner_token,
+        output_text: p.output_text,
+        logical_unit_id: p.logical_unit_id,
+        reply: reply_tx,
+    })
+    .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(PortalProjectionPublishResult {
+            accepted: true,
+            status_summary: "output queued for portal rendering".to_string(),
+        }),
+        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Err(_) => Err(McpError::Internal(
+            "portal authority did not respond (channel dropped)".to_string(),
+        )),
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
