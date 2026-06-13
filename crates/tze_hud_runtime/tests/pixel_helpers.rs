@@ -69,31 +69,6 @@ pub const SCENE_H: u32 = 1080;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Return `true` if the pixel at `(x, y)` differs from `bg` by more than
-/// `min_diff` on any channel.  Useful for asserting that *something* was
-/// rendered without knowing the exact colour.
-pub fn pixel_differs_from_bg(pixels: &[u8], width: u32, x: u32, y: u32, min_diff: u8) -> bool {
-    let idx = ((y * width + x) * 4) as usize;
-    let p = [
-        pixels[idx],
-        pixels[idx + 1],
-        pixels[idx + 2],
-        pixels[idx + 3],
-    ];
-    BG_SRGB
-        .iter()
-        .zip(p.iter())
-        .any(|(&expected, &actual)| actual.abs_diff(expected) > min_diff)
-}
-
-/// Assert that at least one sampled pixel in `[x0..x1) × [y0..y1)` differs
-/// from the background by more than `min_diff` on at least one channel.
-///
-/// Samples every 10th pixel in both dimensions. Fails only when *all* sampled
-/// pixels match the background — i.e. no rendered content is detected at all.
-///
-/// Used for scenes where we know tiles should cover a region but cannot
-/// predict exact colours (e.g. text rendering, alpha blending output).
 /// Build a [`HeadlessRuntime`] sized for the 25-scene tests (1920×1080).
 ///
 /// Uses 1920×1080 to match [`tze_hud_scene::test_scenes::TestSceneRegistry::new`]'s
