@@ -2961,12 +2961,15 @@ impl SceneGraph {
 
     /// Set hover state for a chrome drag handle interaction id.
     pub fn set_drag_handle_hovered(&mut self, interaction_id: &str, hovered: bool) {
-        let state = self
-            .overlay
-            .drag_handle_states
-            .entry(interaction_id.to_string())
-            .or_default();
-        state.hovered = hovered;
+        if let Some(state) = self.overlay.drag_handle_states.get_mut(interaction_id) {
+            state.hovered = hovered;
+        } else {
+            self.overlay
+                .drag_handle_states
+                .entry(interaction_id.to_string())
+                .or_default()
+                .hovered = hovered;
+        }
     }
 
     /// Mark an element as actively being dragged (show visual feedback).
@@ -2986,12 +2989,15 @@ impl SceneGraph {
 
     /// Set pressed state for a chrome drag handle interaction id.
     pub fn set_drag_handle_pressed(&mut self, interaction_id: &str, pressed: bool) {
-        let state = self
-            .overlay
-            .drag_handle_states
-            .entry(interaction_id.to_string())
-            .or_default();
-        state.pressed = pressed;
+        if let Some(state) = self.overlay.drag_handle_states.get_mut(interaction_id) {
+            state.pressed = pressed;
+        } else {
+            self.overlay
+                .drag_handle_states
+                .entry(interaction_id.to_string())
+                .or_default()
+                .pressed = pressed;
+        }
     }
 
     fn hit_test_node(&self, node_id: SceneId, x: f32, y: f32) -> Option<SceneId> {
