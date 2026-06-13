@@ -1353,10 +1353,7 @@ mod tests {
         // The canonical key is `portal.transcript.font_size` (no `_px` suffix)
         // as declared by `PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE` in portal_tokens.rs.
         let mut tokens = DesignTokenMap::new();
-        tokens.insert(
-            "portal.transcript.font_size".to_string(),
-            "32".to_string(),
-        );
+        tokens.insert("portal.transcript.font_size".to_string(), "32".to_string());
 
         // --- Part 1: pre-attach token map propagates to new adapters -------
         driver.apply_token_map(tokens.clone());
@@ -1380,8 +1377,7 @@ mod tests {
         // rather than the default (13.0).  Using `assert_eq!` here ensures the
         // test fails if the wrong key is looked up or the map is not propagated.
         assert_eq!(
-            font_size_pre,
-            32.0,
+            font_size_pre, 32.0,
             "adapter font size must match the pre-attach overridden value (32.0)"
         );
 
@@ -1395,10 +1391,7 @@ mod tests {
 
         // Now apply a custom token map — must propagate to *both* live adapters.
         let mut tokens2 = DesignTokenMap::new();
-        tokens2.insert(
-            "portal.transcript.font_size".to_string(),
-            "48".to_string(),
-        );
+        tokens2.insert("portal.transcript.font_size".to_string(), "48".to_string());
         driver.apply_token_map(tokens2.clone());
 
         // Removing the `set_visual_tokens` loop inside `apply_token_map`
@@ -1414,8 +1407,7 @@ mod tests {
             .transcript_font_size_px;
 
         assert_eq!(
-            font_size_post,
-            48.0,
+            font_size_post, 48.0,
             "adapter font size must match the post-attach overridden value (48.0); \
              removing the set_visual_tokens loop in apply_token_map causes this to fail"
         );
@@ -1431,8 +1423,7 @@ mod tests {
             .transcript_font_size_px;
 
         assert_eq!(
-            font_size_pre_after,
-            48.0,
+            font_size_pre_after, 48.0,
             "pre-existing adapter must also be updated to 48.0 by apply_token_map; \
              only the new-entry path in attach() being correct is not sufficient"
         );
