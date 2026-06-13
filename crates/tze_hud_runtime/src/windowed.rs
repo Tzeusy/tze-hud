@@ -9293,4 +9293,103 @@ redaction_style = "blank"
             "exactly one entry (tile_a) must remain"
         );
     }
+
+    // ── scene.version increment on pointer-drag resize (hud-g1hij) ───────────
+
+    /// A pointer-drag resize (on_pointer_move → GestureUpdate) increments
+    /// `scene.version` exactly once when the tile bounds change, matching the
+    /// hotkey resize path (hud-ghhxa / hud-g1hij).
+    ///
+    /// Regression test — the 20Hz re-prime cadence gate in
+    /// `prime_truncation_cache` is keyed on `scene.version`; if the drag path
+    /// did NOT bump it, mid-drag re-truncation would never fire.
+    ///
+    /// Also verifies that a pointer-move at the identical position (no size
+    /// delta) does NOT bump the version a second time, preventing spurious
+    /// cache invalidations when the gesture is clamped at a boundary.
+    #[test]
+    fn drag_resize_pointer_move_bumps_scene_version_on_size_change() {
+        let (mut scene, tab_id, _tile_id, fm) = portal_scene_with_focus();
+        let mut resize_states = std::collections::HashMap::new();
+        let display_w = 1920.0_f32;
+        let display_h = 1080.0_f32;
+
+        // Pointer-down on the right-edge affordance (x=496 hits the 8px strip
+        // of a tile whose right edge is at 100+400=500).  No version bump expected
+        // on gesture start (clamped initial rect is identical to current rect).
+        let version_before_down = scene.version;
+        let down = PointerEvent {
+            x: 496.0,
+            y: 250.0,
+            kind: PointerEventKind::Down,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &down,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            PortalWindowTokens::default(),
+        );
+        assert_eq!(
+            scene.version, version_before_down,
+            "scene.version must NOT change on gesture start (bounds unchanged at down)"
+        );
+
+        // Pointer-move 20px right → right edge grows, size changes.
+        // scene.version must increment exactly once.
+        let version_before_move = scene.version;
+        let mv_grow = PointerEvent {
+            x: 516.0,
+            y: 250.0,
+            kind: PointerEventKind::Move,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &mv_grow,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            PortalWindowTokens::default(),
+        );
+        assert_eq!(
+            scene.version,
+            version_before_move + 1,
+            "scene.version must increment exactly once when drag resize changes tile size"
+        );
+
+        // Pointer-move at the exact same position (no delta) — the tile size
+        // is already at the value from the previous move, so `size_changed` is
+        // false and the version must NOT advance again.
+        let version_before_noop = scene.version;
+        let mv_noop = PointerEvent {
+            x: 516.0,
+            y: 250.0,
+            kind: PointerEventKind::Move,
+            device_id: 1,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &mv_noop,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            PortalWindowTokens::default(),
+        );
+        assert_eq!(
+            scene.version, version_before_noop,
+            "scene.version must NOT change when pointer-move produces no size delta"
+        );
+    }
 }
