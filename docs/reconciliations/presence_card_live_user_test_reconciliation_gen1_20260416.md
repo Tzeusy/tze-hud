@@ -8,9 +8,9 @@ Epic: `hud-sx7q` (Presence Card live user-test flow)
 
 - `bd show hud-sx7q.5 --json` (epic + sibling bead contract)
 - `openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md`
-- `docs/exemplar-presence-card-coverage.md`
-- `docs/exemplar-presence-card-user-test.md`
-- `docs/exemplar-manual-review-checklist.md`
+- `docs/reports/exemplar-presence-card-coverage.md`
+- `docs/reports/exemplar-presence-card-user-test.md`
+- `docs/reports/exemplar-manual-review-checklist.md`
 - `.claude/skills/user-test/SKILL.md`
 - `.claude/skills/user-test/scripts/presence_card_exemplar.py`
 - `.claude/skills/user-test/scripts/hud_grpc_client.py`
@@ -30,7 +30,7 @@ Epic: `hud-sx7q` (Presence Card live user-test flow)
 | Periodic Content Update | `hud-sx7q.3` | Covered (automation + scenario implementation) | `tests/integration/presence_card_coexistence.rs`; `presence_card_exemplar.py` (`rebuild_agent_card`, 30s update) |
 | Agent Disconnect and Orphan Handling | `hud-sx7q.3`, `hud-sx7q.4` | Covered in automation, live proof blocked | `tests/integration/disconnect_orphan.rs`; live scenario disconnect/orphan steps implemented but 2026-04-16 run blocked on missing `TZE_HUD_PSK` |
 | Resource Upload for Avatar Icons | `hud-sx7q.2` | Partially covered | Automated upload/reference semantics covered in `tests/integration/presence_card_tile.rs`; resident session flow still lacks true upload message path (tracked by epic `hud-ooj1`) |
-| gRPC Test Sequence | `hud-sx7q.2`, `hud-sx7q.3`, `hud-sx7q.4` | Partially covered | Helper + scenario implement resident sequence; live run attempt recorded in `docs/exemplar-presence-card-user-test.md` is blocked by missing `TZE_HUD_PSK` |
+| gRPC Test Sequence | `hud-sx7q.2`, `hud-sx7q.3`, `hud-sx7q.4` | Partially covered | Helper + scenario implement resident sequence; live run attempt recorded in `docs/reports/exemplar-presence-card-user-test.md` is blocked by missing `TZE_HUD_PSK` |
 | User-Test Scenario | `hud-sx7q.3`, `hud-sx7q.4` | Partially covered | Scenario script and skill entry exist; manual visual PASS/FAIL remains blocked by auth preflight failure (`missing_psk`) |
 
 ## Coverage Verdict

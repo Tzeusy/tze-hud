@@ -38,8 +38,8 @@ This narrows remaining work to live validation tooling + manual-review closure, 
 | Agent Disconnect and Orphan Handling | Implemented + automated | `tests/integration/disconnect_orphan.rs` |
 | Multi-Agent Isolation During Disconnect | Implemented + automated | `tests/integration/disconnect_orphan.rs` |
 | Resource Upload for Avatar Icons | Implemented + automated | `tests/integration/presence_card_tile.rs` |
-| gRPC Test Sequence | Implemented + integration-tested; live resident run attempted but blocked by missing auth secret in operator env | `tests/integration/presence_card_coexistence.rs`, `docs/exemplar-presence-card-user-test.md` |
-| User-Test Scenario | Implemented in `/user-test`; live visual proof currently blocked by missing `TZE_HUD_PSK` at execution time | `.claude/skills/user-test/scripts/presence_card_exemplar.py`, `docs/exemplar-presence-card-user-test.md` |
+| gRPC Test Sequence | Implemented + integration-tested; live resident run attempted but blocked by missing auth secret in operator env | `tests/integration/presence_card_coexistence.rs`, `docs/reports/exemplar-presence-card-user-test.md` |
+| User-Test Scenario | Implemented in `/user-test`; live visual proof currently blocked by missing `TZE_HUD_PSK` at execution time | `.claude/skills/user-test/scripts/presence_card_exemplar.py`, `docs/reports/exemplar-presence-card-user-test.md` |
 
 ---
 
@@ -75,4 +75,4 @@ The remaining unresolved proof is explicitly limited to these spec sections:
 
 Presence Card live-proof work is complete when both are true:
 - A resident `/user-test` Presence Card scenario exists and is run with captured evidence.
-- `docs/exemplar-manual-review-checklist.md` marks Presence Card as done with concrete review notes and any residual risk.
+- `docs/reports/exemplar-manual-review-checklist.md` marks Presence Card as done with concrete review notes and any residual risk.

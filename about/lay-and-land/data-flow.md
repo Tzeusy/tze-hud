@@ -273,7 +273,7 @@ Important current seams:
 
 **Cross-references:** `about/legends-and-lore/rfcs/0013-text-stream-portals.md`,
 `openspec/specs/text-stream-portals/spec.md`,
-`docs/text-stream-refinement.md`.
+`docs/reports/text-stream-refinement.md`.
 
 ---
 

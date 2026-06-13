@@ -32,10 +32,10 @@ Not yet fully closed:
 ## What Shipped (By Child Bead)
 
 ## `hud-sx7q.1` — doc reconciliation
-- Updated `docs/exemplar-presence-card-coverage.md` to reflect implemented
+- Updated `docs/reports/exemplar-presence-card-coverage.md` to reflect implemented
   automation and isolate live-proof gaps.
-- Updated `docs/exemplar-presence-card-user-test.md` and
-  `docs/exemplar-manual-review-checklist.md` to align checklist language with
+- Updated `docs/reports/exemplar-presence-card-user-test.md` and
+  `docs/reports/exemplar-manual-review-checklist.md` to align checklist language with
   actual remaining work.
 
 ## `hud-sx7q.2` — resident helper extension
@@ -52,9 +52,9 @@ Not yet fully closed:
 
 ## `hud-sx7q.4` — live validation attempt
 - Recorded live run attempt and blocker in:
-  - `docs/exemplar-presence-card-coverage.md`
-  - `docs/exemplar-presence-card-user-test.md`
-  - `docs/exemplar-manual-review-checklist.md`
+  - `docs/reports/exemplar-presence-card-coverage.md`
+  - `docs/reports/exemplar-presence-card-user-test.md`
+  - `docs/reports/exemplar-manual-review-checklist.md`
 
 ## `hud-sx7q.5` — reconciliation
 - Added reconciliation artifact:
@@ -97,9 +97,9 @@ Scenario/tooling:
 - `.claude/skills/user-test/tests/test_presence_card_exemplar.py`
 
 Coverage/manual review:
-- `docs/exemplar-presence-card-coverage.md`
-- `docs/exemplar-presence-card-user-test.md`
-- `docs/exemplar-manual-review-checklist.md`
+- `docs/reports/exemplar-presence-card-coverage.md`
+- `docs/reports/exemplar-presence-card-user-test.md`
+- `docs/reports/exemplar-manual-review-checklist.md`
 
 ## Coordinator Follow-Through
 

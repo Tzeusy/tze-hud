@@ -85,7 +85,7 @@ Doctrine updates were applied in `about/heart-and-soul/` to relax the static-onl
 - `openspec/changes/component-shape-language/specs/component-shape-language/spec.md`
 - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
 - `openspec/changes/v1-mvp-standards/specs/resource-store/spec.md`
-- `docs/dynamic-svg-project-direction-handover.md`
+- `docs/reports/dynamic-svg-project-direction-handover.md`
 
 No code changes have been made yet for runtime SVG upload/persistence/dedup.
 

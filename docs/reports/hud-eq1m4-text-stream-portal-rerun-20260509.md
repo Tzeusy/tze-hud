@@ -36,7 +36,7 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --target tzehouse-windows.parrot-hen.ts.net:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
-  --doc docs/exemplar-manual-review-checklist.md \
+  --doc docs/reports/exemplar-manual-review-checklist.md \
   --phases baseline,scroll \
   --baseline-hold-s 35 \
   --transcript-out test_results/text-stream-portal-rerun-hitregion-20260509.json
@@ -47,7 +47,7 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --target tzehouse-windows.parrot-hen.ts.net:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
-  --doc docs/exemplar-manual-review-checklist.md \
+  --doc docs/reports/exemplar-manual-review-checklist.md \
   --phases baseline,scroll \
   --baseline-hold-s 45 \
   --transcript-out test_results/text-stream-portal-rerun-hitregion-input-20260509.json
@@ -58,7 +58,7 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --target tzehouse-windows.parrot-hen.ts.net:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
-  --doc docs/exemplar-manual-review-checklist.md \
+  --doc docs/reports/exemplar-manual-review-checklist.md \
   --phases baseline \
   --baseline-hold-s 70 \
   --transcript-out test_results/text-stream-portal-rerun-live-input-final-20260509.json

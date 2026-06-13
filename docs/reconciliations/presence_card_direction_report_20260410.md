@@ -31,15 +31,15 @@ Status: Planned, locally materialized, and filed as epic `hud-sx7q`
 | 5 | Disconnects must orphan leases, preserve frozen content, show disconnection affordance, and permit grace-period reclaim | Hard | [failure.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/failure.md#L15), [0008-lease-governance.md](/home/tze/gt/tze_hud/mayor/rig/about/legends-and-lore/rfcs/0008-lease-governance.md#L1), [spec.md](/home/tze/gt/tze_hud/mayor/rig/openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md#L103) | Partial |
 | 6 | Validation must be machine-readable and culminate in human-visible artifacts for medium/high complexity work | Hard | [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md#L3), [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md#L141) | Partial |
 | 7 | Presence Card live review should use resident gRPC/session flow, not be faked through widgets or guest MCP | Hard | [presence.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/presence.md#L143), [.claude/skills/user-test/scripts/hud_grpc_client.py](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/hud_grpc_client.py#L5) | Unmet |
-| 8 | Manual review must end in checklist closure, not a one-off ad hoc run | Soft | [docs/exemplar-manual-review-checklist.md](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-manual-review-checklist.md#L204), [docs/exemplar-presence-card-user-test.md](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-presence-card-user-test.md#L1) | Unmet |
+| 8 | Manual review must end in checklist closure, not a one-off ad hoc run | Soft | [docs/reports/exemplar-manual-review-checklist.md](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-manual-review-checklist.md#L204), [docs/reports/exemplar-presence-card-user-test.md](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-presence-card-user-test.md#L1) | Unmet |
 | 9 | Presence Card should not require new runtime product surfaces before live proof exists | Non-goal | [presence.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/presence.md#L145), [v1.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/v1.md#L25) | N/A |
 | 10 | Generic raw-tile orchestration framework must land before one exemplar works live | Non-goal | [v1.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/v1.md#L152) | N/A |
 
 ### Contradictions
 
-[Observed] The current coverage note understates implementation reality. It still says `hud-apoe.3` and `hud-apoe.4` are blocked and that periodic updates, coexistence, and disconnect flows are only partial in [docs/exemplar-presence-card-coverage.md](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-presence-card-coverage.md#L12), but the repo now contains those integration surfaces in [tests/integration/presence_card_coexistence.rs](/home/tze/gt/tze_hud/mayor/rig/tests/integration/presence_card_coexistence.rs#L1) and [tests/integration/disconnect_orphan.rs](/home/tze/gt/tze_hud/mayor/rig/tests/integration/disconnect_orphan.rs#L1). This is doc-to-code drift, not missing implementation.
+[Observed] The current coverage note understates implementation reality. It still says `hud-apoe.3` and `hud-apoe.4` are blocked and that periodic updates, coexistence, and disconnect flows are only partial in [docs/reports/exemplar-presence-card-coverage.md](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-presence-card-coverage.md#L12), but the repo now contains those integration surfaces in [tests/integration/presence_card_coexistence.rs](/home/tze/gt/tze_hud/mayor/rig/tests/integration/presence_card_coexistence.rs#L1) and [tests/integration/disconnect_orphan.rs](/home/tze/gt/tze_hud/mayor/rig/tests/integration/disconnect_orphan.rs#L1). This is doc-to-code drift, not missing implementation.
 
-[Observed] The manual user-test document describes a seven-step live scenario in [docs/exemplar-presence-card-user-test.md](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-presence-card-user-test.md#L11), but the actual `/user-test` skill only documents zone/widget flows in [.claude/skills/user-test/SKILL.md](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/SKILL.md#L8). The script inventory also has no Presence Card scenario entry, so the documented manual flow is not executable through the current skill surface.
+[Observed] The manual user-test document describes a seven-step live scenario in [docs/reports/exemplar-presence-card-user-test.md](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-presence-card-user-test.md#L11), but the actual `/user-test` skill only documents zone/widget flows in [.claude/skills/user-test/SKILL.md](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/SKILL.md#L8). The script inventory also has no Presence Card scenario entry, so the documented manual flow is not executable through the current skill surface.
 
 ## Current State
 
@@ -91,17 +91,17 @@ Status: Planned, locally materialized, and filed as epic `hud-sx7q`
 
 | Gap | Why it matters | Who | Evidence | Response | Effort |
 |-----|---------------|-----|---------|----------|--------|
-| No `/user-test` Presence Card scenario exists | Manual review cannot be executed through repo-native tooling | Operators, reviewers | [.claude/skills/user-test/SKILL.md](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/SKILL.md#L8), [docs/exemplar-presence-card-user-test.md](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-presence-card-user-test.md#L11) | Implement resident gRPC scenario + skill integration | M |
+| No `/user-test` Presence Card scenario exists | Manual review cannot be executed through repo-native tooling | Operators, reviewers | [.claude/skills/user-test/SKILL.md](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/SKILL.md#L8), [docs/reports/exemplar-presence-card-user-test.md](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-presence-card-user-test.md#L11) | Implement resident gRPC scenario + skill integration | M |
 | `hud_grpc_client.py` lacks exemplar-specific resident helpers | The current helper cannot express the full manual flow without bespoke ad hoc code | Tooling | [hud_grpc_client.py](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/hud_grpc_client.py#L52) | Extend helper with resource upload + richer mutation helpers | M |
-| Planning/coverage docs are stale versus the code | Beads risk targeting already-completed work or missing the real gap | Planners, implementers | [docs/exemplar-presence-card-coverage.md](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-presence-card-coverage.md#L12), [presence_card_coexistence.rs](/home/tze/gt/tze_hud/mayor/rig/tests/integration/presence_card_coexistence.rs#L1) | Reconcile docs before implementation | S |
-| No live Windows validation evidence or checklist closure exists | The exemplar cannot honestly be called complete | Reviewers, operators | [docs/exemplar-manual-review-checklist.md](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-manual-review-checklist.md#L204) | Run scenario live and update review artifacts | M |
+| Planning/coverage docs are stale versus the code | Beads risk targeting already-completed work or missing the real gap | Planners, implementers | [docs/reports/exemplar-presence-card-coverage.md](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-presence-card-coverage.md#L12), [presence_card_coexistence.rs](/home/tze/gt/tze_hud/mayor/rig/tests/integration/presence_card_coexistence.rs#L1) | Reconcile docs before implementation | S |
+| No live Windows validation evidence or checklist closure exists | The exemplar cannot honestly be called complete | Reviewers, operators | [docs/reports/exemplar-manual-review-checklist.md](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-manual-review-checklist.md#L204) | Run scenario live and update review artifacts | M |
 
 ### Important Enhancements
 
 | Gap | Why it matters | Who | Evidence | Response | Effort |
 |-----|---------------|-----|---------|----------|--------|
 | Live scenario lacks structured operator/run artifact output | Validation doctrine prefers machine-readable evidence over anecdote | Reviewers, future agents | [validation.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/validation.md#L141) | Emit concise run transcript/artifact from Presence Card scenario | S |
-| Presence Card coverage and manual docs are disconnected from `/user-test` skill | Docs cannot directly drive execution | Operators | [docs/exemplar-presence-card-user-test.md](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-presence-card-user-test.md#L1), [.claude/skills/user-test/SKILL.md](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/SKILL.md#L8) | Cross-link scenario from skill and review docs | S |
+| Presence Card coverage and manual docs are disconnected from `/user-test` skill | Docs cannot directly drive execution | Operators | [docs/reports/exemplar-presence-card-user-test.md](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-presence-card-user-test.md#L1), [.claude/skills/user-test/SKILL.md](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/SKILL.md#L8) | Cross-link scenario from skill and review docs | S |
 
 ### Strategic Gaps
 
@@ -168,7 +168,7 @@ Status: Planned, locally materialized, and filed as epic `hud-sx7q`
 ### Chunk 4: Execute Presence Card live validation and close manual review
 
 **Objective**: Produce the missing live evidence and update the checklist/coverage artifacts based on the actual Windows run.
-**Spec reference**: `Requirement: User-Test Scenario`; `docs/exemplar-manual-review-checklist.md` item 7
+**Spec reference**: `Requirement: User-Test Scenario`; `docs/reports/exemplar-manual-review-checklist.md` item 7
 **Dependencies**: Chunk 3
 **Why ordered here**: Manual review closure is the product proof this exemplar still lacks.
 **Scope**: M
@@ -233,8 +233,8 @@ Terminal children:
 ### C. Spec Inventory
 - `openspec/changes/exemplar-presence-card/specs/exemplar-presence-card/spec.md` — primary Presence Card contract
 - `openspec/changes/exemplar-presence-card/tasks.md` — task decomposition, partially stale versus code
-- `docs/exemplar-presence-card-user-test.md` — manual scenario definition
-- `docs/exemplar-manual-review-checklist.md` — visual signoff destination
+- `docs/reports/exemplar-presence-card-user-test.md` — manual scenario definition
+- `docs/reports/exemplar-manual-review-checklist.md` — visual signoff destination
 
 ### D. Evidence Index
 - [presence.md](/home/tze/gt/tze_hud/mayor/rig/about/heart-and-soul/presence.md)
@@ -250,8 +250,8 @@ Terminal children:
 - [disconnect_orphan.rs](/home/tze/gt/tze_hud/mayor/rig/tests/integration/disconnect_orphan.rs)
 - [hud_grpc_client.py](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/hud_grpc_client.py)
 - [user-test skill](/home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/SKILL.md)
-- [Presence Card coverage doc](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-presence-card-coverage.md)
-- [Presence Card manual user-test doc](/home/tze/gt/tze_hud/mayor/rig/docs/exemplar-presence-card-user-test.md)
+- [Presence Card coverage doc](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-presence-card-coverage.md)
+- [Presence Card manual user-test doc](/home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-presence-card-user-test.md)
 
 ---
 

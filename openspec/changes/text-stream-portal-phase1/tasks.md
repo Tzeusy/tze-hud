@@ -116,7 +116,7 @@ No implementation begins until this change is reviewed and accepted. Acceptance 
 - [ ] 7.4 Assess the package against every RFC 0013 §7.2 criterion; record the pass/fail decision and rationale in `docs/reports/`
 - [ ] 7.5 If the gate passes: author the follow-up component-shape-language delta (`text-portal` component type, canonical token keys) and the first-class portal surface design as separate reviewed work items under this change's promotion approval
 - [ ] 7.6 If the gate fails: file beads for the gaps, keep the raw-tile pilot authoritative, and leave Phase-1 behavioral requirements in force on raw tiles
-- [ ] 7.7 Update `docs/exemplar-manual-review-checklist.md` with Phase-1 sign-off rows and record manual review outcomes
+- [ ] 7.7 Update `docs/reports/exemplar-manual-review-checklist.md` with Phase-1 sign-off rows and record manual review outcomes
 
 ## 8. Closeout
 

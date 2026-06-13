@@ -37,7 +37,7 @@ This change was scoped to doctrine/RFC/spec planning only and intentionally stop
 - [x] 5.8 `hud-r9u0` — typing indicator ambient/ephemeral semantics gap closed (PR #438)
 - [x] 5.9 `hud-fomr` — gen-2 reconciliation confirmed full 13/13 spec coverage (PR #441)
 - [x] 5.10 `hud-t98e.6` — epic closeout report published at `docs/reports/hud-t98e-text-stream-portals.md`
-- [ ] 5.11 Live user-test exemplar script (`text_stream_portal_exemplar.py`) and manual visual sign-off recorded in `docs/exemplar-manual-review-checklist.md` row 11
+- [ ] 5.11 Live user-test exemplar script (`text_stream_portal_exemplar.py`) and manual visual sign-off recorded in `docs/reports/exemplar-manual-review-checklist.md` row 11
 
 Primary evidence anchors (see the closeout report for full spec-to-test matrix):
 - `tests/integration/text_stream_portal_surface.rs`

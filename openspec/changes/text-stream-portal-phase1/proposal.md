@@ -1,6 +1,6 @@
 ## Why
 
-The text stream portal is the project's chosen exemplar UX flow: the one interaction the owner wants polished end-to-end to a "works extremely well" bar before breadth work resumes. Phase 0 is complete and reconciled — epic `hud-t98e` shipped the raw-tile pilot, gen-2 reconciliation (PR #441) confirmed 13/13 normative requirement coverage in `openspec/specs/text-stream-portals/spec.md`, and live Windows evidence has accumulated across multiple runs: the 2026-04-27 four-tile exemplar validation (`docs/reports/hud-eq1m4-text-stream-portal-windows-validation-20260427.md`), the 2026-04-28 composer/caret evidence passes (`test_results/text-stream-portal-hud-0ojis-*-20260428.json`, checklist rows in `docs/exemplar-manual-review-checklist.md`), the 2026-05-09 rerun, the 2026-05-10 diagnostic-input validation (`hud-ozbwh`), and the 2026-05-11 live cooperative-projection portal transcript (`docs/evidence/external-agent-projection-authority/live-portal-transcript-20260511T125016Z.json`).
+The text stream portal is the project's chosen exemplar UX flow: the one interaction the owner wants polished end-to-end to a "works extremely well" bar before breadth work resumes. Phase 0 is complete and reconciled — epic `hud-t98e` shipped the raw-tile pilot, gen-2 reconciliation (PR #441) confirmed 13/13 normative requirement coverage in `openspec/specs/text-stream-portals/spec.md`, and live Windows evidence has accumulated across multiple runs: the 2026-04-27 four-tile exemplar validation (`docs/reports/hud-eq1m4-text-stream-portal-windows-validation-20260427.md`), the 2026-04-28 composer/caret evidence passes (`test_results/text-stream-portal-hud-0ojis-*-20260428.json`, checklist rows in `docs/reports/exemplar-manual-review-checklist.md`), the 2026-05-09 rerun, the 2026-05-10 diagnostic-input validation (`hud-ozbwh`), and the 2026-05-11 live cooperative-projection portal transcript (`docs/evidence/external-agent-projection-authority/live-portal-transcript-20260511T125016Z.json`).
 
 That evidence also shows where the pilot stops short of excellent:
 
@@ -71,5 +71,5 @@ Promotion, when its gate passes, permits a dedicated portal surface or node type
   - `tests/integration/text_stream_portal_*.rs` (new coverage per requirement)
 - Affected docs:
   - `about/legends-and-lore/rfcs/0013-text-stream-portals.md` gains an amendment note recording the Phase-1 contract and the answered §8 open question 1 (draft editing model) after acceptance
-  - `docs/exemplar-manual-review-checklist.md` gains Phase-1 sign-off rows
+  - `docs/reports/exemplar-manual-review-checklist.md` gains Phase-1 sign-off rows
 - Risk: composer draft editing is the largest scope step — it introduces a bounded runtime-owned editing primitive. The delta spec bounds it tightly (plain text, byte-capped, no IME, no undo contract, no terminal passthrough) to avoid the "general inline editor" drift RFC 0013 §4.3 warns about.

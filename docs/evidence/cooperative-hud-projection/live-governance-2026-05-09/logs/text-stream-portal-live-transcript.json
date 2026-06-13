@@ -1,6 +1,6 @@
 {
   "target": "tzehouse-windows.parrot-hen.ts.net:50051",
-  "doc": "docs/exemplar-manual-review-checklist.md",
+  "doc": "docs/reports/exemplar-manual-review-checklist.md",
   "scene_width": 3840.0,
   "scene_height": 2160.0,
   "portal_w": 860.0,
@@ -18,7 +18,7 @@
       "action": "connect and open resident session",
       "expected_visual": "operator follows JSON step transcript",
       "target": "tzehouse-windows.parrot-hen.ts.net:50051",
-      "doc": "docs/exemplar-manual-review-checklist.md",
+      "doc": "docs/reports/exemplar-manual-review-checklist.md",
       "phases": "baseline,composer-smoke,streaming"
     },
     {

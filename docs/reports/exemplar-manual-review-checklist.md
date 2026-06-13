@@ -227,7 +227,7 @@ Live validation update (2026-04-16):
 
 Open closeout items:
 1. Re-run `presence_card_exemplar.py` with valid `TZE_HUD_PSK` and archive transcript evidence.
-2. Record PASS/FAIL for all seven visual steps in `docs/exemplar-presence-card-user-test.md`.
+2. Record PASS/FAIL for all seven visual steps in `docs/reports/exemplar-presence-card-user-test.md`.
 3. Move status to `done` only after evidence-backed manual sign-off is recorded.
 
 Spec sections awaiting live proof:
