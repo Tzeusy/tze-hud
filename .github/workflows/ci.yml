@@ -12,6 +12,7 @@
 #   windows-performance-budget — headless Windows benchmark + locked budget gate
 #   vocabulary-lint — scripts/check_canonical_vocabulary.sh
 #   dev-mode-guard  — verifies dev-mode feature is NOT compiled into release binary
+#   v2-preview      — cargo check/clippy/test with --features v2_preview (gated state machines)
 #
 # GPU / windowed jobs:
 #   Windowed rendering and pixel-readback tests require a GPU (real or software).
@@ -41,9 +42,10 @@
 #   Branch protection with required status checks has now been enabled on
 #   `main` to prevent future merges over failing CI.
 #
-#   All ten blocking jobs (check, fmt, clippy, test-unit, test-trace,
+#   All eleven blocking jobs (check, fmt, clippy, test-unit, test-trace,
 #   test-v1-thesis, vertical_slice production boot, canonical app production
-#   boot, vocabulary-lint, dev-mode-guard) are required to pass before merge.
+#   boot, vocabulary-lint, dev-mode-guard, v2-preview) are required to pass
+#   before merge.
 # ─────────────────────────────────────────────────────────────────────────────
 # Spec ref:
 #   validation-framework/spec.md §CI Requirements (headless, no physical GPU)
@@ -564,6 +566,98 @@ jobs:
   # This job is INFORMATIONAL only on PRs and does not block merge.
   # Enable blocking by changing `continue-on-error: true` to `false` once
   # llvmpipe stability is confirmed across all runner image versions.
+
+  # ── v2_preview feature lane ─────────────────────────────────────────────────
+  #
+  # Builds and tests code gated on the `v2_preview` feature flag.
+  #
+  # Without this lane, the hand-written statig state machines in
+  # `tze_hud_compositor::video_surface` and the `tze_hud_runtime` media-ingress
+  # admission gate are NEVER compiled by CI.  A visibility bug like E0446 (caught
+  # only in PR #795 review) could ship a broken gated build undetected.
+  #
+  # Scope:
+  #   - cargo check: full workspace with v2_preview activated on the two crates
+  #     that declare the feature (tze_hud_compositor, tze_hud_runtime).
+  #   - cargo clippy: same per-crate activation, -D warnings.
+  #   - cargo test: module-scoped to avoid the GPU readback tests that deadlock
+  #     on headless runners (see test-gpu-pixel-readback comment below).
+  #
+  # Test filters:
+  #   `video_surface::` — 17 pure unit tests in tze_hud_compositor::video_surface
+  #   `media_ingress::` — 61 pure unit tests in tze_hud_runtime::media_ingress
+  #
+  # Excluded (GPU required, tracked separately):
+  #   `headless::tests::synthetic_media_surface` — 2 tokio tests exercising
+  #       HeadlessRuntime.publish_synthetic_media_surface require a GPU adapter
+  #       (HeadlessRuntime::new() calls wgpu::Instance::request_adapter); they
+  #       are NOT available on ubuntu-latest without Mesa/llvmpipe.
+  #       Tracked by bead hud-ckvd6 for a dedicated GPU runner lane.
+  #
+  # No GPU or Mesa required: all selected tests are pure Rust logic.
+
+  v2-preview:
+    name: v2_preview feature lane (check + clippy + tests)
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+          components: clippy
+      # timeout-minutes caps cache-save hangs (incident: PR #606, canonical-app-production-boot
+      # hung 15+ min in the Swatinem/rust-cache post-step, required --admin merge).
+      # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
+      - name: Install protobuf compiler (required by tze_hud_protocol build script)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+      # Check: verify the entire workspace compiles with v2_preview active on the
+      # two crates that declare the feature.  Catches visibility bugs (E0446) and
+      # missing impls that only appear under the feature flag.
+      - name: cargo check --workspace (v2_preview)
+        run: |
+          cargo check \
+            --workspace \
+            --features tze_hud_compositor/v2_preview,tze_hud_runtime/v2_preview
+      # Clippy: lint the gated crates individually so --features is unambiguous.
+      - name: cargo clippy -p tze_hud_compositor (v2_preview, deny warnings)
+        run: |
+          cargo clippy \
+            -p tze_hud_compositor \
+            --features v2_preview \
+            -- -D warnings
+      - name: cargo clippy -p tze_hud_runtime (v2_preview, deny warnings)
+        run: |
+          cargo clippy \
+            -p tze_hud_runtime \
+            --features v2_preview \
+            -- -D warnings
+      # Tests: module-scoped to the gated code only.
+      # The `video_surface::` filter (double-colon) scopes to the module, not just
+      # any test whose name contains "video_surface" — this avoids the renderer GPU
+      # readback tests (renderer::tests::test_*video_surface*) that require llvmpipe
+      # and call render_frame_headless before the markdown cache is primed.
+      - name: cargo test -p tze_hud_compositor video_surface module (v2_preview)
+        run: |
+          cargo test \
+            -p tze_hud_compositor \
+            --features v2_preview \
+            -- 'video_surface::'
+      - name: cargo test -p tze_hud_runtime media_ingress module (v2_preview)
+        run: |
+          cargo test \
+            -p tze_hud_runtime \
+            --features v2_preview \
+            -- 'media_ingress::'
+      # headless::tests::synthetic_media_surface is intentionally excluded here.
+      # Those 2 tokio tests call HeadlessRuntime::new() which requires a GPU
+      # adapter (wgpu::Instance::request_adapter); HEADLESS_FORCE_SOFTWARE=1 is
+      # insufficient on ubuntu-latest without Mesa/llvmpipe.  They belong in a
+      # dedicated GPU runner lane.  Tracked by bead hud-ckvd6.
 
   test-gpu-pixel-readback:
     name: pixel readback (GPU / llvmpipe, informational)
