@@ -3419,10 +3419,11 @@ async def run_overflow(
         "expected_visual": "portal remains intact; oversized body is truncated to byte budget without visual break",
     })
 
-    # Step 1 — just-under budget
+    # Step 1 — just-under budget (700 lines ≈ 70KB, exceeds 65535-byte budget so
+    # the trim loop below actually exercises the clamp path)
     near_limit_lines = [
         f"[{i:04d}] overflow test line: {'word ' * 14}end"
-        for i in range(300)
+        for i in range(700)
     ]
     near_limit_body = "\n".join(near_limit_lines)
     # Trim to stay under MAX_MARKDOWN_BYTES
@@ -3503,6 +3504,7 @@ async def run_composer_edit(
         ("", 0, "cleared — placeholder re-appears"),
     ]
 
+    total_slept = 0.0
     for idx, (text, cursor, label) in enumerate(states):
         display_text, cursor_x, cursor_row = await render_composer_static(
             client,
@@ -3522,9 +3524,11 @@ async def run_composer_edit(
             "expected_visual": f"composer shows {text!r}; caret at position {cursor}",
         }, cursor_x=cursor_x, cursor_row=cursor_row,
            text_len=len(text), visual_lines=len(display_text.splitlines()))
-        await asyncio.sleep(min(hold_s / max(1, len(states)), 1.5))
+        step_sleep = min(hold_s / max(1, len(states)), 1.5)
+        await asyncio.sleep(step_sleep)
+        total_slept += step_sleep
 
-    await asyncio.sleep(max(0.0, hold_s - 1.5))
+    await asyncio.sleep(max(0.0, hold_s - total_slept))
 
 
 async def run_cadence(
