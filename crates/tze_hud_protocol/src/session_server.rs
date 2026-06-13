@@ -4355,9 +4355,12 @@ async fn handle_mutation_batch(
         }
     };
 
-    // Find the active tab (acquire scene lock in a nested block so the guard
-    // drops before we potentially drop `st` below).
-    let active_tab_opt = { st.scene.lock().await.active_tab };
+    // Read both active_tab and display_area from the scene in a single lock
+    // acquisition to avoid acquiring the scene lock twice in succession.
+    let (active_tab_opt, display_area) = {
+        let scene = st.scene.lock().await;
+        (scene.active_tab, scene.display_area)
+    };
     let tab_id = match active_tab_opt {
         Some(id) => id,
         None => {
@@ -4394,7 +4397,6 @@ async fn handle_mutation_batch(
 
     // Convert proto mutations to scene mutations (single canonical path shared
     // with the freeze-drain path; only the log suffix differs between the two).
-    let display_area = { st.scene.lock().await.display_area };
     let converted = match convert_proto_mutations(
         &batch.mutations,
         &st.element_store,
@@ -4588,7 +4590,12 @@ async fn apply_queued_batch_to_scene(
         Err(_) => return, // invalid lease_id — silently skip (already acked)
     };
 
-    let active_tab_opt = { st.scene.lock().await.active_tab };
+    // Read both active_tab and display_area from the scene in a single lock
+    // acquisition to avoid acquiring the scene lock twice in succession.
+    let (active_tab_opt, display_area) = {
+        let scene = st.scene.lock().await;
+        (scene.active_tab, scene.display_area)
+    };
     let tab_id = match active_tab_opt {
         Some(id) => id,
         None => return, // no active tab — skip silently
@@ -4596,7 +4603,6 @@ async fn apply_queued_batch_to_scene(
 
     // Convert proto mutations to scene mutations (single canonical path shared
     // with the live path; the " (queued)" suffix distinguishes drain-path logs).
-    let display_area = { st.scene.lock().await.display_area };
     let converted = match convert_proto_mutations(
         &batch.mutations,
         &st.element_store,
