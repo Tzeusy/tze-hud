@@ -41,10 +41,10 @@
 use tze_hud_scene::types::SceneId;
 
 // Bring `statig::blocking` items into scope for the state machine impl.
-// `Outcome`, `Transition`, `Handled`, `Super`, `IntoStateMachineExt` etc.
-// are re-exported from `statig::blocking::*`.
+// Uses the no-macro blocking API (statig with default-features = false) to
+// avoid the proc-macro-error2 transitive dependency (RUSTSEC-2026-0173).
 #[cfg(feature = "v2_preview")]
-use statig::blocking::*;
+use statig::blocking::{self, Handled, IntoStateMachine, IntoStateMachineExt, Outcome, Transition};
 
 // ─── Render state (always public — queried by the renderer) ──────────────────
 
@@ -294,10 +294,10 @@ impl VideoSurfaceEntry {
     /// that the render path can act on without knowing `statig` internals.
     pub fn render_state(&self) -> VideoRenderState {
         match self.machine.state() {
-            State::Admitted {} => VideoRenderState::Placeholder,
-            State::Streaming {} | State::Degraded {} => VideoRenderState::Streaming,
-            State::Paused {} => VideoRenderState::LastFrameWithBadge,
-            State::Closing {} | State::Closed {} | State::Revoked {} => VideoRenderState::Closed,
+            State::Admitted => VideoRenderState::Placeholder,
+            State::Streaming | State::Degraded => VideoRenderState::Streaming,
+            State::Paused => VideoRenderState::LastFrameWithBadge,
+            State::Closing | State::Closed | State::Revoked => VideoRenderState::Closed,
         }
     }
 
@@ -317,134 +317,202 @@ impl Default for VideoSurfaceEntry {
     }
 }
 
-// ─── statig state machine definition ─────────────────────────────────────────
+// ─── statig no-macro state machine implementation ─────────────────────────────
+//
+// Uses the statig blocking no-macro API (statig with default-features = false)
+// to avoid the proc-macro-error2 transitive dependency (RUSTSEC-2026-0173).
+// The state behaviour is identical to the previous proc-macro form; only the
+// wiring boilerplate is written by hand instead of being generated.
 
 /// State machine shared-storage (per-surface, currently empty).
 ///
-/// The `statig` `#[state_machine]` attribute generates the `State` enum and
-/// the dispatch infrastructure.  Shared-storage fields can be added here
-/// later (e.g. `decode_drop_count: u32`) without changing the state trait
-/// surface.
-///
-/// State derivations include `Debug` and `PartialEq` so tests can assert on
-/// state values without needing to match variants manually.
+/// Shared-storage fields can be added here later (e.g. `decode_drop_count: u32`)
+/// without changing the state dispatch surface.
 #[cfg(feature = "v2_preview")]
 #[derive(Default)]
-pub struct VideoSurface;
+pub(crate) struct VideoSurface;
+
+/// Leaf-state enum for the VideoSurface state machine.
+///
+/// This enum is what the statig macro would have generated from the
+/// `#[statig::state_machine]` attribute. All variants are unit variants.
+#[cfg(feature = "v2_preview")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum State {
+    Admitted,
+    Streaming,
+    Degraded,
+    Paused,
+    Closing,
+    Closed,
+    Revoked,
+}
 
 #[cfg(feature = "v2_preview")]
-#[statig::state_machine(initial = "State::admitted()", state(derive(Debug, PartialEq, Eq)))]
-impl VideoSurface {
-    /// ADMITTED — decoder admitted by the runtime, waiting for first frame.
-    ///
-    /// Valid transitions:
-    /// - `Admitted` → `Streaming`   (runtime signals media-plane ready)
-    /// - `Admitted` → `Closing`     (graceful close before any frame)
-    /// - `Admitted` → `Revoked`     (operator hard-revoke during startup)
-    #[state]
-    fn admitted(&mut self, event: &MediaEvent) -> Outcome<State> {
-        match event {
-            MediaEvent::Admitted => Transition(State::streaming()),
-            MediaEvent::Close => Transition(State::closing()),
-            MediaEvent::Revoke => Transition(State::revoked()),
-            _ => Super,
+impl State {
+    // Constructor helpers — identical names to what the macro generated.
+    fn admitted() -> Self {
+        Self::Admitted
+    }
+    fn streaming() -> Self {
+        Self::Streaming
+    }
+    fn degraded() -> Self {
+        Self::Degraded
+    }
+    fn paused() -> Self {
+        Self::Paused
+    }
+    fn closing() -> Self {
+        Self::Closing
+    }
+    fn closed() -> Self {
+        Self::Closed
+    }
+    fn revoked() -> Self {
+        Self::Revoked
+    }
+}
+
+/// `IntoStateMachine` wires `VideoSurface` into the statig blocking engine.
+#[cfg(feature = "v2_preview")]
+impl IntoStateMachine for VideoSurface {
+    type State = State;
+    /// No superstates — all states are flat.  `()` is the unit superstate
+    /// required by statig for flat (no-hierarchy) state machines.
+    type Superstate<'sub> = ();
+    type Event<'evt> = MediaEvent;
+    type Context<'ctx> = ();
+
+    fn initial() -> State {
+        State::admitted()
+    }
+}
+
+/// `blocking::State` dispatch: routes each leaf state to its handler.
+#[cfg(feature = "v2_preview")]
+impl blocking::State<VideoSurface> for State {
+    fn call_handler(
+        &mut self,
+        shared: &mut VideoSurface,
+        event: &MediaEvent,
+        _ctx: &mut (),
+    ) -> Outcome<Self> {
+        match self {
+            State::Admitted => vs_admitted_handler(shared, event),
+            State::Streaming => vs_streaming_handler(shared, event),
+            State::Degraded => vs_degraded_handler(shared, event),
+            State::Paused => vs_paused_handler(shared, event),
+            State::Closing => vs_closing_handler(shared, event),
+            State::Closed => {
+                let _ = event;
+                Handled
+            }
+            State::Revoked => {
+                let _ = event;
+                Handled
+            }
         }
     }
 
-    /// STREAMING — live frames arriving normally.
-    ///
-    /// Valid transitions:
-    /// - `Streaming` → `Degraded`   (decode hiccup, below teardown threshold)
-    /// - `Streaming` → `Paused`     (media drop, session survives — B11)
-    /// - `Streaming` → `Closing`    (graceful teardown)
-    /// - `Streaming` → `Revoked`    (operator hard-revoke)
-    ///
-    /// `FrameDecoded` events are captured by `VideoSurfaceEntry::handle` before
-    /// dispatch; the state machine handles them as no-ops.
-    #[state]
-    fn streaming(&mut self, event: &MediaEvent) -> Outcome<State> {
-        match event {
-            MediaEvent::Degraded => Transition(State::degraded()),
-            MediaEvent::MediaDropped => Transition(State::paused()),
-            MediaEvent::Close => Transition(State::closing()),
-            MediaEvent::Revoke => Transition(State::revoked()),
-            MediaEvent::FrameDecoded(_) | MediaEvent::FrameDecodedAccepted => Handled,
-            _ => Super,
-        }
+    // No superstates — return None.
+    fn superstate(&mut self) -> Option<()> {
+        None
     }
+}
 
-    /// DEGRADED — transient quality issue; frames still arriving but
-    /// sub-nominal.  Renders like `Streaming` (no badge).
-    ///
-    /// Valid transitions:
-    /// - `Degraded` → `Streaming`   (quality recovered)
-    /// - `Degraded` → `Paused`      (media drop while degraded — B11)
-    /// - `Degraded` → `Closing`     (graceful teardown)
-    /// - `Degraded` → `Revoked`     (operator hard-revoke)
-    #[state]
-    fn degraded(&mut self, event: &MediaEvent) -> Outcome<State> {
-        match event {
-            MediaEvent::Recovered => Transition(State::streaming()),
-            MediaEvent::MediaDropped => Transition(State::paused()),
-            MediaEvent::Close => Transition(State::closing()),
-            MediaEvent::Revoke => Transition(State::revoked()),
-            MediaEvent::FrameDecoded(_) | MediaEvent::FrameDecodedAccepted => Handled,
-            _ => Super,
-        }
+// ── Per-state handler functions ───────────────────────────────────────────────
+
+/// ADMITTED — decoder admitted by the runtime, waiting for first frame.
+///
+/// Valid transitions:
+/// - `Admitted` → `Streaming`   (runtime signals media-plane ready)
+/// - `Admitted` → `Closing`     (graceful close before any frame)
+/// - `Admitted` → `Revoked`     (operator hard-revoke during startup)
+#[cfg(feature = "v2_preview")]
+fn vs_admitted_handler(_shared: &mut VideoSurface, event: &MediaEvent) -> Outcome<State> {
+    match event {
+        MediaEvent::Admitted => Transition(State::streaming()),
+        MediaEvent::Close => Transition(State::closing()),
+        MediaEvent::Revoke => Transition(State::revoked()),
+        _ => Handled,
     }
+}
 
-    /// PAUSED — media plane dropped while session survives (B11).
-    ///
-    /// The compositor renders the **last decoded frame** (held in
-    /// `VideoSurfaceEntry.last_frame`) with a disconnection-badge overlay.
-    /// The session / control path is unaffected.
-    ///
-    /// Valid transitions:
-    /// - `Paused` → `Streaming`     (media plane reconnected)
-    /// - `Paused` → `Closing`       (graceful teardown)
-    /// - `Paused` → `Revoked`       (operator hard-revoke)
-    #[state]
-    fn paused(&mut self, event: &MediaEvent) -> Outcome<State> {
-        match event {
-            MediaEvent::MediaReconnected | MediaEvent::Admitted => Transition(State::streaming()),
-            MediaEvent::Close => Transition(State::closing()),
-            MediaEvent::Revoke => Transition(State::revoked()),
-            _ => Super,
-        }
+/// STREAMING — live frames arriving normally.
+///
+/// Valid transitions:
+/// - `Streaming` → `Degraded`   (decode hiccup, below teardown threshold)
+/// - `Streaming` → `Paused`     (media drop, session survives — B11)
+/// - `Streaming` → `Closing`    (graceful teardown)
+/// - `Streaming` → `Revoked`    (operator hard-revoke)
+///
+/// `FrameDecoded` events are captured by `VideoSurfaceEntry::handle` before
+/// dispatch; the state machine handles them as no-ops.
+#[cfg(feature = "v2_preview")]
+fn vs_streaming_handler(_shared: &mut VideoSurface, event: &MediaEvent) -> Outcome<State> {
+    match event {
+        MediaEvent::Degraded => Transition(State::degraded()),
+        MediaEvent::MediaDropped => Transition(State::paused()),
+        MediaEvent::Close => Transition(State::closing()),
+        MediaEvent::Revoke => Transition(State::revoked()),
+        MediaEvent::FrameDecoded(_) | MediaEvent::FrameDecodedAccepted => Handled,
+        _ => Handled,
     }
+}
 
-    /// CLOSING — graceful teardown in progress.
-    ///
-    /// Valid transitions:
-    /// - `Closing` → `Closed`       (teardown complete: second `Close` event)
-    /// - `Closing` → `Revoked`      (operator hard-revoke overtakes graceful close)
-    ///
-    /// All other events are absorbed (teardown is in progress; no side-effects).
-    #[state]
-    fn closing(&mut self, event: &MediaEvent) -> Outcome<State> {
-        match event {
-            MediaEvent::Close => Transition(State::closed()),
-            MediaEvent::Revoke => Transition(State::revoked()),
-            _ => Handled,
-        }
+/// DEGRADED — transient quality issue; frames still arriving but sub-nominal.
+/// Renders like `Streaming` (no badge).
+///
+/// Valid transitions:
+/// - `Degraded` → `Streaming`   (quality recovered)
+/// - `Degraded` → `Paused`      (media drop while degraded — B11)
+/// - `Degraded` → `Closing`     (graceful teardown)
+/// - `Degraded` → `Revoked`     (operator hard-revoke)
+#[cfg(feature = "v2_preview")]
+fn vs_degraded_handler(_shared: &mut VideoSurface, event: &MediaEvent) -> Outcome<State> {
+    match event {
+        MediaEvent::Recovered => Transition(State::streaming()),
+        MediaEvent::MediaDropped => Transition(State::paused()),
+        MediaEvent::Close => Transition(State::closing()),
+        MediaEvent::Revoke => Transition(State::revoked()),
+        MediaEvent::FrameDecoded(_) | MediaEvent::FrameDecodedAccepted => Handled,
+        _ => Handled,
     }
+}
 
-    /// CLOSED — terminal.  No further transitions allowed.
-    ///
-    /// Any event delivered after `Closed` is silently absorbed.
-    #[state]
-    fn closed(&mut self, event: &MediaEvent) -> Outcome<State> {
-        let _ = event;
-        Handled
+/// PAUSED — media plane dropped while session survives (B11).
+///
+/// The compositor renders the **last decoded frame** with a disconnection-badge
+/// overlay.  The session / control path is unaffected.
+///
+/// Valid transitions:
+/// - `Paused` → `Streaming`     (media plane reconnected)
+/// - `Paused` → `Closing`       (graceful teardown)
+/// - `Paused` → `Revoked`       (operator hard-revoke)
+#[cfg(feature = "v2_preview")]
+fn vs_paused_handler(_shared: &mut VideoSurface, event: &MediaEvent) -> Outcome<State> {
+    match event {
+        MediaEvent::MediaReconnected | MediaEvent::Admitted => Transition(State::streaming()),
+        MediaEvent::Close => Transition(State::closing()),
+        MediaEvent::Revoke => Transition(State::revoked()),
+        _ => Handled,
     }
+}
 
-    /// REVOKED — terminal hard-revoke by operator or budget watchdog.
-    ///
-    /// Any event delivered after `Revoked` is silently absorbed.
-    #[state]
-    fn revoked(&mut self, event: &MediaEvent) -> Outcome<State> {
-        let _ = event;
-        Handled
+/// CLOSING — graceful teardown in progress.
+///
+/// Valid transitions:
+/// - `Closing` → `Closed`       (teardown complete: second `Close` event)
+/// - `Closing` → `Revoked`      (operator hard-revoke overtakes graceful close)
+///
+/// All other events are absorbed (teardown is in progress; no side-effects).
+#[cfg(feature = "v2_preview")]
+fn vs_closing_handler(_shared: &mut VideoSurface, event: &MediaEvent) -> Outcome<State> {
+    match event {
+        MediaEvent::Close => Transition(State::closed()),
+        MediaEvent::Revoke => Transition(State::revoked()),
+        _ => Handled,
     }
 }
 

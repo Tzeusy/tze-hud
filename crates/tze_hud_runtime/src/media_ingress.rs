@@ -52,7 +52,8 @@
 //! Edits to this file that deviate from RFC 0014 MUST be accompanied by an
 //! RFC amendment.
 
-use statig::blocking::*;
+use statig::blocking::InitializedStateMachine;
+use statig::blocking::{self, Handled, IntoStateMachine, IntoStateMachineExt, Outcome, Transition};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -495,270 +496,337 @@ fn handle_revoke(shared: &mut MediaIngress, reason: &MediaCloseReason) -> Outcom
     }
 }
 
-// ── statig state machine implementation ──────────────────────────────────────
+// ── statig no-macro state machine implementation ──────────────────────────────
+//
+// Uses the statig blocking no-macro API (statig with default-features = false)
+// to avoid the proc-macro-error2 transitive dependency (RUSTSEC-2026-0173).
+// The state behaviour is identical to the previous proc-macro form; only the
+// wiring boilerplate is written by hand instead of being generated.
 
-#[statig::state_machine(
-    initial = "State::admitted()",
-    state(derive(Clone, Debug, PartialEq, Eq))
-)]
-impl MediaIngress {
-    /// ADMITTED — transport negotiation in progress.
-    ///
-    /// Accepts:
-    /// - `TransportEstablished` → STREAMING
-    /// - `TransportNegotiationFailed` → CLOSING
-    /// - `InitiateClose` → CLOSING (early close before transport completes)
-    /// - `Revoke` → REVOKED or CLOSING
-    ///
-    /// All other events are NotApplicable.
-    #[state]
-    fn admitted(&mut self, event: &MediaSessionEvent) -> Outcome<State> {
-        match event {
-            MediaSessionEvent::TransportEstablished => Transition(State::streaming()),
-            MediaSessionEvent::TransportNegotiationFailed => Transition(State::closing()),
-            MediaSessionEvent::InitiateClose {
-                reason,
-                retry_after_us,
-            } => handle_initiate_close(self, reason, retry_after_us),
-            MediaSessionEvent::Revoke(reason) => handle_revoke(self, reason),
-            _ => {
-                self.signal = Some(HandlerSignal::NotApplicable);
+/// Leaf-state enum for the RFC 0014 §3 media ingress state machine.
+///
+/// This enum is what the statig macro would have generated from the
+/// `#[statig::state_machine]` attribute.  All variants are unit structs;
+/// the `State` naming mirrors the macro convention so existing callers of
+/// `statig_state_to_media_session_state` compile without change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum State {
+    Admitted,
+    Streaming,
+    Degraded,
+    Paused,
+    Closing,
+    Closed,
+    Revoked,
+}
+
+impl State {
+    // Constructor helpers — identical names to what the macro generated.
+    fn admitted() -> Self {
+        Self::Admitted
+    }
+    fn streaming() -> Self {
+        Self::Streaming
+    }
+    fn degraded() -> Self {
+        Self::Degraded
+    }
+    fn paused() -> Self {
+        Self::Paused
+    }
+    fn closing() -> Self {
+        Self::Closing
+    }
+    fn closed() -> Self {
+        Self::Closed
+    }
+    fn revoked() -> Self {
+        Self::Revoked
+    }
+}
+
+/// `IntoStateMachine` wires `MediaIngress` into the statig blocking engine.
+impl IntoStateMachine for MediaIngress {
+    type State = State;
+    /// No superstates — all states are flat.  `()` is the unit superstate
+    /// required by statig for flat (no-hierarchy) state machines.
+    type Superstate<'sub> = ();
+    type Event<'evt> = MediaSessionEvent;
+    type Context<'ctx> = ();
+
+    fn initial() -> State {
+        State::admitted()
+    }
+}
+
+/// `blocking::State` dispatch: routes each leaf state to its handler.
+impl blocking::State<MediaIngress> for State {
+    fn call_handler(
+        &mut self,
+        shared: &mut MediaIngress,
+        event: &MediaSessionEvent,
+        _ctx: &mut (),
+    ) -> Outcome<Self> {
+        match self {
+            State::Admitted => admitted_handler(shared, event),
+            State::Streaming => streaming_handler(shared, event),
+            State::Degraded => degraded_handler(shared, event),
+            State::Paused => paused_handler(shared, event),
+            State::Closing => closing_handler(shared, event),
+            State::Closed => {
+                let _ = event;
+                Handled
+            }
+            State::Revoked => {
+                let _ = event;
                 Handled
             }
         }
     }
 
-    /// STREAMING — frames flowing normally.
-    ///
-    /// Accepts:
-    /// - `DegradationAdvanced { step: 1–7 }` → DEGRADED
-    /// - `AgentPauseRequest` → PAUSED (trigger = AGENT_REQUEST)
-    /// - `OperatorPause` → PAUSED (trigger = OPERATOR_REQUEST)
-    /// - `SafeModePause` → PAUSED (trigger = SAFE_MODE)
-    /// - `PolicyQuietHoursPause` → PAUSED (trigger = POLICY_QUIET_HOURS)
-    /// - `InitiateClose` → CLOSING
-    /// - `Revoke` → REVOKED or CLOSING
-    ///
-    /// All other events are NotApplicable.
-    ///
-    /// Note: `DegradationAdvanced` with step outside 1–7 is NotApplicable even
-    /// in STREAMING (bounds check per RFC 0014 §5.2 E25 ladder).
-    #[state]
-    fn streaming(&mut self, event: &MediaSessionEvent) -> Outcome<State> {
-        match event {
-            MediaSessionEvent::DegradationAdvanced { step, .. } => {
-                // RFC 0014 §5.2: steps 1–7 are valid in-ladder degradations.
-                if !(1..=7).contains(step) {
-                    self.signal = Some(HandlerSignal::NotApplicable);
-                    return Handled;
-                }
-                self.degradation_step = *step;
-                Transition(State::degraded())
-            }
-            MediaSessionEvent::AgentPauseRequest => {
-                self.degradation_step = 0;
-                self.pause_trigger = Some(MediaPauseTrigger::AgentRequest);
-                Transition(State::paused())
-            }
-            MediaSessionEvent::OperatorPause => {
-                self.degradation_step = 0;
-                self.pause_trigger = Some(MediaPauseTrigger::OperatorRequest);
-                Transition(State::paused())
-            }
-            MediaSessionEvent::SafeModePause => {
-                self.degradation_step = 0;
-                self.pause_trigger = Some(MediaPauseTrigger::SafeMode);
-                Transition(State::paused())
-            }
-            MediaSessionEvent::PolicyQuietHoursPause => {
-                self.degradation_step = 0;
-                self.pause_trigger = Some(MediaPauseTrigger::PolicyQuietHours);
-                Transition(State::paused())
-            }
-            MediaSessionEvent::InitiateClose {
-                reason,
-                retry_after_us,
-            } => handle_initiate_close(self, reason, retry_after_us),
-            MediaSessionEvent::Revoke(reason) => handle_revoke(self, reason),
-            _ => {
-                self.signal = Some(HandlerSignal::NotApplicable);
-                Handled
-            }
+    // No superstates — return None.
+    fn superstate(&mut self) -> Option<()> {
+        None
+    }
+}
+
+// ── Per-state handler functions ───────────────────────────────────────────────
+//
+// These functions contain exactly the same logic as the `#[state]` methods in
+// the previous proc-macro form.  They are plain functions rather than `impl`
+// methods so they can be called from the `blocking::State` dispatch above.
+
+/// ADMITTED — transport negotiation in progress.
+///
+/// Accepts:
+/// - `TransportEstablished` → STREAMING
+/// - `TransportNegotiationFailed` → CLOSING
+/// - `InitiateClose` → CLOSING (early close before transport completes)
+/// - `Revoke` → REVOKED or CLOSING
+///
+/// All other events are NotApplicable.
+fn admitted_handler(shared: &mut MediaIngress, event: &MediaSessionEvent) -> Outcome<State> {
+    match event {
+        MediaSessionEvent::TransportEstablished => Transition(State::streaming()),
+        MediaSessionEvent::TransportNegotiationFailed => Transition(State::closing()),
+        MediaSessionEvent::InitiateClose {
+            reason,
+            retry_after_us,
+        } => handle_initiate_close(shared, reason, retry_after_us),
+        MediaSessionEvent::Revoke(reason) => handle_revoke(shared, reason),
+        _ => {
+            shared.signal = Some(HandlerSignal::NotApplicable);
+            Handled
         }
     }
+}
 
-    /// DEGRADED — stream active but under E25 quality reduction (step 1–7).
-    ///
-    /// Accepts:
-    /// - `DegradationRecovered` → STREAMING (step cleared to 0)
-    /// - `AgentPauseRequest` → PAUSED (step cleared; trigger = AGENT_REQUEST)
-    /// - `OperatorPause` → PAUSED (step cleared; trigger = OPERATOR_REQUEST)
-    /// - `SafeModePause` → PAUSED (step cleared; trigger = SAFE_MODE)
-    /// - `PolicyQuietHoursPause` → PAUSED (step cleared; trigger = POLICY_QUIET_HOURS)
-    /// - `InitiateClose` → CLOSING
-    /// - `Revoke` → REVOKED or CLOSING
-    ///
-    /// All other events are NotApplicable (including `DegradationAdvanced`
-    /// while already in DEGRADED — must recover first).
-    #[state]
-    fn degraded(&mut self, event: &MediaSessionEvent) -> Outcome<State> {
-        match event {
-            MediaSessionEvent::DegradationRecovered => {
-                self.degradation_step = 0;
+/// STREAMING — frames flowing normally.
+///
+/// Accepts:
+/// - `DegradationAdvanced { step: 1–7 }` → DEGRADED
+/// - `AgentPauseRequest` → PAUSED (trigger = AGENT_REQUEST)
+/// - `OperatorPause` → PAUSED (trigger = OPERATOR_REQUEST)
+/// - `SafeModePause` → PAUSED (trigger = SAFE_MODE)
+/// - `PolicyQuietHoursPause` → PAUSED (trigger = POLICY_QUIET_HOURS)
+/// - `InitiateClose` → CLOSING
+/// - `Revoke` → REVOKED or CLOSING
+///
+/// All other events are NotApplicable.
+///
+/// Note: `DegradationAdvanced` with step outside 1–7 is NotApplicable even
+/// in STREAMING (bounds check per RFC 0014 §5.2 E25 ladder).
+fn streaming_handler(shared: &mut MediaIngress, event: &MediaSessionEvent) -> Outcome<State> {
+    match event {
+        MediaSessionEvent::DegradationAdvanced { step, .. } => {
+            // RFC 0014 §5.2: steps 1–7 are valid in-ladder degradations.
+            if !(1..=7).contains(step) {
+                shared.signal = Some(HandlerSignal::NotApplicable);
+                return Handled;
+            }
+            shared.degradation_step = *step;
+            Transition(State::degraded())
+        }
+        MediaSessionEvent::AgentPauseRequest => {
+            shared.degradation_step = 0;
+            shared.pause_trigger = Some(MediaPauseTrigger::AgentRequest);
+            Transition(State::paused())
+        }
+        MediaSessionEvent::OperatorPause => {
+            shared.degradation_step = 0;
+            shared.pause_trigger = Some(MediaPauseTrigger::OperatorRequest);
+            Transition(State::paused())
+        }
+        MediaSessionEvent::SafeModePause => {
+            shared.degradation_step = 0;
+            shared.pause_trigger = Some(MediaPauseTrigger::SafeMode);
+            Transition(State::paused())
+        }
+        MediaSessionEvent::PolicyQuietHoursPause => {
+            shared.degradation_step = 0;
+            shared.pause_trigger = Some(MediaPauseTrigger::PolicyQuietHours);
+            Transition(State::paused())
+        }
+        MediaSessionEvent::InitiateClose {
+            reason,
+            retry_after_us,
+        } => handle_initiate_close(shared, reason, retry_after_us),
+        MediaSessionEvent::Revoke(reason) => handle_revoke(shared, reason),
+        _ => {
+            shared.signal = Some(HandlerSignal::NotApplicable);
+            Handled
+        }
+    }
+}
+
+/// DEGRADED — stream active but under E25 quality reduction (step 1–7).
+///
+/// Accepts:
+/// - `DegradationRecovered` → STREAMING (step cleared to 0)
+/// - `AgentPauseRequest` → PAUSED (step cleared; trigger = AGENT_REQUEST)
+/// - `OperatorPause` → PAUSED (step cleared; trigger = OPERATOR_REQUEST)
+/// - `SafeModePause` → PAUSED (step cleared; trigger = SAFE_MODE)
+/// - `PolicyQuietHoursPause` → PAUSED (step cleared; trigger = POLICY_QUIET_HOURS)
+/// - `InitiateClose` → CLOSING
+/// - `Revoke` → REVOKED or CLOSING
+///
+/// All other events are NotApplicable (including `DegradationAdvanced`
+/// while already in DEGRADED — must recover first).
+fn degraded_handler(shared: &mut MediaIngress, event: &MediaSessionEvent) -> Outcome<State> {
+    match event {
+        MediaSessionEvent::DegradationRecovered => {
+            shared.degradation_step = 0;
+            Transition(State::streaming())
+        }
+        MediaSessionEvent::AgentPauseRequest => {
+            shared.degradation_step = 0;
+            shared.pause_trigger = Some(MediaPauseTrigger::AgentRequest);
+            Transition(State::paused())
+        }
+        MediaSessionEvent::OperatorPause => {
+            shared.degradation_step = 0;
+            shared.pause_trigger = Some(MediaPauseTrigger::OperatorRequest);
+            Transition(State::paused())
+        }
+        MediaSessionEvent::SafeModePause => {
+            shared.degradation_step = 0;
+            shared.pause_trigger = Some(MediaPauseTrigger::SafeMode);
+            Transition(State::paused())
+        }
+        MediaSessionEvent::PolicyQuietHoursPause => {
+            shared.degradation_step = 0;
+            shared.pause_trigger = Some(MediaPauseTrigger::PolicyQuietHours);
+            Transition(State::paused())
+        }
+        MediaSessionEvent::InitiateClose {
+            reason,
+            retry_after_us,
+        } => handle_initiate_close(shared, reason, retry_after_us),
+        MediaSessionEvent::Revoke(reason) => handle_revoke(shared, reason),
+        _ => {
+            shared.signal = Some(HandlerSignal::NotApplicable);
+            Handled
+        }
+    }
+}
+
+/// PAUSED — stream suspended; frames not flowing.
+///
+/// Resume authority is enforced per RFC 0014 §3.3:
+/// - `AgentResumeRequest` → STREAMING **only if** paused by AGENT_REQUEST;
+///   otherwise silently dropped (`HandlerSignal::Dropped`).
+/// - `OperatorResume` → STREAMING unconditionally.
+/// - `SafeModeResume` → STREAMING only if paused by SAFE_MODE; else dropped.
+/// - `PolicyQuietHoursResume` → STREAMING only if paused by POLICY_QUIET_HOURS;
+///   else dropped.
+///
+/// Also accepts `InitiateClose` and `Revoke` from any non-terminal state.
+fn paused_handler(shared: &mut MediaIngress, event: &MediaSessionEvent) -> Outcome<State> {
+    match event {
+        // ── AGENT_REQUEST authority (RFC 0014 §3.3) ──────────────────
+        MediaSessionEvent::AgentResumeRequest => {
+            let trigger = shared
+                .pause_trigger
+                .unwrap_or(MediaPauseTrigger::AgentRequest);
+            if trigger.agent_can_resume() {
+                shared.pause_trigger = None;
                 Transition(State::streaming())
-            }
-            MediaSessionEvent::AgentPauseRequest => {
-                self.degradation_step = 0;
-                self.pause_trigger = Some(MediaPauseTrigger::AgentRequest);
-                Transition(State::paused())
-            }
-            MediaSessionEvent::OperatorPause => {
-                self.degradation_step = 0;
-                self.pause_trigger = Some(MediaPauseTrigger::OperatorRequest);
-                Transition(State::paused())
-            }
-            MediaSessionEvent::SafeModePause => {
-                self.degradation_step = 0;
-                self.pause_trigger = Some(MediaPauseTrigger::SafeMode);
-                Transition(State::paused())
-            }
-            MediaSessionEvent::PolicyQuietHoursPause => {
-                self.degradation_step = 0;
-                self.pause_trigger = Some(MediaPauseTrigger::PolicyQuietHours);
-                Transition(State::paused())
-            }
-            MediaSessionEvent::InitiateClose {
-                reason,
-                retry_after_us,
-            } => handle_initiate_close(self, reason, retry_after_us),
-            MediaSessionEvent::Revoke(reason) => handle_revoke(self, reason),
-            _ => {
-                self.signal = Some(HandlerSignal::NotApplicable);
+            } else {
+                debug!(
+                    stream_epoch = shared.stream_epoch,
+                    pause_trigger = trigger.as_str(),
+                    "AgentResumeRequest silently dropped: not agent-paused"
+                );
+                shared.signal = Some(HandlerSignal::Dropped);
                 Handled
             }
         }
-    }
-
-    /// PAUSED — stream suspended; frames not flowing.
-    ///
-    /// Resume authority is enforced per RFC 0014 §3.3:
-    /// - `AgentResumeRequest` → STREAMING **only if** paused by AGENT_REQUEST;
-    ///   otherwise silently dropped (`HandlerSignal::Dropped`).
-    /// - `OperatorResume` → STREAMING unconditionally.
-    /// - `SafeModeResume` → STREAMING only if paused by SAFE_MODE; else dropped.
-    /// - `PolicyQuietHoursResume` → STREAMING only if paused by POLICY_QUIET_HOURS;
-    ///   else dropped.
-    ///
-    /// Also accepts `InitiateClose` and `Revoke` from any non-terminal state.
-    #[state]
-    fn paused(&mut self, event: &MediaSessionEvent) -> Outcome<State> {
-        match event {
-            // ── AGENT_REQUEST authority (RFC 0014 §3.3) ──────────────────
-            MediaSessionEvent::AgentResumeRequest => {
-                let trigger = self
-                    .pause_trigger
-                    .unwrap_or(MediaPauseTrigger::AgentRequest);
-                if trigger.agent_can_resume() {
-                    self.pause_trigger = None;
-                    Transition(State::streaming())
-                } else {
-                    debug!(
-                        stream_epoch = self.stream_epoch,
-                        pause_trigger = trigger.as_str(),
-                        "AgentResumeRequest silently dropped: not agent-paused"
-                    );
-                    self.signal = Some(HandlerSignal::Dropped);
-                    Handled
-                }
-            }
-            // ── OPERATOR_REQUEST authority (unconditional) ────────────────
-            MediaSessionEvent::OperatorResume => {
-                self.pause_trigger = None;
+        // ── OPERATOR_REQUEST authority (unconditional) ────────────────
+        MediaSessionEvent::OperatorResume => {
+            shared.pause_trigger = None;
+            Transition(State::streaming())
+        }
+        // ── SAFE_MODE authority (RFC 0014 §3.3) ──────────────────────
+        MediaSessionEvent::SafeModeResume => {
+            let trigger = shared.pause_trigger.unwrap_or(MediaPauseTrigger::SafeMode);
+            if trigger == MediaPauseTrigger::SafeMode {
+                shared.pause_trigger = None;
                 Transition(State::streaming())
-            }
-            // ── SAFE_MODE authority (RFC 0014 §3.3) ──────────────────────
-            MediaSessionEvent::SafeModeResume => {
-                let trigger = self.pause_trigger.unwrap_or(MediaPauseTrigger::SafeMode);
-                if trigger == MediaPauseTrigger::SafeMode {
-                    self.pause_trigger = None;
-                    Transition(State::streaming())
-                } else {
-                    debug!(
-                        stream_epoch = self.stream_epoch,
-                        pause_trigger = trigger.as_str(),
-                        "SafeModeResume ignored: stream not paused by SAFE_MODE"
-                    );
-                    self.signal = Some(HandlerSignal::Dropped);
-                    Handled
-                }
-            }
-            // ── POLICY_QUIET_HOURS authority (RFC 0014 §3.3) ──────────────
-            MediaSessionEvent::PolicyQuietHoursResume => {
-                let trigger = self
-                    .pause_trigger
-                    .unwrap_or(MediaPauseTrigger::PolicyQuietHours);
-                if trigger == MediaPauseTrigger::PolicyQuietHours {
-                    self.pause_trigger = None;
-                    Transition(State::streaming())
-                } else {
-                    debug!(
-                        stream_epoch = self.stream_epoch,
-                        pause_trigger = trigger.as_str(),
-                        "PolicyQuietHoursResume ignored: stream not paused by POLICY_QUIET_HOURS"
-                    );
-                    self.signal = Some(HandlerSignal::Dropped);
-                    Handled
-                }
-            }
-            MediaSessionEvent::InitiateClose {
-                reason,
-                retry_after_us,
-            } => handle_initiate_close(self, reason, retry_after_us),
-            MediaSessionEvent::Revoke(reason) => handle_revoke(self, reason),
-            _ => {
-                self.signal = Some(HandlerSignal::NotApplicable);
+            } else {
+                debug!(
+                    stream_epoch = shared.stream_epoch,
+                    pause_trigger = trigger.as_str(),
+                    "SafeModeResume ignored: stream not paused by SAFE_MODE"
+                );
+                shared.signal = Some(HandlerSignal::Dropped);
                 Handled
             }
         }
-    }
-
-    /// CLOSING — teardown in progress; ring buffer draining.
-    ///
-    /// Accepts:
-    /// - `DrainComplete` → CLOSED (terminal)
-    /// - `Revoke` → REVOKED (hard revoke can overtake a graceful close)
-    ///
-    /// All other events are NotApplicable.
-    #[state]
-    fn closing(&mut self, event: &MediaSessionEvent) -> Outcome<State> {
-        match event {
-            MediaSessionEvent::DrainComplete => Transition(State::closed()),
-            MediaSessionEvent::Revoke(reason) => handle_revoke(self, reason),
-            _ => {
-                self.signal = Some(HandlerSignal::NotApplicable);
+        // ── POLICY_QUIET_HOURS authority (RFC 0014 §3.3) ──────────────
+        MediaSessionEvent::PolicyQuietHoursResume => {
+            let trigger = shared
+                .pause_trigger
+                .unwrap_or(MediaPauseTrigger::PolicyQuietHours);
+            if trigger == MediaPauseTrigger::PolicyQuietHours {
+                shared.pause_trigger = None;
+                Transition(State::streaming())
+            } else {
+                debug!(
+                    stream_epoch = shared.stream_epoch,
+                    pause_trigger = trigger.as_str(),
+                    "PolicyQuietHoursResume ignored: stream not paused by POLICY_QUIET_HOURS"
+                );
+                shared.signal = Some(HandlerSignal::Dropped);
                 Handled
             }
         }
+        MediaSessionEvent::InitiateClose {
+            reason,
+            retry_after_us,
+        } => handle_initiate_close(shared, reason, retry_after_us),
+        MediaSessionEvent::Revoke(reason) => handle_revoke(shared, reason),
+        _ => {
+            shared.signal = Some(HandlerSignal::NotApplicable);
+            Handled
+        }
     }
+}
 
-    /// CLOSED — terminal state.  No transitions possible.
-    ///
-    /// Terminal absorption is handled at the `apply()` level by checking
-    /// `state().is_terminal()` before dispatching to statig.  This handler
-    /// is never called during normal operation.
-    #[state]
-    fn closed(&mut self, event: &MediaSessionEvent) -> Outcome<State> {
-        let _ = event;
-        Handled
-    }
-
-    /// REVOKED — terminal state.  No transitions possible.
-    ///
-    /// See `closed` above — terminal absorption is handled at the `apply()` level.
-    #[state]
-    fn revoked(&mut self, event: &MediaSessionEvent) -> Outcome<State> {
-        let _ = event;
-        Handled
+/// CLOSING — teardown in progress; ring buffer draining.
+///
+/// Accepts:
+/// - `DrainComplete` → CLOSED (terminal)
+/// - `Revoke` → REVOKED (hard revoke can overtake a graceful close)
+///
+/// All other events are NotApplicable.
+fn closing_handler(shared: &mut MediaIngress, event: &MediaSessionEvent) -> Outcome<State> {
+    match event {
+        MediaSessionEvent::DrainComplete => Transition(State::closed()),
+        MediaSessionEvent::Revoke(reason) => handle_revoke(shared, reason),
+        _ => {
+            shared.signal = Some(HandlerSignal::NotApplicable);
+            Handled
+        }
     }
 }
 
@@ -767,13 +835,13 @@ impl MediaIngress {
 /// Convert from the statig-generated `State` enum to the public `MediaSessionState`.
 fn statig_state_to_media_session_state(s: &State) -> MediaSessionState {
     match s {
-        State::Admitted {} => MediaSessionState::Admitted,
-        State::Streaming {} => MediaSessionState::Streaming,
-        State::Degraded {} => MediaSessionState::Degraded,
-        State::Paused {} => MediaSessionState::Paused,
-        State::Closing {} => MediaSessionState::Closing,
-        State::Closed {} => MediaSessionState::Closed,
-        State::Revoked {} => MediaSessionState::Revoked,
+        State::Admitted => MediaSessionState::Admitted,
+        State::Streaming => MediaSessionState::Streaming,
+        State::Degraded => MediaSessionState::Degraded,
+        State::Paused => MediaSessionState::Paused,
+        State::Closing => MediaSessionState::Closing,
+        State::Closed => MediaSessionState::Closed,
+        State::Revoked => MediaSessionState::Revoked,
     }
 }
 

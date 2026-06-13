@@ -34,16 +34,6 @@ ignore = [
     # runtime attack surface.
     # Action: Remove when MSRV is bumped to Rust 1.92+ and wgpu upgraded to 28+.
     { id = "RUSTSEC-2024-0436", reason = "Transitive dep via metal←wgpu-hal←wgpu←glyphon. Compile-time proc-macro, no runtime attack surface. Blocked on wgpu 28+ (needs Rust 1.92+ MSRV bump, tracked with glyphon/wgpu version chain in Cargo.toml)." },
-
-    # RUSTSEC-2026-0173: `proc-macro-error2` is unmaintained.
-    # Transitive dependency chain: proc-macro-error2 ← statig_macro ← statig.
-    # `statig` is a direct workspace dependency used for v2 media plane state
-    # machines. The proc-macro-error2 author recommends `manyhow` as a
-    # replacement; upstream statig must migrate first.
-    # Risk: compile-time proc-macro only, zero runtime attack surface.
-    # Action: Remove when statig releases a version that replaces
-    # proc-macro-error2 with manyhow (or equivalent). File upstream issue.
-    { id = "RUSTSEC-2026-0173", reason = "Transitive dep via statig_macro←statig (v2 media plane state machine). Compile-time proc-macro, no runtime attack surface. Pending upstream statig migration to manyhow." },
 ]
 
 # ─── Licenses ────────────────────────────────────────────────────────────────
