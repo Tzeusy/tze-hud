@@ -2477,6 +2477,43 @@ impl ProjectionAuthority {
             .record_append(projection_id, b"test-orphan".to_vec(), 1, 0);
     }
 
+    // ── Coalescer diagnostic accessors (hud-bq0gl.14) ─────────────────────────
+
+    /// Number of projection IDs currently registered in the cadence coalescer.
+    ///
+    /// This counts both portals with pending updates and those that are registered
+    /// but have already been drained.  Use [`coalescer_pending_portal_count`] for
+    /// the subset with a pending coalesced snapshot waiting to be drained.
+    pub fn coalescer_portal_count(&self) -> usize {
+        self.cadence_coalescer.portal_count()
+    }
+
+    /// Number of portals with a pending coalesced snapshot not yet drained.
+    pub fn coalescer_pending_portal_count(&self) -> usize {
+        self.cadence_coalescer.pending_portal_count()
+    }
+
+    /// Total number of coalesced snapshots taken by the drain loop since
+    /// `ProjectionAuthority` was constructed.
+    ///
+    /// Each call to `take_due_portal_update` that returns `Ok(Some(_))` increments
+    /// this counter by 1, regardless of how many `PublishOutput` calls were
+    /// coalesced into that snapshot.
+    pub fn coalescer_total_taken(&self) -> u64 {
+        self.cadence_coalescer.total_taken()
+    }
+
+    /// Total number of coalesced append operations since `ProjectionAuthority`
+    /// was constructed.
+    ///
+    /// Incremented each time a new `PublishOutput` append supersedes an existing
+    /// pending snapshot for a portal (latest-wins coalescing).  A high ratio of
+    /// `coalescer_total_coalesced` to `coalescer_total_taken` indicates heavy
+    /// burst traffic being efficiently collapsed.
+    pub fn coalescer_total_coalesced(&self) -> u64 {
+        self.cadence_coalescer.total_coalesced()
+    }
+
     pub fn handle_attach(
         &mut self,
         request: AttachRequest,
