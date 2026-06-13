@@ -3,7 +3,7 @@
 ## Purpose
 Defines the gauge widget exemplar bundle, parameter schema, SVG layer bindings, and token-driven vertical fill rendering used by the widget publishing path.
 
-Implementation: assets/widgets/gauge/; tests/vertical_slice/gauge-5step-scenario.json
+Implementation: assets/widgets/gauge/; tests/user-test/gauge-5step-scenario.json
 
 ## Requirements
 ### Requirement: Gauge Widget Visual Contract
