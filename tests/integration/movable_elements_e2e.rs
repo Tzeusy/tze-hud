@@ -20,6 +20,7 @@ use tze_hud_input::{
     DeviceDragState, DragEventOutcome, DragHandleElementKind, DragPhase, InputProcessor,
     PointerEvent, PointerEventKind,
 };
+use tze_hud_runtime::element_store::{from_toml_str, to_toml_string};
 use tze_hud_scene::{
     ElementStore, ElementStoreEntry, ElementType, GeometryPolicy, Rect, SceneGraph, SceneId,
     geometry_policy_to_absolute_rect, rect_to_relative_geometry_policy,
@@ -192,11 +193,8 @@ fn cross_session_persistence_preserves_user_geometry_override() {
         .expect("geometry_override must be set after drag");
 
     // ── Persist → TOML → reload (simulate runtime restart) ───────────────────
-    let toml_str = store
-        .to_toml_string()
-        .expect("ElementStore TOML serialization must succeed");
-    let reloaded_store =
-        ElementStore::from_toml_str(&toml_str).expect("TOML deserialization must succeed");
+    let toml_str = to_toml_string(&store).expect("ElementStore TOML serialization must succeed");
+    let reloaded_store = from_toml_str(&toml_str).expect("TOML deserialization must succeed");
 
     // ── Session B: verify the override survived the round-trip ───────────────
     let entry_b = reloaded_store
@@ -323,8 +321,8 @@ fn element_discovery_by_namespace_returns_correct_scene_id_with_override_preserv
     );
 
     // ── Simulate runtime restart: persist → reload ────────────────────────────
-    let toml_str = store.to_toml_string().expect("serialize must succeed");
-    let reloaded = ElementStore::from_toml_str(&toml_str).expect("deserialize must succeed");
+    let toml_str = to_toml_string(&store).expect("serialize must succeed");
+    let reloaded = from_toml_str(&toml_str).expect("deserialize must succeed");
 
     // ── Session B: agent reconnects and queries by namespace ──────────────────
     // find_id_by_type_namespace simulates the ListElements(namespace_filter="agent-discoverable-")
