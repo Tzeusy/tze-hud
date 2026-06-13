@@ -21,6 +21,7 @@
 //! call `select_gpu_adapter` to enforce the platform constraint.
 
 pub mod adapter;
+pub mod fonts;
 pub mod markdown;
 pub mod overflow;
 pub mod pipeline;
@@ -31,6 +32,7 @@ pub mod video_surface;
 pub mod widget;
 
 pub use adapter::{AdapterSelectionError, PlatformBackends, select_gpu_adapter};
+pub use fonts::{BUNDLED_FONT_FACE_COUNT, bundled_font_sources, bundled_font_system};
 pub use markdown::{MarkdownCache, MarkdownTokens, ParsedMarkdown, StyleAttr, StyledSpan};
 pub use overflow::{
     ELLIPSIS, TruncationResult, TruncationViewport, truncate_for_ellipsis, truncate_tail_anchored,
