@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import http.client
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -41,6 +43,23 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         for banned in media.BANNED_SOURCE_MARKERS:
             self.assertNotIn(banned, html.lower())
 
+    def test_youtube_evidence_with_origin_port_injects_http_origin(self) -> None:
+        """build_source_evidence_html with origin_port bakes ?origin= into the embed URL."""
+        html = media.build_source_evidence_html(origin_port=12345)
+
+        self.assertIn("?origin=http://127.0.0.1:12345", html)
+        self.assertIn("autoplay=1", html)
+        # Must still embed the correct video id.
+        self.assertIn("https://www.youtube.com/embed/O0FGCxkHM-U", html)
+        self.assertIn('id="youtube-source-evidence"', html)
+        for banned in media.BANNED_SOURCE_MARKERS:
+            self.assertNotIn(banned, html.lower())
+
+    def test_youtube_evidence_without_origin_port_omits_origin_param(self) -> None:
+        """Without origin_port the embed URL must not contain an ?origin= param."""
+        html = media.build_source_evidence_html()
+        self.assertNotIn("?origin=", html)
+
     def test_policy_review_blocks_raw_youtube_frame_bridge(self) -> None:
         review = media.policy_review()
 
@@ -60,7 +79,8 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "approved zone"):
             media.validate_approved_media_zone("desktop")
 
-    def test_local_youtube_sidecar_launches_generated_html(self) -> None:
+    def test_local_youtube_sidecar_launches_via_http_origin(self) -> None:
+        """Non-dry-run local launch must open an http://127.0.0.1:<port> URL, not file://."""
         with tempfile.TemporaryDirectory() as tmpdir:
             args = media.build_parser().parse_args(
                 [
@@ -69,14 +89,119 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
                     tmpdir,
                 ]
             )
-            with mock.patch.object(media.webbrowser, "open", return_value=True) as opened:
+            with mock.patch.object(media.webbrowser, "open", return_value=True) as opened, \
+                    mock.patch.object(media, "_start_local_http_server") as mock_server:
                 evidence = media.launch_youtube_sidecar(args)
 
         opened.assert_called_once()
         opened_url = opened.call_args.args[0]
-        self.assertTrue(opened_url.startswith("file://"), opened_url)
+        self.assertTrue(
+            opened_url.startswith("http://127.0.0.1:"),
+            f"Expected http://127.0.0.1:... URL, got: {opened_url}",
+        )
+        self.assertNotIn("file://", opened_url)
         self.assertEqual(evidence["official_player_url"], media.YOUTUBE_EMBED_URL)
         self.assertTrue(Path(evidence["html_evidence_path"]).name.endswith(".html"))
+        self.assertIsNotNone(evidence["http_origin"])
+        self.assertTrue(evidence["http_origin"].startswith("http://127.0.0.1:"))
+        # HTTP server must have been started.
+        mock_server.assert_called_once()
+        self.assertEqual(evidence["launched_by"], "local-browser-http")
+
+    def test_dry_run_sidecar_writes_html_without_http_origin(self) -> None:
+        """Dry-run must write the HTML file and report no http_origin."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = media.build_parser().parse_args(
+                [
+                    "youtube-sidecar",
+                    "--output-dir",
+                    tmpdir,
+                    "--dry-run",
+                ]
+            )
+            evidence = media.launch_youtube_sidecar(args)
+            html_path = Path(evidence["html_evidence_path"])
+            self.assertTrue(html_path.exists())
+            html = html_path.read_text()
+
+        self.assertEqual(evidence["launched_by"], "dry-run")
+        self.assertIsNone(evidence["http_origin"])
+        # Dry-run HTML must not contain an ?origin= param (no server was started).
+        self.assertNotIn("?origin=", html)
+
+
+class LocalHttpServerTests(unittest.TestCase):
+    """Headless tests for _start_local_http_server and _pick_free_port."""
+
+    def test_pick_free_port_returns_valid_port(self) -> None:
+        port = media._pick_free_port()
+        self.assertGreater(port, 0)
+        self.assertLessEqual(port, 65535)
+
+    def test_http_server_serves_html_with_200(self) -> None:
+        """The local HTTP server must serve youtube_source_evidence.html with HTTP 200."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            serve_dir = Path(tmpdir)
+            html = media.build_source_evidence_html(origin_port=9999)
+            html_path = serve_dir / "youtube_source_evidence.html"
+            html_path.write_text(html, encoding="utf-8")
+
+            port = media._pick_free_port()
+            server = media._start_local_http_server(serve_dir, port)
+            try:
+                # Allow the server thread a moment to start.
+                time.sleep(0.05)
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request("GET", "/youtube_source_evidence.html")
+                resp = conn.getresponse()
+                body = resp.read().decode("utf-8")
+                conn.close()
+            finally:
+                server.shutdown()
+
+        self.assertEqual(resp.status, 200)
+        self.assertIn("youtube-source-evidence", body)
+        self.assertIn("?origin=http://127.0.0.1:9999", body)
+
+    def test_http_server_origin_url_matches_embed_url(self) -> None:
+        """The embed URL in the served HTML must carry the correct ?origin= param."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            serve_dir = Path(tmpdir)
+            port = media._pick_free_port()
+            html = media.build_source_evidence_html(origin_port=port)
+            (serve_dir / "youtube_source_evidence.html").write_text(html, encoding="utf-8")
+
+            server = media._start_local_http_server(serve_dir, port)
+            try:
+                time.sleep(0.05)
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request("GET", "/youtube_source_evidence.html")
+                resp = conn.getresponse()
+                body = resp.read().decode("utf-8")
+                conn.close()
+            finally:
+                server.shutdown()
+
+        expected_origin = f"?origin=http://127.0.0.1:{port}"
+        self.assertIn(expected_origin, body, f"Body missing {expected_origin!r}")
+        self.assertEqual(resp.status, 200)
+
+    def test_http_server_404_for_missing_file(self) -> None:
+        """The server must return 404 for files that don't exist in the serve dir."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            port = media._pick_free_port()
+            server = media._start_local_http_server(Path(tmpdir), port)
+            try:
+                time.sleep(0.05)
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request("GET", "/does_not_exist.html")
+                resp = conn.getresponse()
+                resp.read()
+                conn.close()
+            finally:
+                server.shutdown()
+
+        self.assertEqual(resp.status, 404)
 
 
 class ValidateOfficialPlayerFramesTests(unittest.TestCase):
