@@ -42,7 +42,7 @@ cd "${REPO_ROOT}"
 EXEMPT_PATHS=(
     "crates/tze_hud_policy/src/security.rs"
     "crates/tze_hud_protocol/src/auth.rs"
-    "crates/tze_hud_protocol/src/session_server.rs"
+    "crates/tze_hud_protocol/src/session_server/mod.rs"
     "crates/tze_hud_config/src/capability.rs"
     "crates/tze_hud_config/src/tests.rs"
     "crates/tze_hud_scene/src/config/mod.rs"
