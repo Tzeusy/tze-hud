@@ -4,7 +4,6 @@ description = "Layer 2 SSIM visual regression and Layer 4 developer visibility a
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [[test]]
 name = "layer2_headless"
@@ -29,3 +28,6 @@ thiserror = { workspace = true }
 tze_hud_scene = { path = "../tze_hud_scene" }
 tze_hud_compositor = { path = "../tze_hud_compositor", features = ["headless"] }
 tokio = { workspace = true }
+
+[lints]
+workspace = true

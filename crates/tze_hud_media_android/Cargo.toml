@@ -4,7 +4,6 @@ description = "Android GStreamer media shim for tze_hud — phase 3 D19 Pixel ta
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 # Android only; the crate is a no-op stub on non-Android hosts so that
 # `cargo check --workspace` continues to pass on Linux.
 
@@ -13,3 +12,6 @@ lints.workspace = true
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+
+[lints]
+workspace = true

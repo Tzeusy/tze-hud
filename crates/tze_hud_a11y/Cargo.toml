@@ -4,7 +4,6 @@ description = "Accessibility bridge for tze_hud — AT-SPI2, UIA, NSAccessibilit
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
@@ -12,3 +11,6 @@ serde = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+
+[lints]
+workspace = true

@@ -4,7 +4,6 @@ description = "Provider-neutral cooperative HUD projection operation contract"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [[bin]]
 name = "tze_hud_projection_authority"
@@ -39,3 +38,6 @@ proptest = { workspace = true }
 # carried in CliPortalDrainRecord::append_geometry.
 tze_hud_input = { path = "../tze_hud_input" }
 tze_hud_scene = { path = "../tze_hud_scene" }
+
+[lints]
+workspace = true

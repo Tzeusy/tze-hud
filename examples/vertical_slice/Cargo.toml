@@ -4,7 +4,6 @@ description = "Reference vertical slice example for tze_hud"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [[bin]]
 name = "vertical_slice"
@@ -36,3 +35,6 @@ serde_json = { workspace = true }
 # (unrestricted capabilities). The released binary does NOT carry dev-mode; use
 # `--features dev-mode` or `cargo test` to enable it for development.
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["dev-mode"] }
+
+[lints]
+workspace = true

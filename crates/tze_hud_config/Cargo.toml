@@ -4,7 +4,6 @@ description = "TOML configuration loading and validation for tze_hud — impleme
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
@@ -18,3 +17,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

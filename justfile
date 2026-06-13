@@ -125,21 +125,7 @@ vocabulary-lint:
 # For the full belt-and-suspenders release-build check, run the CI job.
 dev-mode-guard:
     cargo metadata --format-version 1 --no-deps 2>/dev/null \
-        | python3 -c "
-import json, sys
-meta = json.load(sys.stdin)
-fail = False
-for pkg in meta['packages']:
-    if pkg['name'] in ('tze_hud_runtime', 'vertical_slice', 'integration'):
-        features = pkg.get('features', {})
-        default_features = features.get('default', [])
-        if 'dev-mode' in default_features:
-            print(f'FAIL: dev-mode is in default features of {pkg[\"name\"]}')
-            fail = True
-        else:
-            print(f'PASS: dev-mode is not in default features of {pkg[\"name\"]}')
-sys.exit(1 if fail else 0)
-"
+        | python3 scripts/ci/check_dev_mode_defaults.py
 
 # ── Full local CI sweep ───────────────────────────────────────────────────────
 

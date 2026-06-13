@@ -4,7 +4,6 @@ description = "Exemplar dashboard tile agent — raw tile API reference for tze_
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [[bin]]
 name = "dashboard_tile_agent"
@@ -35,3 +34,6 @@ tze_hud_input = { path = "../../crates/tze_hud_input" }
 # The released binary does NOT carry dev-mode; activate with `--features dev-mode`
 # when running tests manually, or `cargo test` which picks up dev-dependencies.
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["dev-mode"] }
+
+[lints]
+workspace = true

@@ -4,7 +4,6 @@ description = "Pure scene graph data model for tze_hud — no GPU dependency"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [dependencies]
 uuid = { workspace = true }
@@ -24,3 +23,6 @@ harness = false
 [[bench]]
 name = "snapshot"
 harness = false
+
+[lints]
+workspace = true

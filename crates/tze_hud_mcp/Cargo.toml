@@ -4,7 +4,6 @@ description = "MCP (Model Context Protocol) compatibility bridge for tze_hud —
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
@@ -26,3 +25,6 @@ http = []
 
 [dev-dependencies]
 tokio = { workspace = true }
+
+[lints]
+workspace = true

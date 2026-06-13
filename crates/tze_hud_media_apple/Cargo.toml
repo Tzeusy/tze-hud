@@ -4,7 +4,6 @@ description = "Safe VTDecompressionSession wrapper over objc2-video-toolbox for 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 # This crate is compiled on all targets; platform-specific code is gated via
 # `cfg(target_vendor = "apple")`. On Linux/Windows the crate compiles to an
 # empty stub so the workspace remains buildable without an Apple SDK.
@@ -29,3 +28,6 @@ tokio = { workspace = true }
 [build-dependencies]
 # No external build-time crates required — the build.rs shells out to
 # the libvpx configure script and make, both standard on macOS/Xcode hosts.
+
+[lints]
+workspace = true

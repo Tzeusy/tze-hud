@@ -4,7 +4,6 @@ description = "Widget asset bundle loader and IMAGE_SVG resource support for tze
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [dependencies]
 # Scene types: WidgetDefinition, WidgetParameterDeclaration, WidgetSvgLayer, etc.
@@ -25,3 +24,6 @@ tempfile = { workspace = true }
 # SVG attribute / binding resolution utilities used by status-indicator tests.
 tze_hud_compositor = { path = "../tze_hud_compositor" }
 tze_hud_scene = { path = "../tze_hud_scene" }
+
+[lints]
+workspace = true

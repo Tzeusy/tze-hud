@@ -4,7 +4,6 @@ description = "Multi-crate integration tests for tze_hud"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-lints.workspace = true
 
 [[test]]
 name = "multi_agent"
@@ -197,3 +196,6 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 image = { workspace = true, features = ["png"] }
 blake3 = { workspace = true }
+
+[lints]
+workspace = true
