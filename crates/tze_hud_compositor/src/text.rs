@@ -595,7 +595,7 @@ impl TextRasterizer {
                                 &mut self.font_system,
                                 effective_text,
                                 base_attrs,
-                                Shaping::Basic,
+                                Shaping::Advanced,
                             );
                         } else {
                             let spans = styled_run_spans(
@@ -610,7 +610,7 @@ impl TextRasterizer {
                                 &mut self.font_system,
                                 spans,
                                 base_attrs,
-                                Shaping::Basic,
+                                Shaping::Advanced,
                             );
                         }
                         // Record the effective styled runs (resliced to truncated
@@ -626,7 +626,12 @@ impl TextRasterizer {
                             item.font_size_px,
                             item.line_height_multiplier,
                         );
-                        buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
+                        buf.set_rich_text(
+                            &mut self.font_system,
+                            spans,
+                            base_attrs,
+                            Shaping::Advanced,
+                        );
                         // No truncation — original styled_runs byte offsets are correct.
                         effective_styled_runs_per_item.push(item.styled_runs.to_vec());
                     }
@@ -636,7 +641,7 @@ impl TextRasterizer {
                         &mut self.font_system,
                         effective_text,
                         base_attrs,
-                        Shaping::Basic,
+                        Shaping::Advanced,
                     );
                     // No styled_runs means no backdrop quads possible.
                     effective_styled_runs_per_item.push(vec![]);
@@ -684,7 +689,7 @@ impl TextRasterizer {
                                 &mut self.font_system,
                                 effective_text,
                                 base_attrs,
-                                Shaping::Basic,
+                                Shaping::Advanced,
                             );
                         } else {
                             let spans = color_run_spans(effective_text, &resliced, base_attrs);
@@ -692,12 +697,17 @@ impl TextRasterizer {
                                 &mut self.font_system,
                                 spans,
                                 base_attrs,
-                                Shaping::Basic,
+                                Shaping::Advanced,
                             );
                         }
                     } else {
                         let spans = color_run_spans(&item.text, &item.color_runs, base_attrs);
-                        buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Basic);
+                        buf.set_rich_text(
+                            &mut self.font_system,
+                            spans,
+                            base_attrs,
+                            Shaping::Advanced,
+                        );
                     }
                     // color_runs don't carry background_color; no backdrop quads.
                     effective_styled_runs_per_item.push(vec![]);
@@ -919,27 +929,15 @@ pub fn compute_inline_backdrop_quads(
             offsets
         };
 
-        // `LayoutGlyph::start/end` semantics differ by shaping mode:
-        //   • `Shaping::Advanced` (rustybuzz): `start` is a byte offset in the
-        //     full `BufferLine` text (includes `start_run` offset).
-        //   • `Shaping::Basic`   (shape_skip): `start` is a char index (from
-        //     `.chars().enumerate()`) within the **word** being shaped — the
-        //     `start_run` offset is NOT added, so all words start at index 0.
+        // With `Shaping::Advanced` (rustybuzz), `LayoutGlyph::start` and `end`
+        // are byte offsets within the `BufferLine` text (the `start_run` offset
+        // is already included).  We can therefore map each glyph directly to its
+        // full-text byte range as `line_offset + glyph.start .. line_offset + glyph.end`.
         //
-        // Because production code uses `Shaping::Basic`, we cannot rely on
-        // `glyph.start` as a line-relative byte offset.  Instead, for each
-        // layout run we build a glyph-index-to-byte-offset table by walking the
-        // `BufferLine` text sequentially: glyphs in a LayoutRun appear in the
-        // same order as their characters in the source text (for LTR text, which
-        // covers all inline code span use-cases we target here).  Each entry
-        // gives the byte range `[g_byte_start, g_byte_end)` for glyph `i`
-        // relative to the start of `item.text`.
-        //
-        // For wrapped text a BufferLine may produce multiple LayoutRuns.  We
-        // track a per-line char-index cursor (`line_char_cursors`) that
-        // persists across runs of the same line, advancing by the glyph count
-        // of each run so the next run picks up where this one left off.
-        let mut line_char_cursors: Vec<usize> = vec![0; buf.lines.len()];
+        // (Under the old `Shaping::Basic`/shape_skip mode `start` was a char index
+        // within the word being shaped, not a byte offset — that required the
+        // per-run char-cursor table that was removed here when production code
+        // switched to `Shaping::Advanced`.)
 
         // Record the quads length before this item so we can clip only the
         // quads appended for this item at the end of the layout-runs pass.
@@ -947,26 +945,6 @@ pub fn compute_inline_backdrop_quads(
 
         for run in buf.layout_runs() {
             let line_offset = line_byte_offsets.get(run.line_i).copied().unwrap_or(0);
-
-            // Build a table of byte offsets for each glyph in this run.
-            // Walk the line text from the char cursor position, yielding
-            // (byte_offset, char) for each glyph in sequential order.
-            let glyph_byte_offsets: Vec<(usize, usize)> = {
-                let line_text = buf.lines.get(run.line_i).map(|l| l.text()).unwrap_or("");
-                let char_cursor = line_char_cursors.get(run.line_i).copied().unwrap_or(0);
-                let mut iter = line_text.char_indices().skip(char_cursor);
-                let mut offsets = Vec::with_capacity(run.glyphs.len());
-                for _ in 0..run.glyphs.len() {
-                    if let Some((byte_start, ch)) = iter.next() {
-                        offsets.push((byte_start, byte_start + ch.len_utf8()));
-                    }
-                }
-                offsets
-            };
-            // Advance the char cursor for this line past all glyphs consumed.
-            if let Some(cursor) = line_char_cursors.get_mut(run.line_i) {
-                *cursor += run.glyphs.len();
-            }
 
             // For each StyledRunItem (from the effective/resliced set) with a
             // background_color, find glyphs that overlap its byte range and
@@ -986,13 +964,11 @@ pub fn compute_inline_backdrop_quads(
                 // Track whether we're currently building a quad for this run.
                 let mut current_quad: Option<InlineBackdropQuad> = None;
 
-                for (glyph_i, glyph) in run.glyphs.iter().enumerate() {
-                    // Map glyph index to full-text byte range using the
-                    // sequential table built above.
-                    let (g_byte_start_in_line, g_byte_end_in_line) =
-                        glyph_byte_offsets.get(glyph_i).copied().unwrap_or((0, 0));
-                    let g_start = line_offset + g_byte_start_in_line;
-                    let g_end = line_offset + g_byte_end_in_line;
+                for glyph in run.glyphs.iter() {
+                    // With Shaping::Advanced, glyph.start/end are byte offsets
+                    // in the BufferLine text; add line_offset for the full-text range.
+                    let g_start = line_offset + glyph.start;
+                    let g_end = line_offset + glyph.end;
 
                     // Check overlap: glyph range [g_start, g_end) vs styled run [sr_start, sr_end).
                     // A glyph overlaps if g_start < sr_end && g_end > sr_start.
@@ -4934,6 +4910,8 @@ mod tests {
         let height = 60.0_f32;
 
         // Build and shape the buffer — mirrors what prepare_text_items does.
+        // Must use Shaping::Advanced so glyph.start/end are byte offsets (not
+        // char indices), matching what compute_inline_backdrop_quads expects.
         let mut buf = Buffer::new(&mut fs, Metrics::new(font_size, line_height));
         buf.set_size(&mut fs, Some(width), Some(height));
         buf.set_wrap(&mut fs, Wrap::Word);
@@ -4941,7 +4919,7 @@ mod tests {
             &mut fs,
             &text,
             Attrs::new().family(Family::SansSerif),
-            Shaping::Basic,
+            Shaping::Advanced,
         );
         buf.shape_until_scroll(&mut fs, false);
 
