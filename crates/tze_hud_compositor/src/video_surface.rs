@@ -330,7 +330,7 @@ impl Default for VideoSurfaceEntry {
 /// without changing the state dispatch surface.
 #[cfg(feature = "v2_preview")]
 #[derive(Default)]
-pub struct VideoSurface;
+pub(crate) struct VideoSurface;
 
 /// Leaf-state enum for the VideoSurface state machine.
 ///
