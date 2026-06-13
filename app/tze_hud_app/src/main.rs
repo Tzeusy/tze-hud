@@ -76,13 +76,14 @@ use tze_hud_runtime::window::{WindowConfig, WindowMode};
 use tze_hud_runtime::windowed::{WindowedBenchmarkConfig, WindowedConfig, WindowedRuntime};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_SHA: &str = env!("TZE_HUD_GIT_SHA");
 const BIN_NAME: &str = "tze_hud";
 const DEFAULT_PSK: &str = "tze-hud-key";
 const DEV_ALLOW_INSECURE_STARTUP_ENV: &str = "TZE_HUD_DEV_ALLOW_INSECURE_STARTUP";
 
 fn print_help() {
     println!(
-        r#"{BIN_NAME} {VERSION}
+        r#"{BIN_NAME} {VERSION} ({GIT_SHA})
 Canonical tze_hud windowed display runtime.
 
 USAGE:
@@ -139,7 +140,7 @@ NOTES:
 }
 
 fn print_version() {
-    println!("{BIN_NAME} {VERSION}");
+    println!("{BIN_NAME} {VERSION} ({GIT_SHA})");
 }
 
 /// Parsed startup options.
@@ -650,6 +651,7 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
 
     tracing::info!(
         version = VERSION,
+        git_sha = GIT_SHA,
         window_mode = %opts.window_mode,
         width = opts.width,
         height = opts.height,

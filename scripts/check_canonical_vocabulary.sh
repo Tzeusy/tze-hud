@@ -60,6 +60,7 @@ EXEMPT_PATHS=(
     "about/legends-and-lore/prompts/07-configuration.md"
     "about/legends-and-lore/reviews/0001-scene-contract-round3.md"
     "about/legends-and-lore/reconciliations/reconciliation-gen4.md"
+    "CHANGELOG.md"
 )
 
 # Path prefixes (relative to repo root) under which ALL files are exempt.
