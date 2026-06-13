@@ -347,17 +347,24 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Font Asset Management
-The runtime SHALL discover fonts from three sources: system fonts (platform font directories), bundled fonts (compiled into the binary), and agent-uploaded fonts. System and bundled fonts SHALL have permanent implicit holds and SHALL never be GC'd. Font family resolution SHALL follow: (1) named variant from display profile, (2) custom ResourceId lookup with fallback to SystemSansSerif, (3) bundled default. Fallback SHALL be transparent to agents.
-Source: RFC 0011 §7.1, §7.2, §7.3
+The runtime SHALL support fonts from two mandatory sources and one opt-in source: bundled fonts (compiled into the binary), agent-uploaded fonts, and optionally system fonts (platform font directories, enabled via `resources.fonts.system_discovery = true` in the display profile). Bundled fonts SHALL have permanent implicit holds and SHALL never be GC'd. System fonts, when discovery is enabled, SHALL also have permanent implicit holds. Font family resolution SHALL follow: (1) named variant from display profile, (2) custom ResourceId lookup with fallback to bundled SansSerif default, (3) bundled default. Fallback SHALL be transparent to agents.
+
+> **Implementation note (2026-06-13, bundled-first FontSystem — PR #802, hud-bq0gl.11):** The v1 `FontSystem` shipped in PR #802 uses a bundled-first design. System-font discovery (platform directory scan) is **not performed by default** and is intentionally absent from the initial implementation. The `SystemSansSerif`, `SystemMonospace`, and `SystemSerif` named variants resolve to bundled faces (Noto Sans, a bundled monospace face, and Noto Serif respectively). System-font discovery is deferred to a future opt-in `FontRegistry` layer; the three-source contract in the original RFC 0011 §7.1–7.2 has been reconciled to reflect this design. Agent-uploaded fonts continue to work via `load_font_bytes` and are unaffected.
+
+Source: RFC 0011 §7.1, §7.2, §7.3 (as amended 2026-06-13)
 Scope: v1-mandatory
 
-#### Scenario: System font never GC'd
-- **WHEN** no scene graph nodes reference a system font
-- **THEN** the font MUST remain available; system and bundled fonts have permanent implicit holds
+#### Scenario: Bundled font never GC'd
+- **WHEN** no scene graph nodes reference a bundled font
+- **THEN** the font MUST remain available; bundled fonts have permanent implicit holds
+
+#### Scenario: System font never GC'd (when discovery enabled)
+- **WHEN** system-font discovery is enabled via config AND no scene graph nodes reference a system font
+- **THEN** the font MUST remain available; system fonts loaded via discovery have permanent implicit holds
 
 #### Scenario: Font fallback on missing custom font
 - **WHEN** a TextMarkdownNode references a custom font ResourceId that is not in the store
-- **THEN** the runtime MUST fall back to SystemSansSerif (bundled default) without notifying the agent
+- **THEN** the runtime MUST fall back to the bundled SansSerif default without notifying the agent
 
 ---
 
@@ -377,13 +384,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Font Cache
-Fonts SHALL be cached in an LRU cache bounded by configurable maximum size (default: 64 MiB). The cache SHALL include loaded font faces, shaped glyph caches, and rasterized glyph atlases. Font glyph caches SHALL be evicted LRU when the font memory budget is exceeded. System and bundled fonts SHALL never be evicted from the cache.
+Fonts SHALL be cached in an LRU cache bounded by configurable maximum size (default: 64 MiB). The cache SHALL include loaded font faces, shaped glyph caches, and rasterized glyph atlases. Font glyph caches SHALL be evicted LRU when the font memory budget is exceeded. Bundled fonts SHALL never be evicted from the cache. System fonts loaded via opt-in discovery SHALL also never be evicted.
 Source: RFC 0011 §7.5
 Scope: v1-mandatory
 
 #### Scenario: Font cache LRU eviction
 - **WHEN** the font cache exceeds 64 MiB
-- **THEN** the least recently used agent-uploaded font data MUST be evicted first; system/bundled fonts MUST NOT be evicted
+- **THEN** the least recently used agent-uploaded font data MUST be evicted first; bundled fonts (and system fonts when discovery is enabled) MUST NOT be evicted
 
 ---
 
