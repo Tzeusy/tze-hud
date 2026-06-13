@@ -43,6 +43,7 @@ EXEMPT_PATHS=(
     "crates/tze_hud_policy/src/security.rs"
     "crates/tze_hud_protocol/src/auth.rs"
     "crates/tze_hud_protocol/src/session_server/mod.rs"
+    "crates/tze_hud_protocol/src/session_server/zone_publish.rs"
     "crates/tze_hud_protocol/src/session_server/handshake.rs"
     "crates/tze_hud_protocol/src/session_server/leases.rs"
     "crates/tze_hud_config/src/capability.rs"
