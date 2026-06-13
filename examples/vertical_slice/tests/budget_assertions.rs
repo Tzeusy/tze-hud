@@ -530,7 +530,7 @@ async fn test_input_to_scene_commit_p99_within_budget() {
         .summary_mut()
         .input_to_scene_commit
         .samples
-        .extend_from_slice(&bucket.samples);
+        .extend(bucket.samples.iter().copied());
 }
 
 /// Assert that input_to_next_present p99 is under the 33ms budget at 60Hz.
@@ -621,7 +621,7 @@ async fn test_input_to_next_present_p99_within_budget() {
         .summary_mut()
         .input_to_next_present
         .samples
-        .extend_from_slice(&bucket.samples);
+        .extend(bucket.samples.iter().copied());
 }
 
 /// Assert that hit-test p99 is under the 100µs CPU-calibrated budget.

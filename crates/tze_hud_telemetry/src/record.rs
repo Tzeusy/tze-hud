@@ -1,5 +1,7 @@
 //! Telemetry data types.
 
+use std::collections::VecDeque;
+
 use serde::{Deserialize, Serialize};
 
 /// Per-frame telemetry record.
@@ -214,30 +216,87 @@ impl FrameTelemetry {
     }
 }
 
-/// Latency measurement bucket.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Maximum number of samples retained by a [`LatencyBucket`].
+///
+/// `LatencyBucket` is a diagnostic/observability helper used in debug tracing
+/// and session summaries. Without a cap the `samples` deque grows without bound
+/// for the driver lifetime, making `percentile()` — which clones and sorts the
+/// full window — progressively more expensive in long diagnostic sessions.
+///
+/// 1 024 samples was chosen because:
+/// - At 60 fps a full ring takes ~17 s, covering several seconds of recent history.
+/// - It provides excellent percentile resolution (p99 needs ≥ 100 samples; 1 024
+///   gives stable p95/p99 estimates with room to spare).
+/// - Memory footprint is bounded at 8 KiB per bucket (1 024 × 8 bytes).
+/// - `percentile()` cost is O(N log N) on at most 1 024 elements, i.e. constant.
+pub const LATENCY_BUCKET_WINDOW: usize = 1_024;
+
+/// Latency measurement bucket with a bounded sliding window.
+///
+/// Samples are stored in a `VecDeque` capped at [`LATENCY_BUCKET_WINDOW`]
+/// entries. When the window is full, `record()` evicts the oldest sample before
+/// inserting the new one, so memory and `percentile()` cost stay constant
+/// regardless of session length.
+///
+/// Percentiles reflect the **most recent** window of samples, which is the
+/// correct semantic for long diagnostic sessions: stale measurements from the
+/// start of a session should not drag down (or inflate) current percentiles.
+///
+/// Serialises as a JSON object `{"name": "…", "samples": […]}` — the `samples`
+/// array is bounded to at most `LATENCY_BUCKET_WINDOW` elements.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LatencyBucket {
     pub name: String,
-    pub samples: Vec<u64>, // microseconds
+    /// Recent samples in insertion order (oldest → newest).
+    ///
+    /// The deque is capped at [`LATENCY_BUCKET_WINDOW`] entries. Direct
+    /// read-only access is intentionally public for tests that need to inspect
+    /// raw sample values; callers must not push to it directly — use
+    /// [`LatencyBucket::record`] instead.
+    pub samples: VecDeque<u64>, // microseconds
+}
+
+impl Default for LatencyBucket {
+    fn default() -> Self {
+        Self::new("")
+    }
 }
 
 impl LatencyBucket {
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            samples: Vec::new(),
+            samples: VecDeque::with_capacity(LATENCY_BUCKET_WINDOW),
         }
     }
 
+    /// Record a latency sample (in microseconds).
+    ///
+    /// If the window is full the oldest sample is evicted to make room.
     pub fn record(&mut self, us: u64) {
-        self.samples.push(us);
+        if self.samples.len() == LATENCY_BUCKET_WINDOW {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(us);
+    }
+
+    /// Number of samples currently held (≤ `LATENCY_BUCKET_WINDOW`).
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Returns `true` if no samples have been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
     }
 
     pub fn percentile(&self, pct: f64) -> Option<u64> {
         if self.samples.is_empty() {
             return None;
         }
-        let mut sorted = self.samples.clone();
+        // Collect the bounded window into a Vec for sorting.  The cost is
+        // O(N log N) on at most LATENCY_BUCKET_WINDOW elements — constant.
+        let mut sorted: Vec<u64> = self.samples.iter().copied().collect();
         sorted.sort_unstable();
         // Nearest-rank method: ceil(pct/100 * N) - 1, clamped to valid range
         let rank = ((pct / 100.0) * sorted.len() as f64).ceil() as usize;
@@ -1138,5 +1197,116 @@ mod tests {
             compact.contains("\"scene_lock_misses\":7"),
             "compact serialized value must be 7: {compact}"
         );
+    }
+
+    // ── hud-1rxbs: LatencyBucket bounded sliding window ───────────────────────
+
+    /// Samples beyond LATENCY_BUCKET_WINDOW capacity evict the oldest entry.
+    ///
+    /// After inserting WINDOW + 1 samples the deque must still hold exactly
+    /// WINDOW entries, and the evicted sample (value 0) must no longer be
+    /// present while the most recently inserted sample is at the back.
+    #[test]
+    fn latency_bucket_window_is_bounded() {
+        let mut bucket = LatencyBucket::new("bounded");
+
+        // Fill to capacity.
+        for i in 0..LATENCY_BUCKET_WINDOW {
+            bucket.record(i as u64);
+        }
+        assert_eq!(
+            bucket.len(),
+            LATENCY_BUCKET_WINDOW,
+            "bucket must hold exactly LATENCY_BUCKET_WINDOW samples when full"
+        );
+
+        // One more sample must evict the oldest (value 0) and keep the window size.
+        let overflow_value: u64 = LATENCY_BUCKET_WINDOW as u64;
+        bucket.record(overflow_value);
+        assert_eq!(
+            bucket.len(),
+            LATENCY_BUCKET_WINDOW,
+            "len must stay at LATENCY_BUCKET_WINDOW after overflow"
+        );
+        // Oldest sample (0) must have been evicted.
+        assert!(
+            !bucket.samples.contains(&0),
+            "evicted sample (0) must no longer be in the window"
+        );
+        // Newest sample must be at the back.
+        assert_eq!(
+            *bucket.samples.back().unwrap(),
+            overflow_value,
+            "most recently inserted sample must be at the back of the deque"
+        );
+    }
+
+    /// percentile() on a full window returns a sensible value bounded by the
+    /// window contents, not the full session history.
+    ///
+    /// Loads WINDOW samples of value 1 000 µs, then overflows with WINDOW
+    /// samples of value 2 000 µs. After overflow the window holds only the
+    /// 2 000 µs samples, so p50/p99 must both be 2 000 µs, not 1 000 µs.
+    #[test]
+    fn latency_bucket_percentile_reflects_recent_window() {
+        let mut bucket = LatencyBucket::new("recent");
+
+        // Phase 1: fill with old samples.
+        for _ in 0..LATENCY_BUCKET_WINDOW {
+            bucket.record(1_000);
+        }
+        assert_eq!(bucket.p50(), Some(1_000));
+
+        // Phase 2: overwrite entire window with new samples.
+        for _ in 0..LATENCY_BUCKET_WINDOW {
+            bucket.record(2_000);
+        }
+
+        assert_eq!(
+            bucket.len(),
+            LATENCY_BUCKET_WINDOW,
+            "len must remain bounded after second fill"
+        );
+        assert_eq!(
+            bucket.p50(),
+            Some(2_000),
+            "p50 must reflect recent window, not stale samples"
+        );
+        assert_eq!(
+            bucket.p99(),
+            Some(2_000),
+            "p99 must reflect recent window, not stale samples"
+        );
+    }
+
+    /// An empty bucket's `len()` and `is_empty()` helpers behave correctly.
+    #[test]
+    fn latency_bucket_len_is_empty_helpers() {
+        let mut bucket = LatencyBucket::new("helpers");
+        assert!(bucket.is_empty());
+        assert_eq!(bucket.len(), 0);
+
+        bucket.record(500);
+        assert!(!bucket.is_empty());
+        assert_eq!(bucket.len(), 1);
+    }
+
+    /// LatencyBucket serialises and deserialises through JSON without data loss
+    /// (for windows smaller than LATENCY_BUCKET_WINDOW).
+    #[test]
+    fn latency_bucket_json_round_trip() {
+        let mut bucket = LatencyBucket::new("round_trip");
+        bucket.record(100);
+        bucket.record(200);
+        bucket.record(300);
+
+        let json = serde_json::to_string(&bucket).unwrap();
+        assert!(json.contains("\"samples\":[100,200,300]"), "json: {json}");
+
+        let decoded: LatencyBucket = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.name, "round_trip");
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded.samples[0], 100);
+        assert_eq!(decoded.samples[2], 300);
     }
 }
