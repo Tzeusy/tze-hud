@@ -187,6 +187,7 @@ git worktree add .worktrees/agent-hud-XXXX -b agent/hud-XXXX
 - `git pull --rebase` in this repo can stall ~4-5 min in a detached-HEAD state: the post-checkout hook runs `bd import` of the full 1,745-issue `.beads/issues.jsonl` under `timeout 300`. This is normal, not a hung rebase — wait it out; do not abort the rebase or restart Dolt. Light bd commands (`bd ready`) stay sub-second throughout.
 - `.codex/skills` should remain a symlink to `../.claude/skills`; `.claude/skills` is the canonical tracked tree and currently strictly supersets the Codex mirror.
 - `test_results/` is gitignored; evidence transcripts that must be committed are selectively force-added with `git add -f`, matching prior tracked files in that directory.
+- Merged `agent/*` branches are deleted automatically by `.github/workflows/delete-merged-branches.yml` (daily cron, 03:00 UTC). The workflow runs `scripts/prune-merged-branches.sh --execute` which: (a) fetches remote state, (b) lists all remote `agent/*` branches reachable from `origin/main`, (c) skips any branch checked out in a local worktree, and (d) deletes the rest with `git push origin --delete` (never force). To preview deletions without executing: `bash scripts/prune-merged-branches.sh --dry-run`. To trigger an immediate cleanup via CI: `gh workflow run delete-merged-branches.yml`. Stale merged branches that accumulated before this automation was added (hud-3qpgv.6) were cleaned up in that same PR.
 
 ## CI / Build
 

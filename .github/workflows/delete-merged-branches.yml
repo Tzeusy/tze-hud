@@ -1,0 +1,77 @@
+# tze_hud — Merged-branch cleanup (hud-3qpgv.6)
+#
+# Deletes remote agent/* branches whose tips are already merged into main.
+# This reclaims namespace and keeps `git branch -r` readable.
+#
+# Safety contract
+# ───────────────
+# - Only branches matching `agent/*` are candidates.
+# - Only branches reachable from main (i.e. merged) are deleted.
+# - Deletion uses `git push origin --delete` (never --force); git refuses to
+#   delete an unmerged branch via that path.
+# - Worktree-active branch protection is handled by the script but does not
+#   apply in CI (no local worktrees on GitHub runners); the merged-reachability
+#   check is the primary guard.
+#
+# Trigger policy
+# ──────────────
+# - Scheduled: daily at 03:00 UTC (off-peak; avoids disrupting active agents).
+# - Manual: workflow_dispatch (operator can run on demand).
+# - NOT triggered on push/pull_request — cleanup is async and non-blocking.
+#
+# Permissions
+# ───────────
+# Requires `contents: write` to push branch deletions.
+# Uses GITHUB_TOKEN (built-in); no PAT needed for same-repo deletes.
+#
+# Audit trail
+# ───────────
+# All deletion decisions are logged to the workflow's job output.
+# The script prints "DELETE: origin/<branch>" for every actual deletion.
+
+name: Delete merged branches
+
+on:
+  schedule:
+    # Daily at 03:00 UTC
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run only (do not delete)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    name: Prune merged agent/* branches
+    runs-on: ubuntu-latest
+    # Only run on the main repo, not on forks (forks lack push permission).
+    if: github.repository_owner == 'Tzeusy'
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          # Full fetch so that branch reachability is accurate.
+          fetch-depth: 0
+
+      - name: Fetch all remote branches
+        run: git fetch origin --prune
+
+      - name: Run prune script (dry run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        run: bash scripts/prune-merged-branches.sh --dry-run
+
+      - name: Run prune script (execute)
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+        run: bash scripts/prune-merged-branches.sh --execute
+        env:
+          # GITHUB_TOKEN is used implicitly by git push (credential helper).
+          # GitHub Actions sets up the token as the push credential automatically
+          # for `actions/checkout`-based checkouts.
+          GIT_AUTHOR_NAME: "github-actions[bot]"
+          GIT_AUTHOR_EMAIL: "github-actions[bot]@users.noreply.github.com"
