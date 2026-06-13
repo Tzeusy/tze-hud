@@ -52,9 +52,17 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Rust toolchain (MSRV 1.88)
-        uses: dtolnay/rust-toolchain@1.88
+        uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.88"
           targets: aarch64-apple-ios
+
+      # Explicit target install guards against runners where the toolchain
+      # action's targets: input does not persist into subsequent steps.
+      # dtolnay/rust-toolchain@stable installs the target via the same
+      # rustup call, so this is a no-op when the action succeeds.
+      - name: Add aarch64-apple-ios rustup target
+        run: rustup target add aarch64-apple-ios
 
       # timeout-minutes caps cache-save hangs (see ci.yml — PR #606 incident).
       # v2.9.1 pins to a specific stable release rather than the floating v2 alias.
