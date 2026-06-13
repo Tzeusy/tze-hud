@@ -161,6 +161,24 @@ pub struct FrameTelemetry {
     /// explicitly requested (e.g., via a debug mode flag or test fixture).
     #[serde(default)]
     pub layer0_checks_failed_this_frame: u32,
+
+    /// Cumulative frame-loop scene `try_lock` misses since compositor thread start.
+    ///
+    /// Incremented each time `compositor_scene.try_lock()` fails in the
+    /// compositor frame loop (Stage 4).  A miss means the scene lock was held by
+    /// a concurrent gRPC/MCP handler when the compositor attempted to acquire it;
+    /// the frame is skipped without GPU work or telemetry emission.
+    ///
+    /// The value is a **running total** (not a per-frame delta): it equals the
+    /// number of misses observed from compositor-thread start through the frame
+    /// that emitted this record.  Consumers wanting per-interval rates should
+    /// diff successive records.
+    ///
+    /// Zero-initialized; `#[serde(default)]` ensures old records deserialize
+    /// without error.  On the success path the counter is read with
+    /// `Ordering::Relaxed` — no cross-thread synchronization cost.
+    #[serde(default)]
+    pub scene_lock_miss_count: u64,
 }
 
 impl FrameTelemetry {
@@ -191,6 +209,7 @@ impl FrameTelemetry {
             telemetry_overflow_count: 0,
             invariant_violations_this_frame: 0,
             layer0_checks_failed_this_frame: 0,
+            scene_lock_miss_count: 0,
         }
     }
 }
@@ -490,6 +509,24 @@ pub struct SessionSummary {
     /// session; non-zero indicates agents submitted invalid mutation batches.
     #[serde(default)]
     pub invariant_violations: u64,
+
+    /// Cumulative frame-loop scene `try_lock` misses for this session.
+    ///
+    /// Tracks how many times the compositor frame loop attempted
+    /// `compositor_scene.try_lock()` and failed (contention — the scene lock
+    /// was held by a concurrent gRPC or MCP handler).  Accumulated by
+    /// `record_frame_correctness` from `FrameTelemetry::scene_lock_miss_count`.
+    ///
+    /// Because `scene_lock_miss_count` is a running total, this field holds the
+    /// peak value seen across all recorded frames (i.e., the miss count at the
+    /// last emitted frame), not a sum of per-frame deltas.
+    ///
+    /// Zero is the expected value under no contention; persistent non-zero
+    /// values indicate lock contention between the compositor and scene
+    /// mutation handlers, which is the primary signal for the deferred
+    /// double-buffer evaluation described in hud-3qpgv.2's close reason.
+    #[serde(default)]
+    pub scene_lock_misses: u64,
 }
 
 impl SessionSummary {
@@ -513,6 +550,7 @@ impl SessionSummary {
             budget_overruns: 0,
             sync_drift_violations: 0,
             invariant_violations: 0,
+            scene_lock_misses: 0,
         }
     }
 
@@ -552,6 +590,11 @@ impl SessionSummary {
     /// ```
     pub fn record_frame_correctness(&mut self, frame: &FrameTelemetry) {
         self.invariant_violations += frame.invariant_violations_this_frame as u64;
+        // scene_lock_miss_count is a running total; take the max so the session
+        // summary holds the latest (highest) value observed across all frames.
+        if frame.scene_lock_miss_count > self.scene_lock_misses {
+            self.scene_lock_misses = frame.scene_lock_miss_count;
+        }
     }
 
     /// Finalize: compute FPS from total_frames and elapsed_us.
@@ -976,6 +1019,124 @@ mod tests {
         assert_eq!(
             decoded.markdown_prime_us, 0,
             "markdown_prime_us must default to 0 when absent from JSON"
+        );
+    }
+
+    // ── hud-3qpgv.2: scene_lock_miss_count telemetry ─────────────────────────
+
+    /// FrameTelemetry.scene_lock_miss_count is zero-initialized by
+    /// FrameTelemetry::new, matching the no-contention default.
+    #[test]
+    fn scene_lock_miss_count_zero_initialized() {
+        let frame = FrameTelemetry::new(1);
+        assert_eq!(
+            frame.scene_lock_miss_count, 0,
+            "scene_lock_miss_count must be zero-initialized"
+        );
+    }
+
+    /// scene_lock_miss_count serializes to its canonical JSON field name and
+    /// round-trips through serde without loss.
+    #[test]
+    fn scene_lock_miss_count_serializes_and_round_trips() {
+        let mut frame = FrameTelemetry::new(7);
+        frame.scene_lock_miss_count = 42;
+
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("scene_lock_miss_count"),
+            "JSON must contain scene_lock_miss_count: {json}"
+        );
+        assert!(
+            json.contains("\"scene_lock_miss_count\":42"),
+            "serialized value must be 42: {json}"
+        );
+
+        let decoded: FrameTelemetry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.scene_lock_miss_count, 42,
+            "scene_lock_miss_count must survive JSON round-trip"
+        );
+    }
+
+    /// scene_lock_miss_count defaults to 0 when absent from JSON.
+    ///
+    /// Old telemetry records (written before this field was added) must
+    /// deserialize without error; the field defaults to zero via
+    /// `#[serde(default)]`.
+    #[test]
+    fn scene_lock_miss_count_defaults_on_missing_json() {
+        // JSON without scene_lock_miss_count — simulates a pre-hud-3qpgv.2 record.
+        let json = r#"{"frame_number":1,"timestamp_us":0,"frame_time_us":0,
+            "stage1_input_drain_us":0,"stage2_local_feedback_us":0,
+            "stage3_mutation_intake_us":0,"stage4_scene_commit_us":0,
+            "stage5_layout_resolve_us":0,"stage6_render_encode_us":0,
+            "stage7_gpu_submit_us":0,"stage8_telemetry_emit_us":0,
+            "input_to_local_ack_us":0,"input_to_scene_commit_us":0,
+            "input_to_next_present_us":0,"tile_count":0,"node_count":0,
+            "active_leases":0,"mutations_applied":0,"hit_region_updates":0,
+            "tiles_layout_recomputed":0,"telemetry_overflow_count":0,
+            "invariant_violations_this_frame":0,"layer0_checks_failed_this_frame":0,
+            "markdown_prime_us":0}"#;
+
+        let decoded: FrameTelemetry = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            decoded.scene_lock_miss_count, 0,
+            "scene_lock_miss_count must default to 0 when absent"
+        );
+    }
+
+    /// record_frame_correctness propagates scene_lock_miss_count into
+    /// SessionSummary.scene_lock_misses (takes the max, since it is a running
+    /// total not a per-frame delta).
+    #[test]
+    fn session_summary_scene_lock_misses_tracks_running_total() {
+        let mut summary = SessionSummary::new();
+        assert_eq!(summary.scene_lock_misses, 0, "zero-initialized");
+
+        // Frame 1: 3 misses accumulated so far.
+        let mut frame1 = FrameTelemetry::new(1);
+        frame1.scene_lock_miss_count = 3;
+        summary.record_frame_correctness(&frame1);
+        assert_eq!(
+            summary.scene_lock_misses, 3,
+            "scene_lock_misses should track the running total from frame 1"
+        );
+
+        // Frame 2: 5 misses total (2 more happened between frames 1 and 2).
+        let mut frame2 = FrameTelemetry::new(2);
+        frame2.scene_lock_miss_count = 5;
+        summary.record_frame_correctness(&frame2);
+        assert_eq!(
+            summary.scene_lock_misses, 5,
+            "scene_lock_misses should advance to 5 after frame 2"
+        );
+
+        // Frame 3: no new misses — same running total as frame 2.
+        let mut frame3 = FrameTelemetry::new(3);
+        frame3.scene_lock_miss_count = 5;
+        summary.record_frame_correctness(&frame3);
+        assert_eq!(
+            summary.scene_lock_misses, 5,
+            "scene_lock_misses must not decrease when the total stays flat"
+        );
+    }
+
+    /// SessionSummary.scene_lock_misses serializes to JSON.
+    #[test]
+    fn session_summary_scene_lock_misses_serializes() {
+        let mut summary = SessionSummary::new();
+        summary.scene_lock_misses = 7;
+        let json = summary.to_json().unwrap();
+        assert!(
+            json.contains("scene_lock_misses"),
+            "JSON must contain scene_lock_misses: {json}"
+        );
+        // to_json uses pretty-print (spaces after colons); check for the value.
+        let compact = serde_json::to_string(&summary).unwrap();
+        assert!(
+            compact.contains("\"scene_lock_misses\":7"),
+            "compact serialized value must be 7: {compact}"
         );
     }
 }
