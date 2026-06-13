@@ -17,9 +17,9 @@ headless = []
 v2_preview = []
 
 [dependencies]
-tze_hud_scene = { path = "../tze_hud_scene" }
-tze_hud_input = { path = "../tze_hud_input" }
-tze_hud_telemetry = { path = "../tze_hud_telemetry" }
+tze_hud_scene = { path = "../tze_hud_scene", version = "0.1.0" }
+tze_hud_input = { path = "../tze_hud_input", version = "0.1.0" }
+tze_hud_telemetry = { path = "../tze_hud_telemetry", version = "0.1.0" }
 wgpu = { workspace = true }
 winit = { workspace = true }
 bytemuck = { workspace = true }
@@ -37,7 +37,7 @@ statig = { workspace = true }
 tokio = { workspace = true }
 criterion = { workspace = true }
 proptest = { workspace = true }
-tze_hud_widget = { path = "../tze_hud_widget" }
+tze_hud_widget = { path = "../tze_hud_widget", version = "0.1.0" }
 
 [[bench]]
 name = "widget_rasterize"

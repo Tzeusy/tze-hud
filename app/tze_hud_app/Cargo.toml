@@ -10,14 +10,14 @@ name = "tze_hud"
 path = "src/main.rs"
 
 [dependencies]
-tze_hud_runtime = { path = "../../crates/tze_hud_runtime" }
-tze_hud_config = { path = "../../crates/tze_hud_config" }
+tze_hud_runtime = { path = "../../crates/tze_hud_runtime", version = "0.1.0" }
+tze_hud_config = { path = "../../crates/tze_hud_config", version = "0.1.0" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-tze_hud_scene = { path = "../../crates/tze_hud_scene" }
+tze_hud_scene = { path = "../../crates/tze_hud_scene", version = "0.1.0" }
 toml = { workspace = true }
 
 # Windows: embed the application manifest (tze_hud.manifest) at build time.
