@@ -39,8 +39,9 @@
 //! ## Hook points
 //!
 //! - **hud-ttq97** (submitted_at_us telemetry bucket): `submitted_at_us` from
-//!   `PortalTranscriptUpdate` is available here; a structured bucket should be
-//!   added once hud-ttq97 lands.
+//!   `PortalTranscriptUpdate` is consumed by the drain loop into
+//!   [`InProcessPortalDriver::portal_publish_to_present_latency`], measuring
+//!   the end-to-end publish→present latency for each coalesced portal update.
 //! - **hud-pkg2g** (head-trim notify_head_content_removed): wired — the drain
 //!   loop detects head-trim via `visible_transcript_bytes` / content-height
 //!   decrease and calls `notify_head_content_removed` on the `InputProcessor`
@@ -62,6 +63,7 @@ use tze_hud_scene::{
     Capability, Rect, SceneGraph,
     types::{SceneId, TileScrollConfig},
 };
+use tze_hud_telemetry::LatencyBucket;
 
 /// Line-height multiplier used by the compositor's text shaper (text.rs).
 ///
@@ -169,6 +171,22 @@ pub struct InProcessPortalDriver {
     /// Granted once at driver construction (or lazily on first use) and renewed
     /// as needed.
     lease_id: Option<SceneId>,
+    /// Publish-to-present latency bucket (hud-ttq97).
+    ///
+    /// Accumulates one sample per coalesced `RenderPortal` drain where
+    /// `submitted_at_us > 0`.  Each sample is:
+    ///
+    /// ```text
+    /// delta_us = now_us (drain wall-clock) − submitted_at_us (publish wall-clock)
+    /// ```
+    ///
+    /// This measures the end-to-end time from when a portal update was first
+    /// submitted (via `PublishOutput`) to when the drain loop materialises it
+    /// for presentation — the primary latency signal for live task 5.7
+    /// (hud-sonj6).
+    ///
+    /// Accessible via [`InProcessPortalDriver::portal_publish_to_present_latency`].
+    portal_publish_to_present_latency: LatencyBucket,
 }
 
 impl InProcessPortalDriver {
@@ -180,7 +198,21 @@ impl InProcessPortalDriver {
             authority,
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
         }
+    }
+
+    /// Return a reference to the publish-to-present latency bucket (hud-ttq97).
+    ///
+    /// Each sample is the elapsed microseconds from `submitted_at_us` (the
+    /// wall-clock time when `PublishOutput` was called) to `now_us` (the
+    /// wall-clock time when the drain loop materialised the coalesced update).
+    ///
+    /// Only `RenderPortal` drains where `submitted_at_us > 0` contribute a
+    /// sample; `CreatePortalTile` drains and updates with an unset submission
+    /// time (0) are excluded.
+    pub fn portal_publish_to_present_latency(&self) -> &LatencyBucket {
+        &self.portal_publish_to_present_latency
     }
 
     /// Attach a new projection session to the driver.
@@ -498,8 +530,29 @@ impl InProcessPortalDriver {
                             entry.adapter.config_viewport_height(state.presentation)
                         });
 
-                    // TODO(hud-ttq97): emit structured latency telemetry for
-                    //   update.submitted_at_us → now_us (arrival→present latency).
+                    // hud-ttq97: record publish-to-present latency for this portal drain.
+                    //
+                    // `submitted_at_us` is the wall-clock time when `PublishOutput` was
+                    // called (set by the cadence coalescer in `record_append`).  `now_us`
+                    // is the drain wall-clock time supplied by the caller.  The delta is
+                    // the end-to-end publish→present elapsed time for this coalesced update.
+                    //
+                    // Guard: skip when `submitted_at_us == 0` (coalescer returned the
+                    // `unwrap_or(0)` sentinel from `peek_submitted_at` — no submission
+                    // timestamp was recorded yet) or when `now_us < submitted_at_us`
+                    // (should not happen in production, but guards against test fixtures
+                    // that supply out-of-order timestamps).
+                    if update.submitted_at_us > 0 && now_us >= update.submitted_at_us {
+                        let delta_us = now_us - update.submitted_at_us;
+                        self.portal_publish_to_present_latency.record(delta_us);
+                        tracing::trace!(
+                            proj_id = %proj_id,
+                            submitted_at_us = update.submitted_at_us,
+                            now_us,
+                            delta_us,
+                            "portal drain: publish-to-present latency recorded"
+                        );
+                    }
 
                     // hud-pkg2g: detect head-trim and call notify_head_content_removed.
                     //
@@ -720,6 +773,7 @@ mod tests {
             .unwrap(),
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
         };
 
         let token = attach_and_get_token(&mut driver, "proj-a");
@@ -843,6 +897,7 @@ mod tests {
             .unwrap(),
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
         };
 
         let token = attach_and_get_token(&mut driver, "proj-b");
@@ -1075,6 +1130,7 @@ mod tests {
             .unwrap(),
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
         };
 
         let token = attach_and_get_token(&mut driver, "proj-resize");
@@ -1177,6 +1233,102 @@ mod tests {
             state_after.geometry_batch.is_none(),
             "geometry_batch must be None after the drain consumed it — \
              removing consume_geometry_batch from the drain causes stale re-delivery"
+        );
+    }
+
+    /// hud-ttq97: verify that a drained `RenderPortal` update with a known
+    /// `submitted_at_us` records the expected publish-to-present delta into the
+    /// `portal_publish_to_present_latency` bucket.
+    ///
+    /// Test shape:
+    /// 1. Attach a projection session and drain (CreatePortalTile) at `t=200 µs`.
+    ///    The bucket must have zero samples after the create drain (only `RenderPortal`
+    ///    drains contribute samples).
+    /// 2. Publish content with a known `submitted_at_us = 1_000 µs` and drain at
+    ///    `now_us = 6_000 µs`.  Expected delta: `6_000 − 1_000 = 5_000 µs`.
+    /// 3. Assert the bucket has exactly one sample with value `5_000 µs`.
+    ///
+    /// Removing the `self.portal_publish_to_present_latency.record(delta_us)` call
+    /// at the `RenderPortal` drain site causes the bucket to remain empty and the
+    /// final assertion to fail.
+    #[test]
+    fn render_portal_drain_records_publish_to_present_latency() {
+        use tze_hud_projection::AdapterGeometrySnapshot;
+        use tze_hud_projection::AdapterPortalRect;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+        };
+
+        let token = attach_and_get_token(&mut driver, "proj-lat");
+        driver.attach_projection("proj-lat", Vec::new());
+
+        // Push a geometry snapshot so the drain has a valid viewport.
+        driver.authority_mut().push_geometry_snapshot(
+            "proj-lat",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: 360,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Drain 1 (CreatePortalTile): publish at t=100 µs, drain at t=200 µs.
+        // The bucket must be empty after a CreatePortalTile drain.
+        publish(&mut driver, "proj-lat", &token, "initial-line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        assert_eq!(
+            driver.portal_publish_to_present_latency().samples.len(),
+            0,
+            "CreatePortalTile drain must not record a latency sample — only \
+             RenderPortal drains contribute to the bucket"
+        );
+
+        // Drain 2 (RenderPortal): publish at submitted_at_us = 1_000 µs, drain
+        // at now_us = 6_000 µs.  Expected delta: 6_000 − 1_000 = 5_000 µs.
+        //
+        // Use `base_ts` past the initial rate window so the coalescer releases the update.
+        let submitted_at_us = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1_000;
+        let drain2_now_us = submitted_at_us + 5_000;
+        publish(
+            &mut driver,
+            "proj-lat",
+            &token,
+            "content-line",
+            submitted_at_us,
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain2_now_us);
+
+        // Assert exactly one sample was recorded with the expected delta.
+        let bucket = driver.portal_publish_to_present_latency();
+        assert_eq!(
+            bucket.samples.len(),
+            1,
+            "RenderPortal drain with submitted_at_us > 0 must record exactly one \
+             latency sample; removing the record() call at the drain site causes \
+             this to fail with 0 samples"
+        );
+        assert_eq!(
+            bucket.samples[0], 5_000,
+            "publish-to-present latency must be drain_now_us − submitted_at_us = \
+             {drain2_now_us} − {submitted_at_us} = 5_000 µs"
         );
     }
 }
