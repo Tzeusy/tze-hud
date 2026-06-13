@@ -31,10 +31,11 @@
 //!
 //! ## Hook points left for follow-up beads
 //!
-//! - **hud-ttq97** (submitted_at_us telemetry bucket): the `submitted_at_us`
-//!   field of `PortalTranscriptUpdate` is included in `CliPortalDrainRecord`
-//!   as an arrival→present latency anchor. No structured telemetry bucket is
-//!   wired yet; that hook point is reserved for hud-ttq97.
+//! - **hud-ttq97 / hud-bq0gl.14** (publish-to-present latency): the
+//!   `submitted_at_us` field of `PortalTranscriptUpdate` is now emitted as a
+//!   structured `tracing::debug!` event with the arrival→present delta per
+//!   drained portal update.  Coalescer health (portal_count, total_taken,
+//!   total_coalesced) is emitted as a second debug event after each drain cycle.
 //!
 //! - **hud-0528i** (follow-tail notify_tile_content_appended): wired. After the
 //!   adapter emits a `RenderPortal` command, `CliPortalDrainRecord::append_geometry`
@@ -330,8 +331,9 @@ struct CliPortalDrainRecord {
     /// Wall-clock submission timestamp (µs) of the most-recently-coalesced
     /// append (arrival→present latency anchor, tasks.md §5.7).
     ///
-    /// **Hook point for hud-ttq97**: record this value into the structured
-    /// telemetry latency bucket once that bead lands.
+    /// The drain loop emits a `tracing::debug!` event with the arrival→present
+    /// delta (`server_timestamp_wall_us - submitted_at_us`) for each drained
+    /// portal update (hud-bq0gl.14).
     submitted_at_us: u64,
     /// Rendered portal markdown content (from `portal_node` via the adapter).
     ///
@@ -1644,14 +1646,20 @@ fn drain_and_emit_portal_updates(
                 .insert(proj_id.clone(), ag.new_content_height_px);
         }
 
-        // TODO(hud-ttq97): record submitted_at_us → server_timestamp_wall_us as
-        // an arrival→present latency sample in the structured telemetry bucket.
-        // Hook point:
-        //   telemetry.record_portal_latency(
-        //       &proj_id,
-        //       update.submitted_at_us,
-        //       server_timestamp_wall_us,
-        //   );
+        // hud-bq0gl.14: emit publish-to-present latency as a structured tracing
+        // event so the stdio path surfaces the same observability signal as the
+        // in-process driver.  The delta is the arrival→present latency for this
+        // coalesced portal update.
+        if update.submitted_at_us > 0 && server_timestamp_wall_us >= update.submitted_at_us {
+            let delta_us = server_timestamp_wall_us - update.submitted_at_us;
+            tracing::debug!(
+                proj_id = %proj_id,
+                submitted_at_us = update.submitted_at_us,
+                server_timestamp_wall_us,
+                delta_us,
+                "portal drain: publish-to-present latency (stdio path)"
+            );
+        }
 
         records.push(CliPortalDrainRecord {
             projection_id: proj_id.clone(),
@@ -1670,6 +1678,20 @@ fn drain_and_emit_portal_updates(
             append_geometry,
             head_trim_geometry,
         });
+    }
+
+    // hud-bq0gl.14: emit coalescer health snapshot after each drain cycle so
+    // the stdio path surfaces coalescer fairness stats alongside the per-update
+    // latency events above.
+    if !records.is_empty() {
+        tracing::debug!(
+            drain_count = records.len(),
+            coalescer_portal_count = authority.coalescer_portal_count(),
+            coalescer_pending = authority.coalescer_pending_portal_count(),
+            coalescer_total_taken = authority.coalescer_total_taken(),
+            coalescer_total_coalesced = authority.coalescer_total_coalesced(),
+            "portal drain: coalescer health snapshot (stdio path)"
+        );
     }
 
     records

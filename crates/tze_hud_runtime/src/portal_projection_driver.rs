@@ -184,6 +184,16 @@ pub struct InProcessPortalDriver {
     ///
     /// Accessible via [`InProcessPortalDriver::portal_publish_to_present_latency`].
     portal_publish_to_present_latency: LatencyBucket,
+    /// Count of drain cycles where the rate-window had not yet elapsed (hud-bq0gl.14).
+    ///
+    /// Incremented each time `take_due_portal_update` returns `Ok(None)` (the portal
+    /// has a pending coalesced snapshot but its per-portal rate window has not elapsed
+    /// yet).  A rising deferral count indicates the drain loop is being called more
+    /// frequently than the rate window, or that portals are publishing faster than the
+    /// rate window allows them to drain.
+    ///
+    /// Exposed via [`InProcessPortalDriver::drain_deferral_count`].
+    drain_deferral_count: u64,
 }
 
 impl InProcessPortalDriver {
@@ -196,6 +206,7 @@ impl InProcessPortalDriver {
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
         }
     }
 
@@ -210,6 +221,16 @@ impl InProcessPortalDriver {
     /// time (0) are excluded.
     pub fn portal_publish_to_present_latency(&self) -> &LatencyBucket {
         &self.portal_publish_to_present_latency
+    }
+
+    /// Number of drain cycles where the rate-window had not yet elapsed (hud-bq0gl.14).
+    ///
+    /// Incremented each time the drain loop encounters a portal whose pending
+    /// coalesced snapshot cannot yet be materialised because the per-portal rate
+    /// window has not elapsed.  See [`Self::portal_publish_to_present_latency`]
+    /// for end-to-end latency.
+    pub fn drain_deferral_count(&self) -> u64 {
+        self.drain_deferral_count
     }
 
     /// Attach a new projection session to the driver.
@@ -480,6 +501,10 @@ impl InProcessPortalDriver {
         now_us: u64,
     ) {
         let policy = ProjectedPortalPolicy::permit_all();
+        // Local counters for this drain cycle — emitted as a tracing event after
+        // the loop for portal health observability (hud-bq0gl.14).
+        let mut cycle_updates: u32 = 0;
+        let mut cycle_deferrals: u32 = 0;
 
         loop {
             // Round-robin fairness oracle (tasks.md §5.1 / §5.4).
@@ -490,7 +515,12 @@ impl InProcessPortalDriver {
             // Materialise the coalesced update for this portal.
             let update = match self.authority.take_due_portal_update(&proj_id, now_us) {
                 Ok(Some(update)) => update,
-                Ok(None) => break, // Rate-window not yet elapsed.
+                Ok(None) => {
+                    // Rate-window not yet elapsed — count and exit the loop.
+                    self.drain_deferral_count = self.drain_deferral_count.saturating_add(1);
+                    cycle_deferrals = cycle_deferrals.saturating_add(1);
+                    break;
+                }
                 Err(_) => {
                     // Projection not found or expired — clean up adapter.
                     self.drive.detach(&proj_id);
@@ -770,6 +800,36 @@ impl InProcessPortalDriver {
                     );
                 }
             }
+
+            // Count each successfully materialised update (hud-bq0gl.14).
+            cycle_updates = cycle_updates.saturating_add(1);
+        }
+
+        // Portal health snapshot — emitted at debug level after each drain cycle
+        // (hud-bq0gl.14).  Carries:
+        //   • per-cycle update/deferral counts
+        //   • cumulative drain-deferral counter
+        //   • coalescer fairness stats (portal_count, total_taken, total_coalesced)
+        //   • publish-to-present latency percentiles (p50/p95/p99)
+        //
+        // Emit only when there was activity (at least one update or deferral) to
+        // avoid spamming on idle drain cycles.
+        if cycle_updates > 0 || cycle_deferrals > 0 {
+            let lat = &self.portal_publish_to_present_latency;
+            tracing::debug!(
+                cycle_updates,
+                cycle_deferrals,
+                cumulative_deferrals = self.drain_deferral_count,
+                coalescer_portal_count = self.authority.coalescer_portal_count(),
+                coalescer_pending = self.authority.coalescer_pending_portal_count(),
+                coalescer_total_taken = self.authority.coalescer_total_taken(),
+                coalescer_total_coalesced = self.authority.coalescer_total_coalesced(),
+                latency_p50_us = lat.p50(),
+                latency_p95_us = lat.p95(),
+                latency_p99_us = lat.p99(),
+                latency_sample_count = lat.samples.len(),
+                "portal drain: health snapshot"
+            );
         }
     }
 
@@ -915,6 +975,7 @@ mod tests {
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-a");
@@ -1039,6 +1100,7 @@ mod tests {
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-b");
@@ -1272,6 +1334,7 @@ mod tests {
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-resize");
@@ -1406,6 +1469,7 @@ mod tests {
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-lat");
@@ -1599,6 +1663,7 @@ mod tests {
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("test_dispatch_portal_op"),
+            drain_deferral_count: 0,
         };
 
         // ── Step 1: Attach via dispatch_portal_op ──────────────────────────────
@@ -1746,6 +1811,7 @@ mod tests {
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("test_reattach"),
+            drain_deferral_count: 0,
         };
 
         // ── Step 1: First attach (with an idempotency key) ─────────────────────
@@ -1890,6 +1956,7 @@ mod tests {
             drive: InProcessPortalDriveState::new(),
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("test_htrim_runtime"),
+            drain_deferral_count: 0,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-htrim");
@@ -2032,6 +2099,174 @@ mod tests {
             post_y <= f32::EPSILON,
             "hud-66i1s: after head-trim the max scroll offset is 0 (1-line content in 1-line \
              viewport); offset must clamp to 0, got post_y={post_y}"
+        );
+    }
+
+    // ── Portal observability surface tests (hud-bq0gl.14) ────────────────────
+
+    /// Regression guard: `drain_deferral_count` must be incremented when the
+    /// drain loop encounters a portal whose rate window has not yet elapsed
+    /// (i.e. `take_due_portal_update` returns `Ok(None)`).
+    ///
+    /// The rate window opens on the FIRST successful drain (at `now_us = T1`).
+    /// A second publish + drain within `T1 + PORTAL_UPDATE_RATE_WINDOW_WALL_US`
+    /// triggers the `Ok(None)` path because `portal_update_allowed` returns
+    /// `false` once `max_portal_updates_per_second` is exhausted.
+    ///
+    /// We use `max_portal_updates_per_second: 1` (one update allowed per window)
+    /// so a single publish + drain pair saturates the window, and the next
+    /// drain in the same window is deferred.
+    #[test]
+    fn drain_deferral_count_increments_on_rate_window_not_elapsed() {
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 1,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_deferral"),
+            drain_deferral_count: 0,
+        };
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let mut processor = InputProcessor::new();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        let token = attach_and_get_token(&mut driver, "proj-defer");
+        driver.attach_projection("proj-defer", Vec::new());
+
+        assert_eq!(
+            driver.drain_deferral_count(),
+            0,
+            "deferral count must be 0 before any drain"
+        );
+
+        // First publish + drain at T1: opens the rate window, returns Ok(Some(_)).
+        // max_portal_updates_per_second = 1, so the window is now saturated.
+        let t1 = PORTAL_UPDATE_RATE_WINDOW_WALL_US;
+        publish(&mut driver, "proj-defer", &token, "hello", t1);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), t1);
+
+        assert_eq!(
+            driver.drain_deferral_count(),
+            0,
+            "deferral count must still be 0 after successful drain"
+        );
+
+        // Second publish within the same rate window (T1 + 1, window end = T1 + 1_000_000).
+        // The next drain at T1 + 2 is within the window; take_due_portal_update
+        // returns Ok(None) because max_portal_updates_per_second = 1 is saturated.
+        let t2 = t1 + 1;
+        publish(&mut driver, "proj-defer", &token, "world", t2);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), t2);
+
+        assert_eq!(
+            driver.drain_deferral_count(),
+            1,
+            "deferral count must be 1 after a drain where rate-window has not elapsed"
+        );
+
+        // A second deferred drain must increment again.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), t2 + 1);
+        assert_eq!(
+            driver.drain_deferral_count(),
+            2,
+            "deferral count must increment on each rate-limited drain cycle"
+        );
+    }
+
+    /// `drain_deferral_count` must NOT increment when a drain successfully
+    /// materialises an update (rate window has elapsed).
+    #[test]
+    fn drain_deferral_count_unchanged_on_successful_drain() {
+        let mut driver = InProcessPortalDriver::new();
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let mut processor = InputProcessor::new();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        let token = attach_and_get_token(&mut driver, "proj-ok");
+        driver.attach_projection("proj-ok", Vec::new());
+
+        publish(&mut driver, "proj-ok", &token, "content", 1);
+
+        // Drain past the rate window — update is materialised successfully.
+        let now = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1_000_000;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now);
+
+        assert_eq!(
+            driver.drain_deferral_count(),
+            0,
+            "deferral count must remain 0 after a successful drain"
+        );
+    }
+
+    /// `coalescer_portal_count` on `ProjectionAuthority` must return the number
+    /// of portals registered in the cadence coalescer after attach.
+    #[test]
+    fn coalescer_portal_count_reflects_attached_portals() {
+        let mut driver = InProcessPortalDriver::new();
+
+        assert_eq!(
+            driver.authority_mut().coalescer_portal_count(),
+            0,
+            "coalescer_portal_count must be 0 before any portal is attached"
+        );
+
+        attach_and_get_token(&mut driver, "proj-c1");
+        let _ = driver.authority_mut().coalescer_portal_count(); // idempotent reads
+
+        // After a publish the coalescer registers the portal.
+        let token = attach_and_get_token(&mut driver, "proj-c2");
+        publish(&mut driver, "proj-c2", &token, "hi", 1);
+
+        assert_eq!(
+            driver.authority_mut().coalescer_portal_count(),
+            1,
+            "coalescer_portal_count must be 1 after one portal publishes"
+        );
+    }
+
+    /// `coalescer_total_taken` must increment each time a successful drain
+    /// consumes a pending coalescer snapshot.
+    #[test]
+    fn coalescer_total_taken_increments_on_drain() {
+        let mut driver = InProcessPortalDriver::new();
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let mut processor = InputProcessor::new();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        let token = attach_and_get_token(&mut driver, "proj-tk");
+        driver.attach_projection("proj-tk", Vec::new());
+
+        assert_eq!(
+            driver.authority_mut().coalescer_total_taken(),
+            0,
+            "total_taken must be 0 before any drain"
+        );
+
+        // First publish + drain.
+        publish(&mut driver, "proj-tk", &token, "a", 1);
+        let now1 = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1_000_000;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now1);
+
+        assert_eq!(
+            driver.authority_mut().coalescer_total_taken(),
+            1,
+            "total_taken must be 1 after one successful drain"
+        );
+
+        // Second publish + drain.
+        let ts2 = now1 + 1;
+        publish(&mut driver, "proj-tk", &token, "b", ts2);
+        let now2 = ts2 + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1_000_000;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now2);
+
+        assert_eq!(
+            driver.authority_mut().coalescer_total_taken(),
+            2,
+            "total_taken must be 2 after two successful drains"
         );
     }
 }
