@@ -5052,6 +5052,215 @@ impl Compositor {
         (encoder, encode_us)
     }
 
+    /// Build the shared per-frame vertex / textured-command lists from the scene.
+    ///
+    /// Single source of truth for the scene→geometry stage that was previously
+    /// triplicated across `render_frame`, `render_frame_headless`, and
+    /// `render_frame_with_chrome` (hud-8uafa). It covers the canonical layer
+    /// ordering (Background zones → tiles → Content zones → Chrome zones), the
+    /// per-tile background / content / scroll-indicator / composer-overlay
+    /// geometry, and the overlay-mode alpha-zeroing quad. The three public render
+    /// entry points keep their distinct encode tails (windowed present, headless
+    /// readback + hit regions, chrome two-pass) and consume this shared body.
+    ///
+    /// All colors flow through [`gpu_color_raw`], which is identity outside
+    /// overlay mode and applies the sRGB-premultiply transform inside it. This is
+    /// correct for every call site: only the windowed path is ever in overlay
+    /// mode, so the headless and chrome paths see the raw color unchanged — which
+    /// is exactly what their hand-written predecessors did. (Unifying here also
+    /// removes the previously-latent divergence where the windowed tile
+    /// background went through `gpu_color_raw` but the headless/chrome copies did
+    /// not — benign only because headless never set overlay mode.)
+    ///
+    /// Returns `(vertices, textured_cmds, bg_vertex_count)`, where
+    /// `bg_vertex_count` is the vertex offset just after the Background-layer
+    /// flat-rect zones — used by the caller to split the flat-rect pass so the
+    /// Background SDF pass can be interleaved. Also populates the `tile_count`,
+    /// `node_count`, and `active_leases` telemetry fields.
+    fn build_frame_vertices(
+        &mut self,
+        scene: &SceneGraph,
+        sw: f32,
+        sh: f32,
+        telemetry: &mut FrameTelemetry,
+    ) -> (Vec<RectVertex>, Vec<TexturedDrawCmd>, usize) {
+        // Collect visible tiles, re-sorted with drag-z-order boost applied.
+        let tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
+        telemetry.tile_count = tiles.len() as u32;
+        telemetry.node_count = scene.node_count() as u32;
+        telemetry.active_leases = scene.leases.len() as u32;
+
+        let mut vertices: Vec<RectVertex> = Vec::new();
+        let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
+
+        // In overlay mode, prepend a full-screen quad to zero out alpha.
+        // No-op for the headless/chrome paths, which are never in overlay mode.
+        if self.overlay_mode {
+            vertices.extend_from_slice(&rect_vertices(
+                0.0,
+                0.0,
+                sw,
+                sh,
+                sw,
+                sh,
+                [0.0, 0.0, 0.0, 0.0],
+            ));
+        }
+
+        // ── Ensure image textures are uploaded before rendering ──────────────
+        let mut image_refs = self.ensure_scene_image_textures(scene);
+        // Ensure icon textures (key_icon_map SVGs) are rasterized and cached.
+        // Merge their ResourceIds into the eviction-guard set so they survive.
+        let icon_refs = self.ensure_scene_icon_textures(scene);
+        image_refs.extend(icon_refs);
+        self.evict_unused_image_textures(&image_refs);
+
+        // Update zone animation states (fade-in/fade-out) before rendering.
+        // Must run before any render_zone_content call below.
+        self.update_zone_animations(scene);
+        // §6.3 portal transition: advance per-portal-tile fade animations
+        // alongside zone animations (hud-58rg1). Folded in here so all three
+        // render entry points share the single update site.
+        self.update_portal_tile_animations(scene);
+
+        // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
+        // Background zones render first so agent tiles occlude them.
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Background),
+        );
+
+        // Capture the vertex count after Background zones so the caller can split
+        // the flat-rect pass and interleave the Background SDF pass.
+        let bg_vertex_count = vertices.len();
+
+        // Resolve scroll-indicator tokens once per frame (not per tile) since
+        // the token map does not change during the tile loop.
+        let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+        // Resolve composer overlay tokens once per frame (hud-r3ax6).
+        let composer_overlay_tokens = resolve_composer_overlay_tokens(&self.token_map);
+
+        for tile in &tiles {
+            if let Some(bg_color) = self.tile_background_color(tile, scene) {
+                let verts = rect_vertices(
+                    tile.bounds.x,
+                    tile.bounds.y,
+                    tile.bounds.width,
+                    tile.bounds.height,
+                    sw,
+                    sh,
+                    self.gpu_color_raw(bg_color),
+                );
+                vertices.extend_from_slice(&verts);
+            }
+
+            // Render nodes within the tile.
+            if let Some(root_id) = tile.root_node {
+                self.render_node(
+                    root_id,
+                    tile,
+                    scene,
+                    &mut vertices,
+                    &mut textured_cmds,
+                    sw,
+                    sh,
+                );
+            }
+
+            // ── Scroll indicator (§6b.5) ───────────────────────────────────
+            // Rendered on top of the tile content. Geometry-only; carries no
+            // transcript text. Redaction-safe: the indicator reveals only that
+            // content overflows and approximately where the viewport sits.
+            //
+            // Only emitted for tiles that have a registered scroll config with
+            // a known content_height (set by the portal adapter via
+            // `register_tile_scroll_config`). Indicator is not shown when
+            // content fits within the viewport (no overflow).
+            if let Some(scroll_cfg) = scene.tile_scroll_config(tile.id) {
+                if let Some(content_height) = scroll_cfg.content_height {
+                    let viewport_px = tile.bounds.height;
+                    let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
+                    if let Some(geom) = tze_hud_input::compute_scroll_indicator(
+                        viewport_px,
+                        content_height,
+                        scroll_offset_y,
+                        &scroll_indicator_tokens,
+                    ) {
+                        // Clamp indicator width to tile width so an out-of-range
+                        // token value can never push the thumb outside the tile.
+                        let indicator_w = geom.width_px.min(tile.bounds.width);
+                        // Track rect: right edge of the tile, full height.
+                        // Thumb rect: inset within the track at thumb_y_px.
+                        let track_x = tile.bounds.x + tile.bounds.width - indicator_w;
+                        let thumb_color = self.gpu_color_raw([
+                            scroll_indicator_tokens.color_r,
+                            scroll_indicator_tokens.color_g,
+                            scroll_indicator_tokens.color_b,
+                            scroll_indicator_tokens.color_a,
+                        ]);
+                        let thumb_verts = rect_vertices(
+                            track_x,
+                            tile.bounds.y + geom.thumb_y_px,
+                            indicator_w,
+                            geom.thumb_height_px,
+                            sw,
+                            sh,
+                            thumb_color,
+                        );
+                        vertices.extend_from_slice(&thumb_verts);
+                    }
+                }
+            }
+
+            // ── Composer echo overlay (hud-r3ax6) ─────────────────────────
+            // Renders the local draft text background strip on top of the
+            // tile.  The text itself is injected in collect_text_items via
+            // collect_composer_text_item.  NO adapter round-trip.
+            self.render_composer_overlay(
+                tile,
+                scene,
+                &mut vertices,
+                sw,
+                sh,
+                &composer_overlay_tokens,
+            );
+        }
+
+        // Update zone animation states (fade-in/fade-out) before rendering.
+        self.update_zone_animations(scene);
+        // §6.3 portal transition: advance per-portal-tile fade animations
+        // alongside zone animations (hud-58rg1).
+        self.update_portal_tile_animations(scene);
+
+        // Update streaming word-by-word reveal state.
+        self.update_stream_reveals(scene);
+
+        // Content zones render as a batch after all tiles (above background, below chrome).
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Content),
+        );
+        // Chrome zones render last, above everything.
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Chrome),
+        );
+
+        (vertices, textured_cmds, bg_vertex_count)
+    }
+
     /// Render one frame of the scene to the surface.
     ///
     /// This method is surface-agnostic: it works with any type implementing
@@ -5118,177 +5327,17 @@ impl Compositor {
         // Gated on scene.version — no work on unchanged scenes.
         self.prime_truncation_cache(scene);
 
-        // Collect visible tiles, re-sorted with drag-z-order boost applied.
-        let tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
-        telemetry.tile_count = tiles.len() as u32;
-        telemetry.node_count = scene.node_count() as u32;
-        telemetry.active_leases = scene.leases.len() as u32;
-
-        // Build vertex list from scene.
+        // Build the shared per-frame geometry (Background → tiles → Content →
+        // Chrome zones). `build_frame_vertices` is the single source of truth for
+        // this scene→vertex stage across all three render entry points; it also
+        // populates the tile/node/lease telemetry counts and, in overlay mode,
+        // the alpha-zeroing full-screen quad.
         let (surf_w, surf_h) = surface.size();
         let sw = surf_w as f32;
         let sh = surf_h as f32;
-        let mut vertices: Vec<RectVertex> = Vec::new();
-        let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
+        let (vertices, textured_cmds, bg_vertex_count) =
+            self.build_frame_vertices(scene, sw, sh, &mut telemetry);
 
-        // In overlay mode, prepend a full-screen quad to zero out alpha.
-        if self.overlay_mode {
-            vertices.extend_from_slice(&rect_vertices(
-                0.0,
-                0.0,
-                sw,
-                sh,
-                sw,
-                sh,
-                [0.0, 0.0, 0.0, 0.0],
-            ));
-        }
-
-        // ── Ensure image textures are uploaded before rendering ──────────────
-        let mut image_refs = self.ensure_scene_image_textures(scene);
-        // Ensure icon textures (key_icon_map SVGs) are rasterized and cached.
-        // Merge their ResourceIds into the eviction-guard set so they survive.
-        let icon_refs = self.ensure_scene_icon_textures(scene);
-        image_refs.extend(icon_refs);
-        self.evict_unused_image_textures(&image_refs);
-
-        // Update zone animation states (fade-in/fade-out) before rendering.
-        // Must run before any render_zone_content call below.
-        self.update_zone_animations(scene);
-        self.update_portal_tile_animations(scene);
-
-        // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
-        // Background zones render first so agent tiles occlude them.
-        self.render_zone_content(
-            scene,
-            &mut vertices,
-            &mut textured_cmds,
-            sw,
-            sh,
-            Some(LayerAttachment::Background),
-        );
-
-        // Capture the vertex count after Background zones so encode_frame can
-        // split the flat-rect pass and interleave the Background SDF pass.
-        let bg_vertex_count = vertices.len();
-
-        // Resolve scroll-indicator tokens once per frame (not per tile) since
-        // the token map does not change during the tile loop.
-        let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
-        // Resolve composer overlay tokens once per frame (hud-r3ax6).
-        let composer_overlay_tokens = resolve_composer_overlay_tokens(&self.token_map);
-
-        for tile in &tiles {
-            if let Some(bg_color) = self.tile_background_color(tile, scene) {
-                let verts = rect_vertices(
-                    tile.bounds.x,
-                    tile.bounds.y,
-                    tile.bounds.width,
-                    tile.bounds.height,
-                    sw,
-                    sh,
-                    self.gpu_color_raw(bg_color),
-                );
-                vertices.extend_from_slice(&verts);
-            }
-
-            // Render nodes within the tile
-            if let Some(root_id) = tile.root_node {
-                self.render_node(
-                    root_id,
-                    tile,
-                    scene,
-                    &mut vertices,
-                    &mut textured_cmds,
-                    sw,
-                    sh,
-                );
-            }
-
-            // ── Scroll indicator (§6b.5) ───────────────────────────────────
-            // Rendered on top of the tile content. Geometry-only; carries no
-            // transcript text. Redaction-safe: the indicator reveals only that
-            // content overflows and approximately where the viewport sits.
-            //
-            // Only emitted for tiles that have a registered scroll config with
-            // a known content_height (set by the portal adapter via
-            // `register_tile_scroll_config`). Indicator is not shown when
-            // content fits within the viewport (no overflow).
-            if let Some(scroll_cfg) = scene.tile_scroll_config(tile.id) {
-                if let Some(content_height) = scroll_cfg.content_height {
-                    let viewport_px = tile.bounds.height;
-                    let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
-                    if let Some(geom) = tze_hud_input::compute_scroll_indicator(
-                        viewport_px,
-                        content_height,
-                        scroll_offset_y,
-                        &scroll_indicator_tokens,
-                    ) {
-                        // Clamp indicator width to tile width so an out-of-range
-                        // token value can never push the thumb outside the tile.
-                        let indicator_w = geom.width_px.min(tile.bounds.width);
-                        // Track rect: right edge of the tile, full height.
-                        // Thumb rect: inset within the track at thumb_y_px.
-                        let track_x = tile.bounds.x + tile.bounds.width - indicator_w;
-                        let thumb_color = self.gpu_color(Rgba::new(
-                            scroll_indicator_tokens.color_r,
-                            scroll_indicator_tokens.color_g,
-                            scroll_indicator_tokens.color_b,
-                            scroll_indicator_tokens.color_a,
-                        ));
-                        let thumb_verts = rect_vertices(
-                            track_x,
-                            tile.bounds.y + geom.thumb_y_px,
-                            indicator_w,
-                            geom.thumb_height_px,
-                            sw,
-                            sh,
-                            thumb_color,
-                        );
-                        vertices.extend_from_slice(&thumb_verts);
-                    }
-                }
-            }
-
-            // ── Composer echo overlay (hud-r3ax6) ─────────────────────────
-            // Renders the local draft text background strip on top of the
-            // tile.  The text itself is injected in collect_text_items via
-            // collect_composer_text_item.  NO adapter round-trip.
-            self.render_composer_overlay(
-                tile,
-                scene,
-                &mut vertices,
-                sw,
-                sh,
-                &composer_overlay_tokens,
-            );
-        }
-
-        // Update zone animation states (fade-in/fade-out) before rendering.
-        self.update_zone_animations(scene);
-        self.update_portal_tile_animations(scene);
-
-        // Update streaming word-by-word reveal state.
-        self.update_stream_reveals(scene);
-
-        // Content zones render as a batch after all tiles (above background, below chrome).
-        self.render_zone_content(
-            scene,
-            &mut vertices,
-            &mut textured_cmds,
-            sw,
-            sh,
-            Some(LayerAttachment::Content),
-        );
-        // Chrome zones render last, above everything.
-        self.render_zone_content(
-            scene,
-            &mut vertices,
-            &mut textured_cmds,
-            sw,
-            sh,
-            Some(LayerAttachment::Chrome),
-        );
         let drag_handles = self.collect_drag_handle_entries(scene, sw, sh);
         let mut drag_handle_vertices: Vec<RectVertex> = Vec::new();
         self.append_drag_handle_vertices(scene, &drag_handles, &mut drag_handle_vertices, sw, sh);
@@ -5409,150 +5458,17 @@ impl Compositor {
         // ── Phase-1 truncation cache prime (hud-wgq7j) ────────────────────────
         self.prime_truncation_cache(scene);
 
-        // Collect visible tiles, re-sorted with drag-z-order boost applied.
-        let tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
-        telemetry.tile_count = tiles.len() as u32;
-        telemetry.node_count = scene.node_count() as u32;
-        telemetry.active_leases = scene.leases.len() as u32;
-
-        // Build vertex list from scene.
-        // Use surface.size() — not self.width/self.height — so that vertex
-        // normalization is correct even if the HeadlessSurface was created with
-        // different dimensions than the compositor's stored width/height.
+        // Build the shared per-frame geometry (Background → tiles → Content →
+        // Chrome zones) via the single source of truth shared with the windowed
+        // and chrome render paths. Uses surface.size() — not self.width/height —
+        // so vertex normalization is correct even if the HeadlessSurface was
+        // created with different dimensions than the compositor's stored size.
         let (surf_w, surf_h) = surface.size();
         let sw = surf_w as f32;
         let sh = surf_h as f32;
-        let mut vertices: Vec<RectVertex> = Vec::new();
-        let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
+        let (vertices, textured_cmds, bg_vertex_count) =
+            self.build_frame_vertices(scene, sw, sh, &mut telemetry);
 
-        // ── Ensure image textures are uploaded before rendering ──────────────
-        let mut image_refs = self.ensure_scene_image_textures(scene);
-        // Ensure icon textures (key_icon_map SVGs) are rasterized and cached.
-        let icon_refs = self.ensure_scene_icon_textures(scene);
-        image_refs.extend(icon_refs);
-        self.evict_unused_image_textures(&image_refs);
-
-        // Update zone animation states before rendering zone content.
-        // Must run before any render_zone_content call below.
-        self.update_zone_animations(scene);
-        self.update_portal_tile_animations(scene);
-
-        // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
-        // Background zones render first so agent tiles occlude them.
-        self.render_zone_content(
-            scene,
-            &mut vertices,
-            &mut textured_cmds,
-            sw,
-            sh,
-            Some(LayerAttachment::Background),
-        );
-
-        // Capture the vertex count after Background zones so encode_frame can
-        // split the flat-rect pass and interleave the Background SDF pass.
-        let bg_vertex_count = vertices.len();
-
-        // Resolve scroll-indicator tokens once per frame (not per tile) since
-        // the token map does not change during the tile loop.
-        let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
-        // Resolve composer overlay tokens once per frame (hud-r3ax6).
-        let composer_overlay_tokens = resolve_composer_overlay_tokens(&self.token_map);
-
-        for tile in &tiles {
-            if let Some(bg_color) = self.tile_background_color(tile, scene) {
-                let verts = rect_vertices(
-                    tile.bounds.x,
-                    tile.bounds.y,
-                    tile.bounds.width,
-                    tile.bounds.height,
-                    sw,
-                    sh,
-                    bg_color,
-                );
-                vertices.extend_from_slice(&verts);
-            }
-
-            if let Some(root_id) = tile.root_node {
-                self.render_node(
-                    root_id,
-                    tile,
-                    scene,
-                    &mut vertices,
-                    &mut textured_cmds,
-                    sw,
-                    sh,
-                );
-            }
-
-            // ── Scroll indicator (§6b.5) — same logic as windowed path ─────
-            if let Some(scroll_cfg) = scene.tile_scroll_config(tile.id) {
-                if let Some(content_height) = scroll_cfg.content_height {
-                    let viewport_px = tile.bounds.height;
-                    let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
-                    if let Some(geom) = tze_hud_input::compute_scroll_indicator(
-                        viewport_px,
-                        content_height,
-                        scroll_offset_y,
-                        &scroll_indicator_tokens,
-                    ) {
-                        let indicator_w = geom.width_px.min(tile.bounds.width);
-                        let track_x = tile.bounds.x + tile.bounds.width - indicator_w;
-                        let thumb_color = self.gpu_color_raw([
-                            scroll_indicator_tokens.color_r,
-                            scroll_indicator_tokens.color_g,
-                            scroll_indicator_tokens.color_b,
-                            scroll_indicator_tokens.color_a,
-                        ]);
-                        let thumb_verts = rect_vertices(
-                            track_x,
-                            tile.bounds.y + geom.thumb_y_px,
-                            indicator_w,
-                            geom.thumb_height_px,
-                            sw,
-                            sh,
-                            thumb_color,
-                        );
-                        vertices.extend_from_slice(&thumb_verts);
-                    }
-                }
-            }
-
-            // ── Composer echo overlay (hud-r3ax6) ─────────────────────────
-            self.render_composer_overlay(
-                tile,
-                scene,
-                &mut vertices,
-                sw,
-                sh,
-                &composer_overlay_tokens,
-            );
-        }
-
-        // Update zone animation states before rendering zone content.
-        self.update_zone_animations(scene);
-        self.update_portal_tile_animations(scene);
-
-        // Update streaming word-by-word reveal state.
-        self.update_stream_reveals(scene);
-
-        // Content zones render as a batch after all tiles (above background, below chrome).
-        self.render_zone_content(
-            scene,
-            &mut vertices,
-            &mut textured_cmds,
-            sw,
-            sh,
-            Some(LayerAttachment::Content),
-        );
-        // Chrome zones render last, above everything.
-        self.render_zone_content(
-            scene,
-            &mut vertices,
-            &mut textured_cmds,
-            sw,
-            sh,
-            Some(LayerAttachment::Chrome),
-        );
         // Collect drag handle entries once and reuse for both rendering and hit-region
         // population, avoiding a redundant second traversal at the end of the frame.
         let drag_handles = self.collect_drag_handle_entries(scene, sw, sh);
@@ -5676,145 +5592,17 @@ impl Compositor {
         // ── Widget texture sync before encoding (avoids surface-texture race).
         self.sync_widget_textures(scene, self.degradation_level);
 
-        // ── Ensure image textures are uploaded before rendering ──────────────
-        let mut image_refs = self.ensure_scene_image_textures(scene);
-        // Ensure icon textures (key_icon_map SVGs) are rasterized and cached.
-        let icon_refs = self.ensure_scene_icon_textures(scene);
-        image_refs.extend(icon_refs);
-        self.evict_unused_image_textures(&image_refs);
-
-        // ── Pass 1: Content (background + agent tiles) ──────────────────────
-        // Re-sort with drag-z-order boost so the dragged tile renders on top.
-        let tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
-        telemetry.tile_count = tiles.len() as u32;
-        telemetry.node_count = scene.node_count() as u32;
-        telemetry.active_leases = scene.leases.len() as u32;
-
-        let mut content_vertices: Vec<RectVertex> = Vec::new();
-        let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
+        // Build the shared per-frame content geometry (Background → tiles →
+        // Content → Chrome zones). `build_frame_vertices` is the single source of
+        // truth shared with the windowed and headless render paths; here its
+        // output becomes the *content* pass, with chrome composited as a separate
+        // GPU pass below for capture-safe layer sovereignty. (sync_widget_textures
+        // and image-texture upload already ran above, before encoding begins.)
         let (surf_w, surf_h) = surface.size();
         let sw = surf_w as f32;
         let sh = surf_h as f32;
-
-        // Update zone animation states before rendering zone content.
-        // Must run before any render_zone_content call below.
-        self.update_zone_animations(scene);
-        self.update_portal_tile_animations(scene);
-
-        // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
-        // Background zones render first so agent tiles occlude them.
-        self.render_zone_content(
-            scene,
-            &mut content_vertices,
-            &mut textured_cmds,
-            sw,
-            sh,
-            Some(LayerAttachment::Background),
-        );
-
-        // Capture the vertex count after Background zones so that the Background
-        // SDF pass can be interleaved between the Background flat-rect pass and
-        // the tile/content/chrome pass below.
-        let bg_vertex_count = content_vertices.len();
-
-        // Resolve scroll-indicator tokens once per frame (not per tile) since
-        // the token map does not change during the tile loop.
-        let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
-        // Resolve composer overlay tokens once per frame (hud-r3ax6).
-        let composer_overlay_tokens = resolve_composer_overlay_tokens(&self.token_map);
-
-        for tile in &tiles {
-            if let Some(bg_color) = self.tile_background_color(tile, scene) {
-                let verts = rect_vertices(
-                    tile.bounds.x,
-                    tile.bounds.y,
-                    tile.bounds.width,
-                    tile.bounds.height,
-                    sw,
-                    sh,
-                    bg_color,
-                );
-                content_vertices.extend_from_slice(&verts);
-            }
-            if let Some(root_id) = tile.root_node {
-                self.render_node(
-                    root_id,
-                    tile,
-                    scene,
-                    &mut content_vertices,
-                    &mut textured_cmds,
-                    sw,
-                    sh,
-                );
-            }
-
-            // ── Scroll indicator (§6b.5) ────────────────────────────────────
-            if let Some(scroll_cfg) = scene.tile_scroll_config(tile.id) {
-                if let Some(content_height) = scroll_cfg.content_height {
-                    let viewport_px = tile.bounds.height;
-                    let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
-                    if let Some(geom) = tze_hud_input::compute_scroll_indicator(
-                        viewport_px,
-                        content_height,
-                        scroll_offset_y,
-                        &scroll_indicator_tokens,
-                    ) {
-                        let indicator_w = geom.width_px.min(tile.bounds.width);
-                        let track_x = tile.bounds.x + tile.bounds.width - indicator_w;
-                        let thumb_color = self.gpu_color_raw([
-                            scroll_indicator_tokens.color_r,
-                            scroll_indicator_tokens.color_g,
-                            scroll_indicator_tokens.color_b,
-                            scroll_indicator_tokens.color_a,
-                        ]);
-                        let thumb_verts = rect_vertices(
-                            track_x,
-                            tile.bounds.y + geom.thumb_y_px,
-                            indicator_w,
-                            geom.thumb_height_px,
-                            sw,
-                            sh,
-                            thumb_color,
-                        );
-                        content_vertices.extend_from_slice(&thumb_verts);
-                    }
-                }
-            }
-
-            // ── Composer echo overlay (hud-r3ax6) ─────────────────────────
-            self.render_composer_overlay(
-                tile,
-                scene,
-                &mut content_vertices,
-                sw,
-                sh,
-                &composer_overlay_tokens,
-            );
-        }
-
-        // Update zone animation states, streaming reveal, and render zone content backdrops.
-        self.update_zone_animations(scene);
-        self.update_portal_tile_animations(scene);
-        self.update_stream_reveals(scene);
-
-        // Content zones render as a batch after all tiles (above background, below chrome).
-        self.render_zone_content(
-            scene,
-            &mut content_vertices,
-            &mut textured_cmds,
-            sw,
-            sh,
-            Some(LayerAttachment::Content),
-        );
-        // Chrome zones render last in the content pass (before the separate GPU chrome pass).
-        self.render_zone_content(
-            scene,
-            &mut content_vertices,
-            &mut textured_cmds,
-            sw,
-            sh,
-            Some(LayerAttachment::Chrome),
-        );
+        let (content_vertices, textured_cmds, bg_vertex_count) =
+            self.build_frame_vertices(scene, sw, sh, &mut telemetry);
 
         let encode_start = std::time::Instant::now();
 
