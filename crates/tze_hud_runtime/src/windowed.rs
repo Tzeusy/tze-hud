@@ -319,6 +319,73 @@ fn read_windows_clipboard_text() -> Option<String> {
     None
 }
 
+// ── Debug-log preview helpers ─────────────────────────────────────────────────
+
+/// Return a 64-byte-bounded preview of `s` for use in `tracing` fields.
+///
+/// Mirrors the inline `char_log_preview` block introduced in PR #768 (hud-60hgf)
+/// for `raw.character`. Reused here to bound all unbounded string fields in
+/// debug-level tracing callsites (key names, namespaces, character payloads).
+///
+/// Returns a borrowed `&str` for strings that already fit (zero allocation),
+/// and an owned `String` with an appended `…` ellipsis for longer inputs.
+fn str_preview(s: &str) -> std::borrow::Cow<'_, str> {
+    const MAX: usize = 64;
+    if s.len() <= MAX {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        let mut end = MAX;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        std::borrow::Cow::Owned(format!("{}…", &s[..end]))
+    }
+}
+
+/// Return a bounded string summary of a [`tze_hud_input::KeyboardDispatchKind`]
+/// for tracing fields.
+///
+/// The `Character` variant may carry an arbitrarily large clipboard payload;
+/// this helper applies [`str_preview`] to any embedded string fields so that
+/// the log line stays bounded regardless of paste size.  `KeyDown`/`KeyUp`
+/// key names are also previewed for consistency.
+fn keyboard_kind_preview(kind: &tze_hud_input::KeyboardDispatchKind) -> String {
+    use tze_hud_input::KeyboardDispatchKind;
+    match kind {
+        KeyboardDispatchKind::KeyDown {
+            key_code,
+            key,
+            modifiers,
+            repeat,
+            ..
+        } => format!(
+            "KeyDown {{ key_code: {:?}, key: {:?}, ctrl: {}, shift: {}, alt: {}, repeat: {} }}",
+            str_preview(key_code),
+            str_preview(key),
+            modifiers.ctrl,
+            modifiers.shift,
+            modifiers.alt,
+            repeat,
+        ),
+        KeyboardDispatchKind::KeyUp {
+            key_code,
+            key,
+            modifiers,
+            ..
+        } => format!(
+            "KeyUp {{ key_code: {:?}, key: {:?}, ctrl: {}, shift: {}, alt: {} }}",
+            str_preview(key_code),
+            str_preview(key),
+            modifiers.ctrl,
+            modifiers.shift,
+            modifiers.alt,
+        ),
+        KeyboardDispatchKind::Character { character, .. } => {
+            format!("Character {{ character: {:?} }}", str_preview(character))
+        }
+    }
+}
+
 /// Drive the drag-handle long-press state machine for a single pointer event.
 ///
 /// Must be called while both the `SharedState` lock **and** the inner scene
@@ -3230,7 +3297,7 @@ impl WinitApp {
             .load(std::sync::atomic::Ordering::Acquire)
         {
             tracing::debug!(
-                key = %raw.key,
+                key = %str_preview(&raw.key),
                 "safe-mode capture: key dropped (safe mode active — chrome layer owns input)"
             );
             return;
@@ -3276,7 +3343,7 @@ impl WinitApp {
             raw.modifiers.alt,
         ) {
             tracing::debug!(
-                key = %raw.key,
+                key = %str_preview(&raw.key),
                 ctrl = raw.modifiers.ctrl,
                 shift = raw.modifiers.shift,
                 "shell-reserved shortcut: portal resize skipped (chrome layer handles)"
@@ -3304,7 +3371,7 @@ impl WinitApp {
                 if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
                     if self.apply_portal_resize_hotkey(tab_id, dir) {
                         tracing::debug!(
-                            key = %raw.key,
+                            key = %str_preview(&raw.key),
                             "portal resize: Ctrl hotkey consumed (resize applied)"
                         );
                         return;
@@ -3346,7 +3413,7 @@ impl WinitApp {
             }
             if consumed {
                 tracing::debug!(
-                    key_code = %raw.key_code,
+                    key_code = %str_preview(&raw.key_code),
                     "composer: KeyDown consumed by draft manager"
                 );
                 // Push updated draft snapshot for local echo rendering (hud-r3ax6).
@@ -3380,10 +3447,10 @@ impl WinitApp {
                 .process_key_down(raw, &focus_owner, namespace_fn)
         {
             tracing::debug!(
-                namespace = %dispatch.namespace,
+                namespace = %str_preview(&dispatch.namespace),
                 tile_id = ?dispatch.tile_id,
                 node_id = ?dispatch.node_id,
-                kind = ?dispatch.kind,
+                kind = %keyboard_kind_preview(&dispatch.kind),
                 "keyboard: KeyDown dispatched to agent"
             );
             dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
@@ -3415,7 +3482,7 @@ impl WinitApp {
             .load(std::sync::atomic::Ordering::Acquire)
         {
             tracing::debug!(
-                key = %raw.key,
+                key = %str_preview(&raw.key),
                 "safe-mode capture: KeyUp dropped (safe mode active — chrome layer owns input)"
             );
             return;
@@ -3455,10 +3522,10 @@ impl WinitApp {
                 .process_key_up(raw, &focus_owner, namespace_fn)
         {
             tracing::debug!(
-                namespace = %dispatch.namespace,
+                namespace = %str_preview(&dispatch.namespace),
                 tile_id = ?dispatch.tile_id,
                 node_id = ?dispatch.node_id,
-                kind = ?dispatch.kind,
+                kind = %keyboard_kind_preview(&dispatch.kind),
                 "keyboard: KeyUp dispatched to agent"
             );
             dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
@@ -3564,18 +3631,7 @@ impl WinitApp {
             // can be arbitrarily large.  Formatting is lazy (tracing skips it
             // below info in production), but defensive truncation avoids
             // surprises in debug builds with large paste payloads.
-            let char_log_preview = {
-                const MAX: usize = 64;
-                if raw.character.len() <= MAX {
-                    std::borrow::Cow::Borrowed(raw.character.as_str())
-                } else {
-                    let mut end = MAX;
-                    while end > 0 && !raw.character.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    std::borrow::Cow::Owned(format!("{}…", &raw.character[..end]))
-                }
-            };
+            let char_log_preview = str_preview(&raw.character);
             if outcome != tze_hud_input::EditOutcome::Unchanged {
                 tracing::debug!(
                     character = %char_log_preview,
@@ -3624,10 +3680,10 @@ impl WinitApp {
                 .process_character(raw, &focus_owner, namespace_fn)
         {
             tracing::debug!(
-                namespace = %dispatch.namespace,
+                namespace = %str_preview(&dispatch.namespace),
                 tile_id = ?dispatch.tile_id,
                 node_id = ?dispatch.node_id,
-                kind = ?dispatch.kind,
+                kind = %keyboard_kind_preview(&dispatch.kind),
                 "keyboard: Character dispatched to agent"
             );
             dispatch_keyboard_event(&self.state.input_event_tx, dispatch);
