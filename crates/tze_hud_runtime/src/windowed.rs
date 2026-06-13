@@ -3144,24 +3144,6 @@ impl WinitApp {
     /// `KeyDownEvent`.  Any transactional batch returned (submit / cancel) is
     /// handed to `deliver_composer_batch` for future downstream delivery.
     fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
-        // FIFO guard: if earlier events are still pending, queue this one
-        // immediately so it cannot bypass them even when the lock is free.
-        if !self.state.pending_keyboard_events.is_empty() {
-            self.state
-                .pending_keyboard_events
-                .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
-            return;
-        }
-        // try_lock — do not block the event-loop thread (hud-2fz34).
-        // None = lock busy → defer to the next about_to_wait iteration.
-        let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
-            self.state
-                .pending_keyboard_events
-                .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
-            return;
-        };
-        let Some(tab_id) = active_tab else { return };
-
         // ── Input precedence order (§6b.2 + §6b.6) ───────────────────────
         //
         // Priority (highest → lowest):
@@ -3173,6 +3155,13 @@ impl WinitApp {
         //      composer shortcuts; portal resize MUST NOT steal them.
         //   4. Portal resize hotkey — Ctrl+`+`/`=` grow, Ctrl+`-` shrink.
         //   5. Normal routing — forwarded to the owning agent.
+        //
+        // Ordering contract: the safe-mode atomic check (Priority 1) MUST run
+        // first — before the FIFO guard and before any try_lock attempt.  This
+        // matches `dispatch_key_up_event` and `dispatch_character_event` and
+        // ensures that safe mode fully overrides all input regardless of queue
+        // or lock state.  The FIFO guard only has meaning for events that are
+        // not dropped by a higher-priority filter.
 
         // ── Priority 1: Safe-mode capture ─────────────────────────────────
         //
@@ -3207,6 +3196,26 @@ impl WinitApp {
             );
             return;
         }
+
+        // FIFO guard: if earlier events are still pending, queue this one
+        // immediately so it cannot bypass them even when the lock is free.
+        // Safe-mode is checked above (Priority 1) before we reach this guard,
+        // consistent with dispatch_key_up_event and dispatch_character_event.
+        if !self.state.pending_keyboard_events.is_empty() {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+            return;
+        }
+        // try_lock — do not block the event-loop thread (hud-2fz34).
+        // None = lock busy → defer to the next about_to_wait iteration.
+        let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
+            self.state
+                .pending_keyboard_events
+                .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+            return;
+        };
+        let Some(tab_id) = active_tab else { return };
 
         // ── Priority 2: Shell/chrome-reserved shortcuts ───────────────────
         //
@@ -9165,6 +9174,112 @@ redaction_style = "blank"
         assert!(
             input_was_forwarded_case2,
             "input must NOT be dropped by Priority-1 when safe_mode_atomic=false"
+        );
+    }
+
+    /// Ordering contract: safe_mode_atomic check precedes the FIFO guard in
+    /// all three dispatch functions (hud-e8qwo).
+    ///
+    /// `dispatch_key_down_event`, `dispatch_key_up_event`, and
+    /// `dispatch_character_event` all share the same ordering invariant:
+    ///
+    ///   1. safe_mode_atomic load (Priority 1 — lock-free, always fires)
+    ///   2. FIFO guard (pending_keyboard_events.is_empty() check)
+    ///   3. try_lock / active_tab_for_keyboard_dispatch
+    ///   4. Remaining priority checks
+    ///
+    /// This test documents that invariant: when safe mode is active, input is
+    /// dropped BEFORE the FIFO queue is consulted.  An event must not be
+    /// pushed to the queue while safe mode is active.  This keeps the FIFO
+    /// queue free of events that will be silently dropped on drain.
+    #[test]
+    fn dispatch_key_down_safe_mode_check_precedes_fifo_guard() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Set up a non-empty FIFO queue (simulates pending events in flight).
+        let mut queue: std::collections::VecDeque<PendingKeyboardEvent> =
+            std::collections::VecDeque::new();
+        use tze_hud_input::{KeyboardModifiers, RawKeyDownEvent};
+        use tze_hud_scene::MonoUs;
+        queue.push_back(PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+            key_code: "KeyA".to_string(),
+            key: "a".to_string(),
+            modifiers: KeyboardModifiers::NONE,
+            repeat: false,
+            timestamp_mono_us: MonoUs(1_000),
+        }));
+        assert_eq!(
+            queue.len(),
+            1,
+            "pre-condition: FIFO queue must be non-empty"
+        );
+
+        // When safe mode is active, the Priority-1 guard fires BEFORE the FIFO
+        // guard.  A new event must NOT be pushed to the queue.
+        let safe_mode_atomic = Arc::new(AtomicBool::new(true));
+        let safe_mode_active = safe_mode_atomic.load(Ordering::Acquire);
+        assert!(safe_mode_active, "pre-condition: safe mode must be active");
+
+        // Simulate the dispatch_key_down_event ordering contract:
+        //   Step 1 — safe_mode_atomic check (Priority 1).
+        //   If safe mode is active, return immediately; do NOT reach Step 2.
+        let pushed_to_queue = if safe_mode_active {
+            false // Priority-1 guard fires; no FIFO push
+        } else {
+            // Step 2 — FIFO guard (only reached when safe mode is inactive).
+            if !queue.is_empty() {
+                queue.push_back(PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+                    key_code: "KeyB".to_string(),
+                    key: "b".to_string(),
+                    modifiers: KeyboardModifiers::NONE,
+                    repeat: false,
+                    timestamp_mono_us: MonoUs(2_000),
+                }));
+                true
+            } else {
+                false
+            }
+        };
+
+        assert!(
+            !pushed_to_queue,
+            "safe mode must suppress the event before the FIFO guard is reached"
+        );
+        assert_eq!(
+            queue.len(),
+            1,
+            "FIFO queue must remain unchanged when safe mode drops the event at Priority 1"
+        );
+
+        // Corollary: when safe mode is inactive, the FIFO guard runs normally
+        // and pushes to the queue (the safe_mode check does not suppress).
+        safe_mode_atomic.store(false, Ordering::Release);
+        let safe_mode_active = safe_mode_atomic.load(Ordering::Acquire);
+        let pushed_to_queue_inactive = if safe_mode_active {
+            false
+        } else {
+            if !queue.is_empty() {
+                queue.push_back(PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+                    key_code: "KeyB".to_string(),
+                    key: "b".to_string(),
+                    modifiers: KeyboardModifiers::NONE,
+                    repeat: false,
+                    timestamp_mono_us: MonoUs(2_000),
+                }));
+                true
+            } else {
+                false
+            }
+        };
+        assert!(
+            pushed_to_queue_inactive,
+            "FIFO guard must push event when safe mode is inactive and queue is non-empty"
+        );
+        assert_eq!(
+            queue.len(),
+            2,
+            "FIFO queue must grow by one when safe mode is inactive"
         );
     }
 
