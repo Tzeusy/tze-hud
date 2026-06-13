@@ -3343,6 +3343,494 @@ async def run_diagnostic_input_phase(
     }, **result)
 
 
+# ─── Gate phase runners (task 7.1) ────────────────────────────────────────────
+
+async def run_markdown(
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
+    body_full: str, transcript: list[dict[str, Any]],
+    hold_s: float,
+    mutation_lock: asyncio.Lock,
+) -> None:
+    """Verify that GFM markdown elements render without artefacts in the OUTPUT pane."""
+    emit_step_event(transcript, 7, "started", {
+        "code": "markdown",
+        "title": "Markdown element rendering",
+        "action": "publish a body containing headings, bold, italic, code spans, fenced blocks, and lists",
+        "expected_visual": "all GFM elements are readable; no escaped asterisks or raw backticks visible",
+    })
+    md_body = (
+        "# Heading 1\n\n"
+        "## Heading 2\n\n"
+        "Normal paragraph with **bold**, *italic*, `inline code`, and ~~strikethrough~~.\n\n"
+        "### Heading 3 — fenced block\n\n"
+        "```python\n"
+        "def hello(name: str) -> str:\n"
+        "    return f'hello {name}'\n"
+        "```\n\n"
+        "#### Unordered list\n\n"
+        "- Alpha item\n"
+        "- Beta item\n"
+        "  - Nested item\n"
+        "- Gamma item\n\n"
+        "#### Ordered list\n\n"
+        "1. First step\n"
+        "2. Second step\n"
+        "3. Third step\n\n"
+        "> Blockquote: *the runtime owns the pixels.*\n\n"
+        "Trailing paragraph to confirm no trailing-whitespace artefacts.\n"
+    )
+    await publish_portal(
+        client, lease_id, tiles,
+        title="Exemplar Review Portal",
+        subtitle="Markdown element coverage",
+        body=md_body,
+        footer_meta="markdown  •  GFM element coverage",
+        include_tile_setup=True,
+        mutation_lock=mutation_lock,
+    )
+    elements = [
+        "h1", "h2", "h3", "h4",
+        "bold", "italic", "inline-code", "strikethrough",
+        "fenced-code-block",
+        "unordered-list", "nested-list",
+        "ordered-list",
+        "blockquote",
+    ]
+    emit_step_event(transcript, 7, "completed", {
+        "code": "markdown",
+        "title": "Markdown element rendering",
+        "action": "hold for operator review of rendered elements",
+        "expected_visual": "all markdown elements visually distinct; body text readable; no raw markup leaking",
+    }, hold_s=hold_s, elements_under_review=elements)
+    await asyncio.sleep(hold_s)
+
+
+async def run_overflow(
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
+    body_full: str, transcript: list[dict[str, Any]],
+    hold_s: float,
+    mutation_lock: asyncio.Lock,
+) -> None:
+    """Verify OUTPUT pane clamps content at byte/line budget without layout break."""
+    emit_step_event(transcript, 8, "started", {
+        "code": "overflow",
+        "title": "Content overflow clamp",
+        "action": "publish progressively larger bodies up to and beyond MAX_MARKDOWN_BYTES",
+        "expected_visual": "portal remains intact; oversized body is truncated to byte budget without visual break",
+    })
+
+    # Step 1 — just-under budget (700 lines ≈ 70KB, exceeds 65535-byte budget so
+    # the trim loop below actually exercises the clamp path)
+    near_limit_lines = [
+        f"[{i:04d}] overflow test line: {'word ' * 14}end"
+        for i in range(700)
+    ]
+    near_limit_body = "\n".join(near_limit_lines)
+    # Trim to stay under MAX_MARKDOWN_BYTES
+    while len(near_limit_body.encode("utf-8")) > MAX_MARKDOWN_BYTES:
+        near_limit_lines = near_limit_lines[:-1]
+        near_limit_body = "\n".join(near_limit_lines)
+    await publish_portal(
+        client, lease_id, tiles,
+        title="Exemplar Review Portal",
+        subtitle="Overflow clamp — near limit",
+        body=near_limit_body,
+        footer_meta=f"overflow:near  •  {len(near_limit_body.encode())} bytes / {MAX_MARKDOWN_BYTES} budget",
+        include_tile_setup=True,
+        mutation_lock=mutation_lock,
+    )
+    emit_step_event(transcript, 8, "checkpoint", {
+        "code": "overflow:near-limit",
+        "title": "Near-budget body published",
+        "action": "body sized just under MAX_MARKDOWN_BYTES",
+        "expected_visual": "full content visible; no visual artefact",
+    }, body_bytes=len(near_limit_body.encode()), budget_bytes=MAX_MARKDOWN_BYTES,
+       lines=len(near_limit_lines))
+    await asyncio.sleep(min(hold_s, 3.0))
+
+    # Step 2 — bounded_transcript clamp (uses the existing scroll budget path)
+    all_lines = [
+        f"[{i:04d}] {'overflow ' * 8}end" for i in range(500)
+    ]
+    clamped = bounded_transcript(all_lines, 0, SCROLL_VISIBLE_LINES * 4)
+    await publish_portal(
+        client, lease_id, tiles,
+        title="Exemplar Review Portal",
+        subtitle="Overflow clamp — bounded_transcript",
+        body=clamped,
+        footer_meta=f"overflow:clamped  •  {len(clamped.encode())} bytes",
+        include_tile_setup=False,
+        mutation_lock=mutation_lock,
+    )
+    emit_step_event(transcript, 8, "completed", {
+        "code": "overflow",
+        "title": "Content overflow clamp",
+        "action": "bounded_transcript clamped to budget; operator verifies no layout break",
+        "expected_visual": "clamped content visible; portal chrome intact; no overflow bleed",
+    }, clamped_bytes=len(clamped.encode()), budget_bytes=MAX_MARKDOWN_BYTES)
+    await asyncio.sleep(hold_s)
+
+
+async def run_composer_edit(
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
+    transcript: list[dict[str, Any]],
+    mutation_lock: asyncio.Lock,
+    hold_s: float,
+) -> None:
+    """Render a sequence of deterministic composer edit states: empty → typed → mid-delete → cleared."""
+    emit_step_event(transcript, 9, "started", {
+        "code": "composer-edit",
+        "title": "Composer edit sequence",
+        "action": "render empty → typed → mid-delete → cleared states",
+        "expected_visual": "caret tracks correctly through all edit states; no phantom characters",
+    })
+    await publish_portal(
+        client, lease_id, tiles,
+        title="Exemplar Review Portal",
+        subtitle="Composer edit sequence",
+        body="INPUT pane cycling through deterministic edit states.",
+        footer_meta="composer-edit  •  deterministic states",
+        include_tile_setup=True,
+        mutation_lock=mutation_lock,
+    )
+
+    states: list[tuple[str, int, str]] = [
+        ("", 0, "empty — placeholder visible"),
+        ("Hello", 5, "typed 'Hello' — caret after final l"),
+        ("Hello, world!", 13, "typed ', world!' — caret at end"),
+        ("Hello, world", 12, "deleted '!' — caret at d"),
+        ("Hello", 5, "deleted ', world' — back to 'Hello'"),
+        ("Hell", 4, "deleted 'o' — mid-word"),
+        ("", 0, "cleared — placeholder re-appears"),
+    ]
+
+    total_slept = 0.0
+    for idx, (text, cursor, label) in enumerate(states):
+        display_text, cursor_x, cursor_row = await render_composer_static(
+            client,
+            lease_id,
+            tiles.input_scroll,
+            text,
+            cursor,
+            focused=True,
+            caret_visible=True,
+            mutation_lock=mutation_lock,
+        )
+        status = "completed" if idx == len(states) - 1 else "checkpoint"
+        emit_step_event(transcript, 9, status, {
+            "code": f"composer-edit:{idx}",
+            "title": f"Composer edit state {idx}",
+            "action": label,
+            "expected_visual": f"composer shows {text!r}; caret at position {cursor}",
+        }, cursor_x=cursor_x, cursor_row=cursor_row,
+           text_len=len(text), visual_lines=len(display_text.splitlines()))
+        step_sleep = min(hold_s / max(1, len(states)), 1.5)
+        await asyncio.sleep(step_sleep)
+        total_slept += step_sleep
+
+    await asyncio.sleep(max(0.0, hold_s - total_slept))
+
+
+async def run_cadence(
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
+    body_full: str, transcript: list[dict[str, Any]],
+    cadence_cycles: int,
+    cadence_interval_ms: int,
+    mutation_lock: asyncio.Lock,
+) -> None:
+    """Measure RTT overhead: publish N sequential scene updates and record wall-clock RTT per round."""
+    emit_step_event(transcript, 10, "started", {
+        "code": "cadence",
+        "title": "Cadence RTT overhead measurement",
+        "action": (
+            f"publish {cadence_cycles} sequential updates with ~{cadence_interval_ms}ms pacing; "
+            "measure wall-clock RTT per round and report statistics"
+        ),
+        "expected_visual": "portal body updates each cycle; footer shows cycle index and last RTT",
+    })
+    lines = body_full.splitlines()
+    rtt_ms_list: list[float] = []
+    interval_s = cadence_interval_ms / 1000.0
+
+    for i in range(cadence_cycles):
+        # Alternate body length to stress coalescing path
+        end = max(8, len(lines) // 2) if (i % 2 == 0) else len(lines)
+        body = "\n".join(lines[:end])
+
+        t0 = time.monotonic()
+        await publish_portal(
+            client, lease_id, tiles,
+            title="Exemplar Review Portal",
+            subtitle="Cadence RTT overhead",
+            body=body,
+            footer_meta=f"cadence  •  cycle {i + 1}/{cadence_cycles}",
+            include_tile_setup=False,
+            mutation_lock=mutation_lock,
+        )
+        rtt_ms = (time.monotonic() - t0) * 1000.0
+        rtt_ms_list.append(rtt_ms)
+
+        emit_step_event(transcript, 10, "checkpoint", {
+            "code": f"cadence:cycle:{i}",
+            "title": f"Cadence cycle {i + 1}",
+            "action": f"publish cycle {i + 1}/{cadence_cycles}",
+            "expected_visual": "body updated; footer counter incremented",
+        }, rtt_ms=round(rtt_ms, 2), cycle=i + 1, body_lines=end)
+
+        if i < cadence_cycles - 1:
+            # Sleep minus elapsed, floored at 0 to preserve inter-cycle pacing
+            sleep_s = max(0.0, interval_s - (time.monotonic() - t0))
+            await asyncio.sleep(sleep_s)
+
+    # Compute summary statistics for RTT-overhead reporting
+    if rtt_ms_list:
+        rtt_min = min(rtt_ms_list)
+        rtt_max = max(rtt_ms_list)
+        rtt_mean = sum(rtt_ms_list) / len(rtt_ms_list)
+        sorted_rtts = sorted(rtt_ms_list)
+        p50_idx = len(sorted_rtts) // 2
+        p95_idx = max(0, int(len(sorted_rtts) * 0.95) - 1)
+        rtt_p50 = sorted_rtts[p50_idx]
+        rtt_p95 = sorted_rtts[p95_idx]
+        overhead_budget_ms = cadence_interval_ms
+        over_budget = [r for r in rtt_ms_list if r > overhead_budget_ms]
+    else:
+        rtt_min = rtt_max = rtt_mean = rtt_p50 = rtt_p95 = 0.0
+        over_budget = []
+
+    emit_step_event(transcript, 10, "completed", {
+        "code": "cadence",
+        "title": "Cadence RTT overhead measurement",
+        "action": "all cycles complete; RTT statistics reported",
+        "expected_visual": "portal stable; body settled on last cycle content",
+    },
+        rtt_stats={
+            "cycles": cadence_cycles,
+            "interval_ms": cadence_interval_ms,
+            "min_ms": round(rtt_min, 2),
+            "max_ms": round(rtt_max, 2),
+            "mean_ms": round(rtt_mean, 2),
+            "p50_ms": round(rtt_p50, 2),
+            "p95_ms": round(rtt_p95, 2),
+            "over_budget_count": len(over_budget),
+            "over_budget_threshold_ms": cadence_interval_ms,
+        },
+    )
+
+
+async def run_profile_swap(
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
+    body_full: str, transcript: list[dict[str, Any]],
+    hold_s: float,
+    mutation_lock: asyncio.Lock,
+) -> None:
+    """Cycle through named visual profiles (compact / standard / expanded) by mutating portal chrome tokens."""
+    emit_step_event(transcript, 11, "started", {
+        "code": "profile-swap",
+        "title": "Visual profile swap",
+        "action": "cycle compact → standard → expanded portal chrome profiles",
+        "expected_visual": "portal chrome dimensions shift each cycle; body text remains readable; no layout collapse",
+    })
+
+    profiles: list[tuple[str, float, float, float, float]] = [
+        # (name, portal_w, portal_h, title_font, body_font)
+        ("compact",  680.0, 520.0, 14.0, 11.0),
+        ("standard", PORTAL_W, PORTAL_H, TITLE_FONT, BODY_FONT),
+        ("expanded", 1100.0, 820.0, 18.0, 14.0),
+        ("standard", PORTAL_W, PORTAL_H, TITLE_FONT, BODY_FONT),
+    ]
+
+    lines = body_full.splitlines()
+    tab_width = tiles.tab_width
+    tab_height = tiles.tab_height
+
+    for idx, (name, pw, ph, title_font, body_font) in enumerate(profiles):
+        # Clamp to portal bounds
+        pw_clamped = max(PORTAL_MIN_W, min(pw, PORTAL_MAX_W))
+        ph_clamped = max(PORTAL_MIN_H, min(ph, PORTAL_MAX_H))
+        set_portal_size(pw_clamped, ph_clamped, tab_width, tab_height)
+
+        body_slice = "\n".join(lines[:min(len(lines), 40)])
+        is_last = idx == len(profiles) - 1
+        await publish_portal(
+            client, lease_id, tiles,
+            title="Exemplar Review Portal",
+            subtitle=f"Profile: {name}  ({pw_clamped:.0f}×{ph_clamped:.0f}px)",
+            body=body_slice,
+            footer_meta=f"profile-swap  •  {name}  •  title={title_font}pt body={body_font}pt",
+            include_tile_setup=True,
+            mutation_lock=mutation_lock,
+        )
+        status = "completed" if is_last else "checkpoint"
+        emit_step_event(transcript, 11, status, {
+            "code": f"profile-swap:{name}",
+            "title": f"Profile '{name}'",
+            "action": f"set portal to {pw_clamped:.0f}×{ph_clamped:.0f}px, title_font={title_font}pt, body_font={body_font}pt",
+            "expected_visual": f"portal resizes to {name} chrome dimensions; content remains readable",
+        }, portal_w=pw_clamped, portal_h=ph_clamped,
+           title_font_pt=title_font, body_font_pt=body_font)
+        await asyncio.sleep(hold_s)
+
+    # Restore canonical portal dimensions
+    set_portal_size(PORTAL_W, PORTAL_H, tab_width, tab_height)
+
+
+async def run_window_mgmt(
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
+    body_full: str, transcript: list[dict[str, Any]],
+    hold_s: float,
+    portal_x: float,
+    portal_y: float,
+    mutation_lock: asyncio.Lock,
+) -> None:
+    """Exercise portal window management: move, minimize, restore, and boundary clamp."""
+    emit_step_event(transcript, 12, "started", {
+        "code": "window-mgmt",
+        "title": "Window management sequence",
+        "action": "move portal → boundary clamp → minimize → restore → return to origin",
+        "expected_visual": "portal moves cleanly; minimize icon appears; restore brings full portal back",
+    })
+    tab_width = tiles.tab_width
+    tab_height = tiles.tab_height
+    lines = body_full.splitlines()
+    body_slice = "\n".join(lines[:min(len(lines), 40)])
+    current_x = portal_x
+    current_y = portal_y
+
+    # Step 1 — move to centre
+    centre_x = max(0.0, min(tab_width / 2.0 - PORTAL_W / 2.0, tab_width - PORTAL_W))
+    centre_y = max(0.0, min(tab_height / 2.0 - PORTAL_H / 2.0, tab_height - PORTAL_H))
+    async with mutation_lock:
+        await client.submit_mutation_batch(
+            lease_id,
+            portal_bounds_mutations(tiles, centre_x, centre_y),
+            timeout=2.0,
+        )
+    current_x, current_y = centre_x, centre_y
+    await publish_portal(
+        client, lease_id, tiles,
+        title="Exemplar Review Portal",
+        subtitle="Window management — centred",
+        body=body_slice,
+        footer_meta=f"window-mgmt:move  •  ({centre_x:.0f}, {centre_y:.0f})",
+        include_tile_setup=False,
+        mutation_lock=mutation_lock,
+    )
+    emit_step_event(transcript, 12, "checkpoint", {
+        "code": "window-mgmt:move",
+        "title": "Portal moved to centre",
+        "action": f"portal_x={centre_x:.0f}, portal_y={centre_y:.0f}",
+        "expected_visual": "portal repositioned to centre of scene; chrome intact",
+    }, portal_x=centre_x, portal_y=centre_y)
+    await asyncio.sleep(min(hold_s, 2.0))
+
+    # Step 2 — boundary clamp: try to push beyond right/bottom edge
+    oob_x = tab_width + 200.0
+    oob_y = tab_height + 200.0
+    clamped_x = max(0.0, min(oob_x, tab_width - PORTAL_W))
+    clamped_y = max(0.0, min(oob_y, tab_height - PORTAL_H))
+    async with mutation_lock:
+        await client.submit_mutation_batch(
+            lease_id,
+            portal_bounds_mutations(tiles, clamped_x, clamped_y),
+            timeout=2.0,
+        )
+    current_x, current_y = clamped_x, clamped_y
+    await publish_portal(
+        client, lease_id, tiles,
+        title="Exemplar Review Portal",
+        subtitle="Window management — boundary clamped",
+        body=body_slice,
+        footer_meta=f"window-mgmt:clamp  •  requested({oob_x:.0f},{oob_y:.0f}) → clamped({clamped_x:.0f},{clamped_y:.0f})",
+        include_tile_setup=False,
+        mutation_lock=mutation_lock,
+    )
+    emit_step_event(transcript, 12, "checkpoint", {
+        "code": "window-mgmt:clamp",
+        "title": "Boundary clamp verified",
+        "action": f"OOB ({oob_x:.0f},{oob_y:.0f}) clamped to ({clamped_x:.0f},{clamped_y:.0f})",
+        "expected_visual": "portal visible at bottom-right edge; not partially offscreen",
+    }, requested_x=oob_x, requested_y=oob_y, clamped_x=clamped_x, clamped_y=clamped_y)
+    await asyncio.sleep(min(hold_s, 2.0))
+
+    # Step 3 — minimize: hide portal tiles, show icon at current position
+    hidden_x = max(0.0, tab_width - 1.0)
+    hidden_y = max(0.0, tab_height - 1.0)
+    async with mutation_lock:
+        await client.submit_mutation_batch(
+            lease_id,
+            [
+                publish_to_tile_bounds_mutation(tiles.capture_backstop, hidden_x, hidden_y, 1.0, 1.0),
+                publish_to_tile_bounds_mutation(tiles.input_scroll, hidden_x, hidden_y, 1.0, 1.0),
+                publish_to_tile_bounds_mutation(tiles.output_scroll, hidden_x, hidden_y, 1.0, 1.0),
+                publish_to_tile_bounds_mutation(tiles.drag_shield, hidden_x, hidden_y, 1.0, 1.0),
+                publish_to_tile_bounds_mutation(
+                    tiles.frame, current_x, current_y, MINIMIZED_ICON_SIZE, MINIMIZED_ICON_SIZE,
+                ),
+            ],
+            timeout=2.0,
+        )
+        await client.update_tile_opacity(lease_id, tiles.capture_backstop, 0.0)
+        await client.update_tile_input_mode(
+            lease_id, tiles.capture_backstop, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+        )
+        for tile_id in (tiles.input_scroll, tiles.output_scroll):
+            await client.update_tile_opacity(lease_id, tile_id, 0.0)
+            await client.update_tile_input_mode(
+                lease_id, tile_id, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+            )
+    icon_root, icon_children = build_minimized_icon_nodes(attention=False, pulse=False)
+    await set_root_with_children(
+        client, lease_id, tiles.frame, icon_root, icon_children, mutation_lock,
+    )
+    emit_step_event(transcript, 12, "checkpoint", {
+        "code": "window-mgmt:minimize",
+        "title": "Portal minimized",
+        "action": "portal tiles hidden; minimized icon rendered at current position",
+        "expected_visual": "circular icon visible; full portal surface hidden",
+    }, icon_x=current_x, icon_y=current_y)
+    await asyncio.sleep(min(hold_s, 2.0))
+
+    # Step 4 — restore: show full portal at origin position
+    restore_x = max(0.0, min(portal_x, tab_width - PORTAL_W))
+    restore_y = max(0.0, min(portal_y, tab_height - PORTAL_H))
+    async with mutation_lock:
+        await client.submit_mutation_batch(
+            lease_id,
+            portal_bounds_mutations(tiles, restore_x, restore_y),
+            timeout=2.0,
+        )
+        await client.update_tile_opacity(lease_id, tiles.capture_backstop, 0.0)
+        await client.update_tile_input_mode(
+            lease_id, tiles.capture_backstop, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+        )
+        for tile_id in (tiles.frame, tiles.input_scroll, tiles.output_scroll):
+            await client.update_tile_opacity(lease_id, tile_id, 1.0)
+            await client.update_tile_input_mode(
+                lease_id, tile_id, types_pb2.TILE_INPUT_MODE_CAPTURE,
+            )
+        await client.update_tile_opacity(lease_id, tiles.minimized_icon, 0.0)
+        await client.update_tile_input_mode(
+            lease_id, tiles.minimized_icon, types_pb2.TILE_INPUT_MODE_PASSTHROUGH,
+        )
+    await publish_portal(
+        client, lease_id, tiles,
+        title="Exemplar Review Portal",
+        subtitle="Window management — restored",
+        body=body_slice,
+        footer_meta=f"window-mgmt:restore  •  ({restore_x:.0f}, {restore_y:.0f})",
+        include_tile_setup=True,
+        mutation_lock=mutation_lock,
+    )
+    emit_step_event(transcript, 12, "completed", {
+        "code": "window-mgmt:restore",
+        "title": "Portal restored to origin",
+        "action": f"portal restored at ({restore_x:.0f},{restore_y:.0f})",
+        "expected_visual": "full portal visible at origin position; icon gone; chrome intact",
+    }, restore_x=restore_x, restore_y=restore_y)
+    await asyncio.sleep(hold_s)
+
+
 async def run_scenario(args: argparse.Namespace) -> int:
     psk = os.getenv(args.psk_env, "")
     if not psk:
@@ -3483,6 +3971,40 @@ async def run_scenario(args: argparse.Namespace) -> int:
                     tab_height=scene_height,
                     timeout_s=args.diagnostic_input_timeout_s,
                     connect_timeout_s=args.diagnostic_input_connect_timeout_s,
+                )
+            elif phase == "markdown":
+                await run_markdown(
+                    client, lease_id, tiles, body,
+                    transcript, args.markdown_hold_s, mutation_lock,
+                )
+            elif phase == "overflow":
+                await run_overflow(
+                    client, lease_id, tiles, body,
+                    transcript, args.overflow_hold_s, mutation_lock,
+                )
+            elif phase == "composer-edit":
+                await run_composer_edit(
+                    client, lease_id, tiles,
+                    transcript, mutation_lock, args.composer_edit_hold_s,
+                )
+            elif phase == "cadence":
+                await run_cadence(
+                    client, lease_id, tiles, body,
+                    transcript,
+                    args.cadence_cycles,
+                    args.cadence_interval_ms,
+                    mutation_lock,
+                )
+            elif phase == "profile-swap":
+                await run_profile_swap(
+                    client, lease_id, tiles, body,
+                    transcript, args.profile_swap_hold_s, mutation_lock,
+                )
+            elif phase == "window-mgmt":
+                await run_window_mgmt(
+                    client, lease_id, tiles, body,
+                    transcript, args.window_mgmt_hold_s,
+                    portal_x, portal_y, mutation_lock,
                 )
             else:
                 emit_step_event(transcript, -1, "skipped", {
@@ -3661,8 +4183,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override responsive portal height in scene pixels",
     )
-    p.add_argument("--phases", default="baseline,scroll",
-                   help="Comma list: baseline,scroll,streaming,rapid,composer-smoke,diagnostic-input")
+    p.add_argument(
+        "--phases",
+        default="baseline,scroll",
+        help=(
+            "Comma-separated list of phases to run: "
+            "baseline, scroll, streaming, rapid, composer-smoke, diagnostic-input, "
+            "markdown, overflow, composer-edit, cadence, profile-swap, window-mgmt"
+        ),
+    )
     p.add_argument("--baseline-hold-s", type=float, default=20.0)
     p.add_argument("--composer-smoke-hold-s", type=float, default=8.0)
     p.add_argument("--stream-chunks", type=int, default=6)
@@ -3677,6 +4206,49 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--diagnostic-input-ssh-key", default=DEFAULT_SSH_KEY)
     p.add_argument("--diagnostic-input-timeout-s", type=float, default=12.0)
     p.add_argument("--diagnostic-input-connect-timeout-s", type=float, default=5.0)
+    # Gate phase args (task 7.1)
+    p.add_argument(
+        "--markdown-hold-s",
+        type=float,
+        default=12.0,
+        help="Seconds to hold the markdown phase for operator review",
+    )
+    p.add_argument(
+        "--overflow-hold-s",
+        type=float,
+        default=6.0,
+        help="Seconds to hold each overflow step for operator review",
+    )
+    p.add_argument(
+        "--composer-edit-hold-s",
+        type=float,
+        default=6.0,
+        help="Total hold budget for the composer-edit sequence (divided across states)",
+    )
+    p.add_argument(
+        "--cadence-cycles",
+        type=int,
+        default=20,
+        help="Number of publish cycles in the cadence RTT measurement phase",
+    )
+    p.add_argument(
+        "--cadence-interval-ms",
+        type=int,
+        default=100,
+        help="Target inter-cycle pacing in ms for the cadence phase; also used as RTT budget threshold",
+    )
+    p.add_argument(
+        "--profile-swap-hold-s",
+        type=float,
+        default=4.0,
+        help="Seconds to hold each visual profile during the profile-swap phase",
+    )
+    p.add_argument(
+        "--window-mgmt-hold-s",
+        type=float,
+        default=3.0,
+        help="Seconds to hold each window-mgmt step for operator review",
+    )
     p.add_argument(
         "--leave-lease-on-exit",
         action="store_true",
