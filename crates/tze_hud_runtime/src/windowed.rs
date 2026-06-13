@@ -37,10 +37,10 @@
 //! ## Runtime mode switching
 //!
 //! Mode switching is supported but disruptive (requires surface recreation, spec
-//! line 173). Call `WinitApp::request_mode_switch()` — the event loop stores a
-//! pending mode switch, tears down the existing window and compositor, and
-//! re-initialises with the new mode on the next `RedrawRequested` event (where
-//! the pending switch is detected before the frame is presented).
+//! line 173). The event loop stores a pending mode switch, tears down the existing
+//! window and compositor, and re-initialises with the new mode on the next
+//! `RedrawRequested` event (where the pending switch is detected before the frame
+//! is presented).
 //!
 //! ## Main thread event loop
 //!

@@ -2138,9 +2138,9 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: Some(session_proto::AuthCredential {
-                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
-                        session_proto::PreSharedKeyCredential {
+                auth_credential: Some(sp::AuthCredential {
+                    credential: Some(sp::auth_credential::Credential::PreSharedKey(
+                        sp::PreSharedKeyCredential {
                             key: TEST_PSK.to_string(),
                         },
                     )),
@@ -2531,9 +2531,9 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: Some(session_proto::AuthCredential {
-                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
-                        session_proto::PreSharedKeyCredential {
+                auth_credential: Some(sp::AuthCredential {
+                    credential: Some(sp::auth_credential::Credential::PreSharedKey(
+                        sp::PreSharedKeyCredential {
                             key: TEST_PSK.to_string(),
                         },
                     )),
@@ -2791,9 +2791,9 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: Some(session_proto::AuthCredential {
-                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
-                        session_proto::PreSharedKeyCredential {
+                auth_credential: Some(sp::AuthCredential {
+                    credential: Some(sp::auth_credential::Credential::PreSharedKey(
+                        sp::PreSharedKeyCredential {
                             key: TEST_PSK.to_string(),
                         },
                     )),
@@ -3231,9 +3231,9 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: Some(session_proto::AuthCredential {
-                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
-                        session_proto::PreSharedKeyCredential {
+                auth_credential: Some(sp::AuthCredential {
+                    credential: Some(sp::auth_credential::Credential::PreSharedKey(
+                        sp::PreSharedKeyCredential {
                             key: TEST_PSK.to_string(),
                         },
                     )),
@@ -3902,9 +3902,9 @@ mod tests {
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
-                auth_credential: Some(session_proto::AuthCredential {
-                    credential: Some(session_proto::auth_credential::Credential::PreSharedKey(
-                        session_proto::PreSharedKeyCredential {
+                auth_credential: Some(sp::AuthCredential {
+                    credential: Some(sp::auth_credential::Credential::PreSharedKey(
+                        sp::PreSharedKeyCredential {
                             key: TEST_PSK.to_string(),
                         },
                     )),
