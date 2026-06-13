@@ -111,37 +111,10 @@ pub enum TransitionError {
 
 // ─── Resource Budget ─────────────────────────────────────────────────────────
 
-/// Per-lease resource budget dimensions.
-///
-/// From spec §Requirement: Resource Budget Schema.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResourceBudget {
-    /// Range [1, 64].
-    pub max_nodes_per_tile: u8,
-    /// Mutations per second.
-    pub update_rate_hz: u32,
-    /// Range [1, 64].
-    pub max_tiles: u8,
-    /// Total decoded texture bytes allowed.
-    pub texture_bytes_total: u64,
-    /// Range [1, 64].
-    pub max_active_leases: u8,
-    /// Always 0 in v1.
-    pub max_concurrent_streams: u8,
-}
-
-impl Default for ResourceBudget {
-    fn default() -> Self {
-        ResourceBudget {
-            max_nodes_per_tile: 32,
-            update_rate_hz: 30,
-            max_tiles: 8,
-            texture_bytes_total: 64 * 1024 * 1024,
-            max_active_leases: 8,
-            max_concurrent_streams: 0,
-        }
-    }
-}
+// `ResourceBudget` is the single canonical type defined in `crate::types`.
+// Re-exported here so that `budget.rs` and other lease sub-modules can import
+// it via `super::ResourceBudget` without knowing the originating module.
+pub use crate::types::ResourceBudget;
 
 // ─── LeaseStateMachine Trait ─────────────────────────────────────────────────
 

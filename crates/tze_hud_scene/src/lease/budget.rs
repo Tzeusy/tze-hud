@@ -7,8 +7,9 @@
 //!
 //! ## Spec-alignment notes
 //!
-//! * The `ResourceBudget` struct lives in the parent module (`super`); this
-//!   file adds the *checking* layer on top of it.
+//! * `ResourceBudget` is the single canonical type defined in `crate::types`
+//!   and re-exported through the parent module; this file adds the *checking*
+//!   layer on top of it.
 //! * Soft-limit (80%) checks return `BudgetDimension` values but do
 //!   **not** reject the mutation — callers must send a `BudgetWarning` event.
 //! * Hard-limit (100%) checks reject the entire `MutationBatch` atomically.
@@ -74,7 +75,7 @@ pub enum BudgetHardViolation {
     TileCountExceeded { current: u32, limit: u32 },
     /// A tile would exceed `max_nodes_per_tile`.
     NodesPerTileExceeded { proposed: u32, limit: u32 },
-    /// Texture allocation would exceed `texture_bytes_total`.
+    /// Texture allocation would exceed `max_texture_bytes`.
     TextureBytesExceeded {
         current_bytes: u64,
         limit_bytes: u64,
@@ -120,7 +121,7 @@ pub fn check_budget_soft(
         idx += 1;
     }
 
-    if usage.texture_bytes_used * 5 >= budget.texture_bytes_total.max(1) * 4 {
+    if usage.texture_bytes_used * 5 >= budget.max_texture_bytes.max(1) * 4 {
         result[idx] = Some(BudgetDimension::TextureBytes);
         idx += 1;
     }
@@ -177,19 +178,19 @@ pub fn check_budget_hard(
     // ── Tile count ────────────────────────────────────────────────────────
     if delta.delta_tiles > 0 {
         let proposed_tiles = usage.tile_count.saturating_add(delta.delta_tiles as u32);
-        if proposed_tiles > budget.max_tiles as u32 {
+        if proposed_tiles > budget.max_tiles {
             return Err(BudgetHardViolation::TileCountExceeded {
                 current: proposed_tiles,
-                limit: budget.max_tiles as u32,
+                limit: budget.max_tiles,
             });
         }
     }
 
     // ── Nodes per tile ────────────────────────────────────────────────────
-    if delta.max_nodes_in_batch > 0 && delta.max_nodes_in_batch > budget.max_nodes_per_tile as u32 {
+    if delta.max_nodes_in_batch > 0 && delta.max_nodes_in_batch > budget.max_nodes_per_tile {
         return Err(BudgetHardViolation::NodesPerTileExceeded {
             proposed: delta.max_nodes_in_batch,
-            limit: budget.max_nodes_per_tile as u32,
+            limit: budget.max_nodes_per_tile,
         });
     }
 
@@ -198,20 +199,20 @@ pub fn check_budget_hard(
         let proposed = usage
             .texture_bytes_used
             .saturating_add(delta.delta_texture_bytes as u64);
-        if proposed > budget.texture_bytes_total {
+        if proposed > budget.max_texture_bytes {
             return Err(BudgetHardViolation::TextureBytesExceeded {
                 current_bytes: proposed,
-                limit_bytes: budget.texture_bytes_total,
+                limit_bytes: budget.max_texture_bytes,
             });
         }
     }
 
     // ── Active leases ─────────────────────────────────────────────────────
     // Checked at grant time, but re-verified here for defence-in-depth.
-    if usage.active_lease_count > budget.max_active_leases as u32 {
+    if usage.active_lease_count > u32::from(budget.max_active_leases) {
         return Err(BudgetHardViolation::ActiveLeasesExceeded {
             current: usage.active_lease_count,
-            limit: budget.max_active_leases as u32,
+            limit: u32::from(budget.max_active_leases),
         });
     }
 
@@ -319,9 +320,9 @@ mod tests {
     /// Uses ceiling division to ensure the value is exactly at or above 80%.
     #[test]
     fn test_soft_warning_texture_at_80pct_exact() {
-        let budget = default_budget(); // texture_bytes_total = 64 MiB
+        let budget = default_budget(); // max_texture_bytes = 256 MiB
         // Use integer arithmetic: ceiling of (total * 4 / 5) ensures usage * 5 >= total * 4.
-        let total = budget.texture_bytes_total;
+        let total = budget.max_texture_bytes;
         let eighty_pct = (total * 4).div_ceil(5);
         let usage = BudgetUsage {
             texture_bytes_used: eighty_pct,
@@ -444,11 +445,11 @@ mod tests {
         );
     }
 
-    /// WHEN texture bytes would exceed texture_bytes_total THEN TextureBytesExceeded.
+    /// WHEN texture bytes would exceed max_texture_bytes THEN TextureBytesExceeded.
     #[test]
     fn test_hard_limit_texture_bytes_exceeded() {
         let budget = ResourceBudget {
-            texture_bytes_total: 1000,
+            max_texture_bytes: 1000,
             ..ResourceBudget::default()
         };
         let usage = BudgetUsage {
@@ -623,6 +624,55 @@ mod tests {
         assert_eq!(
             counted, 150,
             "exclusive({exclusive}) + shared({shared}) should be 150"
+        );
+    }
+
+    // ── Canonical defaults (hud-3qpgv.1 unification) ─────────────────────
+
+    /// Asserts that the single canonical `ResourceBudget::default()` matches
+    /// the spec §Per-Agent Resource Envelope defaults exactly.
+    ///
+    /// This test locks the defaults in place so that any future change to them
+    /// must be intentional and justified (changing this test = changing the spec).
+    #[test]
+    fn test_default_budget_matches_spec_envelope() {
+        let b = ResourceBudget::default();
+        assert_eq!(
+            b.max_tiles, 8,
+            "default max_tiles must be 8 (spec §Per-Agent Resource Envelope)"
+        );
+        assert_eq!(
+            b.max_texture_bytes,
+            256 * 1024 * 1024,
+            "default max_texture_bytes must be 256 MiB (spec §Per-Agent Resource Envelope)"
+        );
+        assert!(
+            (b.max_update_rate_hz - 30.0_f32).abs() < f32::EPSILON,
+            "default max_update_rate_hz must be 30.0 Hz"
+        );
+        assert_eq!(
+            b.max_nodes_per_tile, 32,
+            "default max_nodes_per_tile must be 32"
+        );
+        assert_eq!(
+            b.max_active_leases, 8,
+            "default max_active_leases must be 8"
+        );
+        assert_eq!(
+            b.max_concurrent_streams, 0,
+            "max_concurrent_streams must be 0 in v1"
+        );
+    }
+
+    /// Asserts that `max_active_leases` is within the hard-max range [1, 64]
+    /// documented in the spec.
+    #[test]
+    fn test_default_max_active_leases_within_hard_max_range() {
+        let b = ResourceBudget::default();
+        assert!(b.max_active_leases >= 1, "max_active_leases must be ≥ 1");
+        assert!(
+            b.max_active_leases <= 64,
+            "max_active_leases must be ≤ 64 (hard max)"
         );
     }
 }
