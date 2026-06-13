@@ -2462,6 +2462,20 @@ impl ProjectionAuthority {
             .map(|session| session.owner_token_verifier.as_str())
     }
 
+    /// Test-only: inject a coalescer entry for `projection_id` without an
+    /// associated session entry.
+    ///
+    /// This puts the authority into an abnormal state that would not arise in
+    /// production (every `record_append` is paired with a live session under
+    /// normal operation), but is needed to regression-test the drain loop's
+    /// `Err` branch (hud-hkaw2): if `take_due_portal_update` returns
+    /// `Err(ProjectionNotFound)` and the coalescer entry is not cleared, the
+    /// drain loop spins forever.
+    pub fn inject_orphan_coalescer_entry_for_test(&mut self, projection_id: &str) {
+        self.cadence_coalescer
+            .record_append(projection_id, b"test-orphan".to_vec(), 1, 0);
+    }
+
     pub fn handle_attach(
         &mut self,
         request: AttachRequest,

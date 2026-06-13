@@ -33,8 +33,8 @@
 //!
 //! - **hud-ttq97** (submitted_at_us telemetry bucket): the `submitted_at_us`
 //!   field of `PortalTranscriptUpdate` is included in `CliPortalDrainRecord`
-//!   and currently logged at trace level. A structured telemetry bucket should
-//!   be added here once hud-ttq97 lands.
+//!   as an arrival→present latency anchor. No structured telemetry bucket is
+//!   wired yet; that hook point is reserved for hud-ttq97.
 //!
 //! - **hud-0528i** (follow-tail notify_tile_content_appended): wired. After the
 //!   adapter emits a `RenderPortal` command, `CliPortalDrainRecord::append_geometry`
@@ -139,15 +139,11 @@ struct PortalDriveState {
     token_overrides: DesignTokenMap,
     /// Estimated content height (px) from the last `RenderPortal` drain per portal.
     ///
-    /// Used alongside `prev_visible_bytes` to detect head-trim events: a decrease in
-    /// both `visible_transcript_bytes` AND the computed content height indicates that
-    /// the coalescer (64 KiB cap) or visible-window (16 KiB cap) trimmed head content.
+    /// A decrease in this value between consecutive drains is the authoritative signal
+    /// that the visible transcript shrank (head-trim event).  The height is the direct
+    /// observable used by the caller for scroll accounting via
+    /// `InputProcessor::notify_head_content_removed` (hud-pkg2g, hud-hkaw2).
     prev_content_height_px: HashMap<String, f32>,
-    /// Visible-transcript byte count from the last `RenderPortal` drain per portal.
-    ///
-    /// A decrease in this value is the observable signal that a head-trim occurred
-    /// (hud-pkg2g).
-    prev_visible_bytes: HashMap<String, usize>,
 }
 
 impl PortalDriveState {
@@ -156,7 +152,6 @@ impl PortalDriveState {
             adapters: HashMap::new(),
             token_overrides: DesignTokenMap::new(),
             prev_content_height_px: HashMap::new(),
-            prev_visible_bytes: HashMap::new(),
         }
     }
 
@@ -188,7 +183,6 @@ impl PortalDriveState {
     fn detach_adapter(&mut self, projection_id: &str) {
         self.adapters.remove(projection_id);
         self.prev_content_height_px.remove(projection_id);
-        self.prev_visible_bytes.remove(projection_id);
     }
 
     /// Apply a new token override map: resolve, then propagate to all live adapters.
@@ -1476,8 +1470,17 @@ fn drain_and_emit_portal_updates(
             }
             Err(_) => {
                 // Projection not found or expired — clean up the adapter to
-                // prevent leaks and continue draining other portals.
+                // prevent leaks.
+                //
+                // LOOP-TERMINATION INVARIANT: we must also remove the pending
+                // coalescer entry via `expire_projection` so that
+                // `next_due_projection_id` no longer returns this `proj_id`.
+                // Without this call the coalescer entry remains pending,
+                // `next_due_projection_id` keeps returning the same stale key,
+                // `take_due_portal_update` keeps returning `Err`, and the drain
+                // loop spins forever (latent infinite loop, hud-hkaw2).
                 portal_drive.detach_adapter(&proj_id);
+                authority.expire_projection(&proj_id);
                 continue;
             }
         };
@@ -1593,32 +1596,39 @@ fn drain_and_emit_portal_updates(
 
         // hud-pkg2g: detect head-trim and emit PortalHeadTrimGeometry.
         //
-        // A head-trim has occurred when visible_transcript_bytes decreased AND
-        // new_content_height_px (from append_geometry) also decreased relative to
-        // the previous drain for this portal.  Two trim sites produce this signal:
+        // A content-height decrease between consecutive `RenderPortal` drains
+        // indicates that content was removed from the head of the visible
+        // transcript.  Two trim sites produce this:
         //   1. PortalCadenceCoalescer::record_append (64 KiB cap): drops oldest
         //      bytes from the payload snapshot to keep it within MAX_PORTAL_SNAPSHOT_BYTES.
         //   2. visible_transcript_window (16 KiB cap): slices the retained transcript
         //      to the newest max_visible_transcript_bytes bytes.
+        //
+        // Detection criterion: new_content_height_px < prev_content_height_px.
+        // The height is the authoritative signal because the runtime caller uses
+        // new_content_height_px (from append_geometry) as the total content height
+        // for scroll accounting.  Any decrease — regardless of whether the byte
+        // count also decreased — means the caller must receive a
+        // notify_head_content_removed call before notify_tile_content_appended,
+        // so that ScrollTileState::total_content_height_px is correct when the
+        // follow-tail bound is recomputed (spec §3.3, hud-hkaw2 fix).
+        //
+        // Note: the previous dual-condition (bytes < prev_bytes && height <
+        // prev_height) was overly restrictive — it would miss a height shrink
+        // that occurred without a corresponding byte-count decrease (possible when
+        // line counts change due to text reshaping without total byte loss).
         //
         // The runtime caller MUST call:
         //   input_processor.notify_head_content_removed(tile_id, g.removed_height_px)
         // BEFORE notify_tile_content_appended, so ScrollTileState content-height
         // fields are correct when the follow-tail bound is recomputed (spec §3.3).
         let head_trim_geometry = if let Some(ref ag) = append_geometry {
-            let prev_bytes = portal_drive
-                .prev_visible_bytes
-                .get(proj_id.as_str())
-                .copied()
-                .unwrap_or(0);
             let prev_height = portal_drive
                 .prev_content_height_px
                 .get(proj_id.as_str())
                 .copied()
                 .unwrap_or(0.0);
-            if update.visible_transcript_bytes < prev_bytes
-                && ag.new_content_height_px < prev_height
-            {
+            if ag.new_content_height_px < prev_height {
                 let removed_height_px = prev_height - ag.new_content_height_px;
                 Some(PortalHeadTrimGeometry { removed_height_px })
             } else {
@@ -1627,14 +1637,11 @@ fn drain_and_emit_portal_updates(
         } else {
             None
         };
-        // Update per-portal tracking for the next drain cycle (RenderPortal only).
+        // Update per-portal height tracking for the next drain cycle (RenderPortal only).
         if let Some(ref ag) = append_geometry {
             portal_drive
                 .prev_content_height_px
                 .insert(proj_id.clone(), ag.new_content_height_px);
-            portal_drive
-                .prev_visible_bytes
-                .insert(proj_id.clone(), update.visible_transcript_bytes);
         }
 
         // TODO(hud-ttq97): record submitted_at_us → server_timestamp_wall_us as
@@ -2859,6 +2866,173 @@ mod tests {
             !advanced,
             "spec §3.3: scrolled-back tile must NOT advance after append+head-trim; \
              advanced=true means viewport jumped to tail"
+        );
+    }
+
+    // ── hud-hkaw2: drain Err-branch clears coalescer entry ───────────────────
+
+    /// Regression test for hud-hkaw2 bug (a): the `Err` branch of
+    /// `drain_and_emit_portal_updates` must call `expire_projection` to remove
+    /// the orphan coalescer entry.
+    ///
+    /// Without the fix, `next_due_projection_id` keeps returning the stale key,
+    /// `take_due_portal_update` keeps returning `Err(ProjectionNotFound)`, and
+    /// the drain loop spins forever.
+    ///
+    /// The test injects an orphan coalescer entry (coalescer entry without a
+    /// corresponding session) via the test-only helper, then calls
+    /// `drain_and_emit_portal_updates` and asserts it terminates and returns an
+    /// empty record set (the orphan key produced no usable update).
+    #[test]
+    fn drain_terminates_on_orphan_coalescer_entry() {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        // Inject a coalescer entry for a projection that has no session.
+        // This simulates the state that would arise if a session was removed
+        // while a coalescer entry was still pending (race condition or bug).
+        authority.inject_orphan_coalescer_entry_for_test("orphan-portal");
+
+        // drain_and_emit_portal_updates MUST terminate (not loop forever).
+        // If the Err branch does not call expire_projection, this call hangs.
+        let records = drain_and_emit_portal_updates(&mut authority, &mut drive, 100);
+
+        // The orphan key had no session, so no usable record was produced.
+        assert!(
+            records.is_empty(),
+            "drain on orphan coalescer entry must produce no records; got {records:?}"
+        );
+
+        // Confirm the coalescer entry was cleared: a second drain must also
+        // terminate immediately and produce no records.
+        let second = drain_and_emit_portal_updates(&mut authority, &mut drive, 200);
+        assert!(
+            second.is_empty(),
+            "second drain after orphan cleanup must also be empty; got {second:?}"
+        );
+    }
+
+    // ── hud-hkaw2: height-only head-trim detection ────────────────────────────
+
+    /// Regression test for hud-hkaw2 bug (b): `head_trim_geometry` must be
+    /// emitted when `new_content_height_px` shrinks between consecutive drains,
+    /// even when `visible_transcript_bytes` does NOT shrink (or grows).
+    ///
+    /// The old dual-condition (`bytes_shrank && height_shrank`) would miss this
+    /// case. The fixed single condition (`height_shrank`) fires correctly.
+    ///
+    /// Byte/line layout (max_vis=30B):
+    ///
+    ///   drain1 (CreatePortalTile): publish seed unit "S" (1B, 1 line).
+    ///   [register tile]
+    ///   drain2 (RenderPortal): publish many-lines unit "\n" × 24 = 24B, 25 lines.
+    ///     Visible window: 1B + 24B = 25B ≤ 30B → both units visible.
+    ///     visible_bytes=25, lines: max(1,1) + max(1,25) = 26 lines.
+    ///     prev_content_height_px stored = 26 * line_h.
+    ///   drain3 (RenderPortal): publish flat unit "B" × 30 = 30B, 1 line.
+    ///     Visible window from tail: 30B → cumulative=30 ≤ 30B ✓.
+    ///     Next unit (24B) → cumulative=54 > 30 → EVICTED.
+    ///     Also seed (1B) → would also be evicted.
+    ///     Visible: [flat(30B)] → visible_bytes=30 (GREW from 25), lines=1.
+    ///     new_content_height_px = 1 * line_h < prev (26 * line_h) → head_trim fires!
+    ///     Without the height-only fix (old bytes_shrank && height_shrank):
+    ///       bytes_shrank = (30 < 25) = false → head_trim would NOT fire (bug).
+    ///     With the height-only fix (height_shrank):
+    ///       height_shrank = (1*line_h < 26*line_h) = true → head_trim fires.
+    #[test]
+    fn head_trim_geometry_emitted_when_height_shrinks_without_byte_shrink() {
+        // max_vis = 30B: seed(1B) + many-lines(24B) = 25B ≤ 30B fit together;
+        // flat(30B) alone = 30B ≤ 30B fits, but flat + many-lines = 54B > 30B evicts many-lines.
+        let max_vis: usize = 30;
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            max_visible_transcript_bytes: max_vis,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let token_a = attach_projection(&mut authority, "proj-a");
+        drive.attach_adapter("proj-a", Vec::new());
+
+        // drain1: CreatePortalTile. Seed unit: 1B, 1 line.
+        publish_output(&mut authority, "proj-a", &token_a, "S", 20);
+        let drain1 = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+        assert_eq!(drain1.len(), 1, "drain1 must produce one record");
+        // CreatePortalTile (no tile yet): append_geometry must be None.
+        assert!(
+            drain1[0].append_geometry.is_none(),
+            "drain1 (CreatePortalTile) must not carry append_geometry"
+        );
+
+        // Register the tile so subsequent drains produce RenderPortal.
+        let fake_tile_id = vec![0xAA, 0xBB];
+        drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .record_created_tile(fake_tile_id);
+
+        // drain2: many-lines unit: "\n" × 24 = 24B, 25 lines.
+        // Visible window after: seed(1B) + many-lines(24B) = 25B ≤ 30B → both visible.
+        // The drain adapter counts lines: seed("S") = 1 line, many-lines(24 newlines) = 25 lines.
+        // total_lines = 1 + 25 = 26; prev_content_height_px = 26 * line_h is stored.
+        let many_lines = "\n".repeat(24);
+        assert_eq!(
+            many_lines.len(),
+            24,
+            "many_lines must be exactly 24 bytes; got {}",
+            many_lines.len()
+        );
+        let ts2 = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 25;
+        publish_output(&mut authority, "proj-a", &token_a, &many_lines, ts2);
+        let drain2 = drain_and_emit_portal_updates(&mut authority, &mut drive, ts2);
+        assert_eq!(drain2.len(), 1, "drain2 must produce one record");
+        let bytes_drain2 = drain2[0].visible_transcript_bytes;
+        assert_eq!(bytes_drain2, 25, "drain2 must show 25 visible bytes");
+        // No head_trim on drain2 (content grew, not shrunk).
+        assert!(
+            drain2[0].head_trim_geometry.is_none(),
+            "drain2 must not carry head_trim_geometry (content grew)"
+        );
+
+        // drain3: flat unit "B" × 30 = 30B, 1 line.
+        // Visible window from tail: flat(30B) ≤ 30B → fits; many-lines(24B) → 54B > 30 → evicted.
+        // Visible: [flat(30B)], visible_bytes=30 (GREW from 25), lines=1.
+        // new_content_height_px = 1 * line_h < prev_content_height_px (26 * line_h) → head_trim fires.
+        let flat_unit = "B".repeat(30);
+        assert_eq!(flat_unit.len(), 30, "flat_unit must be exactly 30 bytes");
+        let ts3 = ts2 + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 25;
+        publish_output(&mut authority, "proj-a", &token_a, &flat_unit, ts3);
+        let drain3 = drain_and_emit_portal_updates(&mut authority, &mut drive, ts3);
+        assert_eq!(drain3.len(), 1, "drain3 must produce one record");
+
+        let bytes_drain3 = drain3[0].visible_transcript_bytes;
+        // Bytes must NOT have shrunk (they grew from 25 to 30): this is the
+        // key invariant that the old dual-condition would have used to suppress
+        // head_trim_geometry (bytes_shrank = false → old code returned None).
+        assert!(
+            bytes_drain3 >= bytes_drain2,
+            "visible_transcript_bytes must not shrink in drain3 (bytes grew: {bytes_drain2}→{bytes_drain3}); \
+             this is the invariant that exposes the old dual-condition bug"
+        );
+
+        // KEY ASSERTION (hud-hkaw2 fix): head_trim_geometry must be Some because
+        // content height shrank (26 lines → 1 line) even though byte count grew.
+        // Old dual-condition: (bytes_shrank=false) && (height_shrank=true) = false → None (BUG).
+        // Fixed height-only condition: (height_shrank=true) → Some (CORRECT).
+        let htg = drain3[0].head_trim_geometry.expect(
+            "head_trim_geometry must be Some: content height shrank (many-lines unit evicted \
+             by flat unit) even though visible_transcript_bytes grew — height-only condition \
+             (hud-hkaw2 fix) must fire",
+        );
+        assert!(
+            htg.removed_height_px > 0.0,
+            "removed_height_px must be positive; got {}",
+            htg.removed_height_px
         );
     }
 }
