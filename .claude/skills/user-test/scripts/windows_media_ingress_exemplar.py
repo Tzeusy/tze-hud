@@ -13,12 +13,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import http.server
 import json
 import math
 import os
 import re
+import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import webbrowser
@@ -232,10 +235,24 @@ def build_video_only_sdp_offer(
     return "\r\n".join(lines).encode("utf-8")
 
 
-def build_source_evidence_html(video_id: str = YOUTUBE_VIDEO_ID) -> str:
-    """Return a small external-player evidence page using the official embed URL."""
+def build_source_evidence_html(
+    video_id: str = YOUTUBE_VIDEO_ID,
+    origin_port: int | None = None,
+) -> str:
+    """Return a small external-player evidence page using the official embed URL.
+
+    When *origin_port* is provided the embed URL includes ``?origin=http://127.0.0.1:<port>``
+    so that the YouTube IFrame player receives a valid HTTP origin instead of a
+    null/file:// origin.  Pass the port chosen by the local HTTP server (see
+    :func:`_start_local_http_server`).
+    """
     video_id = validate_youtube_video_id(video_id)
-    embed_url = f"https://www.youtube.com/embed/{video_id}"
+    if origin_port is not None:
+        origin = f"http://127.0.0.1:{origin_port}"
+        embed_url = f"https://www.youtube.com/embed/{video_id}?origin={origin}&autoplay=1"
+    else:
+        origin = ""
+        embed_url = f"https://www.youtube.com/embed/{video_id}"
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -340,49 +357,164 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _pick_free_port() -> int:
+    """Return an ephemeral TCP port that is free on 127.0.0.1 at the time of call."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _start_local_http_server(
+    serve_dir: Path,
+    port: int,
+) -> http.server.HTTPServer:
+    """Start a daemon HTTP server bound to 127.0.0.1:<port> serving *serve_dir*.
+
+    Returns the running :class:`http.server.HTTPServer` instance.  The server
+    runs in a daemon thread so it is automatically stopped when the process
+    exits.  Callers that need explicit teardown can call ``server.shutdown()``.
+    """
+
+    class _Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            super().__init__(*a, directory=str(serve_dir), **kw)
+
+        def log_message(self, fmt: str, *args: Any) -> None:  # silence request log
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", port), _Handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    return server
+
+
 def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
     video_id = validate_youtube_video_id(args.video_id)
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    html_path = output_dir / "youtube_source_evidence.html"
-    html = build_source_evidence_html(video_id)
-    html_path.write_text(html, encoding="utf-8")
+    html_filename = "youtube_source_evidence.html"
+    html_path = output_dir / html_filename
     official_url = f"https://www.youtube.com/embed/{video_id}"
 
     launched_by = "dry-run"
-    if not args.dry_run:
-        if args.windows_host:
-            windows_user = validate_ssh_arg("windows_user", args.windows_user)
-            windows_host = validate_ssh_arg("windows_host", args.windows_host)
-            cmd = [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                f"ConnectTimeout={args.connect_timeout_s}",
-                "-l",
-                windows_user,
-            ]
-            if args.ssh_key:
-                cmd.extend(["-i", args.ssh_key])
-            cmd.append(windows_host)
-            remote_html_b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
-            remote_script = (
-                f"$htmlBytes=[Convert]::FromBase64String('{remote_html_b64}');"
-                "$html=[Text.Encoding]::UTF8.GetString($htmlBytes);"
-                "$path=Join-Path $env:TEMP 'tze_hud_youtube_source_evidence.html';"
-                "Set-Content -LiteralPath $path -Value $html -Encoding UTF8;"
-                "Start-Process -FilePath $path"
-            )
-            encoded_script = base64.b64encode(remote_script.encode("utf-16le")).decode(
-                "ascii"
-            )
-            cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", encoded_script])
-            subprocess.run(cmd, check=True)
-            launched_by = f"ssh:{windows_user}@{windows_host}"
-        else:
-            webbrowser.open(html_path.as_uri(), new=1, autoraise=True)
-            launched_by = "local-browser"
+    http_origin: str | None = None
+
+    if args.dry_run:
+        # Dry-run: generate HTML without an HTTP origin (no server is started).
+        html = build_source_evidence_html(video_id)
+        html_path.write_text(html, encoding="utf-8")
+    elif args.windows_host:
+        # Windows SSH path: spin up a PowerShell HttpListener on the remote host
+        # so the YouTube IFrame player receives a valid HTTP origin.
+        windows_user = validate_ssh_arg("windows_user", args.windows_user)
+        windows_host = validate_ssh_arg("windows_host", args.windows_host)
+
+        # The PowerShell script:
+        # 1. Picks a free port on the Windows host.
+        # 2. Generates the HTML with the correct ?origin= param baked in.
+        # 3. Writes it under a temp sidecar directory.
+        # 4. Starts an HttpListener serving that directory.
+        # 5. Opens Chrome (or the default browser) at the http:// URL.
+        # The script keeps running until the process exits; the listener serves
+        # requests in a background thread.
+        ps_script = r"""
+$port = (Get-NetTCPConnection -State Listen | Where-Object { $_.LocalAddress -eq '0.0.0.0' } | Measure-Object).Count
+# Pick a free ephemeral port via TcpListener
+$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+$listener.Start()
+$port = $listener.LocalEndpoint.Port
+$listener.Stop()
+
+$origin = "http://127.0.0.1:$port"
+$embedUrl = "https://www.youtube.com/embed/""" + video_id + r"""?origin=$origin&autoplay=1"
+$html = @"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>tze_hud YouTube source evidence</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #111; }
+    iframe { width: 100vw; height: 100vh; border: 0; }
+  </style>
+</head>
+<body>
+  <iframe
+    id="youtube-source-evidence"
+    width="960"
+    height="540"
+    src="$embedUrl"
+    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+    allowfullscreen>
+  </iframe>
+</body>
+</html>
+"@
+$dir = Join-Path $env:TEMP "tze_hud_youtube_sidecar_$port"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$htmlPath = Join-Path $dir "youtube_source_evidence.html"
+Set-Content -LiteralPath $htmlPath -Value $html -Encoding UTF8
+
+$http = [System.Net.HttpListener]::new()
+$http.Prefixes.Add("http://127.0.0.1:$port/")
+$http.Start()
+$job = Start-Job -ScriptBlock {
+    param($h, $d)
+    while ($h.IsListening) {
+        try {
+            $ctx = $h.GetContext()
+            $req = $ctx.Request
+            $resp = $ctx.Response
+            $rel = $req.Url.AbsolutePath.TrimStart('/')
+            if ($rel -eq '') { $rel = 'youtube_source_evidence.html' }
+            $file = Join-Path $d $rel
+            if (Test-Path $file) {
+                $bytes = [System.IO.File]::ReadAllBytes($file)
+                $resp.ContentLength64 = $bytes.Length
+                $resp.OutputStream.Write($bytes, 0, $bytes.Length)
+            } else {
+                $resp.StatusCode = 404
+            }
+            $resp.OutputStream.Close()
+        } catch { }
+    }
+} -ArgumentList $http, $dir
+
+Start-Process "http://127.0.0.1:$port/youtube_source_evidence.html"
+Start-Sleep -Seconds 5
+"""
+        cmd = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            f"ConnectTimeout={args.connect_timeout_s}",
+            "-l",
+            windows_user,
+        ]
+        if args.ssh_key:
+            cmd.extend(["-i", args.ssh_key])
+        cmd.append(windows_host)
+        encoded_script = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
+        cmd.extend(["powershell", "-NoProfile", "-EncodedCommand", encoded_script])
+        subprocess.run(cmd, check=True)
+        launched_by = f"ssh:{windows_user}@{windows_host}"
+        # HTML was generated dynamically on the Windows host; write a local copy
+        # without the port (port is not known on the Linux side for Windows path).
+        html = build_source_evidence_html(video_id)
+        html_path.write_text(html, encoding="utf-8")
+    else:
+        # Local browser path: spin up a Python HTTP server on a free port so the
+        # IFrame player receives a valid HTTP origin.
+        port = _pick_free_port()
+        http_origin = f"http://127.0.0.1:{port}"
+        html = build_source_evidence_html(video_id, origin_port=port)
+        html_path.write_text(html, encoding="utf-8")
+        _start_local_http_server(output_dir, port)
+        url = f"{http_origin}/{html_filename}"
+        webbrowser.open(url, new=1, autoraise=True)
+        launched_by = "local-browser-http"
 
     return {
         "lane": "youtube-source-evidence",
@@ -390,6 +522,7 @@ def launch_youtube_sidecar(args: argparse.Namespace) -> dict[str, Any]:
         "official_player_url": official_url,
         "html_evidence_path": str(html_path),
         "launched_by": launched_by,
+        "http_origin": http_origin,
         "raw_youtube_frame_bridge": RAW_YOUTUBE_BRIDGE_DECISION,
         "download_or_extraction": "not_used",
         "hud_runtime_receives_youtube_frames": False,
