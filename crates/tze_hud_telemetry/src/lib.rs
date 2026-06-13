@@ -27,7 +27,8 @@ pub use record::{
     DegradationEvent, FrameTelemetry, FrameTimeShedEvent, LatencyBucket, SessionSummary,
 };
 pub use resource_monitor::{
-    AgentFootprint, GrowthRatios, ResourceMonitor, ResourceSnapshot, SPEC_GROWTH_TOLERANCE,
+    AgentFootprint, GrowthRatios, MutationAccountant, ResourceMonitor, ResourceSnapshot,
+    SPEC_GROWTH_TOLERANCE,
 };
 pub use validation::{
     AssertionOutcome, BudgetAssertion, CalibrationDimension, HardwareFactors, ValidationReport,
