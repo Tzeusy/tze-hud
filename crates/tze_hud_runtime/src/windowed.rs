@@ -3475,7 +3475,17 @@ impl WinitApp {
         };
         let Some(tab_id) = active_tab else { return };
 
-        // ── Composer draft intercept (§4.1) ──────────────────────────────
+        // ── Composer draft intercept (§4.4) ──────────────────────────────
+        //
+        // Spec §4.4: NO character input reaches the agent while a composer
+        // region is focused — regardless of what route_character_to_composer
+        // returns.  In particular, when the clipboard text is ENTIRELY control
+        // characters, route_character_to_composer sanitises it to an empty
+        // string and paste("") returns EditOutcome::Unchanged (nothing was
+        // mutated in the draft).  Without an unconditional early-return here,
+        // the Unchanged case would fall through to the agent dispatch path
+        // below, leaking input to the agent while the composer is focused
+        // (hud-60hgf).
         if self.state.input_processor.is_composer_active() {
             // Capture the input-started-at instant for local-ack latency
             // measurement (hud-r3ax6 / hud-o9ybl).
@@ -3502,11 +3512,25 @@ impl WinitApp {
                     );
                 }
             }
-            // Any outcome other than Unchanged means the manager handled it;
-            // do not forward to the agent as a raw CharacterEvent.
+            // Truncate for debug logs: raw.character carries clipboard text and
+            // can be arbitrarily large.  Formatting is lazy (tracing skips it
+            // below info in production), but defensive truncation avoids
+            // surprises in debug builds with large paste payloads.
+            let char_log_preview = {
+                const MAX: usize = 64;
+                if raw.character.len() <= MAX {
+                    std::borrow::Cow::Borrowed(raw.character.as_str())
+                } else {
+                    let mut end = MAX;
+                    while end > 0 && !raw.character.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    std::borrow::Cow::Owned(format!("{}…", &raw.character[..end]))
+                }
+            };
             if outcome != tze_hud_input::EditOutcome::Unchanged {
                 tracing::debug!(
-                    character = %raw.character,
+                    character = %char_log_preview,
                     outcome = ?outcome,
                     "composer: Character consumed by draft manager"
                 );
@@ -3517,8 +3541,21 @@ impl WinitApp {
                 if !char_is_terminal {
                     self.push_local_composer_echo(composer_input_started);
                 }
-                return;
+            } else {
+                // EditOutcome::Unchanged: the draft was not mutated (e.g. the
+                // clipboard contained only control characters that sanitised to
+                // empty, or the paste arrived while the composer was at
+                // capacity and already at its limit).  No echo push needed.
+                // Unconditional early-return below ensures the event still
+                // never reaches the agent path (§4.4).
+                tracing::debug!(
+                    character = %char_log_preview,
+                    "composer: Character absorbed (Unchanged — all-control or no-op paste); not forwarded to agent (§4.4)"
+                );
             }
+            // §4.4 hard gate: the composer is active, so we MUST NOT fall
+            // through to the agent dispatch path below under any outcome.
+            return;
         }
 
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();

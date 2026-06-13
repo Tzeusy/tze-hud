@@ -3936,6 +3936,21 @@ mod tests {
     /// Pure control-character text (e.g. a tab or bell) routed to a focused
     /// composer must similarly be consumed (not leak to agent stream), and the
     /// draft must contain the sanitised result (control chars stripped).
+    ///
+    /// Regression test for hud-60hgf: `dispatch_character_event` in the
+    /// runtime was incorrectly conditioned on `outcome != Unchanged` to decide
+    /// whether to block the agent path.  For an all-control-char clipboard
+    /// payload the sanitised string is empty, so `paste("")` returns
+    /// `EditOutcome::Unchanged` — but the event MUST still not reach the agent
+    /// (spec §4.4).  The fix adds an unconditional early-return whenever
+    /// `is_composer_active()` is true, regardless of outcome.
+    ///
+    /// This test verifies:
+    /// 1. `is_composer_active()` remains true after the paste (so the runtime
+    ///    guard fires correctly).
+    /// 2. The outcome IS `Unchanged` — confirming this is the exact case that
+    ///    previously leaked.
+    /// 3. The draft text is not mutated by the all-control paste.
     #[test]
     fn focused_composer_control_char_paste_is_consumed() {
         let (mut scene, tab_id, _tile_id, _composer_id, _plain_id) = setup_composer_scene();
@@ -3960,11 +3975,8 @@ mod tests {
         let ctrl_text = "\x01\x07\x1b";
         let (outcome, _batch) = processor.route_character_to_composer(ctrl_text);
 
-        // Must be consumed (Unchanged → leak to agent; anything else → consumed).
-        // An all-control string sanitises to empty, so paste() returns Unchanged
-        // because the sanitised text is empty — that is acceptable: no mutation
-        // occurred and no raw text leaks to the agent since the caller checks the
-        // composer-active flag before forwarding.  Verify the draft is unchanged.
+        // The draft must be unchanged — the control chars sanitise to empty,
+        // so nothing was inserted.
         let draft_text = processor
             .composer_draft_manager
             .draft()
@@ -3974,12 +3986,26 @@ mod tests {
             draft_text, "abc",
             "draft must be unchanged for all-control paste (nothing to insert)"
         );
+
         // The outcome for an empty sanitised paste is Unchanged (nothing mutated).
-        // What matters most is that `is_composer_active()` remains true — the
-        // caller in dispatch_character_event gates agent forwarding on `outcome !=
-        // Unchanged` OR `!is_composer_active()`.  For the all-control case the
-        // guard `is_composer_active()` is sufficient to prevent the leak.
-        let _ = outcome; // outcome not asserted here; the draft-integrity check above is the signal
+        // This is the exact case that triggered the hud-60hgf bug: the runtime's
+        // `dispatch_character_event` had `if outcome != Unchanged { return }` which
+        // fell through to the agent path when outcome was Unchanged.  The fix adds
+        // an unconditional `return` after the composer block whenever
+        // `is_composer_active()`.  Assert Unchanged here so any future regression
+        // in the sanitise→paste path is immediately visible.
+        assert_eq!(
+            outcome,
+            EditOutcome::Unchanged,
+            "all-control-char paste must return Unchanged (empty sanitised text → no mutation)"
+        );
+
+        // The composer must still be active after the no-op paste (no terminal
+        // event was routed), so the runtime guard can fire.
+        assert!(
+            processor.is_composer_active(),
+            "composer must remain active after all-control paste (no submit/cancel occurred)"
+        );
     }
 
     /// Ctrl+V KeyDown must be consumed by the composer draft manager so it is
