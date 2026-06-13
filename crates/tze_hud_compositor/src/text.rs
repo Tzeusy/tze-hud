@@ -44,6 +44,7 @@ use tze_hud_scene::types::{
 };
 use wgpu::{Device, MultisampleState, Queue};
 
+use crate::fonts::bundled_font_system;
 use crate::overflow::{self, TruncationResult, TruncationViewport};
 
 // ─── TruncationCache ─────────────────────────────────────────────────────────
@@ -276,7 +277,24 @@ impl TextRasterizer {
     /// This must be called after the wgpu `Device` and `Queue` are available
     /// (i.e. after `Compositor::new_headless` or `new_windowed`).
     pub fn new(device: &Device, queue: &Queue, format: wgpu::TextureFormat) -> Self {
-        let font_system = FontSystem::new();
+        // Build a self-contained FontSystem from bundled fonts only — no OS
+        // system-font scan.  This makes the compositor reliable on kiosk/minimal
+        // hosts (headless servers, containers, Windows Nano) where system fonts
+        // are absent or incomplete.  Agent-uploaded fonts are still accepted
+        // afterwards via `load_font_bytes`.
+        //
+        // `bundled_font_system()` uses `FontSystem::new_with_locale_and_db` to
+        // skip `db.load_system_fonts()` and sets family mappings so that
+        // `Family::SansSerif / Monospace / Serif` resolve to the bundled DejaVu
+        // faces rather than the cosmic-text defaults ("Fira Mono" / "Fira Sans" /
+        // "DejaVu Serif") which may not match the faces we actually loaded.
+        let font_system = bundled_font_system();
+
+        tracing::info!(
+            font_face_count = font_system.db().faces().count(),
+            "TextRasterizer initialised with bundled fonts (no system-font scan)"
+        );
+
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
