@@ -26,6 +26,9 @@ Library and dependency audits. Decisions recorded here have binding effect on im
 | File | Subject |
 |------|---------|
 | `20260612_project_review.md` | Full project audit — §4 topology, §5.13 doc estate, §8 risks, §9 roadmap, §10 shape |
+| `20260612_enforcement_machinery_epic_report.md` | Epic closeout report for enforcement-machinery remediation (hud-1aswu) |
+| `20260612_reconciliation_gen1.md` | Gen-1 reconciliation for enforcement-machinery audit remediation (hud-1aswu.6) |
+| `20260613_validation_framework_verification.md` | Validation-framework conformance audit and OpenSpec sync verification (hud-olxxd) |
 | `android-gstreamer-sdk-build-spike.md` | Android GStreamer SDK build investigation |
 | `cpal-audio-io-crate-audit.md` | `cpal` audio I/O crate fitness |
 | `gstreamer-media-pipeline-audit.md` | GStreamer media pipeline audit |
