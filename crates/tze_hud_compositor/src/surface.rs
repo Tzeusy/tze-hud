@@ -28,14 +28,60 @@ use std::any::Any;
 
 // ─── CompositorFrame ─────────────────────────────────────────────────────────
 
-/// Guard that clears `WindowSurface::encoding_in_progress` on drop. Stored
-/// inside `CompositorFrame._guard` so the flag is held for the entire
-/// encode+submit lifecycle and released when the frame is dropped.
-struct EncodingGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+/// Shared swapchain-ownership state for a `WindowSurface`, guarded by a single
+/// mutex (`WindowSurface::swapchain`).
+///
+/// Bundling the pending texture and the "encode in progress" marker under ONE
+/// mutex is what closes the acquire→submit vs present/reconfigure race
+/// (Bug B Layer-2, hud-hj0xb). The previous design used a separate
+/// `AtomicBool` checked *before* the pending-texture lock was taken, leaving a
+/// check-then-act (TOCTOU) gap: the main thread could observe `encoding=false`,
+/// then — before it acquired the lock — the compositor could begin the next
+/// frame (`encoding=true`, reusing the same `SurfaceTexture`), after which the
+/// main thread would take and present (destroy) that texture while the
+/// compositor's `TextureView` was still mid-submit, producing the wgpu
+/// validation error "Surface Texture has been destroyed".
+///
+/// With both fields under one lock and a condvar, the main thread checks
+/// `encoding` *while holding the lock* and blocks on the condvar until the
+/// compositor's submit completes, so the in-flight surface texture cannot be
+/// destroyed mid-submit.
+struct SwapchainSlot {
+    /// `SurfaceTexture` acquired by the compositor thread and awaiting
+    /// presentation on the main thread. `None` between present and the next
+    /// acquire, or after a reconfigure cleared it.
+    pending: Option<wgpu::SurfaceTexture>,
+    /// `true` from the start of `acquire_frame()` until the `CompositorFrame`
+    /// guard is dropped (after `queue.submit()`). While set, the compositor
+    /// holds a `TextureView` referencing `pending`, so the texture MUST NOT be
+    /// presented (taken/destroyed) or invalidated by a reconfigure.
+    encoding: bool,
+}
+
+/// RAII guard that marks the end of the compositor's encode→submit critical
+/// section. Stored inside `CompositorFrame._guard` so it lives for the entire
+/// encode+submit lifecycle; on drop (after `queue.submit()`) it clears
+/// `encoding` under the swapchain mutex and wakes any main-thread presenter or
+/// compositor reconfigure waiting on the condvar.
+///
+/// This is the release half of the acquire→submit serialization: holding the
+/// `encoding` marker (not the raw `MutexGuard`, which is neither `Send` nor
+/// `'static`) lets the compositor run encode+submit *without* keeping the
+/// mutex locked — so unrelated GPU work is not serialized and the main thread
+/// only blocks when it actually needs the in-flight texture.
+struct EncodingGuard {
+    slot: std::sync::Arc<std::sync::Mutex<SwapchainSlot>>,
+    done: std::sync::Arc<std::sync::Condvar>,
+}
 
 impl Drop for EncodingGuard {
     fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::Release);
+        if let Ok(mut slot) = self.slot.lock() {
+            slot.encoding = false;
+        }
+        // Wake the main thread (present) and/or compositor (reconfigure) that
+        // may be waiting for the in-flight submit to finish.
+        self.done.notify_all();
     }
 }
 
@@ -131,18 +177,22 @@ pub struct WindowSurface {
     pub width: std::sync::atomic::AtomicU32,
     /// Current height in pixels (kept in sync with config).
     pub height: std::sync::atomic::AtomicU32,
-    /// Pending `SurfaceTexture` acquired by the compositor thread and awaiting
-    /// presentation on the main thread.
+    /// Swapchain-ownership state: the pending `SurfaceTexture` awaiting
+    /// presentation plus the compositor's "encode in progress" marker, guarded
+    /// by a single mutex.
     ///
-    /// The compositor stores the texture here in `acquire_frame()` so the main
-    /// thread can retrieve it via `take_pending_texture()` and call
-    /// `SurfaceTexture::present()` without a second swapchain acquire.
-    pub pending_texture: std::sync::Mutex<Option<wgpu::SurfaceTexture>>,
-    /// Flag set by `acquire_frame()` and cleared when the `CompositorFrame` is
-    /// dropped (after `queue.submit()`). While set, `present_pending_texture()`
-    /// spins briefly to avoid presenting (and destroying) the `SurfaceTexture`
-    /// while the compositor thread still holds a `TextureView` referencing it.
-    pub encoding_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// This is the swapchain-ownership mutex the acquire→submit critical
+    /// section is serialized against (Bug B Layer-2, hud-hj0xb). Folding both
+    /// the pending texture and the encoding marker under one lock — rather than
+    /// a separate `AtomicBool` checked before the lock — is what makes the
+    /// main-thread present and the compositor reconfigure unable to destroy a
+    /// surface texture that an in-flight submit still references.
+    swapchain: std::sync::Arc<std::sync::Mutex<SwapchainSlot>>,
+    /// Condition variable paired with `swapchain`. Signalled by the
+    /// `EncodingGuard` drop when the compositor's encode→submit completes, so
+    /// `present_pending_texture()` (main thread) and `reconfigure()`
+    /// (compositor thread) can wait for an in-flight submit without spinning.
+    swapchain_done: std::sync::Arc<std::sync::Condvar>,
     /// Pending resize dimensions signalled from the main thread to the
     /// compositor thread. `(0, 0)` means no resize pending.
     ///
@@ -170,8 +220,11 @@ impl WindowSurface {
             config: std::sync::Mutex::new(config),
             width: std::sync::atomic::AtomicU32::new(width),
             height: std::sync::atomic::AtomicU32::new(height),
-            pending_texture: std::sync::Mutex::new(None),
-            encoding_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            swapchain: std::sync::Arc::new(std::sync::Mutex::new(SwapchainSlot {
+                pending: None,
+                encoding: false,
+            })),
+            swapchain_done: std::sync::Arc::new(std::sync::Condvar::new()),
             pending_resize_width: std::sync::atomic::AtomicU32::new(0),
             pending_resize_height: std::sync::atomic::AtomicU32::new(0),
         }
@@ -193,16 +246,29 @@ impl WindowSurface {
         //   "Texture with '<Surface Texture>' label has been destroyed"
         device.poll(wgpu::Maintain::Wait);
 
-        // wgpu requires all acquired SurfaceTexture images to be dropped before
-        // calling Surface::configure(). During resize races the main thread may
-        // not have presented the last pending image yet; clear it here to avoid:
+        // Serialize against the compositor's acquire→submit critical section
+        // (Bug B Layer-2, hud-hj0xb). `reconfigure()` runs on the compositor
+        // thread at the top of the frame loop, but `Surface::configure()` below
+        // destroys every outstanding swapchain image. If a previous frame's
+        // submit were still in flight (e.g. the main-thread present had not yet
+        // released its `SurfaceTexture`), destroying it here would invalidate a
+        // texture an in-flight `TextureView`/submit still references.
+        //
+        // We take the swapchain lock and block on the condvar until any
+        // `encoding` is finished, then clear `pending` *while still holding the
+        // lock* so no present can take a texture we are about to invalidate.
+        // wgpu also requires all acquired `SurfaceTexture` images to be dropped
+        // before `Surface::configure()`, so clearing `pending` here avoids
         // "SurfaceOutput must be dropped before a new Surface is made".
         {
-            let mut pending = self
-                .pending_texture
-                .lock()
-                .expect("pending_texture lock poisoned");
-            let _ = pending.take();
+            let mut slot = self.swapchain.lock().expect("swapchain lock poisoned");
+            while slot.encoding {
+                slot = self
+                    .swapchain_done
+                    .wait(slot)
+                    .expect("swapchain condvar poisoned");
+            }
+            let _ = slot.pending.take();
         }
         // Clamp to adapter's max texture dimension to avoid wgpu validation errors
         // on GPUs with limits below the requested window size.
@@ -225,61 +291,150 @@ impl WindowSurface {
         );
     }
 
-    /// Take the pending `SurfaceTexture` stored by the compositor thread.
-    ///
-    /// Called from the **main thread** after the compositor signals
-    /// `FrameReadySignal`. Returns `Some(texture)` if a frame is ready,
-    /// `None` if the compositor has not yet produced a frame this cycle.
-    ///
-    /// The caller MUST call `SurfaceTexture::present()` on the returned texture.
-    pub fn take_pending_texture(&self) -> Option<wgpu::SurfaceTexture> {
-        self.pending_texture
-            .lock()
-            .expect("pending_texture lock poisoned")
-            .take()
-    }
-
     /// Present the currently pending swapchain image, if any.
     ///
-    /// This performs `take()+present()` while holding the `pending_texture`
-    /// mutex so the compositor cannot call `get_current_texture()` in the tiny
-    /// window between "take" and "present".
+    /// Called from the **main thread** after the compositor signals
+    /// `FrameReadySignal`. Returns `true` if a texture was presented, `false`
+    /// if no texture was pending.
     ///
-    /// Returns `true` if a texture was presented, `false` if no texture was
-    /// pending.
+    /// ## Serialization (Bug B Layer-2, hud-hj0xb)
+    /// The take+present is performed *while holding the swapchain mutex*, and
+    /// the wait for the compositor's encode→submit to finish happens under that
+    /// same lock via the condvar. This is the fix for the acquire→submit race:
+    /// because the `encoding` check and the `pending.take()` are now atomic
+    /// w.r.t. the compositor (no check-then-act gap), the main thread can never
+    /// take and destroy a `SurfaceTexture` that an in-flight submit's
+    /// `TextureView` still references — which previously produced
+    /// "Surface Texture has been destroyed" on `queue.submit()`.
     pub fn present_pending_texture(&self) -> bool {
+        let mut slot = self.swapchain.lock().expect("swapchain lock poisoned");
+
         // Wait for the compositor thread to finish encoding + submitting before
-        // we take (and destroy) the SurfaceTexture. Without this, the main
-        // thread can present the texture while the compositor's TextureView
-        // still references it, causing "Texture has been destroyed" on submit.
-        //
-        // The spin is bounded: the compositor clears the flag right after
-        // queue.submit() + device.poll(), which is typically < 1ms.
-        let mut spins = 0u32;
-        while self
-            .encoding_in_progress
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            spins += 1;
-            if spins > 10_000 {
-                // Safety valve — don't spin forever if the compositor thread died.
+        // we take (and destroy) the SurfaceTexture. The condvar releases the
+        // lock while parked and re-acquires it on wake, so the compositor can
+        // make progress and the wakeup is observed atomically (no spin, no
+        // TOCTOU). The wait is bounded in practice: the EncodingGuard clears
+        // `encoding` right after queue.submit() + device.poll() (sub-ms).
+        let wait_start = std::time::Instant::now();
+        while slot.encoding {
+            // Safety valve: don't block the main thread forever if the
+            // compositor thread died mid-encode without dropping its guard.
+            let (next, timeout) = self
+                .swapchain_done
+                .wait_timeout(slot, std::time::Duration::from_millis(250))
+                .expect("swapchain condvar poisoned");
+            slot = next;
+            if timeout.timed_out() && slot.encoding {
                 tracing::warn!(
-                    "present_pending_texture: encoding_in_progress stuck after {spins} spins"
+                    elapsed_ms = wait_start.elapsed().as_millis() as u64,
+                    "present_pending_texture: encoding still in progress after timeout; \
+                     presenting anyway (compositor thread may have stalled)"
                 );
                 break;
             }
-            std::hint::spin_loop();
         }
 
-        let mut pending = self
-            .pending_texture
-            .lock()
-            .expect("pending_texture lock poisoned");
-        if let Some(texture) = pending.take() {
+        if let Some(texture) = slot.pending.take() {
             texture.present();
             true
         } else {
             false
+        }
+    }
+
+    /// Finish a successful acquire: release the swapchain lock, then build the
+    /// `EncodingGuard` and the `CompositorFrame`.
+    ///
+    /// The guard is created **after** `drop(slot)` because its `Drop` re-locks
+    /// `self.swapchain`; constructing/holding it while `slot` is still locked
+    /// would deadlock on the non-reentrant `std::sync::Mutex`. The `encoding`
+    /// flag was already set under the lock by `acquire_frame`, so the critical
+    /// section stays open continuously across this hand-off — the guard's drop
+    /// (after `queue.submit()`) is what closes it.
+    fn finish_frame(
+        &self,
+        slot: std::sync::MutexGuard<'_, SwapchainSlot>,
+        view: wgpu::TextureView,
+    ) -> Option<CompositorFrame> {
+        drop(slot);
+        let guard = EncodingGuard {
+            slot: self.swapchain.clone(),
+            done: self.swapchain_done.clone(),
+        };
+        Some(CompositorFrame {
+            view,
+            _guard: Box::new(guard),
+        })
+    }
+
+    /// Handle a `get_current_texture()` error during `acquire_frame`.
+    ///
+    /// Called while holding the swapchain lock (`slot`). Differentiates by
+    /// error variant to avoid wasted GPU calls and log noise during normal
+    /// resize/minimize cycles:
+    ///
+    /// - `Timeout`     — transient; retry once (GPU may have been busy). On a
+    ///   successful retry the texture is stored in `slot.pending` and a view is
+    ///   returned.
+    /// - `Outdated` / `Lost` — surface changed (resize/DPI) or swapchain lost;
+    ///   reconfiguration is required before the next acquire succeeds, so an
+    ///   immediate retry would fail again. Skip the frame.
+    /// - `OutOfMemory` / `Other` — log and skip the frame.
+    ///
+    /// Returns `Some(view)` if a texture was (re)acquired, `None` to skip the
+    /// frame. The caller closes the critical section on `None`.
+    fn acquire_retry_view(
+        &self,
+        slot: &mut SwapchainSlot,
+        err: wgpu::SurfaceError,
+    ) -> Option<wgpu::TextureView> {
+        match err {
+            wgpu::SurfaceError::Timeout => {
+                tracing::warn!(
+                    error = %err,
+                    "WindowSurface::acquire_frame: timeout acquiring texture; retrying once"
+                );
+                match self.surface.get_current_texture() {
+                    Ok(t) => {
+                        let v = t
+                            .texture
+                            .create_view(&wgpu::TextureViewDescriptor::default());
+                        slot.pending = Some(t);
+                        Some(v)
+                    }
+                    Err(e2) => {
+                        tracing::error!(
+                            first_error = %err,
+                            second_error = %e2,
+                            "WindowSurface::acquire_frame: retry after timeout also failed; \
+                             skipping frame (runtime will retry next cycle)"
+                        );
+                        None
+                    }
+                }
+            }
+            wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
+                tracing::warn!(
+                    error = %err,
+                    "WindowSurface::acquire_frame: surface outdated or lost; \
+                     skipping frame to allow reconfiguration"
+                );
+                None
+            }
+            wgpu::SurfaceError::OutOfMemory => {
+                tracing::error!(
+                    error = %err,
+                    "WindowSurface::acquire_frame: out of GPU memory; skipping frame"
+                );
+                None
+            }
+            wgpu::SurfaceError::Other => {
+                tracing::error!(
+                    error = %err,
+                    "WindowSurface::acquire_frame: unexpected surface error; skipping frame"
+                );
+                None
+            }
         }
     }
 }
@@ -294,129 +449,75 @@ impl CompositorSurface for WindowSurface {
     /// e.g., on driver reset or device loss on resume). The caller MUST skip
     /// the render pass and retry on the next frame — this is not a fatal error.
     ///
-    /// The acquired `SurfaceTexture` is stored in `self.pending_texture` so the
-    /// main thread can retrieve it via `take_pending_texture()` and call
-    /// `.present()` — satisfying the macOS/Metal requirement. The
-    /// `CompositorFrame._guard` holds `()` (a no-op) because ownership has been
-    /// transferred to `pending_texture`.
+    /// The acquired `SurfaceTexture` is stored in `swapchain.pending` so the
+    /// main thread can present it via `present_pending_texture()`, satisfying
+    /// the macOS/Metal requirement. The `CompositorFrame._guard` holds an
+    /// `EncodingGuard` that marks the encode→submit critical section and, on
+    /// drop, releases it — it does NOT own the `SurfaceTexture` (ownership stays
+    /// in `swapchain.pending` so the frame is not discarded on the compositor
+    /// thread).
     ///
     /// On the first recoverable error (`Outdated`, `Lost`, `Timeout`) a single
     /// retry is attempted after logging a warning. If the retry also fails,
-    /// `None` is returned and the encoding-in-progress flag is cleared so the
-    /// main thread is not blocked.
+    /// `None` is returned and the `encoding` marker is cleared (and waiters
+    /// woken) so the main thread is not blocked.
     fn acquire_frame(&self) -> Option<CompositorFrame> {
-        // Serialize acquire/pending-state handoff through the same mutex used
-        // by the main thread present path. If a texture is still pending, reuse
+        // Serialize acquire/pending-state handoff through the swapchain-
+        // ownership mutex used by the main-thread present path and the
+        // compositor reconfigure path. If a texture is still pending, reuse
         // that same acquired image instead of trying a second acquire.
-        let mut pending = self
-            .pending_texture
-            .lock()
-            .expect("pending_texture lock poisoned");
+        let mut slot = self.swapchain.lock().expect("swapchain lock poisoned");
 
-        // Set the encoding flag BEFORE creating the TextureView. This prevents
-        // present_pending_texture() from destroying the SurfaceTexture while the
-        // compositor is encoding render passes that reference the view.
-        self.encoding_in_progress
-            .store(true, std::sync::atomic::Ordering::Release);
-        let guard = EncodingGuard(self.encoding_in_progress.clone());
+        // Mark the encode→submit critical section open BEFORE creating the
+        // TextureView and while still holding the lock. This is the acquire
+        // half of the serialization (hud-hj0xb): present_pending_texture() and
+        // reconfigure() both check `encoding` under this same lock and wait on
+        // the condvar, so neither can destroy the SurfaceTexture while the
+        // compositor holds a TextureView referencing it.
+        slot.encoding = true;
 
-        if let Some(existing) = pending.as_ref() {
-            let view = existing
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-            return Some(CompositorFrame {
-                view,
-                _guard: Box::new(guard),
-            });
-        }
-
-        match self.surface.get_current_texture() {
-            Ok(surface_texture) => {
-                let view = surface_texture
+        // Build the frame's TextureView (if any) while holding the lock. On the
+        // success paths we hand off `slot` to `finish_frame`, which constructs
+        // the `EncodingGuard` AFTER the lock has been released — the guard's
+        // drop re-locks `swapchain`, so it must never drop while we still hold
+        // `slot` (`std::sync::Mutex` is non-reentrant → that would deadlock).
+        //
+        // On the skip paths we clear `encoding` directly under the held lock
+        // (no guard is created), so the critical section closes immediately and
+        // any present/reconfigure waiter is woken below.
+        let view = if let Some(existing) = slot.pending.as_ref() {
+            Some(
+                existing
                     .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-                // Store the SurfaceTexture so the main thread can present it.
-                // Do NOT box it inside CompositorFrame._guard — that would drop
-                // it (without calling .present()) when the frame is dropped on
-                // the compositor thread, discarding the rendered frame.
-                *pending = Some(surface_texture);
-                Some(CompositorFrame {
-                    view,
-                    _guard: Box::new(guard),
-                })
-            }
-            Err(e) => {
-                // Differentiate by error variant to avoid wasted GPU calls and
-                // log noise during normal resize/minimize cycles:
-                //
-                //   Timeout    — transient; retry once (GPU may have been busy).
-                //   Outdated   — surface changed (resize/DPI); reconfiguration
-                //                is needed before the next acquire succeeds, so
-                //                an immediate retry would fail again. Skip frame.
-                //   Lost       — swapchain lost; same logic as Outdated.
-                //   OutOfMemory — GPU memory exhausted; log error, skip frame.
-                //   Other      — generic/unexpected; skip frame.
-                //
-                // In all skip cases the EncodingGuard RAII drop clears
-                // encoding_in_progress automatically.
-                match e {
-                    wgpu::SurfaceError::Timeout => {
-                        tracing::warn!(
-                            error = %e,
-                            "WindowSurface::acquire_frame: timeout acquiring texture; retrying once"
-                        );
-                        // Retry once for transient timeout.
-                        match self.surface.get_current_texture() {
-                            Ok(t) => {
-                                let v = t
-                                    .texture
-                                    .create_view(&wgpu::TextureViewDescriptor::default());
-                                *pending = Some(t);
-                                Some(CompositorFrame {
-                                    view: v,
-                                    _guard: Box::new(guard),
-                                })
-                            }
-                            Err(e2) => {
-                                tracing::error!(
-                                    first_error = %e,
-                                    second_error = %e2,
-                                    "WindowSurface::acquire_frame: retry after timeout also failed; \
-                                     skipping frame (runtime will retry next cycle)"
-                                );
-                                // guard drops here, clearing encoding_in_progress
-                                None
-                            }
-                        }
-                    }
-                    wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
-                        // Reconfiguration required before next acquire — do not
-                        // retry immediately as it will fail again.
-                        tracing::warn!(
-                            error = %e,
-                            "WindowSurface::acquire_frame: surface outdated or lost; \
-                             skipping frame to allow reconfiguration"
-                        );
-                        // guard drops here, clearing encoding_in_progress
-                        None
-                    }
-                    wgpu::SurfaceError::OutOfMemory => {
-                        tracing::error!(
-                            error = %e,
-                            "WindowSurface::acquire_frame: out of GPU memory; skipping frame"
-                        );
-                        // guard drops here, clearing encoding_in_progress
-                        None
-                    }
-                    wgpu::SurfaceError::Other => {
-                        tracing::error!(
-                            error = %e,
-                            "WindowSurface::acquire_frame: unexpected surface error; skipping frame"
-                        );
-                        // guard drops here, clearing encoding_in_progress
-                        None
-                    }
+                    .create_view(&wgpu::TextureViewDescriptor::default()),
+            )
+        } else {
+            match self.surface.get_current_texture() {
+                Ok(surface_texture) => {
+                    let v = surface_texture
+                        .texture
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    // Store the SurfaceTexture so the main thread can present
+                    // it. Do NOT box it inside CompositorFrame._guard — that
+                    // would drop it (without calling .present()) when the frame
+                    // is dropped on the compositor thread, discarding the
+                    // rendered frame.
+                    slot.pending = Some(surface_texture);
+                    Some(v)
                 }
+                Err(e) => self.acquire_retry_view(&mut slot, e),
+            }
+        };
+
+        match view {
+            Some(view) => self.finish_frame(slot, view),
+            None => {
+                // Skip this frame: close the critical section under the held
+                // lock and wake any waiter (present/reconfigure) before
+                // releasing it. `slot` is dropped on return.
+                slot.encoding = false;
+                self.swapchain_done.notify_all();
+                None
             }
         }
     }
@@ -424,11 +525,12 @@ impl CompositorSurface for WindowSurface {
     /// Present the current frame to the display.
     ///
     /// On macOS/Metal this MUST be called on the main thread. The
-    /// `WindowedRuntime` main thread calls `take_pending_texture()` and then
-    /// `SurfaceTexture::present()` directly. This trait method is a no-op for
-    /// `WindowSurface` because the actual present happens via the pending-texture
-    /// handoff, NOT through this `present()` call (which runs on the compositor
-    /// thread alongside `render_frame()`).
+    /// `WindowedRuntime` main thread calls `present_pending_texture()`, which
+    /// takes the pending `SurfaceTexture` and calls `SurfaceTexture::present()`
+    /// directly. This trait method is a no-op for `WindowSurface` because the
+    /// actual present happens via the pending-texture handoff, NOT through this
+    /// `present()` call (which runs on the compositor thread alongside
+    /// `render_frame()`).
     fn present(&self) {
         // No-op. The actual SurfaceTexture::present() is called by the main
         // thread via take_pending_texture(). See WindowedRuntime::maybe_present_frame().
@@ -727,5 +829,243 @@ mod tests {
         // pattern compiles and behaves correctly.
         let frame_skipped = surface.acquire_frame().is_none();
         assert!(frame_skipped, "caller must detect None and skip the frame");
+    }
+
+    // ─── Bug B Layer-2: acquire→submit vs present/reconfigure serialization ──
+    //
+    // `WindowSurface::acquire_frame`/`present_pending_texture`/`reconfigure`
+    // need a real `wgpu::Surface` and so cannot be unit-tested without a GPU.
+    // The race they fix, however, lives entirely in the `SwapchainSlot` +
+    // `Condvar` lock discipline, which we CAN exercise directly. The harness
+    // below uses the exact same private types and mirrors the real lock order:
+    //
+    //   compositor: lock → encoding=true → (acquire view) → unlock
+    //                → encode/submit (no lock) → guard drop: lock → encoding=false → notify
+    //   main:       lock → while encoding { wait } → take+present(destroy) → unlock
+    //   reconfigure:lock → while encoding { wait } → take+destroy → configure → unlock
+    //
+    // A live "surface texture" is modelled by an `Arc<AtomicBool>`. Destroying
+    // it (present/reconfigure) while a "TextureView" still references it (the
+    // compositor's encode→submit window) is exactly the wgpu
+    // "Surface Texture has been destroyed" condition; the test asserts it never
+    // happens, across many concurrent cycles.
+
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// A modelled swapchain image: `alive` is cleared when "presented"/destroyed.
+    struct FakeTexture {
+        alive: Arc<AtomicBool>,
+    }
+
+    /// Test harness mirroring `WindowSurface`'s swapchain-ownership protocol.
+    struct SwapchainHarness {
+        slot: Arc<std::sync::Mutex<TestSlot>>,
+        done: Arc<std::sync::Condvar>,
+        /// Set if any present/reconfigure destroyed a texture while a frame was
+        /// mid-encode (i.e. an `EncodingGuard` was still outstanding). Any hit
+        /// here is the bug.
+        violations: Arc<AtomicU64>,
+    }
+
+    /// Mirror of `SwapchainSlot` for the harness (private types can't escape the
+    /// crate, so the test re-declares an equivalent shape).
+    struct TestSlot {
+        pending: Option<FakeTexture>,
+        encoding: bool,
+    }
+
+    /// Mirror of `EncodingGuard`: on drop, clears `encoding` under the lock and
+    /// notifies waiters — closing the critical section after "submit".
+    struct TestGuard {
+        slot: Arc<std::sync::Mutex<TestSlot>>,
+        done: Arc<std::sync::Condvar>,
+        /// Liveness flag of the texture this frame's view references.
+        view_alive: Arc<AtomicBool>,
+        violations: Arc<AtomicU64>,
+    }
+
+    impl Drop for TestGuard {
+        fn drop(&mut self) {
+            // The view must still reference a LIVE texture for the whole
+            // encode→submit window. If a present/reconfigure destroyed it while
+            // we held the guard, that is the race we are guarding against.
+            if !self.view_alive.load(Ordering::Acquire) {
+                self.violations.fetch_add(1, Ordering::Relaxed);
+            }
+            let mut slot = self.slot.lock().expect("slot poisoned");
+            slot.encoding = false;
+            self.done.notify_all();
+        }
+    }
+
+    impl SwapchainHarness {
+        fn new() -> Self {
+            Self {
+                slot: Arc::new(std::sync::Mutex::new(TestSlot {
+                    pending: None,
+                    encoding: false,
+                })),
+                done: Arc::new(std::sync::Condvar::new()),
+                violations: Arc::new(AtomicU64::new(0)),
+            }
+        }
+
+        /// Compositor-thread acquire: open the critical section and return a
+        /// guard plus the referenced texture liveness flag. Mirrors
+        /// `acquire_frame`'s success path (lock → encoding=true → unlock →
+        /// build guard after lock release).
+        fn acquire(&self) -> TestGuard {
+            let view_alive = {
+                let mut slot = self.slot.lock().expect("slot poisoned");
+                slot.encoding = true;
+                let alive = match slot.pending.as_ref() {
+                    Some(t) => t.alive.clone(),
+                    None => {
+                        let alive = Arc::new(AtomicBool::new(true));
+                        slot.pending = Some(FakeTexture {
+                            alive: alive.clone(),
+                        });
+                        alive
+                    }
+                };
+                // Lock released here (mirrors finish_frame's drop(slot) before
+                // building the guard).
+                alive
+            };
+            TestGuard {
+                slot: self.slot.clone(),
+                done: self.done.clone(),
+                view_alive,
+                violations: self.violations.clone(),
+            }
+        }
+
+        /// Main-thread present: wait for encoding to finish, then take+destroy
+        /// the texture. Mirrors `present_pending_texture`.
+        fn present(&self) {
+            let mut slot = self.slot.lock().expect("slot poisoned");
+            while slot.encoding {
+                slot = self.done.wait(slot).expect("condvar poisoned");
+            }
+            if let Some(t) = slot.pending.take() {
+                t.alive.store(false, Ordering::Release); // "present" destroys it
+            }
+        }
+
+        /// Compositor-thread reconfigure: wait for encoding to finish, then
+        /// destroy any pending texture (Surface::configure would invalidate it).
+        /// Mirrors `reconfigure`'s swapchain-lock block.
+        fn reconfigure(&self) {
+            let mut slot = self.slot.lock().expect("slot poisoned");
+            while slot.encoding {
+                slot = self.done.wait(slot).expect("condvar poisoned");
+            }
+            if let Some(t) = slot.pending.take() {
+                t.alive.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    /// Concurrent reconfigure/present vs encode→submit must never destroy a
+    /// surface texture that an in-flight frame still references. [hud-hj0xb]
+    ///
+    /// This is the regression test for Bug B Layer-2: before the fix, the
+    /// main-thread present checked an `AtomicBool` *before* taking the
+    /// pending-texture lock, leaving a check-then-act gap through which the
+    /// texture could be destroyed mid-submit. With the `encoding` check folded
+    /// under the swapchain mutex and a condvar wait, that gap is closed —
+    /// `violations` must stay 0.
+    #[test]
+    fn test_acquire_submit_serialized_against_present_and_reconfigure() {
+        let harness = Arc::new(SwapchainHarness::new());
+        const ITERS: usize = 5_000;
+
+        // Compositor thread: acquire → "encode/submit" → drop guard, in a tight
+        // loop. The drop guard verifies the texture was alive for the whole
+        // window.
+        let compositor = {
+            let h = harness.clone();
+            std::thread::spawn(move || {
+                for _ in 0..ITERS {
+                    let guard = h.acquire();
+                    // Simulate encode + submit work referencing the view. If a
+                    // racing present/reconfigure destroys the texture here, the
+                    // guard's drop records a violation.
+                    std::hint::spin_loop();
+                    std::hint::spin_loop();
+                    drop(guard);
+                }
+            })
+        };
+
+        // Main thread analogue: hammer present.
+        let presenter = {
+            let h = harness.clone();
+            std::thread::spawn(move || {
+                for _ in 0..ITERS {
+                    h.present();
+                }
+            })
+        };
+
+        // Another compositor-side caller: hammer reconfigure.
+        let reconfigurer = {
+            let h = harness.clone();
+            std::thread::spawn(move || {
+                for _ in 0..ITERS {
+                    h.reconfigure();
+                }
+            })
+        };
+
+        compositor.join().expect("compositor thread panicked");
+        presenter.join().expect("presenter thread panicked");
+        reconfigurer.join().expect("reconfigurer thread panicked");
+
+        assert_eq!(
+            harness.violations.load(Ordering::Relaxed),
+            0,
+            "a present/reconfigure destroyed a surface texture while a frame was \
+             mid-encode — the acquire→submit critical section is not serialized"
+        );
+    }
+
+    /// A present that races an in-progress encode MUST block until the encode's
+    /// guard drops, never taking the texture early. [hud-hj0xb]
+    #[test]
+    fn test_present_blocks_until_encoding_completes() {
+        let harness = Arc::new(SwapchainHarness::new());
+
+        // Open a critical section (encoding=true) and hold it.
+        let guard = harness.acquire();
+        let presented_early = Arc::new(AtomicBool::new(false));
+
+        let presenter = {
+            let h = harness.clone();
+            let flag = presented_early.clone();
+            std::thread::spawn(move || {
+                h.present();
+                // We only reach here after present() returns, which must be
+                // after the guard dropped.
+                flag.store(true, Ordering::Release);
+            })
+        };
+
+        // Give the presenter time to reach (and block on) the condvar wait.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !presented_early.load(Ordering::Acquire),
+            "present() returned while encoding was still in progress"
+        );
+
+        // Now finish the encode; present() must unblock and complete.
+        drop(guard);
+        presenter.join().expect("presenter thread panicked");
+        assert!(
+            presented_early.load(Ordering::Acquire),
+            "present() did not complete after the encode guard dropped"
+        );
+        assert_eq!(harness.violations.load(Ordering::Relaxed), 0);
     }
 }
