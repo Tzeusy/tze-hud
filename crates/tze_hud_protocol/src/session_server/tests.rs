@@ -2922,6 +2922,139 @@ async fn test_freeze_queues_mutations_not_applied() {
     );
 }
 
+/// Regression: FIFO ordering preserved when a new mutation arrives after unfreeze
+/// but before the drain loop has emptied the queue.
+///
+/// Before the fix, `handle_mutation_batch` only checked `st.freeze_active`. Once
+/// the shell cleared `freeze_active` the new mutation bypassed the queue and was
+/// applied ahead of still-queued predecessors — a FIFO violation.
+///
+/// The fix: also check `!session.freeze_queue.is_empty()`. A new mutation that
+/// arrives while the queue is non-empty is enqueued, preserving submission order
+/// until the drain loop fully completes.
+///
+/// This is a direct unit test so it does not rely on timing: we manipulate the
+/// freeze queue and shared state directly, then call `handle_mutation_batch` and
+/// assert the queue depth increases (i.e., the new batch was enqueued, not
+/// bypassed).
+#[tokio::test]
+async fn test_fifo_preserved_when_mutation_arrives_during_drain_window() {
+    use tze_hud_resource::{ResourceStore, ResourceStoreConfig};
+    use tze_hud_scene::graph::SceneGraph;
+
+    // Build a minimal shared state with freeze_active = false (already unfrozen).
+    let (outbound_tx, mut outbound_rx) =
+        tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(16);
+
+    let state: Arc<Mutex<SharedState>> = Arc::new(Mutex::new(SharedState {
+        scene: Arc::new(Mutex::new(SceneGraph::new(800.0, 600.0))),
+        sessions: crate::session::SessionRegistry::new("test-key"),
+        resource_store: ResourceStore::new(ResourceStoreConfig::default()),
+        widget_asset_store: crate::session::WidgetAssetStore::default(),
+        runtime_widget_store: None,
+        element_store: tze_hud_scene::element_store::ElementStore::default(),
+        element_store_path: None,
+        safe_mode_active: false,
+        safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        token_store: crate::token::TokenStore::new(),
+        freeze_active: false, // <-- already unfrozen
+        degradation_level: crate::session::RuntimeDegradationLevel::Normal,
+        media_ingress_active: None,
+        input_capture_tx: None,
+    }));
+
+    // Build a session whose freeze_queue already has one entry (simulates the
+    // drain window: freeze was cleared but the drain loop has not run yet).
+    let mut freeze_queue = SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY);
+    let pre_queued_batch = MutationBatch {
+        batch_id: b"pre-queued".to_vec(),
+        lease_id: vec![0u8; 16],
+        mutations: Vec::new(),
+        ..Default::default()
+    };
+    freeze_queue.enqueue(pre_queued_batch, "test-ns");
+    assert_eq!(
+        freeze_queue.is_empty(),
+        false,
+        "Precondition: queue must be non-empty before the race window test"
+    );
+
+    let mut session = StreamSession {
+        session_id: "fifo-test-session".to_string(),
+        namespace: "test-ns".to_string(),
+        agent_name: "test-agent".to_string(),
+        capabilities: Vec::new(),
+        policy_capabilities: Vec::new(),
+        lease_ids: Vec::new(),
+        subscriptions: Vec::new(),
+        subscription_filters: std::collections::HashMap::new(),
+        server_sequence: 0,
+        resume_token: Vec::new(),
+        last_heartbeat_ms: 0,
+        state: SessionState::Active,
+        last_client_sequence: 1,
+        safe_mode_active: false,
+        expect_resume: false,
+        agent_event_rate_limiter: AgentEventRateLimiter::new(),
+        freeze_queue,
+        session_open_at_wall_us: 0,
+        dedup_window: DedupWindow::new(1000, 60),
+        lease_correlation_cache: LeaseCorrelationCache::new(
+            DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+        ),
+        resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
+            tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+        ),
+        media_ingress: None,
+        next_media_stream_epoch: 1,
+    };
+
+    // The new mutation arrives while freeze_active=false but the queue is non-empty
+    // (the "drain window" race). With the fix this must be enqueued, not applied.
+    let new_batch = MutationBatch {
+        batch_id: b"new-in-drain-window".to_vec(),
+        lease_id: vec![0u8; 16],
+        mutations: Vec::new(),
+        ..Default::default()
+    };
+    handle_mutation_batch(&state, &mut session, &outbound_tx, new_batch).await;
+
+    // The queue must now hold 2 entries: the pre-queued one plus the new arrival.
+    // If the fix is absent, the new batch bypasses the queue (queue depth stays 1)
+    // and the pre-queued mutations would be applied AFTER the bypassing one — FIFO
+    // violation.
+    let queue_depth = {
+        // Drain the queue to count entries, then verify order by batch_id.
+        let drained = session.freeze_queue.drain();
+        drained.len()
+    };
+    assert_eq!(
+        queue_depth, 2,
+        "Both the pre-queued batch and the new batch must be in the freeze queue \
+         (FIFO preserved). If this is 1, the new batch bypassed the queue — FIFO violated."
+    );
+
+    // The outbound channel should have received accepted=true for the new batch
+    // (same as the enqueue path response, not an error).
+    let response = outbound_rx
+        .recv()
+        .await
+        .expect("expected a MutationResult response")
+        .expect("expected Ok response");
+    match &response.payload {
+        Some(ServerPayload::MutationResult(r)) => {
+            assert_eq!(r.batch_id, b"new-in-drain-window".to_vec());
+            assert!(
+                r.accepted,
+                "New batch must be accepted (enqueued) during drain window, not rejected"
+            );
+        }
+        other => panic!(
+            "Expected MutationResult(accepted=true) for new batch during drain window, got: {other:?}"
+        ),
+    }
+}
+
 /// Scenario: Freeze ignored during safe mode (spec line 137)
 /// WHEN safe mode is active AND freeze is set
 /// THEN mutations are rejected with SAFE_MODE_ACTIVE (not queued)

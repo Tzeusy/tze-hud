@@ -448,9 +448,16 @@ pub(super) async fn handle_mutation_batch(
     // When the scene is frozen, mutations are QUEUED (not rejected).
     // Agents are NEVER informed that the scene is frozen — signals are generic
     // queue-pressure signals to avoid leaking viewer state.
+    //
+    // FIFO-drain invariant: also enqueue when freeze_active has just been cleared
+    // but the freeze drain loop has NOT yet emptied the queue. A new mutation that
+    // bypasses the queue in this window would be applied BEFORE still-queued ones,
+    // violating submission order. Checking `!session.freeze_queue.is_empty()` here
+    // closes that race: the mutation is kept behind the existing entries until the
+    // drain loop fully empties the queue and steady-state (no freeze) resumes.
     {
         let st = state.lock().await;
-        if st.freeze_active {
+        if st.freeze_active || !session.freeze_queue.is_empty() {
             // Determine traffic class and enqueue.
             let namespace = session.namespace.clone();
             let result = session.freeze_queue.enqueue(batch.clone(), &namespace);
