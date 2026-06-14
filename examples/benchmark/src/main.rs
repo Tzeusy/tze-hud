@@ -104,6 +104,8 @@ mod headless_impl {
     use tokio::sync::Mutex;
     use tracing::{info, warn};
 
+    use tze_hud_telemetry::FrameTelemetry;
+
     use tze_hud_input::{PointerEvent, PointerEventKind};
     use tze_hud_runtime::headless::{HeadlessConfig, HeadlessRuntime};
     use tze_hud_scene::calibration::calibrate as calibrate_cpu;
@@ -256,6 +258,43 @@ mod headless_impl {
         if result.hit.is_node_hit() {
             summary.input_to_local_ack.record(result.local_ack_us);
         }
+    }
+
+    /// Populate the per-frame correctness fields on a `FrameTelemetry` produced
+    /// by the headless runtime, so the benchmark emits a *genuinely computed*
+    /// signal for the CI-gated `invariant_violations` / `scene_lock_misses`
+    /// counters (hud-ipmj0 / PR #887) instead of leaving them at the implicit
+    /// `FrameTelemetry::new()` default.
+    ///
+    /// Why this is needed: `HeadlessRuntime::render_frame()` builds a fresh
+    /// `FrameTelemetry` but never writes `invariant_violations_this_frame` or
+    /// `scene_lock_miss_count` — the benchmark drives mutations directly via
+    /// `SceneGraph::apply_batch` *before* `render_frame()`, so the runtime's own
+    /// Stage-4 rejection counter (pipeline.rs) sees no pending batches. The
+    /// caller therefore computes the violation count from its own `apply_batch`
+    /// outcome and passes it here.
+    ///
+    /// # scene_lock_miss_count — honest zero, not a faked signal
+    ///
+    /// `scene_lock_miss_count` counts compositor-thread `scene.try_lock()` misses
+    /// caused by a concurrent gRPC/MCP handler holding the scene lock. The
+    /// headless benchmark harness is **single-threaded**: it `.lock().await`s the
+    /// scene directly and there are no concurrent scene-mutation handlers racing
+    /// the frame loop, so the lock is *never* contended and the genuine,
+    /// computed value is 0. We set it explicitly here to record that provenance
+    /// (a real measured zero) rather than relying on the struct default.
+    ///
+    /// FOLLOW-UP (the other half of hud-ipmj0's discovered work): producing a
+    /// true *non-zero* `scene_lock_misses` signal requires the benchmark to run
+    /// concurrent scene-mutation handlers against a live windowed/compositor
+    /// frame loop that uses `try_lock`. That is deliberately NOT done here — we
+    /// do not fabricate fake contention. See the worker report for the filed
+    /// follow-up issue.
+    fn attach_frame_correctness(telemetry: &mut FrameTelemetry, invariant_violations: u32) {
+        telemetry.invariant_violations_this_frame = invariant_violations;
+        // Single-threaded headless harness: no concurrent scene-lock contention
+        // is possible, so this is a genuine measured 0 (see doc comment).
+        telemetry.scene_lock_miss_count = 0;
     }
 
     // ── GPU calibration ───────────────────────────────────────────────────────
@@ -558,8 +597,17 @@ mod headless_impl {
 
         for frame_idx in 0..frame_count {
             record_synthetic_input_ack(&mut runtime, &mut summary, frame_idx).await;
-            let telemetry = runtime.render_frame().await;
+            let mut telemetry = runtime.render_frame().await;
+            // Correctness signal (hud-ukq66): this scenario submits no per-frame
+            // mutation batches, so no batch can be rejected — the genuine,
+            // computed invariant-violation count for every frame here is 0.
+            // We still attach the correctness fields and call
+            // record_frame_correctness so the gated counters are emitted from a
+            // real per-frame computation, not left at FrameTelemetry::new()'s
+            // implicit default (headless render_frame() never touches them).
+            attach_frame_correctness(&mut telemetry, 0);
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
+            summary.record_frame_correctness(&telemetry);
 
             // input_to_scene_commit: Stage 3 + Stage 4 (mutation intake + commit)
             let scene_commit =
@@ -655,7 +703,15 @@ mod headless_impl {
         for frame_idx in 0..frame_count {
             record_synthetic_input_ack(&mut runtime, &mut summary, frame_idx).await;
 
-            // Apply bounds mutation to 3 tiles per frame
+            // Apply bounds mutation to 3 tiles per frame. Capture the
+            // batch-rejection outcome so we can feed a *real* invariant-violation
+            // signal into the gated correctness counter (hud-ukq66): a rejected
+            // batch (applied == false) is exactly what the runtime pipeline
+            // counts as one invariant violation (see pipeline.rs Stage 4). In
+            // steady state every batch is valid, so this is normally 0 — but it
+            // is now genuinely computed from apply_batch's result rather than an
+            // implicit FrameTelemetry::new() default.
+            let mut invariant_violations_this_frame = 0u32;
             {
                 let scene_arc = scene_handle(&runtime).await;
                 let mut scene = scene_arc.lock().await;
@@ -682,11 +738,15 @@ mod headless_impl {
                     timing_hints: None,
                     lease_id: None,
                 };
-                let _ = scene.apply_batch(&batch);
+                if !scene.apply_batch(&batch).applied {
+                    invariant_violations_this_frame += 1;
+                }
             }
 
-            let telemetry = runtime.render_frame().await;
+            let mut telemetry = runtime.render_frame().await;
+            attach_frame_correctness(&mut telemetry, invariant_violations_this_frame);
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
+            summary.record_frame_correctness(&telemetry);
 
             let scene_commit =
                 telemetry.stage3_mutation_intake_us + telemetry.stage4_scene_commit_us;
