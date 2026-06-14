@@ -54,3 +54,6 @@
 # - github.repo
 
 export.path: "issues.export.jsonl"
+# Pin bd to the shared GT Dolt server on 3307 (prevents bd auto-starting a local server / write-split).
+dolt:
+  port: 3307
