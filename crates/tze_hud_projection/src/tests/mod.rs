@@ -2189,6 +2189,88 @@ fn owner_cleanup_and_operator_cleanup_use_distinct_authority_paths() {
     );
 }
 
+/// Regression guard (hud-bsr7u): operator cleanup must purge BOTH the session
+/// map and the cadence coalescer.
+///
+/// Before the fix, the `CleanupAuthority::Operator` branch of `handle_cleanup`
+/// removed only the session, leaving an orphaned coalescer pending entry for a
+/// projection whose session was gone. The drain loop would then spin: the
+/// coalescer kept returning the orphaned id from `next_due_projection_id`, but
+/// `take_due_portal_update` failed the session lookup and returned
+/// `Err(ProjectionNotFound)` before it could consume the entry — an unbounded
+/// busy-loop that wedged the whole event loop.
+///
+/// This test seeds a pending coalescer entry via `PublishOutput`, runs operator
+/// cleanup, and asserts NO pending coalescer entry remains for that projection.
+#[test]
+fn operator_cleanup_purges_coalescer_entry() {
+    let mut authority = ProjectionAuthority::default();
+    authority.set_operator_authority("operator-secret").unwrap();
+    let owner_token = attach(&mut authority, "projection-operator");
+
+    // Seed a pending coalescer entry: PublishOutput records an append into the
+    // cadence coalescer (record_append) without draining it.
+    let published = authority.handle_publish_output(
+        output_request("projection-operator", &owner_token, "req-pub"),
+        "caller-a",
+        20,
+    );
+    assert!(published.accepted, "publish_output must be accepted");
+    assert_eq!(
+        authority.coalescer_pending_portal_count(),
+        1,
+        "coalescer must hold a pending entry after publish_output (precondition)"
+    );
+
+    let operator_cleanup = authority.handle_cleanup(
+        CleanupRequest {
+            envelope: envelope(
+                ProjectionOperation::Cleanup,
+                "projection-operator",
+                "req-operator-cleanup",
+            ),
+            cleanup_authority: CleanupAuthority::Operator,
+            owner_token: None,
+            operator_authority: Some("operator-secret".to_string()),
+            reason: "operator override".to_string(),
+        },
+        "operator",
+        41,
+    );
+    assert!(
+        operator_cleanup.accepted,
+        "operator cleanup must be accepted"
+    );
+
+    // The session is gone AND the coalescer no longer holds a pending entry for
+    // this projection. If the coalescer purge were missing, this count would be 1
+    // and the drain loop would busy-spin (hud-bsr7u).
+    assert!(
+        !authority.has_projection("projection-operator"),
+        "session must be purged by operator cleanup"
+    );
+    assert_eq!(
+        authority.coalescer_pending_portal_count(),
+        0,
+        "hud-bsr7u: operator cleanup must purge the coalescer pending entry; \
+         a leftover entry busy-spins the drain loop"
+    );
+    // The round-robin service queue must also be clear so next_due_projection_id
+    // cannot return the orphaned id.
+    assert_eq!(
+        authority.coalescer_portal_count(),
+        0,
+        "hud-bsr7u: operator cleanup must remove the portal from the coalescer \
+         service queue, not just its pending snapshot"
+    );
+
+    // And `next_due_projection_id` must now report no due portal.
+    assert!(
+        authority.next_due_projection_id().is_none(),
+        "hud-bsr7u: no portal may be reported due after operator cleanup"
+    );
+}
+
 #[test]
 fn token_expiry_fails_with_stable_code() {
     let mut authority = ProjectionAuthority::new(ProjectionBounds {

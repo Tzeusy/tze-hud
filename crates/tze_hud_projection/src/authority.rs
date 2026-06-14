@@ -546,6 +546,23 @@ impl ProjectionAuthority {
         self.sessions.remove(projection_id).is_some()
     }
 
+    /// Discard any pending coalescer entry for `projection_id` without touching
+    /// the session map.
+    ///
+    /// This is the targeted backstop for the drain-loop `Err` arm (hud-bsr7u):
+    /// when `take_due_portal_update` returns an error (e.g.
+    /// `ProjectionNotFound`) because the session is gone but the coalescer still
+    /// holds a pending entry, the caller MUST consume that entry so
+    /// `next_due_projection_id` cannot return the same orphaned id again and
+    /// busy-spin the event loop. `take_due_portal_update` only consumes the
+    /// coalescer entry on its `Ok(Some(_))` path (after the session lookup
+    /// succeeds), so the error path leaves the entry stranded.
+    ///
+    /// Idempotent: a no-op when no pending entry exists for `projection_id`.
+    pub fn discard_portal_coalescer_entry(&mut self, projection_id: &str) {
+        self.cadence_coalescer.remove_portal(projection_id);
+    }
+
     pub fn expire_token_expired_projections(&mut self, server_timestamp_wall_us: u64) -> usize {
         let before = self.sessions.len();
         // Collect expired IDs first so we can clean up the coalescer.
@@ -1320,6 +1337,15 @@ impl ProjectionAuthority {
                         constant_time_eq(verifier, &verifier_for_secret(credential))
                     })
                 {
+                    // Purge the coalescer entry BEFORE removing the session so
+                    // both maps stay consistent regardless of which branch is
+                    // taken. The owner-cleanup branch (above), `handle_detach`,
+                    // `expire_projection`, and `expire_token_expired_projections`
+                    // all purge both maps; this operator branch previously purged
+                    // only the session, leaving an orphaned coalescer entry that
+                    // busy-spun the drain loop (hud-bsr7u).
+                    self.cadence_coalescer
+                        .remove_portal(&request.envelope.projection_id);
                     if self
                         .sessions
                         .remove(&request.envelope.projection_id)

@@ -83,6 +83,25 @@ pub const PORTAL_DRIVER_NAMESPACE: &str = "tze_hud_portal_driver";
 /// Default z-order for portal tiles created by the in-process driver.
 const PORTAL_Z_ORDER: u32 = 160;
 
+/// Hard upper bound on the number of portal updates processed in a single
+/// `drain_inner` call (per `about_to_wait` tick).
+///
+/// The drain runs on the winit event-loop thread while holding the scene lock
+/// under `ControlFlow::Poll`, so an unbounded inner loop wedges the entire
+/// presentation pipeline (whole-HUD freeze, one core pegged ~98%). The loop is
+/// normally work-conserving and terminates when the coalescer is drained, but a
+/// divergence between the session map and the coalescer (e.g. an orphaned
+/// coalescer entry whose session was removed by operator cleanup — hud-bsr7u)
+/// could make `next_due_projection_id` return the same id forever.
+///
+/// This cap is a defense-in-depth backstop: even if a future divergence
+/// re-introduces such an entry, the loop can never spin the event loop more than
+/// this many iterations per tick. The value is far above the realistic number of
+/// concurrent portals (≤ 8 in practice, each contributing at most one update per
+/// drain), so it never truncates legitimate work; reaching it indicates a bug
+/// and is logged at `error` level.
+const MAX_PORTAL_DRAIN_ITERATIONS_PER_CYCLE: u32 = 1024;
+
 /// Per-projection adapter state managed by the in-process driver.
 struct DriveEntry {
     /// gRPC adapter that renders markdown and tracks tile state.
@@ -505,8 +524,26 @@ impl InProcessPortalDriver {
         // the loop for portal health observability (hud-bq0gl.14).
         let mut cycle_updates: u32 = 0;
         let mut cycle_deferrals: u32 = 0;
+        // Per-cycle iteration guard (hud-bsr7u). Bounds the number of loop
+        // iterations so a session/coalescer divergence can never busy-spin the
+        // event loop (which runs this drain under the scene lock + ControlFlow::Poll).
+        let mut iterations: u32 = 0;
 
         loop {
+            // Defense-in-depth backstop: never iterate more than the cap per tick.
+            // Reaching this indicates a divergence bug (the loop should normally
+            // be work-conserving and terminate when the coalescer is drained).
+            if iterations >= MAX_PORTAL_DRAIN_ITERATIONS_PER_CYCLE {
+                tracing::error!(
+                    iterations,
+                    cap = MAX_PORTAL_DRAIN_ITERATIONS_PER_CYCLE,
+                    "portal drain hit per-cycle iteration cap — aborting tick to \
+                     avoid wedging the event loop (likely session/coalescer divergence)"
+                );
+                break;
+            }
+            iterations = iterations.saturating_add(1);
+
             // Round-robin fairness oracle (tasks.md §5.1 / §5.4).
             let Some(proj_id) = self.authority.next_due_projection_id() else {
                 break;
@@ -522,7 +559,15 @@ impl InProcessPortalDriver {
                     break;
                 }
                 Err(_) => {
-                    // Projection not found or expired — clean up adapter.
+                    // Projection not found or expired. `take_due_portal_update`
+                    // returns early on the session lookup BEFORE it consumes the
+                    // coalescer entry, so an orphaned entry (session gone but
+                    // coalescer still pending — e.g. operator cleanup, hud-bsr7u)
+                    // would otherwise be returned again by the next
+                    // `next_due_projection_id` and busy-spin this loop forever.
+                    // Discard the coalescer entry here so it cannot recur, then
+                    // clean up the adapter.
+                    self.authority.discard_portal_coalescer_entry(&proj_id);
                     self.drive.detach(&proj_id);
                     continue;
                 }
@@ -2267,6 +2312,137 @@ mod tests {
             driver.authority_mut().coalescer_total_taken(),
             2,
             "total_taken must be 2 after two successful drains"
+        );
+    }
+
+    /// Regression guard (hud-bsr7u): the drain loop must TERMINATE when the
+    /// coalescer holds a pending entry for a projection whose session is gone
+    /// (session/coalescer divergence — e.g. operator cleanup that purged only
+    /// the session).
+    ///
+    /// Mechanism of the original freeze:
+    ///   1. `next_due_projection_id` returns the orphaned id (pending entry set).
+    ///   2. `take_due_portal_update` fails the session lookup and returns
+    ///      `Err(ProjectionNotFound)` BEFORE it can consume the coalescer entry.
+    ///   3. The `Err` arm previously did `detach + continue` without touching the
+    ///      coalescer → `next_due_projection_id` returns the SAME id again →
+    ///      unbounded loop that wedges the event loop under `ControlFlow::Poll`.
+    ///
+    /// The fix discards the coalescer entry in the `Err` arm. This test injects
+    /// an orphaned coalescer entry (no session), runs a drain, and asserts the
+    /// drain RETURNS (does not hang) and that the orphaned entry was consumed so
+    /// it cannot be returned again. The bounded `#[test]` harness will hang and
+    /// time out if the loop spins — termination IS the assertion.
+    #[test]
+    fn drain_terminates_on_orphaned_coalescer_entry() {
+        let mut driver = InProcessPortalDriver::new();
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let mut processor = InputProcessor::new();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        // Inject an orphaned coalescer entry: a pending snapshot with NO session
+        // backing it (the abnormal divergence state operator-cleanup used to leave).
+        driver
+            .authority_mut()
+            .inject_orphan_coalescer_entry_for_test("proj-orphan");
+        assert_eq!(
+            driver.authority_mut().coalescer_pending_portal_count(),
+            1,
+            "precondition: orphaned coalescer entry must be pending"
+        );
+
+        // This must NOT hang. The Err arm of the drain loop consumes the
+        // orphaned entry; the loop then sees an empty coalescer and breaks.
+        let now = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1_000_000;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now);
+
+        // The orphaned entry must be gone so `next_due_projection_id` cannot
+        // return it again on the next tick.
+        assert_eq!(
+            driver.authority_mut().coalescer_pending_portal_count(),
+            0,
+            "hud-bsr7u: drain Err-arm must consume the orphaned coalescer entry"
+        );
+        assert!(
+            driver.authority_mut().next_due_projection_id().is_none(),
+            "hud-bsr7u: no portal may be reported due after the orphaned entry is consumed"
+        );
+
+        // A second drain is a clean no-op (idempotent termination).
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now + 1);
+        assert_eq!(
+            driver.authority_mut().coalescer_pending_portal_count(),
+            0,
+            "second drain must remain idle"
+        );
+    }
+
+    /// Regression guard (hud-bsr7u): operator cleanup performed through the
+    /// driver's hosted authority leaves the coalescer with no pending entry, and
+    /// a subsequent drain terminates cleanly.
+    ///
+    /// This exercises the full path the live freeze took: cooperative attach →
+    /// publish_output (seeds a coalescer pending entry) → operator cleanup →
+    /// drain. With the layer-1 fix the coalescer is already clear at cleanup
+    /// time; with the layer-2 fix the drain would still terminate even if it
+    /// weren't. Together they guarantee no busy-spin.
+    #[test]
+    fn operator_cleanup_then_drain_does_not_spin() {
+        use tze_hud_projection::{CleanupAuthority, CleanupRequest};
+
+        let mut driver = InProcessPortalDriver::new();
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let mut processor = InputProcessor::new();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        driver
+            .authority_mut()
+            .set_operator_authority("operator-secret")
+            .unwrap();
+
+        let token = attach_and_get_token(&mut driver, "proj-op");
+        driver.attach_projection("proj-op", Vec::new());
+
+        // Seed a pending coalescer entry without draining it.
+        publish(&mut driver, "proj-op", &token, "live transcript", 100);
+        assert_eq!(
+            driver.authority_mut().coalescer_pending_portal_count(),
+            1,
+            "precondition: publish seeds a pending coalescer entry"
+        );
+
+        // Operator cleanup — the live freeze trigger.
+        let resp = driver.authority_mut().handle_cleanup(
+            CleanupRequest {
+                envelope: OperationEnvelope {
+                    operation: ProjectionOperation::Cleanup,
+                    projection_id: "proj-op".to_string(),
+                    request_id: "req-op-cleanup".to_string(),
+                    client_timestamp_wall_us: 1,
+                },
+                cleanup_authority: CleanupAuthority::Operator,
+                owner_token: None,
+                operator_authority: Some("operator-secret".to_string()),
+                reason: "operator override".to_string(),
+            },
+            "operator",
+            200,
+        );
+        assert!(resp.accepted, "operator cleanup must be accepted");
+
+        // Layer-1: coalescer already purged at cleanup time.
+        assert_eq!(
+            driver.authority_mut().coalescer_pending_portal_count(),
+            0,
+            "hud-bsr7u layer-1: operator cleanup must purge the coalescer entry"
+        );
+
+        // Drain must terminate (no busy-spin) and remain idle.
+        let now = 200 + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1_000_000;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now);
+        assert!(
+            driver.authority_mut().next_due_projection_id().is_none(),
+            "hud-bsr7u: no portal may remain due after operator cleanup + drain"
         );
     }
 }
