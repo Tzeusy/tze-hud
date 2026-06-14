@@ -59,8 +59,11 @@ Three ADDED requirements on `text-stream-portals`:
 
 - **Portal Reconnect and Resume Presentation** — what a re-attach restores vs.
   clears: on reconnect before grace expiry the portal resumes from the retained
-  coherent window and clears the stale treatment; `logical_unit_id` continuity means
-  a resumed/continued logical unit updates in place rather than duplicating; resume
+  coherent window and clears the stale treatment; identity continuity uses the
+  authority's existing keys — `logical_unit_id` stays idempotency-only (a replayed id
+  is a no-op) while an in-place continuation reuses the unit's `coalesce_key`, so a
+  resumed/continued logical unit updates in place rather than duplicating without
+  redefining `logical_unit_id` semantics; resume
   appends coalesce under the existing state-stream rules; after grace expiry (session
   death) the surface is gone and a fresh attach starts a new portal rather than
   silently reviving stale content.

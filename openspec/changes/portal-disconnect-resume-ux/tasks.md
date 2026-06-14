@@ -28,7 +28,7 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 ## 4. Reconnect and resume presentation
 
 - [ ] 4.1 Resume from the authority-preserved retained visible window; clear the stale treatment
-- [ ] 4.2 Preserve `logical_unit_id` continuity (continued unit updates in place, no duplicate)
+- [ ] 4.2 Preserve identity continuity: keep `logical_unit_id` idempotency-only and update a continued unit in place via its `coalesce_key` (no duplicate, no `logical_unit_id` semantics change)
 - [ ] 4.3 Coalesce resumed appends under the existing state-stream cadence rules
 - [ ] 4.4 Materialize only the bounded visible window (no scene-graph history reconstruction)
 - [ ] 4.5 Preserve non-terminal pending input/ack state across reconnect

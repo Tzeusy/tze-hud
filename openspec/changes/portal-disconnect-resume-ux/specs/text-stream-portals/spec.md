@@ -70,9 +70,9 @@ Scope: v1-mandatory
 
 ### Requirement: Portal Reconnect and Resume Presentation
 
-When a portal's driving session re-attaches before lease grace expiry, the portal SHALL resume from the retained coherent visible transcript window the projection authority preserved, clear the degraded/stale treatment, and restore live presentation without losing already-committed transcript units. Resume SHALL preserve `logical_unit_id` continuity: a logical transcript unit that was in progress at disconnect and is continued on resume SHALL update in place rather than being duplicated as a new unit, and resumed appends SHALL coalesce under the existing state-stream Coherent Transcript Coalescing and Sustained Streaming Cadence rules. Resume SHALL materialize only the bounded retained visible window into scene nodes per the Bounded Transcript Viewport requirement; it MUST NOT reconstruct full transcript history into the scene graph. Pending HUD input and acknowledgement state restored on resume SHALL follow the existing input-inbox contract and MUST NOT be silently dropped by the reconnect. After lease grace expiry (session death), the surface is gone: a subsequent attach SHALL start a fresh portal under a new lease rather than silently reviving the removed surface or presenting pre-death stale content as live. Resume MUST respect the current viewer's redaction policy at every frame of the transition: a restricted viewer never sees transcript content flash during the stale-to-live transition.
+When a portal's driving session re-attaches before lease grace expiry, the portal SHALL resume from the retained coherent visible transcript window the projection authority preserved, clear the degraded/stale treatment, and restore live presentation without losing already-committed transcript units. Resume SHALL preserve transcript identity continuity using the projection authority's existing keys: `logical_unit_id` continues to provide idempotency continuity so a replayed publish reusing an already-seen `logical_unit_id` is accepted idempotently without duplicating the unit, and a continuation that updates a unit in place SHALL reuse that unit's `coalesce_key` so the authority replaces it in the retained window rather than appending a duplicate (per the existing coalesce-key in-place update path). Resume MUST NOT require a change to the existing `logical_unit_id` idempotency semantics. Resumed appends SHALL coalesce under the existing state-stream Coherent Transcript Coalescing and Sustained Streaming Cadence rules. Resume SHALL materialize only the bounded retained visible window into scene nodes per the Bounded Transcript Viewport requirement; it MUST NOT reconstruct full transcript history into the scene graph. Pending HUD input and acknowledgement state restored on resume SHALL follow the existing input-inbox contract and MUST NOT be silently dropped by the reconnect. After lease grace expiry (session death), the surface is gone: a subsequent attach SHALL start a fresh portal under a new lease rather than silently reviving the removed surface or presenting pre-death stale content as live. Resume MUST respect the current viewer's redaction policy at every frame of the transition: a restricted viewer never sees transcript content flash during the stale-to-live transition.
 
-Source: RFC 0013 §3.3 and §4.4, `openspec/specs/cooperative-hud-projection/spec.md` (External Projection State Authority — reconnect preserves projection state), `openspec/specs/external-agent-projection-authority/spec.md` (Multi-Session Lifecycle Management — reconnect bookkeeping), `crates/tze_hud_projection/src/authority.rs` (ReconnectBookkeeping, reconnect_count, last_reconnect_wall_us), `.claude/skills/hud-projection/SKILL.md` (detach/re-attach)
+Source: RFC 0013 §3.3 and §4.4, `openspec/specs/cooperative-hud-projection/spec.md` (External Projection State Authority — reconnect preserves projection state), `openspec/specs/external-agent-projection-authority/spec.md` (Multi-Session Lifecycle Management — reconnect bookkeeping), `crates/tze_hud_projection/src/contract.rs` (ReconnectBookkeeping struct: reconnect_count, last_reconnect_wall_us), `crates/tze_hud_projection/src/authority.rs` (reconnect-bookkeeping updates, coalesce-key in-place update path), `.claude/skills/hud-projection/SKILL.md` (detach/re-attach)
 Scope: v1-mandatory
 
 #### Scenario: reconnect before grace resumes from retained window
@@ -82,11 +82,17 @@ Scope: v1-mandatory
 - **AND** the degraded/stale treatment SHALL clear and live presentation SHALL resume
 - **AND** no already-committed transcript unit from the retained window SHALL be lost
 
-#### Scenario: continued logical unit updates in place
+#### Scenario: continued logical unit updates in place via coalesce key
 
-- **WHEN** a logical transcript unit that was in progress at disconnect is continued after reconnect with the same `logical_unit_id`
-- **THEN** the portal SHALL update that unit in place
+- **WHEN** a logical transcript unit that was in progress at disconnect is continued after reconnect by republishing it with the same `coalesce_key`
+- **THEN** the portal SHALL update that unit in place under the existing coalesce-key in-place update path
 - **AND** it SHALL NOT render the continuation as a duplicate transcript unit
+
+#### Scenario: replayed logical unit id stays idempotent
+
+- **WHEN** a publish replays an already-seen `logical_unit_id` during or after reconnect
+- **THEN** the authority SHALL accept it idempotently without appending or mutating the transcript
+- **AND** resume SHALL NOT redefine `logical_unit_id` to mean an in-place update
 
 #### Scenario: resume materializes only the bounded window
 
