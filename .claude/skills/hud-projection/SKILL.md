@@ -1,7 +1,7 @@
 ---
 name: hud-projection
 description: Use when an already-running Codex, Claude, opencode, or other LLM session should project itself onto the HUD, show its output or status on screen, attach to a text-stream portal, publish live transcript, poll HUD-originated operator input, acknowledge input, detach, or clean up. Trigger phrases — "project this session to the HUD", "attach this agent to HUD", "show this LLM session in a text-stream portal", "check HUD input". Do not use for terminal capture, PTY attachment, tmux scraping, process hosting, or direct runtime v1 MCP zone publishing; for one-shot zone publishing use th-hud-publish instead.
-compatibility: Requires the tze_hud windowed runtime running with MCP enabled (mcp_port > 0). The OUTPUT path is live today — `attach` and `publish_output` reach the in-process ProjectionAuthority through the runtime MCP server's `portal_projection_attach` / `portal_projection_publish` tools. The INPUT-return and lifecycle ops (`publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup`) have no MCP ingress yet (tracked as hud-bq0gl.1/.3); for those, the stdio component harness is local-development only and does not connect to the live runtime.
+compatibility: Requires the tze_hud windowed runtime running with MCP enabled (mcp_port > 0). The OUTPUT path is wired end-to-end in-process — `attach` and `publish_output` reach the in-process ProjectionAuthority through the runtime MCP server's `portal_projection_attach` / `portal_projection_publish` tools, which forward over `portal_op_tx` to the windowed drain loop. CAVEAT: those two tools are classified Resident (`resident_mcp`), and the runtime's HTTP MCP transport only issues bearer/guest caller contexts (no `resident_mcp`), so a normal external LLM session over the PSK still receives `CAPABILITY_REQUIRED` until a resident-capable ingress lands (tracked as hud-bq0gl.1). The INPUT-return and lifecycle ops (`publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup`) additionally have no MCP method at all yet (tracked as hud-bq0gl.1/.3); for those, the stdio component harness is local-development only and does not connect to the live runtime.
 metadata:
   owner: tze
   authors:
@@ -19,7 +19,7 @@ Hard boundaries:
 - This is cooperative opt-in. The current session intentionally calls projection operations.
 - This is not PTY, tmux, shell, stdin/stdout, or terminal byte-stream capture.
 - The `ProjectionAuthority` runs **in-process** inside the tze_hud runtime (not as an external daemon). It owns projection state outside the LLM token context: HUD connection metadata, advisory portal lease identity, bounded transcript/window state, pending HUD input, acknowledgement state, lifecycle state, unread state, privacy classification, and reconnect bookkeeping.
-- The projection MCP surface is a facade into the runtime's in-process authority, not the runtime v1 MCP zone publishing bridge. **The OUTPUT half of this facade IS shipped**: `portal_projection_attach` and `portal_projection_publish` are served by the runtime MCP server (`crates/tze_hud_mcp/src/server.rs` ~556-565) and forward to the in-process authority over `portal_op_tx`. The input-return + lifecycle half (`publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup`) has no MCP ingress yet — see hud-bq0gl.1 (production ingress) and hud-bq0gl.3 (operator input-return loop).
+- The projection MCP surface is a facade into the runtime's in-process authority, not the runtime v1 MCP zone publishing bridge. **The OUTPUT half of this facade is wired in-process**: `portal_projection_attach` and `portal_projection_publish` are served by the runtime MCP server (`crates/tze_hud_mcp/src/server.rs` ~556-565) and forward to the in-process authority over `portal_op_tx`. They are classified Resident tools, so the runtime rejects them with `CAPABILITY_REQUIRED` unless the caller holds `resident_mcp` (`crates/tze_hud_mcp/src/server.rs` ~396); the HTTP MCP transport only mints bearer/guest contexts with no capabilities (`crates/tze_hud_runtime/src/mcp.rs` ~256-260), so a normal external session cannot yet reach them — that resident-capable ingress is hud-bq0gl.1. The input-return + lifecycle half (`publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup`) has no MCP method at all yet — see hud-bq0gl.1 (production ingress) and hud-bq0gl.3 (operator input-return loop).
 
 ## Source Of Truth
 
@@ -66,33 +66,41 @@ Read `references/operation-examples.md` for compact JSON examples of every opera
 6. **Detach on normal exit.** Call `detach` with a bounded reason when the session is done projecting.
 7. **Cleanup stale state when appropriate.** Use owner cleanup with `owner_token`; operator cleanup uses a separate daemon authority and must not expose private projection content.
 
-## Production Ingress (Partial — OUTPUT path is live)
+## Production Ingress (Partial — OUTPUT path wired in-process, gated by `resident_mcp`)
 
-There **is** a live path from an external LLM session to the running HUD for the
-output half of the contract. When the windowed runtime runs with MCP enabled
-(`mcp_port > 0`), the runtime MCP server exposes two portal-projection tools that
-forward into the in-process `ProjectionAuthority`:
+The output half of the contract is wired end-to-end **inside** the runtime, but a
+normal external LLM session cannot reach it yet because the tools require the
+`resident_mcp` capability that no external transport grants (hud-bq0gl.1). When
+the windowed runtime runs with MCP enabled (`mcp_port > 0`), the runtime MCP
+server exposes two portal-projection tools that forward into the in-process
+`ProjectionAuthority`:
 
-| Operation | MCP ingress today | Code path |
-|---|---|---|
-| `attach` | **LIVE** via `portal_projection_attach` | `crates/tze_hud_mcp/src/server.rs` ~556-560 |
-| `publish_output` | **LIVE** via `portal_projection_publish` | `crates/tze_hud_mcp/src/server.rs` ~561-565 |
-| `publish_status` | none yet | tracked by hud-bq0gl.1 |
-| `get_pending_input` | none yet | tracked by hud-bq0gl.1/.3 |
-| `acknowledge_input` | none yet | tracked by hud-bq0gl.1/.3 |
-| `detach` | none yet | tracked by hud-bq0gl.1 |
-| `cleanup` | none yet | tracked by hud-bq0gl.1 |
+| Operation | MCP method present | Reachable by external session today | Code path |
+|---|---|---|---|
+| `attach` | yes — `portal_projection_attach` | **no** — Resident tool, `CAPABILITY_REQUIRED` over HTTP MCP (hud-bq0gl.1) | `crates/tze_hud_mcp/src/server.rs` ~556-560 |
+| `publish_output` | yes — `portal_projection_publish` | **no** — Resident tool, `CAPABILITY_REQUIRED` over HTTP MCP (hud-bq0gl.1) | `crates/tze_hud_mcp/src/server.rs` ~561-565 |
+| `publish_status` | no | no | tracked by hud-bq0gl.1 |
+| `get_pending_input` | no | no | tracked by hud-bq0gl.1/.3 |
+| `acknowledge_input` | no | no | tracked by hud-bq0gl.1/.3 |
+| `detach` | no | no | tracked by hud-bq0gl.1 |
+| `cleanup` | no | no | tracked by hud-bq0gl.1 |
 
-How the live path is wired: the runtime creates `portal_op_tx` whenever
+How the in-process path is wired: the runtime creates `portal_op_tx` whenever
 `mcp_port > 0` and hands it to the MCP server via `with_portal_op_tx`
 (`crates/tze_hud_runtime/src/windowed.rs` ~4924-4978,
 `crates/tze_hud_runtime/src/mcp.rs` ~96-100). The matching `portal_op_rx` is
 drained every frame by the windowed event loop
 (`drain_portal_ops` → `InProcessPortalDriver::dispatch_portal_op`,
-`crates/tze_hud_runtime/src/windowed.rs` ~3746-3788, ~5105-5106), so accepted
-`attach`/`publish` ops reach the live scene. The portal-projection tools are a
-projection facade distinct from the runtime's zone/widget publishing tools — do
-not confuse them with `th-hud-publish`.
+`crates/tze_hud_runtime/src/windowed.rs` ~3746-3788, ~5105-5106), so a *resident*
+`attach`/`publish` op reaches the live scene. The capability gate is the missing
+link for external callers: `portal_projection_attach`/`portal_projection_publish`
+are classified Resident (`classify_tool`, `crates/tze_hud_mcp/src/server.rs`
+~198-199) and rejected with `CAPABILITY_REQUIRED` unless `ctx.has_resident_mcp()`
+(`~396`), while the HTTP MCP transport builds only `CallerContext::with_bearer` /
+`guest` with empty capabilities (`crates/tze_hud_runtime/src/mcp.rs` ~256-260).
+hud-bq0gl.1 is the resident-capable ingress that closes this gap. The
+portal-projection tools are a projection facade distinct from the runtime's
+zone/widget publishing tools — do not confuse them with `th-hud-publish`.
 
 What is still pending (**hud-bq0gl.1** production ingress, **hud-bq0gl.3**
 operator input-return loop): the input-return and lifecycle operations

@@ -17,8 +17,9 @@ What is actually wired today:
   The runtime's MCP server passes accepted portal ops over an mpsc channel
   (`portal_op_tx` → `portal_op_rx`) that the windowed event loop drains each frame
   via `drain_portal_ops` → `InProcessPortalDriver::dispatch_portal_op`
-  (`crates/tze_hud_runtime/src/windowed.rs` ~4924-5106,
-  `crates/tze_hud_runtime/src/mcp.rs` ~96-100).
+  (`drain_portal_ops` at `crates/tze_hud_runtime/src/windowed.rs` ~3746-3788; the
+  channel/driver are created at ~4924-5106; `crates/tze_hud_runtime/src/mcp.rs`
+  ~96-100).
 - The standalone `projection_authority` binary
   (`crates/tze_hud_projection/src/bin/projection_authority.rs`) is a **stdio dev
   harness**: it retains `ProjectionAuthority` state only for its own process
@@ -36,15 +37,21 @@ external-daemon model remains future work (see
 
 The "Low-Token LLM-Facing Operations" requirement says MCP-exposed operations
 "SHALL be served by the external projection authority rather than the runtime v1
-MCP bridge." In v1 the served subset (`attach`, `publish_output`) is reached
-through the runtime MCP server's dedicated portal-projection tools
+MCP bridge." In v1 the served subset (`attach`, `publish_output`) is wired through
+the runtime MCP server's dedicated portal-projection tools
 (`portal_projection_attach`, `portal_projection_publish`,
 `crates/tze_hud_mcp/src/server.rs` ~556-565), which forward to the in-process
 authority over `portal_op_tx` — they are a projection facade distinct from the
-zone/widget publishing tools, not the generic v1 bridge. The remaining operations
-(`publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup`)
-have no MCP ingress yet (tracked by hud-bq0gl.1/.3); the external-daemon transport
-in the original requirement is aspirational.
+zone/widget publishing tools, not the generic v1 bridge. These two tools are not
+yet reachable by an external session: they are classified Resident and rejected
+with `CAPABILITY_REQUIRED` unless the caller holds `resident_mcp`
+(`crates/tze_hud_mcp/src/server.rs` ~198-199, ~396), while the runtime's HTTP MCP
+transport mints only bearer/guest contexts with no capabilities
+(`crates/tze_hud_runtime/src/mcp.rs` ~256-260). The resident-capable ingress that
+makes the served subset reachable externally is tracked by hud-bq0gl.1. The
+remaining operations (`publish_status`, `get_pending_input`, `acknowledge_input`,
+`detach`, `cleanup`) have no MCP method at all yet (tracked by hud-bq0gl.1/.3); the
+external-daemon transport in the original requirement is aspirational.
 
 ## Requirements
 ### Requirement: Cooperative Attachment Contract

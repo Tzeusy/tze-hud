@@ -11,12 +11,20 @@ capture, PTY injection, or an LLM in the frame loop.
 **This external, separately-hosted projection authority is the future deployment
 model. It is NOT what is wired in v1.** In v1 the authority role is filled by an
 **in-process** `ProjectionAuthority` hosted by `InProcessPortalDriver` inside the
-windowed runtime (`crates/tze_hud_runtime/src/portal_projection_driver.rs`; wired
-in `crates/tze_hud_runtime/src/windowed.rs` ~4924-5106 and
+windowed runtime (`crates/tze_hud_runtime/src/portal_projection_driver.rs`; the
+channel/driver are created in `crates/tze_hud_runtime/src/windowed.rs` ~4924-5106
+and drained by `drain_portal_ops` at ~3746-3788; MCP wiring in
 `crates/tze_hud_runtime/src/mcp.rs` ~96-100). Cooperative output operations
-(`attach`, `publish_output`) reach it through the runtime MCP server's
+(`attach`, `publish_output`) are wired into it through the runtime MCP server's
 portal-projection facade tools (`portal_projection_attach`,
-`portal_projection_publish`, `crates/tze_hud_mcp/src/server.rs` ~556-565).
+`portal_projection_publish`, `crates/tze_hud_mcp/src/server.rs` ~556-565). Those
+two tools are not yet reachable by an external session, however: they are
+classified Resident and rejected with `CAPABILITY_REQUIRED` unless the caller
+holds `resident_mcp` (`crates/tze_hud_mcp/src/server.rs` ~198-199, ~396), while
+the runtime's HTTP MCP transport mints only bearer/guest contexts with no
+capabilities (`crates/tze_hud_runtime/src/mcp.rs` ~256-260). The resident-capable
+ingress that makes the served subset reachable externally is tracked by
+hud-bq0gl.1.
 
 The implementation pointer below is the **stdio dev harness**, not a live
 external daemon: `crates/tze_hud_projection/src/bin/projection_authority.rs`
