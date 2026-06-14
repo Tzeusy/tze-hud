@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::proto::session::hud_session_client::HudSessionClient;
 use crate::proto::session::hud_session_server::HudSessionServer;
