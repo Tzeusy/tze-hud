@@ -8061,11 +8061,7 @@ async fn test_zone_stream_text_tail_anchored_opt_in_viewport() {
     let content = "Line A\nLine B\nLine C\nLine D\nLine E\nLine F\nLine G\nLine H";
 
     // Opt-in: Ellipsis overflow + stream_tail_anchored = Some(true) → TailAnchored.
-    let scene_tail = make_stream_zone_scene(
-        Some(TextOverflow::Ellipsis),
-        Some(true),
-        content,
-    );
+    let scene_tail = make_stream_zone_scene(Some(TextOverflow::Ellipsis), Some(true), content);
     let items_tail = compositor.collect_text_items(&scene_tail, 720.0, 360.0);
     assert_eq!(items_tail.len(), 1, "expected one StreamText TextItem");
     assert_eq!(
@@ -8081,11 +8077,7 @@ async fn test_zone_stream_text_tail_anchored_opt_in_viewport() {
     );
 
     // Default: Ellipsis overflow, stream_tail_anchored = None → HeadAnchored.
-    let scene_head = make_stream_zone_scene(
-        Some(TextOverflow::Ellipsis),
-        None,
-        content,
-    );
+    let scene_head = make_stream_zone_scene(Some(TextOverflow::Ellipsis), None, content);
     let items_head = compositor.collect_text_items(&scene_head, 720.0, 360.0);
     assert_eq!(items_head.len(), 1);
     assert_eq!(
@@ -8096,11 +8088,7 @@ async fn test_zone_stream_text_tail_anchored_opt_in_viewport() {
     );
 
     // Explicit Some(false) is also head-anchored.
-    let scene_false = make_stream_zone_scene(
-        Some(TextOverflow::Ellipsis),
-        Some(false),
-        content,
-    );
+    let scene_false = make_stream_zone_scene(Some(TextOverflow::Ellipsis), Some(false), content);
     let items_false = compositor.collect_text_items(&scene_false, 720.0, 360.0);
     assert_eq!(
         items_false[0].viewport,
@@ -8109,11 +8097,7 @@ async fn test_zone_stream_text_tail_anchored_opt_in_viewport() {
     );
 
     // Clip overflow ignores the opt-in (no truncation, head always shown).
-    let scene_clip = make_stream_zone_scene(
-        Some(TextOverflow::Clip),
-        Some(true),
-        content,
-    );
+    let scene_clip = make_stream_zone_scene(Some(TextOverflow::Clip), Some(true), content);
     let items_clip = compositor.collect_text_items(&scene_clip, 720.0, 360.0);
     assert_eq!(
         items_clip[0].viewport,
@@ -8143,8 +8127,7 @@ async fn test_zone_stream_text_tail_anchored_primes_newest_content() {
     let content = "FIRST\nbbbb\ncccc\ndddd\neeee\nffff\ngggg\nLAST";
 
     // ── Tail-anchored zone: cache must show the newest line (LAST) ────────
-    let scene_tail =
-        make_stream_zone_scene(Some(TextOverflow::Ellipsis), Some(true), content);
+    let scene_tail = make_stream_zone_scene(Some(TextOverflow::Ellipsis), Some(true), content);
     compositor.prime_markdown_cache(&scene_tail);
     compositor.prime_truncation_cache(&scene_tail);
 
@@ -8175,11 +8158,9 @@ async fn test_zone_stream_text_tail_anchored_primes_newest_content() {
     );
 
     // ── Head-anchored default: cache must show the oldest line (FIRST) ────
-    let mut compositor2 =
-        require_gpu!(make_compositor_and_surface(720, 360).await).0;
+    let mut compositor2 = require_gpu!(make_compositor_and_surface(720, 360).await).0;
     compositor2.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
-    let scene_head =
-        make_stream_zone_scene(Some(TextOverflow::Ellipsis), None, content);
+    let scene_head = make_stream_zone_scene(Some(TextOverflow::Ellipsis), None, content);
     compositor2.prime_markdown_cache(&scene_head);
     compositor2.prime_truncation_cache(&scene_head);
 
