@@ -824,9 +824,10 @@ impl ProjectionAuthority {
                 // with a not-yet-seen id, is a fresh append. `is_some_and` only
                 // calls `remember_logical_unit` (which records the id) when an id
                 // is present, preserving the original side-effect ordering.
-                let is_duplicate = request.logical_unit_id.as_ref().is_some_and(|id| {
-                    remember_logical_unit(session, id, max_seen_logical_units)
-                });
+                let is_duplicate = request
+                    .logical_unit_id
+                    .as_ref()
+                    .is_some_and(|id| remember_logical_unit(session, id, max_seen_logical_units));
                 if is_duplicate {
                     ProjectionResponse::accepted(
                         &request.envelope.request_id,
