@@ -9598,13 +9598,11 @@ fn composer_selection_display_byte_offsets() {
             );
             assert!(
                 display.is_char_boundary(expected_start),
-                "expected_start {expected_start} is not a char boundary in display {:?}",
-                display
+                "expected_start {expected_start} is not a char boundary in display {display:?}",
             );
             assert!(
                 display.is_char_boundary(expected_end),
-                "expected_end {expected_end} is not a char boundary in display {:?}",
-                display
+                "expected_end {expected_end} is not a char boundary in display {display:?}",
             );
             // The selected slice of the display string must not contain the start
             // of a character from outside the selection.
