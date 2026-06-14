@@ -3113,7 +3113,11 @@ fn degraded_portal_surface_removed_on_lease_grace_expiry_via_orphan_path() {
         crate::lease::TileVisualHint::DisconnectionBadge,
         "the surviving surface must be in the degraded (disconnection-badge) state"
     );
-    assert_eq!(scene.tile_count(), 1, "degraded surface is preserved during grace");
+    assert_eq!(
+        scene.tile_count(),
+        1,
+        "degraded surface is preserved during grace"
+    );
 
     // Within grace, expiry must NOT touch the degraded tile (no premature removal).
     clock.advance(29_000); // 34s since grant, 29s since disconnect (< 30s grace)
@@ -3122,7 +3126,11 @@ fn degraded_portal_surface_removed_on_lease_grace_expiry_via_orphan_path() {
         premature.is_empty(),
         "no lease may expire before its grace period elapses"
     );
-    assert_eq!(scene.tile_count(), 1, "degraded surface still present mid-grace");
+    assert_eq!(
+        scene.tile_count(),
+        1,
+        "degraded surface still present mid-grace"
+    );
     assert_eq!(
         scene.tiles[&tile_id].visual_hint,
         crate::lease::TileVisualHint::DisconnectionBadge,
@@ -3133,7 +3141,11 @@ fn degraded_portal_surface_removed_on_lease_grace_expiry_via_orphan_path() {
     // still-degraded one. No degraded-specific timer or pin keeps it alive.
     clock.advance(2_000); // now 31s since disconnect — past the 30s grace
     let expiries = scene.expire_leases();
-    assert_eq!(expiries.len(), 1, "grace-expired orphaned lease must be reaped");
+    assert_eq!(
+        expiries.len(),
+        1,
+        "grace-expired orphaned lease must be reaped"
+    );
     assert_eq!(expiries[0].lease_id, lease_id);
     assert_eq!(expiries[0].terminal_state, LeaseState::Expired);
     assert!(
@@ -3142,7 +3154,11 @@ fn degraded_portal_surface_removed_on_lease_grace_expiry_via_orphan_path() {
     );
 
     // No leak: the tile is gone from the graph...
-    assert_eq!(scene.tile_count(), 0, "degraded surface removed on grace expiry");
+    assert_eq!(
+        scene.tile_count(),
+        0,
+        "degraded surface removed on grace expiry"
+    );
     assert!(
         !scene.tiles.contains_key(&tile_id),
         "no dangling tile entry after orphan-path removal"
