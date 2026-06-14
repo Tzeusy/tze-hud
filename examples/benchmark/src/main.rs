@@ -99,8 +99,9 @@ pub struct BenchmarkOutput {
 mod headless_impl {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
     use tracing::{info, warn};
 
@@ -284,17 +285,20 @@ mod headless_impl {
     /// computed value is 0. We set it explicitly here to record that provenance
     /// (a real measured zero) rather than relying on the struct default.
     ///
-    /// FOLLOW-UP (the other half of hud-ipmj0's discovered work): producing a
-    /// true *non-zero* `scene_lock_misses` signal requires the benchmark to run
-    /// concurrent scene-mutation handlers against a live windowed/compositor
-    /// frame loop that uses `try_lock`. That is deliberately NOT done here — we
-    /// do not fabricate fake contention. See the worker report for the filed
-    /// follow-up issue.
-    fn attach_frame_correctness(telemetry: &mut FrameTelemetry, invariant_violations: u32) {
+    /// The `scene_lock_miss_count` argument is the **running total** of real
+    /// compositor-thread `scene.try_lock()` misses observed so far (the same
+    /// running-total semantics the windowed runtime uses in `windowed.rs`). For
+    /// the single-threaded `.lock().await` scenarios this is always `0` (no
+    /// concurrent handler can contend the lock); the dedicated
+    /// `run_scene_lock_contention` scenario (hud-iky7b) drives genuine
+    /// `try_lock` contention and passes a real non-zero count through here.
+    fn attach_frame_correctness(
+        telemetry: &mut FrameTelemetry,
+        invariant_violations: u32,
+        scene_lock_miss_count: u64,
+    ) {
         telemetry.invariant_violations_this_frame = invariant_violations;
-        // Single-threaded headless harness: no concurrent scene-lock contention
-        // is possible, so this is a genuine measured 0 (see doc comment).
-        telemetry.scene_lock_miss_count = 0;
+        telemetry.scene_lock_miss_count = scene_lock_miss_count;
     }
 
     // ── GPU calibration ───────────────────────────────────────────────────────
@@ -605,7 +609,8 @@ mod headless_impl {
             // record_frame_correctness so the gated counters are emitted from a
             // real per-frame computation, not left at FrameTelemetry::new()'s
             // implicit default (headless render_frame() never touches them).
-            attach_frame_correctness(&mut telemetry, 0);
+            // scene_lock_miss_count == 0: single-threaded harness, no contention.
+            attach_frame_correctness(&mut telemetry, 0, 0);
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
             summary.record_frame_correctness(&telemetry);
 
@@ -776,7 +781,8 @@ mod headless_impl {
             }
 
             let mut telemetry = runtime.render_frame().await;
-            attach_frame_correctness(&mut telemetry, invariant_violations_this_frame);
+            // scene_lock_miss_count == 0: single-threaded harness, no contention.
+            attach_frame_correctness(&mut telemetry, invariant_violations_this_frame, 0);
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
             summary.record_frame_correctness(&telemetry);
 
@@ -795,6 +801,251 @@ mod headless_impl {
 
         ScenarioResult {
             name: "high_mutation".to_string(),
+            summary,
+        }
+    }
+
+    // ── Scene-lock contention scenario (hud-iky7b) ────────────────────────────
+
+    /// Number of concurrent background scene-mutation tasks to spawn for the
+    /// contention scenario. Each models a gRPC/MCP session handler that takes
+    /// the scene lock (`.lock().await`) to apply a batch — exactly the class of
+    /// handler that contends the windowed compositor's `try_lock` frame loop.
+    const CONTENTION_MUTATION_TASKS: usize = 3;
+
+    /// How long each background mutation task holds the scene lock per
+    /// acquisition. This is the contention window the frame loop's `try_lock`
+    /// races against. Kept short so the scenario stays fast, but long enough to
+    /// reliably overlap a frame attempt under the deterministic handshake below.
+    const CONTENTION_HOLD: Duration = Duration::from_micros(400);
+
+    /// Run the "scene-lock contention" scenario (hud-iky7b).
+    ///
+    /// This is the *other half* of the hud-ipmj0/hud-ukq66 work: it produces a
+    /// genuine, measured **non-zero** `scene_lock_misses` signal by reproducing
+    /// the exact production contention the windowed compositor frame loop
+    /// experiences, without needing a real GPU/winit window.
+    ///
+    /// # Why this is the real `try_lock` path, not a faked counter
+    ///
+    /// The windowed runtime (`crates/tze_hud_runtime/src/windowed.rs`, Stage 4)
+    /// holds `compositor_scene: Arc<Mutex<SceneGraph>>` and acquires it with
+    /// `compositor_scene.try_lock()`. On a miss (the lock is held by a
+    /// concurrent gRPC/MCP scene-mutation handler) it does
+    /// `scene_lock_miss_count = scene_lock_miss_count.saturating_add(1)` and
+    /// snapshots that running total into `FrameTelemetry::scene_lock_miss_count`.
+    ///
+    /// This scenario uses the **same type and the same method**: it shares the
+    /// headless runtime's `Arc<Mutex<SceneGraph>>` scene handle, spawns
+    /// concurrent tasks that hold it via `.lock().await` (modelling the
+    /// handlers), and runs a frame loop that acquires it with the identical
+    /// `try_lock()` call — incrementing the identical running-total counter on a
+    /// miss. The only thing this omits versus production is the GPU render
+    /// between lock-acquire and lock-release, which is irrelevant to lock
+    /// *contention* accounting. No counter is poked directly: every increment
+    /// comes from a real `tokio::sync::Mutex::try_lock` returning `Err`.
+    ///
+    /// # Determinism (no flaky exact-count assertion)
+    ///
+    /// Pure timing races are flaky. To guarantee a non-zero result without
+    /// asserting an exact (flaky) number, each background task uses a
+    /// per-task handshake: it acquires the lock, sets a "holding" flag, holds
+    /// for `CONTENTION_HOLD`, then clears the flag. The frame loop, on every
+    /// frame, first waits until at least one task is in its holding window and
+    /// then performs its `try_lock` — so the contended frames deterministically
+    /// miss. We report the measured total; we never assert it equals a fixed
+    /// value (it floats with scheduling, but is guaranteed `> 0`).
+    pub async fn run_scene_lock_contention(frame_count: u64) -> ScenarioResult {
+        info!(
+            "Running scene-lock contention scenario ({} frames, {} mutation tasks)",
+            frame_count, CONTENTION_MUTATION_TASKS,
+        );
+
+        let config = benchmark_config("contention_bench");
+        let runtime = HeadlessRuntime::new(config)
+            .await
+            .expect("HeadlessRuntime::new failed");
+
+        // Build a small scene the background tasks can legally mutate.
+        let tab_id;
+        let lease_id;
+        let mut tile_ids = Vec::new();
+        {
+            let scene_arc = scene_handle(&runtime).await;
+            let mut scene = scene_arc.lock().await;
+            tab_id = scene.create_tab("contention_bench", 0).expect("create_tab");
+            lease_id = scene.grant_lease(
+                "contention_bench",
+                300_000,
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+            );
+            if let Some(lease) = scene.leases.get_mut(&lease_id) {
+                lease.resource_budget.max_tiles = 15;
+            }
+            for i in 0..6usize {
+                let col = i % 3;
+                let row = i / 3;
+                let bounds = Rect::new(col as f32 * 384.0, row as f32 * 540.0, 380.0, 536.0);
+                if let Ok(tile_id) =
+                    scene.create_tile(tab_id, "contention_bench", lease_id, bounds, (i + 1) as u32)
+                {
+                    tile_ids.push(tile_id);
+                    if i == 0 {
+                        let root_id = SceneId::new();
+                        let node = Node {
+                            id: root_id,
+                            children: vec![],
+                            data: NodeData::SolidColor(SolidColorNode {
+                                color: Rgba::new(0.25, 0.5, 0.75, 1.0),
+                                bounds: Rect::new(0.0, 0.0, 380.0, 536.0),
+                                radius: None,
+                            }),
+                        };
+                        let _ = scene.set_tile_root(tile_id, node);
+                        let _ =
+                            scene.add_node_to_tile(tile_id, Some(root_id), benchmark_hit_region());
+                    }
+                }
+            }
+        }
+
+        if tile_ids.is_empty() {
+            warn!("run_scene_lock_contention: no tiles created; cannot run scenario");
+            return ScenarioResult {
+                name: "scene_lock_contention".to_string(),
+                summary: SessionSummary::new(),
+            };
+        }
+
+        // The scene handle the frame loop will `try_lock` — the SAME
+        // Arc<Mutex<SceneGraph>> the background tasks `.lock().await`. This is
+        // the exact production sharing model (windowed.rs `compositor_scene`).
+        let scene_arc = scene_handle(&runtime).await;
+
+        // Shutdown flag for the background mutation tasks.
+        let stop = Arc::new(AtomicBool::new(false));
+        // Per-task "currently holding the scene lock" flags. The frame loop
+        // waits on the aggregate of these to make contention deterministic.
+        let holding: Vec<Arc<AtomicBool>> = (0..CONTENTION_MUTATION_TASKS)
+            .map(|_| Arc::new(AtomicBool::new(false)))
+            .collect();
+
+        // Spawn the concurrent scene-mutation handlers.
+        let mut task_handles = Vec::with_capacity(CONTENTION_MUTATION_TASKS);
+        for task_idx in 0..CONTENTION_MUTATION_TASKS {
+            let scene_arc = Arc::clone(&scene_arc);
+            let stop = Arc::clone(&stop);
+            let holding = Arc::clone(&holding[task_idx]);
+            let tile_ids = tile_ids.clone();
+            task_handles.push(tokio::spawn(async move {
+                let mut tick: u64 = 0;
+                while !stop.load(Ordering::Acquire) {
+                    {
+                        // Acquire the scene lock exactly as a real gRPC/MCP
+                        // handler would, then apply a real mutation batch.
+                        let mut scene = scene_arc.lock().await;
+                        holding.store(true, Ordering::Release);
+                        let idx = (tick as usize + task_idx) % tile_ids.len();
+                        let jitter = (tick as f32) * 0.13;
+                        let col = idx % 3;
+                        let row = idx / 3;
+                        let batch = MutationBatch {
+                            batch_id: SceneId::new(),
+                            agent_namespace: "contention_bench".to_string(),
+                            mutations: vec![SceneMutation::UpdateTileBounds {
+                                tile_id: tile_ids[idx],
+                                bounds: Rect::new(
+                                    col as f32 * 384.0 + jitter.sin() * 5.0,
+                                    row as f32 * 540.0,
+                                    380.0,
+                                    536.0,
+                                ),
+                            }],
+                            timing_hints: None,
+                            lease_id: None,
+                        };
+                        let _ = scene.apply_batch(&batch);
+                        // Hold the lock for the contention window so a racing
+                        // frame-loop try_lock deterministically misses.
+                        tokio::time::sleep(CONTENTION_HOLD).await;
+                        holding.store(false, Ordering::Release);
+                    }
+                    // Yield the lock between holds so the frame loop and other
+                    // tasks get a turn (and some frames can still succeed).
+                    tokio::time::sleep(CONTENTION_HOLD).await;
+                    tick = tick.wrapping_add(1);
+                }
+            }));
+        }
+
+        // Running total of REAL try_lock misses — identical semantics to the
+        // windowed runtime's `scene_lock_miss_count`.
+        let mut scene_lock_miss_count: u64 = 0;
+        let session_start = Instant::now();
+        let mut summary = SessionSummary::new();
+
+        for frame_idx in 0..frame_count {
+            // Deterministic handshake: wait until at least one mutation task is
+            // inside its hold window before attempting the frame's try_lock, so
+            // the contended frame reliably misses. Bounded spin so we never hang
+            // if every task happens to be between holds.
+            let any_holding = || holding.iter().any(|h| h.load(Ordering::Acquire));
+            let wait_start = Instant::now();
+            while !any_holding() && wait_start.elapsed() < CONTENTION_HOLD * 4 {
+                tokio::time::sleep(Duration::from_micros(50)).await;
+            }
+
+            // ── The real production acquisition path ──────────────────────
+            // Identical to windowed.rs Stage 4: try_lock the scene; on a miss
+            // (a concurrent handler holds it) bump the running miss total.
+            let frame_start = Instant::now();
+            let frame_time_us;
+            let tile_count;
+            match scene_arc.try_lock() {
+                Ok(scene) => {
+                    // Lock acquired: model the per-frame commit cost (snapshot
+                    // the tile count, the cheap part of Stage 4) then release.
+                    tile_count = scene.tiles.len() as u32;
+                    drop(scene);
+                    frame_time_us = frame_start.elapsed().as_micros() as u64;
+                }
+                Err(_) => {
+                    // Real try_lock miss — the contention signal we are after.
+                    scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
+                    tile_count = summary.peak_tile_count;
+                    frame_time_us = frame_start.elapsed().as_micros() as u64;
+                }
+            }
+
+            // Emit telemetry carrying the running miss total, exactly as the
+            // windowed loop does, and accumulate it into the session summary.
+            let mut telemetry = FrameTelemetry::new(frame_idx);
+            telemetry.frame_time_us = frame_time_us;
+            telemetry.tile_count = tile_count;
+            attach_frame_correctness(&mut telemetry, 0, scene_lock_miss_count);
+            summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
+            summary.record_frame_correctness(&telemetry);
+            summary
+                .input_to_next_present
+                .record(telemetry.frame_time_us);
+        }
+
+        // Tear down the background tasks.
+        stop.store(true, Ordering::Release);
+        for handle in task_handles {
+            let _ = handle.await;
+        }
+
+        summary.elapsed_us = session_start.elapsed().as_micros() as u64;
+        summary.finalize();
+
+        info!(
+            "  scene_lock_contention: total_frames={}, scene_lock_misses={} (real try_lock misses)",
+            summary.total_frames, summary.scene_lock_misses,
+        );
+
+        ScenarioResult {
+            name: "scene_lock_contention".to_string(),
             summary,
         }
     }
@@ -899,6 +1150,20 @@ mod headless_impl {
             high_mutation.summary.peak_frame_time_us,
         );
 
+        // Scene-lock contention scenario (hud-iky7b): drives concurrent
+        // scene-mutation handlers racing a real `try_lock` frame loop so
+        // `scene_lock_misses` is genuinely non-zero. This is NOT one of the
+        // gate's REQUIRED_SESSIONS (steady_state_render / high_mutation), so its
+        // non-zero counter does not trip the zero-baseline gate — it exists to
+        // give that gate a measured, real ceiling to reason about. See
+        // about/craft-and-care/engineering-bar.md (scene_lock_misses note).
+        let scene_lock_contention = run_scene_lock_contention(args.frames).await;
+        info!(
+            "  scene_lock_contention: total_frames={}, scene_lock_misses={}",
+            scene_lock_contention.summary.total_frames,
+            scene_lock_contention.summary.scene_lock_misses,
+        );
+
         // ── Phase 3: Validation ───────────────────────────────────────────────
         info!("Phase 3: Layer-3 budget validation");
 
@@ -947,7 +1212,7 @@ mod headless_impl {
                 upload: upload_result,
                 factors,
             },
-            sessions: vec![steady_state, high_mutation],
+            sessions: vec![steady_state, high_mutation, scene_lock_contention],
             validation,
         };
 
@@ -1076,5 +1341,108 @@ mod tests {
         assert_eq!(result.name, "steady_state_render");
         assert_eq!(result.summary.total_frames, 120);
         assert!((result.summary.fps - 60.0).abs() < 0.001);
+    }
+}
+
+// ─── Contention-mechanism tests (headless feature) ───────────────────────────
+//
+// These tests validate the load-bearing scene-lock contention logic — a
+// concurrent task holding the scene lock while a frame loop attempts the
+// production `tokio::sync::Mutex::try_lock` path, accumulating real misses into
+// `SessionSummary::scene_lock_misses` — WITHOUT spinning up the full GPU
+// `HeadlessRuntime`. They exercise the exact same mutex type and `try_lock`
+// method the windowed compositor uses (windowed.rs Stage 4), so a non-zero
+// result here is a genuine contention signal, not a poked counter.
+#[cfg(all(test, feature = "headless"))]
+mod contention_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Mutex;
+
+    use tze_hud_scene::graph::SceneGraph;
+    use tze_hud_telemetry::{FrameTelemetry, SessionSummary};
+
+    /// A concurrent holder racing a `try_lock` frame loop must produce a
+    /// genuine, non-zero `scene_lock_misses` accumulated through the real
+    /// telemetry path. We assert only `> 0` (never an exact count) so the test
+    /// is deterministic-not-flaky: the handshake guarantees at least one miss
+    /// while the floating total stays unasserted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_lock_contention_yields_nonzero_scene_lock_misses() {
+        let scene: Arc<Mutex<SceneGraph>> = Arc::new(Mutex::new(SceneGraph::new(1920.0, 1080.0)));
+        let holding = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Background "handler" task: holds the scene lock in bursts, flagging
+        // its hold window so the frame loop can race it deterministically.
+        let holder = {
+            let scene = Arc::clone(&scene);
+            let holding = Arc::clone(&holding);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                while !stop.load(Ordering::Acquire) {
+                    {
+                        let _guard = scene.lock().await;
+                        holding.store(true, Ordering::Release);
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                        holding.store(false, Ordering::Release);
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+        };
+
+        // Frame loop using the identical production acquisition: try_lock; on a
+        // miss, bump the running total and snapshot it into FrameTelemetry.
+        let mut scene_lock_miss_count: u64 = 0;
+        let mut summary = SessionSummary::new();
+        for frame_idx in 0..200u64 {
+            // Wait until the holder is inside its hold window (bounded).
+            let wait_start = Instant::now();
+            while !holding.load(Ordering::Acquire)
+                && wait_start.elapsed() < Duration::from_millis(20)
+            {
+                tokio::time::sleep(Duration::from_micros(100)).await;
+            }
+            if scene.try_lock().is_err() {
+                scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
+            }
+            let mut telemetry = FrameTelemetry::new(frame_idx);
+            telemetry.scene_lock_miss_count = scene_lock_miss_count;
+            summary.record_frame_correctness(&telemetry);
+        }
+
+        stop.store(true, Ordering::Release);
+        let _ = holder.await;
+
+        assert!(
+            summary.scene_lock_misses > 0,
+            "concurrent holder racing a try_lock frame loop must yield a real \
+             non-zero scene_lock_misses (got {})",
+            summary.scene_lock_misses,
+        );
+    }
+
+    /// With no concurrent holder, the same try_lock frame loop must report a
+    /// genuine zero — proving the non-zero result above comes from real
+    /// contention, not an always-incrementing counter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_lock_without_contention_stays_zero() {
+        let scene: Arc<Mutex<SceneGraph>> = Arc::new(Mutex::new(SceneGraph::new(1920.0, 1080.0)));
+        let mut scene_lock_miss_count: u64 = 0;
+        let mut summary = SessionSummary::new();
+        for frame_idx in 0..200u64 {
+            if scene.try_lock().is_err() {
+                scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
+            }
+            let mut telemetry = FrameTelemetry::new(frame_idx);
+            telemetry.scene_lock_miss_count = scene_lock_miss_count;
+            summary.record_frame_correctness(&telemetry);
+        }
+        assert_eq!(
+            summary.scene_lock_misses, 0,
+            "uncontended try_lock loop must report a genuine zero",
+        );
     }
 }
