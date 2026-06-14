@@ -1270,7 +1270,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-pub(super) fn bounded_copy(mut value: String, max_bytes: usize) -> String {
+pub(crate) fn bounded_copy(mut value: String, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value;
     }
