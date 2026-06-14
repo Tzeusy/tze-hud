@@ -285,9 +285,20 @@ pub fn truncate_for_ellipsis<'a>(
 ///
 /// A [`TruncationResult`].  When the full text fits in `max_lines`, returns
 /// the original text unchanged (identical to head-anchored behaviour).  When
-/// the content exceeds `max_lines`, returns the last `max_lines - 1` content
-/// runs preceded by a single `ELLIPSIS` line, so the total visible line count
-/// is exactly `max_lines` (not `max_lines + 1`).  Sets `was_truncated = true`.
+/// the content exceeds `max_lines` (and `max_lines >= 2`), returns the last
+/// `max_lines - 1` content runs preceded by a single `ELLIPSIS` line, so the
+/// total visible line count is exactly `max_lines` (not `max_lines + 1`).
+/// Sets `was_truncated = true`.
+///
+/// ## Degenerate `max_lines == 1` (hud-qoq52, option (b))
+///
+/// With only one line slot, a dedicated `ELLIPSIS` line would leave no room for
+/// content — a bare `"…"` that shows nothing, defeating the purpose of a
+/// follow-tail surface.  Instead the single line shows the tail of the **newest**
+/// layout run with an **inline leading ellipsis** (`"…tail of newest line"`):
+/// the leading `"…"` preserves the omission signal while the newest content stays
+/// visible.  The line is horizontally truncated to fit `bounds_width` with no
+/// clipped glyph, and the result is exactly one logical line.
 ///
 /// # Spec scenarios
 ///
@@ -357,11 +368,56 @@ pub fn truncate_tail_anchored<'a>(
     // The first visible run is runs[total_runs - (max_lines - 1)].
     // The last  visible run is runs[total_runs - 1].
     //
-    // Guard: if max_lines == 1 we can only show the ellipsis itself (no content
-    // runs fit alongside it).  Return early with just the ellipsis line.
+    // ── Degenerate case: max_lines == 1 (DECISION — option (b), hud-qoq52) ───
+    //
+    // A follow-tail surface exists to show the NEWEST content line.  When only
+    // one line slot is available, spending it on a bare "…" (showing no content
+    // at all) is the worst possible outcome for this surface — the viewer sees
+    // an omission marker and none of the data the surface is supposed to follow.
+    //
+    // Instead, show the tail of the NEWEST layout run with an INLINE LEADING
+    // ellipsis ("…tail of newest line").  This keeps the omission signal (the
+    // leading "…" marks that earlier lines — and possibly the head of this line
+    // — were dropped) AND shows the newest content, on a single line.
+    //
+    // Spec-compatibility (openspec/specs/text-stream-portals/spec.md, "Transcript
+    // Overflow and Ellipsis Contract"): the contract requires the omission signal
+    // and forbids partially clipped glyphs; it does NOT mandate the ellipsis on a
+    // dedicated line.  The leading-ellipsis line satisfies both: it carries the
+    // omission signal and is horizontally truncated to fit bounds_width with no
+    // clipped glyph.  Line count is exactly 1 (== max_lines).
+    //
+    // Considered and rejected: (a) keep bare "…" — degenerate, shows nothing;
+    // (c) truncate the newest line with NO omission signal — drops the contract's
+    // required omission indicator.  (b) preserves both properties, so it wins.
     if max_lines == 1 {
+        // The newest content is the LAST layout run.
+        let newest_run = &runs[total_runs - 1];
+        let newest_line_i = newest_run.0;
+        let newest_run_start = run_logical_start(&newest_run.2);
+        let newest_line_text = if let Some(line) = full_buf.lines.get(newest_line_i) {
+            line.text().to_owned()
+        } else {
+            // Fall back to the bare omission signal if the line is unavailable.
+            return TruncationResult {
+                text: ELLIPSIS.to_owned(),
+                was_truncated: true,
+            };
+        };
+        // Slice the newest run's logical text from its paragraph line (handles
+        // word-wrapped sub-lines that start mid-paragraph).
+        let run_slice = run_start_slice(&newest_line_text, newest_run_start);
+        let leading = truncate_line_to_leading_ellipsis(
+            run_slice,
+            base_attrs,
+            bounds_width,
+            font_size_px,
+            line_height,
+            ellipsis_w,
+            font_system,
+        );
         return TruncationResult {
-            text: ELLIPSIS.to_owned(),
+            text: leading,
             was_truncated: true,
         };
     }
@@ -903,6 +959,190 @@ fn truncate_line_to_ellipsis<'a>(
 
     // Even a single grapheme + ellipsis does not fit — return just the ellipsis.
     ELLIPSIS.to_owned()
+}
+
+/// Truncate a single line from the **left** so that the result
+/// (`"…"` + visible suffix) fits within `bounds_width`.
+///
+/// This is the leading-ellipsis mirror of [`truncate_line_to_ellipsis`].  It is
+/// used by [`truncate_tail_anchored`] in the degenerate `max_lines == 1` case:
+/// a follow-tail surface exists to show the **newest** line, so the single line
+/// slot must carry the *tail* of the newest content with a leading `"…"` that
+/// signals omitted leading content — never a bare `"…"` that shows no content.
+///
+/// # Algorithm
+///
+/// Symmetric to the trailing-ellipsis path but searching for the **smallest**
+/// cut offset whose suffix fits (i.e. the *longest* visible tail).  The
+/// predicate `measure("…" + line[cut..]) ≤ bounds_width` is monotone in `cut`:
+/// a larger cut yields a shorter, narrower suffix, so once a suffix fits every
+/// larger cut also fits.  We binary-search the cut boundaries to find the
+/// smallest fitting one.
+///
+/// 1. If `"…" + line` already fits, return it (no leading omission inside the
+///    line — only the leading `"…"` marking omitted earlier lines).
+/// 2. Otherwise binary-search word-start boundaries for the smallest fitting
+///    cut; the visible tail begins on a word boundary.
+/// 3. Fall back to grapheme-cluster boundaries when no word boundary fits, so a
+///    long unbroken token still shows a visible suffix.
+/// 4. If not even a single trailing grapheme + ellipsis fits, return bare `"…"`.
+///
+/// # Guarantees
+///
+/// - The result is shaped to fit `bounds_width` — no horizontally clipped glyph.
+/// - Cuts land on grapheme-cluster (and char) boundaries — no split clusters.
+/// - RTL/bidi safety matches [`truncate_line_to_ellipsis`]: width comes from
+///   reshaping the logical suffix, never from glyph x-positions.
+fn truncate_line_to_leading_ellipsis<'a>(
+    line: &str,
+    base_attrs: Attrs<'a>,
+    bounds_width: f32,
+    font_size_px: f32,
+    line_height: f32,
+    ellipsis_w: f32,
+    font_system: &mut FontSystem,
+) -> String {
+    let budget = bounds_width - ellipsis_w;
+
+    // Fast path: if budget ≤ 0, only the ellipsis itself fits.
+    if budget <= 0.0 {
+        return ELLIPSIS.to_owned();
+    }
+
+    // ── Helper: measure "…" + suffix-from-`cut` as a single shaped unit ──────
+    // Measuring the combined string accounts for kerning/ligatures between the
+    // ellipsis and the first glyph of the suffix under Shaping::Advanced.
+    let mut measure_with_leading_ellipsis = |cut: usize| -> f32 {
+        if cut >= line.len() {
+            // Empty suffix: the result is just ELLIPSIS.
+            return measure_single_line(
+                ELLIPSIS,
+                base_attrs,
+                bounds_width * 2.0,
+                font_size_px,
+                line_height,
+                font_system,
+            );
+        }
+        let suffix = line[cut..].trim_start();
+        let with_ellipsis = format!("{ELLIPSIS}{suffix}");
+        measure_single_line(
+            &with_ellipsis,
+            base_attrs,
+            bounds_width * 2.0,
+            font_size_px,
+            line_height,
+            font_system,
+        )
+    };
+
+    // Fast path: the whole line plus a leading ellipsis fits — show it all.
+    if measure_with_leading_ellipsis(0) <= bounds_width {
+        let suffix = line.trim_start();
+        return format!("{ELLIPSIS}{suffix}");
+    }
+
+    // ── Step 1: word-start boundary binary search ────────────────────────────
+    //
+    // Candidate cut points are the START byte offsets of words.  A larger cut
+    // means a shorter suffix, which is the monotone-narrowing direction, so we
+    // search for the SMALLEST fitting cut (longest visible tail).
+    let word_cuts: Vec<usize> = line
+        .unicode_word_indices()
+        .map(|(i, _word)| i)
+        .filter(|&b| b > 0 && line.is_char_boundary(b))
+        .collect();
+
+    if let Some(cut) = binary_search_smallest_fitting(
+        &word_cuts,
+        bounds_width,
+        &mut measure_with_leading_ellipsis,
+    ) {
+        let suffix = line[cut..].trim_start();
+        return format!("{ELLIPSIS}{suffix}");
+    }
+
+    // ── Step 2: grapheme-cluster boundary fallback ───────────────────────────
+    //
+    // No word-start cut fits — fall back to grapheme-cluster boundaries so a
+    // long unbroken token still shows a visible suffix before/after the cut.
+    let grapheme_cuts: Vec<usize> = line
+        .grapheme_indices(true)
+        .map(|(i, _g)| i)
+        .filter(|&b| b > 0 && line.is_char_boundary(b))
+        .collect();
+
+    if let Some(cut) = binary_search_smallest_fitting(
+        &grapheme_cuts,
+        bounds_width,
+        &mut measure_with_leading_ellipsis,
+    ) {
+        let suffix = line[cut..].trim_start();
+        return format!("{ELLIPSIS}{suffix}");
+    }
+
+    // Even a single trailing grapheme + ellipsis does not fit — bare ellipsis.
+    ELLIPSIS.to_owned()
+}
+
+/// Find the **smallest** element in the **sorted, ascending** `boundaries`
+/// slice such that `measure(boundary) ≤ budget`, using binary search.
+///
+/// This is the mirror of [`binary_search_largest_fitting`] for leading-ellipsis
+/// (suffix) truncation, where a larger cut offset yields a shorter, narrower
+/// suffix.
+///
+/// Returns `None` if no boundary fits (all are too wide or the slice is empty).
+///
+/// # Correctness requirement
+///
+/// The predicate `measure(b) ≤ budget` must be **monotone increasing in `b`**:
+/// if cut `b` fits, every larger cut `b' > b` also fits.  This holds for suffix
+/// width because advancing the cut can only remove leading characters, which
+/// cannot increase the shaped width.
+///
+/// # Complexity
+///
+/// O(log N) calls to `measure` where N = `boundaries.len()`.
+fn binary_search_smallest_fitting(
+    boundaries: &[usize],
+    budget: f32,
+    measure: &mut impl FnMut(usize) -> f32,
+) -> Option<usize> {
+    if !budget.is_finite() || boundaries.is_empty() {
+        return None;
+    }
+
+    // Quick check: does the smallest cut (longest suffix) fit?  If yes, take it
+    // directly (common case: the line is only slightly too wide).
+    let first = boundaries[0];
+    if measure(first) <= budget {
+        return Some(first);
+    }
+
+    // Quick check: does even the largest cut (shortest suffix) fit?  If not,
+    // nothing fits.
+    let last = *boundaries.last().unwrap();
+    if measure(last) > budget {
+        return None;
+    }
+
+    // Binary search over the index space [0, boundaries.len()).
+    // Invariant: boundaries[lo] does NOT fit, boundaries[hi] fits.
+    let mut lo = 0usize;
+    let mut hi = boundaries.len() - 1;
+
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        if measure(boundaries[mid]) <= budget {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+
+    // `hi` is the first index where the predicate holds.
+    Some(boundaries[hi])
 }
 
 /// Find the largest element in the **sorted, ascending** `boundaries` slice
@@ -2027,6 +2267,147 @@ mod tests {
             "tail-anchored result has {logical_line_count} logical lines but box fits \
              only {max_lines_in_box}; result: {:?}",
             result.text
+        );
+    }
+
+    /// Degenerate `max_lines == 1` (hud-qoq52, option (b)): a follow-tail box
+    /// with room for exactly one line must show the NEWEST line's content with
+    /// an inline LEADING ellipsis — never a bare "…" that shows nothing.
+    ///
+    /// Two sub-cases are exercised:
+    ///   1. The newest line fits within bounds_width: result is "…<newest line>"
+    ///      (leading ellipsis marks the omitted earlier lines; full newest line
+    ///      shown).
+    ///   2. The newest line itself overflows bounds_width: result is
+    ///      "…<tail of newest line>" — the newest content's TAIL is shown after
+    ///      the leading ellipsis, horizontally truncated to fit.
+    ///
+    /// In both cases the result is exactly one logical line, starts with "…",
+    /// and carries visible newest content after the ellipsis.
+    #[test]
+    fn tail_anchored_max_lines_one_shows_newest_with_leading_ellipsis() {
+        let mut fs = make_font_system();
+        let font_size = 14.0_f32;
+        let line_h = font_size * 1.4;
+        // Height for exactly ONE line: line_h + a fractional surplus, < 2*line_h.
+        let bounds_h = line_h + 1.0;
+        assert_eq!(
+            max_whole_lines(bounds_h, line_h),
+            1,
+            "test precondition: box must fit exactly one line"
+        );
+
+        // ── Sub-case 1: short newest line that fits horizontally ─────────────
+        let text = "First old line\nSecond old line\nNewest";
+        let bounds_w = 400.0_f32; // wide enough for "…Newest"
+        let result = truncate_tail_anchored(
+            text,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        assert!(
+            result.was_truncated,
+            "3 lines into a 1-line box must be truncated; got: {:?}",
+            result.text
+        );
+        // Exactly one logical line (no '\n').
+        assert_eq!(
+            result.text.split('\n').count(),
+            1,
+            "max_lines==1 result must be a single line; got: {:?}",
+            result.text
+        );
+        // Must NOT be the degenerate bare ellipsis — newest content is the point.
+        assert_ne!(
+            result.text, ELLIPSIS,
+            "max_lines==1 must NOT return a bare '…' (option (a) rejected); \
+             the newest content must be shown"
+        );
+        // Leading omission signal preserved.
+        assert!(
+            result.text.starts_with(ELLIPSIS),
+            "max_lines==1 result must start with the leading '…' omission signal; got: {:?}",
+            result.text
+        );
+        // Newest content visible after the ellipsis.
+        assert!(
+            result.text.contains("Newest"),
+            "max_lines==1 result must contain the newest line's content; got: {:?}",
+            result.text
+        );
+        // Older lines dropped.
+        assert!(
+            !result.text.contains("First old line"),
+            "older content must be dropped; got: {:?}",
+            result.text
+        );
+
+        // ── Sub-case 2: newest line overflows horizontally ───────────────────
+        // A long unbroken newest line forces a horizontal cut; the TAIL of the
+        // newest content is shown after the leading ellipsis.
+        let long_newest = "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW"; // 30 'W's
+        let text2 = format!("old\nold\n{long_newest}");
+        let narrow_w = 80.0_f32;
+        // Precondition: the long newest line overflows the narrow box.
+        let newest_w = measure_single_line(
+            long_newest,
+            base_attrs(),
+            narrow_w * 4.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        assert!(
+            newest_w > narrow_w,
+            "test precondition: newest line ({newest_w:.1}px) must overflow {narrow_w}px"
+        );
+        let result2 = truncate_tail_anchored(
+            &text2,
+            base_attrs(),
+            narrow_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        assert!(result2.was_truncated, "overflowing case must be truncated");
+        assert_eq!(
+            result2.text.split('\n').count(),
+            1,
+            "max_lines==1 overflow result must be a single line; got: {:?}",
+            result2.text
+        );
+        assert!(
+            result2.text.starts_with(ELLIPSIS),
+            "overflow result must start with leading '…'; got: {:?}",
+            result2.text
+        );
+        // No-partial-glyph guarantee: the result re-measures within bounds_width.
+        let measured_w = measure_single_line(
+            &result2.text,
+            base_attrs(),
+            narrow_w * 4.0,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        assert!(
+            measured_w <= narrow_w + 1.0, // +1.0 float tolerance
+            "max_lines==1 newest-line truncation must re-measure ≤ bounds_width \
+             ({narrow_w}px); got {measured_w:.2}px; result: {:?}",
+            result2.text
+        );
+        // Some newest content must be visible after the ellipsis (not bare '…').
+        let tail = result2.text.strip_prefix(ELLIPSIS).unwrap_or("");
+        assert!(
+            tail.chars().any(|c| c == 'W'),
+            "max_lines==1 overflow result must show some newest content ('W') \
+             after the leading '…'; got: {:?}",
+            result2.text
         );
     }
 

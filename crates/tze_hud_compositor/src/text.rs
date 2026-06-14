@@ -1948,10 +1948,32 @@ pub(crate) fn reslice_color_runs(
         .collect()
 }
 
+/// Byte length of the leading-ellipsis prefix in a tail-anchored truncated
+/// string.
+///
+/// `truncate_tail_anchored` normally emits `"…\n{tail}"` (multi-line window),
+/// whose prefix is `ELLIPSIS` + `'\n'`.  The degenerate `max_lines == 1` case
+/// (hud-qoq52, option (b)) instead emits a single inline-leading-ellipsis line
+/// `"…{tail}"` with **no** newline, whose prefix is just `ELLIPSIS`.  Returns
+/// `None` when `truncated_str` does not begin with `ELLIPSIS` at all (caller
+/// then treats the runs as unremappable).
+fn tail_anchored_leading_bytes(truncated_str: &str) -> Option<usize> {
+    let after_ellipsis = truncated_str.strip_prefix(crate::overflow::ELLIPSIS)?;
+    if let Some(rest) = after_ellipsis.strip_prefix('\n') {
+        // "…\n{tail}" — multi-line leading-ellipsis line.
+        let _ = rest;
+        Some(crate::overflow::ELLIPSIS.len() + 1)
+    } else {
+        // "…{tail}" — single-line inline leading ellipsis (max_lines == 1).
+        Some(crate::overflow::ELLIPSIS.len())
+    }
+}
+
 /// Re-slice [`StyledRunItem`]s for a **tail-anchored** truncated string.
 ///
 /// `truncate_tail_anchored` produces a leading-ellipsis output:
-/// `"…\n{visible_tail}"`.  The original `styled_runs` byte offsets are
+/// `"…\n{visible_tail}"` (multi-line) or `"…{visible_tail}"` (the single-line
+/// `max_lines == 1` case, hud-qoq52).  The original `styled_runs` byte offsets are
 /// relative to the **original** text; they must be shifted to become relative
 /// to `effective_text` (= the leading-ellipsis truncated string).
 ///
@@ -1978,10 +2000,13 @@ pub(crate) fn reslice_styled_runs_tail_anchored(
     truncated_str: &str,
     runs: &[StyledRunItem],
 ) -> Vec<StyledRunItem> {
-    // "…\n" prefix: ELLIPSIS (3 UTF-8 bytes) + newline (1 byte).
-    let leading_bytes = crate::overflow::ELLIPSIS.len() + 1;
+    // Leading-ellipsis prefix: "…\n" (multi-line) or "…" (single-line max_lines==1).
+    let leading_bytes = match tail_anchored_leading_bytes(truncated_str) {
+        Some(n) => n,
+        None => return Vec::new(), // not a leading-ellipsis string — unremappable
+    };
 
-    // Extract the visible tail content (after "…\n").
+    // Extract the visible tail content (after the leading-ellipsis prefix).
     let tail_content = match truncated_str.get(leading_bytes..) {
         Some(s) => s,
         None => return Vec::new(), // truncated_str is too short — malformed
@@ -2048,7 +2073,10 @@ pub(crate) fn reslice_color_runs_tail_anchored(
     truncated_str: &str,
     runs: &[ColorRunItem],
 ) -> Vec<ColorRunItem> {
-    let leading_bytes = crate::overflow::ELLIPSIS.len() + 1;
+    let leading_bytes = match tail_anchored_leading_bytes(truncated_str) {
+        Some(n) => n,
+        None => return Vec::new(),
+    };
 
     let tail_content = match truncated_str.get(leading_bytes..) {
         Some(s) => s,
@@ -4233,6 +4261,45 @@ mod tests {
             &truncated[result[0].start_byte..result[0].end_byte],
             "line2",
             "resliced run must address 'line2' in the effective text"
+        );
+    }
+
+    /// Single-line `max_lines == 1` output (hud-qoq52, option (b)): the
+    /// tail-anchored result is `"…{newest line}"` with NO newline.  The reslice
+    /// must use a `leading_bytes` of `ELLIPSIS.len()` (3), not `ELLIPSIS.len()+1`
+    /// (4), or it would slice off the first content byte and mis-shift offsets.
+    #[test]
+    fn reslice_styled_runs_tail_anchored_single_line_inline_ellipsis() {
+        let original = "old line one\nold line two\nNewest";
+        // max_lines==1 leading-ellipsis output: "…Newest" (no newline).
+        let truncated = "…Newest";
+        // leading_bytes must resolve to 3 (just "…"), tail_content = "Newest".
+        // tail_origin = original.len() - 6.  A bold run over "Newest" in the
+        // original must remap to address "Newest" in "…Newest".
+        let newest_start = original.len() - "Newest".len();
+        let runs = vec![StyledRunItem {
+            start_byte: newest_start,
+            end_byte: original.len(),
+            weight: Some(700),
+            italic: false,
+            monospace: false,
+            color: None,
+            background_color: None,
+            size_scale: None,
+        }];
+        let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
+        assert_eq!(
+            result.len(),
+            1,
+            "bold run on the single visible newest line must survive reslice"
+        );
+        // "…" = 3 bytes; "Newest" occupies bytes [3..9] in "…Newest".
+        assert_eq!(result[0].start_byte, 3, "start must shift past the inline '…'");
+        assert_eq!(result[0].end_byte, truncated.len());
+        assert_eq!(
+            &truncated[result[0].start_byte..result[0].end_byte],
+            "Newest",
+            "resliced run must address 'Newest' in the single-line effective text"
         );
     }
 

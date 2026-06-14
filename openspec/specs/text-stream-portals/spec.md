@@ -330,6 +330,12 @@ Source: RFC 0013 §3.4 and §4.2, RFC 0001 §TextMarkdownNode overflow semantics
 - **WHEN** a content commit's truncation input is within the `max_truncation_input_bytes` bound (e.g. a ~540 B / 5-line window that shapes within the Stage-5 budget)
 - **THEN** truncation SHALL measure the full committed input
 - **AND** the viewport-adjacent-window fallback SHALL NOT engage
+#### Scenario: single-line follow-tail surface shows newest content
+
+- **WHEN** a follow-tail surface has room for exactly one layout line and the transcript has more content than fits
+- **THEN** the single visible line SHALL show the newest layout line's content with an inline leading ellipsis (`…newest content`), not a dedicated bare ellipsis line that shows no content
+- **AND** the leading ellipsis SHALL preserve the omission signal for the dropped earlier lines (and, when the newest line itself overflows horizontally, its dropped leading portion)
+- **AND** no glyph SHALL be partially clipped at the truncation edge
 
 ### Requirement: Local-First Composer Draft Editing
 
