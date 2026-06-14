@@ -69,6 +69,21 @@ pub enum PortalOp {
         output_text: String,
         /// Optional logical-unit ID for idempotent replay detection.
         logical_unit_id: Option<String>,
+        /// Optional output kind as a snake_case string (`assistant`, `tool`,
+        /// `status`, `error`, `other`). The runtime parses this into
+        /// `OutputKind`, defaulting to `assistant` when `None`. An
+        /// unrecognized value is rejected by the runtime.
+        output_kind: Option<String>,
+        /// Optional viewer-facing content classification as a snake_case
+        /// string (`public`, `household`, `private`, `sensitive`). The
+        /// runtime parses this into `ContentClassification`, defaulting to
+        /// the safe-by-default `private` when `None`. An unrecognized value
+        /// is rejected by the runtime.
+        content_classification: Option<String>,
+        /// Optional coalesce key. When set, repeated publishes sharing the
+        /// key collapse in-place into a single transcript unit rather than
+        /// appending. `None` means append (no coalescing).
+        coalesce_key: Option<String>,
         /// One-shot response channel: `Ok(())` on success or an error
         /// description on validation / auth failure.
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
