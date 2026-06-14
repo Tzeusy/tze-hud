@@ -954,7 +954,10 @@ impl super::Compositor {
                     .get(&node_id)
                     .copied()
                     .unwrap_or_else(|| crate::markdown::MarkdownCache::compute_key(&tm.content));
-                if let Some(parsed) = self.markdown_cache.get_by_key(&content_key) {
+                // Load the current snapshot lock-free (hud-33qo7).  Pinned by the
+                // returned Arc for the duration of this lookup.
+                let markdown_cache = self.markdown_cache();
+                if let Some(parsed) = markdown_cache.get_by_key(&content_key) {
                     TextItem::from_text_markdown_cached(
                         tm,
                         tile.bounds.x - scroll_x,
@@ -1033,7 +1036,8 @@ impl super::Compositor {
 ///
 /// This is a free function (not a method) to avoid a split-borrow conflict in
 /// [`super::Compositor::prime_truncation_cache`], where `self.text_rasterizer` is
-/// borrowed mutably while `self.markdown_cache` is borrowed immutably.
+/// borrowed mutably while the markdown snapshot (loaded from the primer) and
+/// `self.node_key_cache` are read immutably.
 ///
 /// The geometry produced here is identical to what `collect_text_items_from_node`
 /// produces at scroll_x=0, scroll_y=0 (valid because truncation is geometry-

@@ -199,15 +199,21 @@ pub struct Compositor {
     /// lifetime of the compositor (SVG paths are static config; runtime reload
     /// of icon paths is not currently supported).
     failed_icon_paths: HashSet<ResourceId>,
-    /// Phase-1 markdown parse cache (hud-5jbra.2).
+    /// Phase-1 markdown parse cache, fronted by the async primer (hud-5jbra.2,
+    /// hud-380dl, hud-33qo7).
     ///
     /// Maps BLAKE3(content) → [`ParsedMarkdown`].  Populated at content-commit
     /// time by [`Compositor::prime_markdown_cache`]; consumed at render time by
     /// [`Compositor::collect_text_items_from_node`] with zero parse cost on
     /// cache hits.  The cache is evicted in sync with node removal.
     ///
+    /// hud-33qo7: the primer owns an `Arc<ArcSwap<MarkdownCache>>`.  Large
+    /// payloads are parsed on a background thread and swapped in atomically; the
+    /// render path `load()`s the current snapshot lock-free.  Read it via
+    /// [`Compositor::markdown_cache`].
+    ///
     /// [`ParsedMarkdown`]: crate::markdown::ParsedMarkdown
-    pub(crate) markdown_cache: crate::markdown::MarkdownCache,
+    pub(crate) markdown_primer: crate::markdown::MarkdownPrimer,
     /// Per-node content-key cache (hud-gpqde).
     ///
     /// Maps `SceneId` → precomputed BLAKE3 content key, populated at prime time
@@ -445,7 +451,7 @@ impl Compositor {
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
-            markdown_cache: crate::markdown::MarkdownCache::new(),
+            markdown_primer: crate::markdown::MarkdownPrimer::new(),
             node_key_cache: HashMap::new(),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
@@ -717,7 +723,7 @@ impl Compositor {
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
-            markdown_cache: crate::markdown::MarkdownCache::new(),
+            markdown_primer: crate::markdown::MarkdownPrimer::new(),
             node_key_cache: HashMap::new(),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
@@ -1000,7 +1006,7 @@ impl Compositor {
         // Clear the markdown cache so existing entries are re-parsed with the
         // new token values on the next prime() call.
         self.markdown_tokens = crate::markdown::MarkdownTokens::from_token_map(&map);
-        self.markdown_cache = crate::markdown::MarkdownCache::new();
+        self.markdown_primer.reset();
         // Clear the per-node key cache: it will be repopulated by the next
         // prime_markdown_cache call once the version sentinel fires.
         self.node_key_cache.clear();
@@ -1070,11 +1076,16 @@ impl Compositor {
         }
         self.markdown_cache_scene_version = scene.version;
 
-        // Collect BLAKE3 keys for all live TextMarkdownNode content.
-        // Iterate with node IDs so we can populate the per-node key cache
-        // at the same time — eliminating per-frame re-hashes in
-        // collect_text_items_from_node (hud-gpqde).
-        let mut live_keys: Vec<[u8; 32]> = Vec::new();
+        // Snapshot the current cache once so we can decide, per node, whether
+        // its content still needs parsing.  Already-cached entries are carried
+        // forward by the primer without re-cloning their source string
+        // (hud-33qo7); only cache misses ship their `Arc<str>` content.
+        let current = self.markdown_primer.load();
+
+        // Build the complete live job set and repopulate the per-node key cache
+        // (hud-gpqde) in the same pass — eliminating per-frame re-hashes in
+        // collect_text_items_from_node.
+        let mut jobs: Vec<crate::markdown::PrimeJob> = Vec::new();
 
         // Rebuild the node key cache for this scene version.
         self.node_key_cache.clear();
@@ -1082,23 +1093,42 @@ impl Compositor {
         for (node_id, node) in scene.nodes.iter() {
             if let NodeData::TextMarkdown(tm) = &node.data {
                 let key = crate::markdown::MarkdownCache::compute_key(&tm.content);
-                live_keys.push(key);
                 // Store the precomputed key so the frame path can look it up
                 // in O(1) without re-hashing content.
                 self.node_key_cache.insert(*node_id, key);
-                // Parse if not already cached — zero cost on hit.
-                self.markdown_cache
-                    .prime(&tm.content, &self.markdown_tokens);
+                // Attach content only for cache misses; hits carry forward by
+                // key with no source clone.
+                let content = if current.get_by_key(&key).is_none() {
+                    Some(std::sync::Arc::<str>::from(tm.content.as_str()))
+                } else {
+                    None
+                };
+                jobs.push(crate::markdown::PrimeJob { key, content });
             }
         }
 
-        // Evict stale entries so the cache does not grow unboundedly.
-        // Skip the HashSet allocation when the cache size matches the live set.
-        live_keys.sort_unstable();
-        live_keys.dedup();
-        if self.markdown_cache.len() > live_keys.len() {
-            self.markdown_cache.evict_except(&live_keys);
-        }
+        // Hand the complete live set to the primer.  It parses any missing
+        // content (inline for small payloads, on the background thread for large
+        // ones), atomically swaps in the new snapshot, and evicts dead entries
+        // implicitly (the new snapshot is exactly the live set).  Gated on
+        // scene.version so a late background result never clobbers a newer one.
+        self.markdown_primer
+            .prime(jobs, &self.markdown_tokens, scene.version);
+    }
+
+    /// Load the current markdown parse-cache snapshot lock-free (hud-33qo7).
+    ///
+    /// Render-path callers use this to read [`ParsedMarkdown`] via
+    /// [`MarkdownCache::get_by_key`].  The returned [`Arc`] pins the snapshot for
+    /// the duration of the borrow, so a concurrent background swap cannot free it
+    /// mid-read.  Hold it across a traversal (it is a cheap atomic load) rather
+    /// than re-loading per node.
+    ///
+    /// [`MarkdownCache::get_by_key`]: crate::markdown::MarkdownCache::get_by_key
+    /// [`ParsedMarkdown`]: crate::markdown::ParsedMarkdown
+    #[inline]
+    pub(crate) fn markdown_cache(&self) -> std::sync::Arc<crate::markdown::MarkdownCache> {
+        self.markdown_primer.load()
     }
 
     /// Prime the ellipsis-truncation cache for all `TextOverflow::Ellipsis` items
@@ -1196,6 +1226,10 @@ impl Compositor {
         self.truncation_cache_scene_version = scene.version;
         self.resize_reprime_last_at = Some(std::time::Instant::now());
 
+        // Load the markdown snapshot once (lock-free atomic load) and pin it for
+        // the whole traversal — a concurrent background swap cannot free it
+        // mid-read (hud-33qo7).
+        let markdown_cache = self.markdown_primer.load();
         let mut live_items: Vec<crate::text::TextItem> = Vec::new();
         for tile in scene.visible_tiles() {
             let tile_x = tile.bounds.x;
@@ -1211,7 +1245,7 @@ impl Compositor {
                     tile_x,
                     tile_y,
                     at_tail,
-                    &self.markdown_cache,
+                    &markdown_cache,
                     &self.node_key_cache,
                     &self.markdown_tokens,
                     &mut live_items,
@@ -1632,7 +1666,8 @@ impl Compositor {
 ///
 /// This is a free function (not a method) to avoid a split-borrow conflict in
 /// [`Compositor::prime_truncation_cache`], where `self.text_rasterizer` is
-/// borrowed mutably while `self.markdown_cache` is borrowed immutably.
+/// borrowed mutably while the markdown snapshot (loaded from the primer) and
+/// `self.node_key_cache` are read immutably.
 ///
 /// The geometry produced here is identical to what `collect_text_items_from_node`
 /// produces at scroll_x=0, scroll_y=0 (valid because truncation is geometry-

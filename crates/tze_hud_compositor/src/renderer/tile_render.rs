@@ -476,8 +476,11 @@ impl Compositor {
                     // lines in the parsed plain text up to the panel byte range.
                     // Inline panel pixel-exact geometry is deferred to Phase 2.
                     if let Some(code_bg) = self.markdown_tokens.code_background {
+                        // Load the current snapshot lock-free (hud-33qo7); pinned
+                        // by the Arc for the lookup + panel emit below.
+                        let markdown_cache = self.markdown_cache();
                         if let Some(key) = self.node_key_cache.get(&node_id) {
-                            if let Some(parsed) = self.markdown_cache.get_by_key(key) {
+                            if let Some(parsed) = markdown_cache.get_by_key(key) {
                                 let line_height = tm.font_size_px * 1.4;
                                 let panel_margin_x = 4.0_f32;
                                 let panel_pad_y = 2.0_f32;

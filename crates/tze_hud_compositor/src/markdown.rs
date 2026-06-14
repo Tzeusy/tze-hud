@@ -514,6 +514,373 @@ impl MarkdownCache {
         let keep: std::collections::HashSet<[u8; 32]> = live_keys.iter().copied().collect();
         self.entries.retain(|k, _| keep.contains(k));
     }
+
+    /// Build the next complete cache snapshot for a live node set, reusing
+    /// already-parsed entries from `base` and parsing only the content that is
+    /// missing.
+    ///
+    /// This is the pure, side-effect-free core of the async prime
+    /// ([`MarkdownPrimer`]): it can run on any thread (the result is plain data
+    /// behind [`Arc`]) and the produced snapshot is **complete** — it contains
+    /// exactly the entries for `jobs` (carried forward from `base` when already
+    /// parsed, freshly parsed otherwise) and nothing else.  Dropping entries
+    /// not present in `jobs` performs eviction implicitly: the returned snapshot
+    /// is the live set, so swapping it in atomically also prunes dead content.
+    ///
+    /// Because every produced snapshot is internally consistent, a reader that
+    /// races the swap sees either `base` or the new snapshot in full — never a
+    /// torn state.
+    fn rebuild_from(base: &MarkdownCache, jobs: &[PrimeJob], tokens: &MarkdownTokens) -> Self {
+        let mut entries: HashMap<[u8; 32], ParsedMarkdown> = HashMap::with_capacity(jobs.len());
+        for job in jobs {
+            if entries.contains_key(&job.key) {
+                // Duplicate content within the live set — already inserted.
+                continue;
+            }
+            if let Some(existing) = base.entries.get(&job.key) {
+                // Carry forward the already-parsed entry (cheap Arc/Vec clone).
+                entries.insert(job.key, existing.clone());
+            } else if let Some(content) = &job.content {
+                entries.insert(job.key, parse_markdown_subset(content, tokens));
+            }
+            // A job with no cached entry and `content: None` cannot be parsed;
+            // it is simply omitted, and the render path's cache-miss fallback
+            // parses it inline.  This only occurs if a caller mislabels a job.
+        }
+        Self { entries }
+    }
+}
+
+// ─── MarkdownPrimer ───────────────────────────────────────────────────────────
+
+/// A single live `TextMarkdownNode` in the prime set, identified by its
+/// precomputed BLAKE3 content key.
+///
+/// `content` is `Some` only when the caller could not find `key` in the current
+/// snapshot (i.e. it must be parsed).  Already-cached entries pass `None`: the
+/// rebuild carries them forward from the previous snapshot by key, so their
+/// (up to 64 KiB) source string is never re-cloned on the commit path.  When
+/// present, the source is held as `Arc<str>` so the job ships to the background
+/// parse thread without copying.
+#[derive(Clone)]
+pub struct PrimeJob {
+    /// BLAKE3 content key (see [`MarkdownCache::compute_key`]).
+    pub key: [u8; 32],
+    /// Raw markdown source — `Some` only when this key needs parsing.
+    pub content: Option<Arc<str>>,
+}
+
+/// Total source bytes below which a prime is parsed inline on the calling
+/// (commit) thread rather than dispatched to the background parse thread.
+///
+/// Small payloads parse in well under the commit-stage budget, so the channel
+/// hop + thread wakeup would cost more than the parse itself.  Large payloads —
+/// the case this design exists for — clear the threshold and parse off-thread.
+/// 4 KiB is roughly the point where parse time begins to matter against the
+/// Stage 4 budget on the reference hardware (the `markdown_cache` bench shows a
+/// 64 KiB payload dominating; a few KiB is negligible).
+const INLINE_PARSE_BYTE_THRESHOLD: usize = 4096;
+
+/// Async, lock-free front end for the markdown parse cache (hud-33qo7).
+///
+/// # What this adds over [`MarkdownCache`]
+///
+/// hud-380dl (Option A) moved parsing **off the per-frame render path** by
+/// priming at scene-commit time — but the parse still ran synchronously on the
+/// commit thread.  For very large payloads that parse cost lands on the commit
+/// thread and can eat into the Stage 4 budget.
+///
+/// `MarkdownPrimer` completes the move: it owns an [`Arc<ArcSwap<MarkdownCache>>`]
+/// that readers `load()` lock-free on the render path, and a dedicated
+/// background OS thread that parses large payloads and `store()`s the freshly
+/// built snapshot atomically.  Small payloads are parsed inline (see
+/// [`INLINE_PARSE_BYTE_THRESHOLD`]) to avoid the channel/wakeup overhead.
+///
+/// # Why a dedicated thread, not rayon/tokio
+///
+/// The compositor crate does not depend on rayon or a tokio runtime (only a
+/// dev-dependency), and the dependency bar (`about/craft-and-care`) prefers std
+/// over new crates.  A single owned `std::thread` mirrors how the runtime crate
+/// already structures off-thread work (`threads.rs`, `chrome.rs`) and adds no
+/// new dependency.  One worker thread suffices: prime jobs are serialized per
+/// scene commit, so there is no fan-out parallelism to exploit.
+///
+/// # Correctness
+///
+/// - **No torn reads.** [`MarkdownCache::rebuild_from`] always produces a
+///   *complete* snapshot; the reader `load()`s an [`Arc`] to one whole snapshot.
+///   It sees either the old or the new cache, never a half-populated map.
+/// - **No stale clobber.** Each store is guarded by a monotonically increasing
+///   scene version ([`Self::published_version`]).  A late background result for
+///   an older scene version is dropped rather than overwriting a newer snapshot.
+/// - **Liveness fallback.** If the background parse has not completed when a
+///   frame renders, the render path's existing cache-miss branch parses that one
+///   node inline (non-lossy), so a racing frame is always correct — just not
+///   zero-cost for that single frame until the swap lands.
+pub struct MarkdownPrimer {
+    /// The current cache snapshot, swapped atomically.  Readers `load()` it
+    /// lock-free; the commit thread and the background worker `store()` it.
+    cache: Arc<arc_swap::ArcSwap<MarkdownCache>>,
+    /// Highest scene version for which a snapshot has been published.  Guards
+    /// against a late background result clobbering a newer snapshot.
+    published_version: Arc<std::sync::atomic::AtomicU64>,
+    /// Channel to the background parse thread.  `None` only after [`Self::new`]
+    /// fails to spawn the thread (then everything falls back to inline parsing).
+    tx: Option<std::sync::mpsc::Sender<PrimeRequest>>,
+    /// Join handle for graceful shutdown on drop.
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+/// A unit of background parse work shipped to the worker thread.
+struct PrimeRequest {
+    /// Snapshot to rebuild from (carry-forward source for already-parsed entries).
+    base: Arc<MarkdownCache>,
+    /// Complete live job set for this scene version.
+    jobs: Vec<PrimeJob>,
+    /// Token styling in effect at dispatch time.
+    tokens: MarkdownTokens,
+    /// Scene version this rebuild targets (store is gated on it).
+    scene_version: u64,
+}
+
+impl Default for MarkdownPrimer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MarkdownPrimer {
+    /// Create a primer with an empty cache and a running background parse thread.
+    pub fn new() -> Self {
+        let cache = Arc::new(arc_swap::ArcSwap::from_pointee(MarkdownCache::new()));
+        let published_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (tx, rx) = std::sync::mpsc::channel::<PrimeRequest>();
+
+        let worker_cache = Arc::clone(&cache);
+        let worker_version = Arc::clone(&published_version);
+        let worker = std::thread::Builder::new()
+            .name("md-prime".to_string())
+            .spawn(move || {
+                // Each request rebuilds a complete snapshot off the commit thread
+                // and swaps it in — unless a newer snapshot was published in the
+                // meantime (stale-clobber guard).
+                while let Ok(req) = rx.recv() {
+                    let next = MarkdownCache::rebuild_from(&req.base, &req.jobs, &req.tokens);
+                    publish_if_newer(
+                        &worker_cache,
+                        &worker_version,
+                        Arc::new(next),
+                        req.scene_version,
+                    );
+                }
+            })
+            .ok();
+
+        Self {
+            cache,
+            published_version,
+            tx: tx_if_worker_spawned(tx, &worker),
+            worker,
+        }
+    }
+
+    /// Load the current cache snapshot lock-free.
+    ///
+    /// Call this on the render path; it is a single atomic pointer load.  The
+    /// returned [`Arc`] keeps the snapshot alive for as long as the caller holds
+    /// it, so a concurrent swap on the background thread cannot free it
+    /// mid-read.
+    #[inline]
+    pub fn load(&self) -> Arc<MarkdownCache> {
+        self.cache.load_full()
+    }
+
+    /// Prime the cache for `jobs` (the complete live `TextMarkdownNode` set for
+    /// `scene_version`), parsing any missing content off the commit thread when
+    /// it is large.
+    ///
+    /// Behaviour:
+    /// - If nothing is missing and the live set already matches the current
+    ///   snapshot, this is a no-op.
+    /// - If the only change is removals (dead nodes), a pruned snapshot is built
+    ///   inline (eviction is cheap — no parsing) and stored.
+    /// - If missing content is small (≤ [`INLINE_PARSE_BYTE_THRESHOLD`] total),
+    ///   it is parsed inline and stored.
+    /// - Otherwise the rebuild is dispatched to the background parse thread; the
+    ///   render path's cache-miss fallback keeps frames correct until the swap
+    ///   lands.
+    pub fn prime(&self, jobs: Vec<PrimeJob>, tokens: &MarkdownTokens, scene_version: u64) {
+        let current = self.cache.load();
+
+        // Compute the byte volume of content not yet present in the snapshot,
+        // and whether the live set already matches the snapshot exactly.  A job
+        // carrying `content: Some(_)` is one the caller already determined is a
+        // cache miss; we sum those bytes to size the parse work.
+        let mut missing_bytes: usize = 0;
+        for job in &jobs {
+            if let Some(content) = &job.content {
+                if current.get_by_key(&job.key).is_none() {
+                    missing_bytes += content.len();
+                }
+            }
+        }
+        let exact_match = missing_bytes == 0 && current.len() == distinct_key_count(&jobs);
+
+        if exact_match {
+            // Snapshot already correct for this live set — nothing to do.
+            // Still advance the published version so a later in-flight rebuild
+            // for an older version cannot clobber the current good snapshot.
+            bump_version_to(&self.published_version, scene_version);
+            return;
+        }
+
+        // Removals-only (or small parse): rebuild inline.  Building a pruned or
+        // small snapshot is cheap and avoids a thread hop for the common case of
+        // a node disappearing or a tiny content edit.
+        if missing_bytes <= INLINE_PARSE_BYTE_THRESHOLD || self.tx.is_none() {
+            let next = MarkdownCache::rebuild_from(&current, &jobs, tokens);
+            publish_if_newer(
+                &self.cache,
+                &self.published_version,
+                Arc::new(next),
+                scene_version,
+            );
+            return;
+        }
+
+        // Large parse: dispatch off the commit thread.  `self.tx` is `Some`
+        // here (the `is_none()` case took the inline branch above).
+        let req = PrimeRequest {
+            base: current.clone(),
+            jobs,
+            tokens: tokens.clone(),
+            scene_version,
+        };
+        if let Some(tx) = &self.tx {
+            if let Err(failed) = tx.send(req) {
+                // Worker is gone (shutdown / panic): fall back to an inline
+                // rebuild so correctness is preserved even without the thread.
+                let req = failed.0;
+                let next = MarkdownCache::rebuild_from(&req.base, &req.jobs, &req.tokens);
+                publish_if_newer(
+                    &self.cache,
+                    &self.published_version,
+                    Arc::new(next),
+                    req.scene_version,
+                );
+            }
+        }
+        // We deliberately do not block on completion.  The worker advances the
+        // published version on store; the render path falls back to inline parse
+        // for any node not yet in the snapshot until the swap lands.
+    }
+
+    /// Reset the cache to empty and force the next [`Self::prime`] to repopulate.
+    ///
+    /// Called when the token map changes (parsed output depends on tokens) so
+    /// stale styling is never served.  Stores an empty snapshot immediately so
+    /// readers see a clean (cache-miss → inline-parse) state until the next
+    /// prime lands.
+    pub fn reset(&self) {
+        // Advance the published version so any in-flight background rebuild for
+        // the pre-reset scene cannot clobber this reset.
+        let v = self
+            .published_version
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        publish_if_newer(
+            &self.cache,
+            &self.published_version,
+            Arc::new(MarkdownCache::new()),
+            v,
+        );
+    }
+
+    /// Number of entries in the current snapshot (test/diagnostic use).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.cache.load().len()
+    }
+
+    /// Whether the current snapshot is empty (test/diagnostic use).
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.cache.load().is_empty()
+    }
+}
+
+impl Drop for MarkdownPrimer {
+    fn drop(&mut self) {
+        // Drop the sender so the worker's `recv()` returns `Err` and the loop
+        // exits, then join it.  Without this the thread would linger until
+        // process exit (harmless, but untidy in tests that create many primers).
+        self.tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Count distinct keys in `jobs` (the live set may contain duplicate content).
+fn distinct_key_count(jobs: &[PrimeJob]) -> usize {
+    let mut keys: Vec<[u8; 32]> = jobs.iter().map(|j| j.key).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys.len()
+}
+
+/// Store `next` into `cache` iff `version` is newer than the last published
+/// version, then record `version` as published.
+///
+/// This is the stale-clobber guard: a background rebuild that finishes after a
+/// newer snapshot has already been published is dropped instead of overwriting
+/// the newer data.  Uses a CAS loop so the commit thread and worker thread
+/// never lose a newer store to a race.
+fn publish_if_newer(
+    cache: &arc_swap::ArcSwap<MarkdownCache>,
+    published: &std::sync::atomic::AtomicU64,
+    next: Arc<MarkdownCache>,
+    version: u64,
+) {
+    use std::sync::atomic::Ordering;
+    loop {
+        let cur = published.load(Ordering::Acquire);
+        if version < cur {
+            // A newer snapshot already won — drop this stale rebuild.
+            return;
+        }
+        // Claim this version.  On success, publish.  `version == cur` is allowed
+        // (re-publish for the same version, e.g. removals-only after a parse) so
+        // the latest store for a version always wins.
+        match published.compare_exchange_weak(cur, version, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                cache.store(next);
+                return;
+            }
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Advance `published` to at least `version` without storing a new snapshot.
+fn bump_version_to(published: &std::sync::atomic::AtomicU64, version: u64) {
+    use std::sync::atomic::Ordering;
+    let mut cur = published.load(Ordering::Acquire);
+    while version > cur {
+        match published.compare_exchange_weak(cur, version, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(observed) => cur = observed,
+        }
+    }
+}
+
+/// Return the sender only if the worker thread actually spawned; otherwise
+/// `None` so [`MarkdownPrimer::prime`] takes the inline-parse path.
+fn tx_if_worker_spawned(
+    tx: std::sync::mpsc::Sender<PrimeRequest>,
+    worker: &Option<std::thread::JoinHandle<()>>,
+) -> Option<std::sync::mpsc::Sender<PrimeRequest>> {
+    if worker.is_some() { Some(tx) } else { None }
 }
 
 // ─── parse_markdown_subset ───────────────────────────────────────────────────
@@ -3231,5 +3598,192 @@ mod tests {
             plain.contains("Heading"),
             "heading text must still appear in output; got: {plain:?}",
         );
+    }
+
+    // ── MarkdownPrimer — async swap-in (hud-33qo7) ────────────────────────────
+
+    /// Build a `PrimeJob` for `content`, marking it as a cache miss (content
+    /// attached) so the primer parses it.
+    fn miss_job(content: &str) -> PrimeJob {
+        PrimeJob {
+            key: MarkdownCache::compute_key(content),
+            content: Some(Arc::<str>::from(content)),
+        }
+    }
+
+    /// Block until the primer's snapshot contains `key`, or fail after `tries`
+    /// short sleeps.  The background parse thread publishes asynchronously, so a
+    /// test that needs the *completed* swap must poll rather than read once.
+    fn wait_for_key(primer: &MarkdownPrimer, key: &[u8; 32], tries: u32) -> Arc<MarkdownCache> {
+        for _ in 0..tries {
+            let snap = primer.load();
+            if snap.get_by_key(key).is_some() {
+                return snap;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("primer never published an entry for the expected key");
+    }
+
+    /// A small payload is parsed inline and is visible in the snapshot
+    /// immediately after `prime` returns (no thread hop, no torn read).
+    #[test]
+    fn primer_small_payload_swaps_in_synchronously() {
+        let primer = MarkdownPrimer::new();
+        let tokens = MarkdownTokens::default();
+        let job = miss_job("**bold** text");
+        let key = job.key;
+
+        primer.prime(vec![job], &tokens, 1);
+
+        let snap = primer.load();
+        let parsed = snap
+            .get_by_key(&key)
+            .expect("small payload must be present synchronously after prime");
+        assert!(parsed.plain_text.contains("bold"));
+    }
+
+    /// A large payload (above the inline threshold) is parsed on the background
+    /// thread and swapped in atomically; the result is eventually visible and
+    /// correct.
+    #[test]
+    fn primer_large_payload_swaps_in_off_thread() {
+        let primer = MarkdownPrimer::new();
+        let tokens = MarkdownTokens::default();
+        // Exceed INLINE_PARSE_BYTE_THRESHOLD so the background path is taken.
+        let big = "# Title\n\n".to_string() + &"word **emphasis** ".repeat(2000);
+        assert!(big.len() > INLINE_PARSE_BYTE_THRESHOLD);
+        let job = miss_job(&big);
+        let key = job.key;
+
+        primer.prime(vec![job], &tokens, 1);
+
+        // The swap completes asynchronously; poll for it.
+        let snap = wait_for_key(&primer, &key, 200);
+        let parsed = snap
+            .get_by_key(&key)
+            .expect("large payload eventually present");
+        assert!(parsed.plain_text.contains("Title"));
+        assert!(parsed.plain_text.contains("emphasis"));
+    }
+
+    /// Removing a node from the live set evicts its entry on the next prime
+    /// (the new snapshot is exactly the live set).
+    #[test]
+    fn primer_evicts_dead_entries_on_reprime() {
+        let primer = MarkdownPrimer::new();
+        let tokens = MarkdownTokens::default();
+        let job_a = miss_job("alpha");
+        let job_b = miss_job("beta");
+        let key_a = job_a.key;
+        let key_b = job_b.key;
+
+        primer.prime(vec![job_a.clone(), job_b], &tokens, 1);
+        let snap = primer.load();
+        assert!(snap.get_by_key(&key_a).is_some());
+        assert!(snap.get_by_key(&key_b).is_some());
+        assert_eq!(snap.len(), 2);
+
+        // Re-prime with only A live: B must be evicted, A carried forward.
+        // A is already cached, so pass `content: None` (carry-forward path).
+        let carry_a = PrimeJob {
+            key: key_a,
+            content: None,
+        };
+        primer.prime(vec![carry_a], &tokens, 2);
+        let snap = primer.load();
+        assert!(
+            snap.get_by_key(&key_a).is_some(),
+            "live entry carried forward"
+        );
+        assert!(snap.get_by_key(&key_b).is_none(), "dead entry evicted");
+        assert_eq!(snap.len(), 1);
+    }
+
+    /// `reset` empties the snapshot so token-map changes never serve stale
+    /// styling.
+    #[test]
+    fn primer_reset_clears_snapshot() {
+        let primer = MarkdownPrimer::new();
+        let tokens = MarkdownTokens::default();
+        let job = miss_job("# Heading");
+        primer.prime(vec![job], &tokens, 1);
+        assert!(!primer.is_empty());
+
+        primer.reset();
+        assert!(primer.is_empty(), "reset must clear the snapshot");
+    }
+
+    /// A stale background result for an older scene version must not clobber a
+    /// newer snapshot already published.  We exercise the guard directly via
+    /// `publish_if_newer`.
+    #[test]
+    fn primer_stale_publish_does_not_clobber_newer() {
+        let cache = arc_swap::ArcSwap::from_pointee(MarkdownCache::new());
+        let published = std::sync::atomic::AtomicU64::new(0);
+        let tokens = MarkdownTokens::default();
+
+        // Publish version 5 with entry "new".
+        let mut newer = MarkdownCache::new();
+        newer.prime("new", &tokens);
+        let new_key = MarkdownCache::compute_key("new");
+        publish_if_newer(&cache, &published, Arc::new(newer), 5);
+        assert!(cache.load().get_by_key(&new_key).is_some());
+
+        // A late version-3 rebuild (containing "old") must be dropped.
+        let mut older = MarkdownCache::new();
+        older.prime("old", &tokens);
+        let old_key = MarkdownCache::compute_key("old");
+        publish_if_newer(&cache, &published, Arc::new(older), 3);
+
+        let snap = cache.load();
+        assert!(
+            snap.get_by_key(&new_key).is_some(),
+            "newer snapshot must survive a stale store"
+        );
+        assert!(
+            snap.get_by_key(&old_key).is_none(),
+            "stale store must be dropped"
+        );
+    }
+
+    /// Concurrent readers loading during an in-flight prime always observe a
+    /// complete snapshot (old-or-new), never a torn map.
+    #[test]
+    fn primer_reader_never_sees_torn_state() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let primer = Arc::new(MarkdownPrimer::new());
+        let tokens = MarkdownTokens::default();
+
+        // Seed an initial complete snapshot.
+        let seed = miss_job("seed content");
+        let seed_key = seed.key;
+        primer.prime(vec![seed], &tokens, 1);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_primer = Arc::clone(&primer);
+        let reader_stop = Arc::clone(&stop);
+        let reader = std::thread::spawn(move || {
+            // Every snapshot the reader sees must be internally consistent:
+            // either it has the seed key (old) or it has the new keys (new),
+            // and its len matches its contents — never partially filled.
+            while !reader_stop.load(Ordering::Relaxed) {
+                let snap = reader_primer.load();
+                // A snapshot is valid as long as len() == number of present
+                // entries it reports; get_by_key on a present key returns a
+                // fully-formed ParsedMarkdown (Arc<str> non-dangling).
+                if let Some(p) = snap.get_by_key(&seed_key) {
+                    assert!(!p.plain_text.is_empty());
+                }
+            }
+        });
+
+        // Hammer the primer with alternating live sets across versions.
+        for v in 2..200u64 {
+            let content = format!("# Doc {v}\n\n{}", "body ".repeat(1000));
+            primer.prime(vec![miss_job(&content)], &tokens, v);
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
     }
 }
