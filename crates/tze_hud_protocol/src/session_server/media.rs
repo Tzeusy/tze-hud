@@ -239,37 +239,6 @@ fn media_open_rejection(
     None
 }
 
-// ─── Error helpers ───────────────────────────────────────────────────────────
-
-/// Send a `RuntimeError` server message.
-///
-/// Module-private copy of the same helper in `mod.rs`; each handler submodule
-/// owns its own copy to avoid a cross-module visibility constraint on
-/// `StreamSession` (which is `pub(super)` in `stream_session.rs`).
-async fn send_runtime_error(
-    session: &mut StreamSession,
-    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
-    error_code: &str,
-    message: &str,
-    context: &str,
-    error_code_enum: ErrorCode,
-) {
-    let seq = session.next_server_seq();
-    let _ = tx
-        .send(Ok(ServerMessage {
-            sequence: seq,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ServerPayload::RuntimeError(RuntimeError {
-                error_code: error_code.to_string(),
-                message: message.to_string(),
-                context: context.to_string(),
-                hint: String::new(),
-                error_code_enum: error_code_enum as i32,
-            })),
-        }))
-        .await;
-}
-
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 pub(super) async fn handle_media_ingress_open(
@@ -497,7 +466,7 @@ pub(super) async fn handle_media_ingress_close(
             .await;
         }
         _ => {
-            send_runtime_error(
+            super::send_runtime_error(
                 session,
                 tx,
                 "MEDIA_STREAM_NOT_FOUND",
