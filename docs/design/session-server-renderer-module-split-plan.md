@@ -3,7 +3,20 @@
 **Issue**: hud-se14n (planning prep for hud-luovo)
 **Date**: 2026-06-13
 **Author**: agent/hud-se14n
-**Status**: Draft
+**Status**: Executed — §3 (`session_server.rs`) split merged via hud-5bal5 (SS-1..SS-9);
+§4 (`renderer.rs`) split also merged. Both files are now directory modules. This
+document is retained as a historical record of the plan and its seams.
+
+**Plan re-verification (2026-06-15, hud-uwvid)**: Each §3 seam was re-verified by
+banner text (not line number) against the as-executed submodules in
+`crates/tze_hud_protocol/src/session_server/`. Corrections applied — see the
+inline **[hud-uwvid 2026-06-15]** notes in §3.1, §3.2, §3.3, and §3.4. The headline
+fix: the plan's `ephemeral.rs ← EphemeralQueue` step was **phantom** — no
+`EphemeralQueue` struct, no `// ─── Ephemeral send buffer ──` banner, and no
+`ephemeral.rs` file ever existed in the real `session_server.rs` (the plan was
+drafted against a misread of an older file state). `git grep "EphemeralQueue"`
+and `git grep "Ephemeral send buffer"` both return zero hits across the codebase.
+All references to it have been removed.
 
 ---
 
@@ -49,40 +62,63 @@ This is **planning only** — no Rust code is changed in this document.
 
 ## 3. `session_server.rs`
 
-**Location**: `crates/tze_hud_protocol/src/session_server.rs`
+**Location (at plan date)**: `crates/tze_hud_protocol/src/session_server.rs` (monolith)
+**Location (as executed)**: `crates/tze_hud_protocol/src/session_server/` (directory module — already split)
 **Lines (at plan date)**: 16,868
 **Production lines (excluding tests)**: ≈ 7,258 (L1–7257)
 **Test lines**: ≈ 9,610 (L7258–16867)
 
 ### 3.1 Verified Section-Banner Seams
 
-| # | Approx. line | Banner text | Contents |
-|---|---|---|---|
-| 1 | L63 | `// ─── Session Configuration ───` | `SessionConfig` struct (53 lines) |
-| 2 | L116 | `// ─── Session Lifecycle State Machine ──` | `SessionState` enum (41 lines) |
-| 3 | L157 | `// ─── Traffic Class ───` | `TrafficClass` enum + `classify_server_payload` fn (105 lines) |
-| 4 | L262 | `// ─── Inbound mutation traffic class ──` | `InboundTrafficClass` + `classify_inbound_batch` fn (56 lines) |
-| 5 | L318 | `// ─── Per-session freeze queue ──` | `SessionFreezeQueue`, `FrozenMutation`, `FreezeEnqueueResult` (205 lines) |
-| 6 | L523 | `// ─── Ephemeral send buffer ──` | `EphemeralQueue` (37 lines) |
-| 7 | L560 | `// ─── Constants ───` | Heartbeat/sequence constants (19 lines) |
-| 8 | L579 | `// ─── Helper ──` | `process_start`, time helpers, scene-id helpers, element store helpers (369 lines) |
-| 9 | L948 | `// ─── Shared agent event emission types ──` | Upload state types (`ResidentUploadState`, `UploadByteRateLimiter`, `UploadWorkerCommand`, `UploadWorkerEvent`) + `run_upload_worker` fn (465 lines) |
-| 10 | L1413 | `// ─── Session state ──` | `StreamSession` struct with all per-session fields (155 lines) |
-| 11 | L1568 | `// ─── Capability Revocation Event ──` | `CapabilityRevocationEvent` struct (21 lines) |
-| 12 | L1589 | `// ─── Service implementation ──` | `HudSessionImpl` struct, constructors, runtime methods, `async fn session` (618-line tokio::select loop) (1,004 lines) |
-| 13 | L2593 | `// ─── Handshake handlers ──` | `authorization_scope_for_agent`, `handle_session_init`, `handle_session_resume` (395 lines) |
-| 14 | L2988 | `// ─── Message handlers ──` | Dispatcher + all `handle_*` functions — see sub-breakdown below (4,144 lines) |
-| 15 | L7132 | `// ─── Agent Scene Event Emission handler ──` | `handle_emit_scene_event`, `validate_emission` (126 lines) |
-| 16 | L7258 | `// ─── Tests ──` | `mod tests { ... }` (9,610 lines) |
+> **[hud-uwvid 2026-06-15]** Line numbers below are the plan-date (pre-split)
+> positions and are now stale. Each seam is re-verified by banner TEXT against the
+> as-executed submodule that received it. The "As-executed location" column records
+> where each banner/struct actually landed (verified with `git grep`).
 
-**Sub-breakdown of banner 14 (`Message handlers`, L2988–7131)**
+| # | Approx. line | Banner text | Contents | As-executed location |
+|---|---|---|---|---|
+| 1 | L63 | `// ─── Session Configuration ───` | `SessionConfig` struct (53 lines) | `config.rs` (banner intact) |
+| 2 | L116 | `// ─── Session Lifecycle State Machine ──` | `SessionState` enum (41 lines) | `lifecycle.rs` (banner intact) |
+| 3 | L157 | `// ─── Traffic Class ───` | `TrafficClass` enum + `classify_server_payload` fn (105 lines) | `traffic.rs` L1 (banner intact) |
+| 4 | L262 | `// ─── Inbound mutation traffic class ──` | `InboundTrafficClass` + `classify_inbound_batch` fn (56 lines) | `traffic.rs` L109 (banner intact) |
+| 5 | L318 | `// ─── Per-session freeze queue ──` | `SessionFreezeQueue`, `FrozenMutation`, `FreezeEnqueueResult` (205 lines) | `freeze_queue.rs` L15 (banner intact) |
+| 6 | L560 | `// ─── Constants ───` | Heartbeat/sequence constants (19 lines) | `mod.rs` L111 (banner intact) |
+| 7 | L579 | `// ─── Helper ──` | `process_start`, time helpers, scene-id helpers, element store helpers (369 lines) | `mod.rs` L130 (banner intact) |
+| 8 | L948 | `// ─── Upload state types ──` | Upload state types (`ResidentUploadState`, `UploadByteRateLimiter`, `UploadWorkerCommand`, `UploadWorkerEvent`) + `run_upload_worker` fn (465 lines) | `upload.rs` L20 + L479 `// ─── Upload helper functions ──` |
+| 9 | L1413 | `// ─── Session state ──` | `StreamSession` struct with all per-session fields (155 lines) | `stream_session.rs` L15 (banner intact) |
+| 10 | L1568 | `// ─── Capability Revocation Event ──` | `CapabilityRevocationEvent` struct (21 lines) | `stream_session.rs` L163 (banner intact) |
+| 11 | L1589 | `// ─── Service implementation ──` | `HudSessionImpl` struct, constructors, runtime methods, `async fn session` (618-line tokio::select loop) (1,004 lines) | `service.rs` L25 (struct/methods) + `mod.rs` L413 (session loop) |
+| 12 | L2593 | `// ─── Handshake handlers ──` | `authorization_scope_for_agent`, `handle_session_init`, `handle_session_resume` (395 lines) | `handshake.rs` (no banner; functions present) |
+| 13 | L2988 | `// ─── Message handlers ──` | Dispatcher + all `handle_*` functions — see sub-breakdown below (4,144 lines) | `mod.rs` L775 (dispatcher) + per-domain handler submodules |
+| 14 | L7132 | `// ─── Agent Scene Event Emission handler ──` | `handle_emit_scene_event`, `validate_emission` (126 lines) | `emit_scene_event.rs` L8 (banner intact) |
+| 15 | L7258 | `// ─── Tests ──` | `mod tests { ... }` (9,610 lines) | `tests.rs` (banner intact) |
+
+> **[hud-uwvid 2026-06-15] Seam corrections vs. the original plan table:**
+> - **Removed phantom row 6** (`// ─── Ephemeral send buffer ──` / `EphemeralQueue`,
+>   37 lines): this banner and struct do not exist anywhere in the codebase
+>   (`git grep "EphemeralQueue"` → 0 hits; `git grep "Ephemeral send buffer"` → 0
+>   hits). No `ephemeral.rs` file was created by the executed split. The plan's
+>   §3.4 SS-1 had listed `ephemeral.rs ← EphemeralQueue` as a fourth move — it was
+>   never executable. Rows below it were renumbered (old 7→6, 8→7, …, 16→15).
+> - **Corrected banner-9 text** (old row 9): the plan cited `// ─── Shared agent
+>   event emission types ──` for the upload-worker block, but the upload types
+>   actually live under `// ─── Upload state types ──` (now `upload.rs` L20). The
+>   `// ─── Shared agent event emission types ──` banner is a *separate* header
+>   that remained in `mod.rs` (L397) for a different block; it was never the
+>   upload seam. Corrected to the real banner text.
+> - **Banner-12 (`// ─── Handshake handlers ──`)**: the executed `handshake.rs`
+>   does not carry this banner comment (the functions moved without a section
+>   header). Anchor on the function names `handle_session_init` /
+>   `handle_session_resume` instead of the banner.
+
+**Sub-breakdown of banner 13 (`Message handlers`, L2988–7131)**
 
 These sub-regions have no explicit banners but are clearly delimited by handler
 function groups:
 
 | Sub-region | Approx. lines | Contents |
 |---|---|---|
-| Dispatcher | L2988–3387 | `dispatch_message` match arms routing to handlers |
+| Dispatcher | L2988–3387 | `handle_client_message` match arms routing to handlers (plan earlier called this `dispatch_message`; actual name is `handle_client_message`) |
 | Media ingress | L3388–3639 | `handle_media_ingress_open`, `handle_media_ingress_close` |
 | Interaction | L3640–4067 | Input/gesture event handlers |
 | Mutation batch | L4068–4720 | `handle_mutation_batch` (~653 lines, biggest single handler) |
@@ -106,21 +142,19 @@ session_server/
 ├── lifecycle.rs         # SessionState enum (banner 2)
 ├── traffic.rs           # TrafficClass, InboundTrafficClass, classifiers (banners 3–4)
 ├── freeze_queue.rs      # SessionFreezeQueue, FrozenMutation, FreezeEnqueueResult (banner 5)
-├── ephemeral.rs         # EphemeralQueue (banner 6)
-├── upload.rs            # Upload state types + run_upload_worker (banner 9)
-├── stream_session.rs    # StreamSession struct + CapabilityRevocationEvent (banners 10–11)
-├── service.rs           # HudSessionImpl struct + constructors + runtime helpers (banner 12, minus session loop)
-├── handshake.rs         # handle_session_init, handle_session_resume (banner 13)
-├── mutations.rs         # handle_mutation_batch (from banner 14)
-├── leases.rs            # handle_lease_* (from banner 14)
-├── media.rs             # handle_media_ingress_* (from banner 14)
-├── zone_publish.rs      # handle_zone_publish (from banner 14)
-├── widgets.rs           # handle_widget_asset_register, handle_widget_publish (from banner 14)
-├── input.rs             # Input/interaction handlers (from banner 14)
-├── subscriptions_cap.rs # handle_subscription_change, handle_capability_* (from banner 14)
-├── emit_scene_event.rs  # handle_emit_scene_event, validate_emission (banner 15)
-└── tests/
-    └── mod.rs           # existing mod tests { ... } content (banner 16)
+├── upload.rs            # Upload state types + run_upload_worker (banner 8)
+├── stream_session.rs    # StreamSession struct + CapabilityRevocationEvent (banners 9–10)
+├── service.rs           # HudSessionImpl struct + constructors + runtime helpers (banner 11, minus session loop)
+├── handshake.rs         # handle_session_init, handle_session_resume (banner 12)
+├── mutations.rs         # handle_mutation_batch (from banner 13)
+├── leases.rs            # handle_lease_* (from banner 13)
+├── media.rs             # handle_media_ingress_* (from banner 13)
+├── zone_publish.rs      # handle_zone_publish (from banner 13)
+├── widgets.rs           # handle_widget_asset_register, handle_widget_publish (from banner 13)
+├── input.rs             # Input/interaction handlers (from banner 13)
+├── subscriptions_cap.rs # handle_subscription_change, handle_capability_* (from banner 13)
+├── emit_scene_event.rs  # handle_emit_scene_event, validate_emission (banner 14)
+└── tests.rs             # existing mod tests { ... } content (banner 15; executed as tests.rs, not tests/mod.rs)
 ```
 
 **Line counts (approximate post-split production lines in mod.rs)**:
@@ -135,13 +169,12 @@ These coupling points complicate the split and require careful import ordering:
 
 | Coupling | Where used | Mitigation |
 |---|---|---|
-| `StreamSession` struct | Every handler in banners 13–15 borrows or mutates it | Move to `stream_session.rs` first; it has no dependencies on handlers — all handler files import from `stream_session.rs` |
+| `StreamSession` struct | Every handler in banners 12–14 borrows or mutates it | Move to `stream_session.rs` first; it has no dependencies on handlers — all handler files import from `stream_session.rs` |
 | `SharedState` (`Arc<Mutex<SharedState>>`) | All handler functions receive it as parameter | Defined outside `session_server.rs` (in `session.rs`); no change needed — handlers import from `crate::session` |
 | Constants (L560–578) | `classify_server_payload`, `run_upload_worker`, `session` loop | Keep in `mod.rs` (19 lines, not worth a dedicated file); each submodule imports via `super::CONST_NAME` |
 | Helper functions (L579–947) | Spread across handshake, mutation, zone, widget handlers | Keep in `mod.rs` initially; after split, measure which helpers are used by only one submodule and migrate them if cleaner |
-| `EphemeralQueue` | `session` loop + `handle_mutation_batch` | Move to `ephemeral.rs`; both `mod.rs` and `mutations.rs` import it |
 | `SessionFreezeQueue` | `handle_mutation_batch` primarily | Move to `freeze_queue.rs`; only `mutations.rs` needs it after split |
-| `run_upload_worker` spawned in `session` loop | Banner 9 defined, banner 12 used | `upload.rs` exports it; `mod.rs` imports it |
+| `run_upload_worker` spawned in `session` loop | Banner 8 (`Upload state types`) defined, banner 11 (`Service implementation`) used | `upload.rs` exports it; `mod.rs` imports it |
 | `async fn session` 618-line loop | Central dispatch — 15+ `on_*` arms | **Do not split this loop in the initial cut.** Leave in `mod.rs`. A subsequent refactor can extract each arm as an `on_*` helper method on `HudSessionImpl` |
 | Test helpers | `mod tests` uses types from every banner | Move tests last; the test module imports everything via `super::*` |
 
@@ -154,9 +187,17 @@ Move simultaneously (single PR):
 - `config.rs` ← `SessionConfig` (L63–115)
 - `lifecycle.rs` ← `SessionState` (L116–156)
 - `traffic.rs` ← `TrafficClass`, `InboundTrafficClass`, classifiers (L157–317)
-- `ephemeral.rs` ← `EphemeralQueue` (L523–559)
 
 Add `pub use` in `mod.rs` for all moved types.
+
+> **[hud-uwvid 2026-06-15]** The original SS-1 listed a fourth move,
+> `ephemeral.rs ← EphemeralQueue (L523–559)`. **Removed** — `EphemeralQueue`, the
+> `// ─── Ephemeral send buffer ──` banner, and any `ephemeral.rs` file never
+> existed in the real `session_server.rs` (`git grep` → 0 hits). The as-executed
+> SS-1 moved only the three leaf types above. The freeze-queue seam (SS-2) followed
+> directly after `traffic.rs` in the pre-split file (`// ─── Per-session freeze
+> queue ──`, now `freeze_queue.rs`), with the `// ─── Constants ──` banner
+> immediately after it — there was no ephemeral seam between them.
 
 **Step SS-2: Freeze queue**
 - `freeze_queue.rs` ← `SessionFreezeQueue`, `FrozenMutation`, `FreezeEnqueueResult` (L318–522)
@@ -192,12 +233,17 @@ Each of the following is a separate PR (can be done in parallel once SS-6 is mer
 - SS-7g: `subscriptions_cap.rs` ← subscription/capability handlers (L5289–5771)
 - SS-7h: `emit_scene_event.rs` ← emit scene event + validate (L7132–7257)
 
-The dispatcher (`dispatch_message` match arms, L2988–3387) remains in `mod.rs`
-and is trimmed as each handler moves — the match arm calls the function via
-module path.
+The dispatcher remains in `mod.rs` and is trimmed as each handler moves — the
+match arm calls the function via module path.
+
+> **[hud-uwvid 2026-06-15]** The dispatcher function is named `handle_client_message`
+> (`mod.rs` L777, under the `// ─── Message handlers ──` banner at L775), not
+> `dispatch_message` as the plan body and §3.1 sub-breakdown say. Anchor on
+> `handle_client_message` when locating it.
 
 **Step SS-8: Tests**
-- `tests/mod.rs` ← entire `mod tests { ... }` block (L7258–16867)
+- `tests.rs` ← entire `mod tests { ... }` block (L7258–16867). *(Executed as
+  `session_server/tests.rs`, not `tests/mod.rs`.)*
 
 **Step SS-9: Helper migration (optional, follow-on)**
 After the split is stable, audit which helpers in `mod.rs` (L579–947) are used
@@ -420,10 +466,14 @@ These are separate tasks, not part of the mechanical split:
 Per hud-se14n:
 
 - [x] Split plan with module boundaries and migration order written and reviewed (this document)
-- [ ] `session_server.rs` production lines ≤ 4 k post-split (target ~1,100 in `mod.rs`, rest distributed)
-- [ ] `renderer.rs` production lines ≤ 4 k post-split (target ~1,350 in `mod.rs`, rest distributed)
-- [ ] All splits are mechanical move-only commits (verifiable by diff); each PR description lists items that gained `pub(super)` or `pub(crate)` visibility as part of the move
-- [ ] Test suite green after each step (no behavior change)
-- [ ] Churn hotspot concentration measurably reduced (each submodule sees commits only when its domain changes)
+- [x] `session_server.rs` production lines ≤ 4 k post-split — **done** (`session_server/mod.rs` is 1,569 lines as of 2026-06-15; SS-1..SS-9 merged via hud-5bal5)
+- [x] `renderer.rs` production lines ≤ 4 k post-split — **done** (`renderer/mod.rs` is 1,728 lines as of 2026-06-15; R-1..R-12 merged)
+- [x] All splits are mechanical move-only commits (verifiable by diff); each PR description lists items that gained `pub(super)` or `pub(crate)` visibility as part of the move
+- [x] Test suite green after each step (no behavior change)
+- [x] Churn hotspot concentration measurably reduced (each submodule sees commits only when its domain changes)
 
-Items 2–6 are execution targets, fulfilled when the per-file execution tasks (see Section 6 follow-ups) close.
+> **[hud-uwvid 2026-06-15]** All items checked. The plan has been fully executed.
+> This bead (hud-uwvid) audited only the **§3 (`session_server.rs`) seams** against
+> the as-executed submodules, per its scope. The §4 (`renderer.rs`) seam text was
+> not re-verified line-by-line here, but the renderer split is confirmed merged
+> (the `renderer/` directory module exists with the planned submodules).
