@@ -14,16 +14,16 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 
 ## 2. Disconnect presentation (raw-tile pilot)
 
-- [ ] 2.1 Drive a token-resolved degraded treatment (dim + stale marker + disconnect affordance) from the component-profile path; no hardcoded styling
-- [ ] 2.2 Clear typing/activity/ephemeral-realtime indicators on disconnect
-- [ ] 2.3 Keep the disconnect indicator geometry-only and present under redaction
-- [ ] 2.4 Verify the retained coherent window is preserved on disconnect (no committed-unit loss)
+- [x] 2.1 Drive a token-resolved degraded treatment (dim + stale marker + disconnect affordance) from the component-profile path; no hardcoded styling
+- [x] 2.2 Clear typing/activity/ephemeral-realtime indicators on disconnect
+- [x] 2.3 Keep the disconnect indicator geometry-only and present under redaction
+- [x] 2.4 Verify the retained coherent window is preserved on disconnect (no committed-unit loss)
 
 ## 3. Degradation contract
 
-- [ ] 3.1 Wire the degraded threshold (liveness gap) to the existing `ProjectionLifecycleState::Degraded`/`HudUnavailable` transition and `mark_hud_disconnected` bookkeeping
+- [x] 3.1 Wire the degraded threshold (liveness gap) to the existing `ProjectionLifecycleState::Degraded`/`HudUnavailable` transition and `mark_hud_disconnected` bookkeeping
 - [ ] 3.2 Bound the degraded window by lease grace; remove the surface on grace expiry via the existing orphan path
-- [ ] 3.3 Keep degraded-transition presentation timing runtime-owned; clock-domain typed metadata only
+- [x] 3.3 Keep degraded-transition presentation timing runtime-owned; clock-domain typed metadata only
 
 ## 4. Reconnect and resume presentation
 

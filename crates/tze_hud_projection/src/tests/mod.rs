@@ -2941,3 +2941,143 @@ fn portal_next_due_at_us_returns_none_when_no_pending_entry() {
         "portal_next_due_at_us must return None when no coalescer entry is pending"
     );
 }
+
+// ── portal-disconnect-resume-ux §2/§3: connection_degraded signal ────────────
+
+/// §3: a session marked HUD-unavailable exposes `connection_degraded = true`
+/// on its projected state (computed from the lifecycle transition the authority
+/// already owns — no new timer authority introduced).
+#[test]
+fn projected_portal_state_sets_connection_degraded_when_hud_unavailable() {
+    let mut authority = ProjectionAuthority::default();
+    authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+
+    let live = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("attach creates portal state");
+    assert!(
+        !live.connection_degraded,
+        "a freshly attached portal is not degraded"
+    );
+
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+
+    let degraded = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state remains materializable when degraded");
+    assert!(
+        degraded.connection_degraded,
+        "§3: HUD-unavailable session must set connection_degraded"
+    );
+}
+
+/// §2: `connection_degraded` is computed independently of viewer redaction, so a
+/// restricted viewer (default fail-closed policy → lifecycle_state None, redacted
+/// true) still learns the portal is disconnected without any content leak.
+#[test]
+fn connection_degraded_survives_redaction() {
+    let mut authority = ProjectionAuthority::default();
+    authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+
+    // Fail-closed default policy: redacts identity/lifecycle/transcript.
+    let redacted = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::default())
+        .expect("portal state materializes under restrictive policy");
+
+    assert!(
+        redacted.redacted,
+        "restrictive policy must redact the portal"
+    );
+    assert!(
+        redacted.lifecycle_state.is_none(),
+        "lifecycle spelling must be redaction-gated to None"
+    );
+    assert!(
+        redacted.connection_degraded,
+        "§2: connection_degraded must survive redaction (geometry-only signal)"
+    );
+}
+
+/// §2: a degraded portal is forced non-interactive even under an input-permitting
+/// policy — the surface must not present an active-stream affordance.
+#[test]
+fn degraded_state_forces_interaction_disabled() {
+    let mut authority = ProjectionAuthority::default();
+    authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+
+    let live = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("attach creates portal state");
+    assert!(
+        live.interaction_enabled,
+        "a live expanded portal with permissive policy is interactive"
+    );
+
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+    let degraded = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state remains materializable when degraded");
+    assert!(
+        !degraded.interaction_enabled,
+        "§2: degraded portal must be non-interactive even with permissive policy"
+    );
+}
+
+/// §2/§3 regression: the stale/degraded latch must stay set until the HUD
+/// genuinely reconnects. Owner publishes are accepted while the HUD is gone and
+/// promote the lifecycle `HudUnavailable -> Active`; if `connection_degraded`
+/// were keyed off `lifecycle_state`, that owner traffic would silently clear the
+/// stale treatment (un-dim, drop the disconnect marker, re-enable input) in the
+/// orphan/grace window even though `authorize_portal_republish` still fails. The
+/// latch is keyed off `hud_connection`/`last_disconnect_wall_us` so only a real
+/// `record_hud_connection` clears it.
+#[test]
+fn connection_degraded_latches_until_real_reconnect_not_owner_traffic() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+    assert!(
+        authority
+            .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+            .unwrap()
+            .connection_degraded,
+        "portal is degraded immediately after HUD disconnect"
+    );
+
+    // Owner publishes more output while the HUD is still gone. This promotes the
+    // lifecycle back to Active but must NOT clear the connection-degraded latch.
+    let accepted = authority.handle_publish_output(
+        output_request("projection-a", &owner_token, "pub-after-disconnect"),
+        "caller-a",
+        40,
+    );
+    assert!(
+        accepted.accepted,
+        "owner publish is accepted even while the HUD is disconnected"
+    );
+    let still_degraded = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state remains materializable while disconnected");
+    assert!(
+        still_degraded.connection_degraded,
+        "§3: owner traffic must NOT clear the stale latch while the HUD is gone"
+    );
+    assert!(
+        !still_degraded.interaction_enabled,
+        "§2: input stays disabled until the HUD actually reconnects"
+    );
+
+    // A genuine HUD reconnect clears the latch.
+    authority
+        .record_hud_connection("projection-a", connection_metadata(&[]))
+        .unwrap();
+    let recovered = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes after reconnect");
+    assert!(
+        !recovered.connection_degraded,
+        "real reconnect clears the connection-degraded latch"
+    );
+}
