@@ -482,3 +482,22 @@ pub(super) async fn handle_list_elements_request(
         }))
         .await;
 }
+
+// ─── Helpers used only by this module (migrated from mod.rs, SS-9) ──────────
+
+fn element_type_wire_name(element_type: ElementType) -> &'static str {
+    match element_type {
+        ElementType::Tile => "tile",
+        ElementType::Zone => "zone",
+        ElementType::Widget => "widget",
+    }
+}
+
+fn parse_element_type_filter(filter: &str) -> Option<ElementType> {
+    match filter.trim().to_ascii_lowercase().as_str() {
+        "tile" => Some(ElementType::Tile),
+        "zone" => Some(ElementType::Zone),
+        "widget" => Some(ElementType::Widget),
+        _ => None,
+    }
+}

@@ -183,32 +183,6 @@ pub(super) fn bytes_to_scene_id(bytes: &[u8]) -> Result<tze_hud_scene::SceneId, 
     Ok(tze_hud_scene::SceneId::from_uuid(uuid))
 }
 
-/// Map proto `batch_id` bytes to a `SceneId` for rejection-correlation semantics.
-///
-/// If the client supplied a valid 16-byte UUID, use it directly so that any
-/// `BatchRejected` or `MutationResult` echoes the client's own `batch_id`.
-/// Note: `bytes_to_scene_id` validates only the byte length (16 bytes); UUID
-/// version/variant are not checked because the spec (RFC 0005 §3.2) requires
-/// only that `batch_id` is a 16-byte RFC 4122 UUID (big-endian, matching
-/// `scene_id_to_bytes` / `bytes_to_scene_id`) — version bits are the client's
-/// responsibility.
-///
-/// Falls back to a fresh `SceneId` only when the field is absent or malformed
-/// (wrong length); logs a debug warning so SDK regressions are diagnosable.
-pub(super) fn proto_batch_id_to_scene_id(batch_id: &[u8]) -> tze_hud_scene::SceneId {
-    match bytes_to_scene_id(batch_id) {
-        Ok(id) => id,
-        Err(_) => {
-            tracing::debug!(
-                batch_id_len = batch_id.len(),
-                "proto batch_id is absent or malformed (expected 16 bytes); \
-                 generating a fresh SceneId — client cannot correlate this batch"
-            );
-            tze_hud_scene::SceneId::new()
-        }
-    }
-}
-
 /// Captures the data needed to persist the element store outside the shared-state lock.
 pub(super) struct ElementStorePersistRequest {
     store: ElementStore,
@@ -387,37 +361,6 @@ pub(super) async fn persist_element_store(request: Option<ElementStorePersistReq
             );
         }
     }
-}
-
-fn element_type_wire_name(element_type: ElementType) -> &'static str {
-    match element_type {
-        ElementType::Tile => "tile",
-        ElementType::Zone => "zone",
-        ElementType::Widget => "widget",
-    }
-}
-
-fn parse_element_type_filter(filter: &str) -> Option<ElementType> {
-    match filter.trim().to_ascii_lowercase().as_str() {
-        "tile" => Some(ElementType::Tile),
-        "zone" => Some(ElementType::Zone),
-        "widget" => Some(ElementType::Widget),
-        _ => None,
-    }
-}
-
-pub(super) fn resolve_tile_bounds_with_override(
-    entry: Option<&ElementStoreEntry>,
-    agent_bounds: Option<Rect>,
-    display_area: Rect,
-) -> Option<Rect> {
-    let user_override = entry.and_then(|e| e.geometry_override);
-    let agent_requested = agent_bounds.map(|bounds| {
-        rect_to_relative_geometry_policy(bounds, display_area.width, display_area.height)
-    });
-    resolve_geometry_override_chain(user_override, agent_requested, None, None).map(|policy| {
-        geometry_policy_to_absolute_rect(policy, display_area.width, display_area.height)
-    })
 }
 
 pub(super) fn touch_element_store_entry_by_id(
