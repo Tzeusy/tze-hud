@@ -102,6 +102,47 @@ const PORTAL_Z_ORDER: u32 = 160;
 /// and is logged at `error` level.
 const MAX_PORTAL_DRAIN_ITERATIONS_PER_CYCLE: u32 = 1024;
 
+/// Parse an optional snake_case `output_kind` string into [`OutputKind`].
+///
+/// `None` defaults to [`OutputKind::Assistant`] (the contract default). The
+/// value is deserialized through the same serde `snake_case` representation
+/// the wire contract uses, so accepted spellings match
+/// `serde(rename_all = "snake_case")` exactly. An unrecognized value yields an
+/// `Err` describing the rejection, which the caller forwards to the requester
+/// rather than silently coercing to a default.
+fn parse_output_kind(raw: Option<&str>) -> Result<OutputKind, String> {
+    match raw {
+        None => Ok(OutputKind::default()),
+        Some(value) => serde_json::from_value(serde_json::Value::String(value.to_string()))
+            .map_err(|_| {
+                format!(
+                    "invalid output_kind {value:?}: expected one of \
+                     assistant, tool, status, error, other"
+                )
+            }),
+    }
+}
+
+/// Parse an optional snake_case `content_classification` string into
+/// [`ContentClassification`].
+///
+/// `None` defaults to [`ContentClassification::Private`] — privacy is
+/// safe-by-default per the cooperative-hud-projection privacy governance
+/// requirement. An unrecognized value yields an `Err` rather than coercing to a
+/// (potentially less private) default.
+fn parse_content_classification(raw: Option<&str>) -> Result<ContentClassification, String> {
+    match raw {
+        None => Ok(ContentClassification::default()),
+        Some(value) => serde_json::from_value(serde_json::Value::String(value.to_string()))
+            .map_err(|_| {
+                format!(
+                    "invalid content_classification {value:?}: expected one of \
+                     public, household, private, sensitive"
+                )
+            }),
+    }
+}
+
 /// Per-projection adapter state managed by the in-process driver.
 struct DriveEntry {
     /// gRPC adapter that renders markdown and tracks tile state.
@@ -341,9 +382,14 @@ impl InProcessPortalDriver {
     ///
     /// ## `PublishOutput` behaviour
     ///
-    /// 1. Calls `ProjectionAuthority::handle_publish_output` with a generated
+    /// 1. Parses the optional `output_kind` / `content_classification`
+    ///    snake_case strings into the projection enums (defaulting to
+    ///    `assistant` / `private` when omitted) and threads through the
+    ///    optional `coalesce_key`. An unrecognized enum value is rejected via
+    ///    the reply channel before the authority is called.
+    /// 2. Calls `ProjectionAuthority::handle_publish_output` with a generated
     ///    envelope and the caller-supplied owner token.
-    /// 2. Forwards accept/reject through the reply channel.
+    /// 3. Forwards accept/reject through the reply channel.
     ///    The cadence coalescer inside the authority accumulates the update; the
     ///    normal `drain()` call in the same `about_to_wait` iteration (or the
     ///    next one) materialises it into the scene.
@@ -416,8 +462,30 @@ impl InProcessPortalDriver {
                 owner_token,
                 output_text,
                 logical_unit_id,
+                output_kind,
+                content_classification,
+                coalesce_key,
                 reply,
             } => {
+                // Parse the optional snake_case classification strings into the
+                // projection enums. Omitted fields default safely
+                // (assistant / private — privacy is safe-by-default). An
+                // unrecognized value is rejected before the authority sees it.
+                let output_kind = match parse_output_kind(output_kind.as_deref()) {
+                    Ok(kind) => kind,
+                    Err(reason) => {
+                        let _ = reply.send(Err(reason));
+                        return;
+                    }
+                };
+                let content_classification =
+                    match parse_content_classification(content_classification.as_deref()) {
+                        Ok(classification) => classification,
+                        Err(reason) => {
+                            let _ = reply.send(Err(reason));
+                            return;
+                        }
+                    };
                 let request_id = uuid::Uuid::now_v7().to_string();
                 let req = PublishOutputRequest {
                     envelope: OperationEnvelope {
@@ -428,10 +496,10 @@ impl InProcessPortalDriver {
                     },
                     owner_token,
                     output_text,
-                    output_kind: OutputKind::Assistant,
-                    content_classification: ContentClassification::Private,
+                    output_kind,
+                    content_classification,
                     logical_unit_id,
-                    coalesce_key: None,
+                    coalesce_key,
                 };
                 let resp = self
                     .authority
@@ -1745,6 +1813,9 @@ mod tests {
             owner_token: owner_token.clone(),
             output_text: "Hello from MCP portal".to_string(),
             logical_unit_id: None,
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
             reply: pub_tx,
         });
 
@@ -1815,6 +1886,9 @@ mod tests {
                 owner_token: owner_token.clone(),
                 output_text: format!("line {i}"),
                 logical_unit_id: Some(format!("u{i}")),
+                output_kind: None,
+                content_classification: None,
+                coalesce_key: None,
                 reply: tx,
             });
         }
@@ -1879,6 +1953,9 @@ mod tests {
             owner_token: owner_token.clone(),
             output_text: "first line".to_string(),
             logical_unit_id: None,
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
             reply: pub_tx,
         });
         pub_rx
@@ -2444,5 +2521,149 @@ mod tests {
             driver.authority_mut().next_due_projection_id().is_none(),
             "hud-bsr7u: no portal may remain due after operator cleanup + drain"
         );
+    }
+
+    // ── hud-m7w3g: publish classification + coalesce_key threading ────────────
+
+    #[test]
+    fn parse_output_kind_defaults_and_variants() {
+        assert_eq!(parse_output_kind(None), Ok(OutputKind::Assistant));
+        assert_eq!(parse_output_kind(Some("assistant")), Ok(OutputKind::Assistant));
+        assert_eq!(parse_output_kind(Some("tool")), Ok(OutputKind::Tool));
+        assert_eq!(parse_output_kind(Some("status")), Ok(OutputKind::Status));
+        assert_eq!(parse_output_kind(Some("error")), Ok(OutputKind::Error));
+        assert_eq!(parse_output_kind(Some("other")), Ok(OutputKind::Other));
+    }
+
+    #[test]
+    fn parse_output_kind_rejects_unknown() {
+        let err = parse_output_kind(Some("Assistant")).unwrap_err();
+        assert!(err.contains("invalid output_kind"), "got: {err}");
+        // Camel-case / unknown spellings are rejected, not silently defaulted.
+        assert!(parse_output_kind(Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn parse_content_classification_defaults_safe_to_private() {
+        // Omitted classification must default to Private (privacy safe-by-default).
+        assert_eq!(
+            parse_content_classification(None),
+            Ok(ContentClassification::Private)
+        );
+        assert_eq!(
+            parse_content_classification(Some("public")),
+            Ok(ContentClassification::Public)
+        );
+        assert_eq!(
+            parse_content_classification(Some("household")),
+            Ok(ContentClassification::Household)
+        );
+        assert_eq!(
+            parse_content_classification(Some("private")),
+            Ok(ContentClassification::Private)
+        );
+        assert_eq!(
+            parse_content_classification(Some("sensitive")),
+            Ok(ContentClassification::Sensitive)
+        );
+    }
+
+    #[test]
+    fn parse_content_classification_rejects_unknown() {
+        let err = parse_content_classification(Some("secret")).unwrap_err();
+        assert!(err.contains("invalid content_classification"), "got: {err}");
+    }
+
+    /// An explicit, valid `output_kind` / `content_classification` plus a
+    /// `coalesce_key` must thread through `dispatch_portal_op(PublishOutput)`
+    /// into the authority and be accepted (hud-m7w3g).
+    #[test]
+    fn dispatch_publish_threads_classification_and_coalesce_key() {
+        use tze_hud_projection::ProjectionBounds;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_publish_classification"),
+            drain_deferral_count: 0,
+        };
+
+        let (attach_tx, mut attach_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "classify-proj".to_string(),
+            display_name: "Classify Projection".to_string(),
+            idempotency_key: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply sent synchronously")
+            .expect("attach accepted");
+
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "classify-proj".to_string(),
+            owner_token,
+            output_text: "status line".to_string(),
+            logical_unit_id: None,
+            output_kind: Some("status".to_string()),
+            content_classification: Some("public".to_string()),
+            coalesce_key: Some("ck-1".to_string()),
+            reply: pub_tx,
+        });
+        pub_rx
+            .try_recv()
+            .expect("reply sent synchronously")
+            .expect("publish with explicit classification + coalesce_key must be accepted");
+    }
+
+    /// An unrecognized `content_classification` must be rejected at the driver
+    /// before reaching the authority, surfaced through the reply channel —
+    /// never silently coerced to a less-private default (hud-m7w3g).
+    #[test]
+    fn dispatch_publish_rejects_invalid_classification() {
+        use tze_hud_projection::ProjectionBounds;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds::default()).unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_publish_invalid"),
+            drain_deferral_count: 0,
+        };
+
+        let (attach_tx, mut attach_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "reject-proj".to_string(),
+            display_name: "Reject Projection".to_string(),
+            idempotency_key: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply sent synchronously")
+            .expect("attach accepted");
+
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "reject-proj".to_string(),
+            owner_token,
+            output_text: "secret payload".to_string(),
+            logical_unit_id: None,
+            output_kind: None,
+            content_classification: Some("top-secret".to_string()),
+            coalesce_key: None,
+            reply: pub_tx,
+        });
+        let result = pub_rx
+            .try_recv()
+            .expect("reply sent synchronously even on rejection");
+        let err = result.expect_err("invalid content_classification must be rejected");
+        assert!(err.contains("invalid content_classification"), "got: {err}");
     }
 }

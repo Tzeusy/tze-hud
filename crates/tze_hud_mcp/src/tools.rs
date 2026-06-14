@@ -2286,6 +2286,19 @@ pub struct PortalProjectionPublishParams {
     /// Optional logical-unit ID for idempotent deduplication (max 128 bytes).
     #[serde(default)]
     pub logical_unit_id: Option<String>,
+    /// Optional output kind (`assistant`, `tool`, `status`, `error`, `other`).
+    /// Defaults to `assistant` when omitted. An unrecognized value is rejected.
+    #[serde(default)]
+    pub output_kind: Option<String>,
+    /// Optional viewer-facing content classification (`public`, `household`,
+    /// `private`, `sensitive`). Defaults to the safe-by-default `private` when
+    /// omitted. An unrecognized value is rejected.
+    #[serde(default)]
+    pub content_classification: Option<String>,
+    /// Optional coalesce key. Repeated publishes sharing the key collapse
+    /// in-place into one transcript unit instead of appending. Omit for append.
+    #[serde(default)]
+    pub coalesce_key: Option<String>,
 }
 
 /// Response from `portal_projection_publish`.
@@ -2306,12 +2319,20 @@ pub struct PortalProjectionPublishResult {
 /// into the live scene, advancing follow-tail (spec §3.2) and preserving
 /// scrolled-back stability (spec §3.3).
 ///
+/// Per the cooperative-hud-projection contract (spec Requirement: Low-Token
+/// LLM-Facing Operations), `publish_output` also accepts optional
+/// `output_kind`, `content_classification`, and `coalesce_key`. These are
+/// forwarded verbatim as snake_case strings; the runtime driver parses them
+/// into the projection enums and defaults safely to `assistant` /
+/// `private` / no-coalesce when omitted. Privacy stays safe-by-default: an
+/// omitted classification is treated as `private`.
+///
 /// # Errors
 ///
 /// - `invalid_params` if `projection_id`, `owner_token`, or `output_text` is empty.
 /// - `internal` if the portal authority is not wired.
 /// - `internal` if the authority rejected the publish (invalid token, rate limit,
-///   oversized payload, etc.).
+///   oversized payload, unrecognized `output_kind` / `content_classification`, etc.).
 pub async fn handle_portal_projection_publish(
     params: Value,
     portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
@@ -2346,6 +2367,9 @@ pub async fn handle_portal_projection_publish(
         owner_token: p.owner_token,
         output_text: p.output_text,
         logical_unit_id: p.logical_unit_id,
+        output_kind: p.output_kind,
+        content_classification: p.content_classification,
+        coalesce_key: p.coalesce_key,
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
@@ -5524,5 +5548,37 @@ mod tests {
             matches!(err, McpError::SceneError(ref msg) if msg.contains("ELEMENT_NOT_FOUND")),
             "expected ELEMENT_NOT_FOUND scene error, got {err:?}"
         );
+    }
+
+    // ── portal_projection_publish params (hud-m7w3g) ──────────────────────────
+
+    #[test]
+    fn portal_publish_params_default_classification_fields_to_none() {
+        let p: PortalProjectionPublishParams = parse_params(json!({
+            "projection_id": "p1",
+            "owner_token": "t1",
+            "output_text": "hello"
+        }))
+        .expect("minimal publish params must parse");
+        assert_eq!(p.logical_unit_id, None);
+        assert_eq!(p.output_kind, None);
+        assert_eq!(p.content_classification, None);
+        assert_eq!(p.coalesce_key, None);
+    }
+
+    #[test]
+    fn portal_publish_params_carry_classification_and_coalesce_key() {
+        let p: PortalProjectionPublishParams = parse_params(json!({
+            "projection_id": "p1",
+            "owner_token": "t1",
+            "output_text": "hello",
+            "output_kind": "status",
+            "content_classification": "public",
+            "coalesce_key": "ck-1"
+        }))
+        .expect("full publish params must parse");
+        assert_eq!(p.output_kind.as_deref(), Some("status"));
+        assert_eq!(p.content_classification.as_deref(), Some("public"));
+        assert_eq!(p.coalesce_key.as_deref(), Some("ck-1"));
     }
 }
