@@ -948,12 +948,26 @@ impl InProcessPortalDriver {
 
     /// Ensure the driver has an active lease in the scene graph.
     ///
-    /// Returns the existing lease if still valid (capabilities can be retrieved),
-    /// or grants a new one.
+    /// Returns the cached lease only if it is still **Active** (mutations
+    /// allowed); otherwise grants a fresh one and caches it.
+    ///
+    /// The active-state check (not mere map presence) is load-bearing for the
+    /// post-grace re-attach path: when a prior portal's lease orphans and its
+    /// grace period elapses, `SceneGraph::expire_leases` removes the lease's
+    /// tiles but leaves the lease entry resident in the map as `Expired`
+    /// (terminal state is recorded in place, not pruned). A session attaching
+    /// *after* that grace expiry must therefore start a FRESH portal under a new
+    /// lease. If we reused the cached-but-Expired lease here, the subsequent
+    /// `create_tile` would fail its `require_active_lease` check and the new
+    /// session would silently get no portal — never reviving the removed surface
+    /// nor presenting pre-death content as live, but also never coming back.
     fn ensure_driver_lease(&mut self, scene: &mut SceneGraph) -> Option<SceneId> {
         if let Some(lease_id) = self.lease_id {
-            // Check if still valid by attempting to read capabilities.
-            if scene.lease_capabilities(&lease_id).is_some() {
+            // Reuse only if the cached lease is still Active. A terminal
+            // (Expired/Revoked) or orphaned/suspended lease must NOT be reused —
+            // `lease_capabilities` would still return `Some` for an Expired
+            // lease left resident by grace-period reaping, so we check liveness.
+            if scene.lease_is_active(&lease_id) {
                 return Some(lease_id);
             }
         }
@@ -2668,5 +2682,130 @@ mod tests {
             .expect("reply sent synchronously even on rejection");
         let err = result.expect_err("invalid content_classification must be rejected");
         assert!(err.contains("invalid content_classification"), "got: {err}");
+    }
+
+    /// hud-pk9pz (task 4.6): a session attaching AFTER the prior portal's lease
+    /// grace period has already expired must start a FRESH portal under a NEW
+    /// lease — it must never revive the removed surface nor reuse the dead lease.
+    ///
+    /// Structural reason this needs a guard: `expire_leases` reaps an orphaned
+    /// lease's tiles on grace expiry but leaves the lease entry resident in the
+    /// map as `Expired` (terminal state recorded in place). The driver caches
+    /// its lease id in `self.lease_id`. The OLD reuse check
+    /// (`lease_capabilities(..).is_some()`) returned `Some` for that dead-but-
+    /// resident lease, so the driver would reuse it; the next `create_tile` then
+    /// fails its `require_active_lease` check and the re-attaching session
+    /// silently gets NO portal. The fix gates reuse on `lease_is_active`, so a
+    /// post-grace re-attach grants a fresh lease and creates a fresh tile.
+    #[test]
+    fn reattach_after_grace_expiry_starts_fresh_portal_under_new_lease() {
+        use std::sync::Arc;
+        use tze_hud_scene::{Clock, TestClock};
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+        };
+
+        // Scene backed by a TestClock so we can drive lease grace expiry
+        // deterministically. Scene clock (ms) is independent of the drain
+        // rate-window clock (`now_us`) passed to `drain_inner`.
+        let clock = TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // --- First session: attach + drain → CreatePortalTile under lease L1. ---
+        let token1 = attach_and_get_token(&mut driver, "proj-1");
+        driver.attach_projection("proj-1", Vec::new());
+        publish(&mut driver, "proj-1", &token1, "session-one content", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let lease1 = driver
+            .lease_id
+            .expect("driver must hold a lease after the first CreatePortalTile drain");
+        let tile1 = driver
+            .drive
+            .entries
+            .get("proj-1")
+            .expect("first drive entry must exist")
+            .tile_scene_id
+            .expect("first tile must be created");
+        assert_eq!(scene.tile_count(), 1, "first portal tile is live");
+        assert!(
+            scene.lease_is_active(&lease1),
+            "the first lease is active while the portal is live"
+        );
+
+        // --- First session drops; grace period elapses; orphan path reaps it. ---
+        scene
+            .disconnect_lease(&lease1, clock.now_millis())
+            .expect("disconnect orphans the lease (degraded surface, grace begins)");
+        // Advance well past the 30s grace period, then run expiry.
+        clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1_000);
+        let expiries = scene.expire_leases();
+        assert_eq!(expiries.len(), 1, "the grace-expired lease must be reaped");
+        assert!(
+            expiries[0].removed_tiles.contains(&tile1),
+            "the dead session's surface is removed on grace expiry"
+        );
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "no surface survives past grace — nothing to revive"
+        );
+        // The lease entry is left resident as Expired (terminal recorded in
+        // place) — this is exactly the trap the fix guards against.
+        assert!(
+            !scene.lease_is_active(&lease1),
+            "L1 is no longer active after grace expiry"
+        );
+
+        // --- Second session attaches AFTER grace expiry. It must get a FRESH ---
+        // --- portal under a NEW lease, not a revived surface or reused lease.  --
+        let token2 = attach_and_get_token(&mut driver, "proj-2");
+        driver.attach_projection("proj-2", Vec::new());
+        publish(&mut driver, "proj-2", &token2, "session-two content", 300);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 400);
+
+        let lease2 = driver
+            .lease_id
+            .expect("driver must hold a lease after the re-attach CreatePortalTile drain");
+        assert_ne!(
+            lease2, lease1,
+            "post-grace re-attach must obtain a FRESH lease, not reuse the dead L1"
+        );
+        assert!(
+            scene.lease_is_active(&lease2),
+            "the fresh lease must be Active so create_tile succeeds"
+        );
+
+        let tile2 = driver
+            .drive
+            .entries
+            .get("proj-2")
+            .expect("second drive entry must exist")
+            .tile_scene_id
+            .expect(
+                "a fresh portal tile MUST be created for the re-attaching session — \
+                 if this is None, the driver reused the dead lease and create_tile \
+                 silently failed (the bug this test guards)",
+            );
+        assert_ne!(
+            tile2, tile1,
+            "the new portal is a fresh surface, not a revival of the removed one"
+        );
+        assert_eq!(
+            scene.tile_count(),
+            1,
+            "exactly one live portal tile — the fresh one"
+        );
     }
 }

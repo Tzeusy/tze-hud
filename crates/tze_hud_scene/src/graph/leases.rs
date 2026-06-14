@@ -275,6 +275,24 @@ impl SceneGraph {
         self.leases.get(lease_id).map(|l| l.capabilities.as_slice())
     }
 
+    /// Whether a lease is present AND in the `Active` state (mutations allowed).
+    ///
+    /// Returns `false` for an unknown lease, or for a lease in any non-Active
+    /// state (Suspended, Orphaned, Expired, Revoked). This is the correct
+    /// liveness predicate for "may I still create/modify tiles under this
+    /// lease?" — unlike [`Self::lease_capabilities`], which returns `Some` for
+    /// any lease still resident in the map (including terminal/Expired leases
+    /// that `expire_leases` left in place after grace-period reaping).
+    ///
+    /// Used by the portal driver's lease-reuse decision so that a session
+    /// attaching *after* its prior lease's grace period has already expired
+    /// gets a FRESH lease rather than re-using the dead one (which would make
+    /// `create_tile` fail its `require_active_lease` check and silently produce
+    /// no portal).
+    pub fn lease_is_active(&self, lease_id: &SceneId) -> bool {
+        self.leases.get(lease_id).is_some_and(|l| l.is_active())
+    }
+
     pub fn renew_lease(
         &mut self,
         lease_id: SceneId,

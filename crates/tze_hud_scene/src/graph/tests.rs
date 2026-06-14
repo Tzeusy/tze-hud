@@ -3654,6 +3654,50 @@ fn lease_capabilities_returns_none_for_unknown_id() {
     assert!(scene.lease_capabilities(&SceneId::new()).is_none());
 }
 
+/// hud-pk9pz: `lease_is_active` is the liveness predicate that distinguishes a
+/// usable lease from a merely-resident terminal one. It returns `false` for an
+/// unknown lease, and — critically — `false` for an `Expired` lease that
+/// grace-period reaping (`expire_leases`) left resident in the map. This is the
+/// distinction `lease_capabilities` does NOT make (it returns `Some` for any
+/// resident lease), and is what lets the portal driver start a fresh portal on
+/// a post-grace re-attach instead of reusing a dead lease.
+#[test]
+fn lease_is_active_false_for_unknown_and_grace_expired_lease() {
+    let (mut scene, clock) = scene_with_test_clock();
+
+    // Unknown lease: not active.
+    assert!(!scene.lease_is_active(&SceneId::new()));
+
+    // Active lease: active.
+    let lease_id = scene.grant_lease("agent", 120_000, vec![Capability::CreateTiles]);
+    assert!(scene.lease_is_active(&lease_id));
+    // ...but lease_capabilities also returns Some here — the two agree while active.
+    assert!(scene.lease_capabilities(&lease_id).is_some());
+
+    // Orphan it and let the grace period elapse, then reap.
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .unwrap();
+    assert!(
+        !scene.lease_is_active(&lease_id),
+        "an orphaned (degraded) lease is not active"
+    );
+    clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1_000);
+    let expiries = scene.expire_leases();
+    assert_eq!(expiries.len(), 1);
+
+    // The lease is Expired but STILL RESIDENT in the map: lease_capabilities
+    // reports Some (the trap), while lease_is_active correctly reports false.
+    assert!(
+        scene.lease_capabilities(&lease_id).is_some(),
+        "expire_leases leaves the terminal lease resident — lease_capabilities still returns Some"
+    );
+    assert!(
+        !scene.lease_is_active(&lease_id),
+        "a grace-expired lease must NOT be reported active — this is the load-bearing distinction"
+    );
+}
+
 /// WHEN revoke_capability succeeds
 /// THEN it returns Ok((cap_name_string, revoked_at_wall_us)) so callers can populate
 /// the LeaseEventKind::CapabilityRevoked audit event fields.
