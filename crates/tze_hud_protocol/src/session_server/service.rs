@@ -117,7 +117,6 @@ impl HudSessionImpl {
                 runtime_widget_store: None,
                 element_store: tze_hud_scene::element_store::ElementStore::default(),
                 element_store_path: None,
-                safe_mode_active: false,
                 safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 token_store: crate::token::TokenStore::new(),
                 freeze_active: false,

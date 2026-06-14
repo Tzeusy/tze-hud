@@ -423,7 +423,10 @@ pub(super) async fn handle_mutation_batch(
     // so this check runs before the freeze check.
     {
         let st = state.lock().await;
-        let safe_mode = session.safe_mode_active || st.safe_mode_active;
+        let safe_mode = session.safe_mode_active
+            || st
+                .safe_mode_atomic
+                .load(std::sync::atomic::Ordering::Acquire);
         if safe_mode {
             let seq = session.next_server_seq();
             let _ = tx

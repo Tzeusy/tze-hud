@@ -16,7 +16,7 @@
 //!
 //! 1. Cancel active freeze and discard freeze queue (`freeze_active = false` first).
 //! 2. Suspend all ACTIVE leases (NOT revoke — identity preserved).
-//! 3. Set `SharedState.safe_mode_active = true` → mutation intake rejects batches.
+//! 3. Set `SharedState.safe_mode_atomic = true` → mutation intake rejects batches.
 //! 4. Broadcast `SessionSuspended` to all connected sessions via `ServerMessage` channel.
 //! 5. Set `ChromeState.safe_mode_active = true` → overlay renders on next frame.
 //!
@@ -24,7 +24,7 @@
 //!
 //! 1. Dismiss overlay: `ChromeState.safe_mode_active = false`.
 //! 2. Resume all SUSPENDED leases → ACTIVE; compute TTL adjustments.
-//! 3. Set `SharedState.safe_mode_active = false` → mutations accepted again.
+//! 3. Set `SharedState.safe_mode_atomic = false` → mutations accepted again.
 //! 4. Broadcast `SessionResumed` to all connected sessions.
 //! 5. After safe mode exit, freeze remains inactive.
 //!
@@ -191,7 +191,7 @@ pub fn classify_safe_mode_input(
 ///
 /// Callers that own an [`tze_hud_input::InputProcessor`] should register a
 /// suspension hook via [`SafeModeController::set_composer_suspension_hook`].
-/// The hook is called with `true` immediately after `SharedState.safe_mode_active`
+/// The hook is called with `true` immediately after `SharedState.safe_mode_atomic`
 /// is set (safe-mode ENTER) and with `false` immediately after it is cleared
 /// (safe-mode EXIT), matching the protocol order in the spec.
 ///
@@ -292,7 +292,7 @@ impl SafeModeController {
     ///
     /// 1. Cancel freeze (`freeze_active = false` BEFORE any other steps).
     /// 2. Suspend all ACTIVE leases — NOT revoke.
-    /// 3. Set `SharedState.safe_mode_active = true` — mutation intake rejects batches.
+    /// 3. Set `SharedState.safe_mode_atomic = true` — mutation intake rejects batches.
     /// 4. Broadcast `SessionSuspended` to all connected sessions.
     /// 5. Set `ChromeState.safe_mode_active = true` — overlay on next frame.
     ///
@@ -329,7 +329,7 @@ impl SafeModeController {
 
         // Steps 2–4: acquire SharedState, suspend leases, signal safe mode, broadcast.
         let (leases_suspended, sessions_notified) = {
-            let mut st = self.shared_state.lock().await;
+            let st = self.shared_state.lock().await;
 
             // Step 2: Suspend all ACTIVE leases (NOT revoke — spec §Safe Mode Suspends Leases).
             let leases_suspended = {
@@ -343,9 +343,9 @@ impl SafeModeController {
             };
 
             // Step 3: Signal safe mode active so mutation intake rejects new batches.
-            // The AtomicBool mirror is also set here so the winit event-thread can read
-            // the flag lock-free (Ordering::Release pairs with Acquire on the reader side).
-            st.safe_mode_active = true;
+            // `safe_mode_atomic` is the single source of truth: the winit event-thread
+            // reads it lock-free and mutation intake reads it under the SharedState lock.
+            // Ordering::Release pairs with the Acquire load on every reader side.
             st.safe_mode_atomic.store(true, Ordering::Release);
 
             // Step 4: Broadcast SessionSuspended to all connected sessions.
@@ -390,7 +390,7 @@ impl SafeModeController {
         self.override_state.assert_invariant();
 
         // Suspend the composer draft manager (§4.5).
-        // Called after `SharedState.safe_mode_active = true` to match the protocol
+        // Called after `SharedState.safe_mode_atomic = true` to match the protocol
         // order: dispatch-level capture is live before the manager-state suspension.
         if let Some(ref hook) = self.composer_suspension_hook {
             hook(true);
@@ -431,7 +431,7 @@ impl SafeModeController {
     ///
     /// 1. Dismiss overlay: `ChromeState.safe_mode_active = false`.
     /// 2. Resume all SUSPENDED leases → ACTIVE; compute TTL adjustments.
-    /// 3. Set `SharedState.safe_mode_active = false` — mutations accepted again.
+    /// 3. Set `SharedState.safe_mode_atomic = false` — mutations accepted again.
     /// 4. Broadcast `SessionResumed` to all connected sessions.
     ///
     /// Returns TTL adjustment information per lease for `LeaseResume` delivery.
@@ -441,18 +441,18 @@ impl SafeModeController {
     pub async fn exit_safe_mode(&mut self) -> SafeModeExitResult {
         // Guard: idempotent — not active is a no-op.
         //
-        // AUTHORITATIVE CHECK: read `SharedState.safe_mode_active` rather than
+        // AUTHORITATIVE CHECK: read `SharedState.safe_mode_atomic` rather than
         // `self.override_state.safe_mode_active`.  A freshly-constructed
         // `SafeModeController` (e.g. the one created per-signal in the keyboard
         // exit bridge) has `override_state.safe_mode_active = false` even when
         // safe mode is genuinely active, because it never went through
-        // `enter_safe_mode()`.  `SharedState.safe_mode_active` is the canonical
+        // `enter_safe_mode()`.  `SharedState.safe_mode_atomic` is the canonical
         // source of truth written by the controller that called
         // `enter_safe_mode()`, so it correctly reflects the current runtime
         // state regardless of which controller instance calls `exit_safe_mode()`.
         let shared_active = {
             let st = self.shared_state.lock().await;
-            st.safe_mode_active
+            st.safe_mode_atomic.load(Ordering::Acquire)
         };
         if !shared_active {
             return SafeModeExitResult {
@@ -491,7 +491,7 @@ impl SafeModeController {
 
         // Steps 2–4: acquire SharedState, resume leases, clear safe mode flag, broadcast.
         let (leases_resumed, lease_resumes, sessions_notified) = {
-            let mut st = self.shared_state.lock().await;
+            let st = self.shared_state.lock().await;
 
             // Step 2a: Collect suspension info and resume leases within the scene lock.
             let safe_mode_entered_ms = self.override_state.safe_mode_entered_at_ms;
@@ -547,9 +547,9 @@ impl SafeModeController {
                 .collect();
 
             // Step 3: Clear safe mode flag — mutation intake accepts new batches.
-            // Clear the AtomicBool mirror too so the event-thread sees the exit
-            // immediately on its next Acquire load (Ordering::Release).
-            st.safe_mode_active = false;
+            // `safe_mode_atomic` is the single source of truth; clearing it lets both
+            // the event-thread (lock-free) and mutation intake (under lock) observe the
+            // exit on their next Acquire load (Ordering::Release).
             st.safe_mode_atomic.store(false, Ordering::Release);
 
             // Step 4: Broadcast SessionResumed to all connected sessions.
@@ -576,7 +576,7 @@ impl SafeModeController {
         self.override_state.assert_invariant();
 
         // Resume the composer draft manager (§4.5).
-        // Called after `SharedState.safe_mode_active = false` so that any keystroke
+        // Called after `SharedState.safe_mode_atomic = false` so that any keystroke
         // that arrives immediately after exit is not blocked by the manager-state.
         if let Some(ref hook) = self.composer_suspension_hook {
             hook(false);
@@ -705,7 +705,6 @@ mod tests {
             runtime_widget_store: None,
             element_store: tze_hud_scene::element_store::ElementStore::default(),
             element_store_path: None,
-            safe_mode_active: false,
             safe_mode_atomic: Arc::new(AtomicBool::new(false)),
             freeze_active: false,
             token_store: TokenStore::new(),
@@ -774,8 +773,8 @@ mod tests {
                 "lease must be SUSPENDED not REVOKED — identity preserved"
             );
             assert!(
-                st.safe_mode_active,
-                "SharedState.safe_mode_active must be true"
+                st.safe_mode_atomic.load(Ordering::Acquire),
+                "SharedState.safe_mode_atomic must be true"
             );
         }
 
@@ -941,8 +940,8 @@ mod tests {
                 "lease must return to ACTIVE — agents do not re-request"
             );
             assert!(
-                !st.safe_mode_active,
-                "SharedState.safe_mode_active must be false"
+                !st.safe_mode_atomic.load(Ordering::Acquire),
+                "SharedState.safe_mode_atomic must be false"
             );
         }
 
@@ -1025,7 +1024,7 @@ mod tests {
 
     // ── 4. Mutations rejected during safe mode ────────────────────────────────
 
-    /// WHEN safe mode active THEN SharedState.safe_mode_active = true,
+    /// WHEN safe mode active THEN SharedState.safe_mode_atomic = true,
     /// which causes the session server to reject MutationBatch with SAFE_MODE_ACTIVE.
     #[tokio::test]
     async fn test_mutations_rejected_via_shared_state_flag() {
@@ -1035,8 +1034,8 @@ mod tests {
         {
             let st = ctrl.shared_state.lock().await;
             assert!(
-                st.safe_mode_active,
-                "SharedState.safe_mode_active must be true — session server uses this flag"
+                st.safe_mode_atomic.load(Ordering::Acquire),
+                "SharedState.safe_mode_atomic must be true — session server uses this flag"
             );
         }
 
@@ -1044,8 +1043,8 @@ mod tests {
         {
             let st = ctrl.shared_state.lock().await;
             assert!(
-                !st.safe_mode_active,
-                "SharedState.safe_mode_active must be false after exit"
+                !st.safe_mode_atomic.load(Ordering::Acquire),
+                "SharedState.safe_mode_atomic must be false after exit"
             );
         }
     }
@@ -1568,12 +1567,12 @@ mod tests {
             atomic.load(Ordering::Acquire),
             "safe_mode_atomic must be true immediately after enter_safe_mode"
         );
-        // SharedState.safe_mode_active must also be true (belt-and-suspenders check).
+        // SharedState.safe_mode_atomic must also be true (belt-and-suspenders check).
         {
             let st = shared.lock().await;
             assert!(
-                st.safe_mode_active,
-                "SharedState.safe_mode_active must be true after enter"
+                st.safe_mode_atomic.load(Ordering::Acquire),
+                "SharedState.safe_mode_atomic must be true after enter"
             );
         }
 
@@ -1586,8 +1585,8 @@ mod tests {
         {
             let st = shared.lock().await;
             assert!(
-                !st.safe_mode_active,
-                "SharedState.safe_mode_active must be false after exit"
+                !st.safe_mode_atomic.load(Ordering::Acquire),
+                "SharedState.safe_mode_atomic must be false after exit"
             );
         }
     }
@@ -1641,7 +1640,7 @@ mod tests {
     /// `self.override_state.safe_mode_active`, which is always `false` on a
     /// fresh controller → the call was a silent no-op.
     ///
-    /// After the fix, the guard reads `SharedState.safe_mode_active` (the
+    /// After the fix, the guard reads `SharedState.safe_mode_atomic` (the
     /// authoritative source), so any controller sharing the same `shared_state`
     /// and `chrome_state` can correctly exit safe mode.
     ///
@@ -1649,8 +1648,8 @@ mod tests {
     ///
     /// Pre-fix `exit_safe_mode()` immediately returns the no-op result because
     /// `self.override_state.safe_mode_active == false` on the fresh controller.
-    /// `SharedState.safe_mode_active` remains `true` after the call.
-    /// The final assertion catches this: `st.safe_mode_active` is still `true`.
+    /// `SharedState.safe_mode_atomic` remains `true` after the call.
+    /// The final assertion catches this: `st.safe_mode_atomic` is still `true`.
     #[tokio::test]
     async fn test_fresh_controller_exit_safe_mode_via_shared_state() {
         use std::sync::atomic::Ordering;
@@ -1668,8 +1667,8 @@ mod tests {
         {
             let st = shared.lock().await;
             assert!(
-                st.safe_mode_active,
-                "SharedState.safe_mode_active must be true after enter_safe_mode"
+                st.safe_mode_atomic.load(Ordering::Acquire),
+                "SharedState.safe_mode_atomic must be true after enter_safe_mode"
             );
             assert_eq!(
                 st.scene.lock().await.leases[&lease_id].state,
@@ -1698,7 +1697,7 @@ mod tests {
 
         // Call exit_safe_mode on the fresh controller.
         // Pre-fix: returns a no-op result (leases_resumed=0, SharedState unchanged).
-        // Post-fix: reads SharedState.safe_mode_active=true and proceeds with exit.
+        // Post-fix: reads SharedState.safe_mode_atomic=true and proceeds with exit.
         let result = ctrl_fresh.exit_safe_mode().await;
 
         // --- Assert: safe mode must be fully exited ---
@@ -1707,8 +1706,8 @@ mod tests {
         {
             let st = shared.lock().await;
             assert!(
-                !st.safe_mode_active,
-                "SharedState.safe_mode_active must be false after fresh-controller exit — \
+                !st.safe_mode_atomic.load(Ordering::Acquire),
+                "SharedState.safe_mode_atomic must be false after fresh-controller exit — \
                  this fails on pre-fix code where exit_safe_mode() is a silent no-op"
             );
             assert!(
