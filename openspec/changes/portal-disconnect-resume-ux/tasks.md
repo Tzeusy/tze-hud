@@ -27,13 +27,13 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 
 ## 4. Reconnect and resume presentation
 
-- [ ] 4.1 Resume from the authority-preserved retained visible window; clear the stale treatment
-- [ ] 4.2 Preserve identity continuity: keep `logical_unit_id` idempotency-only and update a continued unit in place via its `coalesce_key` (no duplicate, no `logical_unit_id` semantics change)
-- [ ] 4.3 Coalesce resumed appends under the existing state-stream cadence rules
-- [ ] 4.4 Materialize only the bounded visible window (no scene-graph history reconstruction)
-- [ ] 4.5 Preserve non-terminal pending input/ack state across reconnect
-- [ ] 4.6 Start a fresh portal on attach after grace expiry (no silent revival of stale content)
-- [ ] 4.7 Respect redaction at every frame of the stale-to-live transition
+- [x] 4.1 Resume from the authority-preserved retained visible window; clear the stale treatment (latch is derived from `hud_connection`/`last_disconnect_wall_us`, so `record_hud_connection` clears it and the never-cleared retained window resumes; locked by `reconnect_resumes_from_retained_window_and_clears_stale_treatment`)
+- [x] 4.2 Preserve identity continuity: keep `logical_unit_id` idempotency-only and update a continued unit in place via its `coalesce_key` (locked by `reconnect_continues_in_progress_unit_in_place_via_coalesce_key` + `reconnect_replayed_logical_unit_id_stays_idempotent`)
+- [x] 4.3 Coalesce resumed appends under the existing state-stream cadence rules (coalesce-key in-place path is reconnect-agnostic; exercised under the 1/window rate limit in the §4.2 coalesce test)
+- [x] 4.4 Materialize only the bounded visible window (no scene-graph history reconstruction) (locked by `reconnect_materializes_only_bounded_visible_window`)
+- [x] 4.5 Preserve non-terminal pending input/ack state across reconnect (`mark_hud_disconnected` does not touch `pending_input`; locked by `reconnect_preserves_transcript_inbox_ack_state_and_requires_new_lease`)
+- [ ] 4.6 Start a fresh portal on attach after grace expiry (no silent revival of stale content) — lease-orphan/grace path, outside the projection authority; tracked by hud-0q1dh (`degraded portal surface removed via lease orphan grace`)
+- [x] 4.7 Respect redaction at every frame of the stale-to-live transition (locked by `stale_to_live_transition_respects_redaction_every_frame`)
 
 ## 5. Evidence
 
