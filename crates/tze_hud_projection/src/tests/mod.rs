@@ -3023,3 +3023,61 @@ fn degraded_state_forces_interaction_disabled() {
         "§2: degraded portal must be non-interactive even with permissive policy"
     );
 }
+
+/// §2/§3 regression: the stale/degraded latch must stay set until the HUD
+/// genuinely reconnects. Owner publishes are accepted while the HUD is gone and
+/// promote the lifecycle `HudUnavailable -> Active`; if `connection_degraded`
+/// were keyed off `lifecycle_state`, that owner traffic would silently clear the
+/// stale treatment (un-dim, drop the disconnect marker, re-enable input) in the
+/// orphan/grace window even though `authorize_portal_republish` still fails. The
+/// latch is keyed off `hud_connection`/`last_disconnect_wall_us` so only a real
+/// `record_hud_connection` clears it.
+#[test]
+fn connection_degraded_latches_until_real_reconnect_not_owner_traffic() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+    assert!(
+        authority
+            .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+            .unwrap()
+            .connection_degraded,
+        "portal is degraded immediately after HUD disconnect"
+    );
+
+    // Owner publishes more output while the HUD is still gone. This promotes the
+    // lifecycle back to Active but must NOT clear the connection-degraded latch.
+    let accepted = authority.handle_publish_output(
+        output_request("projection-a", &owner_token, "pub-after-disconnect"),
+        "caller-a",
+        40,
+    );
+    assert!(
+        accepted.accepted,
+        "owner publish is accepted even while the HUD is disconnected"
+    );
+    let still_degraded = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state remains materializable while disconnected");
+    assert!(
+        still_degraded.connection_degraded,
+        "§3: owner traffic must NOT clear the stale latch while the HUD is gone"
+    );
+    assert!(
+        !still_degraded.interaction_enabled,
+        "§2: input stays disabled until the HUD actually reconnects"
+    );
+
+    // A genuine HUD reconnect clears the latch.
+    authority
+        .record_hud_connection("projection-a", connection_metadata(&[]))
+        .unwrap();
+    let recovered = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes after reconnect");
+    assert!(
+        !recovered.connection_degraded,
+        "real reconnect clears the connection-degraded latch"
+    );
+}

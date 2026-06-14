@@ -1563,14 +1563,26 @@ fn projected_portal_state(
     let pending_visible = projection_visible && policy.reveal_pending_input;
     let redacted = !identity_visible || !lifecycle_visible || (expanded && !transcript_visible);
     // Content-free connection-degraded signal (portal-disconnect-resume-ux §2/§3).
-    // Derived ONLY from the session lifecycle, independent of viewer redaction, so
-    // it survives redaction exactly like the scroll-position indicator: a restricted
-    // viewer still learns the portal is disconnected without any transcript/identity
-    // leak. The richer `lifecycle_state` below stays redaction-gated.
-    let connection_degraded = matches!(
-        session.lifecycle_state,
-        ProjectionLifecycleState::Degraded | ProjectionLifecycleState::HudUnavailable
-    );
+    // Latched on the actual HUD connection bookkeeping, independent of viewer
+    // redaction, so it survives redaction exactly like the scroll-position
+    // indicator: a restricted viewer still learns the portal is disconnected
+    // without any transcript/identity leak. The richer `lifecycle_state` below
+    // stays redaction-gated.
+    //
+    // The signal is keyed off `hud_connection`/`last_disconnect_wall_us`, NOT
+    // `lifecycle_state`, because owner traffic clears the lifecycle latch but not
+    // the connection: `handle_publish_output` accepts owner publishes while the
+    // HUD is gone (`hud_connection == None`) and `append_transcript_unit`
+    // promotes `HudUnavailable` back to `Active`. Deriving from `lifecycle_state`
+    // would silently drop the stale treatment during the orphan/grace window even
+    // though `authorize_portal_republish` still fails — the surface would un-dim
+    // and re-enable input without the HUD ever reconnecting. Only
+    // `record_hud_connection` restores `hud_connection = Some`, so this latch
+    // clears exactly on a genuine reconnect. `last_disconnect_wall_us.is_some()`
+    // gates out a freshly-attached, never-connected portal (which is "connecting",
+    // not "disconnected").
+    let connection_degraded =
+        session.hud_connection.is_none() && session.reconnect.last_disconnect_wall_us.is_some();
     let interaction_enabled = session.portal_presentation == ProjectedPortalPresentation::Expanded
         && projection_visible
         && policy.allow_input
