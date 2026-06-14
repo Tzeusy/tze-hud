@@ -299,6 +299,14 @@ pub struct Compositor {
     /// (background rect + caret rect).  Cleared when the handle delivers
     /// `None` (composer deactivated).
     pub(crate) local_composer: Option<LocalComposerState>,
+    /// Reference instant for the composer caret blink phase.
+    ///
+    /// The caret toggles solid/hidden every [`image_cache::CARET_BLINK_HALF_PERIOD`]
+    /// measured from this instant.  Reset to "now" whenever a new draft state is
+    /// applied (keystroke / caret move) so the caret is solid immediately after
+    /// typing.  Computed per-frame in `collect_composer_text_item`; the model is
+    /// never in this loop.
+    pub(crate) composer_caret_blink_start: std::time::Instant,
 }
 
 /// Partitioned rounded-rectangle draw commands organized by layer.
@@ -467,6 +475,7 @@ impl Compositor {
             video_frame_cache: HashMap::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
             local_composer: None,
+            composer_caret_blink_start: std::time::Instant::now(),
         })
     }
 
@@ -739,6 +748,7 @@ impl Compositor {
             video_frame_cache: HashMap::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
             local_composer: None,
+            composer_caret_blink_start: std::time::Instant::now(),
         };
 
         let window_surface = WindowSurface::new(surface, config);
@@ -1045,7 +1055,12 @@ impl Compositor {
     /// Taking the value (`.take()`) resets the slot to `None` so the
     /// same update is not applied twice.
     pub fn drain_local_composer_state(&mut self) {
-        apply_composer_slot(&self.local_composer_state, &mut self.local_composer);
+        let new_draft = apply_composer_slot(&self.local_composer_state, &mut self.local_composer);
+        if new_draft {
+            // Reset the blink phase so the caret is solid right after typing or
+            // moving the caret (standard editor behavior).
+            self.composer_caret_blink_start = std::time::Instant::now();
+        }
     }
 
     /// Prime the markdown parse cache for all [`TextMarkdownNode`] nodes in the scene.

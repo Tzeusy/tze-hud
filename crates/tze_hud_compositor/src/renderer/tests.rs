@@ -1,6 +1,8 @@
 use super::*;
 use crate::surface::HeadlessSurface;
-use image_cache::composer_display_text;
+use image_cache::{
+    CARET_BLINK_HALF_PERIOD, caret_visible_at, composer_display_text, composer_display_text_blink,
+};
 use tze_hud_input::{DRAG_OPACITY_BOOST, DRAG_Z_ORDER_BOOST};
 use tze_hud_scene::graph::SceneGraph;
 
@@ -9457,6 +9459,63 @@ fn local_composer_state_handle_slot_semantics() {
         local_composer.is_none(),
         "Some(None) slot must clear local_composer (deactivation)"
     );
+}
+
+/// Pure blink-phase logic: `elapsed → caret-visible` must produce a square wave
+/// with period `2 * CARET_BLINK_HALF_PERIOD`, solid in the first half-period so
+/// the caret is solid immediately after a reset (keystroke / caret move).
+#[test]
+fn caret_blink_phase_square_wave() {
+    use std::time::Duration;
+    let half = CARET_BLINK_HALF_PERIOD;
+
+    // Phase 0 (solid) — including exactly at reset.
+    assert!(
+        caret_visible_at(Duration::ZERO),
+        "solid immediately after reset"
+    );
+    assert!(caret_visible_at(half / 2), "solid mid first half-period");
+    assert!(
+        caret_visible_at(half - Duration::from_millis(1)),
+        "solid just before first toggle"
+    );
+
+    // Phase 1 (hidden).
+    assert!(!caret_visible_at(half), "hidden at first toggle boundary");
+    assert!(
+        !caret_visible_at(half + half / 2),
+        "hidden mid second half-period"
+    );
+
+    // Phase 2 (solid again) — wave repeats.
+    assert!(
+        caret_visible_at(half * 2),
+        "solid again after one full period"
+    );
+    assert!(!caret_visible_at(half * 3), "hidden in fourth half-period");
+}
+
+/// Blink-aware display builder: the off phase omits the caret glyph entirely
+/// (the hidden state), while the on phase matches the always-on builder.
+#[test]
+fn caret_blink_display_omits_glyph_when_hidden() {
+    const CARET: char = '▌';
+
+    // On phase → identical to the always-visible builder.
+    let on = composer_display_text_blink("hello", 2, true);
+    assert_eq!(on, composer_display_text("hello", 2));
+    assert!(on.contains(CARET), "on phase must contain the caret glyph");
+
+    // Off phase → just the draft text, no caret.
+    let off = composer_display_text_blink("hello", 2, false);
+    assert_eq!(off, "hello");
+    assert!(
+        !off.contains(CARET),
+        "off phase must not contain the caret glyph"
+    );
+
+    // Off phase must not panic on an OOB / mid-multibyte cursor either.
+    let _ = composer_display_text_blink("éclat", 1, false);
 }
 
 /// The caret glyph (`▌`, U+258C LEFT HALF BLOCK) must be inserted at the

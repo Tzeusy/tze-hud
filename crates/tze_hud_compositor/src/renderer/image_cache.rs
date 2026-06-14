@@ -81,8 +81,37 @@ pub struct LocalComposerState {
 /// frame at the top of the render loop.
 pub type LocalComposerStateHandle = Arc<StdMutex<Option<Option<LocalComposerState>>>>;
 
+/// Caret blink half-period: the caret stays solid for this long, then hidden
+/// for this long, repeating.  ~530 ms is the conventional editor blink rate.
+pub(crate) const CARET_BLINK_HALF_PERIOD: std::time::Duration =
+    std::time::Duration::from_millis(530);
+
+/// Pure blink-phase logic: given the time elapsed since the caret was last reset
+/// to "solid" (a keystroke / caret move), return whether the caret should be
+/// drawn on the current frame.
+///
+/// Phase 0 (`[0, half)`) is solid → `true`; phase 1 (`[half, 2*half)`) is
+/// hidden → `false`; and so on.  Resetting `elapsed` to zero on edit therefore
+/// yields a solid caret immediately after typing (standard editor behavior).
+///
+/// This is frame-level state computed by the runtime from its own clock — the
+/// model never participates in the blink loop.
+pub(crate) fn caret_visible_at(elapsed: std::time::Duration) -> bool {
+    let half = CARET_BLINK_HALF_PERIOD.as_nanos();
+    if half == 0 {
+        return true;
+    }
+    // Even half-period index → solid; odd → hidden.
+    (elapsed.as_nanos() / half) % 2 == 0
+}
+
 /// Build the display string for the composer echo overlay: the draft text with
-/// the caret glyph (`▌`, U+258C LEFT HALF BLOCK) inserted at `cursor_byte`.
+/// the caret glyph (`▌`, U+258C LEFT HALF BLOCK) inserted at `cursor_byte` when
+/// `caret_visible` is `true`.
+///
+/// When `caret_visible` is `false` (blink "off" phase) the caret is omitted
+/// entirely so the strip shows just the draft text — there is no separate caret
+/// draw call to toggle, so omitting the glyph IS the hidden state.
 ///
 /// `cursor_byte` is an **agent-provided** offset and may be:
 /// - out-of-range (> `text.len()`) — clamped to `text.len()`.
@@ -90,7 +119,30 @@ pub type LocalComposerStateHandle = Arc<StdMutex<Option<Option<LocalComposerStat
 ///   boundary (same pattern as the overflow / input crates).
 ///
 /// Either way this function never panics on agent input.
+pub(crate) fn composer_display_text_blink(
+    text: &str,
+    cursor_byte: usize,
+    caret_visible: bool,
+) -> String {
+    composer_display_text_blink_inner(text, cursor_byte, caret_visible)
+}
+
+/// Always-caret-visible convenience wrapper used by the caret-positioning unit
+/// tests (the production render path always goes through
+/// [`composer_display_text_blink`] with the live blink phase).
+#[cfg(test)]
 pub(crate) fn composer_display_text(text: &str, cursor_byte: usize) -> String {
+    composer_display_text_blink_inner(text, cursor_byte, true)
+}
+
+fn composer_display_text_blink_inner(
+    text: &str,
+    cursor_byte: usize,
+    caret_visible: bool,
+) -> String {
+    if !caret_visible {
+        return text.to_string();
+    }
     // Clamp to [0, text.len()] first, then walk back to a char boundary.
     let mut cursor = cursor_byte.min(text.len());
     while cursor > 0 && !text.is_char_boundary(cursor) {
@@ -110,17 +162,25 @@ pub(crate) fn composer_display_text(text: &str, cursor_byte: usize) -> String {
 /// - `handle` holds `Some(None)`    → `current` is cleared (deactivation).
 /// - `handle` holds `Some(Some(s))` → `current` is replaced with `s`.
 ///
+/// Returns `true` when a new draft state (`Some(Some(_))`) was applied — i.e.
+/// the caller should reset the caret-blink phase so the caret is solid right
+/// after the keystroke.  Returns `false` for the keep-current and deactivation
+/// cases (no need to disturb the blink timer).
+///
 /// This is the pure logic extracted from [`Compositor::drain_local_composer_state`]
 /// so that tests can drive it without a GPU-backed [`Compositor`].
 pub(crate) fn apply_composer_slot(
     handle: &LocalComposerStateHandle,
     current: &mut Option<LocalComposerState>,
-) {
+) -> bool {
     if let Ok(mut guard) = handle.lock() {
         if let Some(update) = guard.take() {
+            let is_new_draft = update.is_some();
             *current = update;
+            return is_new_draft;
         }
     }
+    false
 }
 
 // ─── Font / image loading methods ────────────────────────────────────────────
