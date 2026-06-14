@@ -415,6 +415,12 @@ impl Compositor {
     }
 
     /// Render a node and its children within a tile.
+    // Lint suppressed deliberately: `render_node` is a recursive tree walk.
+    // `too_many_arguments` — the args are the node id plus the four distinct
+    // output/scene buffers and two surface dimensions threaded unchanged through
+    // every recursion; a context struct would add indirection on a hot path
+    // without reducing the real fan-out. `only_used_in_recursion` — `tile`,
+    // `sw`, and `sh` are forwarded to child calls, which is the intended shape.
     #[allow(clippy::only_used_in_recursion, clippy::too_many_arguments)]
     pub(super) fn render_node(
         &self,

@@ -355,7 +355,14 @@ impl HudSessionImpl {
                         store: st.element_store.clone(),
                         path,
                     });
-            (previous.unwrap(), fallback, persist_req)
+            (
+                previous.expect(
+                    "invariant: the `previous.is_none()` check above returns early, so \
+                     `previous` is guaranteed `Some` at this point",
+                ),
+                fallback,
+                persist_req,
+            )
         };
 
         // Persist store outside the lock.

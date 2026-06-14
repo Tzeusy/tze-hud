@@ -206,6 +206,11 @@ mod platform {
         Failure = 0,
     }
 
+    // SAFETY: These are declarations of GStreamer/GLib C symbols linked from the
+    // Android `gstreamer_android` shared library. The signatures mirror the
+    // upstream C ABI (pointer + length conventions); callers of each function are
+    // individually responsible for passing valid, correctly-sized pointers, which
+    // is upheld at each `unsafe { ... }` call site below.
     unsafe extern "C" {
         fn gst_android_init(env: *mut c_void, context: *mut c_void);
         fn gst_init(argc: *mut c_int, argv: *mut *mut *mut c_char);
@@ -264,6 +269,11 @@ mod platform {
     }
 
     /// Android native JNI entry point.
+    ///
+    /// # Safety
+    /// This is an FFI entry point invoked by the JVM with `vm`/`reserved`
+    /// pointers it owns; both arguments are ignored here, so no pointer is
+    /// dereferenced and the call is sound for any inputs the JVM provides.
     #[unsafe(no_mangle)]
     pub unsafe extern "system" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> c_int {
         let result = bootstrap()
@@ -277,6 +287,11 @@ mod platform {
     }
 
     /// Runs `gst_android_init(env, context)` and records the bootstrap stage.
+    ///
+    /// # Safety
+    /// `env` and `context` must be valid Android JNI `JNIEnv*` and application
+    /// `Context` pointers for the duration of the call; they are forwarded
+    /// verbatim to `gst_android_init`, which dereferences them.
     pub unsafe fn run_gst_android_init(
         env: *mut c_void,
         context: *mut c_void,

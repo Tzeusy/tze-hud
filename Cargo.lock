@@ -4044,6 +4044,7 @@ dependencies = [
  "prost",
  "quick-xml 0.37.5",
  "serde_json",
+ "subtle",
  "tempfile",
  "tokio",
  "tokio-stream",
