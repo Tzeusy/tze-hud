@@ -26,6 +26,10 @@ bytemuck = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 blake3 = { workspace = true }
+# Lock-free atomic swap of the markdown parse-cache snapshot (hud-33qo7).
+# Already a workspace dependency (used by tze_hud_runtime for the hit-test
+# snapshot); reused here rather than adding a new crate, per the dependency bar.
+arc-swap = { workspace = true }
 glyphon = { workspace = true }
 unicode-segmentation = { workspace = true }
 resvg = { workspace = true }

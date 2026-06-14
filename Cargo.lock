@@ -3925,6 +3925,7 @@ name = "tze_hud_compositor"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "arc-swap",
  "blake3",
  "bytemuck",
  "criterion",
