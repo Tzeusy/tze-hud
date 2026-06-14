@@ -3081,3 +3081,439 @@ fn connection_degraded_latches_until_real_reconnect_not_owner_traffic() {
         "real reconnect clears the connection-degraded latch"
     );
 }
+
+// ── portal-disconnect-resume-ux §4: reconnect and resume presentation ─────────
+//
+// §2/§3 (disconnect + stale degradation) landed in #878. This block locks the
+// §4 reconnect-resume contract through the projected-state path the compositor
+// actually consumes (`projected_portal_state`), not just the audit summary. The
+// production behavior is already structural: the `connection_degraded` latch is
+// derived from the HUD connection bookkeeping, the retained window is never
+// cleared on disconnect, and the coalesce-key / logical_unit_id machinery is
+// reconnect-agnostic. These tests pin that the spec scenarios hold end-to-end so
+// a future change to disconnect/resume cannot silently regress resume continuity.
+
+/// Build an owner publish with explicit identity keys, since the shared
+/// `output_request` fixture hardcodes `logical_unit_id = "unit-1"` and
+/// `coalesce_key = None`. Used by the §4 continuity tests.
+fn output_request_keyed(
+    projection_id: &str,
+    owner_token: &str,
+    request_id: &str,
+    output_text: &str,
+    logical_unit_id: Option<&str>,
+    coalesce_key: Option<&str>,
+) -> PublishOutputRequest {
+    PublishOutputRequest {
+        envelope: envelope(
+            ProjectionOperation::PublishOutput,
+            projection_id,
+            request_id,
+        ),
+        owner_token: owner_token.to_string(),
+        output_text: output_text.to_string(),
+        output_kind: OutputKind::Assistant,
+        content_classification: ContentClassification::Private,
+        logical_unit_id: logical_unit_id.map(str::to_string),
+        coalesce_key: coalesce_key.map(str::to_string),
+    }
+}
+
+/// §4.1: a reconnect before grace expiry resumes from the authority-preserved
+/// retained window AND clears the degraded/stale treatment in the same projected
+/// frame the compositor consumes — the surface goes degraded → live, the
+/// committed transcript unit is still materialized, and input is re-enabled.
+#[test]
+fn reconnect_resumes_from_retained_window_and_clears_stale_treatment() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // Commit a transcript unit, then connect and disconnect the HUD.
+    authority
+        .handle_publish_output(
+            output_request_keyed(
+                "projection-a",
+                &owner_token,
+                "req-pre",
+                "committed before drop",
+                Some("unit-pre"),
+                None,
+            ),
+            "caller-a",
+            20,
+        )
+        .accepted
+        .then_some(())
+        .expect("pre-disconnect publish accepted");
+    authority
+        .record_hud_connection("projection-a", connection_metadata(&["create_tiles"]))
+        .unwrap();
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+
+    let degraded = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("degraded portal state materializes");
+    assert!(
+        degraded.connection_degraded,
+        "portal is degraded while the HUD is gone"
+    );
+    assert!(
+        !degraded.interaction_enabled,
+        "input is disabled while degraded"
+    );
+    // The retained window is preserved across the disconnect (no committed loss).
+    assert_eq!(
+        degraded.visible_transcript.len(),
+        1,
+        "§4.1: committed unit is retained through the disconnect"
+    );
+
+    // Genuine reconnect before grace.
+    let mut reconnected = connection_metadata(&["create_tiles"]);
+    reconnected.connection_id = "connection-resumed".to_string();
+    reconnected.authenticated_session_id = "runtime-session-resumed".to_string();
+    reconnected.connected_at_wall_us = 40;
+    reconnected.last_reconnect_wall_us = 40;
+    authority
+        .record_hud_connection("projection-a", reconnected)
+        .unwrap();
+
+    let resumed = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("resumed portal state materializes");
+    assert!(
+        !resumed.connection_degraded,
+        "§4.1: reconnect clears the degraded/stale treatment"
+    );
+    assert!(
+        resumed.interaction_enabled,
+        "§4.1: live presentation re-enables input after resume"
+    );
+    assert_eq!(
+        resumed.visible_transcript.len(),
+        1,
+        "§4.1: resume preserves the already-committed retained unit"
+    );
+    assert_eq!(
+        resumed.visible_transcript[0].output_text, "committed before drop",
+        "§4.1: resume restores the exact retained content, not a fresh window"
+    );
+}
+
+/// §4.2: a logical unit that was in progress at disconnect is continued after
+/// reconnect by republishing it under the same `coalesce_key`. The authority
+/// updates that unit in place via the existing coalesce-key path — it does NOT
+/// render the continuation as a duplicate transcript unit. The rate limit is
+/// pinned to 1/window so the continuation deterministically coalesces.
+#[test]
+fn reconnect_continues_in_progress_unit_in_place_via_coalesce_key() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        max_portal_updates_per_second: 1,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // First publish of the in-progress unit consumes the one allowed update in
+    // the rate window, so the post-reconnect continuation is forced to coalesce.
+    authority
+        .handle_publish_output(
+            output_request_keyed(
+                "projection-a",
+                &owner_token,
+                "req-partial",
+                "streaming so f",
+                Some("unit-stream-a"),
+                Some("coalesce-stream"),
+            ),
+            "caller-a",
+            20,
+        )
+        .accepted
+        .then_some(())
+        .expect("partial publish accepted");
+    authority
+        .record_hud_connection("projection-a", connection_metadata(&["create_tiles"]))
+        .unwrap();
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+    authority
+        .record_hud_connection("projection-a", {
+            let mut m = connection_metadata(&["create_tiles"]);
+            m.connection_id = "connection-resumed".to_string();
+            m.authenticated_session_id = "runtime-session-resumed".to_string();
+            m.connected_at_wall_us = 40;
+            m.last_reconnect_wall_us = 40;
+            m
+        })
+        .unwrap();
+
+    // Continuation after reconnect: same coalesce_key, fresh logical_unit_id,
+    // still inside the same 1s rate window (server ts 50 < 20 + 1_000_000).
+    let continued = authority.handle_publish_output(
+        output_request_keyed(
+            "projection-a",
+            &owner_token,
+            "req-continue",
+            "streaming so far complete",
+            Some("unit-stream-b"),
+            Some("coalesce-stream"),
+        ),
+        "caller-a",
+        50,
+    );
+    assert!(continued.accepted, "continuation publish accepted");
+
+    let window = authority
+        .visible_transcript_window("projection-a")
+        .expect("portal has a transcript window");
+    assert_eq!(
+        window.len(),
+        1,
+        "§4.2: coalesce-key continuation updates in place, not as a duplicate unit"
+    );
+    assert_eq!(
+        window[0].output_text, "streaming so far complete",
+        "§4.2: the in-place update carries the continued content"
+    );
+}
+
+/// §4.2 (replay): a publish that replays an already-seen `logical_unit_id`
+/// during/after reconnect is accepted idempotently — it does not append or
+/// mutate the transcript. Resume does not redefine `logical_unit_id` semantics.
+#[test]
+fn reconnect_replayed_logical_unit_id_stays_idempotent() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    authority
+        .handle_publish_output(
+            output_request_keyed(
+                "projection-a",
+                &owner_token,
+                "req-orig",
+                "original committed unit",
+                Some("unit-replayed"),
+                None,
+            ),
+            "caller-a",
+            20,
+        )
+        .accepted
+        .then_some(())
+        .expect("original publish accepted");
+    authority
+        .record_hud_connection("projection-a", connection_metadata(&["create_tiles"]))
+        .unwrap();
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+    authority
+        .record_hud_connection("projection-a", {
+            let mut m = connection_metadata(&["create_tiles"]);
+            m.connection_id = "connection-resumed".to_string();
+            m.authenticated_session_id = "runtime-session-resumed".to_string();
+            m.connected_at_wall_us = 40;
+            m.last_reconnect_wall_us = 40;
+            m
+        })
+        .unwrap();
+
+    let before = authority
+        .visible_transcript_window("projection-a")
+        .expect("window exists before replay");
+    assert_eq!(before.len(), 1);
+
+    // Replay the same logical_unit_id with DIFFERENT text after reconnect: the
+    // authority must drop it idempotently without appending or mutating.
+    let replay = authority.handle_publish_output(
+        output_request_keyed(
+            "projection-a",
+            &owner_token,
+            "req-replay",
+            "MUTATED replay text that must be ignored",
+            Some("unit-replayed"),
+            None,
+        ),
+        "caller-a",
+        50,
+    );
+    assert!(replay.accepted, "replay accepted at the protocol level");
+    assert!(
+        replay.status_summary.contains("idempotently"),
+        "§4.2: replayed logical_unit_id is accepted idempotently"
+    );
+
+    let after = authority
+        .visible_transcript_window("projection-a")
+        .expect("window exists after replay");
+    assert_eq!(
+        after.len(),
+        1,
+        "§4.2: idempotent replay does not append a duplicate unit"
+    );
+    assert_eq!(
+        after[0].output_text, "original committed unit",
+        "§4.2: idempotent replay does not mutate the retained unit in place"
+    );
+}
+
+/// §4.4: when retained history exceeds the visible viewport, resume materializes
+/// only the bounded visible window into scene nodes — it does not reconstruct
+/// full transcript history. Bounds are tuned so retained > visible.
+#[test]
+fn reconnect_materializes_only_bounded_visible_window() {
+    // Each unit's byte_len is dominated by output_text. Use a small visible
+    // budget so only the most recent unit fits the visible window while the
+    // retained window keeps several.
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        max_retained_transcript_bytes: 4096,
+        max_visible_transcript_bytes: 32,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    for i in 0..5u32 {
+        authority
+            .handle_publish_output(
+                output_request_keyed(
+                    "projection-a",
+                    &owner_token,
+                    &format!("req-{i}"),
+                    "0123456789abcdef0123", // 20 bytes of text
+                    Some(&format!("unit-{i}")),
+                    None,
+                ),
+                "caller-a",
+                20 + u64::from(i),
+            )
+            .accepted
+            .then_some(())
+            .expect("publish accepted");
+    }
+    authority
+        .record_hud_connection("projection-a", connection_metadata(&["create_tiles"]))
+        .unwrap();
+    authority.mark_hud_disconnected("projection-a", 40).unwrap();
+    authority
+        .record_hud_connection("projection-a", {
+            let mut m = connection_metadata(&["create_tiles"]);
+            m.connection_id = "connection-resumed".to_string();
+            m.authenticated_session_id = "runtime-session-resumed".to_string();
+            m.connected_at_wall_us = 50;
+            m.last_reconnect_wall_us = 50;
+            m
+        })
+        .unwrap();
+
+    let summary = authority.state_summary("projection-a").unwrap();
+    let resumed = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("resumed portal state materializes");
+
+    assert!(
+        summary.retained_transcript_units > resumed.visible_transcript.len(),
+        "§4.4: retained history ({}) must exceed the materialized visible window ({})",
+        summary.retained_transcript_units,
+        resumed.visible_transcript.len()
+    );
+    let materialized_bytes: usize = resumed
+        .visible_transcript
+        .iter()
+        .map(TranscriptUnit::byte_len)
+        .sum();
+    assert!(
+        materialized_bytes <= 32,
+        "§4.4: only the bounded visible window is materialized into scene nodes"
+    );
+}
+
+/// §4.7: every frame of the stale → live transition respects the current
+/// viewer's redaction policy. A viewer permitted identity/lifecycle but NOT
+/// transcript never sees transcript content materialized at any transition
+/// frame: degraded (stale), resumed (live), or live after a post-resume publish.
+#[test]
+fn stale_to_live_transition_respects_redaction_every_frame() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // Viewer policy: reveal identity + lifecycle, redact transcript.
+    let transcript_restricted = ProjectedPortalPolicy {
+        reveal_transcript: false,
+        ..ProjectedPortalPolicy::permit_all()
+    };
+
+    let assert_no_transcript = |authority: &ProjectionAuthority, frame: &str| {
+        let state = authority
+            .projected_portal_state("projection-a", &transcript_restricted)
+            .unwrap_or_else(|| panic!("portal state materializes at frame: {frame}"));
+        assert!(
+            state.visible_transcript.is_empty(),
+            "§4.7: no transcript content may materialize for a restricted viewer at frame: {frame}"
+        );
+    };
+
+    authority
+        .handle_publish_output(
+            output_request_keyed(
+                "projection-a",
+                &owner_token,
+                "req-secret",
+                "secret transcript content",
+                Some("unit-secret"),
+                None,
+            ),
+            "caller-a",
+            20,
+        )
+        .accepted
+        .then_some(())
+        .expect("publish accepted");
+    authority
+        .record_hud_connection("projection-a", connection_metadata(&["create_tiles"]))
+        .unwrap();
+
+    // Frame 1: live before drop.
+    assert_no_transcript(&authority, "live-before-drop");
+
+    // Frame 2: degraded/stale.
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+    let degraded = authority
+        .projected_portal_state("projection-a", &transcript_restricted)
+        .expect("degraded state materializes");
+    assert!(
+        degraded.connection_degraded,
+        "the disconnect geometry signal still reaches the restricted viewer"
+    );
+    assert_no_transcript(&authority, "degraded");
+
+    // Frame 3: resumed/live after reconnect.
+    authority
+        .record_hud_connection("projection-a", {
+            let mut m = connection_metadata(&["create_tiles"]);
+            m.connection_id = "connection-resumed".to_string();
+            m.authenticated_session_id = "runtime-session-resumed".to_string();
+            m.connected_at_wall_us = 40;
+            m.last_reconnect_wall_us = 40;
+            m
+        })
+        .unwrap();
+    assert_no_transcript(&authority, "resumed");
+
+    // Frame 4: a post-resume publish must not flash content for the restricted viewer.
+    authority
+        .handle_publish_output(
+            output_request_keyed(
+                "projection-a",
+                &owner_token,
+                "req-post-resume",
+                "more secret content after resume",
+                Some("unit-secret-2"),
+                None,
+            ),
+            "caller-a",
+            50,
+        )
+        .accepted
+        .then_some(())
+        .expect("post-resume publish accepted");
+    assert_no_transcript(&authority, "post-resume-publish");
+}
