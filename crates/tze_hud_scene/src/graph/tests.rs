@@ -3064,6 +3064,115 @@ fn test_grace_period_expiry_cleans_up() {
     assert_eq!(scene.tile_count(), 0); // Tiles cleaned up
 }
 
+/// hud-0q1dh: a DEGRADED (disconnected) portal surface is removed when its
+/// lease's grace period expires, through the EXISTING orphan lifecycle — there
+/// is no second timer and no leak.
+///
+/// The portal-disconnect/stale work (PR #878) renders a degraded treatment over
+/// a live tile (dimmed surface, disconnection badge) but adds NO bespoke removal
+/// path. This test pins the invariant that grace-bounded removal of a degraded
+/// surface is the SAME orphan path that removes any other tile: `disconnect_lease`
+/// dims the tile (degraded) and orphans the lease, then `expire_leases` — once
+/// `check_grace_expired` — removes the still-degraded tile via the lease orphan
+/// path, surfaces it in `LeaseExpiry::removed_tiles`, and enqueues it on the
+/// `recently_removed_tile_ids` drain so out-of-graph per-tile state (driver drive
+/// entry, resize state) is pruned with no dangling reference.
+#[test]
+fn degraded_portal_surface_removed_on_lease_grace_expiry_via_orphan_path() {
+    let (mut scene, clock) = scene_with_test_clock();
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease(
+        "portal-driver",
+        120_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "portal-driver",
+            lease_id,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            1,
+        )
+        .unwrap();
+
+    // The portal stream/session drops: the HUD-side lease orphans and the surface
+    // enters the DEGRADED treatment (dimmed + disconnection badge). The tile is
+    // intentionally PRESERVED across the grace window so a reconnect can resume it.
+    clock.advance(5_000);
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .unwrap();
+    assert_eq!(
+        scene.leases[&lease_id].state,
+        LeaseState::Orphaned,
+        "disconnect must orphan the lease (no second timer — grace lives on the lease)"
+    );
+    assert_eq!(
+        scene.tiles[&tile_id].visual_hint,
+        crate::lease::TileVisualHint::DisconnectionBadge,
+        "the surviving surface must be in the degraded (disconnection-badge) state"
+    );
+    assert_eq!(
+        scene.tile_count(),
+        1,
+        "degraded surface is preserved during grace"
+    );
+
+    // Within grace, expiry must NOT touch the degraded tile (no premature removal).
+    clock.advance(29_000); // 34s since grant, 29s since disconnect (< 30s grace)
+    let premature = scene.expire_leases();
+    assert!(
+        premature.is_empty(),
+        "no lease may expire before its grace period elapses"
+    );
+    assert_eq!(
+        scene.tile_count(),
+        1,
+        "degraded surface still present mid-grace"
+    );
+    assert_eq!(
+        scene.tiles[&tile_id].visual_hint,
+        crate::lease::TileVisualHint::DisconnectionBadge,
+        "surface stays degraded until grace expiry or reconnect"
+    );
+
+    // Grace elapses: the SAME orphan path that removes any tile removes the
+    // still-degraded one. No degraded-specific timer or pin keeps it alive.
+    clock.advance(2_000); // now 31s since disconnect — past the 30s grace
+    let expiries = scene.expire_leases();
+    assert_eq!(
+        expiries.len(),
+        1,
+        "grace-expired orphaned lease must be reaped"
+    );
+    assert_eq!(expiries[0].lease_id, lease_id);
+    assert_eq!(expiries[0].terminal_state, LeaseState::Expired);
+    assert!(
+        expiries[0].removed_tiles.contains(&tile_id),
+        "the degraded surface must be reported in LeaseExpiry::removed_tiles"
+    );
+
+    // No leak: the tile is gone from the graph...
+    assert_eq!(
+        scene.tile_count(),
+        0,
+        "degraded surface removed on grace expiry"
+    );
+    assert!(
+        !scene.tiles.contains_key(&tile_id),
+        "no dangling tile entry after orphan-path removal"
+    );
+    // ...and its id is queued on the removed-tile drain so out-of-graph per-tile
+    // state (driver drive entries, portal resize states) is pruned — the same
+    // hook the windowed loop uses for any tile removal, not a degraded special case.
+    let drained = scene.drain_removed_tile_ids();
+    assert!(
+        drained.contains(&tile_id),
+        "removed degraded tile must be enqueued for out-of-graph state pruning"
+    );
+}
+
 #[test]
 fn test_grace_period_check() {
     let (mut scene, clock) = scene_with_test_clock();
