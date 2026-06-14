@@ -23,6 +23,13 @@ use super::token_colors::{
     notification_dismiss_bounds, resolve_composer_overlay_tokens,
 };
 
+/// Default line-height multiplier (`font_size_px × 1.4 = line_height_px`).
+///
+/// Mirrors [`crate::markdown::MarkdownTokens::default().line_height_multiplier`]
+/// (1.4) and is used by all notification/icon-inset `TextItem` builders below so
+/// we avoid constructing a default `MarkdownTokens` struct six times per frame.
+const DEFAULT_LINE_HEIGHT_MULTIPLIER: f32 = 1.4;
+
 // ─── Text-collection impl block ───────────────────────────────────────────────
 
 impl super::Compositor {
@@ -115,6 +122,64 @@ impl super::Compositor {
                 )
             })
             .collect()
+    }
+
+    /// Build a zone-derived [`TextItem`] with the shared boilerplate filled in.
+    ///
+    /// All notification and icon-inset `TextItem` literals in
+    /// [`Self::collect_text_items`] share four constant tail fields
+    /// (`color_runs`, `styled_runs`, `line_height_multiplier`,
+    /// `viewport`) and always set `clip_*` to mirror `pixel_*` / `bounds_*`.
+    /// This builder centralises those seven fields so each call site only
+    /// supplies the twelve fields that actually vary.
+    ///
+    /// Call sites (all in `collect_text_items`):
+    /// - Stack / single-line notification (text = body, `alignment = Start`)
+    /// - Stack / two-line title line (`font_weight = notif_title_weight`)
+    /// - Stack / two-line body line (`font_size_px = body_font_size`)
+    /// - MergeByKey fallback icon-inset notification
+    /// - LatestWins/Replace icon-inset notification (identical to MergeByKey)
+    #[allow(clippy::too_many_arguments)]
+    fn make_zone_text_item(
+        text: Arc<str>,
+        pixel_x: f32,
+        pixel_y: f32,
+        bounds_width: f32,
+        bounds_height: f32,
+        font_size_px: f32,
+        font_family: FontFamily,
+        font_weight: u16,
+        color: [u8; 4],
+        alignment: TextAlign,
+        overflow: TextOverflow,
+        outline_color: Option<[u8; 4]>,
+        outline_width: Option<f32>,
+        opacity: f32,
+    ) -> TextItem {
+        TextItem {
+            text,
+            pixel_x,
+            pixel_y,
+            bounds_width,
+            bounds_height,
+            clip_pixel_x: pixel_x,
+            clip_pixel_y: pixel_y,
+            clip_bounds_width: bounds_width,
+            clip_bounds_height: bounds_height,
+            font_size_px,
+            font_family,
+            font_weight,
+            color,
+            alignment,
+            overflow,
+            outline_color,
+            outline_width,
+            opacity,
+            color_runs: Box::default(),
+            styled_runs: Box::default(),
+            line_height_multiplier: DEFAULT_LINE_HEIGHT_MULTIPLIER,
+            viewport: crate::overflow::TruncationViewport::HeadAnchored,
+        }
     }
 
     /// Collect `TextItem`s for all TextMarkdownNode tiles and zone StreamText
@@ -340,33 +405,22 @@ impl super::Compositor {
                                     // ── Single-line rendering (backward-compatible) ──
                                     // Font weight: policy explicit > 400 default
                                     let font_weight = policy.font_weight.unwrap_or(400);
-                                    items.push(TextItem {
-                                        text: std::sync::Arc::from(payload.text.as_str()),
-                                        pixel_x: text_x,
-                                        pixel_y: slot_y + inset_v,
-                                        bounds_width: text_w,
-                                        bounds_height: (effective_slot_h - inset_v * 2.0).max(1.0),
-                                        clip_pixel_x: text_x,
-                                        clip_pixel_y: slot_y + inset_v,
-                                        clip_bounds_width: text_w,
-                                        clip_bounds_height: (effective_slot_h - inset_v * 2.0)
-                                            .max(1.0),
+                                    items.push(Self::make_zone_text_item(
+                                        Arc::from(payload.text.as_str()),
+                                        text_x,
+                                        slot_y + inset_v,
+                                        text_w,
+                                        (effective_slot_h - inset_v * 2.0).max(1.0),
                                         font_size_px,
                                         font_family,
                                         font_weight,
                                         color,
-                                        alignment: tze_hud_scene::types::TextAlign::Start,
-                                        overflow: tze_hud_scene::types::TextOverflow::Clip,
-                                        outline_color: oc,
-                                        outline_width: ow,
-                                        opacity: effective_opacity,
-                                        color_runs: Box::default(),
-                                        styled_runs: Box::default(),
-                                        line_height_multiplier:
-                                            crate::markdown::MarkdownTokens::default()
-                                                .line_height_multiplier,
-                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
-                                    });
+                                        tze_hud_scene::types::TextAlign::Start,
+                                        tze_hud_scene::types::TextOverflow::Clip,
+                                        oc,
+                                        ow,
+                                        effective_opacity,
+                                    ));
                                 } else {
                                     // ── Two-line rendering: bold title + regular body ──
                                     //
@@ -378,64 +432,44 @@ impl super::Compositor {
                                     let content_top = slot_y + inset_v;
 
                                     // Title line (bold)
-                                    items.push(TextItem {
-                                        text: std::sync::Arc::from(payload.title.as_str()),
-                                        pixel_x: text_x,
-                                        pixel_y: content_top,
-                                        bounds_width: text_w,
-                                        bounds_height: title_line_h.max(1.0),
-                                        clip_pixel_x: text_x,
-                                        clip_pixel_y: content_top,
-                                        clip_bounds_width: text_w,
-                                        clip_bounds_height: title_line_h.max(1.0),
+                                    items.push(Self::make_zone_text_item(
+                                        Arc::from(payload.title.as_str()),
+                                        text_x,
+                                        content_top,
+                                        text_w,
+                                        title_line_h.max(1.0),
                                         font_size_px,
                                         font_family,
-                                        font_weight: notif_title_weight,
+                                        notif_title_weight,
                                         color,
-                                        alignment: tze_hud_scene::types::TextAlign::Start,
-                                        overflow: tze_hud_scene::types::TextOverflow::Clip,
-                                        outline_color: oc,
-                                        outline_width: ow,
-                                        opacity: effective_opacity,
-                                        color_runs: Box::default(),
-                                        styled_runs: Box::default(),
-                                        line_height_multiplier:
-                                            crate::markdown::MarkdownTokens::default()
-                                                .line_height_multiplier,
-                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
-                                    });
+                                        tze_hud_scene::types::TextAlign::Start,
+                                        tze_hud_scene::types::TextOverflow::Clip,
+                                        oc,
+                                        ow,
+                                        effective_opacity,
+                                    ));
                                     // Body line (regular weight, 0.85× size)
                                     let body_top =
                                         content_top + title_line_h + NOTIFICATION_INTER_LINE_GAP;
                                     // Remaining slot height available for body (down to inset bottom)
                                     let body_bounds_h =
                                         ((slot_y + effective_slot_h - inset_v) - body_top).max(1.0);
-                                    items.push(TextItem {
-                                        text: std::sync::Arc::from(payload.text.as_str()),
-                                        pixel_x: text_x,
-                                        pixel_y: body_top,
-                                        bounds_width: text_w,
-                                        bounds_height: body_bounds_h,
-                                        clip_pixel_x: text_x,
-                                        clip_pixel_y: body_top,
-                                        clip_bounds_width: text_w,
-                                        clip_bounds_height: body_bounds_h,
-                                        font_size_px: body_font_size,
+                                    items.push(Self::make_zone_text_item(
+                                        Arc::from(payload.text.as_str()),
+                                        text_x,
+                                        body_top,
+                                        text_w,
+                                        body_bounds_h,
+                                        body_font_size,
                                         font_family,
-                                        font_weight: 400,
+                                        400,
                                         color,
-                                        alignment: tze_hud_scene::types::TextAlign::Start,
-                                        overflow: tze_hud_scene::types::TextOverflow::Clip,
-                                        outline_color: oc,
-                                        outline_width: ow,
-                                        opacity: effective_opacity,
-                                        color_runs: Box::default(),
-                                        styled_runs: Box::default(),
-                                        line_height_multiplier:
-                                            crate::markdown::MarkdownTokens::default()
-                                                .line_height_multiplier,
-                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
-                                    });
+                                        tze_hud_scene::types::TextAlign::Start,
+                                        tze_hud_scene::types::TextOverflow::Clip,
+                                        oc,
+                                        ow,
+                                        effective_opacity,
+                                    ));
                                 }
 
                                 if !is_alert_banner_zone(zone_name)
@@ -453,34 +487,22 @@ impl super::Compositor {
                                     );
                                     static DISMISS_LABEL: std::sync::OnceLock<Arc<str>> =
                                         std::sync::OnceLock::new();
-                                    items.push(TextItem {
-                                        text: Arc::clone(
-                                            DISMISS_LABEL.get_or_init(|| Arc::from("X")),
-                                        ),
-                                        pixel_x: dismiss_bounds.x,
-                                        pixel_y: dismiss_bounds.y + 1.0,
-                                        bounds_width: dismiss_bounds.width.max(1.0),
-                                        bounds_height: dismiss_bounds.height.max(1.0),
-                                        clip_pixel_x: dismiss_bounds.x,
-                                        clip_pixel_y: dismiss_bounds.y + 1.0,
-                                        clip_bounds_width: dismiss_bounds.width.max(1.0),
-                                        clip_bounds_height: dismiss_bounds.height.max(1.0),
-                                        font_size_px: notif_dismiss_font_size_px,
+                                    items.push(Self::make_zone_text_item(
+                                        Arc::clone(DISMISS_LABEL.get_or_init(|| Arc::from("X"))),
+                                        dismiss_bounds.x,
+                                        dismiss_bounds.y + 1.0,
+                                        dismiss_bounds.width.max(1.0),
+                                        dismiss_bounds.height.max(1.0),
+                                        notif_dismiss_font_size_px,
                                         font_family,
-                                        font_weight: notif_dismiss_font_weight,
-                                        line_height_multiplier:
-                                            crate::markdown::MarkdownTokens::default()
-                                                .line_height_multiplier,
-                                        color: dismiss_color,
-                                        alignment: tze_hud_scene::types::TextAlign::Center,
-                                        overflow: tze_hud_scene::types::TextOverflow::Clip,
-                                        outline_color: None,
-                                        outline_width: None,
-                                        opacity: effective_opacity,
-                                        color_runs: Box::default(),
-                                        styled_runs: Box::default(),
-                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
-                                    });
+                                        notif_dismiss_font_weight,
+                                        dismiss_color,
+                                        tze_hud_scene::types::TextAlign::Center,
+                                        tze_hud_scene::types::TextOverflow::Clip,
+                                        None,
+                                        None,
+                                        effective_opacity,
+                                    ));
                                 }
                             }
                             _ => {}
@@ -606,45 +628,27 @@ impl super::Compositor {
                                                 }
                                                 _ => (None, None),
                                             };
-                                        items.push(TextItem {
-                                            text: std::sync::Arc::from(payload.text.as_str()),
-                                            pixel_x: zx + margin_h + icon_width_reserved,
-                                            pixel_y: zy + margin_v,
-                                            bounds_width: (zw
-                                                - margin_h
-                                                - icon_width_reserved
-                                                - margin_h)
+                                        items.push(Self::make_zone_text_item(
+                                            Arc::from(payload.text.as_str()),
+                                            zx + margin_h + icon_width_reserved,
+                                            zy + margin_v,
+                                            (zw - margin_h - icon_width_reserved - margin_h)
                                                 .max(1.0),
-                                            bounds_height: (zh - margin_v * 2.0).max(1.0),
-                                            clip_pixel_x: zx + margin_h + icon_width_reserved,
-                                            clip_pixel_y: zy + margin_v,
-                                            clip_bounds_width: (zw
-                                                - margin_h
-                                                - icon_width_reserved
-                                                - margin_h)
-                                                .max(1.0),
-                                            clip_bounds_height: (zh - margin_v * 2.0).max(1.0),
+                                            (zh - margin_v * 2.0).max(1.0),
                                             font_size_px,
                                             font_family,
                                             font_weight,
                                             color,
-                                            alignment: policy
+                                            policy
                                                 .text_align
                                                 .unwrap_or(tze_hud_scene::types::TextAlign::Start),
-                                            overflow: policy.overflow.unwrap_or(
+                                            policy.overflow.unwrap_or(
                                                 tze_hud_scene::types::TextOverflow::Clip,
                                             ),
-                                            outline_color: oc,
-                                            outline_width: ow,
-                                            opacity: anim_opacity,
-                                            color_runs: Box::default(),
-                                            styled_runs: Box::default(),
-                                            line_height_multiplier:
-                                                crate::markdown::MarkdownTokens::default()
-                                                    .line_height_multiplier,
-                                            viewport:
-                                                crate::overflow::TruncationViewport::HeadAnchored,
-                                        });
+                                            oc,
+                                            ow,
+                                            anim_opacity,
+                                        ));
                                     } else {
                                         items.push(TextItem::from_zone_policy(
                                             &payload.text,
@@ -753,44 +757,26 @@ impl super::Compositor {
                                             }
                                             _ => (None, None),
                                         };
-                                    items.push(TextItem {
-                                        text: std::sync::Arc::from(payload.text.as_str()),
-                                        pixel_x: zx + margin_h + icon_width_reserved,
-                                        pixel_y: zy + margin_v,
-                                        bounds_width: (zw
-                                            - margin_h
-                                            - icon_width_reserved
-                                            - margin_h)
-                                            .max(1.0),
-                                        bounds_height: (zh - margin_v * 2.0).max(1.0),
-                                        clip_pixel_x: zx + margin_h + icon_width_reserved,
-                                        clip_pixel_y: zy + margin_v,
-                                        clip_bounds_width: (zw
-                                            - margin_h
-                                            - icon_width_reserved
-                                            - margin_h)
-                                            .max(1.0),
-                                        clip_bounds_height: (zh - margin_v * 2.0).max(1.0),
+                                    items.push(Self::make_zone_text_item(
+                                        Arc::from(payload.text.as_str()),
+                                        zx + margin_h + icon_width_reserved,
+                                        zy + margin_v,
+                                        (zw - margin_h - icon_width_reserved - margin_h).max(1.0),
+                                        (zh - margin_v * 2.0).max(1.0),
                                         font_size_px,
                                         font_family,
                                         font_weight,
                                         color,
-                                        alignment: policy
+                                        policy
                                             .text_align
                                             .unwrap_or(tze_hud_scene::types::TextAlign::Start),
-                                        overflow: policy
+                                        policy
                                             .overflow
                                             .unwrap_or(tze_hud_scene::types::TextOverflow::Clip),
-                                        outline_color: oc,
-                                        outline_width: ow,
-                                        opacity: anim_opacity,
-                                        color_runs: Box::default(),
-                                        styled_runs: Box::default(),
-                                        line_height_multiplier:
-                                            crate::markdown::MarkdownTokens::default()
-                                                .line_height_multiplier,
-                                        viewport: crate::overflow::TruncationViewport::HeadAnchored,
-                                    });
+                                        oc,
+                                        ow,
+                                        anim_opacity,
+                                    ));
                                 } else {
                                     items.push(TextItem::from_zone_policy(
                                         &payload.text,
