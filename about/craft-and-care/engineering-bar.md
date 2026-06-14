@@ -65,6 +65,16 @@ The PR gate runs the existing `examples/benchmark` headless harness on `windows-
 | `high_mutation.input_to_scene_commit` p99 | ≤ 25 ms | CPU factor | Headless Windows benchmark |
 | `high_mutation.input_to_next_present` p99 | ≤ 16.6 ms | GPU factor | Headless Windows benchmark |
 | Lease violations / budget overruns / sync-drift violations | `0` | none | Both benchmark scenarios |
+| `invariant_violations` (scene-commit rejections) | `0` (committed baseline) | none | Both benchmark scenarios |
+| `scene_lock_misses` (frame-loop scene `try_lock` contention) | `0` (committed baseline) | none | Both benchmark scenarios |
+
+##### Zero-Baseline Counter Gate (cross-run trend surface)
+
+`invariant_violations` and `scene_lock_misses` are session-summary correctness/contention counters surfaced per-frame by the telemetry record (`FrameTelemetry::scene_lock_miss_count`, accumulated into `SessionSummary`). The checker (`ZERO_COUNTERS` in `scripts/ci/check_windows_perf_budgets.py`) asserts each stays at its committed baseline of `0` on every `windows-performance-budget` CI run. Because the baseline is checked in, any run whose artifact shows a non-zero counter fails the gate — this is the cross-run regression/trend surface validation.md §5.6 requires for these counters (surface regressions across runs, not just per-run pass/fail). A missing counter field is also a failure (no silent pass).
+
+`scene_lock_misses` is expected to be `0` on the synthetic headless benchmark because that harness has no concurrent gRPC/MCP scene-mutation handlers contending for the scene lock. It is wired here so that (a) the baseline is locked before contention is ever introduced, and (b) when the benchmark harness is extended to exercise concurrent handlers (or `record_frame_correctness` is wired into the benchmark loop — currently a follow-up), the gate already enforces the no-contention invariant. True cross-run *history* (storing prior-run values via GitHub Actions cache/artifact and comparing deltas) is a deferred extension; the committed-zero baseline already fails any regression without cross-run storage infra.
+
+**To change a baseline** (only with data justifying it): for a counter that must tolerate a small non-zero floor, move it out of `ZERO_COUNTERS` into `BASELINE_COUNTERS = {name: ceiling}` in `scripts/ci/check_windows_perf_budgets.py`, set the documented ceiling here, and record the rationale (what change introduced the floor, why it is acceptable). Never raise a ceiling to make a red gate green without that justification.
 
 #### Manual Or Reference-Host Gates
 
