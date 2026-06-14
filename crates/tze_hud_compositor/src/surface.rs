@@ -262,13 +262,37 @@ impl WindowSurface {
         // "SurfaceOutput must be dropped before a new Surface is made".
         {
             let mut slot = self.swapchain.lock().expect("swapchain lock poisoned");
+            // `reconfigure` runs at the top of the compositor frame loop, BEFORE
+            // `acquire_frame`/`render_frame` for this cycle, so no `CompositorFrame`
+            // guard is alive on this thread and `encoding` is normally already
+            // `false`. The wait is bounded purely as a defense-in-depth guard: if
+            // a future refactor ever called this with an in-flight encode on the
+            // SAME thread, an unbounded `wait` would deadlock (the thread that must
+            // drop the guard is the one parked here). On timeout we surface the
+            // contract violation loudly rather than hang forever; we still avoid
+            // taking `pending` while `encoding` is true so we never destroy a
+            // texture an in-flight submit references.
+            let wait_start = std::time::Instant::now();
             while slot.encoding {
-                slot = self
+                let (next, timeout) = self
                     .swapchain_done
-                    .wait(slot)
+                    .wait_timeout(slot, std::time::Duration::from_millis(250))
                     .expect("swapchain condvar poisoned");
+                slot = next;
+                if timeout.timed_out() && slot.encoding {
+                    tracing::error!(
+                        elapsed_ms = wait_start.elapsed().as_millis() as u64,
+                        "reconfigure: encoding still in progress after timeout — \
+                         unexpected (reconfigure must run between frames); leaving \
+                         pending texture intact and proceeding without clearing it"
+                    );
+                    break;
+                }
             }
-            let _ = slot.pending.take();
+            // Only clear (drop) the pending texture if no encode references it.
+            if !slot.encoding {
+                let _ = slot.pending.take();
+            }
         }
         // Clamp to adapter's max texture dimension to avoid wgpu validation errors
         // on GPUs with limits below the requested window size.
@@ -325,12 +349,20 @@ impl WindowSurface {
                 .expect("swapchain condvar poisoned");
             slot = next;
             if timeout.timed_out() && slot.encoding {
+                // The encode→submit is STILL in flight after the timeout. We must
+                // NOT take+present (destroy) the texture here — the compositor's
+                // `TextureView` may still reference it, which would reopen the
+                // exact "Surface Texture has been destroyed" race this lock fixes
+                // (a 250ms encode means a driver stall / shader compile / loaded
+                // CI, not necessarily a dead thread). Skip presenting this tick
+                // and leave `pending` in place; the next event-loop tick will
+                // present it once the compositor finishes and clears `encoding`.
                 tracing::warn!(
                     elapsed_ms = wait_start.elapsed().as_millis() as u64,
                     "present_pending_texture: encoding still in progress after timeout; \
-                     presenting anyway (compositor thread may have stalled)"
+                     skipping present this tick (compositor may be stalled)"
                 );
-                break;
+                return false;
             }
         }
 
