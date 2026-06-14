@@ -883,11 +883,7 @@ fn tx_if_worker_spawned(
     tx: std::sync::mpsc::Sender<PrimeRequest>,
     worker: &Option<std::thread::JoinHandle<()>>,
 ) -> Option<std::sync::mpsc::Sender<PrimeRequest>> {
-    if worker.is_some() {
-        Some(tx)
-    } else {
-        None
-    }
+    if worker.is_some() { Some(tx) } else { None }
 }
 
 // ─── parse_markdown_subset ───────────────────────────────────────────────────
@@ -3667,7 +3663,9 @@ mod tests {
 
         // The swap completes asynchronously; poll for it.
         let snap = wait_for_key(&primer, &key, 200);
-        let parsed = snap.get_by_key(&key).expect("large payload eventually present");
+        let parsed = snap
+            .get_by_key(&key)
+            .expect("large payload eventually present");
         assert!(parsed.plain_text.contains("Title"));
         assert!(parsed.plain_text.contains("emphasis"));
     }
@@ -3697,7 +3695,10 @@ mod tests {
         };
         primer.prime(vec![carry_a], &tokens, 2);
         let snap = primer.load();
-        assert!(snap.get_by_key(&key_a).is_some(), "live entry carried forward");
+        assert!(
+            snap.get_by_key(&key_a).is_some(),
+            "live entry carried forward"
+        );
         assert!(snap.get_by_key(&key_b).is_none(), "dead entry evicted");
         assert_eq!(snap.len(), 1);
     }
