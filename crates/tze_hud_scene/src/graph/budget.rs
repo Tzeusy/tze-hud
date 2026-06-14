@@ -64,7 +64,7 @@ impl SceneGraph {
             match mutation {
                 crate::mutation::SceneMutation::AddNode { tile_id, node, .. } => {
                     let current = usage.nodes_per_tile.get(tile_id).copied().unwrap_or(0);
-                    let new_count = Self::count_node_tree(node);
+                    let new_count = Self::fresh_batch_node_count(node);
                     let projected = current as u64 + new_count as u64;
                     if projected > budget.max_nodes_per_tile as u64 {
                         return Err(BudgetError {
@@ -77,7 +77,7 @@ impl SceneGraph {
                 }
                 crate::mutation::SceneMutation::SetTileRoot { tile_id, node } => {
                     // SetTileRoot replaces the entire tree, so count new tree size
-                    let new_count = Self::count_node_tree(node);
+                    let new_count = Self::fresh_batch_node_count(node);
                     if new_count as u64 > budget.max_nodes_per_tile as u64 {
                         return Err(BudgetError {
                             resource: "nodes_per_tile".to_string(),
@@ -231,11 +231,19 @@ impl SceneGraph {
         }
     }
 
-    /// Count nodes in a node tree (not yet inserted into the graph).
-    fn count_node_tree(_node: &Node) -> u32 {
-        // For the current node model, children are SceneIds referencing
-        // other nodes. In a fresh batch submission, they would be separate
-        // AddNode mutations. So we count just this node.
+    /// Number of nodes a not-yet-inserted node contributes to its tile when
+    /// submitted as part of a fresh mutation batch.
+    ///
+    /// This is **always 1** by construction, not a tree walk: in the current
+    /// node model a `Node`'s children are `SceneId` references, and in a fresh
+    /// batch each child arrives as its own separate `AddNode`/`SetTileRoot`
+    /// mutation. The incoming node therefore adds exactly itself; its children
+    /// are budgeted when their own mutations are processed.
+    ///
+    /// Contrast with [`SceneGraph::count_node_tree_deep`], which *does* walk
+    /// children that already exist in the graph (used by `set_tile_root_impl`
+    /// to catch re-attachment of a persisted subtree).
+    fn fresh_batch_node_count(_node: &Node) -> u32 {
         1
     }
 

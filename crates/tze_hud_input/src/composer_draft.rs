@@ -829,7 +829,11 @@ impl DraftNotificationBatch {
         }
     }
 
-    /// True if the batch contains anything to deliver.
+    /// True if the batch holds nothing to deliver (no latest snapshot, no
+    /// submission, no cancel).
+    ///
+    /// Twin: `tze_hud_projection::contract::AdapterDraftBatch::is_empty` is a
+    /// cross-crate clone of this type and method. Keep the two in sync.
     pub fn is_empty(&self) -> bool {
         self.latest.is_none() && self.submission.is_none() && self.cancel.is_none()
     }

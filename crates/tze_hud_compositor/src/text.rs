@@ -47,6 +47,21 @@ use wgpu::{Device, MultisampleState, Queue};
 use crate::fonts::bundled_font_system;
 use crate::overflow::{self, TruncationResult, TruncationViewport};
 
+/// Default line-height multiplier: `line_height_px = font_size_px × this`.
+///
+/// This is the single source of truth for the compositor's default line height,
+/// used by [`crate::markdown::MarkdownTokens::default`] and any render path that
+/// lacks a parsed `MarkdownTokens` (e.g. zone items, the legacy `TextItem`
+/// constructor). A design-token map may override it per-tile via
+/// `typography.line_height.multiplier`.
+///
+/// Cross-ref: `PORTAL_LINE_HEIGHT_MULTIPLIER` in
+/// `crates/tze_hud_projection/src/bin/projection_authority.rs` mirrors this
+/// value. The projection binary does not depend on `tze_hud_compositor`, so it
+/// cannot import this constant; if you change the value here, update that
+/// constant in the same PR.
+pub const LINE_HEIGHT_MULTIPLIER: f32 = 1.4;
+
 // ─── TruncationCache ─────────────────────────────────────────────────────────
 
 /// Cache key for one truncation computation.

@@ -104,9 +104,6 @@ pub fn check_all(graph: &SceneGraph) -> Vec<InvariantViolation> {
     v.extend(check_lease_granted_at_nonzero_if_not_requested(graph));
     v.extend(check_lease_suspended_fields_consistency(graph));
     v.extend(check_lease_orphaned_fields_consistency(graph));
-    // Note: check_active_lease_has_tiles_or_is_fresh is intentionally not
-    // called from check_all — it is a no-op stub pending a concrete spec
-    // definition for "stale active lease" detection.
     v.extend(check_terminal_lease_has_no_tiles(graph));
     v.extend(check_lease_namespace_matches_tile_namespace(graph));
 
@@ -781,20 +778,6 @@ pub fn check_lease_orphaned_fields_consistency(graph: &SceneGraph) -> Vec<Invari
             )
         })
         .collect()
-}
-
-/// Active leases with tiles must have at least one tile pointing back to them.
-/// This is the forward direction — tiles→lease refs are checked elsewhere;
-/// this verifies the lease itself is coherent w.r.t. tile ownership.
-///
-/// Note: A newly-granted Active lease with no tiles yet is valid (fresh lease).
-/// We only flag leases that have been Active for a while without tiles (this is
-/// a soft heuristic based on granted_at_ms > 0 and ttl_ms > 0).
-pub fn check_active_lease_has_tiles_or_is_fresh(_graph: &SceneGraph) -> Vec<InvariantViolation> {
-    // This check intentionally does NOT flag zero-tile active leases — a fresh
-    // lease may not have acquired tiles yet. We skip this check as it would
-    // produce false positives in normal construction sequences.
-    vec![]
 }
 
 /// Terminal leases must not own any tiles.

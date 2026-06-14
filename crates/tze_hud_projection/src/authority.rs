@@ -819,44 +819,22 @@ impl ProjectionAuthority {
             ProjectionAuditCategory::OwnerPublish,
         ) {
             Ok(session) => {
-                if let Some(logical_unit_id) = &request.logical_unit_id {
-                    if remember_logical_unit(session, logical_unit_id, max_seen_logical_units) {
-                        ProjectionResponse::accepted(
-                            &request.envelope.request_id,
-                            &request.envelope.projection_id,
-                            server_timestamp_wall_us,
-                            "duplicate logical_unit_id accepted idempotently",
-                        )
-                    } else {
-                        let coalescer_seq = append_transcript_unit(
-                            session,
-                            &request,
-                            server_timestamp_wall_us,
-                            max_retained_transcript_bytes,
-                            max_visible_transcript_bytes,
-                            max_portal_updates_per_second,
-                        );
-                        // Capture for cadence coalescer. `append_transcript_unit`
-                        // returns the coalescer sequence — strictly greater than any
-                        // previously drained or pending sequence — so `record_append`
-                        // always clears the post-drain stale-sequence guard even on the
-                        // coalesce-key in-place update path (defect fix: hud-endkj).
-                        cadence_append =
-                            Some((request.envelope.projection_id.clone(), coalescer_seq));
-                        let mut response = ProjectionResponse::accepted(
-                            &request.envelope.request_id,
-                            &request.envelope.projection_id,
-                            server_timestamp_wall_us,
-                            "output accepted",
-                        )
-                        .with_portal_update_state(session);
-                        response.status_summary = if response.portal_update_ready {
-                            "output accepted".to_string()
-                        } else {
-                            "output accepted and coalesced for next portal update".to_string()
-                        };
-                        response
-                    }
+                // A publish with a `logical_unit_id` we have already seen is an
+                // idempotent duplicate (drop it). Any publish without an id, or
+                // with a not-yet-seen id, is a fresh append. `is_some_and` only
+                // calls `remember_logical_unit` (which records the id) when an id
+                // is present, preserving the original side-effect ordering.
+                let is_duplicate = request
+                    .logical_unit_id
+                    .as_ref()
+                    .is_some_and(|id| remember_logical_unit(session, id, max_seen_logical_units));
+                if is_duplicate {
+                    ProjectionResponse::accepted(
+                        &request.envelope.request_id,
+                        &request.envelope.projection_id,
+                        server_timestamp_wall_us,
+                        "duplicate logical_unit_id accepted idempotently",
+                    )
                 } else {
                     let coalescer_seq = append_transcript_unit(
                         session,
@@ -866,7 +844,11 @@ impl ProjectionAuthority {
                         max_visible_transcript_bytes,
                         max_portal_updates_per_second,
                     );
-                    // Capture for cadence coalescer. See note above re: coalescer sequence.
+                    // Capture for cadence coalescer. `append_transcript_unit`
+                    // returns the coalescer sequence — strictly greater than any
+                    // previously drained or pending sequence — so `record_append`
+                    // always clears the post-drain stale-sequence guard even on the
+                    // coalesce-key in-place update path (defect fix: hud-endkj).
                     cadence_append = Some((request.envelope.projection_id.clone(), coalescer_seq));
                     let mut response = ProjectionResponse::accepted(
                         &request.envelope.request_id,
