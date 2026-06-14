@@ -107,15 +107,26 @@ crates/tze_hud_projection/src/
 ├── lib.rs                   # mod declarations + pub use * from each submodule
 │                            # retains: use imports, pub mod portal_cadence,
 │                            #   pub mod resident_grpc (cfg-gated),
-│                            #   wire constants (L29–68), ProjectionContractError
+│                            #   wire constants (L29–68)
 ├── contract.rs              # all pure wire types (no process deps, no authority deps):
 │                            #   core enums (L70–287), ProjectionBounds (L288–353),
 │                            #   request/response structs (L355–1219 incl. both adapter batches),
 │                            #   input/session metadata types (L600–756),
 │                            #   ProjectionAuditRecord, ProjectionIdentitySummary,
 │                            #   ProjectedPortalPolicy, ProjectedPortalState (L879–1015),
-│                            #   PortalTranscriptUpdate, ProjectionStateSummary (L757–878)
-│                            #   NOTE: ProjectionResponse moves here too (see §3.3)
+│                            #   PortalTranscriptUpdate, ProjectionStateSummary (L757–878),
+│                            #   ProjectionResponse (public struct + public methods — see §3.3),
+│                            #   ProjectionContractError (L1896–1915) — pure wire error type,
+│                            #     only refs ProjectionErrorCode (also a wire type); belongs here
+│                            #     not in authority.rs because contract.rs validate() methods
+│                            #     return it (moving it to authority.rs would create a cycle),
+│                            #   pure validation helpers (L3943–4020):
+│                            #     validate_owner_token, validate_non_empty_bounded,
+│                            #     validate_optional_bounded, validate_non_zero,
+│                            #     generate_owner_token, verifier_for_secret, constant_time_eq,
+│                            #     hex_encode, bounded_copy — these are called from validate()
+│                            #     methods on contract and managed_session types; they have no
+│                            #     ProjectionSession or authority deps
 ├── managed_session.rs       # session orchestration types (no process/Child deps):
 │                            #   ManagedSessionOrigin, LaunchSessionSpec, HudCredentialSource,
 │                            #   WindowsHudTarget, ProjectionAttentionIntent,
@@ -128,13 +139,21 @@ crates/tze_hud_projection/src/
 │                            #   ProviderProcessStatus, ProviderProcessRecord (holds Child),
 │                            #   ExternalAgentProjectionAuthority (L1534–1894)
 ├── authority.rs             # core authority state machine:
-│                            #   ProjectionContractError (L1896–1915),
 │                            #   ProjectionSession (private), ProjectionAuditEvent<'a>,
 │                            #   ProjectionAuthority struct + full impl block,
 │                            #   impl Default for ProjectionAuthority,
-│                            #   all free helper functions (L3360–4020)
+│                            #   authority-coupled helpers (L3362–3941: route_plan_for_request,
+│                            #     projected_portal_state, redacted_feedback, portal_id_for_projection,
+│                            #     append_transcript_unit, promote_to_active_if_recovering,
+│                            #     portal_update_allowed, prune_retained_transcript,
+│                            #     visible_transcript_window, capabilities_are_subset,
+│                            #     remember_logical_unit, requested_delivery_state,
+│                            #     terminal_ack_replay_response, remember_terminal_input,
+│                            #     prune_terminal_pending_input, acknowledge_input, expire_pending)
+│                            #   private impl ProjectionResponse { with_portal_update_state }
 └── tests/
-    └── mod.rs               # existing mod tests { ... } content (L4021–6891)
+    └── mod.rs               # contents of mod tests { ... } (L4022–6890, without the outer
+                             #   mod tests { } wrapper — see P-5 for exact instruction)
 ```
 
 **`lib.rs` retains after split**:
@@ -159,9 +178,10 @@ These coupling points require careful handling and ordering:
 |---|---|---|
 | `ProjectionResponse::with_portal_update_state` borrows `&ProjectionSession` | `ProjectionResponse` is a wire type (target: `contract.rs`); `ProjectionSession` is an authority-internal private struct (target: `authority.rs`) | **Move `with_portal_update_state` out of `contract.rs`**: add an `impl ProjectionResponse` block in `authority.rs` containing only this private method. `contract.rs` holds the public struct and public methods; `authority.rs` extends it with the session-coupling method. This is valid Rust (split impl blocks within the same module via `pub use self::contract::ProjectionResponse`). |
 | `ProviderProcessRecord` holds `child: Child` (`std::process::Child`) | In `portal.rs` | `portal.rs` imports `use std::process::{Child, Command, Stdio};` — these imports stay scoped to `portal.rs`, not leaked via `lib.rs` |
-| `ExternalAgentProjectionAuthority` wraps `ProjectionAuthority` | `portal.rs` wraps a type from `authority.rs` | Import ordering: `authority.rs` must be compiled first; `portal.rs` imports `use crate::authority::ProjectionAuthority` (or `use super::authority::ProjectionAuthority`) |
+| `ExternalAgentProjectionAuthority` wraps `ProjectionAuthority` AND returns `ProjectionContractError` | `portal.rs` wraps types from `authority.rs`; `portal.rs` also uses `ProjectionContractError` in return types | Both `ProjectionAuthority` and `ProjectionContractError` move in P-1/P-4. Since `ProjectionContractError` moves to `contract.rs` (P-1), `portal.rs` imports `use crate::ProjectionContractError` (via `lib.rs` re-export) — no cycle. `ProjectionAuthority` is resolved by doing P-4 before P-3 (see §3.5 Option A). |
 | `ExternalAgentProjectionAuthority` also holds `ManagedSessionRecord` using `ManagedSessionHandle` | `portal.rs` uses types from `managed_session.rs` | `portal.rs` imports from both `authority.rs` and `managed_session.rs` — no circular dep |
-| All free helpers call `ProjectionSession` fields | Free helpers (L3360–4020) reference `ProjectionSession` private fields | Move free helpers INTO `authority.rs` alongside `ProjectionSession` — they are already in the same file and are all private; this is the natural home |
+| Free helpers split: authority-coupled helpers reference `ProjectionSession`; pure validation helpers do not | Authority-coupled helpers (L3362–3941: `route_plan_for_request`, `projected_portal_state`, etc.) take `&mut ProjectionSession` and belong in `authority.rs`. Pure validation helpers (L3943–4020: `validate_*`, `generate_owner_token`, etc.) have **zero** `ProjectionSession` deps and are called from `contract.rs` and `managed_session.rs` validate() methods | **Split the helpers**: pure validation helpers move to `contract.rs` in P-1 (where they are called); authority-coupled helpers move to `authority.rs` in P-4. Placing all helpers in `authority.rs` would require `contract.rs` and `managed_session.rs` to import from `authority.rs`, creating a reverse dependency (cycle: authority imports contract, contract imports authority). |
+| `ProjectionContractError` is used in `validate()` methods on contract and managed-session types | PCE is defined at L1898 but called as early as L327 in `contract.rs` zone and L1244 in `managed_session.rs` zone | Move `ProjectionContractError` to `contract.rs` in P-1. It only references `ProjectionErrorCode` (also a wire type in `contract.rs`). This keeps the dependency direction correct: contract ← managed_session ← portal ← authority. |
 | `PortalCadenceCoalescer` used inside `ProjectionAuthority::handle_publish_output` | From `crate::portal_cadence` (already a separate module) | No change — `authority.rs` imports `use crate::portal_cadence::PortalCadenceCoalescer` (same `crate::` path) |
 | Proptest macros in tests | `mod tests` uses `use super::*` | Tests move last; they continue using `use super::*` which expands through `pub use` chain in `lib.rs` — no import path changes needed |
 | Constants referenced across submodules | `DEFAULT_MAX_*` etc. referenced in `ProjectionAuthority::new()` and in tests | Keep constants in `lib.rs`; submodules reference them via `crate::DEFAULT_MAX_AUDIT_RECORDS` etc. |
@@ -170,7 +190,7 @@ These coupling points require careful handling and ordering:
 
 Perform one step per PR. Each step is a pure move with no logic changes.
 
-**Step P-1: Wire contract types (largest single cluster — leaf, no authority deps)**
+**Step P-1: Wire contract types + contract error type + pure validation helpers (leaf, no authority deps)**
 
 Move to `contract.rs`:
 - All wire enums (L70–287): `ProjectionErrorCode`, `INITIAL_ERROR_CODES`, `ProjectionOperation`, `ProviderKind`, `ProjectionLifecycleState`, `ContentClassification`, `OutputKind`, `InputAckState`, `InputDeliveryState`, `CleanupAuthority`, all `ProjectedPortal*` enums, `PortalInputFeedbackState`, `ProjectionAuditCategory`
@@ -180,6 +200,8 @@ Move to `contract.rs`:
 - Response/state structs (L757–1015): `PortalTranscriptUpdate`, `ProjectionStateSummary`, `ProjectionResponse` (public struct + public methods only — see §3.3 for the private method), `ProjectionAuditRecord`, `ProjectionIdentitySummary`, `ProjectedPortalPolicy`, `ProjectedPortalState`
 - Adapter draft batch types (L1017–1122, banner 1)
 - Adapter geometry types (L1124–1219, banner 2)
+- **`ProjectionContractError` (L1896–1915)** — pure wire error enum referencing only `ProjectionErrorCode` (also wire); validate() methods on contract types return it. Moving it here (not to `authority.rs`) prevents a dependency cycle.
+- **Pure validation helpers (L3943–4020)**: `validate_owner_token`, `validate_non_empty_bounded`, `validate_optional_bounded`, `validate_non_zero`, `generate_owner_token`, `verifier_for_secret`, `constant_time_eq`, `hex_encode`, `bounded_copy` — these are private functions with no `ProjectionSession` deps, called directly from validate() methods on types in `contract.rs` and `managed_session.rs`. They cannot be in `authority.rs` (that would require `contract.rs` and `managed_session.rs` to import from `authority.rs`, creating a cycle).
 
 Add to `lib.rs`:
 ```rust
@@ -187,13 +209,9 @@ mod contract;
 pub use self::contract::*;
 ```
 
-This step accounts for ≈ 1,190 lines leaving `lib.rs`. It is the highest-value
-split because `tze_hud_runtime` and the `projection_authority` binary import
-almost exclusively from this cluster.
+This step accounts for ≈ 1,270 lines leaving `lib.rs` (original estimate was ≈1,190; the additional ~80 lines come from PCE + pure validation helpers). It is the highest-value split because `tze_hud_runtime` and the `projection_authority` binary import almost exclusively from this cluster.
 
-**Visibility changes expected**: none (all types are already `pub`; the module
-itself is re-exported via `pub use`). Helper methods on types that are currently
-private within `lib.rs` become `pub(super)` if called from `authority.rs`.
+**Visibility changes expected**: `ProjectionContractError` is already `pub`. Pure validation helpers are currently private within `lib.rs` — they become `pub(super)` so they can be called from `managed_session.rs` (a sibling module). Private methods on wire types that are currently private to `lib.rs` remain `pub(super)` if called cross-module.
 
 **Step P-2: Managed session types**
 
@@ -206,10 +224,10 @@ mod managed_session;
 pub use self::managed_session::*;
 ```
 
-No deps on `contract.rs` types from this cluster (these are purely session
-orchestration enums and structs). Depends on P-1 being merged first so that
-`contract.rs` types referenced by `managed_session.rs` (e.g. `ContentClassification`
-used in `HudSurfaceCommandPlan`) resolve via `crate::` paths.
+Depends on P-1 being merged first so that:
+- `contract.rs` types referenced by `managed_session.rs` (e.g. `ContentClassification` used in `HudSurfaceCommandPlan`) resolve via `crate::` paths
+- Pure validation helpers (now `pub(super)` in `contract.rs`) are importable as `use crate::contract::{validate_non_empty_bounded, validate_optional_bounded, ...}` for the `validate()` methods on `ManagedSessionRequest`, `LaunchSessionSpec`, etc.
+- `ProjectionContractError` (in `contract.rs` after P-1) is accessible as `crate::ProjectionContractError`
 
 **Visibility changes expected**: `ManagedSessionRecord` is already private; it
 moves to `portal.rs` in P-3, not here. All types in this cluster are `pub`.
@@ -245,16 +263,17 @@ PR **or** reverse the order and do P-4 before P-3 (see note in §3.5).
 gain `pub(super)` if accessed from `ExternalAgentProjectionAuthority` (they are
 both private structs used only within `portal.rs`).
 
-**Step P-4: Authority internals + helpers**
+**Step P-4: Authority internals + authority-coupled helpers**
 
 Move to `authority.rs`:
-- `ProjectionContractError` (L1896–1915)
 - `ProjectionSession` (private struct, L1917–1962)
 - `ProjectionAuditEvent<'a>` (private, L1964–1972)
 - `ProjectionAuthority` pub struct + full `impl ProjectionAuthority` block (L1977–3354)
 - `impl Default for ProjectionAuthority` (L3356–3359)
-- All free helper functions (L3360–4020)
+- Authority-coupled helper functions (L3362–3941): `route_plan_for_request`, `projected_portal_state`, `redacted_feedback`, `portal_id_for_projection`, `append_transcript_unit`, `promote_to_active_if_recovering`, `portal_update_allowed`, `prune_retained_transcript`, `visible_transcript_window`, `capabilities_are_subset`, `remember_logical_unit`, `requested_delivery_state`, `terminal_ack_replay_response`, `remember_terminal_input`, `prune_terminal_pending_input`, `acknowledge_input`, `expire_pending` — these all take `&ProjectionSession` / `&mut ProjectionSession` args and belong with their callers in `authority.rs`
 - The private `impl ProjectionResponse` block containing `with_portal_update_state` (see §3.3)
+
+**NOT moved in P-4**: `ProjectionContractError` and pure validation helpers were already moved to `contract.rs` in P-1.
 
 Add to `lib.rs`:
 ```rust
@@ -265,7 +284,7 @@ pub use self::authority::*;
 `authority.rs` imports:
 ```rust
 use crate::portal_cadence::PortalCadenceCoalescer;
-use crate::contract::*;        // all wire types
+use crate::contract::*;        // all wire types + ProjectionContractError + validation helpers
 use crate::managed_session::*; // session route types
 ```
 
@@ -281,26 +300,25 @@ by `pub use self::authority::*;` in `lib.rs`. No downstream change needed.
 
 **Visibility changes expected**: `ProjectionSession` gains `pub(super)` so that
 the `impl ProjectionResponse` block for `with_portal_update_state` (also in
-`authority.rs`) can borrow it. All free helper functions become `pub(super)` if
-called from any `impl` block also in `authority.rs` — since they are all in the
-same file, standard `fn` visibility suffices (no change needed within the file).
+`authority.rs`) can borrow it. Authority-coupled helpers are all in the same file
+as their callers — standard `fn` visibility (no change needed within `authority.rs`).
 
 **Step P-5: Tests**
 
 Move to `tests/mod.rs`:
-- Entire `mod tests { ... }` block (L4021–6891)
+- The **contents** of the `mod tests { ... }` block (L4023–6890) — everything between the opening `{` and closing `}` of `mod tests`, NOT the `mod tests { }` wrapper itself.
 
-Create `crates/tze_hud_projection/src/tests/mod.rs` with the block contents.
+Create `crates/tze_hud_projection/src/tests/mod.rs` containing only the inner content (starting with `use super::*;`).
 
-Change in `lib.rs`:
+**Important**: do NOT wrap the content in another `mod tests { }` in `tests/mod.rs`. When `lib.rs` declares `#[cfg(test)] mod tests;`, Rust maps this to `tests/mod.rs` and the file's top-level items ARE the `tests` module — adding an inner `mod tests { }` wrapper would create a nested `tests::tests` module and break `use super::*` (which would then import from the empty outer `tests` module rather than the crate root).
+
+Change in `lib.rs` (replace the `#[cfg(test)] mod tests { ... }` block with):
 ```rust
 #[cfg(test)]
 mod tests;
 ```
 
-The existing `use super::*;` inside the test module expands through `lib.rs`'s
-full `pub use` chain — all types remain visible to tests without any import
-changes.
+The existing `use super::*;` at the top of the test module (now `tests/mod.rs`) expands through `lib.rs`'s full `pub use` chain — all types remain visible to tests without any import changes.
 
 **Step P-6 (optional): Further sub-splitting of `authority.rs`**
 
@@ -317,7 +335,9 @@ This is an optional follow-on, not part of the initial mechanical split.
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | `ProjectionResponse::with_portal_update_state` straddles wire and authority concerns | High (it is the only cross-concern private method in the file) | Split the `impl ProjectionResponse` block: public methods stay in `contract.rs`; the private `with_portal_update_state` goes in an `impl ProjectionResponse` extension block in `authority.rs` (same module via `pub use`) — Rust allows split impl blocks within the same module. Document explicitly in the P-4 PR description. |
-| P-3 and P-4 ordering dependency (`ExternalAgentProjectionAuthority` wraps `ProjectionAuthority`) | Medium | Option A: do P-4 before P-3 (reverse order). Option B: land P-3 and P-4 as a single PR. Option C: use `super::ProjectionAuthority` in P-3 and update to `crate::authority::ProjectionAuthority` in P-4. Option A (reverse) is cleanest — P-4 first, then P-3 imports `crate::authority::ProjectionAuthority`. Execution agents should use Option A. |
+| P-3 and P-4 ordering dependency (`ExternalAgentProjectionAuthority` wraps `ProjectionAuthority` and returns `ProjectionContractError`) | Medium | Option A: do P-4 before P-3 (reverse order). Option B: land P-3 and P-4 as a single PR. Option C: use `super::ProjectionAuthority` in P-3 and update to `crate::authority::ProjectionAuthority` in P-4. Option A (reverse) is cleanest — P-4 first, then P-3 imports `crate::authority::ProjectionAuthority`. `ProjectionContractError` is already in `contract.rs` (P-1) so no additional ordering issue for PCE. Execution agents should use Option A. |
+| Pure validation helpers (`validate_*`, `generate_owner_token`, etc.) are called from both `contract.rs` and `managed_session.rs` | High (cycle risk if helpers stay in `authority.rs`) | Per the updated plan: pure validation helpers move to `contract.rs` in P-1. `managed_session.rs` imports them as `use crate::contract::{validate_non_empty_bounded, ...}` (or via the `crate::` re-export). They become `pub(super)` in `contract.rs`. Do NOT place them in `authority.rs`. |
+| `tests/mod.rs` nesting: moving `mod tests { ... }` verbatim creates `tests::tests` | High (would break `use super::*` imports) | Move only the CONTENTS of the `mod tests { }` block (without the outer wrapper) to `tests/mod.rs`. See P-5 step for exact instruction. `#[cfg(test)] mod tests;` in `lib.rs` maps to the file — the file's top-level items are already the module. |
 | `pub use self::contract::*` glob re-export may conflict if `authority.rs` also re-exports items with same names | Low | No name clashes exist across the four clusters. Verify with `cargo build --lib` after each step. |
 | `std::process::{Child, Command, Stdio}` leaking into lib.rs scope | Medium | After P-3, `portal.rs` owns these imports. Ensure `lib.rs` does NOT include `use std::process::{...}` in its top-level imports after P-3 lands — remove that import from `lib.rs` as part of the P-3 PR. This is a platform-concern boundary: process supervision is isolated to `portal.rs`. |
 | Integration test imports (`tests/projection_authority_cli.rs` uses `tze_hud_projection::DEFAULT_MAX_AUDIT_RECORDS`) | Low | Constants stay in `lib.rs` — no path change needed. Verify test crate builds after P-1. |
