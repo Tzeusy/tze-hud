@@ -280,6 +280,30 @@ impl Compositor {
     /// cursor byte position in the draft text so glyphon renders it as part of
     /// the normal text flow.  This avoids a separate GPU draw call for the
     /// caret while giving a visually correct block-caret appearance.
+    ///
+    /// When a selection is active (`cursor_byte != selection_anchor`), a
+    /// [`crate::text::StyledRunItem`] with `background_color` set to
+    /// `tokens.selection_bg` is emitted covering the selected byte range in the
+    /// display string.  The text pipeline's `compute_inline_backdrop_quads` then
+    /// renders a highlight quad behind the selected characters using glyph-level
+    /// geometry — no separate geometry pass is required.
+    ///
+    /// ### Byte-offset accounting for the inserted caret glyph
+    ///
+    /// `▌` (U+258C) is 3 UTF-8 bytes.  It is inserted at `cursor_byte` in the
+    /// display string, shifting all bytes after that point by +3.  The
+    /// selection range `[sel_start, sel_end]` in the *original* text becomes:
+    ///
+    /// - Case `cursor_byte <= selection_anchor` (cursor at or before anchor):
+    ///   - `display_sel_start = cursor_byte` (▌ is the first selected char)
+    ///   - `display_sel_end   = selection_anchor + 3`
+    /// - Case `cursor_byte > selection_anchor` (cursor after anchor):
+    ///   - `display_sel_start = selection_anchor` (unshifted, before ▌)
+    ///   - `display_sel_end   = cursor_byte + 3` (▌ is after the selection)
+    ///
+    /// NOTE: single-line selection only.  Multi-line composer is out of scope
+    /// for v1 (the composer strip is always one line); a follow-up bead covers
+    /// multi-line layouts when they land.
     pub(super) fn collect_composer_text_item(
         &self,
         tile: &Tile,
@@ -319,6 +343,50 @@ impl Compositor {
         let _ = sw; // retained for API symmetry with other collect helpers
         let _ = sh;
 
+        // Build a selection-highlight styled run when a non-empty selection
+        // exists.  The run covers the selected characters in the *display*
+        // string (which has the 3-byte ▌ inserted at `cursor_byte`).
+        //
+        // `cursor_byte` and `selection_anchor` are agent-provided and are
+        // clamped to valid char boundaries by composer_display_text / the
+        // ComposerDraft invariants; we still guard with `min(text.len())` here
+        // so a stale snapshot with an out-of-range anchor cannot panic.
+        let caret_utf8_len = '▌'.len_utf8(); // 3
+        let styled_runs: Box<[crate::text::StyledRunItem]> = {
+            let anchor = cs.selection_anchor.min(cs.text.len());
+            let cursor = cs.cursor_byte.min(cs.text.len());
+            if anchor != cursor {
+                // Map original-text offsets to display-string offsets.
+                let (display_sel_start, display_sel_end) = if cursor <= anchor {
+                    // ▌ is inserted at `cursor` (= start of selection in display).
+                    (cursor, anchor + caret_utf8_len)
+                } else {
+                    // ▌ is inserted at `cursor` (after selection end in original).
+                    (anchor, cursor + caret_utf8_len)
+                };
+                // Clamp to display_text bounds (defensive).
+                let display_len = display_text.len();
+                let sel_start = display_sel_start.min(display_len);
+                let sel_end = display_sel_end.min(display_len);
+                if sel_start < sel_end {
+                    Box::new([crate::text::StyledRunItem {
+                        start_byte: sel_start,
+                        end_byte: sel_end,
+                        weight: None,
+                        italic: false,
+                        monospace: false,
+                        color: None,
+                        background_color: Some(tokens.selection_bg),
+                        size_scale: None,
+                    }])
+                } else {
+                    Box::new([])
+                }
+            } else {
+                Box::new([])
+            }
+        };
+
         Some(crate::text::TextItem {
             text: Arc::from(display_text.as_str()),
             pixel_x: tile.bounds.x + text_margin,
@@ -339,7 +407,7 @@ impl Compositor {
             outline_width: None,
             opacity: 1.0,
             color_runs: Box::new([]),
-            styled_runs: Box::new([]),
+            styled_runs,
             line_height_multiplier: crate::markdown::MarkdownTokens::default()
                 .line_height_multiplier,
             viewport: crate::overflow::TruncationViewport::HeadAnchored,

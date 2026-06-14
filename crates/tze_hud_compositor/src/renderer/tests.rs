@@ -9235,6 +9235,7 @@ fn local_composer_state_handle_slot_semantics() {
         *guard = Some(Some(LocalComposerState {
             text: "hello".to_owned(),
             cursor_byte: 5,
+            selection_anchor: 5, // no selection
             at_capacity: false,
             node_id,
         }));
@@ -9497,6 +9498,176 @@ fn composer_at_capacity_token_is_distinct_from_background_and_propagates_overrid
         (t.at_capacity_r - t_override.at_capacity_r).abs() > 0.1,
         "default and overridden at_capacity_r must differ (amber vs red)"
     );
+}
+
+// ── Composer selection-range rendering tests [hud-bq0gl.9] ───────────────
+
+/// The default `selection_bg` token must have a non-zero alpha so selection
+/// highlights are actually visible when no `portal.composer.selection_color`
+/// token is configured.
+///
+/// CPU-only — no GPU required.
+#[test]
+fn composer_selection_bg_default_is_visible() {
+    use std::collections::HashMap;
+
+    let empty: HashMap<String, String> = HashMap::new();
+    let t = resolve_composer_overlay_tokens(&empty);
+
+    // Alpha is the 4th element; must be > 0 for the highlight to show.
+    assert!(
+        t.selection_bg[3] > 0,
+        "default selection_bg alpha must be > 0 so selection highlights are visible, \
+         got {:?}",
+        t.selection_bg,
+    );
+    // Blue channel should dominate the default blue-tint selection color.
+    assert!(
+        t.selection_bg[2] > t.selection_bg[0] && t.selection_bg[2] > t.selection_bg[1],
+        "default selection_bg should be a blue-dominant color (#3A7BD5), got {:?}",
+        t.selection_bg,
+    );
+}
+
+/// `portal.composer.selection_color` token override must propagate to
+/// `ComposerOverlayTokens::selection_bg` correctly.
+///
+/// CPU-only — no GPU required.
+#[test]
+fn composer_selection_bg_token_override_propagates() {
+    use std::collections::HashMap;
+
+    let mut overrides: HashMap<String, String> = HashMap::new();
+    // Pure red sentinel in sRGB hex.
+    overrides.insert(
+        "portal.composer.selection_color".to_string(),
+        "#FF0000FF".to_string(),
+    );
+    let t = resolve_composer_overlay_tokens(&overrides);
+
+    assert_eq!(
+        t.selection_bg[0], 0xFF,
+        "overridden selection_bg red channel must be 0xFF, got {:?}",
+        t.selection_bg
+    );
+    assert_eq!(
+        t.selection_bg[1], 0x00,
+        "overridden selection_bg green channel must be 0x00, got {:?}",
+        t.selection_bg
+    );
+    assert_eq!(
+        t.selection_bg[2], 0x00,
+        "overridden selection_bg blue channel must be 0x00, got {:?}",
+        t.selection_bg
+    );
+    assert_eq!(
+        t.selection_bg[3], 0xFF,
+        "overridden selection_bg alpha channel must be 0xFF, got {:?}",
+        t.selection_bg
+    );
+}
+
+/// Byte-offset mapping from original-text selection range to display-string
+/// selection range (accounting for the 3-byte ▌ caret glyph).
+///
+/// The rules are:
+/// - Cursor at or before anchor: ▌ is inserted at `cursor_byte`, shifting
+///   anchor by +3 in the display string.
+///   `display_sel_start = cursor_byte`, `display_sel_end = anchor + 3`.
+/// - Cursor after anchor: ▌ is inserted at `cursor_byte`, shifting cursor by
+///   +3 but anchor is unshifted (anchor < cursor).
+///   `display_sel_start = anchor`, `display_sel_end = cursor + 3`.
+///
+/// CPU-only — verifies the offset arithmetic directly, no GPU required.
+#[test]
+fn composer_selection_display_byte_offsets() {
+    const CARET: char = '▌'; // U+258C LEFT HALF BLOCK, 3 UTF-8 bytes
+    let caret_len = CARET.len_utf8(); // 3
+
+    // Helper: given (text, cursor, anchor), compute expected display string
+    // and expected (display_sel_start, display_sel_end).
+    let check =
+        |text: &str, cursor: usize, anchor: usize, expected_start: usize, expected_end: usize| {
+            let display = composer_display_text(text, cursor);
+            // Check that the expected byte range is valid within the display string.
+            assert!(
+                expected_end <= display.len(),
+                "expected_end {expected_end} > display.len() {} for text={text:?} \
+             cursor={cursor} anchor={anchor}",
+                display.len()
+            );
+            assert!(
+                display.is_char_boundary(expected_start),
+                "expected_start {expected_start} is not a char boundary in display {display:?}",
+            );
+            assert!(
+                display.is_char_boundary(expected_end),
+                "expected_end {expected_end} is not a char boundary in display {display:?}",
+            );
+            // The selected slice of the display string must not contain the start
+            // of a character from outside the selection.
+            let _ = &display[expected_start..expected_end];
+            (display, expected_start, expected_end)
+        };
+
+    // Case 1: cursor < anchor ("hello", cursor=2, anchor=4 → "he▌ll" ... "o")
+    //  display = "he▌llo"   (cursor=2 → ▌ at byte 2)
+    //  original sel = [2, 4]
+    //  display_sel_start = 2  (where ▌ starts, which is the selection start)
+    //  display_sel_end   = 4 + 3 = 7
+    let (display, sel_start, sel_end) = check("hello", 2, 4, 2, 7);
+    assert_eq!(
+        &display[sel_start..sel_end],
+        format!("{CARET}ll").as_str(),
+        "cursor<anchor: selected slice must be ▌ll"
+    );
+
+    // Case 2: cursor > anchor ("hello", cursor=4, anchor=2 → "hell▌o")
+    //  display = "hell▌o"  (cursor=4 → ▌ at byte 4)
+    //  original sel = [2, 4]
+    //  display_sel_start = 2   (anchor, unshifted)
+    //  display_sel_end   = 4 + 3 = 7
+    let (display, sel_start, sel_end) = check("hello", 4, 2, 2, 7);
+    assert_eq!(
+        &display[sel_start..sel_end],
+        format!("ll{CARET}").as_str(),
+        "cursor>anchor: selected slice must be ll▌"
+    );
+
+    // Case 3: cursor == anchor → no selection (both equal, so styled_runs is empty).
+    // We just verify the display text is as expected; no assertion on offsets
+    // because the production code branches on cursor != anchor.
+    let display = composer_display_text("hello", 3);
+    assert_eq!(
+        display,
+        format!("hel{CARET}lo"),
+        "cursor==anchor: display text must be hel▌lo"
+    );
+
+    // Case 4: cursor=0, anchor=5 (whole string selected, cursor at start)
+    //  display = "▌hello"   (cursor=0 → ▌ at byte 0)
+    //  display_sel_start = 0
+    //  display_sel_end   = 5 + 3 = 8
+    let (display, sel_start, sel_end) = check("hello", 0, 5, 0, 8);
+    assert_eq!(
+        &display[sel_start..sel_end],
+        format!("{CARET}hello").as_str(),
+        "cursor=0,anchor=5: selected slice must be ▌hello"
+    );
+
+    // Case 5: cursor=5, anchor=0 (whole string selected, cursor at end)
+    //  display = "hello▌"   (cursor=5 → ▌ at byte 5)
+    //  display_sel_start = 0   (anchor, unshifted)
+    //  display_sel_end   = 5 + 3 = 8
+    let (display, sel_start, sel_end) = check("hello", 5, 0, 0, 8);
+    assert_eq!(
+        &display[sel_start..sel_end],
+        format!("hello{CARET}").as_str(),
+        "cursor=5,anchor=0: selected slice must be hello▌"
+    );
+
+    // Suppress unused warning on caret_len (used in documenting the rules above).
+    let _ = caret_len;
 }
 
 // ── Tile background color token tests [hud-9wljr.10] ─────────────────────
