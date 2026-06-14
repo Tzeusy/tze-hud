@@ -1,8 +1,8 @@
 # Projection Control Facade Requirements
 
-The production projection ingress routes cooperative projection operations into the runtime's in-process `ProjectionAuthority`. It is **not** a standalone external daemon and **not** the runtime v1 MCP bridge.
+The production projection ingress routes cooperative projection operations into the runtime's in-process `ProjectionAuthority`. It is **not** a standalone external daemon and **not** the runtime v1 MCP zone/widget publishing bridge.
 
-**Current status:** The production ingress (MCP or gRPC surface) has not shipped. It is tracked as hud-bq0gl.1. The architecture below describes the requirements that surface must meet when it lands.
+**Current status:** The ingress is **partially shipped**. The OUTPUT operations `attach` and `publish_output` are live today through the runtime MCP server's portal-projection facade tools `portal_projection_attach` and `portal_projection_publish` (`crates/tze_hud_mcp/src/server.rs` ~556-565), which forward to the in-process authority over `portal_op_tx`. The input-return + lifecycle operations (`publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup`) have **no MCP ingress yet** (tracked by hud-bq0gl.1 for production ingress and hud-bq0gl.3 for the operator input-return loop). The boundary requirements below apply to the full facade as it completes.
 
 ## Required Boundary
 

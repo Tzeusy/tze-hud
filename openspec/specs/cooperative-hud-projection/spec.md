@@ -1,9 +1,51 @@
 # cooperative-hud-projection Specification
 
 ## Purpose
-Define the provider-neutral, cooperative HUD projection contract that lets already-running LLM sessions attach to a governed text-stream portal through an external projection authority, without terminal capture or runtime ownership of provider processes.
+Define the provider-neutral, cooperative HUD projection contract that lets already-running LLM sessions attach to a governed text-stream portal through a projection authority, without terminal capture or runtime ownership of provider processes.
 
 Implementation: crates/tze_hud_projection/
+
+## Deployment Note: In-Process Authority Is the v1 Wiring (vs. External Daemon)
+This spec is written in terms of a "projection daemon" / "external projection
+authority" that owns projection state outside the runtime core. **That external,
+separately-hosted daemon is the aspirational/future deployment model, not what is
+wired in v1.**
+
+What is actually wired today:
+- `ProjectionAuthority` runs **in-process** inside the windowed runtime, hosted by
+  `InProcessPortalDriver` (`crates/tze_hud_runtime/src/portal_projection_driver.rs`).
+  The runtime's MCP server passes accepted portal ops over an mpsc channel
+  (`portal_op_tx` → `portal_op_rx`) that the windowed event loop drains each frame
+  via `drain_portal_ops` → `InProcessPortalDriver::dispatch_portal_op`
+  (`crates/tze_hud_runtime/src/windowed.rs` ~4924-5106,
+  `crates/tze_hud_runtime/src/mcp.rs` ~96-100).
+- The standalone `projection_authority` binary
+  (`crates/tze_hud_projection/src/bin/projection_authority.rs`) is a **stdio dev
+  harness**: it retains `ProjectionAuthority` state only for its own process
+  lifetime and emits stdout drain records for a caller to forward. It does **not**
+  connect to the running runtime, and there is no separately-hosted projection
+  daemon with its own MCP server + bearer token in v1.
+
+Read every "external projection authority", "projection daemon", "daemon
+restart", and "external-daemon MCP server" reference below as the **logical
+authority role** the in-process `ProjectionAuthority` fills in v1. The
+authority-boundary, privacy, bounds, and governance requirements still hold; only
+the hosting/transport shape (in-process vs. external daemon) differs, and the
+external-daemon model remains future work (see
+`external-agent-projection-authority`).
+
+The "Low-Token LLM-Facing Operations" requirement says MCP-exposed operations
+"SHALL be served by the external projection authority rather than the runtime v1
+MCP bridge." In v1 the served subset (`attach`, `publish_output`) is reached
+through the runtime MCP server's dedicated portal-projection tools
+(`portal_projection_attach`, `portal_projection_publish`,
+`crates/tze_hud_mcp/src/server.rs` ~556-565), which forward to the in-process
+authority over `portal_op_tx` — they are a projection facade distinct from the
+zone/widget publishing tools, not the generic v1 bridge. The remaining operations
+(`publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup`)
+have no MCP ingress yet (tracked by hud-bq0gl.1/.3); the external-daemon transport
+in the original requirement is aspirational.
+
 ## Requirements
 ### Requirement: Cooperative Attachment Contract
 An already-running LLM session SHALL attach to HUD projection only by explicitly registering a cooperative projection session with a projection daemon. Attachment SHALL use a stable projection ID, provider kind, display name, optional workspace/repository hints, optional icon/profile hint, lifecycle state, and content classification. The projection contract MUST NOT claim OS-level attachment to arbitrary process stdin/stdout, terminal byte streams, or PTY state.
