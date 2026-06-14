@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tonic::Status;
-use tze_hud_scene::element_store::ElementType;
+use tze_hud_scene::element_store::{ElementStoreEntry, ElementType};
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
 use tze_hud_scene::types::*;
 
@@ -26,8 +26,8 @@ use super::freeze_queue::FreezeEnqueueResult;
 use super::stream_session::StreamSession;
 use super::{
     DEFAULT_MAX_FUTURE_SCHEDULE_US, ElementStorePersistRequest, bytes_to_scene_id, now_ms,
-    now_wall_us, persist_created_tile_entries, persist_element_store, proto_batch_id_to_scene_id,
-    resolve_tile_bounds_with_override, scene_id_to_bytes, validate_timing_hints,
+    now_wall_us, persist_created_tile_entries, persist_element_store, scene_id_to_bytes,
+    validate_timing_hints,
 };
 
 /// Output of [`convert_proto_mutations`]: the converted scene mutations and the
@@ -1010,4 +1010,46 @@ pub(super) async fn apply_queued_batch_to_scene(
         drop(st);
         persist_element_store(persist_request).await;
     }
+}
+
+// ─── Helpers used only by this module (migrated from mod.rs, SS-9) ──────────
+
+/// Map proto `batch_id` bytes to a `SceneId` for rejection-correlation semantics.
+///
+/// If the client supplied a valid 16-byte UUID, use it directly so that any
+/// `BatchRejected` or `MutationResult` echoes the client's own `batch_id`.
+/// Note: `bytes_to_scene_id` validates only the byte length (16 bytes); UUID
+/// version/variant are not checked because the spec (RFC 0005 §3.2) requires
+/// only that `batch_id` is a 16-byte RFC 4122 UUID (big-endian, matching
+/// `scene_id_to_bytes` / `bytes_to_scene_id`) — version bits are the client's
+/// responsibility.
+///
+/// Falls back to a fresh `SceneId` only when the field is absent or malformed
+/// (wrong length); logs a debug warning so SDK regressions are diagnosable.
+fn proto_batch_id_to_scene_id(batch_id: &[u8]) -> tze_hud_scene::SceneId {
+    match bytes_to_scene_id(batch_id) {
+        Ok(id) => id,
+        Err(_) => {
+            tracing::debug!(
+                batch_id_len = batch_id.len(),
+                "proto batch_id is absent or malformed (expected 16 bytes); \
+                 generating a fresh SceneId — client cannot correlate this batch"
+            );
+            tze_hud_scene::SceneId::new()
+        }
+    }
+}
+
+fn resolve_tile_bounds_with_override(
+    entry: Option<&ElementStoreEntry>,
+    agent_bounds: Option<Rect>,
+    display_area: Rect,
+) -> Option<Rect> {
+    let user_override = entry.and_then(|e| e.geometry_override);
+    let agent_requested = agent_bounds.map(|bounds| {
+        rect_to_relative_geometry_policy(bounds, display_area.width, display_area.height)
+    });
+    resolve_geometry_override_chain(user_override, agent_requested, None, None).map(|policy| {
+        geometry_policy_to_absolute_rect(policy, display_area.width, display_area.height)
+    })
 }
