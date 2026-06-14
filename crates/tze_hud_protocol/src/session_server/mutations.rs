@@ -609,7 +609,9 @@ pub(super) async fn handle_mutation_batch(
                                 accepted: false,
                                 created_ids: Vec::new(),
                                 error_code: "MUTATION_DROPPED".to_string(),
-                                error_message: "Mutation evicted from queue due to capacity pressure.".to_string(),
+                                error_message:
+                                    "Mutation evicted from queue due to capacity pressure."
+                                        .to_string(),
                             },
                         );
                     }
