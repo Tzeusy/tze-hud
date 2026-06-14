@@ -4294,7 +4294,10 @@ mod tests {
             "bold run on the single visible newest line must survive reslice"
         );
         // "…" = 3 bytes; "Newest" occupies bytes [3..9] in "…Newest".
-        assert_eq!(result[0].start_byte, 3, "start must shift past the inline '…'");
+        assert_eq!(
+            result[0].start_byte, 3,
+            "start must shift past the inline '…'"
+        );
         assert_eq!(result[0].end_byte, truncated.len());
         assert_eq!(
             &truncated[result[0].start_byte..result[0].end_byte],

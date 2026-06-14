@@ -1053,11 +1053,9 @@ fn truncate_line_to_leading_ellipsis<'a>(
         .filter(|&b| b > 0 && line.is_char_boundary(b))
         .collect();
 
-    if let Some(cut) = binary_search_smallest_fitting(
-        &word_cuts,
-        bounds_width,
-        &mut measure_with_leading_ellipsis,
-    ) {
+    if let Some(cut) =
+        binary_search_smallest_fitting(&word_cuts, bounds_width, &mut measure_with_leading_ellipsis)
+    {
         let suffix = line[cut..].trim_start();
         return format!("{ELLIPSIS}{suffix}");
     }
