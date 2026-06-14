@@ -1820,6 +1820,7 @@ fn roundtrip_rendering_policy_convert_all_fields_populated() {
         key_icon_map: Default::default(),
         backdrop_radius: None,
         media_disconnect_badge_color: None,
+        stream_tail_anchored: None,
     };
 
     let proto = rendering_policy_to_proto(&original);
@@ -1881,6 +1882,7 @@ fn roundtrip_rendering_policy_convert_all_new_fields_none() {
         key_icon_map: Default::default(),
         backdrop_radius: None,
         media_disconnect_badge_color: None,
+        stream_tail_anchored: None,
     };
 
     let proto = rendering_policy_to_proto(&original);

@@ -7996,6 +7996,210 @@ async fn test_collect_text_items_at_tail_ellipsis_uses_tail_anchored_viewport() 
     );
 }
 
+// ── Zone StreamText tail-anchored truncation (hud-gxz0x) ──────────────────
+
+/// Helper: register a `LatestWins` StreamText zone covering the whole display
+/// with the given `overflow` / `stream_tail_anchored` policy, publish `content`,
+/// and return the scene.  The zone uses a monospace font and small geometry so
+/// multi-line content overflows and is forced to truncate.
+fn make_stream_zone_scene(
+    overflow: Option<TextOverflow>,
+    stream_tail_anchored: Option<bool>,
+    content: &str,
+) -> SceneGraph {
+    let mut scene = SceneGraph::new(720.0, 360.0);
+    scene.register_zone(ZoneDefinition {
+        id: SceneId::new(),
+        name: "stream".to_owned(),
+        description: "streaming zone".to_owned(),
+        // Relative geometry: narrow + short so several lines overflow.
+        geometry_policy: GeometryPolicy::Relative {
+            x_pct: 0.0,
+            y_pct: 0.0,
+            width_pct: 200.0 / 720.0,
+            height_pct: 40.0 / 360.0,
+        },
+        accepted_media_types: vec![ZoneMediaType::StreamText],
+        rendering_policy: RenderingPolicy {
+            font_size_px: Some(14.0),
+            font_family: Some(FontFamily::SystemMonospace),
+            overflow,
+            stream_tail_anchored,
+            ..Default::default()
+        },
+        contention_policy: ContentionPolicy::LatestWins,
+        max_publishers: 1,
+        transport_constraint: None,
+        auto_clear_ms: None,
+        ephemeral: false,
+        layer_attachment: LayerAttachment::Content,
+    });
+    scene
+        .publish_to_zone(
+            "stream",
+            ZoneContent::StreamText(content.to_owned()),
+            "test",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    scene
+}
+
+/// A streaming zone that opts into `stream_tail_anchored` produces a
+/// `TailAnchored` `TextItem` so the newest content (tail) is shown; the default
+/// (None) stays `HeadAnchored`, and `Clip` overflow is unaffected.
+///
+/// Exercises the CPU `collect_text_items` path; the `Compositor` itself needs a
+/// GPU device to construct, so the test is GPU-gated like its tile sibling
+/// `test_collect_text_items_at_tail_ellipsis_uses_tail_anchored_viewport`.
+#[tokio::test]
+async fn test_zone_stream_text_tail_anchored_opt_in_viewport() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(720, 360).await);
+
+    let content = "Line A\nLine B\nLine C\nLine D\nLine E\nLine F\nLine G\nLine H";
+
+    // Opt-in: Ellipsis overflow + stream_tail_anchored = Some(true) → TailAnchored.
+    let scene_tail = make_stream_zone_scene(
+        Some(TextOverflow::Ellipsis),
+        Some(true),
+        content,
+    );
+    let items_tail = compositor.collect_text_items(&scene_tail, 720.0, 360.0);
+    assert_eq!(items_tail.len(), 1, "expected one StreamText TextItem");
+    assert_eq!(
+        items_tail[0].overflow,
+        TextOverflow::Ellipsis,
+        "policy overflow must propagate to the item"
+    );
+    assert_eq!(
+        items_tail[0].viewport,
+        crate::overflow::TruncationViewport::TailAnchored,
+        "stream_tail_anchored = Some(true) must produce TailAnchored viewport \
+         so the streaming zone shows the newest content (hud-gxz0x)"
+    );
+
+    // Default: Ellipsis overflow, stream_tail_anchored = None → HeadAnchored.
+    let scene_head = make_stream_zone_scene(
+        Some(TextOverflow::Ellipsis),
+        None,
+        content,
+    );
+    let items_head = compositor.collect_text_items(&scene_head, 720.0, 360.0);
+    assert_eq!(items_head.len(), 1);
+    assert_eq!(
+        items_head[0].viewport,
+        crate::overflow::TruncationViewport::HeadAnchored,
+        "default (no opt-in) zone StreamText must remain HeadAnchored \
+         (no regression for existing zone users)"
+    );
+
+    // Explicit Some(false) is also head-anchored.
+    let scene_false = make_stream_zone_scene(
+        Some(TextOverflow::Ellipsis),
+        Some(false),
+        content,
+    );
+    let items_false = compositor.collect_text_items(&scene_false, 720.0, 360.0);
+    assert_eq!(
+        items_false[0].viewport,
+        crate::overflow::TruncationViewport::HeadAnchored,
+        "stream_tail_anchored = Some(false) must remain HeadAnchored"
+    );
+
+    // Clip overflow ignores the opt-in (no truncation, head always shown).
+    let scene_clip = make_stream_zone_scene(
+        Some(TextOverflow::Clip),
+        Some(true),
+        content,
+    );
+    let items_clip = compositor.collect_text_items(&scene_clip, 720.0, 360.0);
+    assert_eq!(
+        items_clip[0].viewport,
+        crate::overflow::TruncationViewport::TailAnchored,
+        "viewport field still reflects the opt-in even for Clip; truncation key \
+         gating (effective_truncation_key) is what makes it inert for Clip"
+    );
+    // For Clip overflow, effective_truncation_key returns None → no truncation.
+    assert!(
+        crate::text::effective_truncation_key(&items_clip[0]).is_none(),
+        "Clip overflow must not produce a truncation key (anchoring is inert)"
+    );
+}
+
+/// End-to-end: priming the truncation cache for a tail-anchored streaming zone
+/// stores a truncation that shows the **newest** content (the tail), while the
+/// head-anchored default stores the **oldest**.  Proves the zone StreamText
+/// frame path resolves through the shared tail-anchored helpers.
+///
+/// GPU-gated: `prime_truncation_cache` requires the text rasterizer.
+#[tokio::test]
+async fn test_zone_stream_text_tail_anchored_primes_newest_content() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(720, 360).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    // Distinct first/last lines so head vs tail truncation differ observably.
+    let content = "FIRST\nbbbb\ncccc\ndddd\neeee\nffff\ngggg\nLAST";
+
+    // ── Tail-anchored zone: cache must show the newest line (LAST) ────────
+    let scene_tail =
+        make_stream_zone_scene(Some(TextOverflow::Ellipsis), Some(true), content);
+    compositor.prime_markdown_cache(&scene_tail);
+    compositor.prime_truncation_cache(&scene_tail);
+
+    let items_tail = compositor.collect_text_items(&scene_tail, 720.0, 360.0);
+    assert_eq!(items_tail.len(), 1);
+    let key_tail = crate::text::effective_truncation_key(&items_tail[0])
+        .expect("Ellipsis item must yield a truncation key");
+    let cached_tail = compositor
+        .text_rasterizer
+        .as_ref()
+        .expect("rasterizer initialised")
+        .truncation_cache
+        .get_by_key(&key_tail)
+        .expect("tail-anchored zone StreamText must be primed (hud-gxz0x)");
+    assert!(
+        cached_tail.was_truncated,
+        "content must overflow the zone and be truncated"
+    );
+    assert!(
+        cached_tail.text.contains("LAST"),
+        "tail-anchored truncation must show the newest content (LAST); got {:?}",
+        cached_tail.text
+    );
+    assert!(
+        !cached_tail.text.contains("FIRST"),
+        "tail-anchored truncation must NOT pin the oldest content (FIRST); got {:?}",
+        cached_tail.text
+    );
+
+    // ── Head-anchored default: cache must show the oldest line (FIRST) ────
+    let mut compositor2 =
+        require_gpu!(make_compositor_and_surface(720, 360).await).0;
+    compositor2.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let scene_head =
+        make_stream_zone_scene(Some(TextOverflow::Ellipsis), None, content);
+    compositor2.prime_markdown_cache(&scene_head);
+    compositor2.prime_truncation_cache(&scene_head);
+
+    let items_head = compositor2.collect_text_items(&scene_head, 720.0, 360.0);
+    let key_head = crate::text::effective_truncation_key(&items_head[0])
+        .expect("Ellipsis item must yield a truncation key");
+    let cached_head = compositor2
+        .text_rasterizer
+        .as_ref()
+        .expect("rasterizer initialised")
+        .truncation_cache
+        .get_by_key(&key_head)
+        .expect("head-anchored zone StreamText must be primed");
+    assert!(
+        cached_head.text.contains("FIRST"),
+        "head-anchored truncation must show the oldest content (FIRST); got {:?}",
+        cached_head.text
+    );
+}
+
 // ── ZoneContent::VideoSurfaceRef rendering ────────────────────────────────
 
 /// render_zone_content with ZoneContent::VideoSurfaceRef must emit a dark
