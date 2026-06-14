@@ -79,12 +79,12 @@ This is **planning only** — no Rust code is changed in this document.
 | 5 | L637 | `// ─── Tab operations` | `create_tab`, `create_tab_with_lease`, `create_tab_checked`, `delete_tab*`, `rename_tab*`, `reorder_tab*`, `switch_active_tab*`, `set_tab_switch_on_event`, `find_tab_for_event` (L637–1019) |
 | 6 | L897 (sub) | `// ─── Capability helpers` | `require_capability`, `require_active_lease` — sub-banner inside impl block; lives within tab operations region but is a true cross-cutting helper (L897–957) |
 | 7 | L1020 | `// ─── Lease operations` | All lease grant/revoke/renew/suspend/resume/disconnect/reconnect/expire functions; lease state machine; `clear_zone_publications_for_namespace` (L1020–1516) |
-| 8 | L1517 | `// ─── Budget enforcement` | `lease_resource_usage`, `check_budget`, `is_lease_budget_warning`, `count_nodes_in_tile`, `count_node_subtree*`, `sum_texture_bytes*`, `count_node_tree*`, `count_texture_bytes_in_node`, `initiate_budget_revocation`, `finalize_budget_revocation` (L1517–1780) |
+| 8 | L1517 | `// ─── Budget enforcement` | `lease_resource_usage`, `check_budget`, `is_lease_budget_warning`, `count_nodes_in_tile`, `count_node_subtree*`, `sum_texture_bytes*`, `count_node_tree*`, `count_texture_bytes_in_node` (L1517–1780) |
 | 9 | L1781 | `// ─── Tile operations` | `create_tile`, `create_tile_checked`, `create_tile_impl`, `update_tile_bounds`, `update_tile_z_order`, `update_tile_opacity`, `update_tile_input_mode`, `update_tile_expiry`, `delete_tile`, `get_tile_lease_checked`, `set_tile_root`, `set_tile_root_checked`, `set_tile_root_impl`, `add_node_to_tile*`, `update_node_content*` (L1781–2483) |
 | 10 | L2484 | `// ─── Sync group operations` | `create_sync_group`, `delete_sync_group`, `join_sync_group`, `leave_sync_group`, `evaluate_sync_group_commit`, `join_sync_group_checked`, `sync_group_count` (L2484–2717) |
 | 11 | L2719 | `// ─── Node tree helpers` | `insert_node_tree`, `remove_node_tree`, `remove_tile_and_nodes` (L2719–2762) |
 | 12 | L2764 | `// ─── Queries` (first) | `visible_tiles`, `hit_test`, `update_hover_state`, `update_pressed_state`, `update_focused_state`, drag-active helpers, `hit_test_node*`, `is_node_in_subtree*` (L2764–3098) |
-| 13 | L3099 | `// ─── Zone operations` | `register_zone`, `unregister_zone`, `publish_to_zone*`, `coerce_widget_param_value` (already at preamble), `publish_to_widget`, `set_widget_param_local`, `resolve_lease_state_for_namespace`, `initiate/finalize_budget_revocation` (already in budget banner), `clear_zone`, `clear_zone_for_publisher`, `dismiss_notification`, `clear_widget_publications_for_namespace`, `clear_widget_for_publisher`, `refresh_widget_current_params`, `content_media_type` (L3099–3914) |
+| 13 | L3099 | `// ─── Zone operations` | `register_zone`, `unregister_zone`, `publish_to_zone*`, `coerce_widget_param_value` (already at preamble), `publish_to_widget`, `set_widget_param_local`, `resolve_lease_state_for_namespace`, `initiate_budget_revocation` (L3654), `finalize_budget_revocation` (L3712), `clear_zone`, `clear_zone_for_publisher`, `dismiss_notification`, `clear_widget_publications_for_namespace`, `clear_widget_for_publisher`, `refresh_widget_current_params`, `content_media_type` (L3099–3914) |
 | 14 | L3916 | `// ─── Queries` (second) | `snapshot_json`, `from_json`, `take_snapshot`, `node_count`, `tile_count` (L3916–4073) |
 | 15 | L4075 | `// ─── Sequence number (RFC 0001 §3.5)` | `next_sequence_number` (L4075–4085) |
 | 16 | L4086 | `// ─── Clock accessor` | `now_millis` (L4086–4091) |
@@ -219,13 +219,13 @@ graph/
 | `require_capability` + `require_active_lease` | Private helpers; called by tab ops AND lease ops AND tile ops | Move to `tabs.rs` (their natural home); any method in another submodule that needs them imports via `use super::tabs::SceneGraph` — the split impl pattern means the method is still `impl SceneGraph` in `tabs.rs` but visible via `pub(super)` |
 | `inc_resource_ref` / `dec_resource_ref` | Private; called from `insert_node_tree` (node_tree.rs) and `remove_node_tree` (node_tree.rs) | `resources.rs` declares them `pub(super)`; `node_tree.rs` imports via `use super::resources` — both are within the `graph` module |
 | `insert_node_tree` | Called by `set_tile_root_impl`, `add_node_to_tile_impl` (in `tiles.rs`) | `node_tree.rs` declares it `pub(super)`; `tiles.rs` imports via `super::node_tree::SceneGraph` — all within `graph` module |
-| `remove_tile_and_nodes` | Called externally (mutation.rs, session_server), declared `pub(crate)` | Keep `pub(crate)` visibility; `mod.rs` re-exports it as before |
-| `count_node_subtree` | Declared `pub(crate)`; called from `invariants.rs` | Keep `pub(crate)` in `budget.rs`; re-exported via `mod.rs pub use budget::*` |
+| `remove_tile_and_nodes` | Called externally (mutation.rs, session_server), declared `pub(crate)` | Keep `pub(crate)` visibility; inherent methods are accessible to external crate-level callers without re-export — `pub(crate)` on the method itself is sufficient |
+| `count_node_subtree` | Declared `pub(crate)`; called from `invariants.rs` | Keep `pub(crate)` in `budget.rs`; inherent method — external crate callers call it as `scene_graph.count_node_subtree(...)` without any `pub use` in `mod.rs` |
 | `now_micros` free fn | Called by `create_sync_group` (sync_groups.rs) | Keep in `mod.rs` (9 lines, not worth a dedicated file); `sync_groups.rs` calls via `super::now_micros()` |
 | `SyncGroupCommitDecision` enum | Public type, re-exported from `lib.rs` | Keep in `mod.rs` alongside the enum it annotates; `sync_groups.rs` imports via `super::SyncGroupCommitDecision` |
 | `MAX_TABS`, `MAX_TILES_PER_TAB`, etc. | Module-level pub consts referenced by both prod code and tests | Keep as module-level consts in `mod.rs`; all submodules import via `super::*` via the `#[cfg(test)] use super::*` pattern already in tests |
-| `clear_zone_publications_for_namespace` | Logically a zone clean-up op but placed inside the lease banner | Move to `zone_ops.rs` (logical home); the lease revoke path in `leases.rs` calls it via `self.clear_zone_publications_for_namespace(...)` — split impl means the call is direct on `self` |
-| `initiate_budget_revocation` / `finalize_budget_revocation` | In budget banner but delete tiles and affect leases | Keep in `budget.rs`; they call `self.revoke_lease` (from `leases.rs`) and `self.remove_tile_and_nodes` (from `node_tree.rs`) — split impl, all calls are on `self`, no explicit import needed |
+| `clear_zone_publications_for_namespace` | Logically a zone clean-up op but placed inside the lease banner | Move to `leases.rs` in G-6 (matching its current banner home); `revoke_lease` calls it via `self.clear_zone_publications_for_namespace(...)` — split impl. A follow-on (Section 8) can migrate it to `zone_ops.rs` post-split |
+| `initiate_budget_revocation` / `finalize_budget_revocation` | Currently in zone ops banner (L3654/L3712) despite being budget-domain logic | Move to `budget.rs` in G-7; they are found in the zone ops region, not the budget banner — use `rg -n "fn initiate_budget_revocation"` to locate. They call `self.revoke_lease` (from `leases.rs`) and `self.remove_tile_and_nodes` (from `node_tree.rs`) — split impl, all calls are on `self`, no explicit import needed |
 | Test helpers in `mod tests` | Use `use super::*` which brings in everything from `mod.rs` and its re-exports | After split, `tests.rs` uses `use super::*` — unchanged, because `mod.rs` re-exports everything via `pub use submodule::*` |
 
 ---
@@ -256,13 +256,13 @@ Perform one step per PR. Each step is a pure move with no logic changes.
   `inc_resource_ref`, `dec_resource_ref` (banner: `// ─── Resource registry`)
 - `inc_resource_ref` and `dec_resource_ref` become `pub(super)` (currently private to the
   file; after split they must be visible to sibling `node_tree.rs`)
-- `mod.rs` adds `mod resources; pub use resources::{...public items...};`
+- `mod.rs` adds `mod resources;` — no `pub use` needed for inherent methods (split impl makes them available on `SceneGraph` directly); if any module-level types or constants are defined in `resources.rs` they get their own `pub use` entry
 
 **Step G-4: Node tree helpers (depends on G-3 for pub(super) resource ref helpers)**
 - `node_tree.rs` ← `insert_node_tree`, `remove_node_tree` (pub(crate)), `remove_tile_and_nodes` (pub(crate)) (banner: `// ─── Node tree helpers`)
 - These three methods call `self.inc_resource_ref` / `self.dec_resource_ref` (from G-3,
   accessible via split impl since they're all in the same module)
-- `mod.rs` adds `mod node_tree; pub use node_tree::{remove_node_tree, remove_tile_and_nodes};`
+- `mod.rs` adds `mod node_tree;` — both methods are inherent methods on `SceneGraph` (split impl makes them available automatically; no `pub use` needed or valid for inherent methods)
 
 **Step G-5: Tab operations + capability helpers (depends on G-4 for remove_tile_and_nodes call in delete_tab)**
 - `tabs.rs` ← banner `// ─── Tab operations` + inline sub-banner
@@ -273,7 +273,7 @@ Perform one step per PR. Each step is a pure move with no logic changes.
   leases, and zone_ops in later steps via split impl — they call `self.require_capability`
   directly, no explicit import needed)
 - `delete_tab` calls `self.remove_tile_and_nodes` (from `node_tree.rs`) — split impl, no import
-- `mod.rs` adds `mod tabs; pub use tabs::{...};`
+- `mod.rs` adds `mod tabs;` — all exported items are inherent methods (split impl; no `pub use` needed)
 
 **Step G-6: Lease operations (depends on G-5 for require_capability/require_active_lease)**
 - `leases.rs` ← banner `// ─── Lease operations`:
@@ -286,22 +286,26 @@ Perform one step per PR. Each step is a pure move with no logic changes.
 - `clear_zone_publications_for_namespace` moves here from its banner position inside lease ops
   (logically belongs with zone cleanup called at lease revoke time; a follow-on can relocate
   to `zone_ops.rs` if preferred — see Section 8)
-- `mod.rs` adds `mod leases; pub use leases::{...};`
+- `mod.rs` adds `mod leases;` — methods are inherent (split impl); `pub use leases::{DEFAULT_MAX_SUSPENSION_MS, DEFAULT_GRACE_PERIOD_MS, BUDGET_SOFT_LIMIT_PCT, MAX_RUNTIME_LEASES, DEFAULT_MAX_LEASES_PER_SESSION, MAX_LEASES_PER_SESSION, MAX_TILES_PER_LEASE}` re-exports the `pub const` values defined at module level in `leases.rs`
 - **Most import-sensitive step** — all subsequent submodules depend on lease state. Merge
   and verify CI before proceeding with G-7.
 
 **Step G-7: Budget enforcement (depends on G-6 for lease reads)**
-- `budget.rs` ← banner `// ─── Budget enforcement`:
+- `budget.rs` ← banner `// ─── Budget enforcement` (L1517–1780):
   `lease_resource_usage`, `check_budget`, `is_lease_budget_warning`,
-  all `count_*` and `sum_*` private helpers,
-  `initiate_budget_revocation`, `finalize_budget_revocation`
+  all `count_*` and `sum_*` private helpers;
+  **also** `initiate_budget_revocation` (L3654) and `finalize_budget_revocation` (L3712),
+  which currently live in the zone ops region but belong here logically — they are
+  the entry points for budget-driven revocation and are found by scanning the zone ops
+  banner, not the budget banner. Use `rg -n "fn initiate_budget_revocation"` to locate them.
 - `lease_resource_usage` and `check_budget` read `self.leases` (from `leases.rs`) —
   split impl, direct field access via `self.leases`
 - `finalize_budget_revocation` calls `self.revoke_lease` (from `leases.rs`) and
   `self.remove_tile_and_nodes` (from `node_tree.rs`) — both are `impl SceneGraph` methods
   accessible via split impl
 - `count_node_subtree` stays `pub(crate)` (called from `invariants.rs`)
-- `mod.rs` adds `mod budget; pub use budget::{lease_resource_usage, check_budget, ...};`
+- `mod.rs` adds `mod budget;` — all items are inherent methods (no `pub use` needed for methods);
+  `count_node_subtree` (pub(crate)) is accessible to crate-internal callers without re-export
 
 **Step G-8: Tile operations (depends on G-3/G-4 for node tree, G-5/G-6 for capability/lease checks)**
 - `tiles.rs` ← banner `// ─── Tile operations`:
@@ -312,8 +316,8 @@ Perform one step per PR. Each step is a pure move with no logic changes.
 - `set_tile_root_impl` calls `validate_text_markdown_node_data` (now in same file) and
   `self.insert_node_tree` / `self.remove_node_tree` (split impl)
 - `create_tile_impl` calls `self.require_active_lease`, `self.require_capability` (split impl)
-- `mod.rs` adds `mod tiles; pub use tiles::{create_tile, ..., validate_text_markdown_node_data};`
-  (the `pub use tiles::validate_text_markdown_node_data` preserves the re-export from `lib.rs`)
+- `mod.rs` adds `mod tiles; pub use tiles::validate_text_markdown_node_data;`
+  (the `pub use` here is for the free function, not inherent methods; `create_tile`, `update_tile_*`, etc. are inherent methods automatically available via split impl — they need no re-export)
 
 **Step G-9: Sync group operations (depends on G-5 for tile existence checks)**
 - `sync_groups.rs` ← banner `// ─── Sync group operations`:
@@ -323,7 +327,7 @@ Perform one step per PR. Each step is a pure move with no logic changes.
   `now_micros` in `mod.rs` and call it as `super::now_micros()`
 - `SyncGroupCommitDecision` stays in `mod.rs`; `evaluate_sync_group_commit` returns it
   via `super::SyncGroupCommitDecision`
-- `mod.rs` adds `mod sync_groups; pub use sync_groups::{...};`
+- `mod.rs` adds `mod sync_groups;` — all items are inherent methods or `pub const` values defined inside `impl SceneGraph`; `MAX_SYNC_GROUPS_PER_NAMESPACE` is an associated constant on `impl SceneGraph`, not a module-level item, so no `pub use` is required
 
 **Step G-10: Queries / hit-testing (depends on G-5/G-6 for lease priority reads)**
 - `queries.rs` ← banners `// ─── Queries` (first occurrence, L2764) and
@@ -335,7 +339,7 @@ Perform one step per PR. Each step is a pure move with no logic changes.
   `is_node_in_subtree_inner`
 - All methods only read `self.tiles`, `self.nodes`, `self.leases`, `self.overlay` —
   split impl, no explicit cross-submodule calls needed
-- `mod.rs` adds `mod queries; pub use queries::{visible_tiles, hit_test, ...};`
+- `mod.rs` adds `mod queries;` — all items are inherent methods (split impl; no `pub use` needed)
 
 **Step G-11: Zone + widget operations (depends on G-1 for apply_contention, G-6 for lease state)**
 - `zone_ops.rs` ← banner `// ─── Zone operations` and banner `// ─── Zone publication expiry`
@@ -350,7 +354,7 @@ Perform one step per PR. Each step is a pure move with no logic changes.
 - `publish_to_zone` and `publish_to_widget` call `apply_contention` (from `contention.rs`)
   via `super::contention::apply_contention` or via `use super::contention::apply_contention`
 - `resolve_lease_state_for_namespace` reads `self.leases` (split impl)
-- `mod.rs` adds `mod zone_ops; pub use zone_ops::{register_zone, publish_to_zone, ...};`
+- `mod.rs` adds `mod zone_ops;` — all items are inherent methods (split impl; no `pub use` needed)
 - This is the largest submodule (≈ 840 lines); if it grows uncomfortable, the widget
   publish cluster can be extracted as `widget_ops.rs` in a follow-on
 
@@ -358,12 +362,18 @@ Perform one step per PR. Each step is a pure move with no logic changes.
 - `snapshot.rs` ← banner `// ─── Queries` (second occurrence, L3916):
   `snapshot_json`, `from_json`, `take_snapshot`, `node_count`, `tile_count`
 - `take_snapshot` reads all fields of `self` (split impl, direct field access)
-- `mod.rs` adds `mod snapshot; pub use snapshot::{snapshot_json, take_snapshot, ...};`
+- `mod.rs` adds `mod snapshot;` — all items are inherent methods (split impl; no `pub use` needed)
 
 **Step G-13: Tests**
-- `tests.rs` ← entire `#[cfg(test)] mod tests { ... }` block (L4193–10644)
+- `tests.rs` ← the **inner contents only** of `#[cfg(test)] mod tests { ... }` (L4195–10643),
+  i.e. everything between the opening brace of `mod tests` and its closing brace, NOT the
+  `#[cfg(test)] mod tests { ... }` wrapper itself
 - File: `graph/tests.rs` (not a directory — single file is sufficient for the test block)
-- `mod.rs` adds `#[cfg(test)] mod tests;` (or `#[cfg(test)] include!("tests.rs")`)
+- `mod.rs` adds `#[cfg(test)] mod tests;` — Rust's module system wraps the file in `mod tests {}`
+  automatically; including the outer `mod tests { }` in `tests.rs` would create the nested
+  `tests::tests` module and break the `use super::*;` imports that expect `super` to be `graph`
+- Alternatively, keep the full `#[cfg(test)] mod tests { ... }` block in `tests.rs` verbatim
+  and use `#[cfg(test)] include!("tests.rs");` in `mod.rs` instead of `mod tests;`
 - Test module opens with `use super::*;` — unchanged; after split, `super::*` brings in
   everything re-exported from `mod.rs`
 
