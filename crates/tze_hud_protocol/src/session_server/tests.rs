@@ -3054,6 +3054,158 @@ async fn test_fifo_preserved_when_mutation_arrives_during_drain_window() {
     }
 }
 
+/// Regression: a Transactional batch retransmitted while the scene is frozen must
+/// be applied exactly once after drain, not twice.
+///
+/// Before the fix, the freeze enqueue path did not consult `dedup_window`.  A
+/// retransmit (same `batch_id`) while frozen was pushed onto the freeze queue as a
+/// second distinct entry and applied twice when the queue drained — producing a
+/// duplicate-application that never occurs on the non-frozen path.
+///
+/// The fix: check `dedup_window` at enqueue time (symmetric with the non-frozen
+/// path) and record the batch in the window immediately after a successful enqueue.
+/// A retransmit hits the window and is suppressed before it can be pushed.
+///
+/// This is a direct unit test: we manipulate `StreamSession` and `SharedState`
+/// directly so the assertion is deterministic (no timing dependency).
+#[tokio::test]
+async fn test_freeze_retransmit_deduped_applied_exactly_once() {
+    use tze_hud_resource::{ResourceStore, ResourceStoreConfig};
+    use tze_hud_scene::graph::SceneGraph;
+
+    let (outbound_tx, mut outbound_rx) =
+        tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(32);
+
+    // Shared state: scene is frozen.
+    let state: Arc<Mutex<SharedState>> = Arc::new(Mutex::new(SharedState {
+        scene: Arc::new(Mutex::new(SceneGraph::new(800.0, 600.0))),
+        sessions: crate::session::SessionRegistry::new("test-key"),
+        resource_store: ResourceStore::new(ResourceStoreConfig::default()),
+        widget_asset_store: crate::session::WidgetAssetStore::default(),
+        runtime_widget_store: None,
+        element_store: tze_hud_scene::element_store::ElementStore::default(),
+        element_store_path: None,
+        safe_mode_active: false,
+        safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        token_store: crate::token::TokenStore::new(),
+        freeze_active: true, // <-- scene is frozen
+        degradation_level: crate::session::RuntimeDegradationLevel::Normal,
+        media_ingress_active: None,
+        input_capture_tx: None,
+    }));
+
+    let mut session = StreamSession {
+        session_id: "dedup-freeze-test".to_string(),
+        namespace: "test-ns".to_string(),
+        agent_name: "test-agent".to_string(),
+        capabilities: Vec::new(),
+        policy_capabilities: Vec::new(),
+        lease_ids: Vec::new(),
+        subscriptions: Vec::new(),
+        subscription_filters: std::collections::HashMap::new(),
+        server_sequence: 0,
+        resume_token: Vec::new(),
+        last_heartbeat_ms: 0,
+        state: SessionState::Active,
+        last_client_sequence: 1,
+        safe_mode_active: false,
+        expect_resume: false,
+        agent_event_rate_limiter: AgentEventRateLimiter::new(),
+        freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
+        session_open_at_wall_us: 0,
+        dedup_window: DedupWindow::new(1000, 60),
+        lease_correlation_cache: LeaseCorrelationCache::new(
+            DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+        ),
+        resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
+            tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+        ),
+        media_ingress: None,
+        next_media_stream_epoch: 1,
+    };
+
+    // Use a valid 16-byte batch_id so the dedup window key is populated.
+    let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+
+    // ── First send: batch enqueued while frozen ───────────────────────────────
+    let original_batch = MutationBatch {
+        batch_id: batch_id.clone(),
+        lease_id: vec![0u8; 16],
+        mutations: Vec::new(),
+        ..Default::default()
+    };
+    handle_mutation_batch(&state, &mut session, &outbound_tx, original_batch).await;
+
+    // Queue must hold exactly one entry.
+    assert_eq!(
+        session.freeze_queue.is_empty(),
+        false,
+        "Precondition: first batch must have been enqueued"
+    );
+
+    // Consume the enqueue ack (accepted=true).
+    let first_ack = outbound_rx
+        .recv()
+        .await
+        .expect("expected MutationResult for first send")
+        .expect("expected Ok result");
+    match &first_ack.payload {
+        Some(ServerPayload::MutationResult(r)) => {
+            assert_eq!(r.batch_id, batch_id, "batch_id must match");
+            assert!(r.accepted, "first enqueue must be accepted");
+        }
+        other => panic!("Expected MutationResult for first send, got: {other:?}"),
+    }
+
+    // ── Retransmit: same batch_id, still frozen ───────────────────────────────
+    let retransmit_batch = MutationBatch {
+        batch_id: batch_id.clone(),
+        lease_id: vec![0u8; 16],
+        mutations: Vec::new(),
+        ..Default::default()
+    };
+    handle_mutation_batch(&state, &mut session, &outbound_tx, retransmit_batch).await;
+
+    // Consume the dedup response — must be accepted=true (cached from first send).
+    let dedup_ack = outbound_rx
+        .recv()
+        .await
+        .expect("expected MutationResult for retransmit")
+        .expect("expected Ok result");
+    match &dedup_ack.payload {
+        Some(ServerPayload::MutationResult(r)) => {
+            assert_eq!(r.batch_id, batch_id, "batch_id must match on retransmit");
+            assert!(r.accepted, "dedup hit must return cached accepted=true");
+        }
+        other => {
+            panic!("Expected cached MutationResult on retransmit while frozen, got: {other:?}")
+        }
+    }
+
+    // ── Key assertion: queue has exactly ONE entry ────────────────────────────
+    // If the retransmit was deduped (the fix works), the queue depth is 1.
+    // Without the fix the retransmit was pushed as a second entry (depth 2)
+    // and would have been applied twice on drain.
+    let drained = session.freeze_queue.drain();
+    assert_eq!(
+        drained.len(),
+        1,
+        "Retransmit while frozen must be deduped: freeze queue must contain \
+         exactly one entry, not two. If this is 2, the retransmit was enqueued \
+         again and would have been applied twice after drain."
+    );
+    assert_eq!(
+        drained[0].batch_id, batch_id,
+        "The single queued entry must be the original batch"
+    );
+
+    // No further messages should be pending.
+    assert!(
+        outbound_rx.try_recv().is_err(),
+        "No additional messages should be in the outbound channel after dedup"
+    );
+}
+
 /// Scenario: Freeze ignored during safe mode (spec line 137)
 /// WHEN safe mode is active AND freeze is set
 /// THEN mutations are rejected with SAFE_MODE_ACTIVE (not queued)
