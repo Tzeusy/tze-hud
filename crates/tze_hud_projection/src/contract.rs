@@ -1077,7 +1077,11 @@ impl AdapterDraftBatch {
         }
     }
 
-    /// True if the batch contains anything to deliver.
+    /// True if the batch holds nothing to deliver (no latest snapshot, no
+    /// submission, no cancel).
+    ///
+    /// Twin: `tze_hud_input::composer_draft::DraftNotificationBatch::is_empty`
+    /// is the cross-crate source type this is a clone of. Keep the two in sync.
     pub fn is_empty(&self) -> bool {
         self.latest.is_none() && self.submission.is_none() && self.cancel.is_none()
     }

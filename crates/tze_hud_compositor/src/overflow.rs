@@ -158,130 +158,46 @@ pub fn truncate_for_ellipsis<'a>(
     line_height: f32,
     font_system: &mut FontSystem,
 ) -> TruncationResult {
-    // Guard: degenerate or non-finite geometry produces an empty result.
-    // NaN comparisons always return false, so we must check is_finite() before
-    // arithmetic that feeds into floor() / usize casts.
-    if !bounds_width.is_finite()
-        || !bounds_height.is_finite()
-        || !font_size_px.is_finite()
-        || !line_height.is_finite()
-        || bounds_width <= 0.0
-        || bounds_height <= 0.0
-        || font_size_px <= 0.0
-    {
-        return TruncationResult {
-            text: String::new(),
-            was_truncated: !text.is_empty(),
-        };
-    }
-
-    // ── Step 1: determine how many whole lines fit vertically ────────────────
-    let max_lines = max_whole_lines(bounds_height, line_height);
-    if max_lines == 0 {
-        return TruncationResult {
-            text: String::new(),
-            was_truncated: !text.is_empty(),
-        };
-    }
-
-    // ── Step 2: measure the ellipsis glyph width ────────────────────────────
-    let ellipsis_w = measure_single_line(
-        ELLIPSIS,
+    // ── Shared setup: guard geometry, compute max_lines/ellipsis_w, shape ────
+    let shaped = match shape_runs(
+        text,
         base_attrs,
-        bounds_width * 2.0,
+        bounds_width,
+        bounds_height,
         font_size_px,
         line_height,
         font_system,
-    );
-
-    // ── Step 3: shape the full text with word-wrap enabled ───────────────────
-    // We shape with Wrap::Word and bounds_width so that layout_runs() reflects
-    // the actual word-wrapped line structure.  Multiple LayoutRuns can share the
-    // same line_i when a paragraph soft-wraps.
-    let mut full_buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
-    full_buf.set_size(font_system, Some(bounds_width), None);
-    full_buf.set_wrap(font_system, Wrap::Word);
-    full_buf.set_text(font_system, text, base_attrs, Shaping::Advanced);
-    full_buf.shape_until_scroll(font_system, false);
-
-    // ── Step 4: collect rendered lines and their widths ───────────────────────
-    // LayoutRun gives us (line_i, line_w, glyphs, text).
-    // line_i is the index into buffer.lines[] (which is a paragraph/hard-wrap unit).
-    // Multiple LayoutRuns can share the same line_i when word-wrap splits a paragraph.
-    let runs: Vec<LayoutRunEntry> = full_buf
-        .layout_runs()
-        .map(|run| {
-            // Collect (start_byte_in_line, end_byte_in_line, glyph_x_right) per glyph.
-            let glyph_info: Vec<GlyphInfo> = run
-                .glyphs
-                .iter()
-                .map(|g| (g.start, g.end, g.x + g.w))
-                .collect();
-            (run.line_i, run.line_w, glyph_info)
-        })
-        .collect();
-
-    // If the text produces no runs at all (empty text), return as-is.
-    if runs.is_empty() {
-        return TruncationResult {
-            text: text.to_owned(),
-            was_truncated: false,
-        };
-    }
+    ) {
+        ShapeOutcome::EarlyReturn(result) => return result,
+        ShapeOutcome::Proceed(shaped) => shaped,
+    };
+    let ShapedRuns {
+        full_buf,
+        runs,
+        max_lines,
+        ellipsis_w,
+    } = &*shaped;
+    // `full_buf` and `runs` stay borrowed from `shaped`; copy the scalars out.
+    let (max_lines, ellipsis_w) = (*max_lines, *ellipsis_w);
 
     // ── Step 5: whole-line vertical visibility ────────────────────────────────
     // If the text produces more runs than max_lines, we must truncate.
     let total_runs = runs.len();
     if total_runs <= max_lines {
-        // All lines fit vertically; no vertical truncation needed.
-        // Check ALL runs for horizontal overflow, not just the last one.
-        // A long unbreakable token on any non-final line overflows horizontally
-        // and would be clipped by TextBounds without truncation (hud-so7zu).
-        let first_overflow_idx = runs.iter().position(|run| run.1 > bounds_width);
-        if first_overflow_idx.is_none() {
-            // The entire text fits — no truncation.
-            return TruncationResult {
-                text: text.to_owned(),
-                was_truncated: false,
-            };
-        }
-        // At least one run overflows horizontally: truncate at the first
-        // overflowing run so the result fits within bounds_width.
-        let overflow_idx = first_overflow_idx.unwrap();
-        let overflow_run = &runs[overflow_idx];
-        let overflow_line_i = overflow_run.0;
-        let overflow_line_text = if let Some(line) = full_buf.lines.get(overflow_line_i) {
-            line.text().to_owned()
-        } else {
-            return TruncationResult {
-                text: text.to_owned(),
-                was_truncated: false,
-            };
-        };
-
-        // Reconstruct the prefix of `text` that corresponds to all runs before
-        // the overflowing run, then truncate only the slice of the paragraph
-        // that belongs to the overflowing run (avoiding duplication for
-        // word-wrapped paragraphs).
-        let prefix = text_prefix_up_to_run(&runs, overflow_idx, text, &full_buf);
-        // Use min(g.start) so RTL runs resolve to the logical start, not the
-        // visual-first (logical-last) glyph that glyphs[0] gives for RTL text.
-        let run_start = run_logical_start(&overflow_run.2);
-        let run_slice = run_start_slice(&overflow_line_text, run_start);
-        let truncated_overflow = truncate_line_to_ellipsis(
-            run_slice,
+        // All lines fit vertically; only horizontal overflow can force a cut.
+        return try_horizontal_truncate(
+            &shaped,
+            text,
             base_attrs,
             bounds_width,
             font_size_px,
             line_height,
-            ellipsis_w,
             font_system,
-        );
-        let result = format!("{prefix}{truncated_overflow}");
-        return TruncationResult {
-            text: result,
-            was_truncated: true,
-        };
+        )
+        .unwrap_or(TruncationResult {
+            text: text.to_owned(),
+            was_truncated: false,
+        });
     }
 
     // More runs than fit: take only the first `max_lines` runs.
@@ -323,7 +239,7 @@ pub fn truncate_for_ellipsis<'a>(
             (max_lines - 1, line_i, line_text)
         };
 
-    let prefix = text_prefix_up_to_run(&runs, truncation_run_idx, text, &full_buf);
+    let prefix = text_prefix_up_to_run(runs, truncation_run_idx, text, full_buf);
     // Use min(g.start) so RTL runs resolve to the logical start, not the
     // visual-first (logical-last) glyph that glyphs[0] gives for RTL text.
     let truncation_run = &runs[truncation_run_idx];
@@ -390,114 +306,46 @@ pub fn truncate_tail_anchored<'a>(
     line_height: f32,
     font_system: &mut FontSystem,
 ) -> TruncationResult {
-    // Guard: degenerate or non-finite geometry produces an empty result.
-    // NaN comparisons always return false, so we must check is_finite() before
-    // arithmetic that feeds into floor() / usize casts.
-    if !bounds_width.is_finite()
-        || !bounds_height.is_finite()
-        || !font_size_px.is_finite()
-        || !line_height.is_finite()
-        || bounds_width <= 0.0
-        || bounds_height <= 0.0
-        || font_size_px <= 0.0
-    {
-        return TruncationResult {
-            text: String::new(),
-            was_truncated: !text.is_empty(),
-        };
-    }
-
-    // ── Step 1: determine how many whole lines fit vertically ────────────────
-    let max_lines = max_whole_lines(bounds_height, line_height);
-    if max_lines == 0 {
-        return TruncationResult {
-            text: String::new(),
-            was_truncated: !text.is_empty(),
-        };
-    }
-
-    // ── Step 2: measure the ellipsis glyph width ────────────────────────────
-    let ellipsis_w = measure_single_line(
-        ELLIPSIS,
+    // ── Shared setup: guard geometry, compute max_lines/ellipsis_w, shape ────
+    let shaped = match shape_runs(
+        text,
         base_attrs,
-        bounds_width * 2.0,
+        bounds_width,
+        bounds_height,
         font_size_px,
         line_height,
         font_system,
-    );
-
-    // ── Step 3: shape the full text with word-wrap enabled ───────────────────
-    let mut full_buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
-    full_buf.set_size(font_system, Some(bounds_width), None);
-    full_buf.set_wrap(font_system, Wrap::Word);
-    full_buf.set_text(font_system, text, base_attrs, Shaping::Advanced);
-    full_buf.shape_until_scroll(font_system, false);
-
-    // ── Step 4: collect rendered lines and their widths ───────────────────────
-    let runs: Vec<LayoutRunEntry> = full_buf
-        .layout_runs()
-        .map(|run| {
-            let glyph_info: Vec<GlyphInfo> = run
-                .glyphs
-                .iter()
-                .map(|g| (g.start, g.end, g.x + g.w))
-                .collect();
-            (run.line_i, run.line_w, glyph_info)
-        })
-        .collect();
-
-    // If the text produces no runs at all (empty text), return as-is.
-    if runs.is_empty() {
-        return TruncationResult {
-            text: text.to_owned(),
-            was_truncated: false,
-        };
-    }
-
+    ) {
+        ShapeOutcome::EarlyReturn(result) => return result,
+        ShapeOutcome::Proceed(shaped) => shaped,
+    };
+    let ShapedRuns {
+        full_buf,
+        runs,
+        max_lines,
+        ellipsis_w,
+    } = &*shaped;
+    // `full_buf` and `runs` stay borrowed from `shaped`; copy the scalars out.
+    let (max_lines, ellipsis_w) = (*max_lines, *ellipsis_w);
     let total_runs = runs.len();
 
-    // ── Step 5: if all lines fit, delegate to head-anchored path ─────────────
-    // When content fits entirely, both anchoring modes produce the same result.
+    // ── Step 5: if all lines fit, both anchor modes produce the same result ──
+    // When content fits entirely, only horizontal overflow can force a cut, and
+    // tail-anchored behaves identically to head-anchored in that case.
     if total_runs <= max_lines {
-        // All lines fit vertically; no vertical truncation needed.
-        // Check ALL runs for horizontal overflow (hud-so7zu).
-        let first_overflow_idx = runs.iter().position(|run| run.1 > bounds_width);
-        if first_overflow_idx.is_none() {
-            return TruncationResult {
-                text: text.to_owned(),
-                was_truncated: false,
-            };
-        }
-        // At least one run overflows horizontally: truncate at the first
-        // overflowing run so the result fits within bounds_width.
-        let overflow_idx = first_overflow_idx.unwrap();
-        let overflow_run = &runs[overflow_idx];
-        let overflow_line_i = overflow_run.0;
-        let overflow_line_text = if let Some(line) = full_buf.lines.get(overflow_line_i) {
-            line.text().to_owned()
-        } else {
-            return TruncationResult {
-                text: text.to_owned(),
-                was_truncated: false,
-            };
-        };
-        let prefix = text_prefix_up_to_run(&runs, overflow_idx, text, &full_buf);
-        let run_start = run_logical_start(&overflow_run.2);
-        let run_slice = run_start_slice(&overflow_line_text, run_start);
-        let truncated_overflow = truncate_line_to_ellipsis(
-            run_slice,
+        return try_horizontal_truncate(
+            &shaped,
+            text,
             base_attrs,
             bounds_width,
             font_size_px,
             line_height,
-            ellipsis_w,
             font_system,
-        );
-        let result = format!("{prefix}{truncated_overflow}");
-        return TruncationResult {
-            text: result,
-            was_truncated: true,
-        };
+        )
+        .unwrap_or(TruncationResult {
+            text: text.to_owned(),
+            was_truncated: false,
+        });
     }
 
     // ── Step 6: more runs than fit — show LAST (max_lines - 1) content runs ──
@@ -614,6 +462,201 @@ pub fn truncate_tail_anchored<'a>(
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
+
+/// The shared setup state produced by [`shape_runs`] once geometry has been
+/// validated and the text shaped.
+///
+/// Both [`truncate_for_ellipsis`] and [`truncate_tail_anchored`] need exactly
+/// this state before they diverge into head- vs tail-anchored selection.
+struct ShapedRuns {
+    /// The shaped buffer (owns the `lines` referenced by run reconstruction).
+    full_buf: Buffer,
+    /// Collected layout runs: `(line_i, line_w, glyph_infos)`.
+    runs: Vec<LayoutRunEntry>,
+    /// Number of whole lines that fit vertically.
+    max_lines: usize,
+    /// Shaped width of the ellipsis glyph in the base style run.
+    ellipsis_w: f32,
+}
+
+/// Outcome of the shared truncation setup.
+///
+/// Either the caller should return `result` immediately (degenerate geometry,
+/// zero visible lines, or empty text), or it receives the populated
+/// [`ShapedRuns`] and proceeds with anchor-specific selection.
+enum ShapeOutcome {
+    /// Short-circuit: return this result without further work.
+    EarlyReturn(TruncationResult),
+    /// Proceed with the shaped state.
+    ///
+    /// Boxed because `ShapedRuns` owns a glyphon `Buffer` (~360 bytes), which
+    /// would otherwise bloat every `ShapeOutcome` value. Truncation runs only
+    /// on content/geometry change (not per frame), so the one-time allocation
+    /// is off the hot path.
+    Proceed(Box<ShapedRuns>),
+}
+
+/// Validate geometry, compute `max_lines` and the ellipsis width, shape `text`
+/// with word-wrap, and collect its layout runs.
+///
+/// This is the verbatim-shared prologue of both truncation entry points
+/// (guard → `max_lines` → ellipsis measure → shape → collect runs → empty
+/// check). It returns [`ShapeOutcome::EarlyReturn`] for the degenerate /
+/// zero-line / empty-text cases that previously appeared identically in both
+/// functions, preserving their exact `was_truncated` semantics.
+fn shape_runs<'a>(
+    text: &str,
+    base_attrs: Attrs<'a>,
+    bounds_width: f32,
+    bounds_height: f32,
+    font_size_px: f32,
+    line_height: f32,
+    font_system: &mut FontSystem,
+) -> ShapeOutcome {
+    // Guard: degenerate or non-finite geometry produces an empty result.
+    // NaN comparisons always return false, so we must check is_finite() before
+    // arithmetic that feeds into floor() / usize casts.
+    if !bounds_width.is_finite()
+        || !bounds_height.is_finite()
+        || !font_size_px.is_finite()
+        || !line_height.is_finite()
+        || bounds_width <= 0.0
+        || bounds_height <= 0.0
+        || font_size_px <= 0.0
+    {
+        return ShapeOutcome::EarlyReturn(TruncationResult {
+            text: String::new(),
+            was_truncated: !text.is_empty(),
+        });
+    }
+
+    // ── Step 1: determine how many whole lines fit vertically ────────────────
+    let max_lines = max_whole_lines(bounds_height, line_height);
+    if max_lines == 0 {
+        return ShapeOutcome::EarlyReturn(TruncationResult {
+            text: String::new(),
+            was_truncated: !text.is_empty(),
+        });
+    }
+
+    // ── Step 2: measure the ellipsis glyph width ────────────────────────────
+    let ellipsis_w = measure_single_line(
+        ELLIPSIS,
+        base_attrs,
+        bounds_width * 2.0,
+        font_size_px,
+        line_height,
+        font_system,
+    );
+
+    // ── Step 3: shape the full text with word-wrap enabled ───────────────────
+    // We shape with Wrap::Word and bounds_width so that layout_runs() reflects
+    // the actual word-wrapped line structure.  Multiple LayoutRuns can share the
+    // same line_i when a paragraph soft-wraps.
+    let mut full_buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
+    full_buf.set_size(font_system, Some(bounds_width), None);
+    full_buf.set_wrap(font_system, Wrap::Word);
+    full_buf.set_text(font_system, text, base_attrs, Shaping::Advanced);
+    full_buf.shape_until_scroll(font_system, false);
+
+    // ── Step 4: collect rendered lines and their widths ───────────────────────
+    // LayoutRun gives us (line_i, line_w, glyphs, text).
+    // line_i is the index into buffer.lines[] (which is a paragraph/hard-wrap unit).
+    // Multiple LayoutRuns can share the same line_i when word-wrap splits a paragraph.
+    let runs: Vec<LayoutRunEntry> = full_buf
+        .layout_runs()
+        .map(|run| {
+            // Collect (start_byte_in_line, end_byte_in_line, glyph_x_right) per glyph.
+            let glyph_info: Vec<GlyphInfo> = run
+                .glyphs
+                .iter()
+                .map(|g| (g.start, g.end, g.x + g.w))
+                .collect();
+            (run.line_i, run.line_w, glyph_info)
+        })
+        .collect();
+
+    // If the text produces no runs at all (empty text), return as-is.
+    if runs.is_empty() {
+        return ShapeOutcome::EarlyReturn(TruncationResult {
+            text: text.to_owned(),
+            was_truncated: false,
+        });
+    }
+
+    ShapeOutcome::Proceed(Box::new(ShapedRuns {
+        full_buf,
+        runs,
+        max_lines,
+        ellipsis_w,
+    }))
+}
+
+/// Handle the "all lines fit vertically" case: check every run for horizontal
+/// overflow and, if any overflows, truncate at the first overflowing run.
+///
+/// Returns `None` when no truncation is applied — the caller returns the
+/// original text unchanged (`was_truncated: false`). This covers both the
+/// "entire text fits" case and the (defensive) "overflow run's source line is
+/// missing" case; the original code returned the same unchanged result for
+/// both. Returns `Some(result)` when at least one run overflows horizontally
+/// and was truncated with an ellipsis.
+///
+/// This is the shared body of Step 5 (head-anchored) / Step 5 (tail-anchored),
+/// which were previously byte-for-byte identical. The horizontal-overflow scan
+/// over **all** runs (not just the last) is the hud-so7zu fix; centralizing it
+/// here means that fix lives once.
+fn try_horizontal_truncate<'a>(
+    shaped: &ShapedRuns,
+    text: &str,
+    base_attrs: Attrs<'a>,
+    bounds_width: f32,
+    font_size_px: f32,
+    line_height: f32,
+    font_system: &mut FontSystem,
+) -> Option<TruncationResult> {
+    let runs = &shaped.runs;
+    let full_buf = &shaped.full_buf;
+    let ellipsis_w = shaped.ellipsis_w;
+
+    // Check ALL runs for horizontal overflow, not just the last one.
+    // A long unbreakable token on any non-final line overflows horizontally
+    // and would be clipped by TextBounds without truncation (hud-so7zu).
+    // `None` (no overflow) → caller returns the original text unchanged.
+    let overflow_idx = runs.iter().position(|run| run.1 > bounds_width)?;
+
+    // At least one run overflows horizontally: truncate at the first
+    // overflowing run so the result fits within bounds_width.
+    let overflow_run = &runs[overflow_idx];
+    let overflow_line_i = overflow_run.0;
+    // Defensive: if the source line is missing, fall back to the unchanged
+    // result (matches the original `was_truncated: false` fallback).
+    let overflow_line_text = full_buf.lines.get(overflow_line_i)?.text().to_owned();
+
+    // Reconstruct the prefix of `text` that corresponds to all runs before
+    // the overflowing run, then truncate only the slice of the paragraph
+    // that belongs to the overflowing run (avoiding duplication for
+    // word-wrapped paragraphs).
+    let prefix = text_prefix_up_to_run(runs, overflow_idx, text, full_buf);
+    // Use min(g.start) so RTL runs resolve to the logical start, not the
+    // visual-first (logical-last) glyph that glyphs[0] gives for RTL text.
+    let run_start = run_logical_start(&overflow_run.2);
+    let run_slice = run_start_slice(&overflow_line_text, run_start);
+    let truncated_overflow = truncate_line_to_ellipsis(
+        run_slice,
+        base_attrs,
+        bounds_width,
+        font_size_px,
+        line_height,
+        ellipsis_w,
+        font_system,
+    );
+    let result = format!("{prefix}{truncated_overflow}");
+    Some(TruncationResult {
+        text: result,
+        was_truncated: true,
+    })
+}
 
 /// Compute the maximum number of whole lines that fit in `bounds_height`
 /// given `line_height`.

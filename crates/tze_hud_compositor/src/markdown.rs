@@ -139,10 +139,7 @@ impl Default for MarkdownTokens {
             code_monospace: true,
             code_color: None,
             code_background: None,
-            // Cross-ref: PORTAL_LINE_HEIGHT_MULTIPLIER in
-            // crates/tze_hud_projection/src/bin/projection_authority.rs mirrors this
-            // value. If you change 1.4 here, update that constant in the same PR.
-            line_height_multiplier: 1.4,
+            line_height_multiplier: crate::text::LINE_HEIGHT_MULTIPLIER,
             heading_margin_top: 1.0,
             heading_margin_bottom: 0.5,
             list_item_spacing: 0.0,

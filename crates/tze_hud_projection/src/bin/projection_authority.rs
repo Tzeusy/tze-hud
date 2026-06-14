@@ -209,8 +209,9 @@ impl PortalDriveState {
 ///
 /// `line_height_px = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER`
 ///
-/// Must stay in sync with `tze_hud_compositor::text` — search for `1.4` there.
-/// When the compositor's multiplier changes, update this constant in the same PR.
+/// Must stay in sync with `tze_hud_compositor::LINE_HEIGHT_MULTIPLIER`. This
+/// binary does not depend on `tze_hud_compositor`, so the value is duplicated
+/// here; when that constant changes, update this one in the same PR.
 const PORTAL_LINE_HEIGHT_MULTIPLIER: f32 = 1.4;
 
 /// Geometry data required by the runtime to call

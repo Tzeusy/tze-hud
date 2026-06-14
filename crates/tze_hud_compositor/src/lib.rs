@@ -42,7 +42,7 @@ pub use renderer::{
     Compositor, CompositorError, ImageTextureEntry, LocalComposerState, LocalComposerStateHandle,
 };
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
-pub use text::{StyledRunItem, TextItem, TextRasterizer};
+pub use text::{LINE_HEIGHT_MULTIPLIER, StyledRunItem, TextItem, TextRasterizer};
 #[cfg(feature = "v2_preview")]
 pub use video_surface::{MediaDecodePipeline, SyntheticTestPipeline, VideoFrame};
 pub use video_surface::{VideoRenderState, VideoSurfaceMap};
