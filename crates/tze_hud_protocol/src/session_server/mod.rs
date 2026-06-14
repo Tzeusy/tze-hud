@@ -1185,6 +1185,13 @@ async fn handle_client_message(
     }
 }
 
+/// Send a `RuntimeError` server message.
+///
+/// Canonical definition shared by this module and all handler submodules.
+/// Submodules call this as `super::send_runtime_error(...)`. No visibility
+/// modifier is needed: Rust child modules can always reach a parent module's
+/// private items, and keeping this private avoids leaking it beyond the
+/// `session_server` boundary.
 async fn send_runtime_error(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
