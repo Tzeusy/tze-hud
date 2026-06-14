@@ -630,6 +630,39 @@ mod headless_impl {
         }
     }
 
+    // ── high_mutation layout ──────────────────────────────────────────────────
+    //
+    // A 5×2 grid of tiles on the benchmark's 1920×1080 display. Tile size and
+    // pitch are chosen so that, even at the maximum per-frame jitter offset, the
+    // rightmost/bottom tiles stay fully inside the display area — keeping every
+    // UpdateTileBounds batch valid (no spurious `invariant_violations`, hud-f6kjp)
+    // while still moving tiles every frame. Worst-case check:
+    //   col 4: x_max = 4*384 + 16 = 1552; 1552 + 360 = 1912 ≤ 1920 ✓
+    //   row 1: y_max = 1*540 + 16 = 556;  556 + 520 = 1076 ≤ 1080 ✓
+    const MUTATION_TILE_COUNT: usize = 10;
+    const MUTATION_COLS: usize = 5;
+    const MUTATION_COL_PITCH: f32 = 384.0;
+    const MUTATION_ROW_PITCH: f32 = 540.0;
+    const MUTATION_TILE_W: f32 = 360.0;
+    const MUTATION_TILE_H: f32 = 520.0;
+    /// Max jitter offset (px) added to a tile origin; kept small enough that the
+    /// grid above never leaves the display area.
+    const MUTATION_JITTER_PX: f32 = 16.0;
+
+    /// Compute the (x, y) origin for grid tile `idx` given a normalized jitter
+    /// value in `[0.0, 1.0]`. The jitter is added (never subtracted) so the
+    /// origin only ever moves toward the interior headroom we reserved above —
+    /// the resulting bounds are always within the 1920×1080 display area.
+    fn mutation_tile_origin(idx: usize, jitter01: f32) -> (f32, f32) {
+        let col = idx % MUTATION_COLS;
+        let row = idx / MUTATION_COLS;
+        let j = jitter01.clamp(0.0, 1.0) * MUTATION_JITTER_PX;
+        (
+            col as f32 * MUTATION_COL_PITCH + j,
+            row as f32 * MUTATION_ROW_PITCH + j,
+        )
+    }
+
     /// Run the "high-mutation" scenario: apply bounds mutations every frame.
     pub async fn run_high_mutation(frame_count: u64) -> ScenarioResult {
         info!("Running high-mutation scenario ({} frames)", frame_count);
@@ -657,10 +690,9 @@ mod headless_impl {
                 lease.resource_budget.max_tiles = 15;
             }
 
-            for i in 0..10usize {
-                let col = i % 5;
-                let row = i / 5;
-                let bounds = Rect::new(col as f32 * 384.0, row as f32 * 540.0, 380.0, 536.0);
+            for i in 0..MUTATION_TILE_COUNT {
+                let (x, y) = mutation_tile_origin(i, 0.0);
+                let bounds = Rect::new(x, y, MUTATION_TILE_W, MUTATION_TILE_H);
                 if let Ok(tile_id) =
                     scene.create_tile(tab_id, "mutation_bench", lease_id, bounds, (i + 1) as u32)
                 {
@@ -672,7 +704,7 @@ mod headless_impl {
                             children: vec![],
                             data: NodeData::SolidColor(SolidColorNode {
                                 color: Rgba::new(0.25, 0.5, 0.75, 1.0),
-                                bounds: Rect::new(0.0, 0.0, 380.0, 536.0),
+                                bounds: Rect::new(0.0, 0.0, MUTATION_TILE_W, MUTATION_TILE_H),
                                 radius: None,
                             }),
                         };
@@ -707,10 +739,13 @@ mod headless_impl {
             // batch-rejection outcome so we can feed a *real* invariant-violation
             // signal into the gated correctness counter (hud-ukq66): a rejected
             // batch (applied == false) is exactly what the runtime pipeline
-            // counts as one invariant violation (see pipeline.rs Stage 4). In
-            // steady state every batch is valid, so this is normally 0 — but it
-            // is now genuinely computed from apply_batch's result rather than an
-            // implicit FrameTelemetry::new() default.
+            // counts as one invariant violation (see pipeline.rs Stage 4).
+            //
+            // The jittered bounds below are deliberately kept WITHIN the display
+            // area (see `mutation_tile_origin`), so every batch is valid and this
+            // counter is legitimately 0 across the run. The scenario still
+            // exercises real high-rate mutation (3 accepted UpdateTileBounds per
+            // frame); it just no longer models *invalid* load (hud-f6kjp).
             let mut invariant_violations_this_frame = 0u32;
             {
                 let scene_arc = scene_handle(&runtime).await;
@@ -718,17 +753,14 @@ mod headless_impl {
                 let mut mutations = Vec::new();
                 for offset in 0..3usize {
                     let idx = ((frame_idx as usize) + offset) % tile_ids.len();
-                    let jitter = (frame_idx as f32) * 0.1;
-                    let col = idx % 5;
-                    let row = idx / 5;
+                    // Continuous, bounded jitter in [0, 1] driven by the frame
+                    // index, so tiles visibly move every frame while their bounds
+                    // stay fully inside the display area.
+                    let jitter = ((frame_idx as f32) * 0.1).sin() * 0.5 + 0.5;
+                    let (x, y) = mutation_tile_origin(idx, jitter);
                     mutations.push(SceneMutation::UpdateTileBounds {
                         tile_id: tile_ids[idx],
-                        bounds: Rect::new(
-                            col as f32 * 384.0 + jitter.sin() * 5.0,
-                            row as f32 * 540.0,
-                            380.0,
-                            536.0,
-                        ),
+                        bounds: Rect::new(x, y, MUTATION_TILE_W, MUTATION_TILE_H),
                     });
                 }
                 let batch = MutationBatch {
