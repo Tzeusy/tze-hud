@@ -929,6 +929,17 @@ pub struct ProjectedPortalState {
     pub presentation: ProjectedPortalPresentation,
     pub preserve_geometry: bool,
     pub redacted: bool,
+    /// Content-free connection-degraded geometry signal (portal-disconnect-resume-ux
+    /// §2/§3). `true` when the driving stream/session is degraded or HUD-unavailable.
+    ///
+    /// This is computed from the session lifecycle **independently of viewer
+    /// redaction**, exactly like the scroll-position indicator: it conveys only
+    /// connection state, never identity or transcript content, so a restricted
+    /// viewer still sees that the portal is disconnected. The redaction-gated
+    /// `lifecycle_state` field still spells `Degraded` vs `HudUnavailable` only
+    /// to permitted viewers.
+    #[serde(default)]
+    pub connection_degraded: bool,
     pub interaction_enabled: bool,
     pub attention: ProjectedPortalAttention,
     #[serde(default, skip_serializing_if = "Option::is_none")]

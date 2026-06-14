@@ -18,6 +18,22 @@ use crate::{
     TranscriptUnit,
 };
 
+/// Content-free disconnect/stale marker line rendered when the portal's driving
+/// stream/session is degraded (portal-disconnect-resume-ux §2). Carries no
+/// identity or transcript content, so it remains present under redaction exactly
+/// like the scroll-position indicator.
+const PORTAL_DISCONNECT_MARKER_LINE: &str = "⊘ disconnected — stream stale";
+
+/// Whether the portal is in a connection-degraded presentation state.
+///
+/// Keyed off the redaction-independent `connection_degraded` flag (set by the
+/// authority from the session lifecycle), NOT the redaction-gated
+/// `lifecycle_state`, so the degraded treatment is applied even for a restricted
+/// viewer.
+fn is_connection_degraded(state: &ProjectedPortalState) -> bool {
+    state.connection_degraded
+}
+
 /// Client-side materialization budget for one resident portal update.
 ///
 /// The adapter must be comfortably below one 60 Hz frame budget while building
@@ -101,6 +117,14 @@ pub struct PortalVisualTokens {
     pub transcript_background: proto::Rgba,
     pub transcript_text_color: proto::Rgba,
     pub transcript_font_size_px: f32,
+
+    // Degraded / disconnect treatment (portal-disconnect-resume-ux §2/§3).
+    /// Dimmed transcript text shown while the portal is disconnected/stale.
+    pub transcript_dim_text_color: proto::Rgba,
+    /// Dimmed transcript background shown while the portal is disconnected/stale.
+    pub transcript_dim_background: proto::Rgba,
+    /// Color of the content-free stale/disconnect marker (ambient, not alarming).
+    pub stale_marker_color: proto::Rgba,
 
     // Collapsed card (collapsed presentation)
     pub collapsed_background: proto::Rgba,
@@ -745,7 +769,7 @@ impl ResidentGrpcPortalAdapter {
         // §6.1 enforcement: every visual value sourced from self.visual_tokens —
         // no literal colors, font sizes, or opacities permitted here.
         let bounds = self.local_bounds_for_state(state);
-        let (text_color, background_color, font_size_px) = match state.presentation {
+        let (mut text_color, mut background_color, font_size_px) = match state.presentation {
             ProjectedPortalPresentation::Expanded => (
                 self.visual_tokens.transcript_text_color,
                 self.visual_tokens.transcript_background,
@@ -757,6 +781,17 @@ impl ResidentGrpcPortalAdapter {
                 self.visual_tokens.collapsed_font_size_px,
             ),
         };
+        // §2: when the driving stream is disconnected/stale, dim the retained
+        // transcript window using token-resolved colors (never hardcoded) so the
+        // viewer reads it as inactive rather than blanked or faking liveness. The
+        // dim treatment applies to the expanded transcript surface; the collapsed
+        // card keeps its own palette.
+        if is_connection_degraded(state)
+            && state.presentation == ProjectedPortalPresentation::Expanded
+        {
+            text_color = self.visual_tokens.transcript_dim_text_color;
+            background_color = self.visual_tokens.transcript_dim_background;
+        }
         proto::NodeProto {
             // Explicit root ID (little-endian UUID bytes per RFC 0001 §4.1) so
             // render_batch can reference it as AddNodeMutation.parent_id in the
@@ -769,15 +804,21 @@ impl ResidentGrpcPortalAdapter {
                     font_size_px,
                     color: Some(text_color),
                     background: Some(background_color),
-                    // color_runs carry the composer at-capacity indicator when active.
-                    // The at-capacity run covers the composer line with
-                    // `composer_at_capacity_color` so the visual token drives the
-                    // display without any literal color in the render path.
-                    color_runs: composer_color_runs(
-                        state,
-                        self.composer_display.as_ref(),
-                        self.visual_tokens.composer_at_capacity_color,
-                    ),
+                    // color_runs carry the composer at-capacity indicator and the
+                    // disconnect/stale marker color when active. Each is a
+                    // zero-length sentinel run carrying the token color so the
+                    // visual token drives the display without any literal color in
+                    // the render path (§2: token-resolved, never hardcoded).
+                    color_runs: {
+                        let mut runs =
+                            stale_marker_color_runs(state, self.visual_tokens.stale_marker_color);
+                        runs.extend(composer_color_runs(
+                            state,
+                            self.composer_display.as_ref(),
+                            self.visual_tokens.composer_at_capacity_color,
+                        ));
+                        runs
+                    },
                     // Transcript panes use Ellipsis to engage the TruncationCache
                     // contract (word-boundary ellipsis, tail-anchored follow-tail).
                     // This prevents partially-clipped final glyphs under
@@ -839,6 +880,14 @@ fn portal_markdown(
             state.portal_id, state.presentation, state.attention
         ),
     );
+    // §2: content-free disconnect/stale marker. Emitted from the
+    // redaction-independent `connection_degraded` flag and BEFORE the
+    // redaction-gated lifecycle line, so it remains present (and reveals nothing)
+    // even for a restricted viewer — like the scroll-position indicator. It
+    // carries connection state only, never identity or transcript content.
+    if is_connection_degraded(state) {
+        push_line(&mut result, PORTAL_DISCONNECT_MARKER_LINE);
+    }
     if let Some(lifecycle) = state.lifecycle_state {
         push_line(&mut result, &format!("status: {lifecycle:?}"));
     }
@@ -854,7 +903,13 @@ fn portal_markdown(
                 &visible_transcript_markdown(&state.visible_transcript),
             );
             push_line(&mut result, "");
-            if state.interaction_enabled {
+            if is_connection_degraded(state) {
+                // §2: clear live activity/typing/composer-ready signals on
+                // disconnect — the surface must not imply an active stream. The
+                // authority also forces `interaction_enabled = false` when
+                // degraded; this is the redundant presentation-layer guard.
+                push_line(&mut result, "composer: unavailable");
+            } else if state.interaction_enabled {
                 // Render composer region with draft text + caret (§4.1).
                 // Local-first: no remote roundtrip — reads from adapter's cached
                 // ComposerDisplayState which is updated by consume_draft_batch /
@@ -989,6 +1044,30 @@ fn composer_color_runs(
     }]
 }
 
+/// Build a `TextColorRunProto` for the disconnect/stale marker.
+///
+/// When the portal is connection-degraded, emits a single zero-length sentinel
+/// run (`[0..0]`) carrying `stale_marker_color`. This mirrors the Phase-1
+/// at-capacity sentinel mechanism (`composer_color_runs`): the run has no pixel
+/// coverage; its presence + color is the machine-readable signal that the
+/// token-driven stale marker is active. Precise per-line coloring is deferred to
+/// the promotion-era structured layout. Returns an empty vec when not degraded.
+///
+/// §2: the marker color is token-driven — no literal color in the render path.
+fn stale_marker_color_runs(
+    state: &ProjectedPortalState,
+    stale_marker_color: proto::Rgba,
+) -> Vec<proto::TextColorRunProto> {
+    if !is_connection_degraded(state) {
+        return Vec::new();
+    }
+    vec![proto::TextColorRunProto {
+        start_byte: 0,
+        end_byte: 0,
+        color: Some(stale_marker_color),
+    }]
+}
+
 fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {
     if units.is_empty() {
         return "<empty projection stream>".to_string();
@@ -1093,6 +1172,24 @@ pub fn portal_visual_tokens_from_part_tokens(
             a: part.transcript_text_color.a,
         },
         transcript_font_size_px: part.transcript_font_size_px,
+        transcript_dim_text_color: proto::Rgba {
+            r: part.transcript_dim_text_color.r,
+            g: part.transcript_dim_text_color.g,
+            b: part.transcript_dim_text_color.b,
+            a: part.transcript_dim_text_color.a,
+        },
+        transcript_dim_background: proto::Rgba {
+            r: part.transcript_dim_background.r,
+            g: part.transcript_dim_background.g,
+            b: part.transcript_dim_background.b,
+            a: part.transcript_dim_background.a,
+        },
+        stale_marker_color: proto::Rgba {
+            r: part.stale_marker_color.r,
+            g: part.stale_marker_color.g,
+            b: part.stale_marker_color.b,
+            a: part.stale_marker_color.a,
+        },
         collapsed_background: proto::Rgba {
             r: part.collapsed_background.r,
             g: part.collapsed_background.g,
@@ -1148,6 +1245,7 @@ mod tests {
             presentation: ProjectedPortalPresentation::Expanded,
             preserve_geometry: false,
             redacted: false,
+            connection_degraded: false,
             interaction_enabled: true,
             attention: ProjectedPortalAttention::Ambient,
             provider_kind: None,
@@ -1335,5 +1433,160 @@ mod tests {
         assert!(markdown.starts_with("first\n"));
         assert!(markdown.is_char_boundary(markdown.len()));
         assert!(markdown.len() <= "first\n".len() + 4_096);
+    }
+
+    // ── §2/§3 disconnect + stale-content treatment ───────────────────────────
+
+    /// Extract the single `TextMarkdownNodeProto` produced by `portal_node`.
+    fn text_markdown_node(node: &proto::NodeProto) -> &proto::TextMarkdownNodeProto {
+        match node.data.as_ref().expect("node must carry data") {
+            proto::node_proto::Data::TextMarkdown(tm) => tm,
+            other => panic!("portal_node must produce TextMarkdown, got {other:?}"),
+        }
+    }
+
+    /// §2: when the portal is connection-degraded, the expanded transcript
+    /// surface uses the token-resolved DIM colors, not the live transcript
+    /// colors. A control case with `connection_degraded = false` proves the live
+    /// colors are used otherwise — so the difference is driven solely by the
+    /// degraded flag, not by a hardcoded constant.
+    #[test]
+    fn degraded_state_uses_dim_transcript_colors() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let tokens = adapter.visual_tokens().clone();
+
+        let mut live = make_expanded_interaction_state("portal-degraded-colors");
+        live.connection_degraded = false;
+        let live_node = adapter.portal_node(&live, vec![0u8; 16]);
+        let live_tm = text_markdown_node(&live_node);
+        assert_eq!(
+            live_tm.color.unwrap(),
+            tokens.transcript_text_color,
+            "live portal must use the live transcript text color"
+        );
+        assert_eq!(
+            live_tm.background.unwrap(),
+            tokens.transcript_background,
+            "live portal must use the live transcript background"
+        );
+
+        let mut degraded = make_expanded_interaction_state("portal-degraded-colors");
+        degraded.connection_degraded = true;
+        let degraded_node = adapter.portal_node(&degraded, vec![0u8; 16]);
+        let degraded_tm = text_markdown_node(&degraded_node);
+        assert_eq!(
+            degraded_tm.color.unwrap(),
+            tokens.transcript_dim_text_color,
+            "§2: degraded portal must use the DIM transcript text token"
+        );
+        assert_eq!(
+            degraded_tm.background.unwrap(),
+            tokens.transcript_dim_background,
+            "§2: degraded portal must use the DIM transcript background token"
+        );
+    }
+
+    /// §2: a degraded portal emits a content-free disconnect marker line. The
+    /// marker survives redaction (lifecycle_state = None, redacted = true) and
+    /// reveals neither transcript content nor a lifecycle spelling.
+    #[test]
+    fn degraded_state_emits_content_free_disconnect_marker_under_redaction() {
+        let mut state = make_expanded_interaction_state("portal-marker");
+        state.connection_degraded = true;
+        // Restricted viewer: identity/transcript/lifecycle all redacted.
+        state.redacted = true;
+        state.lifecycle_state = None;
+        state.display_name = None;
+        state.visible_transcript = vec![];
+
+        let markdown = portal_markdown(&state, None);
+
+        assert!(
+            markdown.contains(PORTAL_DISCONNECT_MARKER_LINE),
+            "§2: disconnect marker must remain present under redaction"
+        );
+        // No lifecycle spelling leaks (the `status:` line is redaction-gated).
+        assert!(
+            !markdown.contains("status:"),
+            "redaction-gated lifecycle spelling must NOT appear"
+        );
+
+        // A non-degraded state must NOT show the marker.
+        let mut live = make_expanded_interaction_state("portal-marker");
+        live.connection_degraded = false;
+        let live_md = portal_markdown(&live, None);
+        assert!(
+            !live_md.contains(PORTAL_DISCONNECT_MARKER_LINE),
+            "live portal must not show the disconnect marker"
+        );
+    }
+
+    /// §2: the stale marker color is carried as a token-driven sentinel color run
+    /// when degraded (no literal color in the render path), and absent otherwise.
+    #[test]
+    fn degraded_state_emits_stale_marker_color_run() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let stale = adapter.visual_tokens().stale_marker_color;
+
+        let mut degraded = make_expanded_interaction_state("portal-stale-run");
+        degraded.connection_degraded = true;
+        let runs = stale_marker_color_runs(&degraded, stale);
+        assert_eq!(
+            runs.len(),
+            1,
+            "degraded state must emit one stale color run"
+        );
+        assert_eq!(runs[0].color.unwrap(), stale, "run must carry stale token");
+        assert_eq!(runs[0].start_byte, 0);
+        assert_eq!(runs[0].end_byte, 0);
+
+        let mut live = make_expanded_interaction_state("portal-stale-run");
+        live.connection_degraded = false;
+        assert!(
+            stale_marker_color_runs(&live, stale).is_empty(),
+            "live state must emit no stale color run"
+        );
+    }
+
+    /// §2: live activity/composer signals clear on disconnect — a degraded
+    /// portal must not present `composer: ready` (which implies an active
+    /// interactive stream).
+    #[test]
+    fn degraded_state_clears_composer_ready_signal() {
+        let mut state = make_expanded_interaction_state("portal-composer-clear");
+        state.connection_degraded = true;
+        // interaction_enabled would normally render a composer line; the degraded
+        // guard must take precedence.
+        state.interaction_enabled = true;
+
+        let markdown = portal_markdown(&state, None);
+        assert!(
+            !markdown.contains("composer: ready"),
+            "§2: degraded portal must not imply an active composer stream"
+        );
+        assert!(
+            markdown.contains("composer: unavailable"),
+            "§2: degraded portal must show composer as unavailable"
+        );
+    }
+
+    /// The degraded `PortalVisualTokens` fields map 1:1 from the source
+    /// `PortalPartTokens` channels (single-source-of-truth invariant).
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_degraded_fields() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(
+            visual.transcript_dim_text_color.r,
+            part.transcript_dim_text_color.r
+        );
+        assert_eq!(
+            visual.transcript_dim_background.g,
+            part.transcript_dim_background.g
+        );
+        assert_eq!(visual.stale_marker_color.b, part.stale_marker_color.b);
+        assert_eq!(visual.stale_marker_color.a, part.stale_marker_color.a);
     }
 }

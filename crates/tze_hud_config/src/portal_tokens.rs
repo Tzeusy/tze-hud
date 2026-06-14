@@ -37,6 +37,9 @@
 //! | `portal.transcript.background` | transcript body | content backdrop color (RGBA hex) |
 //! | `portal.transcript.text_color` | transcript body | content text color (RGBA hex) |
 //! | `portal.transcript.font_size` | transcript body | content font size in px |
+//! | `portal.transcript.dim_text_color` | transcript body | dimmed text shown while disconnected/stale (RGBA hex) |
+//! | `portal.transcript.dim_background` | transcript body | dimmed backdrop shown while disconnected/stale (RGBA hex) |
+//! | `portal.stale_marker.color` | stale marker | content-free disconnect marker color (RGBA hex) |
 //! | `portal.divider.color` | divider | separator line color (RGBA hex) |
 //! | `portal.collapsed_card.background` | collapsed card | compact view backdrop (RGBA hex) |
 //! | `portal.collapsed_card.text_color` | collapsed card | compact text color (RGBA hex) |
@@ -85,6 +88,25 @@ pub const PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR: &str = "portal.composer.at_ca
 pub const PORTAL_TOKEN_TRANSCRIPT_BACKGROUND: &str = "portal.transcript.background";
 pub const PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR: &str = "portal.transcript.text_color";
 pub const PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE: &str = "portal.transcript.font_size";
+
+// ── Degraded / disconnect tokens (portal-disconnect-resume-ux §2/§3) ─────────
+//
+// Token-resolved degraded treatment for a portal whose driving stream/session
+// has dropped (lifecycle `Degraded`/`HudUnavailable`). The retained transcript
+// window is dimmed and a content-free stale marker is shown rather than blanking
+// or faking liveness. Every value here is token-driven — the adapter never
+// hardcodes a degraded color (CLAUDE.md "visual identity is modular").
+
+/// Dimmed transcript text color shown while the portal is disconnected/stale.
+/// Distinctly muted relative to the live `transcript.text_color` so a viewer
+/// reads the retained window as inactive without it vanishing.
+pub const PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR: &str = "portal.transcript.dim_text_color";
+/// Dimmed transcript background shown while the portal is disconnected/stale.
+pub const PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND: &str = "portal.transcript.dim_background";
+/// Color of the content-free stale/disconnect marker. Muted amber to convey
+/// "ambient stale state" without escalating attention (spec: going stale does
+/// not self-escalate attention).
+pub const PORTAL_TOKEN_STALE_MARKER_COLOR: &str = "portal.stale_marker.color";
 
 pub const PORTAL_TOKEN_DIVIDER_COLOR: &str = "portal.divider.color";
 
@@ -147,6 +169,14 @@ mod defaults {
     pub const TRANSCRIPT_BACKGROUND: &str = "#0A0D11";
     pub const TRANSCRIPT_TEXT_COLOR: &str = "#E6EFFA";
     pub const TRANSCRIPT_FONT_SIZE: &str = "13";
+
+    // Degraded / disconnect treatment (§2/§3). Dim text/background read as
+    // "inactive" relative to the live transcript palette above; the stale
+    // marker uses a muted amber (matching the at-capacity convention) so it is
+    // ambient, not alarming.
+    pub const TRANSCRIPT_DIM_TEXT_COLOR: &str = "#6B7689";
+    pub const TRANSCRIPT_DIM_BACKGROUND: &str = "#07090C";
+    pub const STALE_MARKER_COLOR: &str = "#B87333";
 
     pub const DIVIDER_COLOR: &str = "#2A3344";
 
@@ -213,6 +243,14 @@ pub struct PortalPartTokens {
     pub transcript_text_color: Rgba,
     pub transcript_font_size_px: f32,
 
+    // Degraded / disconnect treatment (portal-disconnect-resume-ux §2/§3).
+    /// Dimmed transcript text shown while the portal is disconnected/stale.
+    pub transcript_dim_text_color: Rgba,
+    /// Dimmed transcript background shown while the portal is disconnected/stale.
+    pub transcript_dim_background: Rgba,
+    /// Color of the content-free stale/disconnect marker (ambient, not alarming).
+    pub stale_marker_color: Rgba,
+
     // Divider
     pub divider_color: Rgba,
 
@@ -274,6 +312,13 @@ impl Default for PortalPartTokens {
                 .expect("transcript text default is valid hex"),
             transcript_font_size_px: parse_numeric(defaults::TRANSCRIPT_FONT_SIZE)
                 .expect("transcript font size default is valid numeric"),
+
+            transcript_dim_text_color: parse_color_hex(defaults::TRANSCRIPT_DIM_TEXT_COLOR)
+                .expect("transcript dim text default is valid hex"),
+            transcript_dim_background: parse_color_hex(defaults::TRANSCRIPT_DIM_BACKGROUND)
+                .expect("transcript dim background default is valid hex"),
+            stale_marker_color: parse_color_hex(defaults::STALE_MARKER_COLOR)
+                .expect("stale marker color default is valid hex"),
 
             divider_color: parse_color_hex(defaults::DIVIDER_COLOR)
                 .expect("divider color default is valid hex"),
@@ -443,6 +488,19 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
         transcript_font_size_px: resolve_f32!(
             PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE,
             defaults.transcript_font_size_px
+        ),
+
+        transcript_dim_text_color: resolve_color!(
+            PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR,
+            defaults.transcript_dim_text_color
+        ),
+        transcript_dim_background: resolve_color!(
+            PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND,
+            defaults.transcript_dim_background
+        ),
+        stale_marker_color: resolve_color!(
+            PORTAL_TOKEN_STALE_MARKER_COLOR,
+            defaults.stale_marker_color
         ),
 
         divider_color: resolve_color!(PORTAL_TOKEN_DIVIDER_COLOR, defaults.divider_color),
@@ -897,6 +955,63 @@ mod tests {
         );
     }
 
+    // ── §2/§3 degraded / disconnect token tests ─────────────────────────
+
+    /// Degraded-treatment tokens resolve to valid, visible colors and read as
+    /// distinctly dimmer than the live transcript palette (spec §2: the retained
+    /// window is dimmed rather than blanked).
+    #[test]
+    fn degraded_tokens_default_values_are_valid() {
+        let tokens = resolve_portal_tokens(&empty_map());
+        // Stale marker must be visible (non-zero alpha) so the disconnect
+        // affordance is actually shown.
+        assert!(
+            tokens.stale_marker_color.a > 0.0,
+            "stale marker color must have non-zero alpha so it is visible"
+        );
+        // Dim treatment must differ from the live transcript palette — otherwise
+        // a disconnected portal would be indistinguishable from a live one.
+        assert_ne!(
+            tokens.transcript_dim_text_color, tokens.transcript_text_color,
+            "dim text color must differ from live transcript text color"
+        );
+        assert_ne!(
+            tokens.transcript_dim_background, tokens.transcript_background,
+            "dim background must differ from live transcript background"
+        );
+    }
+
+    /// Profile-scoped overrides for the degraded tokens propagate through
+    /// `resolve_portal_tokens` (spec §2: degraded treatment is token-resolved,
+    /// not hardcoded — a profile change reskins it with no adapter change).
+    #[test]
+    fn degraded_token_overrides_propagate() {
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR.to_string(),
+            "#FF00FF".to_string(), // magenta sentinel
+        );
+        overrides.insert(
+            PORTAL_TOKEN_STALE_MARKER_COLOR.to_string(),
+            "#00FF00".to_string(), // green sentinel
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+
+        assert!(
+            (tokens.transcript_dim_text_color.r - 1.0).abs() < 1e-3
+                && tokens.transcript_dim_text_color.g.abs() < 1e-3
+                && (tokens.transcript_dim_text_color.b - 1.0).abs() < 1e-3,
+            "dim text color override must propagate (magenta)"
+        );
+        assert!(
+            tokens.stale_marker_color.r.abs() < 1e-3
+                && (tokens.stale_marker_color.g - 1.0).abs() < 1e-3
+                && tokens.stale_marker_color.b.abs() < 1e-3,
+            "stale marker color override must propagate (green)"
+        );
+    }
+
     // ── Diagnostic warn path (hud-dcynv) ─────────────────────────────────
 
     /// Verifies that a present-but-unparseable token (color) falls back to the
@@ -917,6 +1032,9 @@ mod tests {
             PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR,
             PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
             PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR,
+            PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR,
+            PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND,
+            PORTAL_TOKEN_STALE_MARKER_COLOR,
             PORTAL_TOKEN_DIVIDER_COLOR,
             PORTAL_TOKEN_COLLAPSED_BACKGROUND,
             PORTAL_TOKEN_COLLAPSED_TEXT_COLOR,

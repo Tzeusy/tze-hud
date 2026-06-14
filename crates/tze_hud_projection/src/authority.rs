@@ -1562,10 +1562,20 @@ fn projected_portal_state(
     let unread_visible = projection_visible && policy.reveal_unread;
     let pending_visible = projection_visible && policy.reveal_pending_input;
     let redacted = !identity_visible || !lifecycle_visible || (expanded && !transcript_visible);
+    // Content-free connection-degraded signal (portal-disconnect-resume-ux §2/§3).
+    // Derived ONLY from the session lifecycle, independent of viewer redaction, so
+    // it survives redaction exactly like the scroll-position indicator: a restricted
+    // viewer still learns the portal is disconnected without any transcript/identity
+    // leak. The richer `lifecycle_state` below stays redaction-gated.
+    let connection_degraded = matches!(
+        session.lifecycle_state,
+        ProjectionLifecycleState::Degraded | ProjectionLifecycleState::HudUnavailable
+    );
     let interaction_enabled = session.portal_presentation == ProjectedPortalPresentation::Expanded
         && projection_visible
         && policy.allow_input
         && !redacted
+        && !connection_degraded
         && !policy.safe_mode_active
         && !policy.frozen
         && !policy.dismissed;
@@ -1596,6 +1606,7 @@ fn projected_portal_state(
         presentation: session.portal_presentation,
         preserve_geometry: true,
         redacted,
+        connection_degraded,
         interaction_enabled,
         attention: ProjectedPortalAttention::Ambient,
         provider_kind: identity_visible.then(|| session.provider_kind.clone()),
