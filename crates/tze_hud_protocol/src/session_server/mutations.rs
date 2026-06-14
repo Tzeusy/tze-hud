@@ -458,6 +458,43 @@ pub(super) async fn handle_mutation_batch(
     {
         let st = state.lock().await;
         if st.freeze_active || !session.freeze_queue.is_empty() {
+            // ── Deduplication on the freeze path (RFC 0005 §5.2) ─────────────
+            //
+            // A Transactional batch retransmitted while the scene is frozen must
+            // be suppressed here, before it enters the freeze queue.  Without
+            // this check the retransmit is enqueued as a second entry and applied
+            // twice after drain — a duplicate-application bug that does not occur
+            // on the non-frozen path (where the dedup window is consulted before
+            // the batch reaches the scene).
+            //
+            // Symmetry with the non-frozen path:
+            //   non-frozen: check dedup_window → apply to scene → insert dedup_window
+            //   frozen:     check dedup_window → enqueue       → insert dedup_window
+            //
+            // We cache accepted=true (empty created_ids) here because that is the
+            // response the client receives for a queued batch; drain does not send
+            // a second MutationResult.
+            if !batch.batch_id.is_empty() {
+                if let Some(cached) = session.dedup_window.lookup(&batch.batch_id) {
+                    let seq = session.next_server_seq();
+                    drop(st);
+                    let _ = tx
+                        .send(Ok(ServerMessage {
+                            sequence: seq,
+                            timestamp_wall_us: now_wall_us(),
+                            payload: Some(ServerPayload::MutationResult(MutationResult {
+                                batch_id: batch.batch_id,
+                                accepted: cached.accepted,
+                                created_ids: cached.created_ids,
+                                error_code: cached.error_code,
+                                error_message: cached.error_message,
+                            })),
+                        }))
+                        .await;
+                    return;
+                }
+            }
+
             // Determine traffic class and enqueue.
             let namespace = session.namespace.clone();
             let result = session.freeze_queue.enqueue(batch.clone(), &namespace);
@@ -465,6 +502,21 @@ pub(super) async fn handle_mutation_batch(
 
             match result {
                 FreezeEnqueueResult::Queued { pressure_warning } => {
+                    // Cache accepted=true in the dedup window so a retransmit of
+                    // the same batch_id while still frozen is suppressed above.
+                    // created_ids is empty because the queued path sends no
+                    // created-element IDs at enqueue time (they are not known yet).
+                    if !batch.batch_id.is_empty() {
+                        session.dedup_window.insert(
+                            batch.batch_id.clone(),
+                            CachedResult {
+                                accepted: true,
+                                created_ids: Vec::new(),
+                                error_code: String::new(),
+                                error_message: String::new(),
+                            },
+                        );
+                    }
                     if pressure_warning {
                         // Send MUTATION_QUEUE_PRESSURE — generic, not freeze-specific.
                         let seq = session.next_server_seq();
@@ -502,7 +554,19 @@ pub(super) async fn handle_mutation_batch(
                     }
                 }
                 FreezeEnqueueResult::Coalesced => {
-                    // Coalesced with an existing entry — accepted.
+                    // Coalesced with an existing entry — accepted. Cache so retransmits
+                    // while frozen do not re-coalesce or create duplicate queue entries.
+                    if !batch.batch_id.is_empty() {
+                        session.dedup_window.insert(
+                            batch.batch_id.clone(),
+                            CachedResult {
+                                accepted: true,
+                                created_ids: Vec::new(),
+                                error_code: String::new(),
+                                error_message: String::new(),
+                            },
+                        );
+                    }
                     let seq = session.next_server_seq();
                     let _ = tx
                         .send(Ok(ServerMessage {
@@ -520,6 +584,37 @@ pub(super) async fn handle_mutation_batch(
                 }
                 FreezeEnqueueResult::Evicted { evicted_batch_id } => {
                     // An older non-transactional entry was evicted; new one queued.
+                    // Cache the new batch as accepted so retransmits while frozen
+                    // are suppressed.
+                    if !batch.batch_id.is_empty() {
+                        session.dedup_window.insert(
+                            batch.batch_id.clone(),
+                            CachedResult {
+                                accepted: true,
+                                created_ids: Vec::new(),
+                                error_code: String::new(),
+                                error_message: String::new(),
+                            },
+                        );
+                    }
+                    // Invalidate any stale accepted=true entry for the evicted batch.
+                    // Without this, a client that retransmits the evicted batch_id while
+                    // still frozen would hit the old cache entry and receive accepted=true
+                    // even though the mutation was dropped.  Overwrite with the actual
+                    // outcome so the dedup window reflects reality.
+                    if !evicted_batch_id.is_empty() {
+                        session.dedup_window.insert(
+                            evicted_batch_id.clone(),
+                            CachedResult {
+                                accepted: false,
+                                created_ids: Vec::new(),
+                                error_code: "MUTATION_DROPPED".to_string(),
+                                error_message:
+                                    "Mutation evicted from queue due to capacity pressure."
+                                        .to_string(),
+                            },
+                        );
+                    }
                     // Send MUTATION_DROPPED for the evicted batch (generic signal).
                     let seq_evicted = session.next_server_seq();
                     let _ = tx
@@ -555,6 +650,8 @@ pub(super) async fn handle_mutation_batch(
                 }
                 FreezeEnqueueResult::BackpressureRequired => {
                     // Transactional mutation: queue full — apply gRPC backpressure.
+                    // Do NOT cache in dedup_window: the client must retry and we want
+                    // that retry to enter the queue once capacity frees up.
                     // Send MUTATION_QUEUE_PRESSURE signal.
                     let seq = session.next_server_seq();
                     let _ = tx
@@ -573,7 +670,8 @@ pub(super) async fn handle_mutation_batch(
                         .await;
                 }
                 FreezeEnqueueResult::Dropped => {
-                    // Ephemeral mutation dropped.
+                    // Ephemeral mutation dropped. Do NOT cache: ephemeral retransmits
+                    // are not expected (ephemeral = drop-on-overflow is fine semantics).
                     let seq = session.next_server_seq();
                     let _ = tx
                         .send(Ok(ServerMessage {
