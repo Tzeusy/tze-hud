@@ -597,6 +597,22 @@ pub(super) async fn handle_mutation_batch(
                             },
                         );
                     }
+                    // Invalidate any stale accepted=true entry for the evicted batch.
+                    // Without this, a client that retransmits the evicted batch_id while
+                    // still frozen would hit the old cache entry and receive accepted=true
+                    // even though the mutation was dropped.  Overwrite with the actual
+                    // outcome so the dedup window reflects reality.
+                    if !evicted_batch_id.is_empty() {
+                        session.dedup_window.insert(
+                            evicted_batch_id.clone(),
+                            CachedResult {
+                                accepted: false,
+                                created_ids: Vec::new(),
+                                error_code: "MUTATION_DROPPED".to_string(),
+                                error_message: "Mutation evicted from queue due to capacity pressure.".to_string(),
+                            },
+                        );
+                    }
                     // Send MUTATION_DROPPED for the evicted batch (generic signal).
                     let seq_evicted = session.next_server_seq();
                     let _ = tx
