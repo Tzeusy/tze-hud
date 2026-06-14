@@ -585,6 +585,12 @@ pub(super) struct ComposerOverlayTokens {
     pub(super) at_capacity_g: f32,
     pub(super) at_capacity_b: f32,
     pub(super) at_capacity_a: f32,
+    /// Selection highlight background color (sRGB u8).
+    ///
+    /// Stored in sRGB u8 (not linear) because it is handed to
+    /// [`StyledRunItem::background_color`] which expects the same encoding as
+    /// the rest of the text pipeline's backdrop quads.
+    pub(super) selection_bg: [u8; 4],
     /// Font size in pixels.
     pub(super) font_size_px: f32,
 }
@@ -609,6 +615,21 @@ pub(super) fn resolve_composer_overlay_tokens(
             .map(|c| (c.r, c.g, c.b, c.a))
             .unwrap_or((0.722, 0.451, 0.200, 1.0));
 
+    // Selection highlight background (default: #3A7BD5 @ 0.45 alpha — blue tint)
+    //
+    // `portal.composer.selection_color` is expected in the same `#RRGGBB` or
+    // `#RRGGBBAA` format as other composer tokens.  We re-encode to sRGB u8 here
+    // because `StyledRunItem::background_color` uses that encoding.
+    let selection_bg: [u8; 4] = resolve_token_color(token_map, "portal.composer.selection_color")
+        .map(|c| {
+            // `c` is linear sRGB; convert RGB channels back to sRGB u8.
+            let to_srgb_u8 = |v: f32| (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+            let alpha_u8 = (c.a.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            [to_srgb_u8(c.r), to_srgb_u8(c.g), to_srgb_u8(c.b), alpha_u8]
+        })
+        // Default: #3A7BD5 @ ~115/255 alpha (≈ 0.45) — a calm blue selection
+        .unwrap_or([0x3A, 0x7B, 0xD5, 0x73]);
+
     // Font size (default: 13)
     let font_size_px = token_map
         .get("portal.composer.font_size")
@@ -629,6 +650,7 @@ pub(super) fn resolve_composer_overlay_tokens(
         at_capacity_g,
         at_capacity_b,
         at_capacity_a,
+        selection_bg,
         font_size_px,
     }
 }

@@ -822,8 +822,13 @@ impl InputProcessor {
 
     /// Snapshot current composer draft state for local echo rendering.
     ///
-    /// Returns `(text, cursor_byte, at_capacity, focused_node_id)` when a
-    /// composer region is focused, `None` otherwise.
+    /// Returns `(text, cursor_byte, selection_anchor, at_capacity, focused_node_id)`
+    /// when a composer region is focused, `None` otherwise.
+    ///
+    /// `selection_anchor` equals `cursor_byte` when no selection is active.
+    /// When they differ, the selected region spans
+    /// `[min(cursor_byte, selection_anchor), max(cursor_byte, selection_anchor)]`
+    /// as byte offsets into `text`.
     ///
     /// Used by the windowed runtime to push a [`LocalComposerState`]-equivalent
     /// snapshot to the compositor thread after every composer mutation.
@@ -831,12 +836,15 @@ impl InputProcessor {
     /// Spec: §4.1 local feedback first — the snapshot is pushed WITHOUT an
     /// adapter round-trip so the compositor can render the echo on the next
     /// frame.
-    pub fn composer_draft_snapshot(&self) -> Option<(String, usize, bool, tze_hud_scene::SceneId)> {
+    pub fn composer_draft_snapshot(
+        &self,
+    ) -> Option<(String, usize, usize, bool, tze_hud_scene::SceneId)> {
         let node_id = self.composer_draft_manager.focused_node()?;
         let draft = self.composer_draft_manager.draft()?;
         Some((
             draft.text().to_owned(),
             draft.cursor(),
+            draft.selection_anchor(),
             draft.is_at_capacity(),
             node_id,
         ))

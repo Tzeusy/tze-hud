@@ -51,6 +51,14 @@ pub struct LocalComposerState {
     pub text: String,
     /// Caret position as a byte offset into `text`.
     pub cursor_byte: usize,
+    /// Selection anchor as a byte offset into `text`.
+    ///
+    /// Equal to `cursor_byte` when no selection is active.  When
+    /// `selection_anchor != cursor_byte`, the selected region spans
+    /// `[min(cursor_byte, selection_anchor), max(cursor_byte, selection_anchor)]`
+    /// in the original text, and the compositor renders a selection-highlight
+    /// background behind those characters.
+    pub selection_anchor: usize,
     /// True when the draft buffer has reached its byte capacity.
     pub at_capacity: bool,
     /// The `SceneId` of the `HitRegionNode` that owns this composer region.

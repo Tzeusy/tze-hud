@@ -2890,7 +2890,7 @@ impl WinitApp {
                                             .state
                                             .input_processor
                                             .composer_draft_snapshot()
-                                            .map(|(text, _, _, _)| text.len())
+                                            .map(|(text, _, _, _, _)| text.len())
                                             .unwrap_or(0);
                                         (frac * text_len as f64).round() as usize
                                     } else {
@@ -4166,12 +4166,13 @@ impl WinitApp {
     ///
     /// No-ops if the draft manager reports no active draft (safety guard).
     fn push_local_composer_echo(&mut self, input_started_at: std::time::Instant) {
-        if let Some((text, cursor_byte, at_capacity, node_id)) =
+        if let Some((text, cursor_byte, selection_anchor, at_capacity, node_id)) =
             self.state.input_processor.composer_draft_snapshot()
         {
             let state = LocalComposerState {
                 text,
                 cursor_byte,
+                selection_anchor,
                 at_capacity,
                 node_id,
             };
