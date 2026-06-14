@@ -139,6 +139,10 @@ impl super::Compositor {
     /// - Stack / two-line body line (`font_size_px = body_font_size`)
     /// - MergeByKey fallback icon-inset notification
     /// - LatestWins/Replace icon-inset notification (identical to MergeByKey)
+    // Lint suppressed deliberately: this IS the consolidation the lint would
+    // suggest — it already absorbs seven shared fields, leaving only the
+    // twelve genuinely-varying `TextItem` fields, each a distinct primitive.
+    // Bundling them into a struct would just rename the same flat argument list.
     #[allow(clippy::too_many_arguments)]
     fn make_zone_text_item(
         text: Arc<str>,

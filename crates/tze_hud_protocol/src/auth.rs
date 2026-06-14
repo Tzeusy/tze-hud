@@ -24,25 +24,22 @@
 
 use std::net::IpAddr;
 
+use subtle::ConstantTimeEq;
+
 use crate::proto::session::{AuthCredential, auth_credential::Credential};
 
 // Constant-time byte-level equality to resist timing side-channels.
-// `subtle` is not in scope for v1; we use a manual xor-fold that is
-// branch-free across the key bytes and a fixed-time length check.
 //
-// This is NOT a cryptographic HMAC; for v1 PSK the surface is local
-// gRPC only. Replace with subtle::ConstantTimeEq when the crate is added.
+// Backed by `subtle::ConstantTimeEq`, the de-facto-standard constant-time
+// primitive (RustCrypto). For byte slices it short-circuits to a non-match
+// when lengths differ (length is not secret for the PSK) and otherwise
+// performs a branch-free fold over the bytes — exactly the semantics of the
+// previous hand-rolled xor-fold, with the security-relevant primitive now
+// maintained upstream.
+//
+// This is NOT a cryptographic HMAC; for v1 PSK the surface is local gRPC only.
 fn ct_eq_str(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 // ─── Subscription capability requirements ────────────────────────────────────

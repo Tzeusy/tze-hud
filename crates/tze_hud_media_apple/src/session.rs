@@ -414,6 +414,10 @@ impl Drop for VtDecodeSession {
 /// - This function must be non-blocking (`try_send`, no mutex acquisition).
 ///
 #[allow(dead_code)]
+// SAFETY: This `unsafe fn` upholds the "Safety Contract" documented above —
+// it dereferences `refcon`/`image_buffer` only after null-checking them, and
+// relies on VideoToolbox guaranteeing those pointers are valid for the session
+// lifetime per `VTDecompressionOutputCallback`. It performs no blocking work.
 unsafe extern "C-unwind" fn vt_output_callback(
     refcon: *mut c_void,
     _source_frame_refcon: *mut c_void,
@@ -523,6 +527,10 @@ fn cm_time_to_ns(ts: CMTime) -> u64 {
 /// (SPS, PPS, VPS) is valid for the duration of this call.  The function
 /// borrows those slices as C arrays passed to CoreMedia APIs; they must not
 /// be aliased or freed while `create_format_description` is executing.
+// SAFETY: This `unsafe fn`'s contract is the `# Safety` doc section above —
+// callers must keep the `format.parameters` slices (SPS/PPS/VPS) valid and
+// un-aliased for the call; the function only borrows them as C arrays handed
+// to CoreMedia and never retains them past return.
 unsafe fn create_format_description(
     format: &VideoFormat,
 ) -> Result<CFRetained<CMFormatDescription>, VtError> {
