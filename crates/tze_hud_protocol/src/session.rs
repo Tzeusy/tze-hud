@@ -132,25 +132,23 @@ pub struct SharedState {
     /// On-disk path for `element_store.toml`. When `None`, persistence is disabled.
     pub element_store_path: Option<PathBuf>,
     /// Whether the runtime is currently in safe mode (RFC 0005 §3.7).
-    /// When true, all active sessions reject MutationBatch with SAFE_MODE_ACTIVE.
-    pub safe_mode_active: bool,
-    /// Lock-free mirror of `safe_mode_active` for use on the winit event thread.
     ///
-    /// The winit event thread reads this in the `dispatch_key_down_event` /
-    /// `dispatch_key_up_event` / `dispatch_character_event` hot paths without
-    /// acquiring the `SharedState` mutex.  Writers (exclusively
-    /// `SafeModeController::enter_safe_mode` and `exit_safe_mode`) update
-    /// **both** this field and `safe_mode_active` while holding the lock:
+    /// This is the **single source of truth** for the runtime-global safe-mode
+    /// flag.  When `true`, all active sessions reject MutationBatch with
+    /// SAFE_MODE_ACTIVE, and the winit event thread captures input locally.
     ///
-    ///   1. `safe_mode_active = true`  (under lock)
-    ///   2. `safe_mode_atomic.store(true, Ordering::Release)` (under lock —
-    ///      Release pairs with the Acquire load on the event thread)
+    /// It is an `AtomicBool` so it can be read lock-free on the winit event
+    /// thread (`dispatch_key_down_event` / `dispatch_key_up_event` /
+    /// `dispatch_character_event` hot paths) without acquiring the
+    /// `SharedState` mutex.  Writers (exclusively
+    /// `SafeModeController::enter_safe_mode` and `exit_safe_mode`) store with
+    /// `Ordering::Release`; readers load with `Ordering::Acquire`.  The
+    /// Release-Acquire pair guarantees that any stores preceding the flag
+    /// write are visible to the event thread once it observes the raised flag,
+    /// even though the reader does not hold the `SharedState` mutex.
     ///
-    /// `Ordering::Release` ensures the boolean write is visible before the
-    /// atomic flag is raised.  `Ordering::Acquire` on the read side ensures
-    /// the event thread sees any stores that preceded the flag.  Together they
-    /// form a proper Release-Acquire pair even though the `SharedState` mutex
-    /// is not held by the reader.
+    /// Mutation-intake readers (e.g. `handle_mutation_batch`) hold the
+    /// `SharedState` mutex and likewise load with `Ordering::Acquire`.
     pub safe_mode_atomic: Arc<AtomicBool>,
     /// In-memory resume token store (RFC 0005 §6.1).
     /// Cleared on process restart; never persisted.
@@ -160,7 +158,7 @@ pub struct SharedState {
     /// The shell is the sole writer of this field. When `freeze_active` is
     /// `true`, mutation batches are queued (not rejected) until unfreeze.
     ///
-    /// Per the invariant: `safe_mode_active = true` implies
+    /// Per the invariant: `safe_mode_atomic == true` implies
     /// `freeze_active = false`. Safe mode entry cancels freeze
     /// and discards all per-session freeze queues.
     pub freeze_active: bool,

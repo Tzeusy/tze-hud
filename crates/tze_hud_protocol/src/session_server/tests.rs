@@ -2688,7 +2688,7 @@ async fn test_sequence_monotonic_accepted() {
 // ─── Safe mode tests (RFC 0005 §3.7) ─────────────────────────────────────
 
 /// Scenario: Mutations rejected during safe mode (RFC 0005 §3.7)
-/// WHEN the runtime enters safe mode and sets `SharedState.safe_mode_active = true`,
+/// WHEN the runtime enters safe mode and sets `SharedState.safe_mode_atomic = true`,
 /// THEN MutationBatch is rejected with SAFE_MODE_ACTIVE.
 ///
 /// In this test we drive safe mode via `SharedState` directly (as the runtime
@@ -2701,8 +2701,9 @@ async fn test_safe_mode_rejects_mutations() {
 
     // Enable safe mode in shared state (simulates runtime entering safe mode)
     {
-        let mut st = shared_state.lock().await;
-        st.safe_mode_active = true;
+        let st = shared_state.lock().await;
+        st.safe_mode_atomic
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     // Request a lease first (this is transactional, not affected by safe mode)
@@ -2752,8 +2753,9 @@ async fn test_safe_mode_rejects_mutations() {
 
     // Disable safe mode
     {
-        let mut st = shared_state.lock().await;
-        st.safe_mode_active = false;
+        let st = shared_state.lock().await;
+        st.safe_mode_atomic
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     // Mutations should no longer be rejected with SAFE_MODE_ACTIVE.
@@ -2954,7 +2956,6 @@ async fn test_fifo_preserved_when_mutation_arrives_during_drain_window() {
         runtime_widget_store: None,
         element_store: tze_hud_scene::element_store::ElementStore::default(),
         element_store_path: None,
-        safe_mode_active: false,
         safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         token_store: crate::token::TokenStore::new(),
         freeze_active: false, // <-- already unfrozen
@@ -3085,7 +3086,6 @@ async fn test_freeze_retransmit_deduped_applied_exactly_once() {
         runtime_widget_store: None,
         element_store: tze_hud_scene::element_store::ElementStore::default(),
         element_store_path: None,
-        safe_mode_active: false,
         safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         token_store: crate::token::TokenStore::new(),
         freeze_active: true, // <-- scene is frozen
@@ -3236,7 +3236,8 @@ async fn test_safe_mode_takes_precedence_over_freeze() {
     // that safe mode takes precedence in the session server check order)
     {
         let mut st = shared_state.lock().await;
-        st.safe_mode_active = true;
+        st.safe_mode_atomic
+            .store(true, std::sync::atomic::Ordering::Release);
         st.freeze_active = false; // Invariant: safe_mode=true => freeze_active=false
     }
 

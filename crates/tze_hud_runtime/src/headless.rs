@@ -353,7 +353,6 @@ impl HeadlessRuntime {
             runtime_widget_store: runtime_widget_store.clone(),
             element_store: element_store_bootstrap.store,
             element_store_path: Some(element_store_bootstrap.path),
-            safe_mode_active: false,
             safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             token_store: tze_hud_protocol::token::TokenStore::new(),
             freeze_active: false,
