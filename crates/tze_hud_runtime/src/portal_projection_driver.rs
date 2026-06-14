@@ -2528,7 +2528,10 @@ mod tests {
     #[test]
     fn parse_output_kind_defaults_and_variants() {
         assert_eq!(parse_output_kind(None), Ok(OutputKind::Assistant));
-        assert_eq!(parse_output_kind(Some("assistant")), Ok(OutputKind::Assistant));
+        assert_eq!(
+            parse_output_kind(Some("assistant")),
+            Ok(OutputKind::Assistant)
+        );
         assert_eq!(parse_output_kind(Some("tool")), Ok(OutputKind::Tool));
         assert_eq!(parse_output_kind(Some("status")), Ok(OutputKind::Status));
         assert_eq!(parse_output_kind(Some("error")), Ok(OutputKind::Error));
