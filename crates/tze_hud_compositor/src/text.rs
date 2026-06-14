@@ -216,7 +216,10 @@ impl TruncationCache {
     /// never been primed at any geometry (true cold start), in which case the
     /// caller renders the untruncated text clipped to bounds by the glyph buffer.
     #[inline]
-    pub(crate) fn get_stale_by_content(&self, content_hash: &[u8; 32]) -> Option<&TruncationResult> {
+    pub(crate) fn get_stale_by_content(
+        &self,
+        content_hash: &[u8; 32],
+    ) -> Option<&TruncationResult> {
         let key = self.by_content.get(content_hash)?;
         self.entries.get(key)
     }
@@ -579,10 +582,10 @@ impl TextRasterizer {
                 let key = key_opt.as_ref()?;
                 // Exact geometry first; otherwise the nearest stale truncation for
                 // this content.  Neither call shapes; both are O(1) lookups.
-                let result = self
-                    .truncation_cache
-                    .get_by_key(key)
-                    .or_else(|| self.truncation_cache.get_stale_by_content(&key.content_hash()));
+                let result = self.truncation_cache.get_by_key(key).or_else(|| {
+                    self.truncation_cache
+                        .get_stale_by_content(&key.content_hash())
+                });
                 result.map(|r| r.text.clone())
             })
             .collect();
@@ -3700,11 +3703,15 @@ mod tests {
         cache.evict_except(&[key_keep]);
 
         assert!(
-            cache.get_stale_by_content(&key_keep.content_hash()).is_some(),
+            cache
+                .get_stale_by_content(&key_keep.content_hash())
+                .is_some(),
             "surviving content must still resolve via stale fallback"
         );
         assert!(
-            cache.get_stale_by_content(&key_gone.content_hash()).is_none(),
+            cache
+                .get_stale_by_content(&key_gone.content_hash())
+                .is_none(),
             "evicted content must not resolve via a dangling stale index entry"
         );
     }
