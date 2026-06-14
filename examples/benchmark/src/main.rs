@@ -99,8 +99,8 @@ pub struct BenchmarkOutput {
 mod headless_impl {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
     use tracing::{info, warn};
@@ -1355,8 +1355,8 @@ mod tests {
 // result here is a genuine contention signal, not a poked counter.
 #[cfg(all(test, feature = "headless"))]
 mod contention_tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
 
