@@ -1742,6 +1742,25 @@ pub struct RenderingPolicy {
     /// token-resolved badge color flows into the render path.
     #[serde(default)]
     pub media_disconnect_badge_color: Option<Rgba>,
+    /// Tail-anchored truncation opt-in for `ZoneContent::StreamText` content.
+    ///
+    /// `Some(true)` makes a streaming zone show the **newest** content (the tail)
+    /// when text overflows the zone bounds — mirroring the text-stream transcript
+    /// portal's follow-tail behaviour.  `None` / `Some(false)` (the default)
+    /// preserves head-anchored truncation, which pins the **oldest** content.
+    ///
+    /// Only meaningful when [`Self::overflow`] resolves to
+    /// [`TextOverflow::Ellipsis`]: head-anchored truncation shows the first
+    /// `max_lines` runs, tail-anchored shows the last `max_lines` runs.  For
+    /// `Clip` overflow this field has no effect (clipping always shows the head).
+    ///
+    /// Only consulted for `ZoneContent::StreamText`; notification and status-bar
+    /// content always render head-anchored.
+    ///
+    /// Populated from zone configuration / design tokens at profile load time;
+    /// never hardcoded in the compositor.
+    #[serde(default)]
+    pub stream_tail_anchored: Option<bool>,
 }
 
 /// Contention policy — what happens when multiple agents publish to the same zone.

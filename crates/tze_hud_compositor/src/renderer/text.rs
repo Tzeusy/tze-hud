@@ -186,6 +186,134 @@ impl super::Compositor {
         }
     }
 
+    /// Build a `TextItem` for `ZoneContent::StreamText`, honouring the zone's
+    /// tail-anchor opt-in.
+    ///
+    /// Delegates geometry, color, and typography to
+    /// [`TextItem::from_zone_policy`] (so all visual properties still come from
+    /// `RenderingPolicy` — no hardcoded styling), then selects the truncation
+    /// viewport:
+    ///
+    /// - `policy.stream_tail_anchored == Some(true)` →
+    ///   [`TruncationViewport::TailAnchored`]: a streaming surface shows the
+    ///   **newest** content (the tail), mirroring the transcript portal's
+    ///   follow-tail behaviour (spec §3.2).
+    /// - otherwise → [`TruncationViewport::HeadAnchored`] (the default;
+    ///   preserves the pre-existing behaviour for all zones that have not opted
+    ///   in).
+    ///
+    /// The viewport only changes which side is truncated when overflow resolves
+    /// to [`TextOverflow::Ellipsis`]; for `Clip` it is inert.  This is the single
+    /// place the zone-vs-portal tail-anchor decision is made for StreamText, so
+    /// the per-frame item and any primed cache entry agree on `viewport` (the
+    /// truncation key includes it).
+    ///
+    /// [`TruncationViewport`]: crate::overflow::TruncationViewport
+    /// [`TextOverflow`]: tze_hud_scene::types::TextOverflow
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn zone_stream_text_item(
+        text: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        policy: &RenderingPolicy,
+        opacity: f32,
+    ) -> TextItem {
+        let mut item = TextItem::from_zone_policy(text, x, y, w, h, policy, opacity);
+        if policy.stream_tail_anchored == Some(true) {
+            item.viewport = crate::overflow::TruncationViewport::TailAnchored;
+        }
+        item
+    }
+
+    /// Collect the `Ellipsis`-overflow `ZoneContent::StreamText` `TextItem`s in
+    /// the scene, for off-frame truncation-cache priming.
+    ///
+    /// Zone StreamText items are not produced by the tile-node walk in
+    /// [`Compositor::prime_truncation_cache`], so without this pass an
+    /// overflowing streaming zone would hit the render path cold and fall back to
+    /// raw clipping (never tail- or head-anchored truncation).  This method
+    /// rebuilds the same StreamText items `collect_text_items` emits — identical
+    /// geometry, policy, and `viewport` (via [`Self::zone_stream_text_item`]) —
+    /// so the per-frame key matches the primed cache entry.
+    ///
+    /// Only `Ellipsis` items are emitted: `effective_truncation_key` returns
+    /// `None` for any other overflow, so priming them would be wasted work.
+    /// Opacity is irrelevant to the truncation key (which keys on text, geometry,
+    /// font, and viewport only), so this pass uses `1.0`.
+    ///
+    /// # Word-by-word reveal interaction
+    ///
+    /// This pass primes the **full** StreamText content.  While a
+    /// `LatestWins`/`Replace` zone is mid word-by-word reveal, the render path
+    /// keys on the partially-revealed *prefix* (`visible_text`), so the primed
+    /// full-text entry will not match until the reveal completes — those frames
+    /// fall back to raw clipping (the doctrinal arrival≠presentation graceful
+    /// path).  Once the reveal finishes (`visible_text == text`) the keys agree
+    /// and the steady-state streaming surface renders correctly anchored.  Reveal
+    /// prefixes are short and typically fit without overflow, so this is rarely
+    /// observable in practice.
+    pub(super) fn collect_zone_stream_text_ellipsis_items(
+        &self,
+        scene: &SceneGraph,
+        sw: f32,
+        sh: f32,
+    ) -> Vec<TextItem> {
+        let mut items: Vec<TextItem> = Vec::new();
+
+        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
+            if publishes.is_empty() {
+                continue;
+            }
+            let zone_def = match scene.zone_registry.zones.get(zone_name) {
+                Some(z) => z,
+                None => continue,
+            };
+            let policy = &zone_def.rendering_policy;
+            // Truncation (and thus anchoring) only applies to Ellipsis overflow.
+            if policy.overflow != Some(TextOverflow::Ellipsis) {
+                continue;
+            }
+
+            let (zx, zy, zw, zh) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
+
+            match zone_def.contention_policy {
+                ContentionPolicy::Stack { .. } => {
+                    let layout = self.zone_slot_layout(zone_name, publishes, policy, zh);
+                    for (pub_idx, slot_y, effective_slot_h) in layout.iter_visible(zy) {
+                        if let ZoneContent::StreamText(text) = &publishes[pub_idx].content {
+                            items.push(Self::zone_stream_text_item(
+                                text,
+                                zx,
+                                slot_y,
+                                zw,
+                                effective_slot_h,
+                                policy,
+                                1.0,
+                            ));
+                        }
+                    }
+                }
+                ContentionPolicy::MergeByKey { .. }
+                | ContentionPolicy::LatestWins
+                | ContentionPolicy::Replace => {
+                    // Only the most-recent StreamText publish renders (and is primed).
+                    for record in publishes.iter().rev() {
+                        if let ZoneContent::StreamText(text) = &record.content {
+                            items.push(Self::zone_stream_text_item(
+                                text, zx, zy, zw, zh, policy, 1.0,
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        items
+    }
+
     /// Collect `TextItem`s for all TextMarkdownNode tiles and zone StreamText
     /// and ShortTextWithIcon/Notification content in the scene.
     ///
@@ -309,7 +437,7 @@ impl super::Compositor {
 
                         match &record.content {
                             ZoneContent::StreamText(text) => {
-                                items.push(TextItem::from_zone_policy(
+                                items.push(Self::zone_stream_text_item(
                                     text,
                                     zx,
                                     slot_y,
@@ -571,7 +699,7 @@ impl super::Compositor {
                         for record in publishes.iter().rev() {
                             match &record.content {
                                 ZoneContent::StreamText(text) => {
-                                    items.push(TextItem::from_zone_policy(
+                                    items.push(Self::zone_stream_text_item(
                                         text,
                                         zx,
                                         zy,
@@ -701,7 +829,7 @@ impl super::Compositor {
                                 } else {
                                     text.as_str()
                                 };
-                                items.push(TextItem::from_zone_policy(
+                                items.push(Self::zone_stream_text_item(
                                     visible_text,
                                     zx,
                                     zy,

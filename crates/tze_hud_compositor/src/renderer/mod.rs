@@ -1217,14 +1217,36 @@ impl Compositor {
         // rasterizer is available.  If we returned early here (rasterizer = None)
         // while recording the version, subsequent frames would skip priming even
         // once the rasterizer is initialized — until the scene changes again.
-        let rasterizer = match &mut self.text_rasterizer {
-            Some(r) => r,
-            None => return, // text renderer not yet initialized; retry next version change
-        };
+        if self.text_rasterizer.is_none() {
+            return; // text renderer not yet initialized; retry next version change
+        }
+
+        // Zone StreamText items are not produced by the tile-node walk below, so
+        // prime them separately.  Without this, an overflowing streaming zone
+        // would hit the render path with no cache entry and fall back to raw
+        // clipping (head-anchored), never showing the tail (hud-gxz0x).  Zone
+        // geometry resolves against the scene's display area — kept in sync with
+        // the surface size (windowed.rs::sync_scene_display_area), so the primed
+        // geometry matches what `collect_text_items` produces on the frame path.
+        //
+        // Computed here (before the &mut self.text_rasterizer borrow below) so
+        // the &self collector does not conflict with that borrow.
+        let zone_stream_items = self.collect_zone_stream_text_ellipsis_items(
+            scene,
+            scene.display_area.width,
+            scene.display_area.height,
+        );
 
         // Record the version and timestamp now that priming will proceed.
         self.truncation_cache_scene_version = scene.version;
         self.resize_reprime_last_at = Some(std::time::Instant::now());
+
+        // Safe: checked is_none() above and returned; rasterizer stays Some
+        // (this method holds &mut self exclusively).
+        let rasterizer = self
+            .text_rasterizer
+            .as_mut()
+            .expect("text rasterizer presence checked above");
 
         // Load the markdown snapshot once (lock-free atomic load) and pin it for
         // the whole traversal — a concurrent background swap cannot free it
@@ -1252,6 +1274,11 @@ impl Compositor {
                 );
             }
         }
+
+        // Append the zone StreamText Ellipsis items computed before the
+        // rasterizer borrow (see comment above) so they are primed alongside the
+        // tile-node items.
+        live_items.extend(zone_stream_items);
 
         // Update the cached content byte count for the adaptive cadence gate on
         // the *next* call.  Summing item lengths is O(n) in item count here, but

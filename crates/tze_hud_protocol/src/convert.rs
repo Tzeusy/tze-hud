@@ -943,6 +943,10 @@ pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPo
         // It is NOT transmitted via proto — badge color is resolved at profile
         // load time and is not a per-publish payload field.
         media_disconnect_badge_color: None,
+        // stream_tail_anchored is config-layer only (zone configuration / design
+        // token). It is NOT transmitted via proto — it is resolved at profile
+        // load time and is not a per-publish payload field.
+        stream_tail_anchored: None,
     }
 }
 
