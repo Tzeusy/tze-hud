@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::surface::HeadlessSurface;
 use image_cache::composer_display_text;
