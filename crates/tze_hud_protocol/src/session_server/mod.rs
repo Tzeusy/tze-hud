@@ -652,173 +652,21 @@ impl HudSession for HudSessionImpl {
                 tokio::select! {
                     // ── Inbound client message ────────────────────────────────
                     msg_result = tokio::time::timeout(timeout_duration, inbound.message()) => {
-                        match msg_result {
-                            Ok(Ok(Some(msg))) => {
-                                // Update heartbeat timestamp on any received message
-                                session.last_heartbeat_ms = now_ms();
-
-                                // Retransmit fast-path (RFC 0005 §5.3).
-                                //
-                                // For lease operations there is no batch_id correlation key;
-                                // the client-side sequence number serves as the correlation key.
-                                // When the server sees a sequence it has already processed for
-                                // a lease operation, it replays the cached response without
-                                // re-applying the operation and WITHOUT running sequence
-                                // validation (which would reject the same sequence as a
-                                // regression).
-                                let is_lease_op = matches!(
-                                    &msg.payload,
-                                    Some(ClientPayload::LeaseRequest(_))
-                                    | Some(ClientPayload::LeaseRenew(_))
-                                    | Some(ClientPayload::LeaseRelease(_))
-                                );
-                                if is_lease_op && msg.sequence > 0
-                                    && session.lease_correlation_cache.get(msg.sequence).is_some()
-                                {
-                                    // This is a retransmit: dispatch to the lease handler which
-                                    // will replay the cached response.  Skip sequence validation
-                                    // so the duplicate sequence does not terminate the session.
-                                    handle_client_message(
-                                        &state,
-                                        session,
-                                        &tx,
-                                        &upload_command_tx,
-                                        &media_ingress_config,
-                                        msg,
-                                    )
-                                    .await;
-                                    continue;
-                                }
-
-                                // Validate client sequence number (RFC 0005 §2.3).
-                                // Skip validation for sequence 0 (unset) to allow legacy callers
-                                // that don't set sequences. Sequence must be monotonically increasing
-                                // starting at 2 (since 1 is the handshake message).
-                                if msg.sequence != 0 {
-                                    match session.validate_client_sequence(
-                                        msg.sequence,
-                                        DEFAULT_MAX_SEQUENCE_GAP,
-                                    ) {
-                                        Ok(()) => {}
-                                        Err((code, message)) => {
-                                            // Close stream with sequence error
-                                            let seq = session.next_server_seq();
-                                            let _ = tx
-                                                .send(Ok(ServerMessage {
-                                                    sequence: seq,
-                                                    timestamp_wall_us: now_wall_us(),
-                                                    payload: Some(ServerPayload::SessionError(
-                                                        SessionError {
-                                                            code: code.to_string(),
-                                                            message,
-                                                            hint: String::new(),
-                                                        },
-                                                    )),
-                                                }))
-                                                .await;
-                                            session.transition(SessionState::Closed);
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // Check if this is a graceful close message
-                                let is_close = matches!(
-                                    &msg.payload,
-                                    Some(ClientPayload::SessionClose(_))
-                                );
-
-                                handle_client_message(
-                                    &state,
-                                    session,
-                                    &tx,
-                                    &upload_command_tx,
-                                    &media_ingress_config,
-                                    msg,
-                                )
-                                .await;
-
-                                // After handling SessionClose, transition to Disconnecting then Closed
-                                if is_close {
-                                    session.transition(SessionState::Disconnecting);
-                                    session.transition(SessionState::Closed);
-                                    break;
-                                }
-                            }
-                            Ok(Ok(None)) => {
-                                // Stream EOF
-                                session.transition(SessionState::Closed);
-                                break;
-                            }
-                            Ok(Err(_e)) => {
-                                // Stream transport error — ungraceful disconnect
-                                session.transition(SessionState::Closed);
-                                break;
-                            }
-                            Err(_) => {
-                                // Heartbeat timeout (RFC 0005 §1.6, §3.6)
-                                session.transition(SessionState::Closed);
-                                break;
-                            }
+                        match session.on_client_message(
+                            msg_result,
+                            &state,
+                            &tx,
+                            &upload_command_tx,
+                            &media_ingress_config,
+                        ).await {
+                            LoopAction::Continue => continue,
+                            LoopAction::Break => break,
                         }
                     }
 
                     upload_event = upload_event_rx.recv() => {
-                        match upload_event {
-                            Some(UploadWorkerEvent::UploadAccepted {
-                                request_sequence,
-                                upload_id,
-                            }) => {
-                                let seq = session.next_server_seq();
-                                let _ = tx
-                                    .send(Ok(ServerMessage {
-                                        sequence: seq,
-                                        timestamp_wall_us: now_wall_us(),
-                                        payload: Some(ServerPayload::ResourceUploadAccepted(
-                                            ResourceUploadAccepted {
-                                                request_sequence,
-                                                upload_id: upload_id.to_vec(),
-                                            },
-                                        )),
-                                    }))
-                                    .await;
-                            }
-                            Some(UploadWorkerEvent::Stored {
-                                request_sequence,
-                                stored,
-                                stored_bytes,
-                                metadata,
-                                upload_id,
-                            }) => {
-                                send_resource_stored(
-                                    session,
-                                    &tx,
-                                    request_sequence,
-                                    &stored,
-                                    stored_bytes,
-                                    metadata,
-                                    upload_id.as_ref(),
-                                )
-                                .await;
-                            }
-                            Some(UploadWorkerEvent::Error {
-                                request_sequence,
-                                upload_id,
-                                err,
-                            }) => {
-                                send_resource_error_response(
-                                    session,
-                                    &tx,
-                                    request_sequence,
-                                    upload_id.as_deref(),
-                                    &err,
-                                )
-                                .await;
-                            }
-                            None => {
-                                session.transition(SessionState::Closed);
-                                break;
-                            }
+                        if let LoopAction::Break = session.on_upload_event(upload_event, &tx).await {
+                            break;
                         }
                     }
 
@@ -827,31 +675,8 @@ impl HudSession for HudSessionImpl {
                     // Transactional — delivered unconditionally to all active sessions
                     // regardless of subscription config. Never dropped.
                     degradation_result = degradation_rx.recv() => {
-                        match degradation_result {
-                            Ok(notice) => {
-                                let seq = session.next_server_seq();
-                                let _ = tx
-                                    .send(Ok(ServerMessage {
-                                        sequence: seq,
-                                        timestamp_wall_us: now_wall_us(),
-                                        payload: Some(ServerPayload::DegradationNotice(notice)),
-                                    }))
-                                    .await;
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                // We missed `n` notices due to slow consumption.
-                                // Per spec §3.4, DegradationNotice is transactional and must not
-                                // be dropped. Log the anomaly and continue — the session remains
-                                // open. Operators should investigate why this session is slow.
-                                // In a production implementation this would emit a metric/alert.
-                                let _ = n; // suppress unused warning; real code: tracing::warn!
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                // Broadcast channel closed — runtime is shutting down.
-                                // Treat as ungraceful disconnect.
-                                session.transition(SessionState::Closed);
-                                break;
-                            }
+                        if let LoopAction::Break = session.on_degradation(degradation_result, &tx).await {
+                            break;
                         }
                     }
 
@@ -862,33 +687,8 @@ impl HudSession for HudSessionImpl {
                     // to the scene graph and notifies the agent with CapabilityNotice
                     // + LeaseStateChange (both transactional — never dropped).
                     revocation_result = capability_revocation_rx.recv() => {
-                        match revocation_result {
-                            Ok(event) => {
-                                // Only this session's leases are affected.
-                                let global_media_ingress_revoke =
-                                    event.capability_name == "media_ingress"
-                                        && event.lease_id.is_null();
-                                if global_media_ingress_revoke
-                                    || session.lease_ids.contains(&event.lease_id)
-                                {
-                                    handle_capability_revocation(
-                                        &state,
-                                        session,
-                                        &tx,
-                                        event,
-                                    ).await;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                // Missed revocation events. Log and continue; the capability
-                                // scope may be stale for those dropped events.
-                                // In production: emit a metric and re-query the live scope.
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                // Runtime shutting down — treat as ungraceful disconnect.
-                                session.transition(SessionState::Closed);
-                                break;
-                            }
+                        if let LoopAction::Break = session.on_capability_revocation(revocation_result, &state, &tx).await {
+                            break;
                         }
                     }
 
@@ -905,37 +705,8 @@ impl HudSession for HudSessionImpl {
                     // is not subscribed to INPUT_EVENTS / FOCUS_EVENTS the batch is
                     // dropped silently (no error response).
                     input_event_result = input_event_rx.recv() => {
-                        match input_event_result {
-                            Ok((target_namespace, batch)) => {
-                                // Namespace filter: only deliver to the owning session.
-                                if target_namespace == session.namespace {
-                                    // Subscription filter: gate on INPUT_EVENTS / FOCUS_EVENTS.
-                                    if let Some(filtered) = crate::subscriptions::filter_event_batch(
-                                        batch,
-                                        &session.subscriptions,
-                                    ) {
-                                        let seq = session.next_server_seq();
-                                        let _ = tx
-                                            .send(Ok(ServerMessage {
-                                                sequence: seq,
-                                                timestamp_wall_us: now_wall_us(),
-                                                payload: Some(ServerPayload::EventBatch(filtered)),
-                                            }))
-                                            .await;
-                                    }
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                // Missed input events under backpressure. Transactional
-                                // events (ClickEvent, CommandInputEvent) must not be
-                                // dropped; in production this should emit a metric/alert.
-                                // For v1 we continue silently — the session remains open.
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                // Runtime shutting down — treat as ungraceful disconnect.
-                                session.transition(SessionState::Closed);
-                                break;
-                            }
+                        if let LoopAction::Break = session.on_input_event(input_event_result, &tx).await {
+                            break;
                         }
                     }
 
@@ -945,35 +716,8 @@ impl HudSession for HudSessionImpl {
                     // agents subscribed to SCENE_TOPOLOGY (requires read_scene_topology).
                     // Transactional — never coalesced or dropped. Agent cannot reject.
                     element_repositioned_result = element_repositioned_rx.recv() => {
-                        match element_repositioned_result {
-                            Ok(event) => {
-                                // Gate on SCENE_TOPOLOGY subscription.
-                                if session.subscriptions.contains(
-                                    &crate::subscriptions::category::SCENE_TOPOLOGY.to_string()
-                                ) {
-                                    let seq = session.next_server_seq();
-                                    let _ = tx
-                                        .send(Ok(ServerMessage {
-                                            sequence: seq,
-                                            timestamp_wall_us: now_wall_us(),
-                                            payload: Some(
-                                                ServerPayload::ElementRepositioned(event),
-                                            ),
-                                        }))
-                                        .await;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                // Missed notifications. Log and continue — the element
-                                // store state is persistent so a future snapshot or
-                                // ListElementsRequest will reflect the current position.
-                                let _ = n; // suppress unused warning; production: tracing::warn!
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                // Runtime shutting down — treat as ungraceful disconnect.
-                                session.transition(SessionState::Closed);
-                                break;
-                            }
+                        if let LoopAction::Break = session.on_element_repositioned(element_repositioned_result, &tx).await {
+                            break;
                         }
                     }
                 }
@@ -1214,6 +958,384 @@ async fn send_runtime_error(
             })),
         }))
         .await;
+}
+
+/// Signal returned by each `on_*` select-arm handler.
+///
+/// `Continue` — proceed to the next loop iteration.
+/// `Break`    — exit the session loop (stream closed or fatal error).
+enum LoopAction {
+    Continue,
+    Break,
+}
+
+// ─── Per-session select-arm handlers ────────────────────────────────────────
+//
+// Each `on_*` method below is the extracted body of one arm of the main
+// `tokio::select!` in `async fn session`. The select! arms are now thin
+// wrappers that call these helpers and match on `LoopAction`.
+
+impl StreamSession {
+    /// Handle an inbound client message (or timeout/error) from the stream.
+    ///
+    /// Encompasses: heartbeat update, retransmit fast-path, sequence validation,
+    /// graceful-close detection, and dispatch to `handle_client_message`.
+    async fn on_client_message(
+        &mut self,
+        msg_result: Result<
+            Result<Option<ClientMessage>, tonic::Status>,
+            tokio::time::error::Elapsed,
+        >,
+        state: &Arc<Mutex<SharedState>>,
+        tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+        upload_command_tx: &tokio::sync::mpsc::Sender<UploadWorkerCommand>,
+        media_ingress_config: &tze_hud_scene::config::MediaIngressConfig,
+    ) -> LoopAction {
+        match msg_result {
+            Ok(Ok(Some(msg))) => {
+                // Update heartbeat timestamp on any received message
+                self.last_heartbeat_ms = now_ms();
+
+                // Retransmit fast-path (RFC 0005 §5.3).
+                //
+                // For lease operations there is no batch_id correlation key;
+                // the client-side sequence number serves as the correlation key.
+                // When the server sees a sequence it has already processed for
+                // a lease operation, it replays the cached response without
+                // re-applying the operation and WITHOUT running sequence
+                // validation (which would reject the same sequence as a
+                // regression).
+                let is_lease_op = matches!(
+                    &msg.payload,
+                    Some(ClientPayload::LeaseRequest(_))
+                        | Some(ClientPayload::LeaseRenew(_))
+                        | Some(ClientPayload::LeaseRelease(_))
+                );
+                if is_lease_op
+                    && msg.sequence > 0
+                    && self.lease_correlation_cache.get(msg.sequence).is_some()
+                {
+                    // This is a retransmit: dispatch to the lease handler which
+                    // will replay the cached response.  Skip sequence validation
+                    // so the duplicate sequence does not terminate the session.
+                    handle_client_message(
+                        state,
+                        self,
+                        tx,
+                        upload_command_tx,
+                        media_ingress_config,
+                        msg,
+                    )
+                    .await;
+                    return LoopAction::Continue;
+                }
+
+                // Validate client sequence number (RFC 0005 §2.3).
+                // Skip validation for sequence 0 (unset) to allow legacy callers
+                // that don't set sequences. Sequence must be monotonically increasing
+                // starting at 2 (since 1 is the handshake message).
+                if msg.sequence != 0 {
+                    match self.validate_client_sequence(msg.sequence, DEFAULT_MAX_SEQUENCE_GAP) {
+                        Ok(()) => {}
+                        Err((code, message)) => {
+                            // Close stream with sequence error
+                            let seq = self.next_server_seq();
+                            let _ = tx
+                                .send(Ok(ServerMessage {
+                                    sequence: seq,
+                                    timestamp_wall_us: now_wall_us(),
+                                    payload: Some(ServerPayload::SessionError(SessionError {
+                                        code: code.to_string(),
+                                        message,
+                                        hint: String::new(),
+                                    })),
+                                }))
+                                .await;
+                            self.transition(SessionState::Closed);
+                            return LoopAction::Break;
+                        }
+                    }
+                }
+
+                // Check if this is a graceful close message
+                let is_close = matches!(&msg.payload, Some(ClientPayload::SessionClose(_)));
+
+                handle_client_message(
+                    state,
+                    self,
+                    tx,
+                    upload_command_tx,
+                    media_ingress_config,
+                    msg,
+                )
+                .await;
+
+                // After handling SessionClose, transition to Disconnecting then Closed
+                if is_close {
+                    self.transition(SessionState::Disconnecting);
+                    self.transition(SessionState::Closed);
+                    return LoopAction::Break;
+                }
+
+                LoopAction::Continue
+            }
+            Ok(Ok(None)) => {
+                // Stream EOF
+                self.transition(SessionState::Closed);
+                LoopAction::Break
+            }
+            Ok(Err(_e)) => {
+                // Stream transport error — ungraceful disconnect
+                self.transition(SessionState::Closed);
+                LoopAction::Break
+            }
+            Err(_) => {
+                // Heartbeat timeout (RFC 0005 §1.6, §3.6)
+                self.transition(SessionState::Closed);
+                LoopAction::Break
+            }
+        }
+    }
+
+    /// Handle an event from the upload worker.
+    ///
+    /// Encompasses: UploadAccepted, Stored, Error, and channel-closed (→ Break).
+    async fn on_upload_event(
+        &mut self,
+        upload_event: Option<UploadWorkerEvent>,
+        tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+    ) -> LoopAction {
+        match upload_event {
+            Some(UploadWorkerEvent::UploadAccepted {
+                request_sequence,
+                upload_id,
+            }) => {
+                let seq = self.next_server_seq();
+                let _ = tx
+                    .send(Ok(ServerMessage {
+                        sequence: seq,
+                        timestamp_wall_us: now_wall_us(),
+                        payload: Some(ServerPayload::ResourceUploadAccepted(
+                            ResourceUploadAccepted {
+                                request_sequence,
+                                upload_id: upload_id.to_vec(),
+                            },
+                        )),
+                    }))
+                    .await;
+                LoopAction::Continue
+            }
+            Some(UploadWorkerEvent::Stored {
+                request_sequence,
+                stored,
+                stored_bytes,
+                metadata,
+                upload_id,
+            }) => {
+                send_resource_stored(
+                    self,
+                    tx,
+                    request_sequence,
+                    &stored,
+                    stored_bytes,
+                    metadata,
+                    upload_id.as_ref(),
+                )
+                .await;
+                LoopAction::Continue
+            }
+            Some(UploadWorkerEvent::Error {
+                request_sequence,
+                upload_id,
+                err,
+            }) => {
+                send_resource_error_response(
+                    self,
+                    tx,
+                    request_sequence,
+                    upload_id.as_deref(),
+                    &err,
+                )
+                .await;
+                LoopAction::Continue
+            }
+            None => {
+                self.transition(SessionState::Closed);
+                LoopAction::Break
+            }
+        }
+    }
+
+    /// Handle a `DegradationNotice` broadcast result (RFC 0005 §3.4, §7.1).
+    ///
+    /// Transactional — delivered unconditionally to all active sessions.
+    async fn on_degradation(
+        &mut self,
+        degradation_result: Result<DegradationNotice, tokio::sync::broadcast::error::RecvError>,
+        tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+    ) -> LoopAction {
+        match degradation_result {
+            Ok(notice) => {
+                let seq = self.next_server_seq();
+                let _ = tx
+                    .send(Ok(ServerMessage {
+                        sequence: seq,
+                        timestamp_wall_us: now_wall_us(),
+                        payload: Some(ServerPayload::DegradationNotice(notice)),
+                    }))
+                    .await;
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                // We missed `n` notices due to slow consumption.
+                // Per spec §3.4, DegradationNotice is transactional and must not
+                // be dropped. Log the anomaly and continue — the session remains
+                // open. Operators should investigate why this session is slow.
+                // In a production implementation this would emit a metric/alert.
+                let _ = n; // suppress unused warning; real code: tracing::warn!
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // Broadcast channel closed — runtime is shutting down.
+                // Treat as ungraceful disconnect.
+                self.transition(SessionState::Closed);
+                LoopAction::Break
+            }
+        }
+    }
+
+    /// Handle a capability revocation broadcast result (RFC 0001 §3.3, GAP-G3-4).
+    ///
+    /// The runtime can narrow an active lease's capability scope without
+    /// revoking the lease itself. The session handler applies the change
+    /// to the scene graph and notifies the agent with CapabilityNotice
+    /// + LeaseStateChange (both transactional — never dropped).
+    async fn on_capability_revocation(
+        &mut self,
+        revocation_result: Result<
+            CapabilityRevocationEvent,
+            tokio::sync::broadcast::error::RecvError,
+        >,
+        state: &Arc<Mutex<SharedState>>,
+        tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+    ) -> LoopAction {
+        match revocation_result {
+            Ok(event) => {
+                // Only this session's leases are affected.
+                let global_media_ingress_revoke =
+                    event.capability_name == "media_ingress" && event.lease_id.is_null();
+                if global_media_ingress_revoke || self.lease_ids.contains(&event.lease_id) {
+                    handle_capability_revocation(state, self, tx, event).await;
+                }
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                // Missed revocation events. Log and continue; the capability
+                // scope may be stale for those dropped events.
+                // In production: emit a metric and re-query the live scope.
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // Runtime shutting down — treat as ungraceful disconnect.
+                self.transition(SessionState::Closed);
+                LoopAction::Break
+            }
+        }
+    }
+
+    /// Handle a runtime-injected input `EventBatch` broadcast result (hud-i6yd.6).
+    ///
+    /// The compositor input pipeline assembles ClickEvent / CommandInputEvent batches
+    /// for the owning agent. Only batches addressed to this session's namespace are
+    /// forwarded; others are silently discarded. Delivery is gated on subscription.
+    async fn on_input_event(
+        &mut self,
+        input_event_result: Result<
+            (String, crate::proto::EventBatch),
+            tokio::sync::broadcast::error::RecvError,
+        >,
+        tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+    ) -> LoopAction {
+        match input_event_result {
+            Ok((target_namespace, batch)) => {
+                // Namespace filter: only deliver to the owning session.
+                if target_namespace == self.namespace {
+                    // Subscription filter: gate on INPUT_EVENTS / FOCUS_EVENTS.
+                    if let Some(filtered) =
+                        crate::subscriptions::filter_event_batch(batch, &self.subscriptions)
+                    {
+                        let seq = self.next_server_seq();
+                        let _ = tx
+                            .send(Ok(ServerMessage {
+                                sequence: seq,
+                                timestamp_wall_us: now_wall_us(),
+                                payload: Some(ServerPayload::EventBatch(filtered)),
+                            }))
+                            .await;
+                    }
+                }
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                // Missed input events under backpressure. Transactional
+                // events (ClickEvent, CommandInputEvent) must not be
+                // dropped; in production this should emit a metric/alert.
+                // For v1 we continue silently — the session remains open.
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // Runtime shutting down — treat as ungraceful disconnect.
+                self.transition(SessionState::Closed);
+                LoopAction::Break
+            }
+        }
+    }
+
+    /// Handle an `ElementRepositionedEvent` broadcast result (hud-bs2q.6).
+    ///
+    /// Emitted after drag completion or reset-to-default. Delivered to
+    /// agents subscribed to SCENE_TOPOLOGY (requires read_scene_topology).
+    /// Transactional — never coalesced or dropped. Agent cannot reject.
+    async fn on_element_repositioned(
+        &mut self,
+        element_repositioned_result: Result<
+            crate::proto::ElementRepositionedEvent,
+            tokio::sync::broadcast::error::RecvError,
+        >,
+        tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+    ) -> LoopAction {
+        match element_repositioned_result {
+            Ok(event) => {
+                // Gate on SCENE_TOPOLOGY subscription.
+                if self
+                    .subscriptions
+                    .contains(&crate::subscriptions::category::SCENE_TOPOLOGY.to_string())
+                {
+                    let seq = self.next_server_seq();
+                    let _ = tx
+                        .send(Ok(ServerMessage {
+                            sequence: seq,
+                            timestamp_wall_us: now_wall_us(),
+                            payload: Some(ServerPayload::ElementRepositioned(event)),
+                        }))
+                        .await;
+                }
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                // Missed notifications. Log and continue — the element
+                // store state is persistent so a future snapshot or
+                // ListElementsRequest will reflect the current position.
+                let _ = n; // suppress unused warning; production: tracing::warn!
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // Runtime shutting down — treat as ungraceful disconnect.
+                self.transition(SessionState::Closed);
+                LoopAction::Break
+            }
+        }
+    }
 }
 
 /// Maximum future schedule horizon in microseconds (RFC 0003 §3.5, default 5 minutes).
