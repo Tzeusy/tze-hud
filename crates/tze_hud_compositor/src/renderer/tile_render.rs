@@ -36,7 +36,7 @@ use crate::pipeline::{RectVertex, rect_vertices};
 
 use super::Compositor;
 use super::draw_cmds::{TexturedDrawCmd, compute_fit_mode};
-use super::image_cache::composer_display_text;
+use super::image_cache::{caret_visible_at, composer_display_text_blink};
 use super::token_colors::{
     ComposerOverlayTokens, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE, TILE_BG_TEXT_MARKDOWN,
     linear_to_srgb, resolve_tile_bg_token,
@@ -318,9 +318,18 @@ impl Compositor {
             return None;
         }
 
-        // Insert the caret glyph at the cursor byte offset.
-        // composer_display_text handles OOB and non-char-boundary offsets safely.
-        let display_text = composer_display_text(&cs.text, cs.cursor_byte);
+        // Insert the caret glyph at the cursor byte offset, gated by the blink
+        // phase.  composer_display_text_blink handles OOB and non-char-boundary
+        // offsets safely.  The blink phase is derived from the runtime's own
+        // clock (compositor thread) — the model never sits in this loop.
+        //
+        // While a selection is active the caret marks the moving selection edge,
+        // so it stays solid (no blink); the selection-offset math below relies on
+        // the caret glyph being present.
+        let has_selection = cs.selection_anchor != cs.cursor_byte;
+        let caret_visible =
+            has_selection || caret_visible_at(self.composer_caret_blink_start.elapsed());
+        let display_text = composer_display_text_blink(&cs.text, cs.cursor_byte, caret_visible);
 
         let strip_h = (tokens.font_size_px * 1.6).max(20.0);
         let strip_y = (tile.bounds.y + tile.bounds.height - strip_h).max(tile.bounds.y);
