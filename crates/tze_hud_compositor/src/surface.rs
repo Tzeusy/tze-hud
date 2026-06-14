@@ -850,8 +850,8 @@ mod tests {
     // "Surface Texture has been destroyed" condition; the test asserts it never
     // happens, across many concurrent cycles.
 
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// A modelled swapchain image: `alive` is cleared when "presented"/destroyed.
     struct FakeTexture {
@@ -919,7 +919,9 @@ mod tests {
             let view_alive = {
                 let mut slot = self.slot.lock().expect("slot poisoned");
                 slot.encoding = true;
-                let alive = match slot.pending.as_ref() {
+                // Lock released at the end of this block (mirrors finish_frame's
+                // drop(slot) before building the guard).
+                match slot.pending.as_ref() {
                     Some(t) => t.alive.clone(),
                     None => {
                         let alive = Arc::new(AtomicBool::new(true));
@@ -928,10 +930,7 @@ mod tests {
                         });
                         alive
                     }
-                };
-                // Lock released here (mirrors finish_frame's drop(slot) before
-                // building the guard).
-                alive
+                }
             };
             TestGuard {
                 slot: self.slot.clone(),
