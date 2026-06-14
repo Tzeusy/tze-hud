@@ -3137,9 +3137,8 @@ async fn test_freeze_retransmit_deduped_applied_exactly_once() {
     handle_mutation_batch(&state, &mut session, &outbound_tx, original_batch).await;
 
     // Queue must hold exactly one entry.
-    assert_eq!(
-        session.freeze_queue.is_empty(),
-        false,
+    assert!(
+        !session.freeze_queue.is_empty(),
         "Precondition: first batch must have been enqueued"
     );
 
