@@ -122,6 +122,18 @@ impl TruncationKey {
             },
         }
     }
+
+    /// BLAKE3 content hash of the text this key truncates.
+    ///
+    /// Two keys with the same `content_hash` but different geometry/font fields
+    /// truncate the *same* string for *different* bounds.  The render path uses
+    /// this to find a nearest stale entry for the same content when the exact
+    /// (content + geometry) entry has not been primed yet (cadence-deferred
+    /// frame) — see [`TruncationCache::get_stale_by_content`].
+    #[inline]
+    pub(crate) fn content_hash(&self) -> [u8; 32] {
+        self.content_hash
+    }
 }
 
 /// Content-addressed cache of [`TruncationResult`] values.
@@ -136,9 +148,32 @@ impl TruncationKey {
 /// changes — never on every frame.
 ///
 /// Mirrors [`crate::markdown::MarkdownCache`] in structure and ownership model.
+///
+/// # Stale-by-content fallback (hud-n3mq0)
+///
+/// The exact-key entries above are only ever populated by [`prime`], which runs
+/// off the render path (commit-time / cadence-gated geometry change).  During a
+/// fast resize drag the adaptive cadence gate *defers* re-priming, so the
+/// render path can see a cache miss for the newest geometry's key.  Rather than
+/// shaping inline on the frame loop (the exact O(n) cost the cache exists to
+/// avoid — see RFC 0013 §3.4 doctrine "the runtime must never block on
+/// per-frame shaping"), the render path falls back to the most-recently-primed
+/// truncation for the *same content* at slightly-old geometry.  That stale
+/// result is still a VALID truncation (no partial-glyph rows, ellipsis intact),
+/// just computed for bounds that are one cadence tick behind.  The deferred
+/// off-path prime fills the correct entry for a subsequent frame.
+///
+/// `by_content` indexes `content_hash → most-recently-primed TruncationKey` to
+/// make that nearest-stale lookup O(1) on the render path.
+///
+/// [`prime`]: TruncationCache::prime
 #[derive(Default)]
 pub(crate) struct TruncationCache {
     entries: HashMap<TruncationKey, TruncationResult>,
+    /// Maps `content_hash` → the most-recently-primed [`TruncationKey`] for that
+    /// content.  Used by [`TruncationCache::get_stale_by_content`] to serve a
+    /// nearest-geometry truncation on a cadence-deferred render-path miss.
+    by_content: HashMap<[u8; 32], TruncationKey>,
 }
 
 impl TruncationCache {
@@ -166,6 +201,23 @@ impl TruncationCache {
     /// and call [`TruncationCache::get_by_key`].
     #[inline]
     pub(crate) fn get_by_key(&self, key: &TruncationKey) -> Option<&TruncationResult> {
+        self.entries.get(key)
+    }
+
+    /// Render-path fallback: return the most-recently-primed truncation for the
+    /// **same content** at slightly-old geometry, when the exact-geometry key is
+    /// not yet primed (a cadence-deferred frame — hud-n3mq0).
+    ///
+    /// O(1): one `content_hash` index lookup plus one entries lookup.  Does **no**
+    /// shaping — it never calls [`overflow::truncate_for_ellipsis`].  The returned
+    /// result is a valid truncation (no partial-glyph rows, ellipsis intact) for
+    /// the previous geometry; the deferred off-path prime fills the correct
+    /// entry for a subsequent frame.  Returns `None` only when this content has
+    /// never been primed at any geometry (true cold start), in which case the
+    /// caller renders the untruncated text clipped to bounds by the glyph buffer.
+    #[inline]
+    pub(crate) fn get_stale_by_content(&self, content_hash: &[u8; 32]) -> Option<&TruncationResult> {
+        let key = self.by_content.get(content_hash)?;
         self.entries.get(key)
     }
 
@@ -203,6 +255,11 @@ impl TruncationCache {
         line_height_multiplier: f32,
         font_system: &mut FontSystem,
     ) -> &'a TruncationResult {
+        // Track the most-recently-primed key for this content so a later
+        // cadence-deferred render-path miss can fall back to the nearest
+        // geometry's truncation instead of shaping inline (hud-n3mq0).  Updated
+        // on every prime call (hit or miss) so the freshest geometry wins.
+        self.by_content.insert(key.content_hash(), key);
         self.entries.entry(key).or_insert_with(|| {
             let family = match font_family {
                 FontFamily::SystemSansSerif => Family::SansSerif,
@@ -244,12 +301,17 @@ impl TruncationCache {
     pub(crate) fn evict_except(&mut self, live_keys: &[TruncationKey]) {
         let keep: HashSet<TruncationKey> = live_keys.iter().copied().collect();
         self.entries.retain(|k, _| keep.contains(k));
+        // Keep the stale-by-content index bounded to surviving entries so it
+        // never points at an evicted key (which would make get_stale_by_content
+        // return None despite a live entry existing for that content).
+        self.by_content.retain(|_, k| keep.contains(k));
     }
 
     /// Drop all cached entries.  Used when token map changes and font metrics
     /// may shift (font fallback / substitution may change after `set_token_map`).
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.by_content.clear();
     }
 }
 
@@ -491,56 +553,37 @@ impl TextRasterizer {
         // On a warm path (after at least one commit), a cache hit is one BLAKE3
         // hash to reconstruct the key plus one HashMap lookup — zero shaping work.
         //
-        // On a cache miss (e.g. very first frame before any commit, or a newly
-        // added item whose geometry was not yet in the cache), we fall back to
-        // calling `truncate_for_ellipsis` inline to avoid dropped glyphs.  This
-        // fallback also populates the cache so the next frame is free.
+        // The render path NEVER shapes inline (hud-n3mq0).  Truncation is an O(n)
+        // operation and the cache exists precisely to keep it off the frame loop.
+        // On a cache miss we resolve in priority order, all O(1) and shaping-free:
+        //
+        //   1. Exact-geometry hit (warm steady state) — the correct truncation.
+        //   2. Stale-by-content hit (cadence-deferred frame): the most-recently-
+        //      primed truncation for the SAME content at slightly-old geometry.
+        //      Still a valid truncation (no torn glyphs, ellipsis intact), just
+        //      one cadence tick behind.  The deferred off-path prime
+        //      (`Compositor::prime_truncation_cache`) fills the correct entry for
+        //      a subsequent frame — graceful degradation, not a bug (RFC 0013
+        //      §3.4 doctrine: arrival ≠ presentation; never block the frame loop).
+        //   3. True cold start (this content never primed at ANY geometry):
+        //      `None` → the buffer below renders `item.text` clipped to bounds by
+        //      `set_size`, which glyphon clips without partial-glyph rows.
         //
         // For Clip items the entry is `None` (use `item.text` directly).
         // For Ellipsis items the entry is `Some(truncated_text_string)`.
-        //
-        // Two-pass structure: we first build all keys and prime any misses
-        // (requiring &mut self.truncation_cache + &mut self.font_system), then
-        // do the final HashMap lookup pass.  This avoids interleaving mutable
-        // and immutable borrows of the same struct fields inside a single closure.
         let keys: Vec<Option<TruncationKey>> = items.iter().map(effective_truncation_key).collect();
 
-        // Pass 1: prime any cache misses.  Misses are uncommon (first frame or
-        // newly-added items); hits are no-ops via `entry().or_insert_with`.
-        for (item, key_opt) in items.iter().zip(keys.iter()) {
-            if let Some(key) = key_opt {
-                // (hud-so7zu) Re-derive effective measurement attrs for the prime call.
-                let (meas_weight, meas_mono) =
-                    styled_runs_effective_measurement(&item.styled_runs, item.font_weight);
-                let meas_family = if meas_mono {
-                    FontFamily::SystemMonospace
-                } else {
-                    item.font_family
-                };
-                self.truncation_cache.prime(
-                    *key,
-                    &item.text,
-                    item.bounds_width,
-                    item.bounds_height,
-                    item.font_size_px,
-                    meas_family,
-                    meas_weight,
-                    item.viewport,
-                    item.line_height_multiplier,
-                    &mut self.font_system,
-                );
-            }
-        }
-
-        // Pass 2: collect final truncated strings.  All Ellipsis entries are now
-        // in the cache; `get_by_key` will not return None for any Ellipsis item.
         let truncated_texts: Vec<Option<String>> = keys
             .iter()
             .map(|key_opt| {
-                key_opt
-                    .as_ref()
-                    .and_then(|k| self.truncation_cache.get_by_key(k))
-                    .map(|r| r.text.clone())
+                let key = key_opt.as_ref()?;
+                // Exact geometry first; otherwise the nearest stale truncation for
+                // this content.  Neither call shapes; both are O(1) lookups.
+                let result = self
+                    .truncation_cache
+                    .get_by_key(key)
+                    .or_else(|| self.truncation_cache.get_stale_by_content(&key.content_hash()));
+                result.map(|r| r.text.clone())
             })
             .collect();
 
@@ -3436,6 +3479,233 @@ mod tests {
         assert!(
             cache.get_by_key(&key).is_none(),
             "cache must be empty before prime"
+        );
+    }
+
+    /// hud-n3mq0: a cadence-deferred render-path miss for new geometry must be
+    /// served by `get_stale_by_content` (the previous geometry's valid
+    /// truncation) — NEVER by an inline shape on the frame loop.
+    ///
+    /// This mirrors what `prepare_text_items` now does on a cache miss: it
+    /// resolves `get_by_key(...).or_else(get_stale_by_content(content_hash))`
+    /// and never calls `prime` (the inline shaper) on the render path.  We
+    /// assert the stale path returns a previously-primed result while the cache
+    /// length is unchanged — proving no shaping occurred for the new geometry.
+    #[test]
+    fn truncation_stale_by_content_serves_deferred_geometry_miss() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        let content = "A streaming transcript line long enough to require ellipsis truncation";
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+        let font_size = 14.0_f32;
+
+        // Commit-time prime at geometry G0 (width 120).
+        let key_g0 = TruncationKey::new(
+            content,
+            120.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
+        let g0_result = cache
+            .prime(
+                key_g0,
+                content,
+                120.0,
+                30.0,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+                1.4,
+                &mut fs,
+            )
+            .clone();
+        assert_eq!(cache.len(), 1);
+
+        // A resize drag bumps geometry to G1 (width 90), but the adaptive
+        // cadence gate DEFERS the off-path re-prime, so G1's key was never
+        // primed.  The render path sees an exact-key miss.
+        let key_g1 = TruncationKey::new(
+            content,
+            90.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
+        assert!(
+            cache.get_by_key(&key_g1).is_none(),
+            "deferred frame: exact-geometry key must be a miss"
+        );
+
+        // Render-path resolution (no inline shaping): fall back to the nearest
+        // stale truncation for the SAME content.
+        let resolved = cache
+            .get_by_key(&key_g1)
+            .or_else(|| cache.get_stale_by_content(&key_g1.content_hash()))
+            .cloned();
+        assert_eq!(
+            resolved.as_ref(),
+            Some(&g0_result),
+            "deferred miss must reuse the previous geometry's valid truncation"
+        );
+
+        // Critical: the cache MUST NOT have grown — no entry was shaped/inserted
+        // for G1 on the render path.  The deferred off-path prime fills it later.
+        assert_eq!(
+            cache.len(),
+            1,
+            "render-path stale fallback must not shape or insert a new entry"
+        );
+    }
+
+    /// hud-n3mq0: the stale-by-content index tracks the *most recent* primed
+    /// geometry, so the freshest available truncation is reused on a later miss.
+    #[test]
+    fn truncation_stale_by_content_tracks_latest_primed_geometry() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        let content = "Another long transcript line that overflows narrow tiles and truncates";
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+        let font_size = 14.0_f32;
+
+        let prime_at = |cache: &mut TruncationCache, fs: &mut FontSystem, w: f32| {
+            let key = TruncationKey::new(
+                content,
+                w,
+                30.0,
+                font_size,
+                family,
+                weight,
+                TruncationViewport::HeadAnchored,
+            );
+            cache
+                .prime(
+                    key,
+                    content,
+                    w,
+                    30.0,
+                    font_size,
+                    family,
+                    weight,
+                    TruncationViewport::HeadAnchored,
+                    1.4,
+                    fs,
+                )
+                .clone()
+        };
+
+        prime_at(&mut cache, &mut fs, 200.0);
+        let latest = prime_at(&mut cache, &mut fs, 80.0);
+
+        // A miss at an un-primed geometry must reuse the LATEST primed result.
+        let hash = TruncationKey::new(
+            content,
+            55.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        )
+        .content_hash();
+        assert_eq!(
+            cache.get_stale_by_content(&hash),
+            Some(&latest),
+            "stale fallback must serve the most-recently-primed geometry"
+        );
+    }
+
+    /// hud-n3mq0: cold start (content never primed at any geometry) returns
+    /// `None` — the render path then renders untruncated-clipped text, still
+    /// shaping nothing on the truncation path.
+    #[test]
+    fn truncation_stale_by_content_cold_start_is_none() {
+        let cache = TruncationCache::new();
+        let hash = *blake3::hash(b"never primed").as_bytes();
+        assert!(
+            cache.get_stale_by_content(&hash).is_none(),
+            "cold start: no stale entry exists for unprimed content"
+        );
+    }
+
+    /// hud-n3mq0: `evict_except` must keep `by_content` consistent — a content
+    /// hash whose only entries were evicted must no longer resolve via the
+    /// stale fallback (no dangling key pointing at an evicted entry).
+    #[test]
+    fn truncation_stale_index_pruned_on_evict() {
+        let mut fs = FontSystem::new();
+        let mut cache = TruncationCache::new();
+
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+        let font_size = 14.0_f32;
+
+        let content_keep = "Keep me visible in the scene";
+        let content_gone = "This content left the scene entirely";
+
+        let key_keep = TruncationKey::new(
+            content_keep,
+            120.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
+        let key_gone = TruncationKey::new(
+            content_gone,
+            120.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+        );
+
+        cache.prime(
+            key_keep,
+            content_keep,
+            120.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+            1.4,
+            &mut fs,
+        );
+        cache.prime(
+            key_gone,
+            content_gone,
+            120.0,
+            30.0,
+            font_size,
+            family,
+            weight,
+            TruncationViewport::HeadAnchored,
+            1.4,
+            &mut fs,
+        );
+
+        // Evict everything except the surviving content.
+        cache.evict_except(&[key_keep]);
+
+        assert!(
+            cache.get_stale_by_content(&key_keep.content_hash()).is_some(),
+            "surviving content must still resolve via stale fallback"
+        );
+        assert!(
+            cache.get_stale_by_content(&key_gone.content_hash()).is_none(),
+            "evicted content must not resolve via a dangling stale index entry"
         );
     }
 
