@@ -66,7 +66,36 @@ WINDOWS_HEADLESS_BUDGETS = (
     ),
 )
 
-ZERO_COUNTERS = ("lease_violations", "budget_overruns", "sync_drift_violations")
+# Correctness / contention counters whose committed baseline is zero.
+#
+# Each entry is a session-summary counter that MUST stay at its baseline value
+# (0) for the gate to pass. Because the gate runs on every `windows-performance-
+# budget` CI run and compares the current artifact against this checked-in
+# baseline, any regression that pushes a counter above its baseline surfaces as
+# a CI failure — this is the cross-run trend/regression surface for these
+# counters (validation.md §5.6: "surface trends, not just pass/fail").
+#
+# `scene_lock_misses` is the cumulative compositor frame-loop `try_lock` miss
+# count (scene-lock contention between the frame loop and concurrent gRPC/MCP
+# scene-mutation handlers). `invariant_violations` is the session aggregate of
+# per-frame scene-commit rejections. Both are expected to be exactly zero on the
+# synthetic headless benchmark; a non-zero value is a real regression.
+#
+# To raise a baseline (only with data justifying it), move the counter out of
+# ZERO_COUNTERS into BASELINE_COUNTERS with its documented ceiling, and record
+# the rationale in about/craft-and-care/engineering-bar.md.
+ZERO_COUNTERS = (
+    "lease_violations",
+    "budget_overruns",
+    "sync_drift_violations",
+    "invariant_violations",
+    "scene_lock_misses",
+)
+
+# Counters with a non-zero committed ceiling (baseline + documented margin).
+# `name -> ceiling`. A counter is a regression iff observed > ceiling. Empty
+# today; populate only with data-justified ceilings (see ZERO_COUNTERS note).
+BASELINE_COUNTERS: dict[str, int] = {}
 
 
 def nearest_rank(values: list[int], percentile: float) -> int:
@@ -210,6 +239,24 @@ def validate_benchmark(artifact: dict[str, Any]) -> tuple[list[dict[str, Any]], 
             )
             if not passed:
                 failures.append(f"{session_name}.{counter}: expected 0, observed {observed!r}")
+
+        for counter, ceiling in BASELINE_COUNTERS.items():
+            observed = summary.get(counter)
+            passed = isinstance(observed, int) and not isinstance(observed, bool) and observed <= ceiling
+            results.append(
+                {
+                    "session": session_name,
+                    "metric": counter,
+                    "observed": observed,
+                    "budget": ceiling,
+                    "pass": passed,
+                }
+            )
+            if not passed:
+                failures.append(
+                    f"{session_name}.{counter}: observed {observed!r} exceeds "
+                    f"committed baseline ceiling {ceiling}"
+                )
 
     return results, failures
 
