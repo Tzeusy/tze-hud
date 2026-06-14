@@ -32,7 +32,7 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 - [x] 4.3 Coalesce resumed appends under the existing state-stream cadence rules (coalesce-key in-place path is reconnect-agnostic; exercised under the 1/window rate limit in the §4.2 coalesce test)
 - [x] 4.4 Materialize only the bounded visible window (no scene-graph history reconstruction) (locked by `reconnect_materializes_only_bounded_visible_window`)
 - [x] 4.5 Preserve non-terminal pending input/ack state across reconnect (`mark_hud_disconnected` does not touch `pending_input`; locked by `reconnect_preserves_transcript_inbox_ack_state_and_requires_new_lease`)
-- [ ] 4.6 Start a fresh portal on attach after grace expiry (no silent revival of stale content) — lease-orphan/grace path, outside the projection authority; tracked by hud-0q1dh (`degraded portal surface removed via lease orphan grace`)
+- [x] 4.6 Start a fresh portal on attach after grace expiry (no silent revival of stale content) — fix + test in hud-pk9pz: gate `InProcessPortalDriver::ensure_driver_lease` reuse on the new scene-layer `SceneGraph::lease_is_active` predicate (active-state, not mere map presence) so a post-grace re-attach grants a FRESH lease and creates a FRESH tile instead of reusing the resident-but-Expired lease (which made `create_tile` fail `require_active_lease` and silently yield no portal). No new timer — grace still lives on the lease orphan path (cf. hud-0q1dh/#883)
 - [x] 4.7 Respect redaction at every frame of the stale-to-live transition (locked by `stale_to_live_transition_respects_redaction_every_frame`)
 
 ## 5. Evidence
