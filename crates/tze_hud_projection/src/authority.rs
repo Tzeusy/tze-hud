@@ -1468,7 +1468,7 @@ impl Default for ProjectionAuthority {
     }
 }
 
-pub(super) fn route_plan_for_request(
+pub(crate) fn route_plan_for_request(
     request: &ManagedSessionRequest,
     target: &WindowsHudTarget,
 ) -> ManagedSessionRoutePlan {
