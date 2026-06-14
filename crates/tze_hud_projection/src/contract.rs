@@ -1208,7 +1208,7 @@ pub(super) fn validate_owner_token(owner_token: &str) -> Result<(), ProjectionCo
     )
 }
 
-pub(super) fn validate_non_empty_bounded(
+pub(crate) fn validate_non_empty_bounded(
     field: &str,
     value: &str,
     max_bytes: usize,
@@ -1226,7 +1226,7 @@ pub(super) fn validate_non_empty_bounded(
     Ok(())
 }
 
-pub(super) fn validate_optional_bounded(
+pub(crate) fn validate_optional_bounded(
     field: &str,
     value: &Option<String>,
     max_bytes: usize,
@@ -1237,7 +1237,7 @@ pub(super) fn validate_optional_bounded(
     Ok(())
 }
 
-pub(super) fn validate_non_zero(field: &str, value: u64) -> Result<(), ProjectionContractError> {
+pub(crate) fn validate_non_zero(field: &str, value: u64) -> Result<(), ProjectionContractError> {
     if value == 0 {
         return Err(ProjectionContractError::InvalidArgument(format!(
             "{field} must be non-zero"
