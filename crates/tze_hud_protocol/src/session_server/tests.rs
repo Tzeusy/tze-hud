@@ -2973,9 +2973,8 @@ async fn test_fifo_preserved_when_mutation_arrives_during_drain_window() {
         ..Default::default()
     };
     freeze_queue.enqueue(pre_queued_batch, "test-ns");
-    assert_eq!(
-        freeze_queue.is_empty(),
-        false,
+    assert!(
+        !freeze_queue.is_empty(),
         "Precondition: queue must be non-empty before the race window test"
     );
 
