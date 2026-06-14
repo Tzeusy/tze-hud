@@ -2057,6 +2057,13 @@ impl ApplicationHandler for WinitApp {
                 // telemetry.  Plain u64 — accessed only on this thread; no atomics
                 // needed on the success path.
                 let mut scene_lock_miss_count: u64 = 0;
+                // hud-pi5wx present-stall watchdog: surfaces sustained Stage-4
+                // scene try_lock starvation (a handler holding the scene lock) vs a
+                // healthy present path. Reset on every successful commit+present below.
+                let mut consecutive_misses: u64 = 0;
+                let mut last_present_at = std::time::Instant::now();
+                let mut watchdog_logged = false;
+                crate::diag::diag_write("compositor thread: frame loop STARTED");
 
                 tracing::info!(
                     "compositor thread: starting frame loop at {}fps",
@@ -2188,6 +2195,15 @@ impl ApplicationHandler for WinitApp {
                         // FrameReadySignal, and only the main thread SHALL call
                         // surface.present()."
                         let _ = frame_ready_tx.send(true);
+                        // hud-pi5wx: successful commit+present — reset the stall watchdog.
+                        if watchdog_logged {
+                            crate::diag::diag_write(&format!(
+                                "PRESENT-WATCHDOG: RECOVERED after {consecutive_misses} consecutive misses"
+                            ));
+                        }
+                        consecutive_misses = 0;
+                        last_present_at = std::time::Instant::now();
+                        watchdog_logged = false;
 
                         // Telemetry emit (Stage 8)
                         let mut telem = tze_hud_telemetry::FrameTelemetry::new(
@@ -2260,6 +2276,20 @@ impl ApplicationHandler for WinitApp {
                         // (hud-3qpgv.2).  This branch has zero cost on the
                         // success path.
                         scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
+                        // hud-pi5wx: sustained Stage-4 misses => a handler is holding
+                        // the scene lock and never releasing it (HB-1 lock starvation).
+                        consecutive_misses = consecutive_misses.saturating_add(1);
+                        if consecutive_misses >= 120
+                            && (!watchdog_logged || consecutive_misses % 600 == 0)
+                        {
+                            let stalled_ms = last_present_at.elapsed().as_millis();
+                            crate::diag::diag_write(&format!(
+                                "PRESENT-WATCHDOG: scene try_lock missed {consecutive_misses} \
+                                 consecutive frames, {stalled_ms}ms since last present — \
+                                 HB-1 lock-starvation candidate (a gRPC/MCP handler holds the scene lock)"
+                            ));
+                            watchdog_logged = true;
+                        }
                     }
 
                     // Frame rate control.
@@ -2270,6 +2300,9 @@ impl ApplicationHandler for WinitApp {
                 }
 
                 tracing::info!("compositor thread: frame loop exited");
+                crate::diag::diag_write(
+                    "compositor thread: frame loop EXITED — no more frames will present (HB-2)",
+                );
             },
         );
 

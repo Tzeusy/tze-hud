@@ -369,15 +369,34 @@ impl Compositor {
         }
 
         let submit_start = std::time::Instant::now();
-        self.queue.submit(std::iter::once(encoder.finish()));
-
-        // present() is surface-specific: no-op for headless, swap-chain flip for windowed.
-        // Drop frame guard AFTER present() so the backing resource stays alive.
-        surface.present();
+        let cmd = encoder.finish();
+        // hud-pi5wx Layer-1 resilience: a swapchain reconfigure (e.g. a resize) can
+        // destroy the surface texture between acquire_frame() and queue.submit(), so
+        // submit raises a wgpu validation error ("<Surface Texture> has been
+        // destroyed") whose default uncaptured-error handler PANICS. On the compositor
+        // thread that panic would kill the thread and freeze the whole HUD permanently
+        // (FrameReadySignal never fires again). Contain it here so the thread survives;
+        // the next acquire_frame() reacquires/reconfigures the surface. The underlying
+        // acquire->submit-vs-reconfigure race is the separate Layer-2 fix.
+        let present_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.queue.submit(std::iter::once(cmd));
+            // present(): no-op for headless, swap-chain flip for windowed. `frame`
+            // (the surface-texture guard) is still alive here; dropped just below.
+            surface.present();
+            self.device.poll(wgpu::Maintain::Wait);
+        }));
         drop(frame);
-
-        self.device.poll(wgpu::Maintain::Wait);
         telemetry.stage7_gpu_submit_us = submit_start.elapsed().as_micros() as u64;
+
+        if present_result.is_err() {
+            tracing::error!(
+                "compositor: queue.submit/present panicked (surface texture likely \
+                 destroyed mid-frame) — frame skipped, compositor thread preserved \
+                 (hud-pi5wx)"
+            );
+            telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
+            return telemetry;
+        }
 
         // Evict terminal video surface entries periodically to prevent unbounded growth.
         self.maybe_prune_terminal_video_surfaces();

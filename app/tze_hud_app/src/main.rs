@@ -487,6 +487,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .init();
     }
 
+    // hud-pi5wx: file-based panic hook so a silent compositor/render-thread panic
+    // leaves a durable trail — the overlay deployment captures no stdout/stderr.
+    tze_hud_runtime::diag::install_panic_hook();
+
     // Collect CLI args, skipping argv[0] (the binary name).
     let args: Vec<String> = std::env::args().skip(1).collect();
 
