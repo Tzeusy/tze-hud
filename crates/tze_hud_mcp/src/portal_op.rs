@@ -88,4 +88,111 @@ pub enum PortalOp {
         /// description on validation / auth failure.
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    /// Drain HUD-originated pending input for an existing projection session.
+    ///
+    /// This is the LLM-facing poll: the owning session asks the authority for
+    /// any operator input that arrived from the projected portal. Items are
+    /// transitioned to `Delivered` by the authority and must subsequently be
+    /// acknowledged with [`PortalOp::AcknowledgeInput`].
+    GetPendingInput {
+        /// Projection identifier matching a prior successful `Attach`.
+        projection_id: String,
+        /// Owner token returned by the `Attach` response.
+        owner_token: String,
+        /// Optional cap on the number of items returned. The authority clamps
+        /// this to its configured `max_poll_items`. `None` uses the authority
+        /// default.
+        max_items: Option<usize>,
+        /// Optional cap on the total response byte budget. The authority clamps
+        /// this to its configured `max_poll_response_bytes`. `None` uses the
+        /// authority default.
+        max_bytes: Option<usize>,
+        /// One-shot response channel. On success the authority returns a
+        /// [`PendingInputBatch`] (the delivered items plus remaining-count /
+        /// remaining-bytes back-pressure hints). On failure, an error
+        /// description (invalid / expired token, validation error, etc.).
+        reply: tokio::sync::oneshot::Sender<Result<PendingInputBatch, String>>,
+    },
+    /// Acknowledge a previously delivered input item for a projection session.
+    ///
+    /// The owning session reports the terminal disposition of an input item
+    /// (`handled`, `rejected`) or defers it (`deferred`, optionally with a
+    /// `not_before_wall_us` re-delivery floor). Terminal acknowledgement is
+    /// idempotent for replay safety; a conflicting terminal ack is rejected.
+    AcknowledgeInput {
+        /// Projection identifier matching a prior successful `Attach`.
+        projection_id: String,
+        /// Owner token returned by the `Attach` response.
+        owner_token: String,
+        /// Identifier of the input item being acknowledged (from a prior
+        /// `GetPendingInput` response).
+        input_id: String,
+        /// Acknowledgement state as a snake_case string (`handled`,
+        /// `deferred`, `rejected`). The runtime parses this into
+        /// `InputAckState`; an unrecognized value is rejected.
+        ack_state: String,
+        /// Optional human-readable message recorded with the acknowledgement.
+        ack_message: Option<String>,
+        /// Optional re-delivery floor (wall-clock µs). Valid only when
+        /// `ack_state` is `deferred`; the authority rejects it otherwise.
+        not_before_wall_us: Option<u64>,
+        /// One-shot response channel: `Ok(())` on success or an error
+        /// description on validation / auth / conflict failure.
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    /// Detach a projection session, purging its private state.
+    ///
+    /// Tears down the projection: the authority removes the session and its
+    /// coalescer entry, and the driver drops the drive entry / tile mapping.
+    /// After detach the `projection_id` is free to be re-attached.
+    Detach {
+        /// Projection identifier matching a prior successful `Attach`.
+        projection_id: String,
+        /// Owner token returned by the `Attach` response.
+        owner_token: String,
+        /// Human-readable reason recorded in the audit log.
+        reason: String,
+        /// One-shot response channel: `Ok(())` on success or an error
+        /// description on validation / auth failure.
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+}
+
+/// A single HUD-originated input item returned by [`PortalOp::GetPendingInput`].
+///
+/// This is the transport-layer mirror of the projection authority's
+/// `PendingInputItem`. The runtime driver maps the authority type into this
+/// dependency-free shape (this module must not depend on `tze_hud_projection`,
+/// see the module doc). The MCP tool serializes it verbatim into the JSON-RPC
+/// response.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingInputEntry {
+    /// Stable identifier of this input item, used to acknowledge it later.
+    pub input_id: String,
+    /// Projection identifier this input was submitted to.
+    pub projection_id: String,
+    /// Operator-submitted text.
+    pub submission_text: String,
+    /// Wall-clock µs when the input was submitted from the HUD.
+    pub submitted_at_wall_us: u64,
+    /// Wall-clock µs when the input expires if not acknowledged.
+    pub expires_at_wall_us: u64,
+    /// Delivery state as a snake_case string (`delivered`, `deferred`, ...).
+    pub delivery_state: String,
+    /// Viewer-facing content classification as a snake_case string.
+    pub content_classification: String,
+}
+
+/// Result of a [`PortalOp::GetPendingInput`] drain.
+///
+/// Carries the delivered items plus back-pressure hints describing input that
+/// could not fit in this response's item / byte budget.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingInputBatch {
+    /// Items transitioned to `Delivered` and returned in this poll.
+    pub items: Vec<PendingInputEntry>,
+    /// Number of still-pending items that did not fit this response budget.
+    pub remaining_count: usize,
+    /// Total byte size of still-pending items that did not fit.
+    pub remaining_bytes: usize,
 }

@@ -1629,8 +1629,9 @@ struct WindowedRuntimeState {
     portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver,
     /// Receiver for [`PortalOp`] messages sent from the MCP HTTP task (hud-bq0gl.2).
     ///
-    /// The MCP async task sends `PortalOp::Attach` / `PortalOp::PublishOutput`
-    /// values through this channel.  The winit event-loop thread drains it via
+    /// The MCP async task sends the projection-lifecycle `PortalOp` values
+    /// (`Attach`, `PublishOutput`, `GetPendingInput`, `AcknowledgeInput`,
+    /// `Detach`) through this channel.  The winit event-loop thread drains it via
     /// `drain_portal_ops()` on each `about_to_wait` iteration, before the normal
     /// `drain_portal_projection()` call, so content published in the same
     /// event-loop tick is also coalesced by the cadence coalescer and materialised

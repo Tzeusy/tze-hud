@@ -51,10 +51,11 @@ use std::collections::HashMap;
 
 use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
 use tze_hud_input::InputProcessor;
-pub use tze_hud_mcp::portal_op::PortalOp;
+pub use tze_hud_mcp::portal_op::{PendingInputBatch, PendingInputEntry, PortalOp};
 use tze_hud_projection::{
-    AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest, ContentClassification,
-    OperationEnvelope, OutputKind, ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds,
+    AcknowledgeInputRequest, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
+    ContentClassification, DetachRequest, GetPendingInputRequest, InputAckState, OperationEnvelope,
+    OutputKind, PendingInputItem, ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds,
     ProjectionOperation, ProviderKind, PublishOutputRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
@@ -140,6 +141,45 @@ fn parse_content_classification(raw: Option<&str>) -> Result<ContentClassificati
                      public, household, private, sensitive"
                 )
             }),
+    }
+}
+
+/// Parse a snake_case `ack_state` string into [`InputAckState`].
+///
+/// Accepts exactly the wire spellings of `serde(rename_all = "snake_case")`
+/// (`handled`, `deferred`, `rejected`). Unlike the publish-output parsers there
+/// is no default: acknowledgement state is mandatory, so an empty or
+/// unrecognized value yields an `Err` describing the rejection, which the
+/// caller forwards to the requester.
+fn parse_ack_state(raw: &str) -> Result<InputAckState, String> {
+    serde_json::from_value(serde_json::Value::String(raw.to_string())).map_err(|_| {
+        format!("invalid ack_state {raw:?}: expected one of handled, deferred, rejected")
+    })
+}
+
+/// Map an authority [`PendingInputItem`] into the transport-layer
+/// [`PendingInputEntry`] returned through the portal-op reply channel.
+///
+/// The enum fields (`delivery_state`, `content_classification`) are converted to
+/// their snake_case wire spellings via serde so the MCP JSON-RPC response uses
+/// the same vocabulary as the rest of the projection contract. The serde
+/// round-trip cannot fail for these C-like enums; the `unwrap_or_else` fallback
+/// is purely defensive and never taken in practice.
+fn pending_input_entry_from_item(item: &PendingInputItem) -> PendingInputEntry {
+    PendingInputEntry {
+        input_id: item.input_id.clone(),
+        projection_id: item.projection_id.clone(),
+        submission_text: item.submission_text.clone(),
+        submitted_at_wall_us: item.submitted_at_wall_us,
+        expires_at_wall_us: item.expires_at_wall_us,
+        delivery_state: serde_json::to_value(item.delivery_state)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string()),
+        content_classification: serde_json::to_value(item.content_classification)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string()),
     }
 }
 
@@ -523,6 +563,165 @@ impl InProcessPortalDriver {
                     );
                     let _ = reply.send(Err(format!(
                         "publish_output denied: {}: {}",
+                        code, resp.status_summary
+                    )));
+                }
+            }
+
+            PortalOp::GetPendingInput {
+                projection_id,
+                owner_token,
+                max_items,
+                max_bytes,
+                reply,
+            } => {
+                let request_id = uuid::Uuid::now_v7().to_string();
+                let req = GetPendingInputRequest {
+                    envelope: OperationEnvelope {
+                        operation: ProjectionOperation::GetPendingInput,
+                        projection_id: projection_id.clone(),
+                        request_id,
+                        client_timestamp_wall_us: now_us.max(1),
+                    },
+                    owner_token,
+                    max_items,
+                    max_bytes,
+                };
+                let resp = self
+                    .authority
+                    .handle_get_pending_input(req, "mcp-portal", now_us);
+                if resp.accepted {
+                    let items = resp
+                        .pending_input
+                        .iter()
+                        .map(pending_input_entry_from_item)
+                        .collect();
+                    let batch = PendingInputBatch {
+                        items,
+                        remaining_count: resp.pending_remaining_count,
+                        remaining_bytes: resp.pending_remaining_bytes,
+                    };
+                    tracing::debug!(
+                        proj_id = %projection_id,
+                        delivered = resp.pending_input.len(),
+                        remaining = resp.pending_remaining_count,
+                        "portal_op: GetPendingInput accepted"
+                    );
+                    let _ = reply.send(Ok(batch));
+                } else {
+                    let code = resp
+                        .error_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    tracing::warn!(
+                        proj_id = %projection_id,
+                        error_code = %code,
+                        "portal_op: GetPendingInput denied"
+                    );
+                    let _ = reply.send(Err(format!(
+                        "get_pending_input denied: {}: {}",
+                        code, resp.status_summary
+                    )));
+                }
+            }
+
+            PortalOp::AcknowledgeInput {
+                projection_id,
+                owner_token,
+                input_id,
+                ack_state,
+                ack_message,
+                not_before_wall_us,
+                reply,
+            } => {
+                let ack_state = match parse_ack_state(&ack_state) {
+                    Ok(state) => state,
+                    Err(reason) => {
+                        let _ = reply.send(Err(reason));
+                        return;
+                    }
+                };
+                let request_id = uuid::Uuid::now_v7().to_string();
+                let req = AcknowledgeInputRequest {
+                    envelope: OperationEnvelope {
+                        operation: ProjectionOperation::AcknowledgeInput,
+                        projection_id: projection_id.clone(),
+                        request_id,
+                        client_timestamp_wall_us: now_us.max(1),
+                    },
+                    owner_token,
+                    input_id,
+                    ack_state,
+                    ack_message,
+                    not_before_wall_us,
+                };
+                let resp = self
+                    .authority
+                    .handle_acknowledge_input(req, "mcp-portal", now_us);
+                if resp.accepted {
+                    tracing::debug!(
+                        proj_id = %projection_id,
+                        "portal_op: AcknowledgeInput accepted"
+                    );
+                    let _ = reply.send(Ok(()));
+                } else {
+                    let code = resp
+                        .error_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    tracing::warn!(
+                        proj_id = %projection_id,
+                        error_code = %code,
+                        "portal_op: AcknowledgeInput denied"
+                    );
+                    let _ = reply.send(Err(format!(
+                        "acknowledge_input denied: {}: {}",
+                        code, resp.status_summary
+                    )));
+                }
+            }
+
+            PortalOp::Detach {
+                projection_id,
+                owner_token,
+                reason,
+                reply,
+            } => {
+                let request_id = uuid::Uuid::now_v7().to_string();
+                let req = DetachRequest {
+                    envelope: OperationEnvelope {
+                        operation: ProjectionOperation::Detach,
+                        projection_id: projection_id.clone(),
+                        request_id,
+                        client_timestamp_wall_us: now_us.max(1),
+                    },
+                    owner_token,
+                    reason,
+                };
+                let resp = self.authority.handle_detach(req, "mcp-portal", now_us);
+                if resp.accepted {
+                    // The authority purged its session + coalescer entry. Drop
+                    // the driver-side drive entry / tile mapping so the next
+                    // drain does not attempt to render a removed surface and the
+                    // projection_id is free to be re-attached cleanly.
+                    self.detach_projection(&projection_id);
+                    tracing::info!(
+                        proj_id = %projection_id,
+                        "portal_op: Detach accepted — drive entry dropped"
+                    );
+                    let _ = reply.send(Ok(()));
+                } else {
+                    let code = resp
+                        .error_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    tracing::warn!(
+                        proj_id = %projection_id,
+                        error_code = %code,
+                        "portal_op: Detach denied"
+                    );
+                    let _ = reply.send(Err(format!(
+                        "detach denied: {}: {}",
                         code, resp.status_summary
                     )));
                 }
@@ -2806,6 +3005,186 @@ mod tests {
             scene.tile_count(),
             1,
             "exactly one live portal tile — the fresh one"
+        );
+    }
+
+    /// End-to-end ingress lifecycle through `dispatch_portal_op` (hud-bq0gl.1).
+    ///
+    /// This is the production MCP ingress path: each `PortalOp` is the exact
+    /// message the MCP tool handlers send over the portal-op channel. The test
+    /// drives Attach → (seed HUD input) → GetPendingInput → AcknowledgeInput →
+    /// Detach and asserts the authority state transitions at each step, plus the
+    /// owner-token authorization gate.
+    ///
+    /// No GPU / scene drain is involved — this exercises only the op-dispatch
+    /// → authority wiring that the new MCP surface depends on.
+    #[test]
+    fn dispatch_portal_op_input_lifecycle_end_to_end() {
+        use tze_hud_projection::ContentClassification;
+
+        let mut driver = InProcessPortalDriver::new();
+        let proj = "proj-ingress";
+
+        // 1. Attach via the op channel — yields the owner token.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj.to_string(),
+            display_name: "Ingress Test".to_string(),
+            idempotency_key: None,
+            reply: tx,
+        });
+        let token = rx
+            .blocking_recv()
+            .expect("attach reply must arrive")
+            .expect("attach must be accepted");
+        assert!(!token.is_empty(), "attach must return a non-empty token");
+
+        // Seed a HUD-originated input item directly on the authority (the
+        // operator-input producer side is out of scope for this ingress test).
+        let now = now_wall_us().max(1);
+        driver
+            .authority_mut()
+            .enqueue_input(
+                proj,
+                "input-1",
+                "hello from the HUD".to_string(),
+                now,
+                now + 60_000_000,
+                Some(ContentClassification::Household),
+            )
+            .expect("enqueue_input must succeed for an attached projection");
+
+        // 2. GetPendingInput via the op channel — returns the delivered item.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::GetPendingInput {
+            projection_id: proj.to_string(),
+            owner_token: token.clone(),
+            max_items: None,
+            max_bytes: None,
+            reply: tx,
+        });
+        let batch = rx
+            .blocking_recv()
+            .expect("get_pending_input reply must arrive")
+            .expect("get_pending_input must be accepted");
+        assert_eq!(batch.items.len(), 1, "exactly one pending item delivered");
+        let item = &batch.items[0];
+        assert_eq!(item.input_id, "input-1");
+        assert_eq!(item.projection_id, proj);
+        assert_eq!(item.submission_text, "hello from the HUD");
+        assert_eq!(
+            item.delivery_state, "delivered",
+            "item must be transitioned to delivered by the poll"
+        );
+        assert_eq!(
+            item.content_classification, "household",
+            "classification must be mapped to its snake_case wire spelling"
+        );
+        assert_eq!(batch.remaining_count, 0);
+
+        // Auth gate: a wrong token must be rejected (security regression guard).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::GetPendingInput {
+            projection_id: proj.to_string(),
+            owner_token: "not-the-real-token".to_string(),
+            max_items: None,
+            max_bytes: None,
+            reply: tx,
+        });
+        let denied = rx
+            .blocking_recv()
+            .expect("get_pending_input reply must arrive");
+        assert!(
+            denied.is_err(),
+            "get_pending_input with a bad owner token must be denied"
+        );
+
+        // 3. AcknowledgeInput (handled) via the op channel.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::AcknowledgeInput {
+            projection_id: proj.to_string(),
+            owner_token: token.clone(),
+            input_id: "input-1".to_string(),
+            ack_state: "handled".to_string(),
+            ack_message: Some("done".to_string()),
+            not_before_wall_us: None,
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("acknowledge reply must arrive")
+            .expect("acknowledge_input (handled) must be accepted");
+
+        // After a terminal ack, the item is no longer pending.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::GetPendingInput {
+            projection_id: proj.to_string(),
+            owner_token: token.clone(),
+            max_items: None,
+            max_bytes: None,
+            reply: tx,
+        });
+        let batch = rx
+            .blocking_recv()
+            .expect("get_pending_input reply must arrive")
+            .expect("get_pending_input must be accepted");
+        assert!(
+            batch.items.is_empty(),
+            "no pending input should remain after a terminal acknowledgement"
+        );
+
+        // Unrecognized ack_state is rejected before the authority is called.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::AcknowledgeInput {
+            projection_id: proj.to_string(),
+            owner_token: token.clone(),
+            input_id: "input-1".to_string(),
+            ack_state: "bogus".to_string(),
+            ack_message: None,
+            not_before_wall_us: None,
+            reply: tx,
+        });
+        let bad_ack = rx.blocking_recv().expect("acknowledge reply must arrive");
+        assert!(
+            bad_ack.is_err(),
+            "an unrecognized ack_state must be rejected"
+        );
+
+        // 4. Detach via the op channel — purges authority + drive state.
+        assert!(
+            driver.authority_mut().has_projection(proj),
+            "projection must exist before detach"
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Detach {
+            projection_id: proj.to_string(),
+            owner_token: token.clone(),
+            reason: "session ending".to_string(),
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("detach reply must arrive")
+            .expect("detach must be accepted");
+        assert!(
+            !driver.authority_mut().has_projection(proj),
+            "projection state must be purged after detach"
+        );
+
+        // Post-detach, a publish with the old token must fail (session gone).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: proj.to_string(),
+            owner_token: token,
+            output_text: "after detach".to_string(),
+            logical_unit_id: None,
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            reply: tx,
+        });
+        let after = rx.blocking_recv().expect("publish reply must arrive");
+        assert!(
+            after.is_err(),
+            "publishing to a detached projection must be denied"
         );
     }
 }
