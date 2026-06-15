@@ -292,5 +292,169 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertTrue(proc.waited)
 
 
+class PromotionGateEvidenceSchemaTests(unittest.TestCase):
+    """Headless coverage for the RFC 0013 §7.2 promotion-gate evidence schema.
+
+    These exercise the artifact-shaping logic WITHOUT a live HUD, so the harness
+    is provably emitting the gate-conformant artifact shape before any live run.
+    """
+
+    # ── Reference-hardware tag (engineering-bar §2) ───────────────────────
+
+    def test_reference_hardware_tag_has_required_gate_fields(self) -> None:
+        tag = portal.reference_hardware_tag()
+        for field in ("tag", "hostname", "gpu", "gpu_driver", "os", "is_reference"):
+            self.assertIn(field, tag, f"missing reference-hardware field {field!r}")
+        # Defaults fall back to the canonical reference host constants.
+        self.assertEqual(tag["tag"], portal.REFERENCE_HARDWARE_TAG)
+        self.assertEqual(tag["gpu"], portal.REFERENCE_GPU)
+        self.assertEqual(tag["gpu_driver"], portal.REFERENCE_GPU_DRIVER)
+
+    def test_reference_hardware_tag_honours_cli_overrides(self) -> None:
+        tag = portal.reference_hardware_tag(
+            tag="OtherHost",
+            hostname="some-laptop",
+            gpu="Intel UHD",
+            gpu_driver="1.2.3",
+        )
+        self.assertEqual(tag["tag"], "OtherHost")
+        self.assertEqual(tag["hostname"], "some-laptop")
+        self.assertEqual(tag["gpu"], "Intel UHD")
+        self.assertEqual(tag["gpu_driver"], "1.2.3")
+        self.assertFalse(tag["is_reference"])
+
+    def test_reference_hardware_tag_marks_reference_host_from_target(self) -> None:
+        tag = portal.reference_hardware_tag(
+            target=portal.REFERENCE_HOSTNAME + ":50051",
+        )
+        self.assertTrue(tag["is_reference"])
+        self.assertEqual(tag["target_host"], portal.REFERENCE_HOSTNAME)
+
+    # ── Cadence axis: RTT baseline vs runtime overhead ────────────────────
+
+    def test_cadence_evidence_separates_runtime_overhead_from_rtt(self) -> None:
+        # Two presented appends: present latency 30ms over a 20ms RTT baseline
+        # ⇒ runtime overhead 10ms each (within the present budget).
+        appends = [
+            {"cycle": 1, "publish_ms": 0.0, "present_ms": 30.0},
+            {"cycle": 2, "publish_ms": 100.0, "present_ms": 130.0},
+        ]
+        ev = portal.build_cadence_rtt_evidence(
+            20.0, appends, cadence_cycles=2, cadence_interval_ms=100,
+        )
+        self.assertEqual(ev["transport_rtt_baseline_ms"], 20.0)
+        self.assertEqual(ev["presented_count"], 2)
+        self.assertEqual(ev["coalesced_count"], 0)
+        for entry in ev["appends"]:
+            self.assertTrue(entry["presented"])
+            self.assertAlmostEqual(entry["present_latency_ms"], 30.0)
+            self.assertAlmostEqual(entry["overhead_ms"], 10.0)
+            self.assertTrue(entry["within_present_budget"])
+        self.assertEqual(ev["runtime_overhead_ms"]["over_budget_count"], 0)
+        self.assertTrue(ev["within_present_budget"])
+
+    def test_cadence_evidence_records_per_append_publish_present_timestamps(self) -> None:
+        appends = [{"cycle": 1, "publish_ms": 5.0, "present_ms": 12.0}]
+        ev = portal.build_cadence_rtt_evidence(
+            2.0, appends, cadence_cycles=1, cadence_interval_ms=100,
+        )
+        entry = ev["appends"][0]
+        # The per-append entry preserves the publish→present timestamps the gate
+        # requires (tasks 5.7 / spec "runtime overhead beyond transport RTT").
+        self.assertEqual(entry["publish_ms"], 5.0)
+        self.assertEqual(entry["present_ms"], 12.0)
+        self.assertAlmostEqual(entry["present_latency_ms"], 7.0)
+
+    def test_cadence_evidence_excludes_coalesced_appends_from_budget(self) -> None:
+        # A coalesced-away append (no present_ms) must not count toward the
+        # presented-append budget per the spec scenario.
+        appends = [
+            {"cycle": 1, "publish_ms": 0.0, "present_ms": 25.0},
+            {"cycle": 2, "publish_ms": 50.0},  # coalesced away — no present
+        ]
+        ev = portal.build_cadence_rtt_evidence(
+            20.0, appends, cadence_cycles=2, cadence_interval_ms=100,
+        )
+        self.assertEqual(ev["presented_count"], 1)
+        self.assertEqual(ev["coalesced_count"], 1)
+        coalesced = ev["appends"][1]
+        self.assertFalse(coalesced["presented"])
+        self.assertIsNone(coalesced["overhead_ms"])
+        self.assertNotIn("within_present_budget", coalesced)
+
+    def test_cadence_evidence_flags_over_budget_runtime_overhead(self) -> None:
+        # Present latency 40ms over a 5ms baseline ⇒ 35ms overhead > 16.6ms budget.
+        appends = [{"cycle": 1, "publish_ms": 0.0, "present_ms": 40.0}]
+        ev = portal.build_cadence_rtt_evidence(
+            5.0, appends, cadence_cycles=1, cadence_interval_ms=100,
+        )
+        self.assertEqual(ev["runtime_overhead_ms"]["over_budget_count"], 1)
+        self.assertFalse(ev["within_present_budget"])
+        self.assertFalse(ev["appends"][0]["within_present_budget"])
+
+    # ── Operator-confirmable evidence (window-mgmt / profile-swap) ────────
+
+    def test_operator_evidence_entry_is_structured(self) -> None:
+        entry = portal.operator_evidence_entry(
+            "window-mgmt:move",
+            "portal moved cleanly to centre",
+            {"portal_x": 100.0, "portal_y": 50.0},
+        )
+        self.assertEqual(entry["code"], "window-mgmt:move")
+        self.assertEqual(entry["operator_confirm"], "portal moved cleanly to centre")
+        self.assertEqual(entry["observed"]["portal_x"], 100.0)
+        # Operator confirmation defaults to unfilled until the live run.
+        self.assertIsNone(entry["confirmed"])
+
+    # ── Full artifact envelope ────────────────────────────────────────────
+
+    def test_evidence_artifact_carries_reference_tag_and_schema_version(self) -> None:
+        tag = portal.reference_hardware_tag(target=portal.REFERENCE_HOSTNAME + ":50051")
+        artifact = portal.build_evidence_artifact(
+            target="host:50051",
+            doc="docs/x.md",
+            phases="cadence,window-mgmt,profile-swap",
+            scene_width=1920.0,
+            scene_height=1080.0,
+            portal_w=860.0,
+            portal_h=680.0,
+            lease_release_on_exit=True,
+            cleanup_errors=[],
+            steps=[{"code": "cadence", "status": "completed"}],
+            hardware_tag=tag,
+        )
+        self.assertEqual(artifact["schema_version"], portal.EVIDENCE_SCHEMA_VERSION)
+        self.assertIn("reference_hardware", artifact)
+        self.assertTrue(artifact["reference_hardware"]["is_reference"])
+        # The artifact must round-trip through JSON (it is written to disk).
+        import json as _json
+        _json.dumps(artifact)
+
+    def test_evidence_artifact_is_backward_compatible(self) -> None:
+        # The fields the prior schema exposed must still be present so existing
+        # consumers/readers do not break.
+        artifact = portal.build_evidence_artifact(
+            target="host:50051",
+            doc="docs/x.md",
+            phases="baseline",
+            scene_width=1920.0,
+            scene_height=1080.0,
+            portal_w=860.0,
+            portal_h=680.0,
+            lease_release_on_exit=False,
+            cleanup_errors=["boom"],
+            steps=[],
+            hardware_tag=portal.reference_hardware_tag(),
+        )
+        for legacy_field in (
+            "target", "doc", "scene_width", "scene_height",
+            "portal_w", "portal_h", "lease_release_on_exit",
+            "cleanup_errors", "steps",
+        ):
+            self.assertIn(legacy_field, artifact)
+        self.assertEqual(artifact["cleanup_errors"], ["boom"])
+        self.assertFalse(artifact["lease_release_on_exit"])
+
+
 if __name__ == "__main__":
     unittest.main()
