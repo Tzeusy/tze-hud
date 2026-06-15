@@ -301,6 +301,10 @@ jobs:
               Write-Host "Baseline artifact not present on run $runId; treating as no baseline."
             }
           }
+          # Missing baseline is the expected bootstrap state, not a step failure.
+          # GitHub's pwsh shell appends `exit $LASTEXITCODE`, so clear any
+          # non-zero code left by the probing `gh` calls above.
+          $global:LASTEXITCODE = 0
       - name: Report Windows perf trend deltas (vs main baseline)
         if: always()
         shell: pwsh
