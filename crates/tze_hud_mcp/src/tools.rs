@@ -2386,6 +2386,287 @@ pub async fn handle_portal_projection_publish(
     }
 }
 
+// ─── portal_projection_get_pending_input ─────────────────────────────────────
+
+/// Parameters for `portal_projection_get_pending_input`.
+#[derive(Debug, Deserialize)]
+pub struct PortalProjectionGetPendingInputParams {
+    /// Projection identifier from a prior `portal_projection_attach` call.
+    pub projection_id: String,
+    /// Owner token returned by the successful `portal_projection_attach` response.
+    pub owner_token: String,
+    /// Optional cap on the number of items returned. Clamped to the authority's
+    /// configured `max_poll_items`. Omit to use the authority default.
+    #[serde(default)]
+    pub max_items: Option<usize>,
+    /// Optional cap on the total response byte budget. Clamped to the
+    /// authority's configured `max_poll_response_bytes`. Omit to use the
+    /// authority default.
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+}
+
+/// Response from `portal_projection_get_pending_input`.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionGetPendingInputResult {
+    /// `true` when the authority accepted the poll.
+    pub accepted: bool,
+    /// HUD-originated input items delivered by this poll.
+    pub items: Vec<crate::portal_op::PendingInputEntry>,
+    /// Still-pending items that did not fit this response's item/byte budget.
+    pub remaining_count: usize,
+    /// Total byte size of still-pending items that did not fit.
+    pub remaining_bytes: usize,
+    /// Human-readable status summary.
+    pub status_summary: String,
+}
+
+/// Drain HUD-originated pending input for a projection session (hud-bq0gl.1).
+///
+/// Forwards the poll through the portal-op channel to the winit event-loop
+/// thread. The driver calls `handle_get_pending_input` on the authority, which
+/// transitions matching items to `Delivered` and returns them. Delivered items
+/// must subsequently be acknowledged via `portal_projection_acknowledge_input`.
+///
+/// # Errors
+///
+/// - `invalid_params` if `projection_id` or `owner_token` is empty.
+/// - `internal` if the portal authority is not wired.
+/// - `internal` if the authority rejected the poll (invalid / expired token).
+pub async fn handle_portal_projection_get_pending_input(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+) -> McpResult<PortalProjectionGetPendingInputResult> {
+    let p: PortalProjectionGetPendingInputParams = parse_params(params)?;
+
+    if p.projection_id.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "projection_id must be non-empty".to_string(),
+        ));
+    }
+    if p.owner_token.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "owner_token must be non-empty".to_string(),
+        ));
+    }
+
+    let tx = portal_op_tx.ok_or_else(|| {
+        McpError::Internal(
+            "portal authority not wired — runtime must enable portal_op channel".to_string(),
+        )
+    })?;
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::portal_op::PortalOp::GetPendingInput {
+        projection_id: p.projection_id,
+        owner_token: p.owner_token,
+        max_items: p.max_items,
+        max_bytes: p.max_bytes,
+        reply: reply_tx,
+    })
+    .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+    match reply_rx.await {
+        Ok(Ok(batch)) => Ok(PortalProjectionGetPendingInputResult {
+            accepted: true,
+            items: batch.items,
+            remaining_count: batch.remaining_count,
+            remaining_bytes: batch.remaining_bytes,
+            status_summary: "pending input returned".to_string(),
+        }),
+        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Err(_) => Err(McpError::Internal(
+            "portal authority did not respond (channel dropped)".to_string(),
+        )),
+    }
+}
+
+// ─── portal_projection_acknowledge_input ─────────────────────────────────────
+
+/// Parameters for `portal_projection_acknowledge_input`.
+#[derive(Debug, Deserialize)]
+pub struct PortalProjectionAcknowledgeInputParams {
+    /// Projection identifier from a prior `portal_projection_attach` call.
+    pub projection_id: String,
+    /// Owner token returned by the successful `portal_projection_attach` response.
+    pub owner_token: String,
+    /// Identifier of the input item being acknowledged (from a prior
+    /// `portal_projection_get_pending_input` response).
+    pub input_id: String,
+    /// Acknowledgement state: `handled`, `deferred`, or `rejected`.
+    pub ack_state: String,
+    /// Optional human-readable message recorded with the acknowledgement.
+    #[serde(default)]
+    pub ack_message: Option<String>,
+    /// Optional re-delivery floor (wall-clock µs). Valid only when `ack_state`
+    /// is `deferred`.
+    #[serde(default)]
+    pub not_before_wall_us: Option<u64>,
+}
+
+/// Response from `portal_projection_acknowledge_input`.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionAcknowledgeInputResult {
+    /// `true` when the authority accepted the acknowledgement.
+    pub accepted: bool,
+    /// Human-readable status summary.
+    pub status_summary: String,
+}
+
+/// Acknowledge a delivered input item for a projection session (hud-bq0gl.1).
+///
+/// Forwards the acknowledgement through the portal-op channel to the winit
+/// event-loop thread. The driver calls `handle_acknowledge_input`, recording
+/// the terminal (`handled` / `rejected`) or deferred disposition. Terminal
+/// acknowledgement is idempotent; a conflicting terminal ack is rejected.
+///
+/// # Errors
+///
+/// - `invalid_params` if `projection_id`, `owner_token`, `input_id`, or
+///   `ack_state` is empty.
+/// - `internal` if the portal authority is not wired.
+/// - `internal` if the authority rejected the acknowledgement (invalid token,
+///   unrecognized `ack_state`, terminal conflict, etc.).
+pub async fn handle_portal_projection_acknowledge_input(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+) -> McpResult<PortalProjectionAcknowledgeInputResult> {
+    let p: PortalProjectionAcknowledgeInputParams = parse_params(params)?;
+
+    if p.projection_id.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "projection_id must be non-empty".to_string(),
+        ));
+    }
+    if p.owner_token.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "owner_token must be non-empty".to_string(),
+        ));
+    }
+    if p.input_id.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "input_id must be non-empty".to_string(),
+        ));
+    }
+    if p.ack_state.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "ack_state must be non-empty".to_string(),
+        ));
+    }
+
+    let tx = portal_op_tx.ok_or_else(|| {
+        McpError::Internal(
+            "portal authority not wired — runtime must enable portal_op channel".to_string(),
+        )
+    })?;
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::portal_op::PortalOp::AcknowledgeInput {
+        projection_id: p.projection_id,
+        owner_token: p.owner_token,
+        input_id: p.input_id,
+        ack_state: p.ack_state,
+        ack_message: p.ack_message,
+        not_before_wall_us: p.not_before_wall_us,
+        reply: reply_tx,
+    })
+    .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(PortalProjectionAcknowledgeInputResult {
+            accepted: true,
+            status_summary: "input acknowledged".to_string(),
+        }),
+        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Err(_) => Err(McpError::Internal(
+            "portal authority did not respond (channel dropped)".to_string(),
+        )),
+    }
+}
+
+// ─── portal_projection_detach ────────────────────────────────────────────────
+
+/// Parameters for `portal_projection_detach`.
+#[derive(Debug, Deserialize)]
+pub struct PortalProjectionDetachParams {
+    /// Projection identifier from a prior `portal_projection_attach` call.
+    pub projection_id: String,
+    /// Owner token returned by the successful `portal_projection_attach` response.
+    pub owner_token: String,
+    /// Human-readable reason recorded in the audit log.
+    pub reason: String,
+}
+
+/// Response from `portal_projection_detach`.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionDetachResult {
+    /// `true` when the authority accepted the detach.
+    pub accepted: bool,
+    /// Human-readable status summary.
+    pub status_summary: String,
+}
+
+/// Detach a projection session, purging its private state (hud-bq0gl.1).
+///
+/// Forwards the detach through the portal-op channel to the winit event-loop
+/// thread. The driver calls `handle_detach` (purging the session + coalescer
+/// entry) and drops the drive entry / tile mapping. After detach the
+/// `projection_id` is free to be re-attached.
+///
+/// # Errors
+///
+/// - `invalid_params` if `projection_id`, `owner_token`, or `reason` is empty.
+/// - `internal` if the portal authority is not wired.
+/// - `internal` if the authority rejected the detach (invalid / expired token).
+pub async fn handle_portal_projection_detach(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+) -> McpResult<PortalProjectionDetachResult> {
+    let p: PortalProjectionDetachParams = parse_params(params)?;
+
+    if p.projection_id.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "projection_id must be non-empty".to_string(),
+        ));
+    }
+    if p.owner_token.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "owner_token must be non-empty".to_string(),
+        ));
+    }
+    if p.reason.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "reason must be non-empty".to_string(),
+        ));
+    }
+
+    let tx = portal_op_tx.ok_or_else(|| {
+        McpError::Internal(
+            "portal authority not wired — runtime must enable portal_op channel".to_string(),
+        )
+    })?;
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::portal_op::PortalOp::Detach {
+        projection_id: p.projection_id,
+        owner_token: p.owner_token,
+        reason: p.reason,
+        reply: reply_tx,
+    })
+    .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(PortalProjectionDetachResult {
+            accepted: true,
+            status_summary: "projection detached and private state purged".to_string(),
+        }),
+        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Err(_) => Err(McpError::Internal(
+            "portal authority did not respond (channel dropped)".to_string(),
+        )),
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -5580,5 +5861,165 @@ mod tests {
         assert_eq!(p.output_kind.as_deref(), Some("status"));
         assert_eq!(p.content_classification.as_deref(), Some("public"));
         assert_eq!(p.coalesce_key.as_deref(), Some("ck-1"));
+    }
+
+    // ── portal_projection get_pending_input / acknowledge / detach (hud-bq0gl.1) ─
+
+    #[tokio::test]
+    async fn portal_get_pending_input_rejects_empty_token() {
+        let err = handle_portal_projection_get_pending_input(
+            json!({ "projection_id": "p1", "owner_token": "" }),
+            None,
+        )
+        .await
+        .expect_err("empty owner_token must be rejected");
+        assert!(matches!(err, McpError::InvalidParams(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn portal_get_pending_input_errors_when_authority_unwired() {
+        let err = handle_portal_projection_get_pending_input(
+            json!({ "projection_id": "p1", "owner_token": "t1" }),
+            None,
+        )
+        .await
+        .expect_err("unwired authority must error");
+        assert!(matches!(err, McpError::Internal(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn portal_get_pending_input_forwards_op_and_returns_batch() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        // Authority stand-in: reply to the GetPendingInput op with one item.
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("op must be sent") {
+                crate::portal_op::PortalOp::GetPendingInput {
+                    projection_id,
+                    owner_token,
+                    max_items,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(projection_id, "p1");
+                    assert_eq!(owner_token, "t1");
+                    assert_eq!(max_items, Some(5));
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: vec![crate::portal_op::PendingInputEntry {
+                                input_id: "i1".to_string(),
+                                projection_id: "p1".to_string(),
+                                submission_text: "hi".to_string(),
+                                submitted_at_wall_us: 1,
+                                expires_at_wall_us: 2,
+                                delivery_state: "delivered".to_string(),
+                                content_classification: "household".to_string(),
+                            }],
+                            remaining_count: 3,
+                            remaining_bytes: 42,
+                        }))
+                        .expect("reply must send");
+                }
+                other => panic!("unexpected op: {other:?}"),
+            }
+        });
+        let result = handle_portal_projection_get_pending_input(
+            json!({ "projection_id": "p1", "owner_token": "t1", "max_items": 5 }),
+            Some(&tx),
+        )
+        .await
+        .expect("poll must succeed");
+        responder.await.expect("responder task must finish");
+        assert!(result.accepted);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].input_id, "i1");
+        assert_eq!(result.remaining_count, 3);
+        assert_eq!(result.remaining_bytes, 42);
+    }
+
+    #[tokio::test]
+    async fn portal_acknowledge_input_rejects_empty_fields() {
+        for params in [
+            json!({ "projection_id": "", "owner_token": "t", "input_id": "i", "ack_state": "handled" }),
+            json!({ "projection_id": "p", "owner_token": "", "input_id": "i", "ack_state": "handled" }),
+            json!({ "projection_id": "p", "owner_token": "t", "input_id": "", "ack_state": "handled" }),
+            json!({ "projection_id": "p", "owner_token": "t", "input_id": "i", "ack_state": "" }),
+        ] {
+            let err = handle_portal_projection_acknowledge_input(params, None)
+                .await
+                .expect_err("empty required field must be rejected");
+            assert!(matches!(err, McpError::InvalidParams(_)), "got {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn portal_acknowledge_input_forwards_op() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("op must be sent") {
+                crate::portal_op::PortalOp::AcknowledgeInput {
+                    input_id,
+                    ack_state,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(input_id, "i1");
+                    assert_eq!(ack_state, "handled");
+                    reply.send(Ok(())).expect("reply must send");
+                }
+                other => panic!("unexpected op: {other:?}"),
+            }
+        });
+        let result = handle_portal_projection_acknowledge_input(
+            json!({
+                "projection_id": "p1",
+                "owner_token": "t1",
+                "input_id": "i1",
+                "ack_state": "handled"
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("ack must succeed");
+        responder.await.expect("responder task must finish");
+        assert!(result.accepted);
+    }
+
+    #[tokio::test]
+    async fn portal_detach_rejects_empty_reason() {
+        let err = handle_portal_projection_detach(
+            json!({ "projection_id": "p1", "owner_token": "t1", "reason": "" }),
+            None,
+        )
+        .await
+        .expect_err("empty reason must be rejected");
+        assert!(matches!(err, McpError::InvalidParams(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn portal_detach_forwards_op() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("op must be sent") {
+                crate::portal_op::PortalOp::Detach {
+                    projection_id,
+                    reason,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(projection_id, "p1");
+                    assert_eq!(reason, "bye");
+                    reply.send(Ok(())).expect("reply must send");
+                }
+                other => panic!("unexpected op: {other:?}"),
+            }
+        });
+        let result = handle_portal_projection_detach(
+            json!({ "projection_id": "p1", "owner_token": "t1", "reason": "bye" }),
+            Some(&tx),
+        )
+        .await
+        .expect("detach must succeed");
+        responder.await.expect("responder task must finish");
+        assert!(result.accepted);
     }
 }

@@ -196,7 +196,10 @@ fn classify_tool(method: &str) -> ToolClass {
         // Portal projection tools (hud-bq0gl.2): resident-only to limit access
         // to trusted callers that already hold the resident_mcp capability.
         | "portal_projection_attach"
-        | "portal_projection_publish" => ToolClass::Resident,
+        | "portal_projection_publish"
+        | "portal_projection_get_pending_input"
+        | "portal_projection_acknowledge_input"
+        | "portal_projection_detach" => ToolClass::Resident,
         _ => ToolClass::Unknown,
     }
 }
@@ -560,6 +563,27 @@ impl McpServer {
             }
             "portal_projection_publish" => {
                 let r = tools::handle_portal_projection_publish(params, self.portal_op_tx.as_ref())
+                    .await?;
+                serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
+            }
+            "portal_projection_get_pending_input" => {
+                let r = tools::handle_portal_projection_get_pending_input(
+                    params,
+                    self.portal_op_tx.as_ref(),
+                )
+                .await?;
+                serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
+            }
+            "portal_projection_acknowledge_input" => {
+                let r = tools::handle_portal_projection_acknowledge_input(
+                    params,
+                    self.portal_op_tx.as_ref(),
+                )
+                .await?;
+                serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
+            }
+            "portal_projection_detach" => {
+                let r = tools::handle_portal_projection_detach(params, self.portal_op_tx.as_ref())
                     .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
