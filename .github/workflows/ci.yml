@@ -258,52 +258,76 @@ jobs:
           python scripts/ci/check_windows_perf_budgets.py `
             --benchmark-json test_results/windows-performance-budget/benchmark.json `
             --output-json test_results/windows-performance-budget/budget-gate.json
-      # ── Cross-run telemetry trend (informational; hud-kkx15) ────────────────
+      # ── Cross-run telemetry trend (informational; hud-kkx15, hud-bp3c3) ──────
       #
       # The gate above is a hard PASS/FAIL against the checked-in baseline; it
       # does not retain prior numeric values, so within-budget drift is
-      # invisible. We persist each run's budget-gate.json in an actions/cache
-      # entry keyed per-run, and restore the newest prior entry via the
-      # branch-scoped restore-keys prefix to surface numeric deltas.
+      # invisible. This step surfaces the numeric deltas.
       #
-      # Cache keys are immutable, so `key` carries the run id while
-      # `restore-keys` matches the newest entry sharing the branch prefix. The
-      # cache is branch-scoped (refName) so PR drift compares against the PR's
-      # own history, and main's trend tracks main — neither pollutes the other.
-      - name: Restore previous Windows perf summary
-        id: restore-perf-trend
-        uses: actions/cache/restore@v5
-        with:
-          path: perf-trend-prev
-          key: windows-perf-trend-${{ github.ref_name }}-${{ github.run_id }}
-          restore-keys: |
-            windows-perf-trend-${{ github.ref_name }}-
-      - name: Report Windows perf trend deltas
+      # RETENTION/SCOPE POLICY (hud-bp3c3): the trend baseline is MAIN-PINNED,
+      # not branch-scoped. Every run compares against the budget-gate summary
+      # published as an artifact by the latest SUCCESSFUL `main` run. This gives
+      # a stable baseline immune to per-branch cache divergence — a PR no longer
+      # drifts against its own prior PR runs, and the headline "vs main" delta is
+      # what a reviewer actually wants. The previous branch-scoped actions/cache
+      # approach was replaced because it made each branch its own moving target.
+      #
+      # We fetch the main artifact with `gh run download` (cross-run, so plain
+      # actions/download-artifact does not apply): pick the latest successful run
+      # of this workflow on `main` and pull its `windows-perf-baseline-main`
+      # artifact. On main pushes there may be no prior green main yet -> the
+      # reporter handles the no-baseline case gracefully (prints a notice).
+      - name: Download main-pinned Windows perf baseline
+        id: perf-baseline
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path perf-baseline-main | Out-Null
+          # Latest successful CI run on main (exclude this run if we ARE main).
+          $runId = gh run list --workflow ci.yml --branch main --status success `
+            --limit 1 --json databaseId --jq '.[0].databaseId' 2>$null
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($runId)) {
+            Write-Host "No successful main run found yet; no baseline to download."
+          } else {
+            Write-Host "Downloading perf baseline artifact from main run $runId"
+            # Non-fatal: a green run may predate this artifact name.
+            gh run download $runId `
+              --name windows-perf-baseline-main `
+              --dir perf-baseline-main 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Baseline artifact not present on run $runId; treating as no baseline."
+            }
+          }
+          # Missing baseline is the expected bootstrap state, not a step failure.
+          # GitHub's pwsh shell appends `exit $LASTEXITCODE`, so clear any
+          # non-zero code left by the probing `gh` calls above.
+          $global:LASTEXITCODE = 0
+      - name: Report Windows perf trend deltas (vs main baseline)
+        if: always()
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $prev = "perf-trend-prev/budget-gate.json"
-          $prevArg = @()
-          if (Test-Path $prev) { $prevArg = @("--previous", $prev) }
+          $baseline = "perf-baseline-main/budget-gate.json"
+          $baselineArg = @()
+          if (Test-Path $baseline) { $baselineArg = @("--baseline", $baseline) }
           python scripts/ci/report_telemetry_trend.py `
             --current test_results/windows-performance-budget/budget-gate.json `
-            @prevArg
-      # Stage the current summary under the cache path and save it for the next
-      # run. A fresh run id means a new (immutable) cache entry every time.
-      - name: Save current Windows perf summary for trend history
-        if: always()
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path perf-trend-prev | Out-Null
-          Copy-Item test_results/windows-performance-budget/budget-gate.json `
-            perf-trend-prev/budget-gate.json -Force
-      - name: Persist Windows perf summary to trend cache
-        if: always()
-        uses: actions/cache/save@v5
+            @baselineArg
+      # Publish this run's summary as the main-pinned baseline artifact. Only
+      # main pushes update the baseline (branch/PR runs must not overwrite it),
+      # and only when the run is green up to here — a failed gate must not become
+      # the baseline future runs trend against.
+      - name: Publish main-pinned Windows perf baseline
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v6
         with:
-          path: perf-trend-prev
-          key: windows-perf-trend-${{ github.ref_name }}-${{ github.run_id }}
+          name: windows-perf-baseline-main
+          path: test_results/windows-performance-budget/budget-gate.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Upload Windows performance artifact
         uses: actions/upload-artifact@v6
         if: always()

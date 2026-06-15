@@ -191,7 +191,8 @@ class MainEntrypointTests(unittest.TestCase):
             else:
                 trend.os.environ.pop("GITHUB_STEP_SUMMARY", None)
 
-    def test_first_run_no_previous_arg_exits_zero(self) -> None:
+    def test_no_baseline_arg_exits_zero(self) -> None:
+        # No main-pinned baseline supplied (no green main artifact yet).
         current = self._write(
             _report([_latency_result("steady_state_render", "frame_time_p99", 5000)])
         )
@@ -199,22 +200,23 @@ class MainEntrypointTests(unittest.TestCase):
         rc = self._run_main(["--current", str(current)], summary)
         self.assertEqual(rc, 0)
         text = summary.read_text(encoding="utf-8")
-        self.assertIn("first run on this cache key", text)
+        self.assertIn("No main-pinned Windows performance baseline found", text)
 
-    def test_previous_arg_points_to_missing_file_exits_zero(self) -> None:
+    def test_baseline_arg_points_to_missing_file_exits_zero(self) -> None:
         current = self._write(
             _report([_latency_result("steady_state_render", "frame_time_p99", 5000)])
         )
-        missing = Path(tempfile.gettempdir()) / "tze_hud_no_such_prev_summary.json"
+        missing = Path(tempfile.gettempdir()) / "tze_hud_no_such_baseline.json"
         summary = Path(tempfile.mktemp(suffix=".md"))
         rc = self._run_main(
-            ["--current", str(current), "--previous", str(missing)], summary
+            ["--current", str(current), "--baseline", str(missing)], summary
         )
         self.assertEqual(rc, 0)
-        self.assertIn("first run", summary.read_text(encoding="utf-8"))
+        self.assertIn("no green main artifact yet", summary.read_text(encoding="utf-8"))
 
-    def test_full_run_writes_table_to_step_summary(self) -> None:
-        previous = self._write(
+    def test_full_run_against_baseline_writes_table(self) -> None:
+        # The main-pinned baseline (latest green main summary) is the comparison.
+        baseline = self._write(
             _report([_latency_result("steady_state_render", "frame_time_p99", 14100)])
         )
         current = self._write(
@@ -222,12 +224,27 @@ class MainEntrypointTests(unittest.TestCase):
         )
         summary = Path(tempfile.mktemp(suffix=".md"))
         rc = self._run_main(
-            ["--current", str(current), "--previous", str(previous)], summary
+            ["--current", str(current), "--baseline", str(baseline)], summary
         )
         self.assertEqual(rc, 0)
         text = summary.read_text(encoding="utf-8")
         self.assertIn("14100us | 14800us", text)
         self.assertIn("+5.0%", text)
+
+    def test_previous_alias_still_accepted(self) -> None:
+        # ``--previous`` is retained as a back-compat alias for ``--baseline``.
+        baseline = self._write(
+            _report([_latency_result("steady_state_render", "frame_time_p99", 14100)])
+        )
+        current = self._write(
+            _report([_latency_result("steady_state_render", "frame_time_p99", 14800)])
+        )
+        summary = Path(tempfile.mktemp(suffix=".md"))
+        rc = self._run_main(
+            ["--current", str(current), "--previous", str(baseline)], summary
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("14100us | 14800us", summary.read_text(encoding="utf-8"))
 
 
 class LoadReportTests(unittest.TestCase):

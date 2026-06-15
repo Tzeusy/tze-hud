@@ -10,9 +10,17 @@ wants the numbers, not just the verdict.
 
 Input is the budget-gate report JSON emitted by ``check_windows_perf_budgets.py
 --output-json`` (schema ``tze_hud.windows_perf_budget_gate.v1``). Given a current
-report and an optional previous report (restored from a cross-run cache/artifact),
-this computes and prints per-metric deltas, and appends a Markdown table to the
-GitHub Actions step summary when ``GITHUB_STEP_SUMMARY`` is set.
+report and an optional baseline report, this computes and prints per-metric
+deltas, and appends a Markdown table to the GitHub Actions step summary when
+``GITHUB_STEP_SUMMARY`` is set.
+
+Baseline source (retention/scope policy — hud-bp3c3): the baseline is the
+budget-gate summary published as a *main-pinned artifact* from the latest
+successful ``main`` run, NOT a branch-scoped cache. Every branch/PR run compares
+against the same stable main baseline, so the trend delta is immune to
+per-branch cache divergence (a PR no longer drifts against its own prior PR
+runs). The CI workflow downloads that main artifact and passes it via
+``--baseline``; ``--previous`` is retained as a back-compat alias.
 
 This script never fails the build on a within-budget delta: trend reporting is
 informational. The first-run / no-prior-history case is handled gracefully
@@ -183,9 +191,9 @@ def render_markdown_table(deltas: list[dict[str, Any]]) -> str:
     lines = [
         "### Windows performance budget — cross-run trend",
         "",
-        "Informational trend deltas vs the previous run's summary. The hard "
-        "PASS/FAIL baseline gate is enforced separately and is unaffected by "
-        "within-budget drift.",
+        "Informational trend deltas vs the main-pinned baseline (latest green "
+        "main run's summary). The hard PASS/FAIL baseline gate is enforced "
+        "separately and is unaffected by within-budget drift.",
         "",
         "| Session | Metric | Previous | Current | Delta | % | Budget |",
         "|---|---|---|---|---|---|---|",
@@ -228,21 +236,27 @@ def main() -> int:
         required=True,
         help="Path to the current run's budget-gate report JSON.",
     )
+    # The baseline is the main-pinned budget-gate summary (artifact from the
+    # latest successful main run); ``--previous`` is a back-compat alias.
     parser.add_argument(
+        "--baseline",
         "--previous",
+        dest="baseline",
         type=Path,
-        help="Path to the previous run's budget-gate report JSON "
-        "(restored from cross-run cache/artifact). Optional: when absent or "
-        "missing on disk, the first-run case is handled gracefully.",
+        help="Path to the baseline budget-gate report JSON, downloaded from the "
+        "main-pinned artifact of the latest successful main run. Optional: when "
+        "absent or missing on disk (e.g. no green main baseline yet), the "
+        "no-baseline case is handled gracefully.",
     )
     args = parser.parse_args()
 
     current = load_report(args.current)
 
-    if args.previous is None or not args.previous.exists():
+    if args.baseline is None or not args.baseline.exists():
         notice = (
-            "No prior Windows performance summary found — first run on this "
-            "cache key. Trend deltas will appear on the next run."
+            "No main-pinned Windows performance baseline found — no green main "
+            "artifact yet. Trend deltas will appear once main publishes a "
+            "baseline summary."
         )
         print(notice)
         write_step_summary(
@@ -251,13 +265,13 @@ def main() -> int:
         )
         return 0
 
-    previous = load_report(args.previous)
-    deltas = compute_deltas(current, previous)
+    baseline = load_report(args.baseline)
+    deltas = compute_deltas(current, baseline)
 
     if not deltas:
         notice = (
-            "No comparable trend metrics between the current and previous "
-            "Windows performance summaries."
+            "No comparable trend metrics between the current run and the "
+            "main-pinned Windows performance baseline."
         )
         print(notice)
         write_step_summary(
