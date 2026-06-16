@@ -3565,6 +3565,71 @@ async def run_rapid(
     })
 
 
+async def run_soak(
+    client: HudClient, lease_id: bytes, tiles: PortalTiles,
+    body_full: str, transcript: list[dict[str, Any]],
+    duration_s: float, interval_ms: int, window_lines: int,
+    mutation_lock: asyncio.Lock,
+) -> None:
+    """Sustained streaming memory-drift soak (task 5.5).
+
+    Unlike the cadence/rapid stress phases, this appends one new line per cycle
+    and republishes a CONSTANT-SIZE tail-anchored window (the newest
+    ``window_lines`` lines). Because the rendered body never changes size, the
+    portal scrolls smoothly instead of reflowing — no visible flicker — while
+    still exercising the sustained-streaming + bounded-viewport + coalescing
+    path for the full duration so memory drift can be measured.
+    """
+    emit_step_event(transcript, 11, "started", {
+        "code": "soak",
+        "title": "Sustained streaming soak",
+        "action": (
+            f"append a line every ~{interval_ms}ms for {duration_s:.0f}s, "
+            f"republishing a constant {window_lines}-line tail window"
+        ),
+        "expected_visual": "portal body scrolls smoothly; no resize/flicker; footer counts up",
+    })
+    seed = body_full.splitlines() or ["(empty document)"]
+    lines: list[str] = list(seed)
+    interval_s = interval_ms / 1000.0
+    t0 = time.monotonic()
+    next_checkpoint = 60.0
+    cycle = 0
+    while True:
+        elapsed = time.monotonic() - t0
+        if elapsed >= duration_s:
+            break
+        cycle += 1
+        # Append one synthetic streamed line (constant cadence content).
+        lines.append(f"[soak] line {cycle:06d}  t+{elapsed:7.1f}s  {seed[cycle % len(seed)]}")
+        start = max(0, len(lines) - window_lines)
+        window = bounded_transcript(lines, start, window_lines)
+        await publish_portal(
+            client, lease_id, tiles,
+            title="Exemplar Review Portal",
+            subtitle="sustained streaming soak (task 5.5)",
+            body=window,
+            footer_meta=f"soak  •  cycle {cycle}  •  t+{elapsed:.0f}s / {duration_s:.0f}s",
+            include_tile_setup=(cycle == 1),
+            mutation_lock=mutation_lock,
+        )
+        if elapsed >= next_checkpoint:
+            emit_step_event(transcript, 11, "checkpoint", {
+                "code": "soak:progress",
+                "title": "Soak progress",
+                "action": f"sustained streaming at cycle {cycle}",
+                "expected_visual": "portal still scrolling smoothly; no flicker",
+            }, cycle=cycle, elapsed_s=round(elapsed, 1), window_lines=window_lines)
+            next_checkpoint += 60.0
+        await asyncio.sleep(interval_s)
+    emit_step_event(transcript, 11, "completed", {
+        "code": "soak",
+        "title": "Sustained streaming soak",
+        "action": f"completed {cycle} cycles over {time.monotonic() - t0:.0f}s",
+        "expected_visual": "portal settled on last tail window",
+    }, cycles=cycle, duration_s=round(time.monotonic() - t0, 1))
+
+
 async def run_composer_smoke(
     client: HudClient, lease_id: bytes, tiles: PortalTiles,
     transcript: list[dict[str, Any]],
@@ -4375,6 +4440,12 @@ async def run_scenario(args: argparse.Namespace) -> int:
                     client, lease_id, tiles, body, transcript,
                     args.rapid_cycles, args.rapid_interval_ms, mutation_lock,
                 )
+            elif phase == "soak":
+                await run_soak(
+                    client, lease_id, tiles, body, transcript,
+                    args.soak_duration_s, args.soak_interval_ms,
+                    args.soak_window_lines, mutation_lock,
+                )
             elif phase == "composer-smoke":
                 await run_composer_smoke(
                     client, lease_id, tiles, transcript, mutation_lock,
@@ -4627,7 +4698,7 @@ def parse_args() -> argparse.Namespace:
         default="baseline,scroll",
         help=(
             "Comma-separated list of phases to run: "
-            "baseline, scroll, streaming, rapid, composer-smoke, diagnostic-input, "
+            "baseline, scroll, streaming, rapid, soak, composer-smoke, diagnostic-input, "
             "markdown, overflow, composer-edit, cadence, profile-swap, window-mgmt"
         ),
     )
@@ -4637,6 +4708,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stream-interval-s", type=float, default=1.5)
     p.add_argument("--rapid-cycles", type=int, default=12)
     p.add_argument("--rapid-interval-ms", type=int, default=80)
+    # Sustained streaming soak (task 5.5): constant-size tail window, no flicker.
+    p.add_argument("--soak-duration-s", type=float, default=3600.0,
+                   help="Total soak duration in seconds for the 'soak' phase")
+    p.add_argument("--soak-interval-ms", type=int, default=250,
+                   help="Inter-append pacing in ms for the 'soak' phase")
+    p.add_argument("--soak-window-lines", type=int, default=60,
+                   help="Constant tail-window line count republished each soak cycle")
     p.add_argument("--cleanup-timeout-s", type=float, default=5.0)
     p.add_argument("--clipboard-user", default="admin-user")
     p.add_argument("--clipboard-ssh-key", default=DEFAULT_SSH_KEY)
