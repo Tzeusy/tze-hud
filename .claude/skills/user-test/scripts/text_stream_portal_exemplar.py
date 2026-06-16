@@ -192,6 +192,13 @@ COMPOSER_NODE_IDS = {
 }
 COMPOSER_RUNTIME_NODE_IDS: dict[str, bytes] = {}
 FRAME_RUNTIME_NODE_IDS: dict[str, bytes] = {}
+# Runtime-assigned node ids for the output-scroll body tile, captured at mount
+# so steady-state republishes can update the body text node IN PLACE (single
+# atomic ``update_node_content`` batch) instead of tearing down and rebuilding
+# the tile root every cycle. The teardown path (set_tile_root → N×add_node, each
+# its own RPC/commit) leaves the body tile transiently empty across several
+# render frames, which is observed live as a per-publish flicker (hud-ooeam).
+OUTPUT_RUNTIME_NODE_IDS: dict[str, bytes] = {}
 PORTAL_STATUS_STATE: dict[str, bool] = {
     "minimized": False,
     "attention": False,
@@ -1460,12 +1467,23 @@ def build_composer_caret_node(
     )
 
 
-def build_output_scroll_nodes(body: str) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
+def build_output_scroll_nodes(
+    body: str,
+    *,
+    node_ids: Optional[dict[str, bytes]] = None,
+) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
+    node_ids = node_ids or {}
     _, output_rect = portal_pane_rects()
     content_h = scroll_content_height_for_text(body, output_rect.h, SCROLL_LINE_PX)
     hit_h = content_h
-    root = make_solid_color_node(*TEXT_WINDOW_BG_RGBA, 0.0, 0.0, output_rect.w, output_rect.h)
-    hit = make_hit_region(SCROLL_INTERACTION_ID, 0.0, 0.0, output_rect.w, hit_h)
+    root = make_solid_color_node(
+        *TEXT_WINDOW_BG_RGBA, 0.0, 0.0, output_rect.w, output_rect.h,
+        node_id=node_ids.get("root"),
+    )
+    hit = make_hit_region(
+        SCROLL_INTERACTION_ID, 0.0, 0.0, output_rect.w, hit_h,
+        node_id=node_ids.get("hit"),
+    )
     body_node = make_text_node(
         body,
         0.0,
@@ -1474,8 +1492,29 @@ def build_output_scroll_nodes(body: str) -> tuple[types_pb2.NodeProto, list[type
         content_h,
         BODY_FONT,
         BODY_RGBA,
+        node_id=node_ids.get("body"),
     )
     return root, [hit, body_node]
+
+
+def build_output_body_text_node(body: str) -> types_pb2.NodeProto:
+    """Build only the output-pane body text node (for in-place updates).
+
+    Matches the geometry of the body node produced by
+    [`build_output_scroll_nodes`] so the node can be swapped in place via a
+    single ``update_node_content`` mutation without tearing down the tile.
+    """
+    _, output_rect = portal_pane_rects()
+    content_h = scroll_content_height_for_text(body, output_rect.h, SCROLL_LINE_PX)
+    return make_text_node(
+        body,
+        0.0,
+        0.0,
+        output_rect.w,
+        content_h,
+        BODY_FONT,
+        BODY_RGBA,
+    )
 
 
 def visible_output_text(body: str, offset_y: float, viewport_h: float) -> tuple[str, int]:
@@ -1598,6 +1637,13 @@ async def update_frame_chrome_live(
         "footer_bg",
         "resize_handle",
         "resize_hit",
+        # Text content that changes per steady-state publish. Updating these in
+        # place (vs. tile teardown/rebuild) is what keeps the frame chrome from
+        # flashing empty between the set_tile_root and the trailing add_node
+        # batches each cycle (hud-ooeam).
+        "title",
+        "subtitle",
+        "footer_node",
     }
     allowed_keys = live_keys if live_only else set(keyed_nodes.keys())
     mutations = [
@@ -1637,6 +1683,86 @@ async def set_input_root_with_runtime_ids(
             await mount()
     else:
         await mount()
+
+
+async def set_output_root_with_runtime_ids(
+    client: HudClient,
+    lease_id: bytes,
+    tile_id: bytes,
+    body: str,
+    mutation_lock: Optional[asyncio.Lock] = None,
+) -> None:
+    """Mount the output-scroll tile with stable, captured node ids.
+
+    Records the runtime-assigned ids in [`OUTPUT_RUNTIME_NODE_IDS`] so that
+    subsequent steady-state republishes can update the body text node in place
+    (see [`update_output_scroll_body_live`]) instead of tearing the tile down
+    and rebuilding it (hud-ooeam).
+    """
+    output_root, output_children = build_output_scroll_nodes(body)
+
+    async def mount() -> None:
+        OUTPUT_RUNTIME_NODE_IDS.clear()
+        root_id, child_ids = await set_root_with_children(
+            client, lease_id, tile_id, output_root, output_children,
+        )
+        OUTPUT_RUNTIME_NODE_IDS["root"] = root_id
+        if len(child_ids) >= 2:
+            OUTPUT_RUNTIME_NODE_IDS["hit"] = child_ids[0]
+            OUTPUT_RUNTIME_NODE_IDS["body"] = child_ids[1]
+
+    if mutation_lock is not None:
+        async with mutation_lock:
+            await mount()
+    else:
+        await mount()
+
+
+async def update_output_scroll_body_live(
+    client: HudClient,
+    lease_id: bytes,
+    tile_id: bytes,
+    body: str,
+    mutation_lock: Optional[asyncio.Lock] = None,
+) -> bool:
+    """Update the output-pane body text node IN PLACE.
+
+    Returns ``True`` when the in-place update was issued, ``False`` when the
+    output tile has not been mounted yet (no captured body node id) and the
+    caller must fall back to a full mount via
+    [`set_output_root_with_runtime_ids`].
+
+    This is the steady-state flicker fix (hud-ooeam): a single atomic
+    ``update_node_content`` batch swaps the rasterized body content, so the
+    render thread never samples an empty/half-rebuilt body tile between commits.
+    The scroll content-height is re-registered in the same batch so the
+    scrollable region tracks the new line count.
+    """
+    body_node_id = OUTPUT_RUNTIME_NODE_IDS.get("body")
+    if body_node_id is None:
+        return False
+    _, output_rect = portal_pane_rects()
+    body_node = build_output_body_text_node(body)
+    mutations = [
+        register_tile_scroll_mutation(
+            tile_id,
+            scrollable_y=True,
+            content_height=scroll_max_y_for_text(
+                body, output_rect.h, SCROLL_LINE_PX,
+            ),
+        ),
+        update_node_content_mutation(tile_id, body_node_id, body_node),
+    ]
+
+    async def update() -> None:
+        await client.submit_mutation_batch(lease_id, mutations, timeout=2.0)
+
+    if mutation_lock is not None:
+        async with mutation_lock:
+            await update()
+    else:
+        await update()
+    return True
 
 
 async def render_composer_static(
@@ -1775,10 +1901,22 @@ async def publish_portal(
         mutation_lock,
     )
 
-    await set_frame_root_with_runtime_ids(
-        client, lease_id, tiles.frame, title, subtitle, body, footer_meta,
-        mutation_lock,
-    )
+    # Frame chrome (title/subtitle/footer + static chrome). In steady state,
+    # update the captured nodes IN PLACE rather than tearing down and rebuilding
+    # all ~30 frame children (set_tile_root → N×add_node, each its own commit),
+    # which would flash the chrome empty for several frames each cycle
+    # (hud-ooeam). Fall back to a full mount on first publish / tile setup or if
+    # the runtime ids have not been captured yet.
+    if not include_tile_setup and FRAME_RUNTIME_NODE_IDS:
+        await update_frame_chrome_live(
+            client, lease_id, tiles.frame, title, subtitle, body, footer_meta,
+            live_only=True,
+        )
+    else:
+        await set_frame_root_with_runtime_ids(
+            client, lease_id, tiles.frame, title, subtitle, body, footer_meta,
+            mutation_lock,
+        )
 
     should_mount_input = (
         include_tile_setup
@@ -1790,10 +1928,21 @@ async def publish_portal(
             client, lease_id, tiles.input_scroll, composer_text, mutation_lock,
         )
 
-    output_root, output_children = build_output_scroll_nodes(body)
-    await set_root_with_children(
-        client, lease_id, tiles.output_scroll, output_root, output_children, mutation_lock,
-    )
+    # Output-pane body — the tile that actually renders the streamed transcript.
+    # The body node always renders `body` (the visible window); the full
+    # `output_scroll_content`, when supplied, only sizes the scrollable region.
+    # In steady state, swap the body text node IN PLACE via a single atomic
+    # update_node_content batch (no tile teardown → no empty-body frame). Only
+    # mount/rebuild on first publish, tile setup, or if ids are not yet captured.
+    updated_in_place = False
+    if not include_tile_setup and OUTPUT_RUNTIME_NODE_IDS:
+        updated_in_place = await update_output_scroll_body_live(
+            client, lease_id, tiles.output_scroll, body, mutation_lock,
+        )
+    if not updated_in_place:
+        await set_output_root_with_runtime_ids(
+            client, lease_id, tiles.output_scroll, body, mutation_lock,
+        )
 
     if include_tile_setup:
         shield_root, shield_children = build_drag_shield_nodes(
@@ -2750,6 +2899,11 @@ async def portal_interaction_loop(
         nonlocal output_view_start
         visible_body, output_view_start = visible_output_text(body_full, offset_y, output_rect.h)
         output_root, output_children = build_output_scroll_nodes(visible_body)
+        # This path tears the output tile down and rebuilds it with fresh ids,
+        # so any previously-captured runtime ids are now stale. Invalidate them
+        # so the next steady-state publish re-mounts instead of issuing an
+        # in-place update against a node that no longer exists (hud-ooeam).
+        OUTPUT_RUNTIME_NODE_IDS.clear()
         await set_root_with_children(
             client, lease_id, tiles.output_scroll, output_root, output_children,
             mutation_lock,
