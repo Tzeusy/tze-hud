@@ -539,6 +539,9 @@ def _make_node(data: dict) -> types_pb2.NodeProto:
             interaction_id=h.get("interaction_id", ""),
             accepts_focus=h.get("accepts_focus", False),
             accepts_pointer=h.get("accepts_pointer", False),
+            auto_capture=h.get("auto_capture", False),
+            release_on_up=h.get("release_on_up", False),
+            accepts_composer_input=h.get("accepts_composer_input", False),
         ))
     elif "static_image" in data:
         s = data["static_image"]
