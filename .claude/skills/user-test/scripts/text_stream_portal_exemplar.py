@@ -4367,6 +4367,11 @@ async def run_scenario(args: argparse.Namespace) -> int:
             "expected_visual": "portal can be dragged across the full HUD surface",
         }, scene_width=scene_width, scene_height=scene_height)
         lease_ttl_ms = max(600_000, int(args.baseline_hold_s * 1000) + 120_000)
+        # A long soak runs well past the default 10-min lease TTL; size the lease
+        # to cover the full soak duration (+2min margin) so it does not expire
+        # mid-run (the soak does not renew leases).
+        if "soak" in [p.strip() for p in (args.phases or "").split(",")]:
+            lease_ttl_ms = max(lease_ttl_ms, int(args.soak_duration_s * 1000) + 120_000)
         lease_id = await client.request_lease(ttl_ms=lease_ttl_ms)
         default_w, default_h = default_portal_size(scene_width, scene_height)
         set_portal_size(
