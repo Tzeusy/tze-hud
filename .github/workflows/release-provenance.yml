@@ -1,0 +1,69 @@
+# Release Artifact Provenance
+#
+# Implements the `release-provenance` OpenSpec change (runtime-app-binary spec
+# §Release Artifact Provenance): the release pipeline — not a manual operator
+# step — cross-builds the canonical Windows artifact `tze_hud.exe` and publishes
+# a SHA-256 checksum alongside it, so deployment automation can verify the
+# artifact against the published checksum before activation.
+#
+# Signing (cosign/gpg) is intentionally OUT OF SCOPE for v1 (optional/deferred
+# per the spec). This workflow produces the checksum only.
+name: release-provenance
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-artifact-provenance:
+    name: Cross-build tze_hud.exe + publish SHA-256 checksum
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+          targets: x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
+
+      - name: Install protobuf compiler + MinGW cross toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler \
+            mingw-w64
+
+      - name: Cross-build canonical app (release, x86_64-pc-windows-gnu)
+        run: |
+          cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
+
+      - name: Generate SHA-256 checksum
+        id: checksum
+        run: |
+          set -euo pipefail
+          ART_DIR="target/x86_64-pc-windows-gnu/release"
+          cd "$ART_DIR"
+          # Checksum references the deterministic artifact name `tze_hud.exe`.
+          sha256sum tze_hud.exe > tze_hud.exe.sha256
+          echo "Published checksum:"
+          cat tze_hud.exe.sha256
+          # Self-check: the published checksum MUST verify against the artifact.
+          sha256sum -c tze_hud.exe.sha256
+
+      - name: Publish artifact + checksum
+        uses: actions/upload-artifact@v6
+        with:
+          name: tze_hud-windows-gnu
+          path: |
+            target/x86_64-pc-windows-gnu/release/tze_hud.exe
+            target/x86_64-pc-windows-gnu/release/tze_hud.exe.sha256
+          if-no-files-found: error

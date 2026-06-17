@@ -231,7 +231,12 @@ For automation purposes, the canonical app binary produces:
 - **Artifact name**: `tze_hud.exe` (stable, deterministic)
 - **Linux build output**: `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 - **Windows remote path**: `C:\tze_hud\tze_hud.exe` (default deployment location)
-- **Checksum**: Use `sha256sum` on Linux before/after deployment for integrity verification
+- **Checksum / provenance**: the `release-provenance` workflow
+  (`.github/workflows/release-provenance.yml`) cross-builds `tze_hud.exe` and
+  publishes a pipeline-generated `tze_hud.exe.sha256` alongside it as a workflow
+  artifact. Deployment automation MUST verify the artifact against the published
+  checksum (`sha256sum -c tze_hud.exe.sha256`) before activation. (Signing is
+  optional/deferred for v1.)
 
 ## 2) Linux + TigerVNC, then connect from Windows
 
