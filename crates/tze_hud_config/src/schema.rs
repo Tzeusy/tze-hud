@@ -77,4 +77,16 @@ mod tests {
             "schema should contain widget_runtime_assets field"
         );
     }
+
+    /// WHEN the schema is exported THEN it includes the optional `schema_version`
+    /// field (configuration spec §Config Schema Version and Compatibility Policy).
+    #[test]
+    fn test_schema_contains_schema_version_field() {
+        let v = schema_value();
+        let json_str = serde_json::to_string(&v).unwrap();
+        assert!(
+            json_str.contains("schema_version"),
+            "exported schema should contain the schema_version field"
+        );
+    }
 }
