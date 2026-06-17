@@ -2821,6 +2821,40 @@ impl WinitApp {
                 // compositor ring-update hint; we log the transition below and
                 // broadcast FocusGainedEvent / FocusLostEvent to agents via
                 // dispatch_focus_event on the input_event_tx channel.
+                // Resolve the tab that should receive focus for this pointer
+                // event.  Click-to-focus is per-tab (RFC 0004 §1.1/§1.2), so the
+                // authoritative tab is the one that OWNS the tile under the
+                // pointer — not the global `active_tab`.  A resident gRPC /
+                // projection session (e.g. a text-stream portal) creates tiles
+                // into the active tab at create time, but configs whose default
+                // tab carries no widgets boot with `active_tab == None`, and
+                // tab activation can otherwise drift; in either case keying focus
+                // off the stale/absent global `active_tab` silently drops focus
+                // acquisition (hud-dwcr7).  Pointer-down on a tile therefore
+                // activates that tile's tab so focus + keyboard routing (which
+                // reads `active_tab`) target the surface the operator clicked.
+                if pointer_event.kind == PointerEventKind::Down {
+                    if let HitResult::NodeHit { tile_id, .. } | HitResult::TileHit { tile_id } =
+                        scene.hit_test(pointer_event.x, pointer_event.y)
+                    {
+                        if let Some(hit_tab) = scene.tiles.get(&tile_id).map(|t| t.tab_id) {
+                            if scene.active_tab != Some(hit_tab) {
+                                // Prefer the validated switch path (emits the
+                                // active-tab-changed bookkeeping); fall back to a
+                                // direct assignment if the tab is the first/only
+                                // one and switch_active_tab is unavailable.
+                                if scene.switch_active_tab(hit_tab).is_err() {
+                                    scene.active_tab = Some(hit_tab);
+                                }
+                                tracing::debug!(
+                                    tab_id = ?hit_tab,
+                                    "click-to-focus: activated tab owning clicked tile"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 let active_tab = scene.active_tab;
                 let (result, focus_transition) = if let Some(tab_id) = active_tab {
                     self.state.input_processor.process_with_focus(
@@ -2830,7 +2864,8 @@ impl WinitApp {
                         tab_id,
                     )
                 } else {
-                    // No active tab — fall back to focus-unaware processing.
+                    // No active tab AND the pointer did not land on any tile —
+                    // fall back to focus-unaware processing.
                     let r = self
                         .state
                         .input_processor
@@ -8659,6 +8694,140 @@ redaction_style = "blank"
             "post-submit clear seq={} must exceed submission seq={}",
             clr.sequence,
             sub.sequence
+        );
+    }
+
+    // ── Click-to-focus tab resolution (hud-dwcr7) ───────────────────────────
+
+    /// Build a scene with a composer tile (accepts_focus + accepts_composer_input)
+    /// living in `portal_tab`, while `scene.active_tab` is set to `other_tab`.
+    /// Returns (scene, portal_tab, composer_tile, composer_node, pointer x/y).
+    fn scene_with_composer_in_nonactive_tab() -> (
+        tze_hud_scene::graph::SceneGraph,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        f32,
+        f32,
+    ) {
+        use tze_hud_scene::types::HitRegionNode;
+        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        // Two tabs: an "other" tab that is active, and the portal tab that owns
+        // the composer tile.  This reproduces the live failure where the global
+        // active_tab is NOT the tab the operator clicked (hud-dwcr7).
+        let other_tab = scene.create_tab("Other", 0).unwrap(); // auto-activates
+        let portal_tab = scene.create_tab("Portal", 1).unwrap();
+        assert_eq!(scene.active_tab, Some(other_tab));
+
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                portal_tab,
+                "portal-agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+
+        let node_id = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                        interaction_id: "portal-composer-focus".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        accepts_composer_input: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        // Pointer lands inside the composer tile (tile origin 100,100).
+        (scene, portal_tab, tile_id, node_id, 150.0, 150.0)
+    }
+
+    /// Regression: click-to-focus must acquire focus on a composer tile whose
+    /// tab is NOT the global active_tab.  Keying focus off the stale active_tab
+    /// (the pre-fix behavior) drops the focus transition at FocusManager::on_click
+    /// (focus.rs tab-mismatch guard); resolving the tab from the hit tile fixes
+    /// it.  This pins the core behavior the windowed pointer-down handler relies
+    /// on (hud-dwcr7).
+    #[test]
+    fn click_focus_uses_hit_tile_tab_not_stale_active_tab() {
+        use tze_hud_input::{FocusManager, InputProcessor, PointerEvent, PointerEventKind};
+
+        let (mut scene, portal_tab, tile_id, node_id, px, py) =
+            scene_with_composer_in_nonactive_tab();
+        let stale_active_tab = scene.active_tab.unwrap();
+        assert_ne!(stale_active_tab, portal_tab);
+
+        let pointer = PointerEvent {
+            x: px,
+            y: py,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+
+        // ── Pre-fix behavior: focus keyed off the stale active_tab drops it. ──
+        {
+            let mut processor = InputProcessor::new();
+            let mut fm = FocusManager::new();
+            let (_r, transition) = processor.process_with_focus(
+                &pointer,
+                &mut scene.clone(),
+                &mut fm,
+                stale_active_tab,
+            );
+            assert!(
+                transition.is_none() || transition.unwrap().gained.is_none(),
+                "focusing off the stale active_tab must NOT acquire the composer \
+                 (tab-mismatch guard) — this is the bug"
+            );
+            assert!(
+                !processor.is_composer_active(),
+                "composer must not activate when focus targets the wrong tab"
+            );
+        }
+
+        // ── Fixed behavior: resolve the hit tile's tab, activate it, focus it. ──
+        let hit_tab = scene.tiles.get(&tile_id).map(|t| t.tab_id).unwrap();
+        assert_eq!(hit_tab, portal_tab, "hit tile must resolve to its own tab");
+        if scene.active_tab != Some(hit_tab) {
+            scene.switch_active_tab(hit_tab).unwrap();
+        }
+        assert_eq!(scene.active_tab, Some(portal_tab));
+
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        let (_r, transition) = processor.process_with_focus(&pointer, &mut scene, &mut fm, hit_tab);
+
+        let transition = transition.expect("focus transition must be produced");
+        let (gained, _ns) = transition
+            .gained
+            .expect("pointer-down on composer tile must acquire focus");
+        assert_eq!(
+            gained.node_id,
+            Some(node_id),
+            "focus must land on the composer hit-region node"
+        );
+        assert!(
+            processor.is_composer_active(),
+            "composer draft manager must be active after focusing a node with \
+             accepts_composer_input=true"
         );
     }
 
