@@ -456,5 +456,209 @@ class PromotionGateEvidenceSchemaTests(unittest.TestCase):
         self.assertFalse(artifact["lease_release_on_exit"])
 
 
+# ── Steady-state publish atomicity (hud-ooeam flicker fix) ────────────────────
+
+
+class _RecordingClient:
+    """Minimal fake HudClient that records every mutation batch.
+
+    All higher-level helpers funnel through ``submit_mutation_batch`` exactly as
+    the real client does, so recording that one entry point captures the full
+    mutation stream (set_tile_root / add_node / update_node_content / …) plus
+    which tile each touched.
+    """
+
+    def __init__(self) -> None:
+        self.batches: list[dict] = []
+        self._next_id = 0
+
+    def _alloc_id(self) -> bytes:
+        self._next_id += 1
+        return self._next_id.to_bytes(16, "big")
+
+    async def submit_mutation_batch(self, lease_id, mutations, timeout=5.0):
+        created: list[bytes] = []
+        for m in mutations:
+            kind = m.WhichOneof("mutation")
+            tile_id = b""
+            field = getattr(m, kind)
+            if hasattr(field, "tile_id"):
+                tile_id = field.tile_id
+            elif kind == "publish_to_tile":
+                tile_id = field.element_id
+            self.batches.append({"kind": kind, "tile_id": tile_id})
+            # set_tile_root / add_node / create_tile produce a server id.
+            if kind in ("set_tile_root", "add_node", "create_tile"):
+                created.append(self._alloc_id())
+
+        class _Result:
+            accepted = True
+            error_code = 0
+            error_message = ""
+
+        result = _Result()
+        result.batch_id = b""
+        result.created_ids = created
+        return result
+
+    async def add_node(self, lease_id, tile_id, node, parent_id=None):
+        mr = await self.submit_mutation_batch(
+            lease_id,
+            [portal.types_pb2.MutationProto(
+                add_node=portal.types_pb2.AddNodeMutation(
+                    tile_id=tile_id, parent_id=parent_id or b"", node=node,
+                ),
+            )],
+        )
+        return mr.created_ids[0]
+
+    async def update_node_content(self, lease_id, tile_id, node_id, node):
+        mut = portal.update_node_content_mutation(tile_id, node_id, node)
+        await self.submit_mutation_batch(lease_id, [mut])
+
+    async def update_tile_opacity(self, lease_id, tile_id, opacity):
+        await self.submit_mutation_batch(
+            lease_id,
+            [portal.types_pb2.MutationProto(
+                update_tile_opacity=portal.types_pb2.UpdateTileOpacityMutation(
+                    tile_id=tile_id, opacity=opacity,
+                ),
+            )],
+        )
+
+    async def update_tile_input_mode(self, lease_id, tile_id, input_mode):
+        await self.submit_mutation_batch(
+            lease_id,
+            [portal.types_pb2.MutationProto(
+                update_tile_input_mode=portal.types_pb2.UpdateTileInputModeMutation(
+                    tile_id=tile_id, input_mode=input_mode,
+                ),
+            )],
+        )
+
+
+def _portal_tiles() -> "portal.PortalTiles":
+    ids = [i.to_bytes(16, "big") for i in range(900, 906)]
+    return portal.PortalTiles(
+        capture_backstop=ids[0],
+        frame=ids[1],
+        input_scroll=ids[2],
+        output_scroll=ids[3],
+        drag_shield=ids[4],
+        minimized_icon=ids[5],
+        tab_width=portal.PORTAL_W,
+        tab_height=portal.PORTAL_H,
+    )
+
+
+class SteadyStatePublishAtomicityTests(unittest.TestCase):
+    """Lock in the hud-ooeam flicker fix at the mutation-stream contract level.
+
+    The live flicker came from the steady-state publish tearing the output-body
+    tile down (set_tile_root → empties the tile) and re-adding children via
+    separate add_node RPCs/commits, so the render thread sampled an empty body
+    between commits. The fix updates the body text node in place via a single
+    atomic update_node_content batch. These tests assert that contract without a
+    live HUD.
+    """
+
+    def _setup_then_steady(self):
+        tiles = _portal_tiles()
+        client = _RecordingClient()
+        lease = b"lease"
+        body0 = "line 0\nline 1\nline 2"
+        body1 = "line 0\nline 1\nline 2\nline 3"
+
+        async def run():
+            # Reset module-level runtime-id registries for isolation.
+            portal.FRAME_RUNTIME_NODE_IDS.clear()
+            portal.COMPOSER_RUNTIME_NODE_IDS.clear()
+            portal.OUTPUT_RUNTIME_NODE_IDS.clear()
+            # First publish: full tile setup (mounts + captures runtime ids).
+            await portal.publish_portal(
+                client, lease, tiles,
+                title="T", subtitle="S", body=body0,
+                footer_meta="f0", include_tile_setup=True,
+            )
+            setup_batches = list(client.batches)
+            client.batches.clear()
+            # Steady-state publish: append one line, republish window.
+            await portal.publish_portal(
+                client, lease, tiles,
+                title="T", subtitle="S", body=body1,
+                footer_meta="f1", include_tile_setup=False,
+            )
+            return setup_batches, list(client.batches)
+
+        return asyncio.run(run()), tiles
+
+    def test_steady_state_output_body_updates_in_place_not_torn_down(self) -> None:
+        (setup_batches, steady_batches), tiles = self._setup_then_steady()
+
+        out = tiles.output_scroll
+        # Setup must have mounted the output tile via a tile-root + add_node(s).
+        self.assertTrue(
+            any(b["kind"] == "set_tile_root" and b["tile_id"] == out for b in setup_batches),
+            "setup should mount the output tile root",
+        )
+        # The captured body id must exist after setup.
+        self.assertIn("body", portal.OUTPUT_RUNTIME_NODE_IDS)
+
+        # Steady state: NO teardown/rebuild of the output tile.
+        out_set_root = [b for b in steady_batches if b["kind"] == "set_tile_root" and b["tile_id"] == out]
+        out_add_node = [b for b in steady_batches if b["kind"] == "add_node" and b["tile_id"] == out]
+        self.assertEqual(out_set_root, [], "steady-state must not reset the output tile root")
+        self.assertEqual(out_add_node, [], "steady-state must not re-add output children")
+
+        # Steady state MUST update the body content in place.
+        out_updates = [b for b in steady_batches if b["kind"] == "update_node_content" and b["tile_id"] == out]
+        self.assertTrue(out_updates, "steady-state must update the output body in place")
+
+    def test_steady_state_frame_chrome_updates_in_place_not_torn_down(self) -> None:
+        (_setup, steady_batches), tiles = self._setup_then_steady()
+        frame = tiles.frame
+        frame_set_root = [b for b in steady_batches if b["kind"] == "set_tile_root" and b["tile_id"] == frame]
+        frame_add_node = [b for b in steady_batches if b["kind"] == "add_node" and b["tile_id"] == frame]
+        self.assertEqual(frame_set_root, [], "steady-state must not reset the frame tile root")
+        self.assertEqual(frame_add_node, [], "steady-state must not re-add frame children")
+        frame_updates = [b for b in steady_batches if b["kind"] == "update_node_content" and b["tile_id"] == frame]
+        self.assertTrue(frame_updates, "steady-state must update frame chrome in place")
+
+    def test_steady_state_remounts_when_output_ids_invalidated(self) -> None:
+        # If the captured output ids were invalidated (e.g. the interactive
+        # scroll path tore the tile down), a steady-state publish must fall back
+        # to a full re-mount (set_tile_root) rather than issuing an in-place
+        # update against a node id that no longer exists.
+        tiles = _portal_tiles()
+        client = _RecordingClient()
+        lease = b"lease"
+
+        async def run():
+            portal.FRAME_RUNTIME_NODE_IDS.clear()
+            portal.COMPOSER_RUNTIME_NODE_IDS.clear()
+            portal.OUTPUT_RUNTIME_NODE_IDS.clear()
+            await portal.publish_portal(
+                client, lease, tiles,
+                title="T", subtitle="S", body="a\nb",
+                footer_meta="f0", include_tile_setup=True,
+            )
+            # Simulate the scroll-path teardown invalidation.
+            portal.OUTPUT_RUNTIME_NODE_IDS.clear()
+            client.batches.clear()
+            await portal.publish_portal(
+                client, lease, tiles,
+                title="T", subtitle="S", body="a\nb\nc",
+                footer_meta="f1", include_tile_setup=False,
+            )
+            return list(client.batches)
+
+        steady_batches = asyncio.run(run())
+        out = tiles.output_scroll
+        out_set_root = [b for b in steady_batches if b["kind"] == "set_tile_root" and b["tile_id"] == out]
+        self.assertTrue(out_set_root, "must re-mount the output tile when ids are invalidated")
+        # And the re-mount must re-capture the body id for subsequent cycles.
+        self.assertIn("body", portal.OUTPUT_RUNTIME_NODE_IDS)
+
+
 if __name__ == "__main__":
     unittest.main()
