@@ -593,8 +593,14 @@ fn register_demo_target(authority: &mut ExternalAgentProjectionAuthority) -> Res
 fn demo_windows_target() -> WindowsHudTarget {
     WindowsHudTarget {
         target_id: "windows-local".to_string(),
-        mcp_url: Some(std::env::var("TZE_HUD_DEMO_MCP_URL").unwrap_or_else(|_| "http://windows-host.example:9090/mcp".to_string())),
-        grpc_endpoint: Some(std::env::var("TZE_HUD_DEMO_GRPC").unwrap_or_else(|_| "windows-host.example:50051".to_string())),
+        mcp_url: Some(
+            std::env::var("TZE_HUD_DEMO_MCP_URL")
+                .unwrap_or_else(|_| "http://windows-host.example:9090/mcp".to_string()),
+        ),
+        grpc_endpoint: Some(
+            std::env::var("TZE_HUD_DEMO_GRPC")
+                .unwrap_or_else(|_| "windows-host.example:50051".to_string()),
+        ),
         credential_source: HudCredentialSource::EnvVar("TZE_HUD_PSK".to_string()),
         runtime_audience: "local-windows-hud".to_string(),
     }
