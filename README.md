@@ -136,6 +136,15 @@ Minimal valid config requirements:
 - `[runtime]` with a `profile` field
 - at least one `[[tabs]]` entry
 
+Schema version and compatibility policy:
+- An optional top-level `schema_version` (integer) declares the config schema the
+  document targets. It appears in the exported JSON schema (`--print-schema`).
+- **Absent** → treated as the current supported version, so existing v1 configs
+  load unchanged.
+- **Within the supported range** → loads and proceeds to normal validation.
+- **Newer than the runtime supports** → fail-closed startup error
+  `CONFIG_SCHEMA_VERSION_UNSUPPORTED` naming the supported range; no port is bound.
+
 Canonical operator config path:
 - `app/tze_hud_app/config/production.toml` (deploy this as `tze_hud.toml` beside the binary)
 

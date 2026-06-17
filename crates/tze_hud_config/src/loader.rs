@@ -48,6 +48,18 @@ use crate::tokens;
 use crate::widgets;
 use crate::zones;
 
+// ─── Config schema version ───────────────────────────────────────────────────
+
+/// Current config schema version. An absent `schema_version` field is treated as
+/// this value, so existing (unversioned) v1 configs load unchanged.
+pub const CURRENT_CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum config schema version this runtime can load. A config declaring a
+/// `schema_version` greater than this fails closed with
+/// `CONFIG_SCHEMA_VERSION_UNSUPPORTED` (configuration spec §Config Schema Version
+/// and Compatibility Policy).
+pub const MAX_SUPPORTED_CONFIG_SCHEMA_VERSION: u32 = 1;
+
 // ─── Regex helper ────────────────────────────────────────────────────────────
 
 /// Scene event name pattern: `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`
@@ -122,6 +134,31 @@ impl ConfigLoader for TzeHudConfig {
 
     fn validate(&self) -> Vec<ConfigError> {
         let mut errors: Vec<ConfigError> = Vec::new();
+
+        // ── (0) schema_version gate (precedes field-level validation) ─────────
+        // Spec §Config Schema Version and Compatibility Policy: absent → current
+        // (back-compatible default); within range → proceed; newer than the
+        // runtime's max supported version → fail closed naming the range. An
+        // unsupported schema means we cannot reliably interpret the rest of the
+        // document, so this short-circuits the remaining field-level checks.
+        let schema_version = self
+            .raw
+            .schema_version
+            .unwrap_or(CURRENT_CONFIG_SCHEMA_VERSION);
+        if schema_version > MAX_SUPPORTED_CONFIG_SCHEMA_VERSION {
+            errors.push(ConfigError {
+                code: ConfigErrorCode::Other("CONFIG_SCHEMA_VERSION_UNSUPPORTED".into()),
+                field_path: "schema_version".into(),
+                expected: format!(
+                    "schema_version within supported range 0..={MAX_SUPPORTED_CONFIG_SCHEMA_VERSION}"
+                ),
+                got: schema_version.to_string(),
+                hint: format!(
+                    "this runtime supports config schema versions up to {MAX_SUPPORTED_CONFIG_SCHEMA_VERSION}; upgrade the runtime or lower schema_version"
+                ),
+            });
+            return errors;
+        }
 
         // ── (1) includes field (v1-reserved) ──────────────────────────────────
         if self.raw.includes.is_some() {

@@ -1982,3 +1982,80 @@ max_update_hz = 45
             .collect::<Vec<_>>()
     );
 }
+
+// ── Spec §Config Schema Version and Compatibility Policy ──────────────────────
+
+fn has_schema_version_error(errors: &[tze_hud_scene::config::ConfigError]) -> bool {
+    errors
+        .iter()
+        .any(|e| matches!(&e.code, ConfigErrorCode::Other(s) if s == "CONFIG_SCHEMA_VERSION_UNSUPPORTED"))
+}
+
+/// WHEN config omits schema_version THEN it is treated as current (no schema error).
+#[test]
+fn spec_absent_schema_version_defaults_to_current() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        !has_schema_version_error(&errors),
+        "absent schema_version must not produce a schema-version error"
+    );
+}
+
+/// WHEN schema_version exceeds the supported max THEN CONFIG_SCHEMA_VERSION_UNSUPPORTED
+/// and the gate short-circuits the remaining field-level validation.
+#[test]
+fn spec_newer_schema_version_fails_closed() {
+    let toml = r#"
+schema_version = 999
+
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let schema_err = errors
+        .iter()
+        .find(|e| matches!(&e.code, ConfigErrorCode::Other(s) if s == "CONFIG_SCHEMA_VERSION_UNSUPPORTED"))
+        .expect("newer schema_version must fail closed");
+    assert!(
+        schema_err.expected.contains("supported range")
+            || schema_err.hint.contains("supports config schema versions"),
+        "schema-version error must name the supported range"
+    );
+    assert_eq!(
+        errors.len(),
+        1,
+        "unsupported schema version should short-circuit other field validation"
+    );
+}
+
+/// WHEN schema_version is within the supported range THEN no schema-version error.
+#[test]
+fn spec_supported_schema_version_proceeds() {
+    let toml = r#"
+schema_version = 1
+
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        !has_schema_version_error(&errors),
+        "in-range schema_version must not produce a schema-version error"
+    );
+}
