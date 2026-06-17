@@ -1,4 +1,5 @@
 # exemplar-status-bar Specification
+Status: implemented
 
 ## Purpose
 Defines the status-bar exemplar zone contract for chrome-layer key/value status rendering and merge-by-key coexistence across agents.

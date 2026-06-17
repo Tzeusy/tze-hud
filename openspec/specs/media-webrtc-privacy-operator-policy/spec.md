@@ -1,4 +1,5 @@
 # Specification: Media/WebRTC Privacy, Operator Controls, and Enablement Policy
+Status: parked
 
 > **DEFERRED INDEFINITELY (2026-05-09).** Pairs with `media-webrtc-bounded-ingress` and is deferred for the same reason: the project has refocused on a performant single-device Rust HUD runtime for Windows. The accepted `openspec/changes/windows-media-ingress-exemplar/` change is the only active exception and is limited to default-off Windows-only, one-stream, video-only `media-pip` ingress with explicit operator disable state. Active source of truth: `openspec/changes/windows-first-performant-runtime/`, `openspec/changes/windows-media-ingress-exemplar/` for the exception, and epic `hud-9wljr`.
 >

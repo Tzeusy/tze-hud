@@ -1,4 +1,5 @@
 # text-stream-portals Specification
+Status: implemented
 
 ## Purpose
 Defines transport-agnostic text stream portal behavior for resident raw-tile pilots, including output rendering, bounded input, session metadata, and cooperative projection integration points.

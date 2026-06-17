@@ -1,4 +1,5 @@
 # external-agent-projection-authority Specification
+Status: v1-reserved
 
 ## Purpose
 Define the contract for an **external** agent projection authority that supervises

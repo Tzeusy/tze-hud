@@ -36,6 +36,33 @@ The rest of this README is command-first and focused on four workflows:
 3. Run all test categories
 4. Trigger zone publishing to the server and verify UI-control/overlay path
 
+## Required Gates / CI
+
+CI (`.github/workflows/ci.yml`) runs the gates below on every PR; `just ci`
+reproduces the blocking set locally (requires [just](https://github.com/casey/just)).
+Each local recipe maps to a CI job:
+
+| Local recipe (`just …`) | CI job | Checks |
+|---|---|---|
+| `check` | `check` | `cargo check` (fast compile gate) |
+| `fmt` | `fmt` | `cargo fmt --check` |
+| `clippy` | `clippy` | `cargo clippy --workspace --all-targets -D warnings` |
+| `test` | `test-unit` | workspace unit tests (excludes `integration`) |
+| `test-integration` | `test-integration` | headless integration suites |
+| `test-trace` | `test-trace` | trace-regression suite |
+| `test-v1-thesis` | `test-v1-thesis` | v1 thesis proof |
+| `production-boot` | `production-boot-vertical-slice` | vertical-slice production-config boot |
+| `canonical-app-boot` | `canonical-app-production-boot` | canonical app production-config boot |
+| `vocabulary-lint` | `vocabulary-lint` | canonical-vocabulary lint |
+| `dev-mode-guard` | `dev-mode-guard` | dev-mode excluded from release default features |
+| — (raw `cargo test --test pixel_readback`) | `test-gpu-pixel-readback` | GPU pixel-readback; needs Mesa llvmpipe headless, excluded from `just ci` |
+| — | `cargo-deny` | dependency/advisory policy (`deny.toml`) |
+| — | `windows-performance-budget` | Windows perf-budget lane (reference hardware) |
+| — | `v2-preview` | v2-scope preview (informational) |
+
+The toolchain is pinned in `rust-toolchain.toml` (Rust 1.88, matching CI and the
+`glyphon 0.8.x` / `wgpu 24.x` co-pin; see `docs/dependency-upgrade-ledger.md`).
+
 ## Overview: Canonical Runtime App vs. Demo Binaries
 
 **Important:** This project distinguishes between the **canonical runtime application binary** and demo/reference binaries.

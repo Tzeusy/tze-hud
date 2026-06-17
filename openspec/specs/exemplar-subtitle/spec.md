@@ -1,4 +1,5 @@
 # exemplar-subtitle Specification
+Status: implemented
 
 ## Purpose
 Defines the subtitle exemplar zone contract for readable bottom-of-screen text, dual-layer readability, backdrop/outline policy, and transition behavior.

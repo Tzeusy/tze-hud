@@ -1,4 +1,5 @@
 # lease-governance Specification
+Status: implemented
 
 ## Purpose
 

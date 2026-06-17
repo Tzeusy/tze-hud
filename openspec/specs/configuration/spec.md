@@ -1,4 +1,5 @@
 # configuration Specification
+Status: implemented
 
 Source: RFC 0006 (Configuration)
 Domain: GOVERNANCE

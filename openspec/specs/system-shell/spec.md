@@ -1,4 +1,5 @@
 # System Shell Specification
+Status: implemented
 
 Source: RFC 0007 (System Shell)
 Domain: GOVERNANCE

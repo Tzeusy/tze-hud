@@ -1,4 +1,5 @@
 # exemplar-alert-banner Specification
+Status: implemented
 
 ## Purpose
 Defines the alert-banner exemplar component profile and visual contract for severity-colored, chrome-layer alert rendering using the component shape language.

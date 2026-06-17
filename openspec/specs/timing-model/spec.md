@@ -1,4 +1,5 @@
 # timing-model Specification
+Status: implemented
 
 ## Purpose
 

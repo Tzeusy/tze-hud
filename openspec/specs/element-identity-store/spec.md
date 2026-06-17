@@ -1,4 +1,5 @@
 # element-identity-store Specification
+Status: implemented
 
 ## Purpose
 Governs persistent element identity for scene objects (zones, widgets, tiles): stable ID survival across runtime restarts, additive-only v1 growth semantics, and the lease-gated `PublishToTileMutation` path that addresses tiles through resolved element identity with runtime geometry overrides applied atomically at commit.

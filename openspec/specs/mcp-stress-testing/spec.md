@@ -1,4 +1,5 @@
 # mcp-stress-testing Specification
+Status: implemented
 
 ## Purpose
 External load testing capability for the MCP HTTP `publish_to_zone` endpoint. Exercises zone publishing at configurable load levels while collecting latency and host resource telemetry. Provides network-facing latency and throughput characterization complementary to internal compositor telemetry.

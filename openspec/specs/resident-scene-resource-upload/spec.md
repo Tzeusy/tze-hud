@@ -1,4 +1,5 @@
 # resident-scene-resource-upload Specification
+Status: implemented
 
 ## Purpose
 Defines resident scene-resource upload over the existing HudSession stream, including resource start/chunk/complete correlation, deduplication, error surfaces, and separation from widget asset registration.

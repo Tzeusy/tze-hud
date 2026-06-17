@@ -1,4 +1,5 @@
 # scene-events Specification
+Status: implemented
 
 Source: RFC 0010 (Scene Events)
 Domain: EVENTS

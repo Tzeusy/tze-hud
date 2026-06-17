@@ -1,4 +1,5 @@
 # component-shape-language Specification
+Status: implemented
 
 ## Purpose
 Defines the v1 component shape language for token-driven visual identity, rendering-policy resolution, component profile loading, readability validation, and SVG token substitution used by zones and widgets.

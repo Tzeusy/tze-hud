@@ -1,4 +1,5 @@
 # Specification: Exemplar Notification
+Status: implemented
 
 ## Purpose
 

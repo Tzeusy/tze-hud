@@ -1,4 +1,5 @@
 # exemplar-status-indicator Specification
+Status: implemented
 
 ## Purpose
 Defines the status-indicator widget exemplar bundle and parameter contract for token-driven status/severity display.

@@ -1,4 +1,5 @@
 # windowed-runtime-network-services Specification
+Status: implemented
 
 ## Purpose
 Defines network service initialization, MCP listener lifecycle, and authentication enforcement inside the canonical windowed runtime process.

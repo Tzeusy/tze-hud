@@ -1,4 +1,5 @@
 # runtime-app-binary Specification
+Status: implemented
 
 ## Purpose
 Defines the canonical operator-facing runtime application binary, its configuration-driven startup behavior, and stable Windows artifact identity for automation.
