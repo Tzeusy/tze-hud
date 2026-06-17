@@ -95,7 +95,7 @@ use tze_hud_compositor::{
 };
 use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{
-    DragEventOutcome, FocusManager, HotkeyResizeDir, InputProcessor, KeyboardProcessor,
+    DragEventOutcome, DragPhase, FocusManager, HotkeyResizeDir, InputProcessor, KeyboardProcessor,
     PointerEvent, PointerEventKind, PortalRect, PortalResizeState, PortalWindowTokens,
     RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ResizeBounds, ResizeEdge, ResizeOutcome,
     ShellReservedShortcut, apply_hotkey_resize, hit_affordance,
@@ -403,6 +403,51 @@ fn keyboard_kind_preview(kind: &tze_hud_input::KeyboardDispatchKind) -> String {
 /// (touch) before activating the drag.  A quick press-release cycle (tap/click)
 /// never reaches the `Activated` phase and therefore does not interfere with the
 /// click-to-focus path wired in [`WinitApp::enqueue_pointer_event`].
+/// Time budget for the main-thread interactive-feedback lock acquisition
+/// (an active drag move or a live resize step).
+///
+/// Sized at roughly one 60 fps frame: long enough to outlast the compositor's
+/// per-frame scene-lock hold (it releases at the Stage-4 `drop(scene)` every
+/// frame), short enough that a pathological lock holder cannot stall the UI
+/// thread for more than a frame before we fall back to dropping the update.
+const INTERACTION_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
+
+/// Bounded-spin acquisition of a [`tokio::sync::Mutex`] from the synchronous
+/// main (UI) thread.
+///
+/// The main-thread input path only ever uses `try_lock` — it must not `.await`
+/// (it is not async) and must not `blocking_lock` (that panics inside an async
+/// runtime context).  For interactive gestures, dropping the local feedback on
+/// a single contended `try_lock` is exactly what makes a dragged window jump in
+/// bursts instead of tracking the pointer, and makes a `Ctrl+`/`-` resize step
+/// silently no-op — both violations of the local-feedback-first contract.
+///
+/// This retries `try_lock`, yielding to the scheduler so the current holder
+/// (the compositor render thread or a publish handler) can finish, until it
+/// succeeds or `budget` elapses.  The wait is inherently bounded because the
+/// compositor releases the scene lock at the end of every frame, so under
+/// normal operation acquisition succeeds within a fraction of one frame.
+/// Returns `None` only when the budget elapses, in which case the caller falls
+/// back to the prior drop-the-update behaviour (no regression on a true stall).
+fn spin_acquire<T>(
+    mutex: &Mutex<T>,
+    budget: std::time::Duration,
+) -> Option<tokio::sync::MutexGuard<'_, T>> {
+    if let Ok(guard) = mutex.try_lock() {
+        return Some(guard);
+    }
+    let start = Instant::now();
+    loop {
+        std::thread::yield_now();
+        if let Ok(guard) = mutex.try_lock() {
+            return Some(guard);
+        }
+        if start.elapsed() >= budget {
+            return None;
+        }
+    }
+}
+
 // The input processor, pointer event, hit result, scene, and display dimensions
 // are all separate concerns that cannot be bundled into a context struct without
 // creating an artificial abstraction; the argument count is genuinely necessary.
@@ -2811,8 +2856,45 @@ impl WinitApp {
         // locked block below; consumed after the lock is released to call
         // clear_local_composer_echo() without a borrow conflict (hud-r3ax6).
         let mut composer_focus_lost = false;
-        if let Ok(state) = self.state.shared_state.try_lock() {
-            if let Ok(mut scene) = state.scene.try_lock() {
+        // An in-flight interactive gesture — an active drag move or a live
+        // pointer-affordance resize — requires guaranteed same-frame local
+        // feedback (local-feedback-first).  For those events, acquire the locks
+        // with a bounded spin instead of a single `try_lock`, so the
+        // `tile.bounds` update is never dropped on contention with the
+        // compositor render thread or a publish handler.  Dropping it is the
+        // root cause of bursty, laggy drag and no-op `Ctrl+`/`-` resize on
+        // continuously-streaming portals (the dropped step otherwise leaks out
+        // only via the adapter geometry roundtrip, lagging the body).  The
+        // phase/gesture flags are read without any lock (owned state).
+        let needs_guaranteed_feedback = matches!(
+            pointer_event.kind,
+            PointerEventKind::Move | PointerEventKind::Up
+        ) && (self
+            .state
+            .input_processor
+            .drag_states
+            .values()
+            .any(|s| s.phase == DragPhase::Activated)
+            || self
+                .state
+                .portal_resize_states
+                .values()
+                .any(|s| s.gesture_active()));
+        // Inlined into the if-let scrutinee (not a named `let`) so the guard's
+        // borrow of `self` is released at the end of this if-let/else — the
+        // post-lock section below needs `&mut self` (drag-release persist,
+        // composer-echo clear).
+        if let Some(state) = if needs_guaranteed_feedback {
+            spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+        } else {
+            self.state.shared_state.try_lock().ok()
+        } {
+            let scene_guard = if needs_guaranteed_feedback {
+                spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET)
+            } else {
+                state.scene.try_lock().ok()
+            };
+            if let Some(mut scene) = scene_guard {
                 // ── Click-to-focus (Stage 2) ─────────────────────────────────
                 // Use process_with_focus on every pointer event so that a
                 // pointer-down on a focusable HitRegionNode transfers keyboard
@@ -4010,10 +4092,15 @@ impl WinitApp {
         // Acquire scene + check if focused tile is a portal (has scroll config).
         // Resolve the bounds and display dimensions we need for clamping.
         let (current_rect, bounds, portal_id_hash) = {
-            let Ok(state) = self.state.shared_state.try_lock() else {
+            // A resize hotkey is a deliberate user action that must produce
+            // visible feedback this frame; acquire with a bounded spin rather
+            // than a single try_lock so a contended scene lock (compositor /
+            // streaming publish) cannot silently swallow the resize.
+            let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+            else {
                 return false;
             };
-            let Ok(scene) = state.scene.try_lock() else {
+            let Some(scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
                 return false;
             };
             // Only scrollable portal tiles accept resize hotkeys.
@@ -4104,10 +4191,11 @@ impl WinitApp {
         // blow the frame budget (re-prime rate is content-length-dependent;
         // see `adaptive_reprime_interval_ms` in the compositor).
         {
-            let Ok(state) = self.state.shared_state.try_lock() else {
+            let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+            else {
                 return true; // hotkey consumed even if local update fails
             };
-            let Ok(mut scene) = state.scene.try_lock() else {
+            let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
                 return true;
             };
             if let Some(tile) = scene.tiles.get_mut(&focused_tile_id) {
@@ -9140,6 +9228,71 @@ redaction_style = "blank"
             mutex.try_lock().is_ok(),
             "try_lock must succeed when no other task holds the Tokio mutex"
         );
+    }
+
+    /// `spin_acquire` is the bounded-wait acquisition used on the main-thread
+    /// interactive-feedback path (active drag move / resize step).  It must:
+    /// acquire immediately when free, wait out a brief contending holder and
+    /// still acquire within budget, and give up (return `None`) — never
+    /// hard-block — once a holder outlasts the budget.  This is what keeps a
+    /// dragged window tracking the pointer instead of jumping in bursts, and a
+    /// `Ctrl+`/`-` resize landing the same frame, without ever freezing the UI
+    /// thread on a pathological lock holder (hud-0xudd).  Deliberately a plain
+    /// `#[test]` (no runtime) to also assert it works off the async runtime.
+    #[test]
+    fn spin_acquire_waits_out_brief_holder_but_yields_on_overrun() {
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Free lock → immediate Some.
+        let m: Arc<Mutex<u32>> = Arc::new(Mutex::new(7));
+        {
+            let g =
+                spin_acquire(&m, Duration::from_millis(50)).expect("free mutex acquires at once");
+            assert_eq!(*g, 7);
+        }
+
+        // Holder releases after a brief hold → spin_acquire waits it out.
+        let m2 = Arc::clone(&m);
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let g = m2.try_lock().expect("holder takes the free lock");
+            acquired_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            drop(g);
+        });
+        acquired_rx.recv().unwrap(); // ensure the holder owns the lock first
+        assert!(
+            spin_acquire(&m, Duration::from_secs(2)).is_some(),
+            "spin_acquire must wait out a brief holder and acquire within budget"
+        );
+        holder.join().unwrap();
+
+        // Holder outlasts the budget → spin_acquire gives up promptly.
+        let m3 = Arc::clone(&m);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let g = m3.try_lock().expect("holder takes the free lock");
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap(); // hold until the assertion completes
+            drop(g);
+        });
+        held_rx.recv().unwrap();
+        let start = Instant::now();
+        let guard = spin_acquire(&m, Duration::from_millis(10));
+        let elapsed = start.elapsed();
+        assert!(
+            guard.is_none(),
+            "spin_acquire must return None once the budget elapses"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "spin_acquire must return promptly after the budget, not hard-block"
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
     }
 
     /// Verify that a non-empty `pending_keyboard_events` queue preserves FIFO
