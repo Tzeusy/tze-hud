@@ -1,7 +1,7 @@
 {
   "date": "2026-05-12",
-  "host": "tzehouse-windows.parrot-hen.ts.net",
-  "ssh_identity": "~/.ssh/ecdsa_home",
+  "host": "windows-host.example",
+  "ssh_identity": "~/.ssh/hud-ssh-key",
   "production_state": {
     "tze_hud_process": {
       "pid": 49856,

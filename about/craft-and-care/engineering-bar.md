@@ -44,7 +44,7 @@ A change that moves a metric closer to its budget ceiling (even while still pass
 
 These budgets apply only to the Windows-first runtime lane. They are calibrated against the May 2026 baseline in `docs/reports/windows_perf_baseline_2026-05.md`.
 
-Reference hardware tag: `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`), Intel Core i5-13600KF, NVIDIA GeForce RTX 3080 driver `32.0.15.9636`, 16 GiB RAM, 4096x2160 at 60 Hz, Windows 11 Pro `10.0.26200` build `26200`, `C:\tze_hud\tze_hud.exe` in overlay mode. Baseline calibration factors from the 600-frame run: CPU `0.854`, GPU `0.338`, texture upload `0.215`.
+Reference hardware tag: `TzeHouse` (`windows-host.example`), Intel Core i5-13600KF, NVIDIA GeForce RTX 3080 driver `32.0.15.9636`, 16 GiB RAM, 4096x2160 at 60 Hz, Windows 11 Pro `10.0.26200` build `26200`, `C:\tze_hud\tze_hud.exe` in overlay mode. Baseline calibration factors from the 600-frame run: CPU `0.854`, GPU `0.338`, texture upload `0.215`.
 
 Any future Windows performance number quoted in docs, PRs, or release notes must carry this reference tag, a newer approved reference tag, or an explicit statement that the number is not comparable.
 

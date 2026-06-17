@@ -10,7 +10,7 @@ psk_env = "MCP_TEST_PSK"
 
 [[targets]]
 target_id = "user-test-windows-tailnet"
-grpc_endpoint = "tzehouse-windows.parrot-hen.ts.net:50051"
-target_host = "tzehouse-windows.parrot-hen.ts.net"
+grpc_endpoint = "windows-host.example:50051"
+target_host = "windows-host.example"
 network_scope = "tailnet"
 psk_env = "MCP_TEST_PSK"

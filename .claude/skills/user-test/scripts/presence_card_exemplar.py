@@ -100,7 +100,7 @@ DISMISS_FONT_SIZE_PX = 15.0
 DISMISS_INTERACTION_ID = "dismiss-card"
 
 DEFAULT_PSK_ENV = "TZE_HUD_PSK"
-DEFAULT_TARGET = "tzehouse-windows.parrot-hen.ts.net:50051"
+DEFAULT_TARGET = "windows-host.example:50051"
 DEFAULT_TRANSCRIPT_PATH = "test_results/presence-card-latest.json"
 
 

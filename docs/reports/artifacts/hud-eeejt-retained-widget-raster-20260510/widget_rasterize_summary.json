@@ -3,7 +3,7 @@
   "issue": "hud-eeejt",
   "recorded_at_utc": "2026-05-10T03:02:02Z",
   "reference_host": "TzeHouse",
-  "host_dns": "tzehouse-windows.parrot-hen.ts.net",
+  "host_dns": "windows-host.example",
   "remote_artifact_root": "C:/tze_hud/perf/hud-eeejt",
   "local_artifact_root": "docs/reports/artifacts/hud-eeejt-retained-widget-raster-20260510",
   "benchmark_executable_source": "target/x86_64-pc-windows-gnu/release/deps/widget_rasterize-d946571f82217fad.exe",

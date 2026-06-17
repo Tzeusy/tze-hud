@@ -223,16 +223,16 @@ right thing (no background rect emitted).
 ```bash
 # Optional: kill + relaunch HUD if a previous run used --leave-lease-on-exit
 # or crashed before cleanup.
-ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes tzeus@tzehouse-windows.parrot-hen.ts.net \
+ssh -i ~/.ssh/hud-ssh-key -o BatchMode=yes admin-user@windows-host.example \
   "taskkill /F /IM tze_hud.exe"
-ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes tzeus@tzehouse-windows.parrot-hen.ts.net \
+ssh -i ~/.ssh/hud-ssh-key -o BatchMode=yes admin-user@windows-host.example \
   "schtasks /Run /TN TzeHudOverlay"
 # Wait until MCP HTTP responds, then render.
 set -a && source /home/tze/gt/tze_hud/mayor/rig/.env && set +a
 
 # Two-pane UX render
 python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc /home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-manual-review-checklist.md \
@@ -243,7 +243,7 @@ python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_str
 
 # Automated compositor-path input pass
 python3 /home/tze/gt/tze_hud/mayor/rig/.claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc /home/tze/gt/tze_hud/mayor/rig/docs/reports/exemplar-manual-review-checklist.md \

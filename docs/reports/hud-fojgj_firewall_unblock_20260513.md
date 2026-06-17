@@ -16,9 +16,9 @@ copy binaries, clear the GPU lock, or change tracked secrets.
 
 Connectivity checks passed for the Windows host:
 
-- `tailscale ping --c 1 tzehouse-windows.parrot-hen.ts.net`
-- SSH as `hudbot` with `~/.ssh/ecdsa_home`
-- SSH as `tzeus` with `~/.ssh/ecdsa_home`
+- `tailscale ping --c 1 windows-host.example`
+- SSH as `hud-user` with `~/.ssh/hud-ssh-key`
+- SSH as `admin-user` with `~/.ssh/hud-ssh-key`
 
 The production HUD remained active:
 

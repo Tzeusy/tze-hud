@@ -92,8 +92,8 @@ fn portal_submission(input_id: &str, text: &str) -> PortalInputSubmission {
 fn windows_target() -> WindowsHudTarget {
     WindowsHudTarget {
         target_id: "windows-local".to_string(),
-        mcp_url: Some("http://tzehouse-windows.parrot-hen.ts.net:9090/mcp".to_string()),
-        grpc_endpoint: Some("tzehouse-windows.parrot-hen.ts.net:50051".to_string()),
+        mcp_url: Some("http://windows-host.example:9090/mcp".to_string()),
+        grpc_endpoint: Some("windows-host.example:50051".to_string()),
         credential_source: HudCredentialSource::EnvVar("TZE_HUD_PSK".to_string()),
         runtime_audience: "local-windows-hud".to_string(),
     }

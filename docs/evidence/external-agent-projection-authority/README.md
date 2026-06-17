@@ -21,13 +21,13 @@ This directory contains the headless demo artifact and replay fixtures for the 2
 
 ## Live Replay
 
-After `tzehouse-windows.parrot-hen.ts.net` is reachable, verify SSH, start `TzeHudOverlay` if needed, and use the MCP `/mcp` endpoint:
+After `windows-host.example` is reachable, verify SSH, start `TzeHudOverlay` if needed, and use the MCP `/mcp` endpoint:
 
 ```bash
 bash docs/evidence/external-agent-projection-authority/live-replay.sh
 ```
 
-The harness checks Tailscale reachability, SSH for `hudbot` and `tzeus`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. Zone and widget replay steps fail if either the command exits nonzero or any JSON line contains a top-level error, discovery error, publish response error, or cleanup response error. On successful publish steps it writes timestamped `live-zone-replay-<stamp>.json`, `live-widget-replay-<stamp>.json`, and `live-portal-transcript-<stamp>.json` evidence files under this directory by default. It expects `TZE_HUD_PSK` to be set locally, but accepts `MCP_TEST_PSK` as a fallback for the MCP publish scripts and exports the same value for the portal smoke. It never writes the value into artifacts. `PORTAL_AGENT_ID` can override the resident gRPC agent used for the portal smoke; the recovered-host replay used `agent-alpha` because the deployed Windows config grants that agent `create_tiles`, `modify_own_tiles`, and `access_input_events`.
+The harness checks Tailscale reachability, SSH for `hud-user` and `admin-user`, MCP `:9090`, gRPC `:50051`, starts `TzeHudOverlay` if SSH works but ports are down, publishes the zone/widget replay payloads, and runs the text-stream portal composer smoke. Zone and widget replay steps fail if either the command exits nonzero or any JSON line contains a top-level error, discovery error, publish response error, or cleanup response error. On successful publish steps it writes timestamped `live-zone-replay-<stamp>.json`, `live-widget-replay-<stamp>.json`, and `live-portal-transcript-<stamp>.json` evidence files under this directory by default. It expects `TZE_HUD_PSK` to be set locally, but accepts `MCP_TEST_PSK` as a fallback for the MCP publish scripts and exports the same value for the portal smoke. It never writes the value into artifacts. `PORTAL_AGENT_ID` can override the resident gRPC agent used for the portal smoke; the recovered-host replay used `agent-alpha` because the deployed Windows config grants that agent `create_tiles`, `modify_own_tiles`, and `access_input_events`.
 
 If the host is reachable but the existing scheduled task starts without a non-default PSK, opt into task recreation before launch:
 

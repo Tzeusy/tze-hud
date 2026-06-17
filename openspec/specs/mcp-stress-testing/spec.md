@@ -172,10 +172,10 @@ The tool SHALL also print a summary table to stdout with columns: Profile, Reqs,
 
 ### Requirement: Connection Parameters
 The tool SHALL accept connection parameters via CLI arguments with defaults matching the `/user-test` skill:
-- `--url` (default: `http://tzehouse-windows.parrot-hen.ts.net:9090`)
+- `--url` (default: `http://windows-host.example:9090`)
 - `--psk-env` (default: `MCP_TEST_PSK`)
-- `--ssh-host` (default: `tzeus@tzehouse-windows.parrot-hen.ts.net`)
-- `--ssh-key` (default: `~/.ssh/ecdsa_home`)
+- `--ssh-host` (default: `admin-user@windows-host.example`)
+- `--ssh-key` (default: `~/.ssh/hud-ssh-key`)
 - `--output` (default: `stress_report_{ISO8601_compact}.json`)
 - `--concurrency` (default: per-profile)
 - `--short-ttl` (flag, default: off)

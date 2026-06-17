@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPLAY_SCRIPT="$SCRIPT_DIR/live-replay.sh"
 
-WIN_HOST="${WIN_HOST:-tzehouse-windows.parrot-hen.ts.net}"
+WIN_HOST="${WIN_HOST:-windows-host.example}"
 MAX_POLLS="${MAX_POLLS:-30}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-60}"
 PROBE_TIMEOUT_S="${PROBE_TIMEOUT_S:-12}"

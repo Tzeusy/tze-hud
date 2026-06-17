@@ -6,10 +6,10 @@ Exercises the MCP publish_to_zone endpoint at varying load levels while
 collecting latency percentiles and host resource telemetry via SSH.
 
 Connection defaults:
-  MCP URL : http://tzehouse-windows.parrot-hen.ts.net:9090
+  MCP URL : http://windows-host.example:9090
   PSK env : MCP_TEST_PSK  (default token: tze-hud-key)
-  SSH host: tzeus@tzehouse-windows.parrot-hen.ts.net
-  SSH key : ~/.ssh/ecdsa_home
+  SSH host: admin-user@windows-host.example
+  SSH key : ~/.ssh/hud-ssh-key
 
 CLI flags (see parse_args() for full reference):
   --url           MCP HTTP endpoint
@@ -47,12 +47,12 @@ from typing import Any
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_MCP_URL = "http://tzehouse-windows.parrot-hen.ts.net:9090"
+DEFAULT_MCP_URL = "http://windows-host.example:9090"
 DEFAULT_PSK_ENV = "MCP_TEST_PSK"
 DEFAULT_PSK_FALLBACK = "tze-hud-key"
-DEFAULT_SSH_USER = "tzeus"
-DEFAULT_SSH_HOST = "tzehouse-windows.parrot-hen.ts.net"
-DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/ecdsa_home")
+DEFAULT_SSH_USER = "admin-user"
+DEFAULT_SSH_HOST = "windows-host.example"
+DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/hud-ssh-key")
 # Spec: --output default is stress_report_{ISO8601_compact}.json (generated at startup)
 DEFAULT_NAMESPACE = "stress-test"
 DEFAULT_TTL_US = 60_000_000   # 60 seconds (spec default)
@@ -1335,7 +1335,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ssh-host",
         default=DEFAULT_SSH_HOST,
-        # Spec default: tzeus@tzehouse-windows.parrot-hen.ts.net.
+        # Spec default: admin-user@windows-host.example.
         # If the value contains '@', it is split into user and host below.
         help=(
             f"SSH hostname (or user@host) for telemetry "

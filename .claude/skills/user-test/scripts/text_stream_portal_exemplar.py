@@ -164,10 +164,10 @@ class ComposerVisualLine:
 # ─── CLI defaults ─────────────────────────────────────────────────────────────
 
 DEFAULT_PSK_ENV = "TZE_HUD_PSK"
-DEFAULT_TARGET = "tzehouse-windows.parrot-hen.ts.net:50051"
+DEFAULT_TARGET = "windows-host.example:50051"
 DEFAULT_DOC = "docs/exemplar-manual-review-checklist.md"
 DEFAULT_TRANSCRIPT_PATH = "test_results/text-stream-portal-latest.json"
-DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/ecdsa_home")
+DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/hud-ssh-key")
 MAX_MARKDOWN_BYTES = 65535
 DRAG_MAX_SECONDS = 12.0
 DRAG_IDLE_RELEASE_SECONDS = 1.0
@@ -2281,7 +2281,7 @@ def emit_step_event(
 # A live run on the reference host SHALL match this; off-reference runs are
 # informational-only per the gate's "evidence without reference tag" scenario.
 REFERENCE_HARDWARE_TAG = "TzeHouse"
-REFERENCE_HOSTNAME = "tzehouse-windows.parrot-hen.ts.net"
+REFERENCE_HOSTNAME = "windows-host.example"
 REFERENCE_GPU = "NVIDIA GeForce RTX 3080"
 REFERENCE_GPU_DRIVER = "32.0.15.9636"
 # high_mutation input-to-next-present p99 budget (Windows locked lane), used as
@@ -4638,10 +4638,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rapid-cycles", type=int, default=12)
     p.add_argument("--rapid-interval-ms", type=int, default=80)
     p.add_argument("--cleanup-timeout-s", type=float, default=5.0)
-    p.add_argument("--clipboard-user", default="tzeus")
+    p.add_argument("--clipboard-user", default="admin-user")
     p.add_argument("--clipboard-ssh-key", default=DEFAULT_SSH_KEY)
     p.add_argument("--clipboard-timeout-s", type=float, default=0.7)
-    p.add_argument("--diagnostic-input-user", default="tzeus")
+    p.add_argument("--diagnostic-input-user", default="admin-user")
     p.add_argument("--diagnostic-input-ssh-key", default=DEFAULT_SSH_KEY)
     p.add_argument("--diagnostic-input-timeout-s", type=float, default=12.0)
     p.add_argument("--diagnostic-input-connect-timeout-s", type=float, default=5.0)

@@ -1,6 +1,6 @@
 # TzeHouse Windows Recovery Runbook
 
-Reference host: `tzehouse-windows.parrot-hen.ts.net` / `100.87.181.125`
+Reference host: `windows-host.example` / `100.87.181.125`
 
 This runbook is for restoring the Windows HUD reference host before `/user-test`
 validation, strict smoke, or the 60-minute Windows soak. It contains no secrets.
@@ -22,8 +22,8 @@ operator supplies and documents a no-secret Wake-on-LAN or equivalent procedure.
 2. Confirm Windows is connected to the network.
 3. Confirm Tailscale is running and the Windows node is online in the tailnet.
 4. Confirm Windows OpenSSH is running.
-5. Confirm the existing `~/.ssh/ecdsa_home` public key is accepted for the
-   required users, especially `tzeus` and `hudbot`.
+5. Confirm the existing `~/.ssh/hud-ssh-key` public key is accepted for the
+   required users, especially `admin-user` and `hud-user`.
 6. Confirm the intended HUD scheduled task exists:
    - `TzeHudOverlay` for production validation.
    - `TzeHudBenchmarkOverlay` for benchmark/soak validation.
@@ -33,21 +33,21 @@ operator supplies and documents a no-secret Wake-on-LAN or equivalent procedure.
 Run these from `/home/tze/gt/tze_hud/mayor/rig`.
 
 ```bash
-tailscale status --json | jq '.Peer[] | select(.DNSName=="tzehouse-windows.parrot-hen.ts.net.") | {HostName,DNSName,Online,LastSeen,TailscaleIPs}'
-timeout 12 tailscale ping -c 1 tzehouse-windows.parrot-hen.ts.net
+tailscale status --json | jq '.Peer[] | select(.DNSName=="windows-host.example.") | {HostName,DNSName,Online,LastSeen,TailscaleIPs}'
+timeout 12 tailscale ping -c 1 windows-host.example
 ```
 
 ```bash
-timeout 12 ssh -i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 \
-  tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"
+timeout 12 ssh -i ~/.ssh/hud-ssh-key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 \
+  admin-user@windows-host.example "whoami"
 
-timeout 12 ssh -i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 \
-  hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+timeout 12 ssh -i ~/.ssh/hud-ssh-key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 \
+  hud-user@windows-host.example "whoami"
 ```
 
 ```bash
 for port in 22 50051 9090; do
-  timeout 6 bash -lc "cat < /dev/null > /dev/tcp/tzehouse-windows.parrot-hen.ts.net/$port" \
+  timeout 6 bash -lc "cat < /dev/null > /dev/tcp/windows-host.example/$port" \
     >/dev/null 2>&1 && echo "$port open" || echo "$port closed_or_timeout"
 done
 ```
@@ -61,16 +61,16 @@ the validation mode.
 Production validation:
 
 ```bash
-ssh -i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes \
-  tzeus@tzehouse-windows.parrot-hen.ts.net \
+ssh -i ~/.ssh/hud-ssh-key -o IdentitiesOnly=yes -o BatchMode=yes \
+  admin-user@windows-host.example \
   'schtasks /Run /TN TzeHudOverlay'
 ```
 
 Benchmark/soak validation:
 
 ```bash
-ssh -i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes \
-  tzeus@tzehouse-windows.parrot-hen.ts.net \
+ssh -i ~/.ssh/hud-ssh-key -o IdentitiesOnly=yes -o BatchMode=yes \
+  admin-user@windows-host.example \
   'schtasks /Run /TN TzeHudBenchmarkOverlay'
 ```
 
@@ -86,7 +86,7 @@ MCP widget discovery:
 
 ```bash
 python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
-  --url http://tzehouse-windows.parrot-hen.ts.net:9090/mcp \
+  --url http://windows-host.example:9090/mcp \
   --list-widgets
 ```
 
@@ -94,7 +94,7 @@ MCP zone discovery:
 
 ```bash
 python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
-  --url http://tzehouse-windows.parrot-hen.ts.net:9090/mcp \
+  --url http://windows-host.example:9090/mcp \
   --list-zones
 ```
 
@@ -102,7 +102,7 @@ gRPC session smoke:
 
 ```bash
 python3 .claude/skills/user-test/scripts/hud_grpc_client.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk "$TZE_HUD_PSK"
 ```
 
@@ -147,7 +147,7 @@ python3 .claude/skills/user-test-performance/scripts/widget_soak_runner.py \
   --windows-live-metrics-path 'C:\tze_hud\perf\hud-nfl7n\windowed_live_metrics.json' \
   --sample-windows-resources \
   --windows-process-command-match 'C:\tze_hud\benchmark.toml' \
-  --ssh-identity ~/.ssh/ecdsa_home \
+  --ssh-identity ~/.ssh/hud-ssh-key \
   --output-root docs/reports/artifacts/hud-nfl7n-strict-smoke-<timestamp>
 ```
 
@@ -160,7 +160,7 @@ After the strict smoke passes, the release-gating soak must run the three-agent
 - `--windows-live-metrics-path 'C:\tze_hud\perf\hud-nfl7n\windowed_live_metrics.json'`
 - `--sample-windows-resources`
 - `--windows-process-command-match 'C:\tze_hud\benchmark.toml'`
-- `--ssh-identity ~/.ssh/ecdsa_home`
+- `--ssh-identity ~/.ssh/hud-ssh-key`
 
 Do not use `--allow-missing-live-metrics` for release evidence. The strict smoke
 or soak artifact must show `live_metrics.ok=true`, nonzero frame/input metrics,

@@ -3,7 +3,7 @@
 Issue: `hud-ok1y0`
 OpenSpec source: `openspec/changes/windows-first-performant-runtime/tasks.md` section 5
 Latest attempt: 2026-05-10T02:47:24Z to 2026-05-10T03:34:43Z
-Reference host: `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`, tailnet `100.87.181.125`)
+Reference host: `TzeHouse` (`windows-host.example`, tailnet `100.87.181.125`)
 
 ## Verdict
 
@@ -22,7 +22,7 @@ Primary evidence:
 
 | Surface | Value |
 |---|---|
-| Host | `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`) |
+| Host | `TzeHouse` (`windows-host.example`) |
 | CPU | 13th Gen Intel(R) Core(TM) i5-13600KF, 14 cores / 20 logical processors |
 | GPU | NVIDIA GeForce RTX 3080, driver `32.0.15.9636` |
 | RAM | 16 GiB physical memory |
@@ -52,8 +52,8 @@ python3 .claude/skills/user-test-performance/scripts/widget_soak_runner.py \
   --rate-rps 1 \
   --sample-windows-resources \
   --resource-sample-interval-s 300 \
-  --win-user tzeus \
-  --ssh-identity ~/.ssh/ecdsa_home \
+  --win-user admin-user \
+  --ssh-identity ~/.ssh/hud-ssh-key \
   --skip-build \
   --output-root docs/reports/artifacts/windows_soak_release_closeout_2026-05/soak_20260510T024723Z
 ```

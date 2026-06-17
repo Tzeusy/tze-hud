@@ -2,7 +2,7 @@
   "benchmark_key": "user-test-windows-tailnet|grpc|burst|main-progress|gauge_default|tailnet|count:1000",
   "identity": {
     "target_id": "user-test-windows-tailnet",
-    "target_host": "tzehouse-windows.parrot-hen.ts.net",
+    "target_host": "windows-host.example",
     "network_scope": "tailnet",
     "transport": "grpc",
     "mode": "burst",

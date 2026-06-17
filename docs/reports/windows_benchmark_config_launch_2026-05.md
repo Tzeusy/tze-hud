@@ -66,7 +66,7 @@ python3 .claude/skills/user-test-performance/scripts/widget_soak_runner.py \
   --windows-live-metrics-path 'C:\tze_hud\perf\<bead-id>\windowed_live_metrics.json' \
   --sample-windows-resources \
   --windows-process-command-match 'C:\tze_hud\benchmark.toml' \
-  --ssh-identity ~/.ssh/ecdsa_home
+  --ssh-identity ~/.ssh/hud-ssh-key
 ```
 
 Artifacts are written under `benchmarks/soak/<timestamp>/`:
@@ -101,5 +101,5 @@ input-path evidence, not human desktop interaction.
 ## MCP Compatibility
 
 The `/user-test-performance` target registry now uses
-`http://tzehouse-windows.parrot-hen.ts.net:9090/mcp` for MCP HTTP publishes. The
+`http://windows-host.example:9090/mcp` for MCP HTTP publishes. The
 bare `:9090` URL can return an empty/non-JSON response on the deployed runtime.

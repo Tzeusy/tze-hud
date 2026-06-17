@@ -26,9 +26,9 @@
 #                 Set via --psk flag or TZE_HUD_PSK env var.
 #
 # Options:
-#   --win-host <host>      Windows SSH/SCP hostname          (default: tzehouse-windows.parrot-hen.ts.net)
-#   --win-user <user>      Windows SSH user                  (default: hudbot)
-#   --ssh-key <path>       SSH identity key                  (default: ~/.ssh/ecdsa_home)
+#   --win-host <host>      Windows SSH/SCP hostname          (default: windows-host.example)
+#   --win-user <user>      Windows SSH user                  (default: hud-user)
+#   --ssh-key <path>       SSH identity key                  (default: ~/.ssh/hud-ssh-key)
 #   --full-app-exe <path>  Prebuilt Windows .exe to deploy   (build if omitted)
 #   --target <triple>      Rust cross-target                 (default: x86_64-pc-windows-gnu)
 #   --profile <name>       Cargo profile: release|debug      (default: release)
@@ -49,9 +49,9 @@ set -euo pipefail
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
-WIN_HOST="tzehouse-windows.parrot-hen.ts.net"
-WIN_USER="${WIN_USER:-hudbot}"
-SSH_KEY="${SSH_KEY:-${HOME}/.ssh/ecdsa_home}"
+WIN_HOST="windows-host.example"
+WIN_USER="${WIN_USER:-hud-user}"
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/hud-ssh-key}"
 FULL_APP_EXE="${FULL_APP_EXE:-}"
 TARGET="x86_64-pc-windows-gnu"
 PROFILE="release"

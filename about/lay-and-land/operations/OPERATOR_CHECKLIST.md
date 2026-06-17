@@ -15,13 +15,13 @@ This document provides operators and automation engineers with a checklist for u
 ### SSH Connectivity
 
 - [ ] SSH key configured and permissions correct
-  - Key file: `~/.ssh/ecdsa_home`
+  - Key file: `~/.ssh/hud-ssh-key`
   - Permissions: `-rw-------` (600)
-  - Fix if needed: `chmod 600 ~/.ssh/ecdsa_home`
+  - Fix if needed: `chmod 600 ~/.ssh/hud-ssh-key`
 
 - [ ] SSH connectivity verified to Windows host
-  - Command: `ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"`
-  - Expected output: `hudbot`
+  - Command: `ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/hud-ssh-key hud-user@windows-host.example "whoami"`
+  - Expected output: `hud-user`
   - **Do NOT proceed without successful SSH key auth**
 
 ### Windows Environment
@@ -31,7 +31,7 @@ This document provides operators and automation engineers with a checklist for u
   - If stopped, start: `Get-Service sshd | Start-Service -Force`
 
 - [ ] Windows host has network reachability
-  - Ping from Linux: `ping -c 1 tzehouse-windows.parrot-hen.ts.net`
+  - Ping from Linux: `ping -c 1 windows-host.example`
   - Expected: Response from host
 
 - [ ] Firewall allows SSH (port 22) and MCP HTTP (port 8765)
@@ -68,10 +68,10 @@ This document provides operators and automation engineers with a checklist for u
 
 - [ ] Run deployment script
   ```bash
-  WIN_USER=hudbot \
-  SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes' \
+  WIN_USER=hud-user \
+  SSH_OPTS='-i ~/.ssh/hud-ssh-key -o IdentitiesOnly=yes -o BatchMode=yes' \
   ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
-    --win-host tzehouse-windows.parrot-hen.ts.net \
+    --win-host windows-host.example \
     --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud.exe \
     --launch-mode auto \
     --tail
@@ -93,14 +93,14 @@ This document provides operators and automation engineers with a checklist for u
 
 - [ ] Verify endpoint accepts HTTP connections
   ```bash
-  curl -v http://tzehouse-windows.parrot-hen.ts.net:8765
+  curl -v http://windows-host.example:8765
   ```
   - Expected: Connection accepted (HTTP response)
   - Failure: "Connection refused" or "Connection timed out" = endpoint not live
 
 - [ ] Test endpoint with MCP JSON-RPC (without auth first)
   ```bash
-  curl -s -X POST http://tzehouse-windows.parrot-hen.ts.net:8765 \
+  curl -s -X POST http://windows-host.example:8765 \
     -H "Content-Type: application/json" \
     -d '{"jsonrpc":"2.0","method":"list_resources","params":{},"id":1}' | jq .
   ```
@@ -133,7 +133,7 @@ This document provides operators and automation engineers with a checklist for u
 - [ ] List available zones (optional verification)
   ```bash
   python3 ./.claude/skills/user-test/scripts/publish_zone_batch.py \
-    --url "http://tzehouse-windows.parrot-hen.ts.net:8765" \
+    --url "http://windows-host.example:8765" \
     --psk-env MCP_TEST_PSK \
     --list-zones
   ```
@@ -141,7 +141,7 @@ This document provides operators and automation engineers with a checklist for u
 - [ ] Publish zone messages
   ```bash
   python3 ./.claude/skills/user-test/scripts/publish_zone_batch.py \
-    --url "http://tzehouse-windows.parrot-hen.ts.net:8765" \
+    --url "http://windows-host.example:8765" \
     --psk-env MCP_TEST_PSK \
     --messages-file /tmp/hud-test-zones.json
   ```
@@ -160,7 +160,7 @@ This document provides operators and automation engineers with a checklist for u
   - Zone publish results (success/failure, zone names, timestamps)
 
 - [ ] Cleanup (if needed)
-  - Stop runtime: `ssh hudbot@tzehouse-windows.parrot-hen.ts.net "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue | Stop-Process -Force'"`
+  - Stop runtime: `ssh hud-user@windows-host.example "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue | Stop-Process -Force'"`
   - Or preserve for additional testing
 
 ## Runtime Widget Asset Store Health Checks
@@ -208,17 +208,17 @@ Use this when validating runtime SVG register/upload persistence behavior.
 **Diagnosis**:
 ```bash
 # Check key permissions
-ls -la ~/.ssh/ecdsa_home
+ls -la ~/.ssh/hud-ssh-key
 
 # Test connectivity with verbose output
-ssh -vv -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net whoami
+ssh -vv -i ~/.ssh/hud-ssh-key hud-user@windows-host.example whoami
 ```
 
 **Solutions**:
-- Fix key permissions: `chmod 600 ~/.ssh/ecdsa_home`
+- Fix key permissions: `chmod 600 ~/.ssh/hud-ssh-key`
 - Verify SSH server running on Windows: `Get-Service sshd | Start-Service`
 - Check firewall allows port 22
-- Verify network connectivity: `ping tzehouse-windows.parrot-hen.ts.net`
+- Verify network connectivity: `ping windows-host.example`
 
 ### Deployment Script Fails
 
@@ -228,31 +228,31 @@ ssh -vv -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net whoami
 ```bash
 # Re-run with debug output
 bash -x ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
-  --win-host tzehouse-windows.parrot-hen.ts.net \
+  --win-host windows-host.example \
   --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud.exe
 ```
 
 **Solutions**:
 - Verify artifact exists: `ls -lh target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 - Verify SSH connectivity (see above)
-- Check Windows disk space: `ssh hudbot@tzehouse-windows.parrot-hen.ts.net "powershell -Command 'Get-Volume C | Select SizeRemaining, Size'"`
+- Check Windows disk space: `ssh hud-user@windows-host.example "powershell -Command 'Get-Volume C | Select SizeRemaining, Size'"`
 
 ### MCP Endpoint Unreachable
 
-**Symptom**: `curl` to `http://tzehouse-windows.parrot-hen.ts.net:8765` fails with "Connection refused" or "Connection timed out"
+**Symptom**: `curl` to `http://windows-host.example:8765` fails with "Connection refused" or "Connection timed out"
 
 **Diagnosis** (on Windows, via SSH):
 ```bash
 # Check if process is running
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue | Select ProcessName, Id'"
 
 # Check if port 8765 is listening
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "netstat -an | findstr :8765"
 
 # Check runtime logs
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "type C:\\tze_hud\\logs\\hud.stdout.log"
 ```
 
@@ -274,7 +274,7 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 echo "PSK is: $MCP_TEST_PSK"
 
 # Check runtime logs for auth errors
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "type C:\\tze_hud\\logs\\hud.stdout.log | findstr -i auth"
 ```
 
@@ -291,7 +291,7 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 ```bash
 # List valid zones
 python3 ./.claude/skills/user-test/scripts/publish_zone_batch.py \
-  --url "http://tzehouse-windows.parrot-hen.ts.net:8765" \
+  --url "http://windows-host.example:8765" \
   --psk-env MCP_TEST_PSK \
   --list-zones
 ```
@@ -308,8 +308,8 @@ python3 ./.claude/skills/user-test/scripts/publish_zone_batch.py \
 cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
 
 # Verify SSH connectivity
-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
-  hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/hud-ssh-key \
+  hud-user@windows-host.example "whoami"
 
 # Deploy and launch
 ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
@@ -317,27 +317,27 @@ ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
   --launch-mode auto --tail
 
 # Test MCP endpoint
-curl http://tzehouse-windows.parrot-hen.ts.net:8765
+curl http://windows-host.example:8765
 
 # List zones
 python3 ./.claude/skills/user-test/scripts/publish_zone_batch.py \
-  --url "http://tzehouse-windows.parrot-hen.ts.net:8765" \
+  --url "http://windows-host.example:8765" \
   --psk-env MCP_TEST_PSK --list-zones
 
 # Publish zones
 python3 ./.claude/skills/user-test/scripts/publish_zone_batch.py \
-  --url "http://tzehouse-windows.parrot-hen.ts.net:8765" \
+  --url "http://windows-host.example:8765" \
   --psk-env MCP_TEST_PSK --messages-file /tmp/test-zones.json
 
 # View logs (from Windows via SSH)
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net "type C:\\tze_hud\\logs\\hud.stdout.log"
+ssh hud-user@windows-host.example "type C:\\tze_hud\\logs\\hud.stdout.log"
 
 # Stop process
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "powershell -Command 'Get-Process tze_hud | Stop-Process -Force'"
 
 # Check if process running
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue'"
 ```
 

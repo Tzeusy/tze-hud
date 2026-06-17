@@ -1,7 +1,7 @@
 ## tailscale status
 {
   "HostName": "TzeHouse",
-  "DNSName": "tzehouse-windows.parrot-hen.ts.net.",
+  "DNSName": "windows-host.example.",
   "Online": true,
   "LastSeen": "2026-05-11T16:39:14.1Z",
   "TailscaleIPs": [
@@ -11,10 +11,10 @@
 }
 ## tailscale ping
 pong from tzehouse-windows (100.87.181.125) via [2406:3003:2001:183a:9199:e0f6:eee:31f8]:41641 in 73ms
-## ssh tzeus
-tzehouse\tzeus
-## ssh hudbot
-tzehouse\hudbot
+## ssh admin-user
+tzehouse\admin-user
+## ssh hud-user
+tzehouse\hud-user
 ## tcp ports
 22 open
 50051 open

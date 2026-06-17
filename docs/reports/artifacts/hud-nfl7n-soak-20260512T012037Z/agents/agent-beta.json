@@ -2,7 +2,7 @@
   "benchmark_key": "user-test-windows-tailnet|grpc|paced|main-progress|progress_soak|tailnet|duration:3600.000000|count:3600|target_rate:1.000000",
   "identity": {
     "target_id": "user-test-windows-tailnet",
-    "target_host": "tzehouse-windows.parrot-hen.ts.net",
+    "target_host": "windows-host.example",
     "network_scope": "tailnet",
     "transport": "grpc",
     "mode": "paced",

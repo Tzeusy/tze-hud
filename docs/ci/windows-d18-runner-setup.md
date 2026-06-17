@@ -486,7 +486,7 @@ scheduled task manually.
    If the CI lock is held by a live process, exits immediately with code 1 and
    a clear message — the session cannot start.
 3. **Launch**: triggers `schtasks /Run /TN TzeHudOverlay` via
-   `Start-ScheduledTask`.  The HUD still runs as the scheduled task (as `tzeus`
+   `Start-ScheduledTask`.  The HUD still runs as the scheduled task (as `admin-user`
    on the interactive desktop) — this is mandatory for overlay transparency.
 4. **Monitor**: polls until `tze_hud.exe` disappears from the process list.
 5. **Release** (try/finally — runs even on Ctrl-C): calls
@@ -524,7 +524,7 @@ C:\tze_hud\scripts\windows\run_hud.ps1 -TaskName TzeHudOverlay -PollIntervalSec 
 The scheduled task must exist before using the wrapper.  Register it once:
 
 ```powershell
-# Run as tzeus (must own the interactive desktop session)
+# Run as admin-user (must own the interactive desktop session)
 Register-ScheduledTask -TaskName "TzeHudOverlay" `
   -Action (New-ScheduledTaskAction `
     -Execute "C:\tze_hud\tze_hud.exe" `
@@ -565,15 +565,15 @@ See audit §9 caveat 5 (gstreamer-rs 0.23 ↔ GStreamer 1.24 ABI lock).
 If you need to verify or troubleshoot D18 remotely via SSH:
 
 ```bash
-# Public key auth for user tzeus (or hudbot)
-# Must use explicit identity: -i ~/.ssh/ecdsa_home
-ssh -i ~/.ssh/ecdsa_home tzeus@parrot-hen.ts.net
+# Public key auth for user admin-user (or hud-user)
+# Must use explicit identity: -i ~/.ssh/hud-ssh-key
+ssh -i ~/.ssh/hud-ssh-key admin-user@parrot-hen.ts.net
 
 # SCP with explicit identity
-scp -i ~/.ssh/ecdsa_home <file> tzeus@parrot-hen.ts.net:C:/path/
+scp -i ~/.ssh/hud-ssh-key <file> admin-user@parrot-hen.ts.net:C:/path/
 ```
 
-Default SSH identity resolution fails for this host. Always pass `-i ~/.ssh/ecdsa_home`
+Default SSH identity resolution fails for this host. Always pass `-i ~/.ssh/hud-ssh-key`
 explicitly. See AGENTS.md notes on Windows SSH pubkey auth.
 
 ---

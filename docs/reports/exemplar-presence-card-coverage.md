@@ -63,7 +63,7 @@ The remaining unresolved proof is explicitly limited to these spec sections:
 ## 2026-04-16 Live Validation Attempt
 
 - Attempted to run the canonical resident scenario against
-  `tzehouse-windows.parrot-hen.ts.net:50051`.
+  `windows-host.example:50051`.
 - Host/port reachability checks passed for gRPC (`50051`) and MCP (`9090`).
 - Scenario exited immediately with `{"error":"missing_psk","psk_env":"TZE_HUD_PSK"}`.
 - Outcome: live proof remains blocked on missing `TZE_HUD_PSK` in the operator

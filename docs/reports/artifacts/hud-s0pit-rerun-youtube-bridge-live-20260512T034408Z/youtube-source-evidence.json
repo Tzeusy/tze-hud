@@ -5,7 +5,7 @@
   "html_evidence_path": "docs/reports/artifacts/hud-s0pit-rerun-youtube-bridge-live-20260512T034408Z/youtube_source_evidence.html",
   "hud_runtime_receives_youtube_frames": false,
   "lane": "youtube-source-evidence",
-  "launched_by": "ssh:tzeus@tzehouse-windows.parrot-hen.ts.net",
+  "launched_by": "ssh:admin-user@windows-host.example",
   "official_player_url": "https://www.youtube.com/embed/O0FGCxkHM-U",
   "operator_visible_player_controls": true,
   "policy_review": {
