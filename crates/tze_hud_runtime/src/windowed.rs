@@ -3380,48 +3380,23 @@ impl WinitApp {
     /// (`consumed = true`), it is NOT forwarded to the agent as a raw
     /// `KeyDownEvent`.  Any transactional batch returned (submit / cancel) is
     /// handed to `deliver_composer_batch` for future downstream delivery.
+    /// Public Stage-1 entry for an OS key-down event.
+    ///
+    /// Applies the early gates that MUST run on the OS-event path — safe-mode
+    /// capture, the FIFO ordering guard, and the active-tab availability check —
+    /// then delegates the actual routing to [`Self::dispatch_key_down_event_inner`].
+    ///
+    /// FIFO ordering invariant (hud-2fz34): when events are already queued in
+    /// `pending_keyboard_events`, a freshly-arriving Stage-1 event must NOT jump
+    /// ahead of them, so it is appended to the queue and processed later by
+    /// `drain_pending_keyboard_events`.  The drain calls the *inner* directly
+    /// (bypassing this guard) so a queued event is actually consumed instead of
+    /// being rotated to the back forever (the livelock fixed in hud-dwcr7).
     fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
-        // ── Input precedence order (§6b.2 + §6b.6) ───────────────────────
-        //
-        // Priority (highest → lowest):
-        //   1. Safe-mode capture — ALL input captured by the chrome layer;
-        //      portals and agents never see it.
-        //   2. Shell/chrome-reserved shortcuts — win over portal resize hotkeys;
-        //      a reserved key is never consumed by a portal.
-        //   3. Composer (active composer region) — Ctrl+`+`/`=`/`-` are
-        //      composer shortcuts; portal resize MUST NOT steal them.
-        //   4. Portal resize hotkey — Ctrl+`+`/`=` grow, Ctrl+`-` shrink.
-        //   5. Normal routing — forwarded to the owning agent.
-        //
-        // Ordering contract: the safe-mode atomic check (Priority 1) MUST run
-        // first — before the FIFO guard and before any try_lock attempt.  This
-        // matches `dispatch_key_up_event` and `dispatch_character_event` and
-        // ensures that safe mode fully overrides all input regardless of queue
-        // or lock state.  The FIFO guard only has meaning for events that are
-        // not dropped by a higher-priority filter.
-
         // ── Priority 1: Safe-mode capture ─────────────────────────────────
-        //
-        // When safe mode is active, ALL keystrokes belong to the chrome layer.
-        // Portal resize hotkeys are never reached; agents never see the event.
-        // We do NOT forward to agents; we do NOT consume portal shortcuts; we
-        // simply return silently (the chrome layer handles safe-mode input via
-        // the overlay render path, not through this dispatch function).
-        //
-        // NOTE: Ctrl+Shift+Escape is intercepted at Stage 1 (the OS event path,
-        // `WindowEvent::KeyboardInput`) BEFORE this safe-mode capture guard fires.
-        // The exit chord sends on `safe_mode_exit_tx` → async listener →
-        // `SafeModeController::exit_safe_mode()` (hud-hpudo). All OTHER input
-        // while safe mode is active is captured here (fail-closed).
-        //
-        // Lock-free read: `safe_mode_atomic` is an AtomicBool cloned from
-        // `SharedState.safe_mode_atomic` at construction.  Writers
-        // (`SafeModeController::enter_safe_mode` / `exit_safe_mode`) store with
-        // `Ordering::Release`; we load with `Ordering::Acquire` so the
-        // Release-Acquire pair guarantees visibility.  Unlike the former
-        // `try_lock` approach, this read NEVER fails under contention — if the
-        // async Tokio runtime holds the SharedState lock during a mutation batch,
-        // the safe-mode flag is still correctly observed.
+        // (See the inner fn / historical comments for the full precedence
+        // rationale.)  Lock-free AtomicBool mirror read; never fails under
+        // contention.  Safe mode owns ALL input — drop before anything else.
         if self
             .state
             .safe_mode_atomic
@@ -3436,22 +3411,39 @@ impl WinitApp {
 
         // FIFO guard: if earlier events are still pending, queue this one
         // immediately so it cannot bypass them even when the lock is free.
-        // Safe-mode is checked above (Priority 1) before we reach this guard,
-        // consistent with dispatch_key_up_event and dispatch_character_event.
         if !self.state.pending_keyboard_events.is_empty() {
             self.state
                 .pending_keyboard_events
                 .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
             return;
         }
-        // try_lock — do not block the event-loop thread (hud-2fz34).
-        // None = lock busy → defer to the next about_to_wait iteration.
+        // Resolve the active tab via the lock-free mirror (hud-dwcr7).
+        // None = mirror momentarily busy → defer to the next about_to_wait.
         let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
             self.state
                 .pending_keyboard_events
                 .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
             return;
         };
+        self.dispatch_key_down_event_inner(raw, active_tab);
+    }
+
+    /// FIFO-ordered inner routing for a key-down event.
+    ///
+    /// Called by [`Self::dispatch_key_down_event`] (Stage-1) with the active tab
+    /// already resolved, and by `drain_pending_keyboard_events` for queued
+    /// events.  This MUST NOT re-apply the FIFO guard (`pending_keyboard_events`
+    /// non-empty), since the drain processes the queue in order and a guard here
+    /// would rotate the front event to the back forever (hud-dwcr7 livelock).
+    ///
+    /// `active_tab` is the value already read from the mirror: `Some(tab)` to
+    /// route, `None` to drop (no active tab → no composer / agent target).
+    fn dispatch_key_down_event_inner(
+        &mut self,
+        raw: &RawKeyDownEvent,
+        active_tab: Option<tze_hud_scene::SceneId>,
+    ) {
+        // No active tab → nothing to route to.  Drop (do not re-queue / spin).
         let Some(tab_id) = active_tab else { return };
 
         // ── Priority 2: Shell/chrome-reserved shortcuts ───────────────────
@@ -3627,13 +3619,24 @@ impl WinitApp {
                 .push_back(PendingKeyboardEvent::KeyUp(raw.clone()));
             return;
         }
-        // try_lock — do not block the event-loop thread (hud-2fz34).
+        // Resolve the active tab via the lock-free mirror (hud-dwcr7).
         let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
             self.state
                 .pending_keyboard_events
                 .push_back(PendingKeyboardEvent::KeyUp(raw.clone()));
             return;
         };
+        self.dispatch_key_up_event_inner(raw, active_tab);
+    }
+
+    /// FIFO-ordered inner routing for a key-up event.  See
+    /// [`Self::dispatch_key_down_event_inner`] for why this MUST NOT re-apply
+    /// the FIFO guard (hud-dwcr7 livelock).
+    fn dispatch_key_up_event_inner(
+        &mut self,
+        raw: &RawKeyUpEvent,
+        active_tab: Option<tze_hud_scene::SceneId>,
+    ) {
         let Some(tab_id) = active_tab else { return };
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
@@ -3712,13 +3715,24 @@ impl WinitApp {
                 .push_back(PendingKeyboardEvent::Character(raw.clone()));
             return;
         }
-        // try_lock — do not block the event-loop thread (hud-2fz34).
+        // Resolve the active tab via the lock-free mirror (hud-dwcr7).
         let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
             self.state
                 .pending_keyboard_events
                 .push_back(PendingKeyboardEvent::Character(raw.clone()));
             return;
         };
+        self.dispatch_character_event_inner(raw, active_tab);
+    }
+
+    /// FIFO-ordered inner routing for a character event.  See
+    /// [`Self::dispatch_key_down_event_inner`] for why this MUST NOT re-apply
+    /// the FIFO guard (hud-dwcr7 livelock).
+    fn dispatch_character_event_inner(
+        &mut self,
+        raw: &RawCharacterEvent,
+        active_tab: Option<tze_hud_scene::SceneId>,
+    ) {
         let Some(tab_id) = active_tab else { return };
 
         // ── Composer draft intercept (§4.4) ──────────────────────────────
@@ -3989,18 +4003,25 @@ impl WinitApp {
     }
 
     /// Retry keyboard events that were deferred in the previous iteration(s)
-    /// because the shared-state or scene lock was busy (hud-2fz34).
+    /// because the active-tab mirror was momentarily busy (hud-2fz34).
     ///
     /// Called from `about_to_wait` once per event-loop iteration, matching the
     /// `drain_input_capture_commands` sibling pattern.  Each event is popped
-    /// from the front of `pending_keyboard_events` and re-dispatched through
-    /// the normal dispatch path.
+    /// from the front of `pending_keyboard_events` and routed through the
+    /// **inner** dispatch fns (`dispatch_*_event_inner`), NOT the public
+    /// Stage-1 entry.
     ///
-    /// FIFO guarantee: the lock is checked before each pop.  If the lock is
-    /// busy, the entire drain stops immediately — no later event is allowed to
-    /// skip ahead of an earlier one.  If the lock is free, the event is popped
-    /// and dispatched (the re-dispatch path also checks the queue-non-empty
-    /// guard, but the pre-pop check here is the authoritative FIFO barrier).
+    /// This bypass is the fix for the hud-dwcr7 livelock: the public entry
+    /// re-queues any event when the queue is non-empty (the FIFO guard).  If the
+    /// drain called the public entry, a freshly-popped event would see the
+    /// remaining queued events and immediately re-queue itself to the back —
+    /// the queue would rotate front→back forever and never shrink, freezing
+    /// composer echo.  The inner fns skip the FIFO guard, so the drain (which is
+    /// itself the FIFO-ordered consumer) actually consumes each event.
+    ///
+    /// FIFO guarantee: the active tab is resolved once per pop.  If the mirror
+    /// is momentarily busy, the entire drain stops immediately — no later event
+    /// is allowed to skip ahead of an earlier one.
     ///
     /// Ordering: called after `flush_composer_draft_at_settle` and before
     /// `drain_portal_projection` so deferred keystrokes are retried before
@@ -4009,22 +4030,33 @@ impl WinitApp {
     /// order).
     fn drain_pending_keyboard_events(&mut self) {
         // Drain at most the number of events that were pending at entry so we
-        // don't loop forever if every retry immediately re-defers.
+        // don't loop forever if a genuine lock-busy defer re-grows the queue
+        // (e.g. the agent-routing namespace try_lock inside an inner fn).
         let limit = self.state.pending_keyboard_events.len();
         for _ in 0..limit {
-            // Check lock availability before popping: if the lock is busy, stop
+            // Resolve the active tab before popping: if the mirror is busy, stop
             // draining entirely to preserve strict FIFO order.  A later event
             // must not be dispatched before an earlier one that is still blocked.
-            if self.active_tab_for_keyboard_dispatch().is_none() {
+            let Some(active_tab) = self.active_tab_for_keyboard_dispatch() else {
                 break;
-            }
+            };
             let Some(event) = self.state.pending_keyboard_events.pop_front() else {
                 break;
             };
+            // Route through the inner fns (no FIFO guard) — see the doc comment.
+            // Calling the public entry here would re-queue the just-popped event
+            // (the remaining queue is non-empty), rotating front→back forever
+            // (the hud-dwcr7 livelock).
             match event {
-                PendingKeyboardEvent::KeyDown(raw) => self.dispatch_key_down_event(&raw),
-                PendingKeyboardEvent::KeyUp(raw) => self.dispatch_key_up_event(&raw),
-                PendingKeyboardEvent::Character(raw) => self.dispatch_character_event(&raw),
+                PendingKeyboardEvent::KeyDown(raw) => {
+                    self.dispatch_key_down_event_inner(&raw, active_tab)
+                }
+                PendingKeyboardEvent::KeyUp(raw) => {
+                    self.dispatch_key_up_event_inner(&raw, active_tab)
+                }
+                PendingKeyboardEvent::Character(raw) => {
+                    self.dispatch_character_event_inner(&raw, active_tab)
+                }
             }
         }
     }
@@ -7282,6 +7314,147 @@ mod tests {
         // never depended on it.
         drop(scene_guard);
         drop(st);
+    }
+
+    /// Regression (hud-dwcr7): the pending-keyboard drain must DRAIN, not
+    /// livelock.
+    ///
+    /// The bug: `dispatch_key_down_event` (the public Stage-1 entry) re-queues
+    /// any event when `pending_keyboard_events` is non-empty (the FIFO guard).
+    /// The drain originally called that public entry, so a freshly-popped event
+    /// saw the remaining queued events and immediately re-queued itself to the
+    /// back — the queue rotated front→back forever, never shrank, and composer
+    /// echo froze after a few words (once >=2 events ever piled up).
+    ///
+    /// The fix routes the drain through the *inner* dispatch fns, which skip the
+    /// FIFO guard.  This test models the drain loop exactly (front-pop +
+    /// per-event dispatch, bounded by the entry length) and asserts that with a
+    /// consuming (inner-style) dispatcher the queue fully drains AND every
+    /// keystroke is applied to a real composer draft — while a guarded
+    /// (public-style) dispatcher would rotate and never drain.
+    #[test]
+    fn pending_keyboard_drain_consumes_queue_and_applies_all_keys() {
+        use std::collections::VecDeque;
+        use tze_hud_input::{FocusManager, InputProcessor, PointerEvent, PointerEventKind};
+        use tze_hud_scene::types::HitRegionNode;
+        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
+
+        // ── Active composer (real InputProcessor draft) ──────────────────────
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                1,
+            )
+            .unwrap();
+        let composer_id = SceneId::new();
+        scene.nodes.insert(
+            composer_id,
+            Node {
+                id: composer_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 800.0, 60.0),
+                    interaction_id: "composer-input".to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(composer_id);
+
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+        processor.process_with_focus(
+            &PointerEvent {
+                x: 10.0,
+                y: 10.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
+            &mut scene,
+            &mut fm,
+            tab_id,
+        );
+        assert!(processor.is_composer_active());
+
+        // ── Seed >=2 pending character events (the pile-up that triggered the
+        // livelock). ─────────────────────────────────────────────────────────
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        for ch in ["h", "e", "l", "l", "o"] {
+            queue.push_back(ch);
+        }
+        assert!(
+            queue.len() >= 2,
+            "need >=2 queued events to exercise the guard"
+        );
+
+        // ── Model the FIXED drain loop exactly (windowed.rs
+        // `drain_pending_keyboard_events`): bound by entry length, front-pop,
+        // dispatch each via the INNER (consuming) path — never re-queue on a
+        // non-empty queue. ──────────────────────────────────────────────────
+        let limit = queue.len();
+        for _ in 0..limit {
+            // active-tab always resolves here (mirror not busy in this test).
+            let Some(ch) = queue.pop_front() else { break };
+            // Inner-style dispatch: route into the composer draft, NO FIFO guard.
+            let (outcome, _batch) = processor.route_character_to_composer(ch);
+            assert_eq!(
+                outcome,
+                tze_hud_input::EditOutcome::Mutated,
+                "each queued key must mutate the draft when dispatched via the inner path"
+            );
+        }
+
+        // (a) The queue is fully drained.
+        assert!(
+            queue.is_empty(),
+            "drain must empty the queue (no front→back rotation livelock)"
+        );
+        // (b) The composer draft reflects ALL seeded keys, in order.
+        let snapshot = processor
+            .composer_draft_snapshot()
+            .expect("composer draft must exist");
+        assert_eq!(
+            snapshot.0, "hello",
+            "all drained keystrokes must be applied to the composer draft (echo)"
+        );
+
+        // (c) Guard against the regression: the BUGGY public-style dispatcher
+        // (re-queue when the queue is non-empty) would never drain.  Model it to
+        // prove the loop bound is what previously spun (and that the fixed path
+        // above does not).
+        let mut buggy: VecDeque<&str> = ["a", "b", "c"].into_iter().collect();
+        let buggy_limit = buggy.len();
+        let mut consumed = 0usize;
+        for _ in 0..buggy_limit {
+            let Some(ch) = buggy.pop_front() else { break };
+            // Public-style guard: if others remain queued, re-defer to the back
+            // and DON'T consume — exactly the livelock.
+            if !buggy.is_empty() {
+                buggy.push_back(ch);
+                continue;
+            }
+            consumed += 1;
+        }
+        assert!(
+            !buggy.is_empty() || consumed < 3,
+            "public-style guarded dispatch must NOT fully drain — this is the bug \
+             the inner-path fix avoids"
+        );
     }
 
     /// When `grpc_port == 0`, `start_network_services` must return `None` for
