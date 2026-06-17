@@ -4939,7 +4939,7 @@ impl WindowedRuntime {
                     if let Err(e) = scene.publish_to_zone(
                         "subtitle",
                         ZoneContent::StreamText(line.to_string()),
-                        "hudbot-sim",
+                        "hud-user-sim",
                         None,
                         None,
                         None,

@@ -22,8 +22,8 @@ Run live Windows governance validation for cooperative HUD projection GAP-3:
 
 Connectivity and runtime checks:
 
-- `ssh -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"`: passed.
-- `ssh -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"`: passed.
+- `ssh -i ~/.ssh/hud-ssh-key hud-user@windows-host.example "whoami"`: passed.
+- `ssh -i ~/.ssh/hud-ssh-key admin-user@windows-host.example "whoami"`: passed.
 - Remote `tze_hud` process was present.
 - Remote `Test-NetConnection` showed `127.0.0.1:50051` and `127.0.0.1:9090` reachable.
 - PSK was extracted from `TzeHudOverlay` into a local temp file with CR stripping; it is not stored in these artifacts.
@@ -47,7 +47,7 @@ The resident gRPC surface is reachable and accepts live HUD scene mutations, but
 ## Gates
 
 - Worker bootstrap/context gate: passed.
-- SSH connectivity gate for `hudbot` and `tzeus`: passed.
+- SSH connectivity gate for `hud-user` and `admin-user`: passed.
 - Windows runtime process and port reachability gate: passed.
 - Live resident gRPC mutation/lease cleanup smoke: passed.
 - Visible HUD screenshot gate: blocked by lock-screen capture.

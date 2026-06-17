@@ -1,7 +1,7 @@
 # hud-7oafx Idle GPU Classification - 2026-05-12
 
 Issue: `hud-7oafx`
-Host: `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`)
+Host: `TzeHouse` (`windows-host.example`)
 
 ## Verdict
 

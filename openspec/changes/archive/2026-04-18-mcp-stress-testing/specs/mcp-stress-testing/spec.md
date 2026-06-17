@@ -106,10 +106,10 @@ burst      | 1000 |   85 | 105ms  | 350ms  | 800ms  | 2100ms |   100.0 |    22.5
 
 ### Requirement: Connection Parameters
 The tool SHALL accept connection parameters via CLI arguments with defaults matching the `/user-test` skill:
-- `--url` (default: `http://tzehouse-windows.parrot-hen.ts.net:9090`)
+- `--url` (default: `http://windows-host.example:9090`)
 - `--psk-env` (default: `MCP_TEST_PSK`)
-- `--ssh-host` (default: `tzeus@tzehouse-windows.parrot-hen.ts.net`)
-- `--ssh-key` (default: `~/.ssh/ecdsa_home`)
+- `--ssh-host` (default: `admin-user@windows-host.example`)
+- `--ssh-key` (default: `~/.ssh/hud-ssh-key`)
 - `--output` (default: `stress_report_{ISO8601_compact}.json`, e.g. `stress_report_20260330T162200.json`)
 - `--concurrency` (default: per-profile, see load profiles table)
 - `--short-ttl` (flag, default: off)

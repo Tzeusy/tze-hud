@@ -2,7 +2,7 @@
 
 Date: 2026-05-10 UTC
 Issue: `hud-eeejt`
-Reference host: `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`)
+Reference host: `TzeHouse` (`windows-host.example`)
 
 ## Purpose
 
@@ -22,7 +22,7 @@ to the host:
 cargo bench -p tze_hud_compositor --bench widget_rasterize \
   --target x86_64-pc-windows-gnu --no-run
 scp target/x86_64-pc-windows-gnu/release/deps/widget_rasterize-d946571f82217fad.exe \
-  tzeus@tzehouse-windows.parrot-hen.ts.net:C:/tze_hud/perf/hud-eeejt/widget_rasterize.exe
+  admin-user@windows-host.example:C:/tze_hud/perf/hud-eeejt/widget_rasterize.exe
 ```
 
 The benchmark then ran on TzeHouse:

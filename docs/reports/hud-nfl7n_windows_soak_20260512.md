@@ -1,7 +1,7 @@
 # hud-nfl7n Windows Soak Evidence - 2026-05-12
 
 Issue: `hud-nfl7n`
-Host: `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`, `100.87.181.125`)
+Host: `TzeHouse` (`windows-host.example`, `100.87.181.125`)
 Runtime config: `C:\tze_hud\benchmark.toml` via `TzeHudBenchmarkOverlay`
 
 ## Verdict
@@ -60,8 +60,8 @@ benchmark task's DPAPI-protected PSK into process memory only.
 Immediately before the run:
 
 - Tailscale peer was online and `tailscale ping` returned `pong` in 7 ms.
-- Non-interactive SSH succeeded for both `tzeus` and `hudbot` using
-  `~/.ssh/ecdsa_home`.
+- Non-interactive SSH succeeded for both `admin-user` and `hud-user` using
+  `~/.ssh/hud-ssh-key`.
 - TCP ports `22`, `50051`, and `9090` were open.
 - MCP `/mcp` returned HTTP 200 and authenticated widget/zone discovery/publish
   smokes succeeded with the benchmark PSK.
@@ -95,8 +95,8 @@ python3 .claude/skills/user-test-performance/scripts/widget_soak_runner.py \
   --sample-windows-resources \
   --windows-process-command-match 'C:\tze_hud\benchmark.toml' \
   --resource-sample-interval-s 300 \
-  --win-user tzeus \
-  --ssh-identity ~/.ssh/ecdsa_home \
+  --win-user admin-user \
+  --ssh-identity ~/.ssh/hud-ssh-key \
   --skip-build \
   --output-root docs/reports/artifacts/hud-nfl7n-soak-20260512T012037Z
 ```

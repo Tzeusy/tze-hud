@@ -7,7 +7,7 @@ use tze_hud_telemetry::{
 fn baseline_artifact() -> PublishLoadArtifact {
     let identity = PublishLoadIdentity {
         target_id: "user-test-windows-tailnet".to_string(),
-        target_host: "tzehouse-windows.parrot-hen.ts.net".to_string(),
+        target_host: "windows-host.example".to_string(),
         network_scope: "tailnet".to_string(),
         transport: PublishLoadTransport::Grpc,
         mode: PublishLoadMode::Burst,

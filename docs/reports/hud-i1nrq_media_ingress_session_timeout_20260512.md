@@ -40,11 +40,11 @@ That failure shape means the Python client did not receive either
 Connectivity to the Windows host was healthy:
 
 ```bash
-timeout 10s tailscale ping --c 1 tzehouse-windows.parrot-hen.ts.net
+timeout 10s tailscale ping --c 1 windows-host.example
 timeout 12s ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+  -i ~/.ssh/hud-ssh-key hud-user@windows-host.example "whoami"
 timeout 12s ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"
+  -i ~/.ssh/hud-ssh-key admin-user@windows-host.example "whoami"
 ```
 
 Current production HUD state was left intact:

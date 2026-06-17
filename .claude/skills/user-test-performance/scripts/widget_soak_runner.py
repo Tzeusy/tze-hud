@@ -663,8 +663,8 @@ def main() -> int:
         ),
     )
     parser.add_argument("--resource-sample-interval-s", type=float, default=300.0)
-    parser.add_argument("--win-user", default="hudbot")
-    parser.add_argument("--win-host", default="tzehouse-windows.parrot-hen.ts.net")
+    parser.add_argument("--win-user", default="hud-user")
+    parser.add_argument("--win-host", default="windows-host.example")
     parser.add_argument("--ssh-identity", default="")
     args = parser.parse_args()
 

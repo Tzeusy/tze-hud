@@ -116,12 +116,12 @@ C:\tze_hud\tze_hud.exe --config C:\tze_hud\tze_hud.toml --window-mode overlay --
 
 1. **SSH key-based authentication** to Windows host
    ```bash
-   ssh-keygen -t ecdsa -f ~/.ssh/ecdsa_home  # Generate if needed
+   ssh-keygen -t ecdsa -f ~/.ssh/hud-ssh-key  # Generate if needed
    ```
 
 2. **Windows SSH server** (e.g., OpenSSH for Windows)
-   - User: `hudbot` (default, customizable)
-   - Host: `tzehouse-windows.parrot-hen.ts.net` (default, customizable)
+   - User: `hud-user` (default, customizable)
+   - Host: `windows-host.example` (default, customizable)
    - Port: 22 (SSH)
 
 3. **Network connectivity**
@@ -134,14 +134,14 @@ C:\tze_hud\tze_hud.exe --config C:\tze_hud\tze_hud.toml --window-mode overlay --
 Always verify SSH access BEFORE deploying:
 
 ```bash
-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
-  hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/hud-ssh-key \
+  hud-user@windows-host.example "whoami"
 ```
 
-**Expected output**: `hudbot`
+**Expected output**: `hud-user`
 
 If this fails, do not proceed. Troubleshoot:
-- SSH key permissions: `chmod 600 ~/.ssh/ecdsa_home`
+- SSH key permissions: `chmod 600 ~/.ssh/hud-ssh-key`
 - Windows SSH server running: `Get-Service sshd | Start-Service` (Windows PowerShell)
 - Firewall allows port 22
 
@@ -158,10 +158,10 @@ The `.claude/skills/user-test/scripts/deploy_windows_hud.sh` script handles:
 
 ```bash
 # With prebuilt canonical app exe (recommended)
-WIN_USER=hudbot \
-SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes' \
+WIN_USER=hud-user \
+SSH_OPTS='-i ~/.ssh/hud-ssh-key -o IdentitiesOnly=yes -o BatchMode=yes' \
 ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
-  --win-host tzehouse-windows.parrot-hen.ts.net \
+  --win-host windows-host.example \
   --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud.exe \
   --launch-mode auto \
   --tail
@@ -175,8 +175,8 @@ SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes' \
 ```
 
 **Options:**
-- `--win-user` (default: `hudbot`)
-- `--win-host` (default: `tzehouse-windows.parrot-hen.ts.net`)
+- `--win-user` (default: `hud-user`)
+- `--win-host` (default: `windows-host.example`)
 - `--full-app-exe` (path to prebuilt `.exe`, recommended)
 - `--launch-mode` (auto, task, direct - default: auto)
 - `--tail` (tail launcher logs after deploy)
@@ -190,7 +190,7 @@ SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes' \
 
 ```bash
 # Test with curl
-curl -v http://tzehouse-windows.parrot-hen.ts.net:8765
+curl -v http://windows-host.example:8765
 ```
 
 **Expected:** Connection accepted, HTTP response with MCP error (expected, no auth).
@@ -206,19 +206,19 @@ If unreachable, collect:
 
 1. **Remote runtime logs:**
    ```bash
-   ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+   ssh hud-user@windows-host.example \
      "type C:\\tze_hud\\logs\\hud.stdout.log"
    ```
 
 2. **Process state:**
    ```bash
-   ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+   ssh hud-user@windows-host.example \
      "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue | Select ProcessName, Id, Handles'"
    ```
 
 3. **Network binding (Windows):**
    ```bash
-   ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+   ssh hud-user@windows-host.example \
      "powershell -Command 'netstat -an | findstr :8765'"
    ```
 
@@ -251,7 +251,7 @@ Once MCP endpoint is verified reachable, publish test zones.
 
 ```bash
 python3 ./.claude/skills/user-test/scripts/publish_zone_batch.py \
-  --url "http://tzehouse-windows.parrot-hen.ts.net:8765" \
+  --url "http://windows-host.example:8765" \
   --psk-env MCP_TEST_PSK \
   --messages-file /tmp/test-zones.json \
   --list-zones
@@ -265,19 +265,19 @@ python3 ./.claude/skills/user-test/scripts/publish_zone_batch.py \
 
 ```bash
 # Check key permissions
-ls -la ~/.ssh/ecdsa_home
+ls -la ~/.ssh/hud-ssh-key
 # Should be: -rw------- (600)
-chmod 600 ~/.ssh/ecdsa_home
+chmod 600 ~/.ssh/hud-ssh-key
 
 # Test key auth
-ssh -v -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net whoami
+ssh -v -i ~/.ssh/hud-ssh-key hud-user@windows-host.example whoami
 ```
 
 **Problem:** `Connection refused`
 
 ```bash
 # Windows: Verify SSH server is running
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "powershell -Command 'Get-Service sshd | Select Status'"
 
 # If stopped, start it:
@@ -297,11 +297,11 @@ cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
 
 ```bash
 # Verify Windows user has permission to C:\tze_hud
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "powershell -Command 'Test-Path C:\\ -PathType Container'"
 
 # Verify write permission
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "powershell -Command '[io.file]::WriteAllText(\"C:\\tze_hud\\test.txt\", \"ok\")'"
 ```
 
@@ -311,19 +311,19 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 
 1. Check remote process running:
    ```bash
-   ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+   ssh hud-user@windows-host.example \
      "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue'"
    ```
 
 2. Check runtime logs:
    ```bash
-   ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+   ssh hud-user@windows-host.example \
      "powershell -Command 'Get-Content C:\\tze_hud\\logs\\hud.stdout.log -Tail 100'"
    ```
 
 3. Check network binding:
    ```bash
-   ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+   ssh hud-user@windows-host.example \
      "netstat -an | findstr :8765"
    ```
 
@@ -337,11 +337,11 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 
 ```bash
 # Ensure tze_hud.toml is deployed
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "powershell -Command 'Get-Item C:\\tze_hud\\tze_hud.toml'"
 
 # Copy if missing
-scp app/tze_hud_app/config/production.toml hudbot@tzehouse-windows.parrot-hen.ts.net:C:\\tze_hud\\tze_hud.toml
+scp app/tze_hud_app/config/production.toml hud-user@windows-host.example:C:\\tze_hud\\tze_hud.toml
 ```
 
 ### Cleanup
@@ -349,14 +349,14 @@ scp app/tze_hud_app/config/production.toml hudbot@tzehouse-windows.parrot-hen.ts
 **Stop running runtime:**
 
 ```bash
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "powershell -Command \"Get-Process tze_hud -ErrorAction SilentlyContinue | Stop-Process -Force\""
 ```
 
 **Remove deployment files:**
 
 ```bash
-ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh hud-user@windows-host.example \
   "powershell -Command \"Remove-Item -Path C:\\tze_hud -Recurse -Force\""
 ```
 

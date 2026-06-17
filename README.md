@@ -387,19 +387,19 @@ For automated cross-machine deployment and MCP publish validation, use the `user
 ### Quick Start
 
 **Prerequisites:**
-- `~/.ssh/ecdsa_home` SSH key (or override via `SSH_OPTS`)
-- Windows host: `tzehouse-windows.parrot-hen.ts.net` (or override `--win-host`)
-- Windows SSH user: `hudbot` (or override `--win-user`)
+- `~/.ssh/hud-ssh-key` SSH key (or override via `SSH_OPTS`)
+- Windows host: `windows-host.example` (or override `--win-host`)
+- Windows SSH user: `hud-user` (or override `--win-user`)
 - MCP test PSK in environment: `export MCP_TEST_PSK="..."`
 
 **Step 1: Verify SSH connectivity**
 
 ```bash
-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
-  hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/hud-ssh-key \
+  hud-user@windows-host.example "whoami"
 ```
 
-Must return `hudbot`. Do not proceed without successful key auth.
+Must return `hud-user`. Do not proceed without successful key auth.
 
 **Step 2: Build canonical app for Windows**
 
@@ -412,10 +412,10 @@ FULL_APP_EXE="target/x86_64-pc-windows-gnu/release/tze_hud.exe"
 
 ```bash
 # From repo root
-WIN_USER=hudbot \
-SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes' \
+WIN_USER=hud-user \
+SSH_OPTS='-i ~/.ssh/hud-ssh-key -o IdentitiesOnly=yes -o BatchMode=yes' \
 .claude/skills/user-test/scripts/deploy_windows_hud.sh \
-  --win-host tzehouse-windows.parrot-hen.ts.net \
+  --win-host windows-host.example \
   --full-app-exe "$FULL_APP_EXE" \
   --launch-mode auto \
   --tail
@@ -429,7 +429,7 @@ SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes' \
 
 ```bash
 # Test MCP HTTP endpoint
-curl -s -X POST http://tzehouse-windows.parrot-hen.ts.net:8765 \
+curl -s -X POST http://windows-host.example:8765 \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MCP_TEST_PSK" \
   -d '{"jsonrpc":"2.0","method":"list_resources","params":{},"id":1}' | jq .
@@ -460,7 +460,7 @@ EOF
 
 # Publish via MCP HTTP
 python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
-  --url "http://tzehouse-windows.parrot-hen.ts.net:8765" \
+  --url "http://windows-host.example:8765" \
   --psk-env MCP_TEST_PSK \
   --messages-file /tmp/hud-test-zones.json
 ```
@@ -468,7 +468,7 @@ python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
 ### Troubleshooting
 
 **Symptom**: SSH connectivity fails at step 1
-- Verify `~/.ssh/ecdsa_home` exists and has correct permissions
+- Verify `~/.ssh/hud-ssh-key` exists and has correct permissions
 - Check Windows SSH server is running
 - Verify firewall rules allow SSH (port 22)
 
@@ -487,20 +487,20 @@ python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
 **Tail launcher logs on Windows:**
 
 ```bash
-ssh -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh -i ~/.ssh/hud-ssh-key hud-user@windows-host.example \
   "powershell -Command \"Get-Content -Path 'C:\\tze_hud\\logs\\hud.launcher.log' -Tail 50 -Wait\""
 ```
 
 **Stop running runtime and check process state:**
 
 ```bash
-ssh -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh -i ~/.ssh/hud-ssh-key hud-user@windows-host.example \
   "powershell -Command \"Get-Process tze_hud -ErrorAction SilentlyContinue | Stop-Process -Force\""
 ```
 
 **Verify artifact was copied:**
 
 ```bash
-ssh -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net \
+ssh -i ~/.ssh/hud-ssh-key hud-user@windows-host.example \
   "powershell -Command \"Get-Item 'C:\\tze_hud\\tze_hud.exe' | Select-Object FullName, Length, LastWriteTime\""
 ```

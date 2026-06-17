@@ -1,7 +1,7 @@
 # Text Stream Portal Windows Input Validation - hud-ozbwh
 
 Date: 2026-05-10
-Host: `tzehouse-windows.parrot-hen.ts.net`
+Host: `windows-host.example`
 Branch: `agent/hud-ozbwh`
 
 ## Scope
@@ -28,14 +28,14 @@ Reachability evidence is recorded in:
 
 Key observations:
 
-- `tzehouse-windows.parrot-hen.ts.net` resolved to `100.87.181.125`.
+- `windows-host.example` resolved to `100.87.181.125`.
 - Local Tailscale source route was `100.99.218.4` via `tailscale0`.
 - `tailscale status` listed `tzehouse-windows` as a Windows node, but
   `tailscale ping --timeout=5s` timed out.
 - SSH to both validation users timed out even with explicit non-interactive
   flags and connection timeouts:
-  - `hudbot@tzehouse-windows.parrot-hen.ts.net`
-  - `tzeus@tzehouse-windows.parrot-hen.ts.net`
+  - `hud-user@windows-host.example`
+  - `admin-user@windows-host.example`
 - Direct port checks for SSH `22`, gRPC `50051`, and MCP `9090` did not
   complete within the timeout window.
 - The retry loop's recorded shell exit code reflects loop completion only; all
@@ -62,8 +62,8 @@ ssh -o BatchMode=yes -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=accept-new \
   -o UserKnownHostsFile="${TMPDIR:-/tmp}/tze_hud_known_hosts" \
   -o ConnectTimeout=8 -o ConnectionAttempts=1 \
-  -i ~/.ssh/ecdsa_home \
-  hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+  -i ~/.ssh/hud-ssh-key \
+  hud-user@windows-host.example "whoami"
 ```
 
 ```bash
@@ -71,27 +71,27 @@ ssh -o BatchMode=yes -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=accept-new \
   -o UserKnownHostsFile="${TMPDIR:-/tmp}/tze_hud_known_hosts" \
   -o ConnectTimeout=8 -o ConnectionAttempts=1 \
-  -i ~/.ssh/ecdsa_home \
-  tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"
+  -i ~/.ssh/hud-ssh-key \
+  admin-user@windows-host.example "whoami"
 ```
 
 ```bash
 timeout 10 bash -lc \
-  'nc -vz tzehouse-windows.parrot-hen.ts.net 22; \
-   nc -vz tzehouse-windows.parrot-hen.ts.net 50051; \
-   nc -vz tzehouse-windows.parrot-hen.ts.net 9090'
+  'nc -vz windows-host.example 22; \
+   nc -vz windows-host.example 50051; \
+   nc -vz windows-host.example 9090'
 ```
 
 ```bash
 for i in 1 2 3; do
   echo retry=$i
-  timeout 8 tailscale ping --timeout=5s tzehouse-windows.parrot-hen.ts.net || true
+  timeout 8 tailscale ping --timeout=5s windows-host.example || true
   timeout 8 ssh -o BatchMode=yes -o IdentitiesOnly=yes \
     -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="${TMPDIR:-/tmp}/tze_hud_known_hosts" \
     -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-    -i ~/.ssh/ecdsa_home \
-    tzeus@tzehouse-windows.parrot-hen.ts.net "whoami" || true
+    -i ~/.ssh/hud-ssh-key \
+    admin-user@windows-host.example "whoami" || true
   sleep 10
 done
 ```

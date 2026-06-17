@@ -64,10 +64,10 @@ release gates:
 ## Current Blockers
 
 `hud-9m47l` tracks the renewed TzeHouse outage. The latest refresh at
-`2026-05-10T19:43:19Z` found `tzehouse-windows.parrot-hen.ts.net` still
+`2026-05-10T19:43:19Z` found `windows-host.example` still
 `Online=false` in Tailscale, with `LastSeen=2026-05-10T17:06:32.1Z` and IP
 `100.87.181.125`. Fresh probes timed out for Tailscale ping, non-interactive
-SSH as `tzeus`, and TCP ports `22`, `50051`, and `9090`. This blocks the live
+SSH as `admin-user`, and TCP ports `22`, `50051`, and `9090`. This blocks the live
 strict smoke and full soak.
 
 The out-of-band recovery planning gap is closed by `hud-9wljr.6` and

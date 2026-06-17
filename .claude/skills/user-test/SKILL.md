@@ -21,11 +21,11 @@ Collect these before executing:
 - `package` (optional fallback): cargo package/bin crate to build only if explicitly requested
 - `target` (default: `x86_64-pc-windows-gnu`)
 - `profile` (`release` or `debug`, default: `release`)
-- `win_user` (default: `hudbot`)
-- `win_host` (default: `tzehouse-windows.parrot-hen.ts.net`)
-- `ssh_key_path` (default in local environment: `~/.ssh/ecdsa_home`)
+- `win_user` (default: `hud-user`)
+- `win_host` (default: `windows-host.example`)
+- `ssh_key_path` (default in local environment: `~/.ssh/hud-ssh-key`)
 - `task_name` (default: `TzeHudOverlay`)
-- `mcp_http_url` (default: `http://tzehouse-windows.parrot-hen.ts.net:9090`)
+- `mcp_http_url` (default: `http://windows-host.example:9090`)
 - `mcp_psk_env` (default: `MCP_TEST_PSK`)
 - `messages`: array of zone publishes
 
@@ -138,7 +138,7 @@ HUD media-ingress proof uses a self-owned/local synthetic video source. It is vi
 ```bash
 TZE_HUD_PSK="$PSK" python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
   local-producer \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --agent-id windows-local-media-producer \
   --zone-name media-pip \
   --source-label synthetic-color-bars \
@@ -151,9 +151,9 @@ YouTube source evidence is separate from HUD frame-ingress proof. Launch video I
 ```bash
 python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
   youtube-sidecar \
-  --windows-host tzehouse-windows.parrot-hen.ts.net \
-  --windows-user tzeus \
-  --ssh-key ~/.ssh/ecdsa_home \
+  --windows-host windows-host.example \
+  --windows-user admin-user \
+  --ssh-key ~/.ssh/hud-ssh-key \
   --evidence-json build/windows-media-ingress/youtube-source-evidence.json
 ```
 
@@ -194,40 +194,40 @@ the rig resolver; override with `--win-host`.
 Verify key auth for **both** users (Linux):
 
 ```bash
-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
-  hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
-  tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/hud-ssh-key \
+  hud-user@windows-host.example "whoami"
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/hud-ssh-key \
+  admin-user@windows-host.example "whoami"
 ```
 
-Both must succeed. `hudbot` is used for file deployment (SCP). `tzeus` is used for process control (kill, scheduled task trigger) because `tzeus` owns the interactive desktop session.
+Both must succeed. `hud-user` is used for file deployment (SCP). `admin-user` is used for process control (kill, scheduled task trigger) because `admin-user` owns the interactive desktop session.
 
-### Step 1: Deploy (SCP via hudbot)
+### Step 1: Deploy (SCP via hud-user)
 
 Copy the prebuilt `.exe` to the Windows host:
 
 ```bash
-# Kill any running instance first (must use tzeus — hudbot can't kill it)
-ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
-  tzeus@tzehouse-windows.parrot-hen.ts.net "taskkill /F /IM tze_hud.exe"
+# Kill any running instance first (must use admin-user — hud-user can't kill it)
+ssh -i ~/.ssh/hud-ssh-key -o BatchMode=yes -o StrictHostKeyChecking=no \
+  admin-user@windows-host.example "taskkill /F /IM tze_hud.exe"
 sleep 2
 
-# SCP the exe (via hudbot)
-scp -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
+# SCP the exe (via hud-user)
+scp -i ~/.ssh/hud-ssh-key -o BatchMode=yes -o StrictHostKeyChecking=no \
   /path/to/tze_hud.exe \
-  hudbot@tzehouse-windows.parrot-hen.ts.net:C:/tze_hud/tze_hud.exe
+  hud-user@windows-host.example:C:/tze_hud/tze_hud.exe
 ```
 
 Report: file size, checksum (`sha256sum`), remote path.
 
-### Step 2: Register + Launch (via tzeus)
+### Step 2: Register + Launch (via admin-user)
 
-The HUD **must** be launched via a scheduled task as `tzeus` with `--window-mode overlay`. This is critical for transparency — SSH-launched processes cannot access the desktop GPU, and `run_hud.ps1` wrappers interfere with window creation.
+The HUD **must** be launched via a scheduled task as `admin-user` with `--window-mode overlay`. This is critical for transparency — SSH-launched processes cannot access the desktop GPU, and `run_hud.ps1` wrappers interfere with window creation.
 
 ```bash
 # Register the overlay task (idempotent — safe to re-run)
-ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
-  tzeus@tzehouse-windows.parrot-hen.ts.net \
+ssh -i ~/.ssh/hud-ssh-key -o BatchMode=yes -o StrictHostKeyChecking=no \
+  admin-user@windows-host.example \
   "powershell -NoProfile -Command \"Register-ScheduledTask -TaskName 'TzeHudOverlay' \
     -Action (New-ScheduledTaskAction \
       -Execute 'C:\\tze_hud\\tze_hud.exe' \
@@ -237,14 +237,14 @@ ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
     -Force\""
 
 # Launch it
-ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
-  tzeus@tzehouse-windows.parrot-hen.ts.net \
+ssh -i ~/.ssh/hud-ssh-key -o BatchMode=yes -o StrictHostKeyChecking=no \
+  admin-user@windows-host.example \
   "schtasks /Run /TN TzeHudOverlay"
 ```
 
 **Transparency requirements** (if the window is grey/opaque, one of these is wrong):
 - `--window-mode overlay` — fullscreen mode is intentionally opaque
-- Task runs as `tzeus` (the user logged into the console desktop)
+- Task runs as `admin-user` (the user logged into the console desktop)
 - Exe runs directly (no PowerShell/bat wrapper — wrapper windows break transparency)
 - NVIDIA driver 595.97+ on the Windows host
 - Commit must include `with_no_redirection_bitmap(true)`, Vulkan forcing, PreMultiplied alpha
@@ -253,7 +253,7 @@ ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
 
 Require live MCP HTTP reachability before publish.
 
-- Default URL: `http://tzehouse-windows.parrot-hen.ts.net:9090`
+- Default URL: `http://windows-host.example:9090`
 - If MCP HTTP is unreachable, stop and report launch/runtime mismatch.
 - Do not treat startup subtitle simulation as a substitute for MCP publish validation.
 
@@ -506,7 +506,7 @@ observation, cleanup, and the real resident image-upload consumer contract.
 
 ```bash
 python3 .claude/skills/user-test/scripts/presence_card_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --tab-height 1080 \
   --transcript-out test_results/presence-card-latest.json
@@ -557,7 +557,7 @@ the `exemplar-test` namespace.
 
 ```bash
 python3 .claude/skills/user-test/scripts/subtitle_exemplar.py \
-  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --url http://windows-host.example:9090 \
   --psk-env TZE_HUD_PSK \
   --ttl 10000
 ```
@@ -647,7 +647,7 @@ notifications with mixed urgency levels across 4 phases.
 
 ```bash
 python3 .claude/skills/user-test/scripts/notification_exemplar.py \
-  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --url http://windows-host.example:9090 \
   --psk-env TZE_HUD_PSK \
   --ttl 8000
 ```
@@ -705,7 +705,7 @@ long-body containment, and action-button rows.
 
 ```bash
 python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
-  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --url http://windows-host.example:9090 \
   --psk-env TZE_HUD_PSK \
   --messages-file .claude/skills/user-test/scripts/notification-full-gamut.json \
   --delay-ms 250 \
@@ -735,7 +735,7 @@ multi-alert display.
 
 ```bash
 python3 .claude/skills/user-test/scripts/alert_banner_exemplar.py \
-  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --url http://windows-host.example:9090 \
   --psk-env TZE_HUD_PSK \
   --ttl 15000
 ```
@@ -783,7 +783,7 @@ key replacement, empty-value removal, and TTL-driven sweep.
 
 ```bash
 python3 .claude/skills/user-test/scripts/status_bar_exemplar.py \
-  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --url http://windows-host.example:9090 \
   --psk-env TZE_HUD_PSK \
   --battery-ttl 5000
 ```
@@ -864,7 +864,7 @@ latest-wins replacement, static-image placeholder, and rapid-replacement stress.
 
 ```bash
 python3 .claude/skills/user-test/scripts/ambient_background_exemplar.py \
-  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --url http://windows-host.example:9090 \
   --psk-env TZE_HUD_PSK
 ```
 
@@ -948,7 +948,7 @@ Evidence artifact: `docs/evidence/text-stream-portals/validation-2026-04-16.md`.
 
 ```bash
 python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc docs/reports/exemplar-manual-review-checklist.md \
@@ -1026,11 +1026,11 @@ cannot validate alone:
 - Default to full app deployment via SCP + scheduled task.
 - Use `--package` / cargo build only when explicitly requested.
 - Always pass non-interactive SSH/SCP flags (`BatchMode`, `IdentitiesOnly`) for automation safety.
-- Use `hudbot` for file operations (SCP, mkdir). Use `tzeus` for process control (taskkill, schtasks).
+- Use `hud-user` for file operations (SCP, mkdir). Use `admin-user` for process control (taskkill, schtasks).
 - **Always launch via `TzeHudOverlay` scheduled task with `--window-mode overlay`.** Never launch via `run_hud.ps1` or direct SSH exec — both produce grey opaque windows.
 - **Never use `Start-Process -RedirectStandardOutput`** — it sets `CREATE_NO_WINDOW` which breaks `WS_EX_NOREDIRECTIONBITMAP` transparency.
 - Require real MCP HTTP reachability before claiming publish-path success.
 - Never invent zone names or endpoint values; require user-provided values.
 - Treat any publish error as actionable; include exact response payload.
 - Keep messages configurable from the user prompt; do not hardcode content.
-- Assume Windows host defaults to `tzehouse-windows.parrot-hen.ts.net` unless user overrides.
+- Assume Windows host defaults to `windows-host.example` unless user overrides.

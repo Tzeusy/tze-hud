@@ -1,7 +1,7 @@
 # Text Stream Portal Windows Rerun - hud-eq1m4
 
 Date: 2026-05-09
-Host: `tzehouse-windows.parrot-hen.ts.net`
+Host: `windows-host.example`
 Branch: `agent/hud-eq1m4-rerun`
 
 ## Scope
@@ -19,8 +19,8 @@ wheel scroll event delivery, and cleanup/lease release.
   expects exactly `agent/<ISSUE_ID>`; an equivalent assertion against the
   explicit assignment passed.
 - SSH key auth succeeded for both users:
-  - `hudbot@tzehouse-windows.parrot-hen.ts.net`
-  - `tzeus@tzehouse-windows.parrot-hen.ts.net`
+  - `hud-user@windows-host.example`
+  - `admin-user@windows-host.example`
 - HUD ports were listening from the Windows host:
   - gRPC `127.0.0.1:50051`
   - MCP `127.0.0.1:9090`
@@ -33,7 +33,7 @@ PowerShell carriage returns stripped before exporting `TZE_HUD_PSK`.
 
 ```bash
 python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc docs/reports/exemplar-manual-review-checklist.md \
@@ -44,7 +44,7 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
 
 ```bash
 python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc docs/reports/exemplar-manual-review-checklist.md \
@@ -55,7 +55,7 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
 
 ```bash
 python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc docs/reports/exemplar-manual-review-checklist.md \
@@ -64,7 +64,7 @@ python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
   --transcript-out test_results/text-stream-portal-rerun-live-input-final-20260509.json
 ```
 
-Input injection was run as interactive scheduled tasks under `tzeus`, because a
+Input injection was run as interactive scheduled tasks under `admin-user`, because a
 direct SSH process could not move the console cursor. The final injector used
 `SetCursorPos` for exact placement plus `SendInput` for button and wheel events.
 Its local evidence log is:
@@ -107,7 +107,7 @@ portal's `3840x2160` scene-space coordinates.
 
 Partial pass:
 
-- PASS: SSH reachability remained restored for both `hudbot` and `tzeus`.
+- PASS: SSH reachability remained restored for both `hud-user` and `admin-user`.
 - PASS: HUD gRPC and MCP ports remained reachable.
 - PASS: resident text-stream portal lease request, tile creation, and baseline
   render completed on the live HUD.

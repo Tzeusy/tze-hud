@@ -13,8 +13,8 @@ Automates:
 4) optional remote log tail
 
 Options:
-  --win-user <user>          Windows SSH user (default: hudbot)
-  --win-host <host>          Windows host (default: tzehouse-windows.parrot-hen.ts.net)
+  --win-user <user>          Windows SSH user (default: hud-user)
+  --win-host <host>          Windows host (default: windows-host.example)
   --full-app-exe <path>      Preferred: prebuilt full app .exe from Linux
   --local-exe <path>         Alias for --full-app-exe
   --package <name>           Optional fallback: cargo package/bin crate to build
@@ -34,14 +34,14 @@ Options:
   -h, --help                 Show help
 
 Environment:
-  WIN_USER                   Default Windows SSH user (default: hudbot)
+  WIN_USER                   Default Windows SSH user (default: hud-user)
   FULL_APP_EXE               Default full app .exe path (same as --full-app-exe)
   LOCAL_EXE                  Back-compat alias for FULL_APP_EXE
   SSH_OPTS                   Extra SSH/SCP options (split by shell)
 EOF
 }
 
-WIN_HOST="tzehouse-windows.parrot-hen.ts.net"
+WIN_HOST="windows-host.example"
 PACKAGE=""
 TARGET="x86_64-pc-windows-gnu"
 PROFILE="release"
@@ -56,7 +56,7 @@ TAIL=0
 TAIL_LINES=120
 SKIP_BUILD=0
 NO_RUN=0
-WIN_USER="${WIN_USER:-hudbot}"
+WIN_USER="${WIN_USER:-hud-user}"
 LOCAL_EXE_OVERRIDE="${FULL_APP_EXE:-${LOCAL_EXE:-}}"
 
 while [[ $# -gt 0 ]]; do

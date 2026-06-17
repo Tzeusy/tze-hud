@@ -51,8 +51,8 @@ After this change on the same worker machine:
 
 ## Windows Validation
 
-The Windows host `tzehouse-windows.parrot-hen.ts.net` was reachable as both
-`hudbot` and `tzeus`, but neither account exposed `cargo` in PATH. The host
+The Windows host `windows-host.example` was reachable as both
+`hud-user` and `admin-user`, but neither account exposed `cargo` in PATH. The host
 contains the prior `C:\tze_hud\benchmark_hud1753c.exe` artifact, not a usable
 source checkout plus Rust toolchain for rebuilding this branch. I did not run
 that old executable because it would only re-measure the previous baseline.

@@ -171,8 +171,8 @@ class LiveMetricsArtifactTests(unittest.TestCase):
                     allow_missing_live_metrics=False,
                     live_metrics_artifact=str(source),
                     windows_live_metrics_path="",
-                    win_user="hudbot",
-                    win_host="tzehouse-windows.parrot-hen.ts.net",
+                    win_user="hud-user",
+                    win_host="windows-host.example",
                     ssh_identity="",
                 ),
                 output_root=output_root,
@@ -219,8 +219,8 @@ class LiveMetricsArtifactTests(unittest.TestCase):
     def test_windows_resource_sampler_uses_noninteractive_powershell(self) -> None:
         args = Namespace(
             sample_windows_resources=True,
-            win_user="hudbot",
-            win_host="tzehouse-windows.parrot-hen.ts.net",
+            win_user="hud-user",
+            win_host="windows-host.example",
             ssh_identity="",
             windows_process_name="tze_hud*",
             windows_process_command_match="",

@@ -221,7 +221,7 @@ _(to be filled during review)_
 ### UX Tweaks
 
 Live validation update (2026-04-16):
-1. Attempted canonical resident `/user-test` run against `tzehouse-windows.parrot-hen.ts.net:50051`.
+1. Attempted canonical resident `/user-test` run against `windows-host.example:50051`.
 2. Reachability succeeded (`50051` and `9090` reachable), but scenario exited with `{"error":"missing_psk","psk_env":"TZE_HUD_PSK"}`.
 3. Manual visual verdict is blocked until `TZE_HUD_PSK` is provisioned in the operator environment and the scenario is re-run.
 
@@ -390,7 +390,7 @@ Integration tests prove structure; these axes still need operator-visible proof 
 | Caret geometry | Reply Submission | 2026-04-28 evidence pass, still open for UX refinement — composer-smoke long markdown-like paste rendered as 5 visual lines with no trailing-whitespace wrap lines and caret on the final wrapped row |
 | Pane / portal resizing | Transcript Interaction Contract | 2026-04-28 live refinement in progress — center divider and bottom-right handle were added, black pane backgrounds resize consistently during drag, and scroll tile z-order conflicts were fixed; manual sign-off remains open because cursor-follow still stutters without runtime pointer capture for gRPC hit regions |
 | Minimized icon | Transcript Interaction Contract | 2026-04-28 live refinement in progress — top-left minimize works, the icon is now split into immediate restore body + separate drag grip, and restore no longer depends on `pointer_up`; manual sign-off remains open because icon dragging still depends on incomplete runtime pointer capture and the final live split-target pass was interrupted by a Windows rig/HUD connection reset |
-| Runtime stability | User-Test Scenario | 2026-04-28 blocker — latest split-target run reached baseline render, then gRPC reset with `StatusCode.UNAVAILABLE` / `recvmsg:Connection reset by peer`; subsequent ping, SSH, and port probes to `tzehouse-windows.parrot-hen.ts.net` timed out, so live verification could not be completed |
+| Runtime stability | User-Test Scenario | 2026-04-28 blocker — latest split-target run reached baseline render, then gRPC reset with `StatusCode.UNAVAILABLE` / `recvmsg:Connection reset by peer`; subsequent ping, SSH, and port probes to `windows-host.example` timed out, so live verification could not be completed |
 
 ### Out of scope
 

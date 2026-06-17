@@ -24,8 +24,8 @@ worker did not stop, restart, or replace the existing runtime.
 
 ## Observed State
 
-- Tailscale ping succeeded for `tzehouse-windows.parrot-hen.ts.net`.
-- Non-interactive SSH succeeded with `~/.ssh/ecdsa_home` as `tzeus`.
+- Tailscale ping succeeded for `windows-host.example`.
+- Non-interactive SSH succeeded with `~/.ssh/hud-ssh-key` as `admin-user`.
 - TCP ports `22`, `50051`, and `9090` were open.
 - `TzeHudBenchmarkOverlay` exists and last returned `0`.
 - Running process:

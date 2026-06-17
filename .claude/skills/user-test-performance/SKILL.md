@@ -206,7 +206,7 @@ python3 .claude/skills/user-test-performance/scripts/widget_soak_runner.py \
   --rate-rps 1 \
   --windows-live-metrics-path 'C:\tze_hud\perf\hud-wydpo\windowed_live_metrics.json' \
   --sample-windows-resources \
-  --ssh-identity ~/.ssh/ecdsa_home
+  --ssh-identity ~/.ssh/hud-ssh-key
 ```
 
 ## Traceability and Threshold Flags

@@ -3,7 +3,7 @@
 Issue: `hud-1753c`
 OpenSpec source: `openspec/changes/windows-first-performant-runtime/tasks.md` section 2
 Run date: 2026-05-09 UTC
-Reference host: `TzeHouse` (`tzehouse-windows.parrot-hen.ts.net`)
+Reference host: `TzeHouse` (`windows-host.example`)
 
 ## Reference Hardware
 

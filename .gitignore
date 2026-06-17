@@ -45,3 +45,7 @@ hud-hkle2/
 hud-9wljr.8/
 # bd worktree
 hud-w5pct/
+
+# Private operator runbook (real host/user/key/topology — never commit)
+docs/operations/private/
+.claude/skills/user-test/target.env

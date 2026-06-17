@@ -34,7 +34,7 @@ The agentskills.io specification defines a portable skill format: a `SKILL.md` f
 
 **Choice**: Ship a `settings.template.json` inside the skill directory. The SKILL.md instructions tell the agent (or user) to copy it to `.claude/settings.json` and fill in the host/PSK values.
 
-**Rationale**: The HUD server host and PSK vary per user. Hardcoding `tzehouse-windows.parrot-hen.ts.net` (the dev/test host) would be wrong for anyone else. A template with placeholder values (`${HUD_MCP_HOST}`, `${HUD_MCP_PSK}`) is portable.
+**Rationale**: The HUD server host and PSK vary per user. Hardcoding `windows-host.example` (the dev/test host) would be wrong for anyone else. A template with placeholder values (`${HUD_MCP_HOST}`, `${HUD_MCP_PSK}`) is portable.
 
 **Alternative considered**: Inline the settings JSON in SKILL.md — harder to copy-paste correctly; generating settings via a script — over-engineering for a JSON file.
 

@@ -24,7 +24,7 @@ Run it with:
 
 ```bash
 python3 .claude/skills/user-test/scripts/presence_card_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --tab-height 1080 \
   --transcript-out test_results/presence-card-latest.json
@@ -37,14 +37,14 @@ each emitted step while performing the manual checks below.
 ### Latest Live Run Attempt (2026-04-16)
 
 Runtime target reachability checks passed:
-- `tzehouse-windows.parrot-hen.ts.net:50051` reachable
-- `tzehouse-windows.parrot-hen.ts.net:9090` reachable
+- `windows-host.example:50051` reachable
+- `windows-host.example:9090` reachable
 
 Scenario execution command:
 
 ```bash
 python3 .claude/skills/user-test/scripts/presence_card_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --tab-height 1080 \
   --transcript-out test_results/presence-card-latest.json

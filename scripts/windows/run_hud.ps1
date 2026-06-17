@@ -16,7 +16,7 @@
 #
 # LAUNCH CONSTRAINT — READ THIS BEFORE MODIFYING
 #   tze_hud.exe MUST be started via the Windows Task Scheduler task
-#   "TzeHudOverlay" (run as the interactive desktop user "tzeus").  A direct
+#   "TzeHudOverlay" (run as the interactive desktop user "admin-user").  A direct
 #   Start-Process or SSH-spawned launch produces a grey/opaque window because the
 #   process cannot access the desktop GPU and WS_EX_NOREDIRECTIONBITMAP is not
 #   honoured outside an interactive session.  This wrapper triggers the task; it

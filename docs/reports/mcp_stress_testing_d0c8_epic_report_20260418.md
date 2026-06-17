@@ -203,7 +203,7 @@ Criteria map to `openspec/changes/mcp-stress-testing/tasks.md` Task 1.
 | `--url` (default tzehouse-windows:9090) | YES |
 | `--psk-env` (default MCP_TEST_PSK) | YES |
 | `--ssh-host` (default tzehouse-windows) | YES |
-| `--ssh-key` (default ~/.ssh/ecdsa_home) | YES |
+| `--ssh-key` (default ~/.ssh/hud-ssh-key) | YES |
 | `--output` (default stress_report_{ISO8601}.json) | YES |
 | `--concurrency` (default per-profile) | YES |
 | `--short-ttl` | YES |

@@ -554,7 +554,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     local = sub.add_parser("local-producer", help="open a video-only HUD media ingress stream")
-    local.add_argument("--target", default="tzehouse-windows.parrot-hen.ts.net:50051")
+    local.add_argument("--target", default="windows-host.example:50051")
     local.add_argument("--psk-env", default="TZE_HUD_PSK")
     local.add_argument("--psk", help="PSK value; prefer --psk-env for normal runs")
     local.add_argument("--agent-id", default=LOCAL_PRODUCER_AGENT_ID)
@@ -574,7 +574,7 @@ def build_parser() -> argparse.ArgumentParser:
     youtube.add_argument("--output-dir", default="build/windows-media-ingress")
     youtube.add_argument("--dry-run", action="store_true")
     youtube.add_argument("--windows-host")
-    youtube.add_argument("--windows-user", default="tzeus")
+    youtube.add_argument("--windows-user", default="admin-user")
     youtube.add_argument("--ssh-key")
     youtube.add_argument("--connect-timeout-s", type=int, default=5)
     add_common_evidence_arg(youtube)

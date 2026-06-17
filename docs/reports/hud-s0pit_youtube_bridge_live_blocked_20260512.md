@@ -46,10 +46,10 @@ Connectivity:
 
 ```bash
 timeout 12 ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net whoami
+  -i ~/.ssh/hud-ssh-key hud-user@windows-host.example whoami
 
 timeout 12 ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net whoami
+  -i ~/.ssh/hud-ssh-key admin-user@windows-host.example whoami
 ```
 
 Build:
@@ -63,34 +63,34 @@ Deploy isolated binary/config:
 
 ```bash
 ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net \
+  -i ~/.ssh/hud-ssh-key hud-user@windows-host.example \
   "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path C:\\tze_hud\\hud-s0pit | Out-Null\""
 
 scp -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home \
+  -i ~/.ssh/hud-ssh-key \
   target/x86_64-pc-windows-gnu/release/tze_hud.exe \
-  hudbot@tzehouse-windows.parrot-hen.ts.net:C:/tze_hud/hud-s0pit/tze_hud.exe
+  hud-user@windows-host.example:C:/tze_hud/hud-s0pit/tze_hud.exe
 
 scp -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home \
+  -i ~/.ssh/hud-ssh-key \
   app/tze_hud_app/config/windows-media-ingress.toml \
-  hudbot@tzehouse-windows.parrot-hen.ts.net:C:/tze_hud/hud-s0pit/windows-media-ingress.toml
+  hud-user@windows-host.example:C:/tze_hud/hud-s0pit/windows-media-ingress.toml
 ```
 
 Launch isolated HUD task, using the existing HUD PSK only in process memory:
 
 ```bash
 PSK=$(ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net \
+  -i ~/.ssh/hud-ssh-key admin-user@windows-host.example \
   'schtasks /Query /TN TzeHudOverlay /V /FO LIST' |
   sed -n 's/.*--psk \([^ ]*\).*/\1/p' | tr -d '\r' | head -n1)
 
 ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net \
+  -i ~/.ssh/hud-ssh-key admin-user@windows-host.example \
   "schtasks /Create /F /TN TzeHudHudS0pit /SC ONCE /ST 23:59 /IT /RL HIGHEST /TR \"C:\\tze_hud\\hud-s0pit\\tze_hud.exe --config C:\\tze_hud\\hud-s0pit\\windows-media-ingress.toml --window-mode overlay --grpc-port 50052 --mcp-port 9091 --psk <redacted>\""
 
 ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net \
+  -i ~/.ssh/hud-ssh-key admin-user@windows-host.example \
   "schtasks /Run /TN TzeHudHudS0pit"
 ```
 
@@ -98,10 +98,10 @@ Live bridge attempt:
 
 ```bash
 TZE_HUD_PSK="$PSK" python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py youtube-bridge \
-  --target tzehouse-windows.parrot-hen.ts.net:50052 \
-  --windows-host tzehouse-windows.parrot-hen.ts.net \
-  --windows-user tzeus \
-  --ssh-key ~/.ssh/ecdsa_home \
+  --target windows-host.example:50052 \
+  --windows-host windows-host.example \
+  --windows-user admin-user \
+  --ssh-key ~/.ssh/hud-ssh-key \
   --output-dir docs/reports/artifacts/hud-s0pit-youtube-bridge-live-20260512T1043 \
   --capture-settle-s 8 \
   --capture-frame-samples 5 \
@@ -115,7 +115,7 @@ Additional media-open check:
 
 ```bash
 TZE_HUD_PSK="$PSK" python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py local-producer \
-  --target tzehouse-windows.parrot-hen.ts.net:50052 \
+  --target windows-host.example:50052 \
   --agent-id windows-local-media-producer \
   --zone-name media-pip \
   --source-label synthetic-color-bars \

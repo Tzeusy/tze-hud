@@ -40,9 +40,9 @@ convert \
 
 Connectivity and runtime checks passed:
 
-- `ssh -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"` returned `tzehouse\hudbot`.
-- `ssh -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"` returned `tzehouse\tzeus`.
-- `query user` showed `tzeus` active on console session 2.
+- `ssh -i ~/.ssh/hud-ssh-key hud-user@windows-host.example "whoami"` returned `tzehouse\hud-user`.
+- `ssh -i ~/.ssh/hud-ssh-key admin-user@windows-host.example "whoami"` returned `tzehouse\admin-user`.
+- `query user` showed `admin-user` active on console session 2.
 - `tze_hud.exe` was running in session 2.
 - `Test-NetConnection 127.0.0.1 -Port 50051` passed.
 - `Test-NetConnection 127.0.0.1 -Port 9090` passed.

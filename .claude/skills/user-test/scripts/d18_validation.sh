@@ -10,7 +10,7 @@ SSH-driven D18 validation lane (replaces the suspended GitHub Actions
 real-decode-windows.yml — see hud-1aswu.4). Runs the lane's substantive
 checks against the tzehouse-windows box from the Linux rig:
 
-1) SSH connectivity gate (tzeus)
+1) SSH connectivity gate (admin-user)
 2) GPU lock check at %PROGRAMDATA%\tze_hud\gpu.lock (skips if a live
    interactive session holds the lock; reports stale locks, never removes
    them — interactive sessions own their cleanup)
@@ -29,21 +29,21 @@ Exit codes:
      With --allow-missing-sdk this becomes exit 0 with a GATED report.
 
 Options:
-  --win-user <user>        Windows SSH user for checks (default: tzeus)
+  --win-user <user>        Windows SSH user for checks (default: admin-user)
   --win-host <host>        Windows host; default resolves the tailnet IP via
                            'tailscale ip -4 tzehouse-windows' (MagicDNS is not
                            in the rig resolver), falling back to
-                           tzehouse-windows.parrot-hen.ts.net
-  --ssh-key <path>         SSH identity (default: ~/.ssh/ecdsa_home)
+                           windows-host.example
+  --ssh-key <path>         SSH identity (default: ~/.ssh/hud-ssh-key)
   --allow-missing-sdk      Report missing GStreamer SDK as GATED instead of
                            failing (for status sweeps before provisioning)
   -h, --help               Show help
 EOF
 }
 
-WIN_USER="tzeus"
+WIN_USER="admin-user"
 WIN_HOST=""
-SSH_KEY="$HOME/.ssh/ecdsa_home"
+SSH_KEY="$HOME/.ssh/hud-ssh-key"
 ALLOW_MISSING_SDK=0
 
 while [[ $# -gt 0 ]]; do
@@ -60,7 +60,7 @@ done
 if [[ -z "$WIN_HOST" ]]; then
   WIN_HOST="$(tailscale ip -4 tzehouse-windows 2>/dev/null || true)"
   if [[ -z "$WIN_HOST" ]]; then
-    WIN_HOST="tzehouse-windows.parrot-hen.ts.net"
+    WIN_HOST="windows-host.example"
   fi
 fi
 

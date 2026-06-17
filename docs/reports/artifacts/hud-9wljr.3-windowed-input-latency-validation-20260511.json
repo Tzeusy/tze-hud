@@ -23,25 +23,25 @@
     ]
   },
   "reference_host_probe": {
-    "host": "tzehouse-windows.parrot-hen.ts.net",
+    "host": "windows-host.example",
     "commands": [
       {
-        "command": "timeout 12 tailscale ping -c 1 tzehouse-windows.parrot-hen.ts.net",
+        "command": "timeout 12 tailscale ping -c 1 windows-host.example",
         "result": "fail",
         "summary": "ping 100.87.181.125 timed out; no reply"
       },
       {
-        "command": "timeout 12 ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net \"whoami\"",
+        "command": "timeout 12 ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -i ~/.ssh/hud-ssh-key admin-user@windows-host.example \"whoami\"",
         "result": "fail",
         "summary": "SSH port 22 connection timed out."
       },
       {
-        "command": "timeout 5 bash -lc '</dev/tcp/tzehouse-windows.parrot-hen.ts.net/50051' && echo grpc-open || echo grpc-closed",
+        "command": "timeout 5 bash -lc '</dev/tcp/windows-host.example/50051' && echo grpc-open || echo grpc-closed",
         "result": "fail",
         "summary": "grpc-closed"
       },
       {
-        "command": "timeout 5 bash -lc '</dev/tcp/tzehouse-windows.parrot-hen.ts.net/9090' && echo mcp-open || echo mcp-closed",
+        "command": "timeout 5 bash -lc '</dev/tcp/windows-host.example/9090' && echo mcp-open || echo mcp-closed",
         "result": "fail",
         "summary": "mcp-closed"
       }

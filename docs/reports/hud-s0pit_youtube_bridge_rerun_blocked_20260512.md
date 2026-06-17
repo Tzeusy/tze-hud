@@ -43,11 +43,11 @@ recording the active state. Cleanup restored the benchmark overlay through
 Connectivity:
 
 ```bash
-timeout 10s tailscale ping --c 1 tzehouse-windows.parrot-hen.ts.net
+timeout 10s tailscale ping --c 1 windows-host.example
 timeout 12s ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+  -i ~/.ssh/hud-ssh-key hud-user@windows-host.example "whoami"
 timeout 12s ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 \
-  -i ~/.ssh/ecdsa_home tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"
+  -i ~/.ssh/hud-ssh-key admin-user@windows-host.example "whoami"
 ```
 
 Local validation:
@@ -65,9 +65,9 @@ Official-player sidecar:
 
 ```bash
 python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py youtube-sidecar \
-  --windows-host tzehouse-windows.parrot-hen.ts.net \
-  --windows-user tzeus \
-  --ssh-key ~/.ssh/ecdsa_home \
+  --windows-host windows-host.example \
+  --windows-user admin-user \
+  --ssh-key ~/.ssh/hud-ssh-key \
   --connect-timeout-s 8 \
   --output-dir docs/reports/artifacts/hud-s0pit-rerun-youtube-bridge-live-20260512T034408Z \
   --evidence-json docs/reports/artifacts/hud-s0pit-rerun-youtube-bridge-live-20260512T034408Z/youtube-source-evidence.json
@@ -94,10 +94,10 @@ Live bridge attempt:
 
 ```bash
 TZE_HUD_PSK="$PSK" python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py youtube-bridge \
-  --target tzehouse-windows.parrot-hen.ts.net:50052 \
-  --windows-host tzehouse-windows.parrot-hen.ts.net \
-  --windows-user tzeus \
-  --ssh-key ~/.ssh/ecdsa_home \
+  --target windows-host.example:50052 \
+  --windows-host windows-host.example \
+  --windows-user admin-user \
+  --ssh-key ~/.ssh/hud-ssh-key \
   --connect-timeout-s 8 \
   --frame-capture-fixture-json docs/reports/artifacts/hud-s0pit-rerun-youtube-bridge-live-20260512T034408Z/frame-capture-live.json \
   --output-dir docs/reports/artifacts/hud-s0pit-rerun-youtube-bridge-live-20260512T034408Z \

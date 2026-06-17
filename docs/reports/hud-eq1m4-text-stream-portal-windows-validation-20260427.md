@@ -1,7 +1,7 @@
 # Text Stream Portal Windows Validation - hud-eq1m4
 
 Date: 2026-04-27
-Host: `tzehouse-windows.parrot-hen.ts.net`
+Host: `windows-host.example`
 Branch: `agent/hud-eq1m4`
 
 ## Scope
@@ -12,7 +12,7 @@ ending by watchdog before a later `pointer_up` drag succeeded.
 
 ## Environment
 
-- SSH key auth succeeded for both `hudbot` and `tzeus`.
+- SSH key auth succeeded for both `hud-user` and `admin-user`.
 - Fresh HUD processes were launched via scheduled task `TzeHudOverlay`.
 - gRPC `50051` and MCP `9090` were reachable after each restart.
 - The scheduled task carries a non-default PSK; when extracting it over SSH,
@@ -48,7 +48,7 @@ Command shape:
 
 ```bash
 python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc docs/reports/exemplar-manual-review-checklist.md \
@@ -81,7 +81,7 @@ Command shape:
 
 ```bash
 python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc docs/reports/exemplar-manual-review-checklist.md \

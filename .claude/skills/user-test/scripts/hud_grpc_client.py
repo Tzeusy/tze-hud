@@ -9,7 +9,7 @@ over the bidirectional gRPC session stream.
 Usage:
     from hud_grpc_client import HudClient
 
-    async with HudClient("tzehouse-windows.parrot-hen.ts.net:50051",
+    async with HudClient("windows-host.example:50051",
                           psk="tze-hud-key",
                           agent_id="test-agent") as client:
         lease_id = await client.request_lease(ttl_ms=60000)
@@ -1326,7 +1326,7 @@ async def _self_test():
     """Connect, create a Presence Card tile, hold for 5s, close."""
     import argparse
     parser = argparse.ArgumentParser(description="gRPC client self-test")
-    parser.add_argument("--target", default="tzehouse-windows.parrot-hen.ts.net:50051")
+    parser.add_argument("--target", default="windows-host.example:50051")
     parser.add_argument("--psk", default=os.getenv("MCP_TEST_PSK", "tze-hud-key"))
     args = parser.parse_args()
 

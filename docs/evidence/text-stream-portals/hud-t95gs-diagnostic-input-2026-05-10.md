@@ -38,7 +38,7 @@ Run shape:
 
 ```bash
 python3 .claude/skills/user-test/scripts/text_stream_portal_exemplar.py \
-  --target tzehouse-windows.parrot-hen.ts.net:50051 \
+  --target windows-host.example:50051 \
   --psk-env TZE_HUD_PSK \
   --agent-id agent-alpha \
   --doc docs/reports/exemplar-manual-review-checklist.md \
@@ -78,16 +78,16 @@ Reachability attempt from this worktree:
 
 ```bash
 timeout 8s ssh -o ConnectTimeout=5 -o BatchMode=yes -o IdentitiesOnly=yes \
-  -o StrictHostKeyChecking=no -i ~/.ssh/ecdsa_home \
-  hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+  -o StrictHostKeyChecking=no -i ~/.ssh/hud-ssh-key \
+  hud-user@windows-host.example "whoami"
 
 timeout 8s ssh -o ConnectTimeout=5 -o BatchMode=yes -o IdentitiesOnly=yes \
-  -o StrictHostKeyChecking=no -i ~/.ssh/ecdsa_home \
-  tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"
+  -o StrictHostKeyChecking=no -i ~/.ssh/hud-ssh-key \
+  admin-user@windows-host.example "whoami"
 ```
 
 Both returned:
 
 ```text
-ssh: connect to host tzehouse-windows.parrot-hen.ts.net port 22: Connection timed out
+ssh: connect to host windows-host.example port 22: Connection timed out
 ```
