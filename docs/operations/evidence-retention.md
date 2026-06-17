@@ -9,7 +9,7 @@ sprawl.
 | Location | Tracked? | Purpose |
 |---|---|---|
 | `test_results/` | **No** — git-ignored (`.gitignore`) | Ephemeral local test output. Regenerated on every run; never committed. |
-| `docs/evidence/<area>/` | **Selectively** (force-add) | Durable, representative proof for a milestone (live runs, soak summaries, reachability). Committed only when it backs a specific bead/report. |
+| `docs/evidence/<area>/` | **Selectively committed** (tracked, not ignored) | Durable, representative proof for a milestone (live runs, soak summaries, reachability). Committed only when it backs a specific bead/report. |
 | `docs/reports/` and `docs/reports/artifacts/` | **Yes** | Curated closeout reports and the specific artifacts they cite. |
 
 ## Rules
@@ -17,10 +17,11 @@ sprawl.
 1. **`test_results/` is never committed.** It is git-ignored by design. Do not
    `git add -f` anything under it.
 2. **`docs/evidence/` is opt-in, not automatic.** A run that produces evidence
-   leaves it untracked by default. Commit it only when it is the durable proof
-   for a bead or report, using an explicit force-add:
+   leaves new files untracked by default (the directory is tracked, not
+   git-ignored). Commit them only when they are the durable proof for a bead or
+   report:
    ```bash
-   git add -f docs/evidence/<area>/<representative-artifact>
+   git add docs/evidence/<area>/<representative-artifact>
    ```
    Commit one representative artifact set per milestone — not every soak run.
 3. **Prefer summaries over raw streams.** Commit `*.meta`, summary `*.md`, and
@@ -37,7 +38,7 @@ sprawl.
 
 As of this policy's introduction, `docs/evidence/text-stream-portals/soak-*`
 directories exist untracked. Under this policy they stay untracked unless a
-specific bead/report needs one as durable proof, in which case force-add only
+specific bead/report needs one as durable proof, in which case commit only
 that representative set.
 
 ## Optional lint

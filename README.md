@@ -55,7 +55,7 @@ Each local recipe maps to a CI job:
 | `canonical-app-boot` | `canonical-app-production-boot` | canonical app production-config boot |
 | `vocabulary-lint` | `vocabulary-lint` | canonical-vocabulary lint |
 | `dev-mode-guard` | `dev-mode-guard` | dev-mode excluded from release default features |
-| `test-gpu-pixel-readback` | `test-gpu-pixel-readback` | GPU pixel-readback (needs Mesa llvmpipe headless) |
+| — (raw `cargo test --test pixel_readback`) | `test-gpu-pixel-readback` | GPU pixel-readback; needs Mesa llvmpipe headless, excluded from `just ci` |
 | — | `cargo-deny` | dependency/advisory policy (`deny.toml`) |
 | — | `windows-performance-budget` | Windows perf-budget lane (reference hardware) |
 | — | `v2-preview` | v2-scope preview (informational) |
