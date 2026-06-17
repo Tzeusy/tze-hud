@@ -1,4 +1,5 @@
 # exemplar-dashboard-tile Specification
+Status: implemented
 
 ## Purpose
 Defines the dashboard tile exemplar used to prove raw resident tile composition, atomic node-tree mutation, uploaded resource references, and hit-region interaction structure.

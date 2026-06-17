@@ -1,4 +1,5 @@
 # exemplar-gauge-widget Specification
+Status: implemented
 
 ## Purpose
 Defines the gauge widget exemplar bundle, parameter schema, SVG layer bindings, and token-driven vertical fill rendering used by the widget publishing path.

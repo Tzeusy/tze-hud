@@ -1,4 +1,5 @@
 # Policy Arbitration Specification
+Status: v1-reserved
 
 Source: RFC 0009 (Policy and Arbitration)
 Domain: GOVERNANCE

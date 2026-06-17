@@ -1,4 +1,5 @@
 # cooperative-hud-projection Specification
+Status: v1-reserved
 
 ## Purpose
 Define the provider-neutral, cooperative HUD projection contract that lets already-running LLM sessions attach to a governed text-stream portal through a projection authority, without terminal capture or runtime ownership of provider processes.

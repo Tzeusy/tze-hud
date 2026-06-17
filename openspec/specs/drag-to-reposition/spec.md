@@ -1,4 +1,5 @@
 # drag-to-reposition Specification
+Status: implemented
 
 ## Purpose
 Defines the v1-compatible drag-to-reposition interaction contract for movable chrome elements: the long-press activation state machine, permitted visual feedback (z-order boost, highlight border, immediate opacity), the conflict-free reset gesture (short tap → auto-dismiss affordance), and the invariant that drag feedback must not depend on deferred animation systems.

@@ -10,6 +10,7 @@ template:
 
 ```
 # <family> Specification
+Status: <implemented | v1-reserved | deferred | parked>
 
 ## Purpose
 <One or two sentences describing what the spec governs. Must be specific —
@@ -29,6 +30,26 @@ Scope: <v1-mandatory | v1-reserved | post-v1>
 - **THEN** <expected outcome>
 - **AND** <additional outcome>
 ```
+
+## Spec Status Convention
+
+Every spec file MUST carry a header-level `Status:` line immediately after the
+H1 title (before `## Purpose`). This records the spec's *implementation
+lifecycle* and is **orthogonal** to the requirement-level `Scope:` field
+(`v1-mandatory | v1-reserved | post-v1`) used inside `### Requirement:` blocks:
+`Status:` describes the whole spec's realization; `Scope:` describes an
+individual requirement's v1 obligation.
+
+| `Status:` value | Meaning |
+|---|---|
+| `implemented` | The spec is realized in shipping code (an `Implementation:` crate exists and is substantial). |
+| `v1-reserved` | The contract is frozen for v1 but implementation is partial or not-yet-wired (e.g. a tracked integration seam). |
+| `deferred` | Parked for post-v1; not implemented and not gating v1. |
+| `parked` | Indefinitely parked (no planned implementation), e.g. deferred-indefinitely contracts. |
+
+Where a spec also carries an explanatory banner (for example a
+`> **DEFERRED INDEFINITELY**` note), the banner prose MAY remain as context, but
+the canonical machine-readable signal is the `Status:` field.
 
 ## Implementation Source-Reference Convention
 

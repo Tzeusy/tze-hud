@@ -1,4 +1,5 @@
 # exemplar-ambient-background Specification
+Status: implemented
 
 ## Purpose
 Defines the ambient-background exemplar zone contract for full-display background-layer content, latest-wins publication behavior, and transparent/clear fallback rendering.

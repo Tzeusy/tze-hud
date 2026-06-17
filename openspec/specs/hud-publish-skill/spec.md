@@ -1,4 +1,5 @@
 # hud-publish-skill Specification
+Status: implemented
 
 ## Purpose
 Defines the HUD publish skill packaging and behavior for LLM-facing MCP zone publishing, discovery, configuration templates, and no-dependency publish tooling.

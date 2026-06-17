@@ -1,4 +1,5 @@
 # windows-runtime-scope Specification
+Status: implemented
 
 ## Purpose
 Defines the active deployment-scope discipline for the single-Windows performance

@@ -1,4 +1,5 @@
 # resource-store Specification
+Status: implemented
 
 ## Purpose
 The resource store is the runtime's content-addressed repository for all binary assets uploaded by agents: raster images, fonts, and SVG widget graphics. It provides content-addressed identity via BLAKE3 hashing, deduplication, per-agent budget accounting, reference-counted garbage collection, and governed upload capability checks. The store enforces v1 scope boundaries (ephemeral scene-node resources, durable widget SVG assets, font cache management) and integrates with the session stream for all resource ingress.

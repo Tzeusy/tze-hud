@@ -1,4 +1,5 @@
 # exemplar-progress-bar Specification
+Status: implemented
 
 ## Purpose
 Defines the progress-bar widget exemplar bundle and publishing contract for token-driven horizontal progress visualization.

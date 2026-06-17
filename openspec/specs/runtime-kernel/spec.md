@@ -1,4 +1,5 @@
 # runtime-kernel Specification
+Status: implemented
 
 ## Purpose
 The runtime kernel is the sovereign process core of tze_hud: it owns the GPU context, frame pipeline, thread model, window surface, scene commit, and resource enforcement. It defines the authority boundary for frame-loop safety, per-agent budget enforcement, and graceful degradation — all executed directly in runtime/session/scene paths without delegation to external policy evaluators.

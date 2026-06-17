@@ -1,4 +1,5 @@
 # session-protocol Specification
+Status: implemented
 
 Source: RFC 0005 (Session/Protocol)
 Domain: Hot Path

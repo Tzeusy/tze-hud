@@ -1,4 +1,5 @@
 # exemplar-presence-card Specification
+Status: implemented
 
 ## Purpose
 Defines the Presence Card exemplar for a compact resident raw-tile surface with avatar imagery, status metadata, input capture, and lease-governed cleanup behavior.

@@ -1,4 +1,5 @@
 # widget-system Specification
+Status: implemented
 
 ## Purpose
 Defines the v1 widget system for startup asset bundles, runtime SVG registration, parameter schemas, publication/occupancy semantics, MCP/gRPC publishing, and compositor rasterization.
