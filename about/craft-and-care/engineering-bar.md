@@ -210,3 +210,13 @@ Approver identity is recorded per-phase in the phase closeout report (`docs/repo
 ## 9. Validation Lane Co-tenancy
 
 The existing `mcp-stress-testing` harness (MCP HTTP endpoint stress test tool; see `openspec/specs/mcp-stress-testing/spec.md`) cohabits with the v2 media validation lane in Layer 3 of the validation framework. Both extend Layer 3 as complementary dimensions: `mcp-stress-testing` characterizes network-facing MCP endpoint latency and throughput; the v2 media lane characterizes real-decode pipeline performance against D18 budgets. The v2 `validation-operations` spec must not conflict with the existing Layer 3 MCP stress integration — share the Layer 4 artifact output conventions (`benchmarks/`) and the structured JSON report format already established by the `mcp-stress-testing` harness.
+
+## 10. Structural Hotspot Ledger
+
+Files that have grown past the point where a single reviewer can hold them in working memory are tracked here until decomposed. An entry names the file, its size when flagged, the natural seams, and the tracking bead. An entry is closed (struck through, with the closing PR) only when the file is below threshold and the seams are realized as modules.
+
+Adding a hotspot does **not** block merges — it documents intent and prevents silent regrowth. Decomposition must be **semantic-preserving**: no behavior change and no public-API change absent a spec delta. Flag a single file once it exceeds ~3,000 lines or hosts more than one clearly separable subsystem.
+
+| File | Size flagged | Seams | Tracking bead | Status |
+|------|--------------|-------|---------------|--------|
+| `crates/tze_hud_runtime/src/windowed.rs` | 10,061 lines (2026-06) | window lifecycle · input routing · overlay hittest · GPU lock/present · widgets/local-feedback · safe-mode/freeze shell · MCP/gRPC network startup · key/pointer/scroll dispatch helpers · ~3.8k-line test block | `hud-4icehz` (decompose into `windowed/`) | Open |
