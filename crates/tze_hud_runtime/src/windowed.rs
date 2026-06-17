@@ -1498,6 +1498,13 @@ struct WindowedRuntimeState {
     /// both `SharedState.safe_mode_active` (under the mutex) and this AtomicBool
     /// (also under the mutex, with `Ordering::Release`).
     safe_mode_atomic: Arc<std::sync::atomic::AtomicBool>,
+    /// Lock-free mirror of `scene.active_tab` for the winit event thread.
+    ///
+    /// Cloned from `SharedState.active_tab_mirror` at construction.  The
+    /// keyboard-dispatch path reads this (via `active_tab_for_keyboard_dispatch`)
+    /// instead of `try_lock`ing the scene Tokio mutex, so composer keystroke
+    /// echo is never starved by gRPC scene-mutation batches (hud-dwcr7).
+    active_tab_mirror: Arc<std::sync::Mutex<Option<tze_hud_scene::SceneId>>>,
     /// Channel sender for the Ctrl+Shift+Escape safe-mode exit chord.
     ///
     /// The winit event-loop thread sends on this channel when it detects
@@ -1747,6 +1754,14 @@ impl ApplicationHandler for WinitApp {
         // guarantees the terminal draft state is delivered within the same batch
         // window (spec §4.3 flush guarantee).
         self.flush_composer_draft_at_settle();
+        // Opportunistically reconverge the lock-free active_tab mirror from the
+        // authoritative scene (hud-dwcr7).  The mirror is also refreshed at the
+        // point of every active_tab change (gRPC mutation apply, pointer-down
+        // tab switch), but this best-effort per-frame sync is a safety net so a
+        // mirror can never drift indefinitely from any tab-change path.  Uses
+        // try_lock — never stalls the event loop; simply skips this frame if the
+        // scene lock is momentarily busy.
+        self.refresh_active_tab_mirror_opportunistic();
         // Retry any keyboard events that were deferred because the scene lock
         // was busy during dispatch (hud-2fz34).  Runs after composer flush so
         // deferred keystrokes re-enter the same path as fresh ones.
@@ -2499,20 +2514,6 @@ impl ApplicationHandler for WinitApp {
             // Stage 1: Drain keyboard events into the input ring buffer.
             // Map winit keyboard events to InputEventKind::KeyPress / KeyRelease.
             WindowEvent::KeyboardInput { event, .. } => {
-                // ── TEMP DIAGNOSTIC (hud-dwcr7) ──────────────────────────────
-                // Proves whether OS keyboard events reach the overlay window at
-                // all.  If the overlay never wins OS keyboard focus (the
-                // SetForegroundWindow foreground-lock failure on a topmost
-                // WS_EX_NOREDIRECTIONBITMAP overlay), this arm NEVER fires and
-                // no `[hud-dwcr7-kbd] os-key` line appears in hud-diag.log —
-                // confirming mouse-yes / keyboard-no.  Grep the live box's
-                // hud-diag.log for `hud-dwcr7-kbd`.  Remove once the live focus
-                // fix is confirmed.
-                crate::diag::diag_write(&format!(
-                    "[hud-dwcr7-kbd] os-key recv state={:?} repeat={} phys={:?} logical={:?}",
-                    event.state, event.repeat, event.physical_key, event.logical_key
-                ));
-
                 // ── Monitor cycling: Ctrl+Shift+F9 (next) / Ctrl+Shift+F8 (prev)
                 if event.state == ElementState::Pressed && !event.repeat {
                     use winit::keyboard::{KeyCode, PhysicalKey};
@@ -2904,6 +2905,9 @@ impl WinitApp {
                                 if scene.switch_active_tab(hit_tab).is_err() {
                                     scene.active_tab = Some(hit_tab);
                                 }
+                                // Keep the lock-free keyboard-dispatch mirror in
+                                // sync with the tab we just activated (hud-dwcr7).
+                                state.refresh_active_tab_mirror(&scene);
                                 tracing::debug!(
                                     tab_id = ?hit_tab,
                                     "click-to-focus: activated tab owning clicked tile"
@@ -3377,36 +3381,6 @@ impl WinitApp {
     /// `KeyDownEvent`.  Any transactional batch returned (submit / cancel) is
     /// handed to `deliver_composer_batch` for future downstream delivery.
     fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
-        // ── TEMP DIAGNOSTIC (hud-dwcr7) ──────────────────────────────────
-        // Reached only if the OS delivered the key to the overlay (Stage 1
-        // fired).  Logs whether the keystroke can route to a focused composer:
-        // active_tab present? composer active? focus owner? This distinguishes
-        // "key never arrives" (no `[hud-dwcr7-kbd] dispatch` line at all) from
-        // "key arrives but mis-routes" (line present but composer_active=false
-        // / wrong focus owner).  Remove once the live focus fix is confirmed.
-        {
-            let composer_active = self.state.input_processor.is_composer_active();
-            let composer_node = self.state.input_processor.composer_focused_node();
-            let active_tab = self.active_tab_for_keyboard_dispatch();
-            let focus_owner = match active_tab {
-                Some(Some(tab_id)) => {
-                    format!("{:?}", self.state.focus_manager.current_owner(tab_id))
-                }
-                Some(None) => "no-active-tab".to_string(),
-                None => "lock-busy".to_string(),
-            };
-            crate::diag::diag_write(&format!(
-                "[hud-dwcr7-kbd] dispatch key={:?} ctrl={} active_tab={:?} \
-                 composer_active={} composer_node={:?} focus_owner={}",
-                raw.key,
-                raw.modifiers.ctrl,
-                active_tab,
-                composer_active,
-                composer_node,
-                focus_owner,
-            ));
-        }
-
         // ── Input precedence order (§6b.2 + §6b.6) ───────────────────────
         //
         // Priority (highest → lowest):
@@ -4055,30 +4029,56 @@ impl WinitApp {
         }
     }
 
-    /// Try to read the active tab without blocking the event-loop thread
-    /// (hud-2fz34).
-    ///
-    /// Returns:
-    /// - `None` — shared-state or scene lock is busy; caller must defer to the
-    ///   next iteration.
-    /// - `Some(None)` — lock acquired; no active tab (event can be dropped).
-    /// - `Some(Some(id))` — lock acquired; active tab found.
-    ///
-    /// Uses `try_lock` on both the shared-state and scene Tokio mutexes,
-    /// matching `drain_portal_projection` (~line 3205) which avoids
-    /// `blocking_lock` for the same reason: a gRPC session handler may hold the
-    /// scene lock for an unbounded duration, which would stall the event-loop
-    /// thread past the 4 ms input-to-local-ack budget.
-    fn active_tab_for_keyboard_dispatch(&self) -> Option<Option<tze_hud_scene::SceneId>> {
+    /// Best-effort per-frame reconvergence of the lock-free `active_tab_mirror`
+    /// from the authoritative scene (hud-dwcr7).  Non-blocking: uses `try_lock`
+    /// on both the shared-state and scene mutexes and silently skips this frame
+    /// if either is busy.  This is a safety net — the mirror is primarily kept
+    /// fresh at the point of each active_tab change — so it must never stall the
+    /// event loop.
+    fn refresh_active_tab_mirror_opportunistic(&self) {
         let Ok(state) = self.state.shared_state.try_lock() else {
-            tracing::trace!("keyboard dispatch deferred: shared_state lock busy");
-            return None;
+            return;
         };
         let Ok(scene) = state.scene.try_lock() else {
-            tracing::trace!("keyboard dispatch deferred: scene lock busy");
-            return None;
+            return;
         };
-        Some(scene.active_tab)
+        state.refresh_active_tab_mirror(&scene);
+    }
+
+    /// Read the active tab without blocking the event-loop thread on the scene
+    /// mutex (hud-2fz34, hud-dwcr7).
+    ///
+    /// Returns:
+    /// - `None` — the (tiny, dedicated) mirror lock was momentarily contended;
+    ///   caller may defer to the next iteration.
+    /// - `Some(None)` — resolved; no active tab.
+    /// - `Some(Some(id))` — resolved; active tab found.
+    ///
+    /// This reads `SharedState.active_tab_mirror` — a lock-free-by-design
+    /// `std::sync::Mutex<Option<SceneId>>` that is updated whenever a writer
+    /// holding the scene changes `active_tab` (gRPC mutation apply, event-loop
+    /// tab switch).  It deliberately does NOT `try_lock` the scene Tokio mutex:
+    /// under sustained gRPC portal streaming that lock is held across mutation
+    /// batches, so the old try_lock kept failing and every composer keystroke
+    /// deferred — freezing the local echo and violating the "Local feedback
+    /// first" doctrine + the 4 ms input-to-local-ack budget.  Composer
+    /// keystroke echo (the composer intercept in `dispatch_key_down_event`)
+    /// depends only on the lock-free `InputProcessor` plus this `tab_id`, so
+    /// removing the scene-lock dependency here fully unblocks it.
+    ///
+    /// A one-frame lag on the mirror across a tab switch is acceptable: the
+    /// scene remains the source of truth and the mirror reconverges on the next
+    /// refresh.
+    fn active_tab_for_keyboard_dispatch(&self) -> Option<Option<tze_hud_scene::SceneId>> {
+        match self.state.active_tab_mirror.try_lock() {
+            Ok(guard) => Some(*guard),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                tracing::trace!("keyboard dispatch deferred: active_tab mirror busy");
+                None
+            }
+            // A poisoned mirror still yields a valid Copy value — recover it.
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(*p.into_inner()),
+        }
     }
 
     /// Try to read the agent namespace for a keyboard tile without blocking the
@@ -4995,6 +4995,11 @@ impl WindowedRuntime {
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&cfg.psk);
         let (input_capture_tx, input_capture_rx) = tokio::sync::mpsc::unbounded_channel();
         let safe_mode_atomic = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Lock-free mirror of `scene.active_tab` for the winit event thread's
+        // keyboard-dispatch path (hud-dwcr7).  Held both by `SharedState` (the
+        // writer side) and cloned into the `WinitApp` (the lock-free reader
+        // side) so composer echo never try_locks the scene mutex.
+        let active_tab_mirror = Arc::new(std::sync::Mutex::new(None));
         let chrome_state = Arc::new(std::sync::RwLock::new(crate::shell::ChromeState::new()));
         let shared_state = Arc::new(Mutex::new(SharedState {
             scene: Arc::clone(&shared_scene),
@@ -5007,6 +5012,7 @@ impl WindowedRuntime {
             element_store: startup_element_store,
             element_store_path: Some(startup_element_store_path),
             safe_mode_atomic: Arc::clone(&safe_mode_atomic),
+            active_tab_mirror: Arc::clone(&active_tab_mirror),
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
@@ -5220,6 +5226,7 @@ impl WindowedRuntime {
             fallback_unrestricted,
             shared_state,
             safe_mode_atomic,
+            active_tab_mirror,
             safe_mode_exit_tx: safe_mode_exit_tx_opt,
             chrome_state,
             input_ring,
@@ -7146,12 +7153,135 @@ mod tests {
             element_store: tze_hud_scene::element_store::ElementStore::default(),
             element_store_path: None,
             safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            active_tab_mirror: Arc::new(std::sync::Mutex::new(None)),
             token_store: TokenStore::new(),
             freeze_active: false,
             degradation_level: RuntimeDegradationLevel::Normal,
             media_ingress_active: None,
             input_capture_tx: None,
         }))
+    }
+
+    /// Regression (hud-dwcr7): composer keystroke echo must apply to the draft
+    /// even while the scene mutex is held by a gRPC mutation batch.
+    ///
+    /// Before the fix, keyboard dispatch read `scene.active_tab` by `try_lock`ing
+    /// the scene Tokio mutex; under sustained portal streaming that lock is held
+    /// across batches, so every keystroke deferred and the local echo froze
+    /// ("worked for a few seconds then stopped").  This test reproduces the busy
+    /// condition by holding the scene lock for the entire keystroke window and
+    /// proves the two lock-free properties the fix relies on:
+    ///   1. `active_tab_for_keyboard_dispatch`'s data source — the
+    ///      `active_tab_mirror` — resolves the tab WITHOUT the scene lock.
+    ///   2. The composer intercept (`InputProcessor`) applies the keystroke to
+    ///      the draft (echo would render) WITHOUT the scene lock.
+    #[tokio::test]
+    async fn composer_echo_applies_while_scene_lock_is_held() {
+        use tze_hud_input::{FocusManager, InputProcessor, PointerEvent, PointerEventKind};
+        use tze_hud_scene::types::HitRegionNode;
+        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
+
+        // Build a scene with a focusable composer region (accepts_composer_input).
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                1,
+            )
+            .unwrap();
+        let composer_id = SceneId::new();
+        scene.nodes.insert(
+            composer_id,
+            Node {
+                id: composer_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 800.0, 60.0),
+                    interaction_id: "composer-input".to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(composer_id);
+
+        // Focus the composer (the pointer-down path that activates the draft
+        // manager); this is the lock-free InputProcessor side.
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+        processor.process_with_focus(
+            &PointerEvent {
+                x: 10.0,
+                y: 10.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
+            &mut scene,
+            &mut fm,
+            tab_id,
+        );
+        assert!(
+            processor.is_composer_active(),
+            "composer must be active after focusing the composer region"
+        );
+
+        // Stand up SharedState, seed the mirror from the scene, then move the
+        // scene into the SharedState's Tokio mutex.
+        let shared = make_shared_state();
+        {
+            let st = shared.lock().await;
+            // Replace the empty default scene with our composer scene and seed
+            // the mirror, mimicking the post-apply_batch refresh.
+            *st.scene.lock().await = scene;
+            st.refresh_active_tab_mirror(&*st.scene.lock().await);
+        }
+
+        // ── Reproduce the starvation condition: hold the scene lock for the
+        // entire keystroke window, exactly as a sustained gRPC mutation batch
+        // would. ──────────────────────────────────────────────────────────────
+        let st = shared.lock().await;
+        let scene_guard = st.scene.lock().await; // held across the keystroke below
+
+        // (1) The mirror still resolves the active tab — no scene try_lock.
+        assert_eq!(
+            st.active_tab_mirror_value(),
+            Some(tab_id),
+            "active_tab_mirror must resolve the tab while the scene lock is held"
+        );
+
+        // (2) The composer intercept applies the keystroke to the draft while the
+        // scene lock is held — the echo would render this frame.
+        let (outcome, _batch) = processor.route_character_to_composer("h");
+        assert_eq!(
+            outcome,
+            tze_hud_input::EditOutcome::Mutated,
+            "keystroke must mutate the composer draft even under scene-lock contention"
+        );
+        let snapshot = processor
+            .composer_draft_snapshot()
+            .expect("composer draft snapshot must exist while active");
+        assert_eq!(
+            snapshot.0, "h",
+            "composer draft must reflect the typed character (echo) without the scene lock"
+        );
+
+        // The scene lock was held for the whole keystroke path — proving echo
+        // never depended on it.
+        drop(scene_guard);
+        drop(st);
     }
 
     /// When `grpc_port == 0`, `start_network_services` must return `None` for

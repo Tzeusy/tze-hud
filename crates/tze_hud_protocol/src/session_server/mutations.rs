@@ -895,7 +895,16 @@ pub(super) async fn handle_mutation_batch(
         lease_id: Some(lease_id),
     };
 
-    let result = st.scene.lock().await.apply_batch(&scene_batch);
+    let result = {
+        let mut scene = st.scene.lock().await;
+        let r = scene.apply_batch(&scene_batch);
+        // A batch may switch the active tab (SwitchTab mutation) or auto-activate
+        // the first tab on initial tile creation; keep the lock-free
+        // keyboard-dispatch mirror in sync so composer echo routes correctly
+        // without ever touching the scene mutex (hud-dwcr7).
+        st.refresh_active_tab_mirror(&scene);
+        r
+    };
 
     let seq = session.next_server_seq();
     if result.applied {
@@ -1080,7 +1089,14 @@ pub(super) async fn apply_queued_batch_to_scene(
     };
 
     // Apply to scene; response was already sent when the batch was queued.
-    let result = st.scene.lock().await.apply_batch(&scene_batch);
+    let result = {
+        let mut scene = st.scene.lock().await;
+        let r = scene.apply_batch(&scene_batch);
+        // Keep the lock-free keyboard-dispatch mirror in sync with any
+        // active-tab change in this drained batch (hud-dwcr7).
+        st.refresh_active_tab_mirror(&scene);
+        r
+    };
     if result.applied {
         let mut persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
         let now = now_ms();

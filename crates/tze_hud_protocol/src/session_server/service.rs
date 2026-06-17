@@ -118,6 +118,7 @@ impl HudSessionImpl {
                 element_store: tze_hud_scene::element_store::ElementStore::default(),
                 element_store_path: None,
                 safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                active_tab_mirror: Arc::new(std::sync::Mutex::new(None)),
                 token_store: crate::token::TokenStore::new(),
                 freeze_active: false,
                 degradation_level: crate::session::RuntimeDegradationLevel::Normal,

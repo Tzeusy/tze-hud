@@ -150,6 +150,26 @@ pub struct SharedState {
     /// Mutation-intake readers (e.g. `handle_mutation_batch`) hold the
     /// `SharedState` mutex and likewise load with `Ordering::Acquire`.
     pub safe_mode_atomic: Arc<AtomicBool>,
+    /// Lock-free mirror of `scene.active_tab` for the winit event thread.
+    ///
+    /// The composer keystroke-echo path (`dispatch_key_down_event` →
+    /// composer intercept) must apply local feedback within the 4 ms
+    /// input-to-local-ack budget ("Local feedback first" doctrine) and MUST
+    /// NOT be blocked by gRPC scene-mutation batches that hold the scene
+    /// `Mutex`.  Reading `scene.active_tab` for the tab-id guard previously
+    /// required `try_lock`ing the scene mutex; under sustained portal
+    /// streaming that try_lock kept failing, so keystrokes were deferred and
+    /// the echo froze (hud-dwcr7).
+    ///
+    /// This mirror is a tiny dedicated `std::sync::Mutex<Option<SceneId>>`
+    /// that is **never** held across an `.await` and **never** nested with the
+    /// scene mutex — locking it is a single `Option<SceneId>` copy, so it can
+    /// never reproduce the scene-mutex starvation.  Writers refresh it via
+    /// [`SharedState::refresh_active_tab_mirror`] whenever they hold the scene
+    /// and may have changed `active_tab` (gRPC mutation apply, event-loop tab
+    /// switch).  A one-frame lag is acceptable: the scene remains the source of
+    /// truth and the mirror reconverges on the next refresh.
+    pub active_tab_mirror: Arc<std::sync::Mutex<Option<SceneId>>>,
     /// In-memory resume token store (RFC 0005 §6.1).
     /// Cleared on process restart; never persisted.
     pub token_store: TokenStore,
@@ -174,6 +194,34 @@ pub struct SharedState {
     /// runtime installs this so gRPC InputCaptureRequest/InputCaptureRelease
     /// mutates the same InputProcessor used for OS pointer routing.
     pub input_capture_tx: Option<mpsc::UnboundedSender<InputCaptureCommand>>,
+}
+
+impl SharedState {
+    /// Refresh the lock-free `active_tab_mirror` from the authoritative
+    /// `scene.active_tab`.  Call this from any path that holds the scene and
+    /// may have changed the active tab (gRPC mutation apply, event-loop tab
+    /// switch).  Best-effort: a poisoned mirror lock is recovered in place
+    /// since the stored value is a plain `Copy` `Option<SceneId>` with no
+    /// invariant to corrupt.
+    pub fn refresh_active_tab_mirror(&self, scene: &SceneGraph) {
+        let value = scene.active_tab;
+        let mut guard = self
+            .active_tab_mirror
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = value;
+    }
+
+    /// Read the mirrored active tab without touching the scene mutex.
+    ///
+    /// Used by the winit event thread's keyboard-dispatch path so composer
+    /// echo is never blocked by gRPC scene-mutation batches (hud-dwcr7).
+    pub fn active_tab_mirror_value(&self) -> Option<SceneId> {
+        self.active_tab_mirror
+            .lock()
+            .map(|g| *g)
+            .unwrap_or_else(|poisoned| *poisoned.into_inner())
+    }
 }
 
 /// Runtime-global owner for the currently admitted Windows media ingress stream.
