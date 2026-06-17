@@ -205,13 +205,57 @@ fn focus_window_for_text_input(window: &Window) {
 
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::UI::WindowsAndMessaging::{BringWindowToTop, SetForegroundWindow};
+        use windows::Win32::Foundation::{FALSE, TRUE};
+        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+        };
 
         if let Some(hwnd) = hwnd_for_window(window) {
-            // SAFETY: The HWND is owned by this winit window on the event-loop thread.
+            // Acquiring OS keyboard focus for a topmost, taskbar-hidden,
+            // WS_EX_NOREDIRECTIONBITMAP overlay is subject to the Windows
+            // foreground-activation lock: a bare SetForegroundWindow() from a
+            // process that is not already the foreground process silently fails
+            // (returns FALSE and does nothing).  When it fails the overlay
+            // receives mouse input (mouse is routed via SetCapture, which does
+            // not require keyboard focus) but NO WindowEvent::KeyboardInput —
+            // typing and focus-scoped hotkeys (Ctrl+/-) are dead even though the
+            // composer is focused at the scene level (hud-dwcr7).
+            //
+            // The standard Win32 workaround is to temporarily attach this
+            // thread's input queue to the current foreground window's thread,
+            // which lifts the foreground-lock for the duration of the attach so
+            // SetForegroundWindow + SetFocus take effect, then detach.
+            //
+            // SAFETY: The HWND is owned by this winit window on the event-loop
+            // thread; all calls are standard user32 focus APIs invoked on that
+            // thread.  AttachThreadInput is always paired (TRUE then FALSE).
             unsafe {
                 let _ = BringWindowToTop(hwnd);
+
+                let fg = GetForegroundWindow();
+                let our_thread = GetCurrentThreadId();
+                // Thread that owns the current foreground window (0 if none).
+                let fg_thread = if fg.0.is_null() {
+                    0
+                } else {
+                    GetWindowThreadProcessId(fg, None)
+                };
+
+                let attached = fg_thread != 0 && fg_thread != our_thread && {
+                    AttachThreadInput(our_thread, fg_thread, TRUE).as_bool()
+                };
+
                 let _ = SetForegroundWindow(hwnd);
+                // SetFocus targets the keyboard-focus window within the (now)
+                // foreground thread's input queue; needed in addition to
+                // SetForegroundWindow so WM_KEY* messages route to our HWND.
+                let _ = SetFocus(hwnd);
+
+                if attached {
+                    let _ = AttachThreadInput(our_thread, fg_thread, FALSE);
+                }
             }
         }
     }
@@ -2455,6 +2499,20 @@ impl ApplicationHandler for WinitApp {
             // Stage 1: Drain keyboard events into the input ring buffer.
             // Map winit keyboard events to InputEventKind::KeyPress / KeyRelease.
             WindowEvent::KeyboardInput { event, .. } => {
+                // ── TEMP DIAGNOSTIC (hud-dwcr7) ──────────────────────────────
+                // Proves whether OS keyboard events reach the overlay window at
+                // all.  If the overlay never wins OS keyboard focus (the
+                // SetForegroundWindow foreground-lock failure on a topmost
+                // WS_EX_NOREDIRECTIONBITMAP overlay), this arm NEVER fires and
+                // no `[hud-dwcr7-kbd] os-key` line appears in hud-diag.log —
+                // confirming mouse-yes / keyboard-no.  Grep the live box's
+                // hud-diag.log for `hud-dwcr7-kbd`.  Remove once the live focus
+                // fix is confirmed.
+                crate::diag::diag_write(&format!(
+                    "[hud-dwcr7-kbd] os-key recv state={:?} repeat={} phys={:?} logical={:?}",
+                    event.state, event.repeat, event.physical_key, event.logical_key
+                ));
+
                 // ── Monitor cycling: Ctrl+Shift+F9 (next) / Ctrl+Shift+F8 (prev)
                 if event.state == ElementState::Pressed && !event.repeat {
                     use winit::keyboard::{KeyCode, PhysicalKey};
@@ -3319,6 +3377,36 @@ impl WinitApp {
     /// `KeyDownEvent`.  Any transactional batch returned (submit / cancel) is
     /// handed to `deliver_composer_batch` for future downstream delivery.
     fn dispatch_key_down_event(&mut self, raw: &RawKeyDownEvent) {
+        // ── TEMP DIAGNOSTIC (hud-dwcr7) ──────────────────────────────────
+        // Reached only if the OS delivered the key to the overlay (Stage 1
+        // fired).  Logs whether the keystroke can route to a focused composer:
+        // active_tab present? composer active? focus owner? This distinguishes
+        // "key never arrives" (no `[hud-dwcr7-kbd] dispatch` line at all) from
+        // "key arrives but mis-routes" (line present but composer_active=false
+        // / wrong focus owner).  Remove once the live focus fix is confirmed.
+        {
+            let composer_active = self.state.input_processor.is_composer_active();
+            let composer_node = self.state.input_processor.composer_focused_node();
+            let active_tab = self.active_tab_for_keyboard_dispatch();
+            let focus_owner = match active_tab {
+                Some(Some(tab_id)) => {
+                    format!("{:?}", self.state.focus_manager.current_owner(tab_id))
+                }
+                Some(None) => "no-active-tab".to_string(),
+                None => "lock-busy".to_string(),
+            };
+            crate::diag::diag_write(&format!(
+                "[hud-dwcr7-kbd] dispatch key={:?} ctrl={} active_tab={:?} \
+                 composer_active={} composer_node={:?} focus_owner={}",
+                raw.key,
+                raw.modifiers.ctrl,
+                active_tab,
+                composer_active,
+                composer_node,
+                focus_owner,
+            ));
+        }
+
         // ── Input precedence order (§6b.2 + §6b.6) ───────────────────────
         //
         // Priority (highest → lowest):
