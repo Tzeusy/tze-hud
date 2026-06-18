@@ -192,8 +192,7 @@ mod headless_impl {
                             Ok(n) => frames = n,
                             Err(_) => {
                                 eprintln!(
-                                    "Error: --frames requires a positive integer, got '{}'",
-                                    n_str
+                                    "Error: --frames requires a positive integer, got '{n_str}'"
                                 );
                                 eprintln!("Usage: --frames <number>");
                                 std::process::exit(1);
@@ -1221,11 +1220,11 @@ mod headless_impl {
 
         if let Some(path) = &args.emit {
             std::fs::write(path, &json).unwrap_or_else(|e| {
-                eprintln!("Failed to write telemetry to {:?}: {}", path, e);
+                eprintln!("Failed to write telemetry to {path:?}: {e}");
             });
             info!("Telemetry written to {:?}", path);
         } else {
-            println!("{}", json);
+            println!("{json}");
         }
 
         // Exit with non-zero if any definitive failures
