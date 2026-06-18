@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use tze_hud_input::{
@@ -86,6 +87,20 @@ pub(super) enum PendingKeyboardEvent {
     KeyDown(RawKeyDownEvent),
     KeyUp(RawKeyUpEvent),
     Character(RawCharacterEvent),
+}
+
+fn restore_front_requeued_event(
+    pending_keyboard_events: &mut VecDeque<PendingKeyboardEvent>,
+    len_after_pop: usize,
+) -> bool {
+    if pending_keyboard_events.len() <= len_after_pop {
+        return false;
+    }
+
+    if let Some(requeued_event) = pending_keyboard_events.pop_back() {
+        pending_keyboard_events.push_front(requeued_event);
+    }
+    true
 }
 
 impl WinitApp {
@@ -692,6 +707,7 @@ impl WinitApp {
             let Some(event) = self.state.pending_keyboard_events.pop_front() else {
                 break;
             };
+            let len_after_pop = self.state.pending_keyboard_events.len();
             // Route through the inner fns (no FIFO guard) — see the doc comment.
             // Calling the public entry here would re-queue the just-popped event
             // (the remaining queue is non-empty), rotating front→back forever
@@ -706,6 +722,14 @@ impl WinitApp {
                 PendingKeyboardEvent::Character(raw) => {
                     self.dispatch_character_event_inner(&raw, active_tab)
                 }
+            }
+            // Inner dispatch can still defer the popped event if a required
+            // namespace/composer delivery-context lookup is busy. Those paths
+            // append to the tail; move that retry back to the front and stop so
+            // later events cannot overtake it.
+            if restore_front_requeued_event(&mut self.state.pending_keyboard_events, len_after_pop)
+            {
+                break;
             }
         }
     }
@@ -815,5 +839,59 @@ impl WinitApp {
             Some(None) => ComposerDeliveryContextLookup::Unavailable,
             None => ComposerDeliveryContextLookup::Busy,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use tze_hud_input::{KeyboardModifiers, RawKeyDownEvent};
+    use tze_hud_scene::MonoUs;
+
+    use super::{PendingKeyboardEvent, restore_front_requeued_event};
+
+    fn key_down(key: &str, timestamp_mono_us: u64) -> PendingKeyboardEvent {
+        PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+            key_code: format!("Key{}", key.to_ascii_uppercase()),
+            key: key.to_string(),
+            modifiers: KeyboardModifiers::NONE,
+            repeat: false,
+            timestamp_mono_us: MonoUs(timestamp_mono_us),
+        })
+    }
+
+    fn assert_key_down(event: &PendingKeyboardEvent, expected: &str) {
+        match event {
+            PendingKeyboardEvent::KeyDown(raw) => assert_eq!(
+                raw.key, expected,
+                "pending keyboard event order must preserve FIFO"
+            ),
+            other => panic!("expected KeyDown({expected:?}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_front_requeued_event_keeps_blocked_event_ahead_of_later_events() {
+        let mut queue: VecDeque<PendingKeyboardEvent> =
+            [key_down("b", 2_000), key_down("c", 3_000)]
+                .into_iter()
+                .collect();
+        let len_after_pop = queue.len();
+
+        // Simulate the real drain path after "a" was popped from the front and
+        // the inner dispatch had to retry because a required delivery-context or
+        // namespace lookup was busy. The inner dispatch appends the same event to
+        // the tail; the drain must restore it to the front before returning.
+        queue.push_back(key_down("a", 1_000));
+
+        assert!(
+            restore_front_requeued_event(&mut queue, len_after_pop),
+            "helper must detect that the popped event was requeued"
+        );
+        assert_eq!(queue.len(), 3, "restoration must not drop any event");
+        assert_key_down(&queue[0], "a");
+        assert_key_down(&queue[1], "b");
+        assert_key_down(&queue[2], "c");
     }
 }
