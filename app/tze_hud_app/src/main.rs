@@ -307,12 +307,13 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
         opts.psk = v;
     }
     if let Ok(v) = std::env::var(PROJECTION_OPERATOR_AUTHORITY_ENV) {
-        if v.trim().is_empty() {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
             return Err(format!(
                 "{PROJECTION_OPERATOR_AUTHORITY_ENV} requires a non-empty value"
             ));
         }
-        opts.projection_operator_authority = Some(v);
+        opts.projection_operator_authority = Some(trimmed.to_string());
     }
     if let Ok(v) = std::env::var("TZE_HUD_BIND_ALL_INTERFACES") {
         // Security opt-in (hud-1aswu.1): "1" or "true" (case-insensitive).
@@ -959,7 +960,10 @@ mod tests {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
         // Safety: single-threaded within ENV_VAR_MUTEX guard.
         unsafe {
-            std::env::set_var("TZE_HUD_PROJECTION_OPERATOR_AUTHORITY", "operator-secret");
+            std::env::set_var(
+                "TZE_HUD_PROJECTION_OPERATOR_AUTHORITY",
+                " operator-secret\n",
+            );
         }
 
         let opts = parse_options(&[]).unwrap();
@@ -979,7 +983,7 @@ mod tests {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
         // Safety: single-threaded within ENV_VAR_MUTEX guard.
         unsafe {
-            std::env::set_var("TZE_HUD_PROJECTION_OPERATOR_AUTHORITY", "");
+            std::env::set_var("TZE_HUD_PROJECTION_OPERATOR_AUTHORITY", " \n\t ");
         }
 
         let err = parse_options(&[]).unwrap_err();
