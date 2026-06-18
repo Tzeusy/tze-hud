@@ -2667,6 +2667,130 @@ pub async fn handle_portal_projection_detach(
     }
 }
 
+// ─── portal_projection_cleanup ───────────────────────────────────────────────
+
+/// Parameters for `portal_projection_cleanup`.
+#[derive(Debug, Deserialize)]
+pub struct PortalProjectionCleanupParams {
+    /// Projection identifier from a prior `portal_projection_attach` call.
+    pub projection_id: String,
+    /// Cleanup authority: `owner` or `operator`.
+    pub cleanup_authority: String,
+    /// Owner token required when `cleanup_authority = "owner"`.
+    #[serde(default)]
+    pub owner_token: Option<String>,
+    /// Operator credential required when `cleanup_authority = "operator"`.
+    #[serde(default)]
+    pub operator_authority: Option<String>,
+    /// Human-readable reason recorded in the audit log.
+    pub reason: String,
+}
+
+/// Response from `portal_projection_cleanup`.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionCleanupResult {
+    /// `true` when the authority accepted the cleanup.
+    pub accepted: bool,
+    /// Human-readable status summary.
+    pub status_summary: String,
+}
+
+/// Cleanup a projection session, purging its private state (hud-vkisv).
+///
+/// This is deliberately distinct from owner `detach`: owner cleanup requires the
+/// owner token, while operator cleanup requires a separate operator-authority
+/// credential and forwards no owner token.
+///
+/// # Errors
+///
+/// - `invalid_params` if `projection_id`, `cleanup_authority`, the selected
+///   credential field, or `reason` is empty.
+/// - `invalid_params` if `cleanup_authority` is not `owner` or `operator`.
+/// - `internal` if the portal authority is not wired.
+/// - `internal` if the authority rejected cleanup (invalid credential, missing
+///   configured operator authority, projection not found, etc.).
+pub async fn handle_portal_projection_cleanup(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+) -> McpResult<PortalProjectionCleanupResult> {
+    let p: PortalProjectionCleanupParams = parse_params(params)?;
+
+    if p.projection_id.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "projection_id must be non-empty".to_string(),
+        ));
+    }
+    let cleanup_authority = p.cleanup_authority.trim();
+    if cleanup_authority.is_empty() {
+        return Err(McpError::InvalidParams(
+            "cleanup_authority must be non-empty".to_string(),
+        ));
+    }
+    if p.reason.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "reason must be non-empty".to_string(),
+        ));
+    }
+
+    let (owner_token, operator_authority) = match cleanup_authority {
+        "owner" => {
+            let token = p.owner_token.ok_or_else(|| {
+                McpError::InvalidParams("owner_token must be non-empty".to_string())
+            })?;
+            if token.trim().is_empty() {
+                return Err(McpError::InvalidParams(
+                    "owner_token must be non-empty".to_string(),
+                ));
+            }
+            (Some(token), None)
+        }
+        "operator" => {
+            let credential = p.operator_authority.ok_or_else(|| {
+                McpError::InvalidParams("operator_authority must be non-empty".to_string())
+            })?;
+            if credential.trim().is_empty() {
+                return Err(McpError::InvalidParams(
+                    "operator_authority must be non-empty".to_string(),
+                ));
+            }
+            (None, Some(credential))
+        }
+        other => {
+            return Err(McpError::InvalidParams(format!(
+                "invalid cleanup_authority {other:?}: expected owner or operator"
+            )));
+        }
+    };
+
+    let tx = portal_op_tx.ok_or_else(|| {
+        McpError::Internal(
+            "portal authority not wired — runtime must enable portal_op channel".to_string(),
+        )
+    })?;
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::portal_op::PortalOp::Cleanup {
+        projection_id: p.projection_id,
+        cleanup_authority: cleanup_authority.to_string(),
+        owner_token,
+        operator_authority,
+        reason: p.reason,
+        reply: reply_tx,
+    })
+    .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(PortalProjectionCleanupResult {
+            accepted: true,
+            status_summary: "projection cleanup accepted and private state purged".to_string(),
+        }),
+        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Err(_) => Err(McpError::Internal(
+            "portal authority did not respond (channel dropped)".to_string(),
+        )),
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -6019,6 +6143,60 @@ mod tests {
         )
         .await
         .expect("detach must succeed");
+        responder.await.expect("responder task must finish");
+        assert!(result.accepted);
+    }
+
+    #[tokio::test]
+    async fn portal_cleanup_rejects_missing_authority_fields() {
+        for params in [
+            json!({ "projection_id": "", "cleanup_authority": "owner", "owner_token": "t", "reason": "cleanup" }),
+            json!({ "projection_id": "p", "cleanup_authority": "", "owner_token": "t", "reason": "cleanup" }),
+            json!({ "projection_id": "p", "cleanup_authority": "owner", "owner_token": "", "reason": "cleanup" }),
+            json!({ "projection_id": "p", "cleanup_authority": "operator", "operator_authority": "", "reason": "cleanup" }),
+            json!({ "projection_id": "p", "cleanup_authority": "operator", "operator_authority": "op", "reason": "" }),
+        ] {
+            let err = handle_portal_projection_cleanup(params, None)
+                .await
+                .expect_err("empty required cleanup field must be rejected");
+            assert!(matches!(err, McpError::InvalidParams(_)), "got {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn portal_cleanup_forwards_operator_op_without_owner_token() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("op must be sent") {
+                crate::portal_op::PortalOp::Cleanup {
+                    projection_id,
+                    cleanup_authority,
+                    owner_token,
+                    operator_authority,
+                    reason,
+                    reply,
+                } => {
+                    assert_eq!(projection_id, "p1");
+                    assert_eq!(cleanup_authority, "operator");
+                    assert_eq!(owner_token, None);
+                    assert_eq!(operator_authority.as_deref(), Some("operator-secret"));
+                    assert_eq!(reason, "operator override");
+                    reply.send(Ok(())).expect("reply must send");
+                }
+                other => panic!("unexpected op: {other:?}"),
+            }
+        });
+        let result = handle_portal_projection_cleanup(
+            json!({
+                "projection_id": "p1",
+                "cleanup_authority": "operator",
+                "operator_authority": "operator-secret",
+                "reason": "operator override"
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("operator cleanup must succeed");
         responder.await.expect("responder task must finish");
         assert!(result.accepted);
     }

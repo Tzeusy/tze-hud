@@ -55,9 +55,10 @@ pub use tze_hud_mcp::portal_op::{PendingInputBatch, PendingInputEntry, PortalOp}
 use tze_hud_projection::{
     AcknowledgeInputRequest, AdapterDraftBatch, AdapterDraftCancel, AdapterDraftNotification,
     AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
-    ContentClassification, DetachRequest, GetPendingInputRequest, InputAckState, OperationEnvelope,
-    OutputKind, PendingInputItem, PortalInputFeedback, ProjectedPortalPolicy, ProjectionAuthority,
-    ProjectionBounds, ProjectionOperation, ProviderKind, PublishOutputRequest,
+    CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
+    InputAckState, OperationEnvelope, OutputKind, PendingInputItem, PortalInputFeedback,
+    ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds, ProjectionOperation,
+    ProviderKind, PublishOutputRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -156,6 +157,16 @@ fn parse_ack_state(raw: &str) -> Result<InputAckState, String> {
     serde_json::from_value(serde_json::Value::String(raw.to_string())).map_err(|_| {
         format!("invalid ack_state {raw:?}: expected one of handled, deferred, rejected")
     })
+}
+
+/// Parse a snake_case cleanup authority string into [`CleanupAuthority`].
+///
+/// Accepted spellings match the projection contract enum exactly (`owner`,
+/// `operator`). Rejection happens before reaching the authority so malformed MCP
+/// requests cannot be silently treated as owner or operator cleanup.
+fn parse_cleanup_authority(raw: &str) -> Result<CleanupAuthority, String> {
+    serde_json::from_value(serde_json::Value::String(raw.to_string()))
+        .map_err(|_| format!("invalid cleanup_authority {raw:?}: expected owner or operator"))
 }
 
 fn adapter_draft_batch_from_runtime(batch: &DraftNotificationBatch) -> AdapterDraftBatch {
@@ -791,6 +802,62 @@ impl InProcessPortalDriver {
                     );
                     let _ = reply.send(Err(format!(
                         "detach denied: {}: {}",
+                        code, resp.status_summary
+                    )));
+                }
+            }
+
+            PortalOp::Cleanup {
+                projection_id,
+                cleanup_authority,
+                owner_token,
+                operator_authority,
+                reason,
+                reply,
+            } => {
+                let cleanup_authority = match parse_cleanup_authority(&cleanup_authority) {
+                    Ok(authority) => authority,
+                    Err(reason) => {
+                        let _ = reply.send(Err(reason));
+                        return;
+                    }
+                };
+                let request_id = uuid::Uuid::now_v7().to_string();
+                let req = CleanupRequest {
+                    envelope: OperationEnvelope {
+                        operation: ProjectionOperation::Cleanup,
+                        projection_id: projection_id.clone(),
+                        request_id,
+                        client_timestamp_wall_us: now_us.max(1),
+                    },
+                    cleanup_authority,
+                    owner_token,
+                    operator_authority,
+                    reason,
+                };
+                let resp = self.authority.handle_cleanup(req, "mcp-portal", now_us);
+                if resp.accepted {
+                    // Cleanup purges authority state through either owner-token or
+                    // operator-authority paths. Drop driver-side state as well so
+                    // stale projected-session tiles are not rendered after cleanup.
+                    self.detach_projection(&projection_id);
+                    tracing::info!(
+                        proj_id = %projection_id,
+                        "portal_op: Cleanup accepted — drive entry dropped"
+                    );
+                    let _ = reply.send(Ok(()));
+                } else {
+                    let code = resp
+                        .error_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    tracing::warn!(
+                        proj_id = %projection_id,
+                        error_code = %code,
+                        "portal_op: Cleanup denied"
+                    );
+                    let _ = reply.send(Err(format!(
+                        "cleanup denied: {}: {}",
                         code, resp.status_summary
                     )));
                 }
@@ -3363,6 +3430,57 @@ mod tests {
         assert!(
             after.is_err(),
             "publishing to a detached projection must be denied"
+        );
+    }
+
+    #[test]
+    fn dispatch_portal_op_operator_cleanup_purges_authority_and_drive_state() {
+        let mut driver = InProcessPortalDriver::new();
+        driver
+            .authority_mut()
+            .set_operator_authority("operator-secret")
+            .expect("operator credential must configure");
+        let proj = "proj-cleanup";
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj.to_string(),
+            display_name: "Cleanup Test".to_string(),
+            idempotency_key: None,
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("attach reply must arrive")
+            .expect("attach must be accepted");
+        assert!(
+            driver.authority_mut().has_projection(proj),
+            "projection must exist before cleanup"
+        );
+        assert!(
+            driver.drive.entries.contains_key(proj),
+            "dispatch attach must create a driver entry"
+        );
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Cleanup {
+            projection_id: proj.to_string(),
+            cleanup_authority: "operator".to_string(),
+            owner_token: None,
+            operator_authority: Some("operator-secret".to_string()),
+            reason: "operator override".to_string(),
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("cleanup reply must arrive")
+            .expect("operator cleanup must be accepted");
+
+        assert!(
+            !driver.authority_mut().has_projection(proj),
+            "operator cleanup must purge authority state"
+        );
+        assert!(
+            !driver.drive.entries.contains_key(proj),
+            "operator cleanup must drop the driver entry"
         );
     }
 }
