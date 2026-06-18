@@ -973,6 +973,91 @@ fn portal_composer_submission_is_transactional_bounded_inbox_feedback() {
 }
 
 #[test]
+fn accepted_portal_input_schedules_state_render_without_output() {
+    let mut authority = ProjectionAuthority::default();
+    attach(&mut authority, "projection-a");
+
+    let feedback =
+        authority.submit_portal_input("projection-a", portal_submission("input-1", "ok"));
+    assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
+
+    assert_eq!(
+        authority.next_due_projection_id().as_deref(),
+        Some("projection-a"),
+        "accepted HUD input must schedule a portal state render even without output"
+    );
+    let update = authority
+        .take_due_portal_update("projection-a", 31)
+        .expect("projection exists")
+        .expect("state-only portal update must be drainable");
+    assert_eq!(update.unread_output_count, 0);
+    assert!(
+        update.visible_transcript.is_empty(),
+        "input feedback render must not invent transcript output"
+    );
+}
+
+#[test]
+fn acknowledged_portal_input_schedules_state_render_without_output() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+    let feedback =
+        authority.submit_portal_input("projection-a", portal_submission("input-1", "ok"));
+    assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
+    let _ = authority
+        .take_due_portal_update("projection-a", 31)
+        .expect("projection exists")
+        .expect("submit state update must be drainable");
+
+    let poll = authority.handle_get_pending_input(
+        GetPendingInputRequest {
+            envelope: envelope(
+                ProjectionOperation::GetPendingInput,
+                "projection-a",
+                "req-poll",
+            ),
+            owner_token: owner_token.clone(),
+            max_items: None,
+            max_bytes: None,
+        },
+        "caller-a",
+        40,
+    );
+    assert!(poll.accepted);
+    assert_eq!(poll.pending_input.len(), 1);
+
+    let handled = authority.handle_acknowledge_input(
+        AcknowledgeInputRequest {
+            envelope: envelope(
+                ProjectionOperation::AcknowledgeInput,
+                "projection-a",
+                "req-ack",
+            ),
+            owner_token,
+            input_id: "input-1".to_string(),
+            ack_state: InputAckState::Handled,
+            ack_message: None,
+            not_before_wall_us: None,
+        },
+        "caller-a",
+        41,
+    );
+    assert!(handled.accepted);
+
+    assert_eq!(
+        authority.next_due_projection_id().as_deref(),
+        Some("projection-a"),
+        "handled acknowledgement must schedule a portal state render"
+    );
+    let update = authority
+        .take_due_portal_update("projection-a", 42)
+        .expect("projection exists")
+        .expect("ack state update must be drainable");
+    assert_eq!(update.unread_output_count, 0);
+    assert!(update.visible_transcript.is_empty());
+}
+
+#[test]
 fn default_bounds_match_projection_spec_values() {
     let bounds = ProjectionBounds::default();
     assert_eq!(
