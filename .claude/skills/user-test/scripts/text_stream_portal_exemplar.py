@@ -22,6 +22,7 @@ Phases:
                 then return to latest output
   - streaming : clear transcript, reveal content in ordered chunks
   - rapid     : rapid-replace stress (coalescing-coherence smoke)
+  - soak      : sustained constant-window streaming for memory-drift evidence
 
 Emits per-step JSON transcript to stdout and writes an artifact (default:
 `test_results/text-stream-portal-latest.json`).
@@ -1002,6 +1003,30 @@ def bounded_transcript(lines: list[str], start: int, max_lines: int) -> str:
             return joined
         start += 1
     return ""
+
+
+def scenario_phase_names(phases: str | None) -> list[str]:
+    """Parse a comma-separated phase list, dropping empty entries."""
+    return [phase.strip() for phase in (phases or "").split(",") if phase.strip()]
+
+
+def scenario_lease_ttl_ms(phases: str | None, baseline_hold_s: float, soak_duration_s: float) -> int:
+    """Size the initial lease so long-running phases finish before TTL expiry."""
+    lease_ttl_ms = max(600_000, int(baseline_hold_s * 1000) + 120_000)
+    if "soak" in scenario_phase_names(phases):
+        lease_ttl_ms = max(lease_ttl_ms, int(soak_duration_s * 1000) + 120_000)
+    return lease_ttl_ms
+
+
+def append_soak_tail_line(
+    lines: list[str], seed: list[str], cycle: int, elapsed_s: float, window_lines: int,
+) -> None:
+    """Append one synthetic soak line while keeping only the published tail window."""
+    lines.append(f"[soak] line {cycle:06d}  t+{elapsed_s:7.1f}s  {seed[cycle % len(seed)]}")
+    if window_lines <= 0:
+        lines.clear()
+    elif len(lines) > window_lines:
+        del lines[:len(lines) - window_lines]
 
 
 def make_solid_color_node(
@@ -3590,20 +3615,19 @@ async def run_soak(
         "expected_visual": "portal body scrolls smoothly; no resize/flicker; footer counts up",
     })
     seed = body_full.splitlines() or ["(empty document)"]
-    lines: list[str] = list(seed)
+    lines: list[str] = list(seed[-window_lines:] if window_lines > 0 else [])
     interval_s = interval_ms / 1000.0
     t0 = time.monotonic()
     next_checkpoint = 60.0
     cycle = 0
     while True:
-        elapsed = time.monotonic() - t0
+        cycle_started = time.monotonic()
+        elapsed = cycle_started - t0
         if elapsed >= duration_s:
             break
         cycle += 1
-        # Append one synthetic streamed line (constant cadence content).
-        lines.append(f"[soak] line {cycle:06d}  t+{elapsed:7.1f}s  {seed[cycle % len(seed)]}")
-        start = max(0, len(lines) - window_lines)
-        window = bounded_transcript(lines, start, window_lines)
+        append_soak_tail_line(lines, seed, cycle, elapsed, window_lines)
+        window = bounded_transcript(lines, 0, window_lines)
         await publish_portal(
             client, lease_id, tiles,
             title="Exemplar Review Portal",
@@ -3620,8 +3644,9 @@ async def run_soak(
                 "action": f"sustained streaming at cycle {cycle}",
                 "expected_visual": "portal still scrolling smoothly; no flicker",
             }, cycle=cycle, elapsed_s=round(elapsed, 1), window_lines=window_lines)
-            next_checkpoint += 60.0
-        await asyncio.sleep(interval_s)
+            next_checkpoint = (int(elapsed // 60.0) + 1) * 60.0
+        cycle_elapsed_s = time.monotonic() - cycle_started
+        await asyncio.sleep(max(0.0, interval_s - cycle_elapsed_s))
     emit_step_event(transcript, 11, "completed", {
         "code": "soak",
         "title": "Sustained streaming soak",
@@ -4366,12 +4391,9 @@ async def run_scenario(args: argparse.Namespace) -> int:
             "action": "use live scene dimensions for portal placement and drag bounds",
             "expected_visual": "portal can be dragged across the full HUD surface",
         }, scene_width=scene_width, scene_height=scene_height)
-        lease_ttl_ms = max(600_000, int(args.baseline_hold_s * 1000) + 120_000)
-        # A long soak runs well past the default 10-min lease TTL; size the lease
-        # to cover the full soak duration (+2min margin) so it does not expire
-        # mid-run (the soak does not renew leases).
-        if "soak" in [p.strip() for p in (args.phases or "").split(",")]:
-            lease_ttl_ms = max(lease_ttl_ms, int(args.soak_duration_s * 1000) + 120_000)
+        lease_ttl_ms = scenario_lease_ttl_ms(
+            args.phases, args.baseline_hold_s, args.soak_duration_s,
+        )
         lease_id = await client.request_lease(ttl_ms=lease_ttl_ms)
         default_w, default_h = default_portal_size(scene_width, scene_height)
         set_portal_size(
@@ -4426,7 +4448,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
             )
         )
 
-        phases = [p.strip() for p in (args.phases or "baseline").split(",")]
+        phases = scenario_phase_names(args.phases or "baseline")
         for phase in phases:
             if phase == "baseline":
                 await run_baseline(

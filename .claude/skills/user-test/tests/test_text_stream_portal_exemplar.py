@@ -456,6 +456,88 @@ class PromotionGateEvidenceSchemaTests(unittest.TestCase):
         self.assertFalse(artifact["lease_release_on_exit"])
 
 
+# ── Sustained soak phase (hud-pnofj) ──────────────────────────────────────────
+
+
+class SoakPhaseTests(unittest.TestCase):
+    def test_soak_tail_history_stays_bounded_to_window_lines(self) -> None:
+        seed = [f"seed {i}" for i in range(5)]
+        lines = list(seed[-3:])
+
+        for cycle in range(1, 101):
+            portal.append_soak_tail_line(lines, seed, cycle, elapsed_s=float(cycle), window_lines=3)
+            self.assertLessEqual(len(lines), 3)
+
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(line.startswith("[soak] line") for line in lines))
+        self.assertIn("line 000098", lines[0])
+        self.assertIn("line 000100", lines[-1])
+
+    def test_soak_pacing_subtracts_publish_duration(self) -> None:
+        captured_bodies: list[list[str]] = []
+        sleeps: list[float] = []
+        now = 0.0
+
+        original_publish = portal.publish_portal
+        original_sleep = portal.asyncio.sleep
+        original_monotonic = portal.time.monotonic
+
+        def fake_monotonic() -> float:
+            return now
+
+        async def fake_publish_portal(*args, body: str, **kwargs) -> None:
+            nonlocal now
+            captured_bodies.append(body.splitlines())
+            now += 0.07
+
+        async def fake_sleep(delay_s: float) -> None:
+            nonlocal now
+            sleeps.append(delay_s)
+            now += delay_s
+
+        async def run() -> list[dict]:
+            transcript: list[dict] = []
+            await portal.run_soak(
+                client=object(),
+                lease_id=b"lease",
+                tiles=_portal_tiles(),
+                body_full="\n".join(f"seed {i}" for i in range(5)),
+                transcript=transcript,
+                duration_s=0.8,
+                interval_ms=250,
+                window_lines=3,
+                mutation_lock=asyncio.Lock(),
+            )
+            return transcript
+
+        portal.publish_portal = fake_publish_portal
+        portal.asyncio.sleep = fake_sleep
+        portal.time.monotonic = fake_monotonic
+        try:
+            transcript = asyncio.run(run())
+        finally:
+            portal.publish_portal = original_publish
+            portal.asyncio.sleep = original_sleep
+            portal.time.monotonic = original_monotonic
+
+        self.assertEqual(len(captured_bodies), 4)
+        self.assertTrue(all(len(body) <= 3 for body in captured_bodies))
+        self.assertAlmostEqual(sleeps[0], 0.18, places=6)
+        self.assertTrue(all(sleep_s >= 0.0 for sleep_s in sleeps))
+        completed = [step for step in transcript if step["status"] == "completed"][-1]
+        self.assertEqual(completed["cycles"], 4)
+
+    def test_soak_phase_extends_initial_lease_ttl(self) -> None:
+        self.assertEqual(
+            portal.scenario_lease_ttl_ms("baseline,soak", baseline_hold_s=20.0, soak_duration_s=3600.0),
+            3_720_000,
+        )
+        self.assertEqual(
+            portal.scenario_lease_ttl_ms("baseline,scroll", baseline_hold_s=20.0, soak_duration_s=3600.0),
+            600_000,
+        )
+
+
 # ── Steady-state publish atomicity (hud-ooeam flicker fix) ────────────────────
 
 
