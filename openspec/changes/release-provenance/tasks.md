@@ -18,6 +18,6 @@ authorizes the checksum-generation and smoke-test work.
 
 ## 3. Verification (release-artifact smoke test)
 
-- [ ] 3.1 CI gate: build the real release `.exe`, compute its SHA-256, assert it matches the published checksum (provenance round-trip)
-- [ ] 3.2 Keep this gate distinct from the config-only `canonical-app-production-boot` gate
+- [x] 3.1 CI gate: build the real release `.exe`, compute its SHA-256, assert it matches the published checksum (provenance round-trip)
+- [x] 3.2 Keep this gate distinct from the config-only `canonical-app-production-boot` gate
 - [ ] 3.3 (Optional) headless smoke-boot of the packaged exe if feasible on the runner
