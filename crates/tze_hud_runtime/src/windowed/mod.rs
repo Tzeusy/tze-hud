@@ -1367,6 +1367,11 @@ pub struct WindowedConfig {
     pub bind_all_interfaces: bool,
     /// Pre-shared key for session authentication (gRPC and MCP).
     pub psk: String,
+    /// Optional operator-authority credential for cooperative projection cleanup.
+    ///
+    /// When unset, owner cleanup remains available through owner tokens, while
+    /// operator cleanup stays fail-closed with `PROJECTION_UNAUTHORIZED`.
+    pub projection_operator_authority: Option<String>,
     /// Target frames per second.  Default: 60.
     pub target_fps: u32,
     /// Raw TOML content of the configuration file, if one was loaded.
@@ -1417,6 +1422,7 @@ impl Default for WindowedConfig {
             grpc_port: 50051,
             mcp_port: 9090,
             psk: "tze-hud-key".to_string(),
+            projection_operator_authority: None,
             target_fps: 60,
             config_toml: None,
             config_file_path: None,
@@ -4274,6 +4280,22 @@ pub struct WindowedRuntime {
     config: WindowedConfig,
 }
 
+fn build_portal_projection_driver(
+    config: &WindowedConfig,
+) -> Result<
+    crate::portal_projection_driver::InProcessPortalDriver,
+    tze_hud_projection::ProjectionContractError,
+> {
+    let mut driver = crate::portal_projection_driver::InProcessPortalDriver::new();
+    if let Some(operator_authority) = config.projection_operator_authority.as_deref() {
+        driver
+            .authority_mut()
+            .set_operator_authority(operator_authority)?;
+        tracing::info!("portal projection operator authority configured");
+    }
+    Ok(driver)
+}
+
 impl WindowedRuntime {
     /// Create a new `WindowedRuntime` with the given config.
     pub fn new(config: WindowedConfig) -> Self {
@@ -4627,6 +4649,8 @@ impl WindowedRuntime {
             None
         };
 
+        let portal_projection_driver = build_portal_projection_driver(&cfg)?;
+
         let app_state = WindowedRuntimeState {
             config: cfg,
             compositor_handle: None,
@@ -4676,7 +4700,7 @@ impl WindowedRuntime {
             // Placeholder; replaced in resumed() with the Arc cloned from the
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
-            portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
+            portal_projection_driver,
             portal_op_rx: portal_op_rx_opt.take(),
             pending_keyboard_events: VecDeque::new(),
         };
@@ -5096,6 +5120,90 @@ mod tests {
         assert_eq!(cfg.mcp_port, 9090);
         assert!(!cfg.psk.is_empty());
         assert!(cfg.benchmark.is_none());
+        assert!(
+            cfg.projection_operator_authority.is_none(),
+            "operator cleanup must stay fail-closed unless explicitly configured"
+        );
+    }
+
+    #[test]
+    fn build_portal_projection_driver_configures_operator_authority() {
+        use tze_hud_projection::{
+            AttachRequest, CleanupAuthority, CleanupRequest, ContentClassification,
+            OperationEnvelope, ProjectionErrorCode, ProjectionOperation, ProviderKind,
+        };
+
+        let cfg = WindowedConfig {
+            projection_operator_authority: Some("operator-secret".to_string()),
+            ..WindowedConfig::default()
+        };
+        let mut driver = build_portal_projection_driver(&cfg)
+            .expect("configured operator authority should build a portal driver");
+        let projection_id = "projection-runtime-configured-operator";
+        let attach = driver.authority_mut().handle_attach(
+            AttachRequest {
+                envelope: OperationEnvelope {
+                    operation: ProjectionOperation::Attach,
+                    projection_id: projection_id.to_string(),
+                    request_id: "attach-runtime-configured-operator".to_string(),
+                    client_timestamp_wall_us: 1,
+                },
+                provider_kind: ProviderKind::Other,
+                display_name: "Runtime Configured Operator".to_string(),
+                workspace_hint: None,
+                repository_hint: None,
+                icon_profile_hint: None,
+                content_classification: ContentClassification::Private,
+                hud_target: None,
+                idempotency_key: None,
+            },
+            "test-caller",
+            1_000,
+        );
+        assert!(attach.accepted, "attach precondition must be accepted");
+
+        let denied = driver.authority_mut().handle_cleanup(
+            CleanupRequest {
+                envelope: OperationEnvelope {
+                    operation: ProjectionOperation::Cleanup,
+                    projection_id: projection_id.to_string(),
+                    request_id: "bad-operator-cleanup".to_string(),
+                    client_timestamp_wall_us: 1,
+                },
+                cleanup_authority: CleanupAuthority::Operator,
+                owner_token: None,
+                operator_authority: Some("wrong-secret".to_string()),
+                reason: "operator override".to_string(),
+            },
+            "operator",
+            2_000,
+        );
+        assert!(!denied.accepted, "wrong operator authority must be denied");
+        assert_eq!(
+            denied.error_code,
+            Some(ProjectionErrorCode::ProjectionUnauthorized)
+        );
+
+        let accepted = driver.authority_mut().handle_cleanup(
+            CleanupRequest {
+                envelope: OperationEnvelope {
+                    operation: ProjectionOperation::Cleanup,
+                    projection_id: projection_id.to_string(),
+                    request_id: "good-operator-cleanup".to_string(),
+                    client_timestamp_wall_us: 1,
+                },
+                cleanup_authority: CleanupAuthority::Operator,
+                owner_token: None,
+                operator_authority: Some("operator-secret".to_string()),
+                reason: "operator override".to_string(),
+            },
+            "operator",
+            3_000,
+        );
+        assert!(
+            accepted.accepted,
+            "configured operator authority must allow operator cleanup"
+        );
     }
 
     #[test]
