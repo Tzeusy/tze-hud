@@ -68,10 +68,9 @@ pub struct McpServerConfig {
 /// * `shutdown`        — token that stops the accept loop when triggered.
 /// * `paste_inject_tx` — optional channel for injecting paste text into the composer.
 /// * `portal_op_tx` — optional channel sender for portal projection operations
-///   (hud-bq0gl.2).  When `Some`, the MCP server forwards
-///   `portal_projection_attach` and `portal_projection_publish`
-///   tool calls through this channel to the winit event-loop
-///   thread where the `InProcessPortalDriver` lives.
+///   (hud-bq0gl.2).  When `Some`, the MCP server forwards `portal_projection_*`
+///   tool calls through this channel to the winit event-loop thread where the
+///   `InProcessPortalDriver` lives.
 ///
 /// # Errors
 ///

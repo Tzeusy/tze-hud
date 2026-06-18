@@ -55,9 +55,10 @@ pub use tze_hud_mcp::portal_op::{PendingInputBatch, PendingInputEntry, PortalOp}
 use tze_hud_projection::{
     AcknowledgeInputRequest, AdapterDraftBatch, AdapterDraftCancel, AdapterDraftNotification,
     AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
-    ContentClassification, DetachRequest, GetPendingInputRequest, InputAckState, OperationEnvelope,
-    OutputKind, PendingInputItem, PortalInputFeedback, ProjectedPortalPolicy, ProjectionAuthority,
-    ProjectionBounds, ProjectionOperation, ProviderKind, PublishOutputRequest,
+    CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
+    InputAckState, OperationEnvelope, OutputKind, PendingInputItem, PortalInputFeedback,
+    ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds, ProjectionOperation,
+    ProviderKind, PublishOutputRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -158,6 +159,16 @@ fn parse_ack_state(raw: &str) -> Result<InputAckState, String> {
     })
 }
 
+/// Parse a snake_case cleanup authority string into [`CleanupAuthority`].
+///
+/// Accepted spellings match the projection contract enum exactly (`owner`,
+/// `operator`). Rejection happens before reaching the authority so malformed MCP
+/// requests cannot be silently treated as owner or operator cleanup.
+fn parse_cleanup_authority(raw: &str) -> Result<CleanupAuthority, String> {
+    serde_json::from_value(serde_json::Value::String(raw.to_string()))
+        .map_err(|_| format!("invalid cleanup_authority {raw:?}: expected owner or operator"))
+}
+
 fn adapter_draft_batch_from_runtime(batch: &DraftNotificationBatch) -> AdapterDraftBatch {
     AdapterDraftBatch {
         latest: batch
@@ -236,6 +247,9 @@ struct DriveEntry {
 struct InProcessPortalDriveState {
     /// Per-projection drive entries keyed by `projection_id`.
     entries: HashMap<String, DriveEntry>,
+    /// Scene tiles whose projection state has been accepted for detach/cleanup,
+    /// but whose tile removal must wait until the next drain has scene access.
+    pending_tile_removals: Vec<SceneId>,
     /// Current resolved design-token overrides (flat key → value strings).
     token_overrides: DesignTokenMap,
 }
@@ -244,6 +258,7 @@ impl InProcessPortalDriveState {
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            pending_tile_removals: Vec::new(),
             token_overrides: DesignTokenMap::new(),
         }
     }
@@ -269,7 +284,11 @@ impl InProcessPortalDriveState {
     }
 
     fn detach(&mut self, projection_id: &str) {
-        self.entries.remove(projection_id);
+        if let Some(entry) = self.entries.remove(projection_id)
+            && let Some(tile_id) = entry.tile_scene_id
+        {
+            self.pending_tile_removals.push(tile_id);
+        }
     }
 
     fn apply_token_map(&mut self, overrides: DesignTokenMap) {
@@ -278,6 +297,10 @@ impl InProcessPortalDriveState {
         for entry in self.entries.values_mut() {
             entry.adapter.set_visual_tokens(tokens.clone());
         }
+    }
+
+    fn drain_pending_tile_removals(&mut self) -> Vec<SceneId> {
+        self.pending_tile_removals.drain(..).collect()
     }
 }
 
@@ -795,6 +818,62 @@ impl InProcessPortalDriver {
                     )));
                 }
             }
+
+            PortalOp::Cleanup {
+                projection_id,
+                cleanup_authority,
+                owner_token,
+                operator_authority,
+                reason,
+                reply,
+            } => {
+                let cleanup_authority = match parse_cleanup_authority(&cleanup_authority) {
+                    Ok(authority) => authority,
+                    Err(reason) => {
+                        let _ = reply.send(Err(reason));
+                        return;
+                    }
+                };
+                let request_id = uuid::Uuid::now_v7().to_string();
+                let req = CleanupRequest {
+                    envelope: OperationEnvelope {
+                        operation: ProjectionOperation::Cleanup,
+                        projection_id: projection_id.clone(),
+                        request_id,
+                        client_timestamp_wall_us: now_us.max(1),
+                    },
+                    cleanup_authority,
+                    owner_token,
+                    operator_authority,
+                    reason,
+                };
+                let resp = self.authority.handle_cleanup(req, "mcp-portal", now_us);
+                if resp.accepted {
+                    // Cleanup purges authority state through either owner-token or
+                    // operator-authority paths. Drop driver-side state as well so
+                    // stale projected-session tiles are not rendered after cleanup.
+                    self.detach_projection(&projection_id);
+                    tracing::info!(
+                        proj_id = %projection_id,
+                        "portal_op: Cleanup accepted — drive entry dropped"
+                    );
+                    let _ = reply.send(Ok(()));
+                } else {
+                    let code = resp
+                        .error_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    tracing::warn!(
+                        proj_id = %projection_id,
+                        error_code = %code,
+                        "portal_op: Cleanup denied"
+                    );
+                    let _ = reply.send(Err(format!(
+                        "cleanup denied: {}: {}",
+                        code, resp.status_summary
+                    )));
+                }
+            }
         }
     }
 
@@ -855,6 +934,8 @@ impl InProcessPortalDriver {
         tab_id: Option<SceneId>,
         now_us: u64,
     ) {
+        self.drain_pending_tile_removals(scene);
+
         let policy = ProjectedPortalPolicy::permit_all();
         // Local counters for this drain cycle — emitted as a tracing event after
         // the loop for portal health observability (hud-bq0gl.14).
@@ -904,7 +985,7 @@ impl InProcessPortalDriver {
                     // Discard the coalescer entry here so it cannot recur, then
                     // clean up the adapter.
                     self.authority.discard_portal_coalescer_entry(&proj_id);
-                    self.drive.detach(&proj_id);
+                    self.detach_projection(&proj_id);
                     continue;
                 }
             };
@@ -912,7 +993,7 @@ impl InProcessPortalDriver {
             // Build the full projected portal state for rendering.
             let Some(state) = self.authority.projected_portal_state(&proj_id, &policy) else {
                 // Session was removed between take_due and state query (race).
-                self.drive.detach(&proj_id);
+                self.detach_projection(&proj_id);
                 continue;
             };
 
@@ -1248,6 +1329,26 @@ impl InProcessPortalDriver {
         );
         self.lease_id = Some(new_lease);
         Some(new_lease)
+    }
+
+    fn drain_pending_tile_removals(&mut self, scene: &mut SceneGraph) {
+        for tile_id in self.drive.drain_pending_tile_removals() {
+            match scene.delete_tile(tile_id, PORTAL_DRIVER_NAMESPACE) {
+                Ok(()) => {
+                    tracing::info!(
+                        tile_id = ?tile_id,
+                        "portal drain: removed detached projection tile"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        tile_id = ?tile_id,
+                        error = ?error,
+                        "portal drain: failed to remove detached projection tile"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -3363,6 +3464,131 @@ mod tests {
         assert!(
             after.is_err(),
             "publishing to a detached projection must be denied"
+        );
+    }
+
+    #[test]
+    fn dispatch_portal_op_operator_cleanup_purges_authority_and_drive_state() {
+        let mut driver = InProcessPortalDriver::new();
+        driver
+            .authority_mut()
+            .set_operator_authority("operator-secret")
+            .expect("operator credential must configure");
+        let proj = "proj-cleanup";
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj.to_string(),
+            display_name: "Cleanup Test".to_string(),
+            idempotency_key: None,
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("attach reply must arrive")
+            .expect("attach must be accepted");
+        assert!(
+            driver.authority_mut().has_projection(proj),
+            "projection must exist before cleanup"
+        );
+        assert!(
+            driver.drive.entries.contains_key(proj),
+            "dispatch attach must create a driver entry"
+        );
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Cleanup {
+            projection_id: proj.to_string(),
+            cleanup_authority: "operator".to_string(),
+            owner_token: None,
+            operator_authority: Some("operator-secret".to_string()),
+            reason: "operator override".to_string(),
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("cleanup reply must arrive")
+            .expect("operator cleanup must be accepted");
+
+        assert!(
+            !driver.authority_mut().has_projection(proj),
+            "operator cleanup must purge authority state"
+        );
+        assert!(
+            !driver.drive.entries.contains_key(proj),
+            "operator cleanup must drop the driver entry"
+        );
+    }
+
+    #[test]
+    fn dispatch_portal_op_operator_cleanup_removes_projection_tile_on_next_drain() {
+        let mut driver = InProcessPortalDriver::new();
+        driver
+            .authority_mut()
+            .set_operator_authority("operator-secret")
+            .expect("operator credential must configure");
+        let proj = "proj-cleanup-tile";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        publish(&mut driver, proj, &token, "line before cleanup", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        let tile_id = driver
+            .drive
+            .entries
+            .get(proj)
+            .expect("drive entry must exist")
+            .tile_scene_id
+            .expect("drain must create a portal tile");
+        assert!(
+            scene.tiles.contains_key(&tile_id),
+            "precondition: projected tile must exist before cleanup"
+        );
+        assert!(
+            scene.tile_scroll_config(tile_id).is_some(),
+            "precondition: projected tile must have scroll state before cleanup"
+        );
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Cleanup {
+            projection_id: proj.to_string(),
+            cleanup_authority: "operator".to_string(),
+            owner_token: None,
+            operator_authority: Some("operator-secret".to_string()),
+            reason: "operator override".to_string(),
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("cleanup reply must arrive")
+            .expect("operator cleanup must be accepted");
+        assert!(
+            !driver.drive.entries.contains_key(proj),
+            "accepted cleanup must drop the drive entry immediately"
+        );
+        assert!(
+            scene.tiles.contains_key(&tile_id),
+            "tile removal is queued until the next drain has scene access"
+        );
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 300);
+
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "accepted cleanup must remove the projection tile on the next drain"
+        );
+        assert!(
+            scene.tile_scroll_config(tile_id).is_none(),
+            "accepted cleanup must clear scene scroll config for the projection tile"
+        );
+        assert!(
+            !scene.tile_follow_tail_at_tail(tile_id),
+            "accepted cleanup must clear follow-tail scene state for the projection tile"
+        );
+        assert!(
+            scene.drain_removed_tile_ids().contains(&tile_id),
+            "accepted cleanup must publish a removed-tile notification for external state pruning"
         );
     }
 }

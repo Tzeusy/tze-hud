@@ -40,6 +40,7 @@
 //! - `create_tile`
 //! - `set_content`
 //! - `dismiss`
+//! - `portal_projection_*`
 //!
 //! Calling a resident tool without the capability returns a structured
 //! JSON-RPC 2.0 error: code -32603, `data.error_code="CAPABILITY_REQUIRED"`.
@@ -199,7 +200,8 @@ fn classify_tool(method: &str) -> ToolClass {
         | "portal_projection_publish"
         | "portal_projection_get_pending_input"
         | "portal_projection_acknowledge_input"
-        | "portal_projection_detach" => ToolClass::Resident,
+        | "portal_projection_detach"
+        | "portal_projection_cleanup" => ToolClass::Resident,
         _ => ToolClass::Unknown,
     }
 }
@@ -215,10 +217,10 @@ pub struct McpServer {
     paste_inject_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Channel to the in-process portal projection authority (hud-bq0gl.2).
     ///
-    /// When `Some`, the `portal_projection_attach` and `portal_projection_publish`
-    /// tools are reachable — they forward operations through this channel to the
-    /// winit event-loop thread which owns the `InProcessPortalDriver`.  When
-    /// `None`, those tools return an `Internal` error (authority not wired).
+    /// When `Some`, `portal_projection_*` tools are reachable — they forward
+    /// operations through this channel to the winit event-loop thread which owns
+    /// the `InProcessPortalDriver`.  When `None`, those tools return an
+    /// `Internal` error (authority not wired).
     portal_op_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
 }
 
@@ -269,10 +271,9 @@ impl McpServer {
 
     /// Attach the portal-operation channel sender (hud-bq0gl.2).
     ///
-    /// When set, `portal_projection_attach` and `portal_projection_publish` MCP
-    /// tools forward operations to the in-process `InProcessPortalDriver` on the
-    /// winit event-loop thread via this channel.  Without this, those tools
-    /// return an `Internal` error.
+    /// When set, `portal_projection_*` MCP tools forward operations to the
+    /// in-process `InProcessPortalDriver` on the winit event-loop thread via
+    /// this channel.  Without this, those tools return an `Internal` error.
     pub fn with_portal_op_tx(
         mut self,
         tx: tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>,
@@ -584,6 +585,11 @@ impl McpServer {
             }
             "portal_projection_detach" => {
                 let r = tools::handle_portal_projection_detach(params, self.portal_op_tx.as_ref())
+                    .await?;
+                serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
+            }
+            "portal_projection_cleanup" => {
+                let r = tools::handle_portal_projection_cleanup(params, self.portal_op_tx.as_ref())
                     .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
@@ -1060,6 +1066,58 @@ mod tests {
             resp["error"]["data"]["hint"]["required_capability"],
             "resident_mcp"
         );
+    }
+
+    #[tokio::test]
+    async fn test_guest_cannot_call_resident_tool_portal_projection_cleanup() {
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"portal_projection_cleanup","params":{"projection_id":"p1","cleanup_authority":"operator","operator_authority":"op","reason":"override"},"id":15}"#,
+                &guest(),
+            )
+            .await;
+        let resp = parse_response(&raw);
+        assert_eq!(resp["error"]["code"], -32603);
+        assert_eq!(resp["error"]["data"]["error_code"], "CAPABILITY_REQUIRED");
+        assert_eq!(
+            resp["error"]["data"]["context"],
+            "tool=portal_projection_cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resident_portal_projection_cleanup_dispatches_to_op_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0)).with_portal_op_tx(tx);
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("cleanup op must be forwarded") {
+                crate::portal_op::PortalOp::Cleanup {
+                    projection_id,
+                    cleanup_authority,
+                    operator_authority,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(projection_id, "p1");
+                    assert_eq!(cleanup_authority, "operator");
+                    assert_eq!(operator_authority.as_deref(), Some("op"));
+                    reply.send(Ok(())).expect("cleanup reply must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"portal_projection_cleanup","params":{"projection_id":"p1","cleanup_authority":"operator","operator_authority":"op","reason":"override"},"id":16}"#,
+                &resident(),
+            )
+            .await;
+        responder.await.expect("responder must complete");
+        let resp = parse_response(&raw);
+        assert!(resp["error"].is_null(), "{resp:#}");
+        assert_eq!(resp["result"]["accepted"], true);
     }
 
     #[tokio::test]
