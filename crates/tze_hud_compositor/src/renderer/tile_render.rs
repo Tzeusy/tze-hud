@@ -91,6 +91,74 @@ impl Compositor {
         sorted
     }
 
+    pub(super) fn clip_rect_to_tile(tile: &Tile, rect: Rect) -> Option<Rect> {
+        let left = rect.x.max(tile.bounds.x);
+        let top = rect.y.max(tile.bounds.y);
+        let right = (rect.x + rect.width).min(tile.bounds.x + tile.bounds.width);
+        let bottom = (rect.y + rect.height).min(tile.bounds.y + tile.bounds.height);
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(Rect::new(left, top, right - left, bottom - top))
+    }
+
+    fn append_clipped_rect_vertices(
+        tile: &Tile,
+        rect: Rect,
+        sw: f32,
+        sh: f32,
+        color: [f32; 4],
+        vertices: &mut Vec<RectVertex>,
+    ) {
+        let Some(clipped) = Self::clip_rect_to_tile(tile, rect) else {
+            return;
+        };
+        vertices.extend_from_slice(&rect_vertices(
+            clipped.x,
+            clipped.y,
+            clipped.width,
+            clipped.height,
+            sw,
+            sh,
+            color,
+        ));
+    }
+
+    fn clipped_textured_rect(
+        tile: &Tile,
+        rect: Rect,
+        uv_rect: [f32; 4],
+    ) -> Option<(Rect, [f32; 4])> {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return None;
+        }
+        let clipped = Self::clip_rect_to_tile(tile, rect)?;
+        if clipped.x == rect.x
+            && clipped.y == rect.y
+            && clipped.width == rect.width
+            && clipped.height == rect.height
+        {
+            return Some((rect, uv_rect));
+        }
+        let left_frac = ((clipped.x - rect.x) / rect.width).clamp(0.0, 1.0);
+        let right_frac = ((clipped.x + clipped.width - rect.x) / rect.width).clamp(0.0, 1.0);
+        let top_frac = ((clipped.y - rect.y) / rect.height).clamp(0.0, 1.0);
+        let bottom_frac = ((clipped.y + clipped.height - rect.y) / rect.height).clamp(0.0, 1.0);
+
+        let [u0, v0, u1, v1] = uv_rect;
+        let du = u1 - u0;
+        let dv = v1 - v0;
+        Some((
+            clipped,
+            [
+                u0 + du * left_frac,
+                v0 + dv * top_frac,
+                u0 + du * right_frac,
+                v0 + dv * bottom_frac,
+            ],
+        ))
+    }
+
     /// Determine the background fill color for a tile based on its root content.
     ///
     /// Colors are resolved from design tokens (`color.tile.background.*`) with
@@ -451,31 +519,37 @@ impl Compositor {
         match &node.data {
             NodeData::SolidColor(sc) => {
                 if !sc.radius.is_some_and(|r| r > 0.0) {
-                    let verts = rect_vertices(
-                        tile.bounds.x + sc.bounds.x - scroll_x,
-                        tile.bounds.y + sc.bounds.y - scroll_y,
-                        sc.bounds.width,
-                        sc.bounds.height,
+                    Self::append_clipped_rect_vertices(
+                        tile,
+                        Rect::new(
+                            tile.bounds.x + sc.bounds.x - scroll_x,
+                            tile.bounds.y + sc.bounds.y - scroll_y,
+                            sc.bounds.width,
+                            sc.bounds.height,
+                        ),
                         sw,
                         sh,
                         self.gpu_color(sc.color),
+                        vertices,
                     );
-                    vertices.extend_from_slice(&verts);
                 }
             }
             NodeData::TextMarkdown(tm) => {
                 if self.text_rasterizer.is_some() {
                     if let Some(bg) = tm.background {
-                        let verts = rect_vertices(
-                            tile.bounds.x + tm.bounds.x - scroll_x,
-                            tile.bounds.y + tm.bounds.y - scroll_y,
-                            tm.bounds.width,
-                            tm.bounds.height,
+                        Self::append_clipped_rect_vertices(
+                            tile,
+                            Rect::new(
+                                tile.bounds.x + tm.bounds.x - scroll_x,
+                                tile.bounds.y + tm.bounds.y - scroll_y,
+                                tm.bounds.width,
+                                tm.bounds.height,
+                            ),
                             sw,
                             sh,
                             self.gpu_color(bg),
+                            vertices,
                         );
-                        vertices.extend_from_slice(&verts);
                     }
                     // Code panel backdrop quads: emitted behind fenced/indented code
                     // blocks when the `color.code.background` design token is set.
@@ -531,16 +605,14 @@ impl Compositor {
                                         tile.bounds.y + tm.bounds.y + panel_y_offset - scroll_y;
                                     let panel_w = (tm.bounds.width - panel_margin_x * 2.0).max(0.0);
                                     if panel_w > 0.0 && panel_height > 0.0 {
-                                        let verts = rect_vertices(
-                                            panel_x,
-                                            panel_y,
-                                            panel_w,
-                                            panel_height,
+                                        Self::append_clipped_rect_vertices(
+                                            tile,
+                                            Rect::new(panel_x, panel_y, panel_w, panel_height),
                                             sw,
                                             sh,
                                             self.gpu_color(code_bg),
+                                            vertices,
                                         );
-                                        vertices.extend_from_slice(&verts);
                                     }
                                 }
                             }
@@ -550,29 +622,35 @@ impl Compositor {
                     // Fallback when glyphon is unavailable: preserve the old
                     // placeholder treatment so text tiles remain visible.
                     let bg = tm.background.unwrap_or(TILE_BG_TEXT_MARKDOWN);
-                    let verts = rect_vertices(
-                        tile.bounds.x + tm.bounds.x - scroll_x,
-                        tile.bounds.y + tm.bounds.y - scroll_y,
-                        tm.bounds.width,
-                        tm.bounds.height,
+                    Self::append_clipped_rect_vertices(
+                        tile,
+                        Rect::new(
+                            tile.bounds.x + tm.bounds.x - scroll_x,
+                            tile.bounds.y + tm.bounds.y - scroll_y,
+                            tm.bounds.width,
+                            tm.bounds.height,
+                        ),
                         sw,
                         sh,
                         self.gpu_color(bg),
+                        vertices,
                     );
-                    vertices.extend_from_slice(&verts);
 
                     let text_margin = 8.0;
                     if tm.bounds.width > text_margin * 2.0 && tm.bounds.height > text_margin * 2.0 {
-                        let verts = rect_vertices(
-                            tile.bounds.x + tm.bounds.x + text_margin - scroll_x,
-                            tile.bounds.y + tm.bounds.y + text_margin - scroll_y,
-                            tm.bounds.width - text_margin * 2.0,
-                            (tm.font_size_px * 1.2).min(tm.bounds.height - text_margin * 2.0),
+                        Self::append_clipped_rect_vertices(
+                            tile,
+                            Rect::new(
+                                tile.bounds.x + tm.bounds.x + text_margin - scroll_x,
+                                tile.bounds.y + tm.bounds.y + text_margin - scroll_y,
+                                tm.bounds.width - text_margin * 2.0,
+                                (tm.font_size_px * 1.2).min(tm.bounds.height - text_margin * 2.0),
+                            ),
                             sw,
                             sh,
                             self.gpu_color(tm.color),
+                            vertices,
                         );
-                        vertices.extend_from_slice(&verts);
                     }
                 }
             }
@@ -602,16 +680,19 @@ impl Compositor {
                     _ => None,
                 };
                 if let Some(color) = tint {
-                    let verts = rect_vertices(
-                        tile.bounds.x + hr.bounds.x - scroll_x,
-                        tile.bounds.y + hr.bounds.y - scroll_y,
-                        hr.bounds.width,
-                        hr.bounds.height,
+                    Self::append_clipped_rect_vertices(
+                        tile,
+                        Rect::new(
+                            tile.bounds.x + hr.bounds.x - scroll_x,
+                            tile.bounds.y + hr.bounds.y - scroll_y,
+                            hr.bounds.width,
+                            hr.bounds.height,
+                        ),
                         sw,
                         sh,
                         self.gpu_color_raw(color),
+                        vertices,
                     );
-                    vertices.extend_from_slice(&verts);
                 }
             }
             NodeData::StaticImage(img) => {
@@ -627,42 +708,52 @@ impl Compositor {
                         entry.width,
                         entry.height,
                     );
-                    textured_cmds.push(TexturedDrawCmd {
-                        resource_id: img.resource_id,
-                        x: dx,
-                        y: dy,
-                        w: dw,
-                        h: dh,
-                        uv_rect,
-                        tint: [1.0, 1.0, 1.0, Self::effective_tile_opacity(tile, scene)],
-                    });
+                    if let Some((clipped, clipped_uv)) =
+                        Self::clipped_textured_rect(tile, Rect::new(dx, dy, dw, dh), uv_rect)
+                    {
+                        textured_cmds.push(TexturedDrawCmd {
+                            resource_id: img.resource_id,
+                            x: clipped.x,
+                            y: clipped.y,
+                            w: clipped.width,
+                            h: clipped.height,
+                            uv_rect: clipped_uv,
+                            tint: [1.0, 1.0, 1.0, Self::effective_tile_opacity(tile, scene)],
+                        });
+                    }
                 } else {
                     // Fallback: warm-gray placeholder when bytes not registered.
                     let outer_color = [0.55_f32, 0.50, 0.45, 1.0];
-                    let verts = rect_vertices(
-                        tile.bounds.x + img.bounds.x - scroll_x,
-                        tile.bounds.y + img.bounds.y - scroll_y,
-                        img.bounds.width,
-                        img.bounds.height,
+                    Self::append_clipped_rect_vertices(
+                        tile,
+                        Rect::new(
+                            tile.bounds.x + img.bounds.x - scroll_x,
+                            tile.bounds.y + img.bounds.y - scroll_y,
+                            img.bounds.width,
+                            img.bounds.height,
+                        ),
                         sw,
                         sh,
                         self.gpu_color_raw(outer_color),
+                        vertices,
                     );
-                    vertices.extend_from_slice(&verts);
 
                     let margin = 4.0_f32;
                     if img.bounds.width > margin * 2.0 && img.bounds.height > margin * 2.0 {
                         let accent_color = [0.75_f32, 0.70, 0.65, 1.0];
-                        let verts = rect_vertices(
-                            tile.bounds.x + img.bounds.x + margin - scroll_x,
-                            tile.bounds.y + img.bounds.y + margin - scroll_y,
-                            img.bounds.width - margin * 2.0,
-                            img.bounds.height - margin * 2.0,
+                        Self::append_clipped_rect_vertices(
+                            tile,
+                            Rect::new(
+                                tile.bounds.x + img.bounds.x + margin - scroll_x,
+                                tile.bounds.y + img.bounds.y + margin - scroll_y,
+                                img.bounds.width - margin * 2.0,
+                                img.bounds.height - margin * 2.0,
+                            ),
                             sw,
                             sh,
                             self.gpu_color_raw(accent_color),
+                            vertices,
                         );
-                        vertices.extend_from_slice(&verts);
                     }
                 }
             }

@@ -29,7 +29,8 @@ use tze_hud_scene::types::*;
 use wgpu::util::DeviceExt;
 
 use crate::pipeline::{
-    RoundedRectDrawCmd, RoundedRectVertex, rounded_rect_vertices, textured_rect_vertices,
+    RoundedRectClip, RoundedRectDrawCmd, RoundedRectVertex, rounded_rect_vertices,
+    rounded_rect_vertices_with_draw_bounds, textured_rect_vertices,
 };
 
 use super::LayerPartitionedRoundedRectCmds;
@@ -378,6 +379,7 @@ impl super::Compositor {
                                 height: effective_slot_h,
                                 radius: slot_radius,
                                 color: self.gpu_color(rgba),
+                                clip: None,
                             };
                             // Partition by layer
                             match zone_def.layer_attachment {
@@ -434,6 +436,7 @@ impl super::Compositor {
                             height: h,
                             radius,
                             color: self.gpu_color(rgba),
+                            clip: None,
                         };
                         // Partition by layer
                         match zone_def.layer_attachment {
@@ -484,15 +487,29 @@ impl super::Compositor {
 
         if let NodeData::SolidColor(sc) = &node.data {
             if let Some(radius) = sc.radius.filter(|r| *r > 0.0) {
-                let max_r = (sc.bounds.width * 0.5).min(sc.bounds.height * 0.5).max(0.0);
-                cmds.push(crate::pipeline::RoundedRectDrawCmd {
-                    x: tile.bounds.x + sc.bounds.x - scroll_x,
-                    y: tile.bounds.y + sc.bounds.y - scroll_y,
-                    width: sc.bounds.width,
-                    height: sc.bounds.height,
-                    radius: radius.min(max_r),
-                    color: self.gpu_color(sc.color),
-                });
+                let rect = Rect::new(
+                    tile.bounds.x + sc.bounds.x - scroll_x,
+                    tile.bounds.y + sc.bounds.y - scroll_y,
+                    sc.bounds.width,
+                    sc.bounds.height,
+                );
+                if let Some(clipped) = Self::clip_rect_to_tile(tile, rect) {
+                    let max_r = (rect.width * 0.5).min(rect.height * 0.5).max(0.0);
+                    cmds.push(crate::pipeline::RoundedRectDrawCmd {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                        radius: radius.min(max_r),
+                        color: self.gpu_color(sc.color),
+                        clip: Some(RoundedRectClip {
+                            x: clipped.x,
+                            y: clipped.y,
+                            width: clipped.width,
+                            height: clipped.height,
+                        }),
+                    });
+                }
             }
         }
 
@@ -523,9 +540,35 @@ impl super::Compositor {
         // Build vertex buffer from all commands.
         let mut vertices: Vec<RoundedRectVertex> = Vec::with_capacity(cmds.len() * 6);
         for cmd in cmds {
-            vertices.extend_from_slice(&rounded_rect_vertices(
-                cmd.x, cmd.y, cmd.width, cmd.height, sw, sh, cmd.radius, cmd.color,
-            ));
+            if cmd.width <= 0.0 || cmd.height <= 0.0 {
+                continue;
+            }
+            if let Some(clip) = cmd.clip {
+                if clip.width <= 0.0 || clip.height <= 0.0 {
+                    continue;
+                }
+                vertices.extend_from_slice(&rounded_rect_vertices_with_draw_bounds(
+                    clip.x,
+                    clip.y,
+                    clip.width,
+                    clip.height,
+                    cmd.x,
+                    cmd.y,
+                    cmd.width,
+                    cmd.height,
+                    sw,
+                    sh,
+                    cmd.radius,
+                    cmd.color,
+                ));
+            } else {
+                vertices.extend_from_slice(&rounded_rect_vertices(
+                    cmd.x, cmd.y, cmd.width, cmd.height, sw, sh, cmd.radius, cmd.color,
+                ));
+            }
+        }
+        if vertices.is_empty() {
+            return;
         }
 
         let vertex_buffer = self
