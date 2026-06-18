@@ -44,20 +44,30 @@ jobs:
 
       - name: Cross-build canonical app (release, x86_64-pc-windows-gnu)
         run: |
-          cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
+          set -euo pipefail
+          EXE_PATH="$(scripts/build_windows_app.sh \
+            --target x86_64-pc-windows-gnu \
+            --profile release \
+            --skip-toolchain)"
+          echo "TZE_HUD_RELEASE_EXE=${EXE_PATH}" >> "$GITHUB_ENV"
 
       - name: Generate SHA-256 checksum
         id: checksum
         run: |
           set -euo pipefail
-          ART_DIR="target/x86_64-pc-windows-gnu/release"
-          cd "$ART_DIR"
-          # Checksum references the deterministic artifact name `tze_hud.exe`.
-          sha256sum tze_hud.exe > tze_hud.exe.sha256
+          ART_DIR="$(dirname "$TZE_HUD_RELEASE_EXE")"
+          (
+            cd "$ART_DIR"
+            # Checksum references the deterministic artifact name `tze_hud.exe`.
+            sha256sum tze_hud.exe > tze_hud.exe.sha256
+          )
           echo "Published checksum:"
-          cat tze_hud.exe.sha256
-          # Self-check: the published checksum MUST verify against the artifact.
-          sha256sum -c tze_hud.exe.sha256
+          cat "$ART_DIR/tze_hud.exe.sha256"
+
+      - name: Verify artifact/checksum provenance
+        run: |
+          bash scripts/ci/release_artifact_provenance_smoke.sh \
+            --artifact-dir target/x86_64-pc-windows-gnu/release
 
       - name: Publish artifact + checksum
         uses: actions/upload-artifact@v6
