@@ -247,6 +247,9 @@ struct DriveEntry {
 struct InProcessPortalDriveState {
     /// Per-projection drive entries keyed by `projection_id`.
     entries: HashMap<String, DriveEntry>,
+    /// Scene tiles whose projection state has been accepted for detach/cleanup,
+    /// but whose tile removal must wait until the next drain has scene access.
+    pending_tile_removals: Vec<SceneId>,
     /// Current resolved design-token overrides (flat key → value strings).
     token_overrides: DesignTokenMap,
 }
@@ -255,6 +258,7 @@ impl InProcessPortalDriveState {
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            pending_tile_removals: Vec::new(),
             token_overrides: DesignTokenMap::new(),
         }
     }
@@ -280,7 +284,11 @@ impl InProcessPortalDriveState {
     }
 
     fn detach(&mut self, projection_id: &str) {
-        self.entries.remove(projection_id);
+        if let Some(entry) = self.entries.remove(projection_id)
+            && let Some(tile_id) = entry.tile_scene_id
+        {
+            self.pending_tile_removals.push(tile_id);
+        }
     }
 
     fn apply_token_map(&mut self, overrides: DesignTokenMap) {
@@ -289,6 +297,10 @@ impl InProcessPortalDriveState {
         for entry in self.entries.values_mut() {
             entry.adapter.set_visual_tokens(tokens.clone());
         }
+    }
+
+    fn drain_pending_tile_removals(&mut self) -> Vec<SceneId> {
+        self.pending_tile_removals.drain(..).collect()
     }
 }
 
@@ -922,6 +934,8 @@ impl InProcessPortalDriver {
         tab_id: Option<SceneId>,
         now_us: u64,
     ) {
+        self.drain_pending_tile_removals(scene);
+
         let policy = ProjectedPortalPolicy::permit_all();
         // Local counters for this drain cycle — emitted as a tracing event after
         // the loop for portal health observability (hud-bq0gl.14).
@@ -971,7 +985,7 @@ impl InProcessPortalDriver {
                     // Discard the coalescer entry here so it cannot recur, then
                     // clean up the adapter.
                     self.authority.discard_portal_coalescer_entry(&proj_id);
-                    self.drive.detach(&proj_id);
+                    self.detach_projection(&proj_id);
                     continue;
                 }
             };
@@ -979,7 +993,7 @@ impl InProcessPortalDriver {
             // Build the full projected portal state for rendering.
             let Some(state) = self.authority.projected_portal_state(&proj_id, &policy) else {
                 // Session was removed between take_due and state query (race).
-                self.drive.detach(&proj_id);
+                self.detach_projection(&proj_id);
                 continue;
             };
 
@@ -1315,6 +1329,26 @@ impl InProcessPortalDriver {
         );
         self.lease_id = Some(new_lease);
         Some(new_lease)
+    }
+
+    fn drain_pending_tile_removals(&mut self, scene: &mut SceneGraph) {
+        for tile_id in self.drive.drain_pending_tile_removals() {
+            match scene.delete_tile(tile_id, PORTAL_DRIVER_NAMESPACE) {
+                Ok(()) => {
+                    tracing::info!(
+                        tile_id = ?tile_id,
+                        "portal drain: removed detached projection tile"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        tile_id = ?tile_id,
+                        error = ?error,
+                        "portal drain: failed to remove detached projection tile"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -3481,6 +3515,80 @@ mod tests {
         assert!(
             !driver.drive.entries.contains_key(proj),
             "operator cleanup must drop the driver entry"
+        );
+    }
+
+    #[test]
+    fn dispatch_portal_op_operator_cleanup_removes_projection_tile_on_next_drain() {
+        let mut driver = InProcessPortalDriver::new();
+        driver
+            .authority_mut()
+            .set_operator_authority("operator-secret")
+            .expect("operator credential must configure");
+        let proj = "proj-cleanup-tile";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        publish(&mut driver, proj, &token, "line before cleanup", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        let tile_id = driver
+            .drive
+            .entries
+            .get(proj)
+            .expect("drive entry must exist")
+            .tile_scene_id
+            .expect("drain must create a portal tile");
+        assert!(
+            scene.tiles.contains_key(&tile_id),
+            "precondition: projected tile must exist before cleanup"
+        );
+        assert!(
+            scene.tile_scroll_config(tile_id).is_some(),
+            "precondition: projected tile must have scroll state before cleanup"
+        );
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Cleanup {
+            projection_id: proj.to_string(),
+            cleanup_authority: "operator".to_string(),
+            owner_token: None,
+            operator_authority: Some("operator-secret".to_string()),
+            reason: "operator override".to_string(),
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("cleanup reply must arrive")
+            .expect("operator cleanup must be accepted");
+        assert!(
+            !driver.drive.entries.contains_key(proj),
+            "accepted cleanup must drop the drive entry immediately"
+        );
+        assert!(
+            scene.tiles.contains_key(&tile_id),
+            "tile removal is queued until the next drain has scene access"
+        );
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 300);
+
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "accepted cleanup must remove the projection tile on the next drain"
+        );
+        assert!(
+            scene.tile_scroll_config(tile_id).is_none(),
+            "accepted cleanup must clear scene scroll config for the projection tile"
+        );
+        assert!(
+            !scene.tile_follow_tail_at_tail(tile_id),
+            "accepted cleanup must clear follow-tail scene state for the projection tile"
+        );
+        assert!(
+            scene.drain_removed_tile_ids().contains(&tile_id),
+            "accepted cleanup must publish a removed-tile notification for external state pruning"
         );
     }
 }
