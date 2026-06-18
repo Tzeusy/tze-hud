@@ -61,8 +61,6 @@ PORTAL_W = 860.0
 PORTAL_H = 680.0
 PORTAL_MIN_W = 640.0
 PORTAL_MIN_H = 480.0
-PORTAL_MAX_W = 1280.0
-PORTAL_MAX_H = 960.0
 PORTAL_DEFAULT_WIDTH_PCT = PORTAL_W / 1920.0
 PORTAL_DEFAULT_HEIGHT_PCT = PORTAL_H / 1080.0
 PORTAL_RADIUS = 14.0
@@ -571,10 +569,49 @@ def composer_word_forward_end(text: str, cursor: int) -> int:
     return i
 
 
-def clamp_portal_size(w: float, h: float, tab_width: float, tab_height: float) -> tuple[float, float]:
+def resolved_portal_max_size(
+    tab_width: float,
+    tab_height: float,
+    *,
+    lease_max_width: Optional[float] = None,
+    lease_max_height: Optional[float] = None,
+) -> tuple[float, float]:
+    """Resolve portal maxima from runtime budgets exposed to this harness.
+
+    The current resident SceneSnapshot path exposes display_area but not a
+    portal-specific lease maximum, so display bounds are the interim harness
+    limit. Keep the lease parameters explicit so the live adapter can honor that
+    signal as soon as the runtime surfaces it.
+    """
+    max_w = max(0.0, tab_width)
+    max_h = max(0.0, tab_height)
+    if lease_max_width is not None:
+        max_w = min(max_w, max(0.0, lease_max_width))
+    if lease_max_height is not None:
+        max_h = min(max_h, max(0.0, lease_max_height))
+    return max_w, max_h
+
+
+def clamp_portal_size(
+    w: float,
+    h: float,
+    tab_width: float,
+    tab_height: float,
+    *,
+    lease_max_width: Optional[float] = None,
+    lease_max_height: Optional[float] = None,
+) -> tuple[float, float]:
+    max_w, max_h = resolved_portal_max_size(
+        tab_width,
+        tab_height,
+        lease_max_width=lease_max_width,
+        lease_max_height=lease_max_height,
+    )
+    min_w = min(PORTAL_MIN_W, max_w)
+    min_h = min(PORTAL_MIN_H, max_h)
     return (
-        max(PORTAL_MIN_W, min(w, min(PORTAL_MAX_W, tab_width))),
-        max(PORTAL_MIN_H, min(h, min(PORTAL_MAX_H, tab_height))),
+        min(max(w, min_w), max_w),
+        min(max(h, min_h), max_h),
     )
 
 
@@ -4336,9 +4373,7 @@ async def run_profile_swap(
     tab_height = tiles.tab_height
 
     for idx, (name, pw, ph, title_font, body_font) in enumerate(profiles):
-        # Clamp to portal bounds
-        pw_clamped = max(PORTAL_MIN_W, min(pw, PORTAL_MAX_W))
-        ph_clamped = max(PORTAL_MIN_H, min(ph, PORTAL_MAX_H))
+        pw_clamped, ph_clamped = clamp_portal_size(pw, ph, tab_width, tab_height)
         set_portal_size(pw_clamped, ph_clamped, tab_width, tab_height)
 
         body_slice = "\n".join(lines[:min(len(lines), 40)])
