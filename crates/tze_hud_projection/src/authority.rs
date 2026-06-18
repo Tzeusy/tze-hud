@@ -435,7 +435,7 @@ impl ProjectionAuthority {
             .sessions
             .get_mut(projection_id)
             .ok_or(ProjectionErrorCode::ProjectionNotFound)?;
-        if session.unread_output_count == 0 {
+        if session.unread_output_count == 0 && !session.portal_update_pending {
             return Ok(None);
         }
         if !session.portal_update_pending {
@@ -987,6 +987,7 @@ impl ProjectionAuthority {
         submission: PortalInputSubmission,
     ) -> PortalInputFeedback {
         let input_id = submission.input_id.clone();
+        let submitted_at_wall_us = submission.submitted_at_wall_us;
         let result = match submission.effective_expires_at_wall_us() {
             Ok(expires_at_wall_us) => self.enqueue_input_item(
                 projection_id,
@@ -1003,6 +1004,17 @@ impl ProjectionAuthority {
                 },
             ),
             Err(code) => Err(code),
+        };
+        let cadence_append = if result.is_ok() {
+            self.sessions.get_mut(projection_id).map(|session| {
+                (
+                    projection_id.to_string(),
+                    schedule_portal_state_update(session),
+                    submitted_at_wall_us,
+                )
+            })
+        } else {
+            None
         };
 
         let (pending_input_count, pending_input_bytes) = self
@@ -1031,6 +1043,14 @@ impl ProjectionAuthority {
         };
         if let Some(session) = self.sessions.get_mut(projection_id) {
             session.last_input_feedback = Some(feedback.clone());
+        }
+        if let Some((projection_id, sequence, submitted_at_wall_us)) = cadence_append {
+            self.cadence_coalescer.record_append(
+                &projection_id,
+                Vec::new(),
+                sequence,
+                submitted_at_wall_us,
+            );
         }
         feedback
     }
@@ -1180,13 +1200,25 @@ impl ProjectionAuthority {
                 ProjectionAuditCategory::BoundsDenied,
             );
         }
+        let mut cadence_append: Option<(String, u64, u64)> = None;
         let response = match self.authorize_owner(
             &request.envelope,
             &request.owner_token,
             server_timestamp_wall_us,
             ProjectionAuditCategory::OwnerInputAck,
         ) {
-            Ok(session) => acknowledge_input(session, &request, server_timestamp_wall_us),
+            Ok(session) => {
+                let (response, state_changed) =
+                    acknowledge_input(session, &request, server_timestamp_wall_us);
+                if state_changed {
+                    cadence_append = Some((
+                        request.envelope.projection_id.clone(),
+                        schedule_portal_state_update(session),
+                        server_timestamp_wall_us,
+                    ));
+                }
+                response
+            }
             Err(code) => ProjectionResponse::denied(
                 &request.envelope.request_id,
                 &request.envelope.projection_id,
@@ -1195,6 +1227,14 @@ impl ProjectionAuthority {
                 "owner authorization failed",
             ),
         };
+        if let Some((projection_id, sequence, submitted_at_wall_us)) = cadence_append {
+            self.cadence_coalescer.record_append(
+                &projection_id,
+                Vec::new(),
+                sequence,
+                submitted_at_wall_us,
+            );
+        }
         self.audit_from_response(
             &request.envelope,
             caller_identity,
@@ -1791,6 +1831,13 @@ fn append_transcript_unit(
     session.next_transcript_sequence - 1
 }
 
+fn schedule_portal_state_update(session: &mut ProjectionSession) -> u64 {
+    session.portal_update_pending = true;
+    let sequence = session.next_transcript_sequence;
+    session.next_transcript_sequence += 1;
+    sequence
+}
+
 fn promote_to_active_if_recovering(session: &mut ProjectionSession) {
     if matches!(
         session.lifecycle_state,
@@ -1979,7 +2026,7 @@ fn acknowledge_input(
     session: &mut ProjectionSession,
     request: &AcknowledgeInputRequest,
     server_timestamp_wall_us: u64,
-) -> ProjectionResponse {
+) -> (ProjectionResponse, bool) {
     expire_pending(session, server_timestamp_wall_us);
     let Some(item) = session
         .pending_input
@@ -1987,48 +2034,55 @@ fn acknowledge_input(
         .find(|item| item.input_id == request.input_id)
     else {
         if let Some(terminal_state) = session.completed_input_ack_states.get(&request.input_id) {
-            return terminal_ack_replay_response(
-                *terminal_state,
-                request,
-                server_timestamp_wall_us,
+            return (
+                terminal_ack_replay_response(*terminal_state, request, server_timestamp_wall_us),
+                false,
             );
         }
-        return ProjectionResponse::denied(
-            &request.envelope.request_id,
-            &request.envelope.projection_id,
-            server_timestamp_wall_us,
-            ProjectionErrorCode::ProjectionNotFound,
-            "input_id not found",
+        return (
+            ProjectionResponse::denied(
+                &request.envelope.request_id,
+                &request.envelope.projection_id,
+                server_timestamp_wall_us,
+                ProjectionErrorCode::ProjectionNotFound,
+                "input_id not found",
+            ),
+            false,
         );
     };
 
     if request.ack_state != InputAckState::Deferred && request.not_before_wall_us.is_some() {
-        return ProjectionResponse::denied(
-            &request.envelope.request_id,
-            &request.envelope.projection_id,
-            server_timestamp_wall_us,
-            ProjectionErrorCode::ProjectionInvalidArgument,
-            "not_before_wall_us is only valid for deferred acknowledgements",
+        return (
+            ProjectionResponse::denied(
+                &request.envelope.request_id,
+                &request.envelope.projection_id,
+                server_timestamp_wall_us,
+                ProjectionErrorCode::ProjectionInvalidArgument,
+                "not_before_wall_us is only valid for deferred acknowledgements",
+            ),
+            false,
         );
     }
 
     if let Some(not_before_wall_us) = request.not_before_wall_us {
         if not_before_wall_us >= item.expires_at_wall_us {
-            return ProjectionResponse::denied(
-                &request.envelope.request_id,
-                &request.envelope.projection_id,
-                server_timestamp_wall_us,
-                ProjectionErrorCode::ProjectionInvalidArgument,
-                "not_before_wall_us must be before expires_at_wall_us",
+            return (
+                ProjectionResponse::denied(
+                    &request.envelope.request_id,
+                    &request.envelope.projection_id,
+                    server_timestamp_wall_us,
+                    ProjectionErrorCode::ProjectionInvalidArgument,
+                    "not_before_wall_us must be before expires_at_wall_us",
+                ),
+                false,
             );
         }
     }
 
     if item.delivery_state.is_terminal() {
-        return terminal_ack_replay_response(
-            item.delivery_state,
-            request,
-            server_timestamp_wall_us,
+        return (
+            terminal_ack_replay_response(item.delivery_state, request, server_timestamp_wall_us),
+            false,
         );
     }
 
@@ -2047,12 +2101,15 @@ fn acknowledge_input(
         }
         InputAckState::Deferred => {
             if item.delivery_state != InputDeliveryState::Delivered {
-                return ProjectionResponse::denied(
-                    &request.envelope.request_id,
-                    &request.envelope.projection_id,
-                    server_timestamp_wall_us,
-                    ProjectionErrorCode::ProjectionStateConflict,
-                    "only delivered input can be deferred",
+                return (
+                    ProjectionResponse::denied(
+                        &request.envelope.request_id,
+                        &request.envelope.projection_id,
+                        server_timestamp_wall_us,
+                        ProjectionErrorCode::ProjectionStateConflict,
+                        "only delivered input can be deferred",
+                    ),
+                    false,
                 );
             }
             item.delivery_state = InputDeliveryState::Deferred;
@@ -2060,11 +2117,14 @@ fn acknowledge_input(
         }
     }
 
-    ProjectionResponse::accepted(
-        &request.envelope.request_id,
-        &request.envelope.projection_id,
-        server_timestamp_wall_us,
-        "acknowledgement accepted",
+    (
+        ProjectionResponse::accepted(
+            &request.envelope.request_id,
+            &request.envelope.projection_id,
+            server_timestamp_wall_us,
+            "acknowledgement accepted",
+        ),
+        true,
     )
 }
 
