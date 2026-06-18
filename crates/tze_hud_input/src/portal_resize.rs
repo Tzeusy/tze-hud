@@ -45,10 +45,11 @@
 //! 2. **Shell/chrome-reserved shortcuts** — shortcuts in
 //!    [`ShellReservedShortcut::is_reserved`] win over portal resize hotkeys.
 //!    A reserved key is never consumed by a portal.
-//! 3. **Composer** — if an active composer region holds focus,
-//!    `Ctrl++`/`Ctrl+=`/`Ctrl+-` are composer shortcuts and MUST NOT be stolen.
-//! 4. **Portal resize hotkey** — `Ctrl++`/`Ctrl+=` (grow) and `Ctrl+-` (shrink)
-//!    on the focused portal tile.
+//! 3. **Portal resize hotkey** — `Ctrl++`/`Ctrl+=` (grow) and `Ctrl+-` (shrink)
+//!    on the focused portal tile, including when focus is inside that portal's
+//!    composer surface.
+//! 4. **Composer draft routing** — non-resize composer keys are routed to the
+//!    active composer before normal agent key forwarding.
 //! 5. **Normal routing** — key forwarded to the owning agent.
 //!
 //! ## Performance contract
