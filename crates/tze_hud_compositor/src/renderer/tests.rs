@@ -7737,6 +7737,127 @@ async fn test_collect_text_items_applies_tile_scroll_offset() {
     );
 }
 
+/// Headless readback regression for the text-stream portal output pane.
+///
+/// The live exemplar mounts the OUTPUT transcript body as a scrollable tile
+/// inside a larger portal frame. Scrolled node geometry must be clipped to that
+/// output tile viewport: root/background fills must not bleed above it, and
+/// scrolled child fills must not bleed below it.
+#[tokio::test]
+async fn scrolled_portal_output_tile_clips_geometry_outside_viewport() {
+    let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(220, 180).await);
+
+    let mut scene = SceneGraph::new(220.0, 180.0);
+    let tab_id = scene.create_tab("portal-output-clip", 0).unwrap();
+    let lease_id = scene.grant_lease("portal-output-clip", 120_000, vec![]);
+
+    let frame_id = scene
+        .create_tile(
+            tab_id,
+            "portal-output-clip",
+            lease_id,
+            Rect::new(40.0, 20.0, 160.0, 140.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .set_tile_root(
+            frame_id,
+            Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.28, 0.34, 0.50, 1.0),
+                    radius: None,
+                    bounds: Rect::new(0.0, 0.0, 160.0, 140.0),
+                }),
+            },
+        )
+        .unwrap();
+
+    let output_id = scene
+        .create_tile(
+            tab_id,
+            "portal-output-clip",
+            lease_id,
+            Rect::new(90.0, 60.0, 80.0, 60.0),
+            2,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(
+            output_id,
+            TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: None,
+                content_height: Some(240.0),
+            },
+        )
+        .unwrap();
+
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            output_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                    radius: None,
+                    bounds: Rect::new(0.0, 0.0, 80.0, 60.0),
+                }),
+            },
+        )
+        .unwrap();
+    scene
+        .add_node_to_tile(
+            output_id,
+            Some(root_id),
+            Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                    radius: None,
+                    bounds: Rect::new(0.0, 92.0, 80.0, 80.0),
+                }),
+            },
+        )
+        .unwrap();
+
+    for scroll_y in [0.0_f32, 48.0, 96.0] {
+        scene
+            .set_tile_scroll_offset_local(output_id, 0.0, scroll_y)
+            .unwrap();
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
+        compositor.render_frame_headless(&mut scene, &surface);
+
+        let pixels = surface.read_pixels(&compositor.device);
+        let frame_control = HeadlessSurface::pixel_at(&pixels, 220, 55, 45);
+        let above_output = HeadlessSurface::pixel_at(&pixels, 220, 110, 45);
+        let below_output = HeadlessSurface::pixel_at(&pixels, 220, 110, 135);
+        let inside_output = HeadlessSurface::pixel_at(&pixels, 220, 110, 70);
+
+        assert_eq!(
+            above_output, frame_control,
+            "scroll_y={scroll_y}: output root fill leaked above the output viewport; \
+             above={above_output:?}, frame={frame_control:?}"
+        );
+        assert_eq!(
+            below_output, frame_control,
+            "scroll_y={scroll_y}: scrolled output content leaked below the output viewport; \
+             below={below_output:?}, frame={frame_control:?}"
+        );
+        assert_ne!(
+            inside_output, frame_control,
+            "scroll_y={scroll_y}: output viewport should still render its black pane fill"
+        );
+    }
+}
+
 /// `collect_text_items` does NOT shift text for tiles with zero scroll offset.
 ///
 /// Regression guard: ensuring the fix is additive (non-scrolled tiles

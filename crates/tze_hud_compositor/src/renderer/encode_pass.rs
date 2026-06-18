@@ -484,15 +484,23 @@ impl super::Compositor {
 
         if let NodeData::SolidColor(sc) = &node.data {
             if let Some(radius) = sc.radius.filter(|r| *r > 0.0) {
-                let max_r = (sc.bounds.width * 0.5).min(sc.bounds.height * 0.5).max(0.0);
-                cmds.push(crate::pipeline::RoundedRectDrawCmd {
-                    x: tile.bounds.x + sc.bounds.x - scroll_x,
-                    y: tile.bounds.y + sc.bounds.y - scroll_y,
-                    width: sc.bounds.width,
-                    height: sc.bounds.height,
-                    radius: radius.min(max_r),
-                    color: self.gpu_color(sc.color),
-                });
+                let rect = Rect::new(
+                    tile.bounds.x + sc.bounds.x - scroll_x,
+                    tile.bounds.y + sc.bounds.y - scroll_y,
+                    sc.bounds.width,
+                    sc.bounds.height,
+                );
+                if let Some(clipped) = Self::clip_rect_to_tile(tile, rect) {
+                    let max_r = (clipped.width * 0.5).min(clipped.height * 0.5).max(0.0);
+                    cmds.push(crate::pipeline::RoundedRectDrawCmd {
+                        x: clipped.x,
+                        y: clipped.y,
+                        width: clipped.width,
+                        height: clipped.height,
+                        radius: radius.min(max_r),
+                        color: self.gpu_color(sc.color),
+                    });
+                }
             }
         }
 
