@@ -1202,6 +1202,7 @@ impl ComposerDraftManager {
     /// - `End` → `draft.move_to_end()` (or `select_to_end` with Shift)
     /// - `Ctrl+ArrowLeft` → `draft.move_word_left()`
     /// - `Ctrl+ArrowRight` → `draft.move_word_right()`
+    /// - `Space` → insert literal space
     /// - `Enter` / `NumpadEnter` → submit (returns batch with submission + clear)
     /// - `Escape` → cancel (returns batch with cancel)
     ///
@@ -1287,6 +1288,13 @@ impl ComposerDraftManager {
                     draft.move_to_end()
                 };
                 if o == EditOutcome::Mutated {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
+                (true, None)
+            }
+            "Space" if !ctrl && !alt => {
+                let o = draft.insert(" ");
+                if matches!(o, EditOutcome::Mutated | EditOutcome::AtCapacity) {
                     self.scheduler.push_notification(draft.snapshot());
                 }
                 (true, None)
@@ -2125,6 +2133,33 @@ mod tests {
         let flush_batch = mgr.try_flush().expect("flush delivers accumulated state");
         let snap = flush_batch.latest.as_ref().unwrap();
         assert_eq!(snap.text, "hi", "draft must contain routed characters");
+    }
+
+    /// Space arrives as a named KeyDown on some platforms instead of a
+    /// Character(" ") event; the composer must still treat it as text.
+    #[test]
+    fn manager_space_key_down_inserts_literal_space() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        mgr.route_character("h");
+        mgr.route_character("i");
+        let (consumed, batch) = mgr.route_key_down("Space", "Space", false, false, false);
+
+        assert!(consumed, "Space must be consumed by the draft manager");
+        assert!(
+            batch.is_none(),
+            "Space routes through coalesced draft state, not an immediate batch"
+        );
+
+        let flush_batch = mgr.try_flush().expect("flush delivers accumulated state");
+        let snap = flush_batch.latest.as_ref().unwrap();
+        assert_eq!(snap.text, "hi ", "draft must include the literal space");
+        assert_eq!(
+            snap.cursor, 3,
+            "cursor must advance after the inserted space"
+        );
     }
 
     /// Enter key submits the draft and emits a clear notification.

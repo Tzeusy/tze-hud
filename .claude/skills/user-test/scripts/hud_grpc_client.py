@@ -516,6 +516,8 @@ def _make_node(data: dict) -> types_pb2.NodeProto:
             font_size_px=t.get("font_size_px", 14.0),
             color=types_pb2.Rgba(r=color[0], g=color[1], b=color[2], a=color[3]),
         )
+        if "overflow" in t:
+            tm.overflow = t["overflow"]
         bg = t.get("background")
         if bg:
             tm.background.CopyFrom(types_pb2.Rgba(r=bg[0], g=bg[1], b=bg[2], a=bg[3]))
