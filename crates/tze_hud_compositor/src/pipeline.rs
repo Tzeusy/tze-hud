@@ -324,12 +324,24 @@ pub fn create_texture_rect_pipeline(
 /// `Compositor::encode_rounded_rect_pass`.
 #[derive(Clone, Debug)]
 pub struct RoundedRectDrawCmd {
+    /// Original rounded rectangle shape used by the SDF.
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
     pub radius: f32,
     pub color: [f32; 4],
+    /// Optional raster bounds. When present, the draw quad is clipped to this
+    /// rectangle while the SDF still evaluates against the original shape.
+    pub clip: Option<RoundedRectClip>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RoundedRectClip {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// Vertex for rendering SDF rounded rectangles.
@@ -424,17 +436,44 @@ pub fn rounded_rect_vertices(
     radius: f32,
     color: [f32; 4],
 ) -> [RoundedRectVertex; 6] {
+    rounded_rect_vertices_with_draw_bounds(
+        x, y, w, h, x, y, w, h, screen_w, screen_h, radius, color,
+    )
+}
+
+/// Generate 6 vertices for a rounded rectangle whose raster quad may be
+/// smaller than the original SDF shape.
+///
+/// `draw_*` bounds determine where fragments are emitted. `shape_*` bounds
+/// determine the rounded rectangle SDF center and half-size. This is used when
+/// tile scrolling clips a rounded node to the tile viewport: the clipped edge
+/// must not become a new rounded corner.
+#[allow(clippy::too_many_arguments)]
+pub fn rounded_rect_vertices_with_draw_bounds(
+    draw_x: f32,
+    draw_y: f32,
+    draw_w: f32,
+    draw_h: f32,
+    shape_x: f32,
+    shape_y: f32,
+    shape_w: f32,
+    shape_h: f32,
+    screen_w: f32,
+    screen_h: f32,
+    radius: f32,
+    color: [f32; 4],
+) -> [RoundedRectVertex; 6] {
     // NDC corners
-    let left_ndc = (x / screen_w) * 2.0 - 1.0;
-    let right_ndc = ((x + w) / screen_w) * 2.0 - 1.0;
-    let top_ndc = 1.0 - (y / screen_h) * 2.0;
-    let bottom_ndc = 1.0 - ((y + h) / screen_h) * 2.0;
+    let left_ndc = (draw_x / screen_w) * 2.0 - 1.0;
+    let right_ndc = ((draw_x + draw_w) / screen_w) * 2.0 - 1.0;
+    let top_ndc = 1.0 - (draw_y / screen_h) * 2.0;
+    let bottom_ndc = 1.0 - ((draw_y + draw_h) / screen_h) * 2.0;
 
     // Pixel-space center and half-size for the SDF.
-    let cx = x + w * 0.5;
-    let cy = y + h * 0.5;
-    let hx = w * 0.5;
-    let hy = h * 0.5;
+    let cx = shape_x + shape_w * 0.5;
+    let cy = shape_y + shape_h * 0.5;
+    let hx = shape_w * 0.5;
+    let hy = shape_h * 0.5;
 
     let v = |px: f32, py: f32, ndc_x: f32, ndc_y: f32| RoundedRectVertex {
         position: [ndc_x, ndc_y],
@@ -447,13 +486,13 @@ pub fn rounded_rect_vertices(
 
     [
         // Triangle 1
-        v(x, y, left_ndc, top_ndc),
-        v(x + w, y, right_ndc, top_ndc),
-        v(x, y + h, left_ndc, bottom_ndc),
+        v(draw_x, draw_y, left_ndc, top_ndc),
+        v(draw_x + draw_w, draw_y, right_ndc, top_ndc),
+        v(draw_x, draw_y + draw_h, left_ndc, bottom_ndc),
         // Triangle 2
-        v(x + w, y, right_ndc, top_ndc),
-        v(x + w, y + h, right_ndc, bottom_ndc),
-        v(x, y + h, left_ndc, bottom_ndc),
+        v(draw_x + draw_w, draw_y, right_ndc, top_ndc),
+        v(draw_x + draw_w, draw_y + draw_h, right_ndc, bottom_ndc),
+        v(draw_x, draw_y + draw_h, left_ndc, bottom_ndc),
     ]
 }
 

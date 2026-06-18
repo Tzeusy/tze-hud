@@ -133,6 +133,13 @@ impl Compositor {
             return None;
         }
         let clipped = Self::clip_rect_to_tile(tile, rect)?;
+        if clipped.x == rect.x
+            && clipped.y == rect.y
+            && clipped.width == rect.width
+            && clipped.height == rect.height
+        {
+            return Some((rect, uv_rect));
+        }
         let left_frac = ((clipped.x - rect.x) / rect.width).clamp(0.0, 1.0);
         let right_frac = ((clipped.x + clipped.width - rect.x) / rect.width).clamp(0.0, 1.0);
         let top_frac = ((clipped.y - rect.y) / rect.height).clamp(0.0, 1.0);

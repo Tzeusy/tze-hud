@@ -7858,6 +7858,87 @@ async fn scrolled_portal_output_tile_clips_geometry_outside_viewport() {
     }
 }
 
+#[tokio::test]
+async fn scrolled_rounded_solid_preserves_original_shape_with_viewport_clip() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(220, 180).await);
+
+    let mut scene = SceneGraph::new(220.0, 180.0);
+    let tab_id = scene.create_tab("portal-rounded-clip", 0).unwrap();
+    let lease_id = scene.grant_lease("portal-rounded-clip", 120_000, vec![]);
+    let output_id = scene
+        .create_tile(
+            tab_id,
+            "portal-rounded-clip",
+            lease_id,
+            Rect::new(90.0, 60.0, 80.0, 60.0),
+            2,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(
+            output_id,
+            TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: None,
+                content_height: Some(240.0),
+            },
+        )
+        .unwrap();
+
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            output_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                    radius: None,
+                    bounds: Rect::new(0.0, 0.0, 80.0, 60.0),
+                }),
+            },
+        )
+        .unwrap();
+    scene
+        .add_node_to_tile(
+            output_id,
+            Some(root_id),
+            Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                    radius: Some(16.0),
+                    bounds: Rect::new(0.0, 92.0, 80.0, 80.0),
+                }),
+            },
+        )
+        .unwrap();
+
+    scene
+        .set_tile_scroll_offset_local(output_id, 0.0, 96.0)
+        .unwrap();
+
+    let cmds = compositor.collect_tile_rounded_rect_cmds(&scene);
+    assert_eq!(cmds.len(), 1, "expected exactly one rounded child command");
+    let cmd = &cmds[0];
+    assert_eq!(cmd.x, 90.0);
+    assert_eq!(cmd.y, 56.0);
+    assert_eq!(cmd.width, 80.0);
+    assert_eq!(cmd.height, 80.0);
+    assert_eq!(cmd.radius, 16.0);
+
+    let clip = cmd
+        .clip
+        .expect("scrolled rounded child must carry a viewport clip");
+    assert_eq!(clip.x, 90.0);
+    assert_eq!(clip.y, 60.0);
+    assert_eq!(clip.width, 80.0);
+    assert_eq!(clip.height, 60.0);
+}
+
 /// `collect_text_items` does NOT shift text for tiles with zero scroll offset.
 ///
 /// Regression guard: ensuring the fix is additive (non-scrolled tiles
