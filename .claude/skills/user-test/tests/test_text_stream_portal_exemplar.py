@@ -28,6 +28,20 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertGreater(w, 1280.0)
         self.assertGreater(h, 960.0)
 
+    def test_profile_swap_expanded_stays_larger_than_large_display_standard(self) -> None:
+        standard_w, standard_h = portal.default_portal_size(3840.0, 2160.0)
+        profiles = portal.profile_swap_dimensions(standard_w, standard_h)
+        expanded = next(profile for profile in profiles if profile[0] == "expanded")
+
+        expanded_w, expanded_h = portal.clamp_portal_size(
+            expanded[1],
+            expanded[2],
+            3840.0,
+            2160.0,
+        )
+        self.assertGreater(expanded_w, standard_w)
+        self.assertGreater(expanded_h, standard_h)
+
     def test_portal_size_clamp_keeps_geometry_on_screen(self) -> None:
         self.assertEqual(
             portal.clamp_portal_size(5000.0, 3000.0, 3840.0, 2160.0),

@@ -624,6 +624,21 @@ def default_portal_size(tab_width: float, tab_height: float) -> tuple[float, flo
     )
 
 
+def profile_swap_dimensions(
+    standard_w: float,
+    standard_h: float,
+) -> list[tuple[str, float, float, float, float]]:
+    expanded_w = max(1100.0, standard_w * 1.15)
+    expanded_h = max(820.0, standard_h * 1.15)
+    return [
+        # (name, portal_w, portal_h, title_font, body_font)
+        ("compact", 680.0, 520.0, 14.0, 11.0),
+        ("standard", standard_w, standard_h, TITLE_FONT, BODY_FONT),
+        ("expanded", expanded_w, expanded_h, 18.0, 14.0),
+        ("standard", standard_w, standard_h, TITLE_FONT, BODY_FONT),
+    ]
+
+
 def clamp_input_pane_width(width: float) -> float:
     max_input_w = max(MIN_PANE_W, PORTAL_W - PANE_DIVIDER_W - MIN_PANE_W)
     return max(MIN_PANE_W, min(width, max_input_w))
@@ -4360,13 +4375,7 @@ async def run_profile_swap(
         "expected_visual": "portal chrome dimensions shift each cycle; body text remains readable; no layout collapse",
     })
 
-    profiles: list[tuple[str, float, float, float, float]] = [
-        # (name, portal_w, portal_h, title_font, body_font)
-        ("compact",  680.0, 520.0, 14.0, 11.0),
-        ("standard", PORTAL_W, PORTAL_H, TITLE_FONT, BODY_FONT),
-        ("expanded", 1100.0, 820.0, 18.0, 14.0),
-        ("standard", PORTAL_W, PORTAL_H, TITLE_FONT, BODY_FONT),
-    ]
+    profiles = profile_swap_dimensions(PORTAL_W, PORTAL_H)
 
     lines = body_full.splitlines()
     tab_width = tiles.tab_width
