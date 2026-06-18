@@ -1212,7 +1212,7 @@ impl ComposerDraftManager {
     pub fn route_key_down(
         &mut self,
         key_code: &str,
-        _key: &str,
+        key: &str,
         shift: bool,
         ctrl: bool,
         alt: bool,
@@ -1221,6 +1221,7 @@ impl ComposerDraftManager {
             return (false, None);
         };
 
+        let enter_key = is_enter_key(key_code, key);
         match key_code {
             "Backspace" => {
                 let o = if ctrl || alt {
@@ -1300,6 +1301,16 @@ impl ComposerDraftManager {
                 (true, None)
             }
             "Enter" | "NumpadEnter" => {
+                if let Some(sub) = draft.submit() {
+                    self.scheduler.flush_submit(sub);
+                    let b = self.scheduler.take_batch();
+                    (true, b)
+                } else {
+                    // Empty draft — consume but nothing to deliver.
+                    (true, None)
+                }
+            }
+            _ if enter_key => {
                 if let Some(sub) = draft.submit() {
                     self.scheduler.flush_submit(sub);
                     let b = self.scheduler.take_batch();
@@ -1395,6 +1406,11 @@ impl ComposerDraftManager {
         }
         (outcome, None)
     }
+}
+
+fn is_enter_key(key_code: &str, key: &str) -> bool {
+    matches!(key_code, "Enter" | "NumpadEnter")
+        || matches!(key, "Enter" | "NumpadEnter" | "\r" | "\n")
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -2193,6 +2209,37 @@ mod tests {
         assert!(
             clear.sequence > sub.sequence,
             "clear must have higher sequence than submission"
+        );
+    }
+
+    /// Logical Enter must submit even when the physical key/code is unknown.
+    #[test]
+    fn manager_logical_enter_submits_when_physical_key_is_unidentified() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        mgr.route_character("h");
+        mgr.route_character("i");
+
+        let (consumed, batch) = mgr.route_key_down("Unidentified", "Enter", false, false, false);
+        assert!(
+            consumed,
+            "logical Enter must be consumed by the draft manager"
+        );
+        let batch = batch.expect("logical Enter must emit a batch");
+
+        let sub = batch
+            .submission
+            .as_ref()
+            .expect("submission must be present");
+        assert_eq!(sub.text, "hi");
+        assert!(
+            batch
+                .latest
+                .as_ref()
+                .is_some_and(|clear| clear.text.is_empty()),
+            "logical Enter must include the post-submit clear"
         );
     }
 

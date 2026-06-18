@@ -169,12 +169,11 @@ impl Compositor {
     /// tile.  If no matching node is found in the tile the call is a no-op.
     ///
     /// Emits:
-    /// 1. A background fill rect for the composer strip (bottom
-    ///    `font_size_px * 1.6` pixels of the tile).
+    /// 1. A background fill rect for the composer hit-region.
     /// 2. When at_capacity, a 2px left-edge accent rect using the at-capacity
     ///    color so the user has a visual signal that no further input is
     ///    accepted.  The text pass (see `collect_composer_text_item`) renders
-    ///    the draft text on top.
+    ///    the draft text on top in the same hit-region.
     ///
     /// Geometry is clamped to the tile bounds to avoid overdraw outside the portal.
     pub(super) fn render_composer_overlay(
@@ -190,22 +189,17 @@ impl Compositor {
             return;
         };
 
-        // Only render inside the tile that owns the focused composer node.
-        if !self.tile_contains_composer_node(tile, scene, cs.node_id) {
+        let Some(region) = Self::composer_region_bounds(tile, scene, cs.node_id) else {
             return;
-        }
-
-        let strip_h = (tokens.font_size_px * 1.6).max(20.0);
-        let strip_y = tile.bounds.y + tile.bounds.height - strip_h;
-        let strip_y = strip_y.max(tile.bounds.y); // never above tile top
+        };
 
         // Background fill.
         let bg_color = [tokens.bg_r, tokens.bg_g, tokens.bg_b, tokens.bg_a];
         vertices.extend_from_slice(&rect_vertices(
-            tile.bounds.x,
-            strip_y,
-            tile.bounds.width,
-            strip_h,
+            region.x,
+            region.y,
+            region.width,
+            region.height,
             sw,
             sh,
             bg_color,
@@ -220,10 +214,10 @@ impl Compositor {
                 tokens.at_capacity_a,
             ];
             vertices.extend_from_slice(&rect_vertices(
-                tile.bounds.x,
-                strip_y,
+                region.x,
+                region.y,
                 2.0,
-                strip_h,
+                region.height,
                 sw,
                 sh,
                 accent,
@@ -231,42 +225,53 @@ impl Compositor {
         }
     }
 
-    /// Return `true` when `node_id` is a `HitRegionNode` with
-    /// `accepts_composer_input = true` that lives somewhere in the subtree
-    /// rooted at `tile.root_node`.
+    /// Return display-space bounds for the focused composer HitRegion inside a
+    /// tile, clamped to the tile bounds.
     ///
-    /// The search is bounded by the tile's node tree; the common case (one root
-    /// node with a few children) terminates in O(n) with n typically ≤ 10.
-    fn tile_contains_composer_node(
-        &self,
-        tile: &Tile,
-        scene: &SceneGraph,
-        target: SceneId,
-    ) -> bool {
-        let Some(root_id) = tile.root_node else {
-            return false;
-        };
-        self.node_tree_contains(root_id, scene, target)
+    /// Local composer echo belongs to the composer region, not the bottom edge
+    /// of the containing tile.  This keeps runtime-local feedback aligned with
+    /// agent-rendered composer chrome in raw-tile portals.
+    fn composer_region_bounds(tile: &Tile, scene: &SceneGraph, target: SceneId) -> Option<Rect> {
+        let root_id = tile.root_node?;
+        let local = Self::node_tree_composer_bounds(root_id, scene, target)?;
+
+        let left = local.x.clamp(0.0, tile.bounds.width);
+        let top = local.y.clamp(0.0, tile.bounds.height);
+        let right = (local.x + local.width).clamp(0.0, tile.bounds.width);
+        let bottom = (local.y + local.height).clamp(0.0, tile.bounds.height);
+        if right <= left || bottom <= top {
+            return None;
+        }
+
+        Some(Rect::new(
+            tile.bounds.x + left,
+            tile.bounds.y + top,
+            right - left,
+            bottom - top,
+        ))
     }
 
     /// Depth-first search for `target` in the node sub-tree rooted at `node_id`.
-    #[allow(clippy::only_used_in_recursion)]
-    fn node_tree_contains(&self, node_id: SceneId, scene: &SceneGraph, target: SceneId) -> bool {
+    fn node_tree_composer_bounds(
+        node_id: SceneId,
+        scene: &SceneGraph,
+        target: SceneId,
+    ) -> Option<Rect> {
         if node_id == target {
             // Verify the node is indeed a composer-capable HitRegion.
-            return scene.nodes.get(&node_id).is_some_and(|n| match &n.data {
-                NodeData::HitRegion(hr) => hr.accepts_composer_input,
-                _ => false,
+            return scene.nodes.get(&node_id).and_then(|n| match &n.data {
+                NodeData::HitRegion(hr) if hr.accepts_composer_input => Some(hr.bounds),
+                _ => None,
             });
         }
         if let Some(node) = scene.nodes.get(&node_id) {
             for child in &node.children {
-                if self.node_tree_contains(*child, scene, target) {
-                    return true;
+                if let Some(bounds) = Self::node_tree_composer_bounds(*child, scene, target) {
+                    return Some(bounds);
                 }
             }
         }
-        false
+        None
     }
 
     /// Build a [`TextItem`] for the local composer echo draft text.
@@ -314,9 +319,7 @@ impl Compositor {
     ) -> Option<crate::text::TextItem> {
         let cs = self.local_composer.as_ref()?;
         self.text_rasterizer.as_ref()?;
-        if !self.tile_contains_composer_node(tile, scene, cs.node_id) {
-            return None;
-        }
+        let region = Self::composer_region_bounds(tile, scene, cs.node_id)?;
 
         // Insert the caret glyph at the cursor byte offset, gated by the blink
         // phase.  composer_display_text_blink handles OOB and non-char-boundary
@@ -331,8 +334,6 @@ impl Compositor {
             has_selection || caret_visible_at(self.composer_caret_blink_start.elapsed());
         let display_text = composer_display_text_blink(&cs.text, cs.cursor_byte, caret_visible);
 
-        let strip_h = (tokens.font_size_px * 1.6).max(20.0);
-        let strip_y = (tile.bounds.y + tile.bounds.height - strip_h).max(tile.bounds.y);
         let text_margin = 6.0;
 
         // Convert linear-sRGB floats → sRGB u8 for TextItem (matches rgba_to_srgb_u8
@@ -346,8 +347,8 @@ impl Compositor {
             to_alpha_u8(tokens.text_a),
         ];
 
-        let bw = (tile.bounds.width - text_margin * 2.0).max(1.0);
-        let bh = (strip_h - text_margin).max(1.0);
+        let bw = (region.width - text_margin * 2.0).max(1.0);
+        let bh = (region.height - text_margin * 2.0).max(1.0);
 
         let _ = sw; // retained for API symmetry with other collect helpers
         let _ = sh;
@@ -398,14 +399,14 @@ impl Compositor {
 
         Some(crate::text::TextItem {
             text: Arc::from(display_text.as_str()),
-            pixel_x: tile.bounds.x + text_margin,
-            pixel_y: strip_y + text_margin * 0.5,
+            pixel_x: region.x + text_margin,
+            pixel_y: region.y + text_margin,
             bounds_width: bw,
             bounds_height: bh,
-            clip_pixel_x: tile.bounds.x + text_margin,
-            clip_pixel_y: strip_y,
+            clip_pixel_x: region.x + text_margin,
+            clip_pixel_y: region.y,
             clip_bounds_width: bw.max(1.0),
-            clip_bounds_height: strip_h.max(1.0),
+            clip_bounds_height: region.height.max(1.0),
             font_size_px: tokens.font_size_px,
             font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
             font_weight: 400,

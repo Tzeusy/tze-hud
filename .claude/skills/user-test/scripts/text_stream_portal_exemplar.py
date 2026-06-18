@@ -200,8 +200,15 @@ COMPOSER_VISIBLE_LINE_NODES = 8
 COMPOSER_LINE_KEYS = tuple(
     f"line_{index}" for index in range(COMPOSER_VISIBLE_LINE_NODES)
 )
+COMPOSER_INPUT_CHILD_KEYS = (
+    "clear_bg",
+    "hit",
+    *COMPOSER_LINE_KEYS,
+    "caret",
+)
 COMPOSER_NODE_IDS = {
     "root": uuid.uuid4().bytes,
+    "clear_bg": uuid.uuid4().bytes,
     "hit": uuid.uuid4().bytes,
     **{key: uuid.uuid4().bytes for key in COMPOSER_LINE_KEYS},
     "caret": uuid.uuid4().bytes,
@@ -241,6 +248,7 @@ FRAME_CHILD_KEYS = [
 def fresh_composer_node_ids() -> dict[str, bytes]:
     return {
         "root": uuid.uuid4().bytes,
+        "clear_bg": uuid.uuid4().bytes,
         "hit": uuid.uuid4().bytes,
         **{key: uuid.uuid4().bytes for key in COMPOSER_LINE_KEYS},
         "caret": uuid.uuid4().bytes,
@@ -1478,16 +1486,15 @@ def build_input_scroll_nodes(
     node_ids = node_ids or fresh_composer_node_ids()
     input_rect, _ = portal_pane_rects()
     composer_rect = input_composer_local_rect()
-    text_inset = 12.0
-    hit_h = input_rect.h + scroll_max_y_for_text(composer_text, composer_rect.h, SCROLL_LINE_PX)
     root = make_solid_color_node(
         0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, input_rect.w, input_rect.h,
         node_id=node_ids.get("root"),
     )
+    clear_bg = build_composer_clear_node(node_id=node_ids.get("clear_bg"))
     hit = make_hit_region(
         COMPOSER_INTERACTION_ID,
-        0.0, 0.0, input_rect.w, hit_h,
+        composer_rect.x, composer_rect.y, composer_rect.w, composer_rect.h,
         accepts_composer_input=True,
         node_id=node_ids.get("hit"),
     )
@@ -1506,7 +1513,23 @@ def build_input_scroll_nodes(
         visible_start_row=line_window.start_row,
         node_id=node_ids.get("caret"),
     )
-    return root, [hit, *line_nodes, caret]
+    return root, [clear_bg, hit, *line_nodes, caret]
+
+
+def build_composer_clear_node(
+    *,
+    node_id: Optional[bytes] = None,
+) -> types_pb2.NodeProto:
+    composer_rect = input_composer_local_rect()
+    return make_solid_color_node(
+        *TEXT_WINDOW_BG_RGBA,
+        composer_rect.x + 1.0,
+        composer_rect.y + 1.0,
+        max(0.0, composer_rect.w - 2.0),
+        max(0.0, composer_rect.h - 2.0),
+        radius=9.0,
+        node_id=node_id,
+    )
 
 
 def build_composer_line_node(
@@ -1548,7 +1571,7 @@ def build_composer_line_nodes(
     )
     line_nodes = [
         build_composer_line_node(
-            line,
+            line if line else " ",
             index,
             placeholder_style=line_window.placeholder_style and index == 0,
             node_id=(node_ids or {}).get(COMPOSER_LINE_KEYS[index]),
@@ -1846,17 +1869,18 @@ async def set_input_root_with_runtime_ids(
         _, input_child_ids = await set_root_with_children(
             client, lease_id, tile_id, input_root, input_children,
         )
-        expected_children = 1 + COMPOSER_VISIBLE_LINE_NODES + 1
+        expected_children = len(COMPOSER_INPUT_CHILD_KEYS)
         if len(input_child_ids) >= expected_children:
-            COMPOSER_RUNTIME_NODE_IDS["hit"] = input_child_ids[0]
+            COMPOSER_RUNTIME_NODE_IDS["clear_bg"] = input_child_ids[0]
+            COMPOSER_RUNTIME_NODE_IDS["hit"] = input_child_ids[1]
             for key, node_id in zip(
                 COMPOSER_LINE_KEYS,
-                input_child_ids[1:1 + COMPOSER_VISIBLE_LINE_NODES],
+                input_child_ids[2:2 + COMPOSER_VISIBLE_LINE_NODES],
             ):
                 COMPOSER_RUNTIME_NODE_IDS[key] = node_id
-            COMPOSER_RUNTIME_NODE_IDS["text"] = input_child_ids[1]
+            COMPOSER_RUNTIME_NODE_IDS["text"] = input_child_ids[2]
             COMPOSER_RUNTIME_NODE_IDS["caret"] = input_child_ids[
-                1 + COMPOSER_VISIBLE_LINE_NODES
+                2 + COMPOSER_VISIBLE_LINE_NODES
             ]
 
     if mutation_lock is not None:
@@ -2007,7 +2031,7 @@ async def update_input_scroll_geometry_live(
     if not COMPOSER_RUNTIME_NODE_IDS:
         return
     _, input_children = build_input_scroll_nodes(composer_text)
-    child_keys = ["hit", *COMPOSER_LINE_KEYS, "caret"]
+    child_keys = list(COMPOSER_INPUT_CHILD_KEYS)
     mutations = [
         update_node_content_mutation(tile_id, node_id, node)
         for key, node in zip(child_keys, input_children)
@@ -2981,16 +3005,22 @@ async def portal_interaction_loop(
         if line_node_ids is None or caret_node_id is None:
             print("  [grpc] Composer render skipped; input nodes not mounted yet.", flush=True)
             return
+        runtime_echo_active = composer_focused and bool(composer_text)
+        render_text = "" if runtime_echo_active else composer_text
+        render_cursor = 0 if runtime_echo_active else composer_cursor
+        render_focused = composer_focused and not runtime_echo_active
+        render_placeholder = " " if runtime_echo_active else "type a reply — Enter to submit"
         line_nodes, line_window = build_composer_line_nodes(
-            composer_text,
-            composer_cursor,
-            focused=composer_focused,
+            render_text,
+            render_cursor,
+            focused=render_focused,
+            composer_placeholder=render_placeholder,
         )
         caret_node = build_composer_caret_node(
-            composer_text,
-            composer_cursor,
-            focused=composer_focused,
-            caret_visible=composer_caret_visible,
+            render_text,
+            render_cursor,
+            focused=render_focused,
+            caret_visible=composer_caret_visible and not runtime_echo_active,
             visible_start_row=line_window.start_row,
             node_id=caret_node_id,
         )
@@ -3028,11 +3058,6 @@ async def portal_interaction_loop(
                 print("  [grpc] Composer render skipped; stale input nodes during resize.", flush=True)
                 return
             raise
-        print(
-            "  [grpc] Composer lines/caret updated: "
-            f"{line_node_ids[0].hex()[:16]}.../{caret_node_id.hex()[:16]}...",
-            flush=True,
-        )
 
     async def composer_render_worker() -> None:
         nonlocal composer_render_dirty, composer_render_task
@@ -3452,6 +3477,18 @@ async def portal_interaction_loop(
                     "action": "runtime delivered key input; draft state update arrives via composer_draft_state",
                     "expected_visual": "editing result arrives via runtime-owned draft-state event",
                 }, key=ev.key, key_code=ev.key_code, repeat=ev.repeat,
+                   ctrl=ev.ctrl, shift=ev.shift, alt=ev.alt, meta=ev.meta)
+
+            elif kind == "key_up":
+                ev = envelope.key_up
+                if ev.tile_id != tiles.input_scroll:
+                    continue
+                emit_step_event(transcript, 10, "checkpoint", {
+                    "code": "input:key-up",
+                    "title": "Composer key up received (observed)",
+                    "action": "runtime delivered key release; used to diagnose OS key delivery",
+                    "expected_visual": "no visible change expected from release alone",
+                }, key=ev.key, key_code=ev.key_code,
                    ctrl=ev.ctrl, shift=ev.shift, alt=ev.alt, meta=ev.meta)
 
             elif kind == "scroll_offset_changed":
@@ -4835,16 +4872,36 @@ def run_composer_self_test() -> int:
         failures.append(f"long-word caret x={long_x:.2f} exceeds wrap width {width:.2f}")
 
     _, input_children = build_input_scroll_nodes("typed text that should live in fixed line nodes")
-    expected_composer_children = 1 + 8 + 1  # hit region + fixed line nodes + caret
+    expected_composer_children = len(COMPOSER_INPUT_CHILD_KEYS)
     if len(input_children) != expected_composer_children:
         failures.append(
-            "composer input tile must mount fixed per-line text nodes; "
+            "composer input tile must mount clear background, hit region, fixed per-line text nodes, and caret; "
             f"got {len(input_children)} children, expected {expected_composer_children}"
         )
-    line_nodes = input_children[1:1 + COMPOSER_VISIBLE_LINE_NODES]
+    clear_node = input_children[0]
+    if not clear_node.HasField("solid_color"):
+        failures.append("composer input tile must draw a clear/background node before text")
+    hit_node = input_children[1]
+    composer_rect = input_composer_local_rect()
+    if not hit_node.HasField("hit_region"):
+        failures.append("composer input tile must mount a hit region after the clear background")
+    else:
+        hit_bounds = hit_node.hit_region.bounds
+        if (
+            abs(hit_bounds.x - composer_rect.x) > 0.01
+            or abs(hit_bounds.y - composer_rect.y) > 0.01
+            or abs(hit_bounds.width - composer_rect.w) > 0.01
+            or abs(hit_bounds.height - composer_rect.h) > 0.01
+        ):
+            failures.append("composer hit region must match the visible composer box")
+    line_nodes = input_children[2:2 + COMPOSER_VISIBLE_LINE_NODES]
     if len(line_nodes) == COMPOSER_VISIBLE_LINE_NODES:
         first_line_y = line_nodes[0].text_markdown.bounds.y
         for index, line_node in enumerate(line_nodes):
+            if line_node.text_markdown.content == "":
+                failures.append(
+                    f"composer line {index} uses empty content; blank lines must still invalidate stale text"
+                )
             if line_node.text_markdown.overflow != types_pb2.TEXT_OVERFLOW_PROTO_CLIP:
                 failures.append(
                     f"composer line {index} must explicitly use Clip overflow"

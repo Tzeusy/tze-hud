@@ -9461,6 +9461,97 @@ fn local_composer_state_handle_slot_semantics() {
     );
 }
 
+/// Local composer echo must render inside the focused composer HitRegion, not
+/// as a generic strip at the bottom of the containing tile.
+#[tokio::test]
+async fn local_composer_text_item_uses_hit_region_bounds() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(320, 200).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let mut scene = SceneGraph::new(320.0, 200.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("test", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "test",
+            lease_id,
+            Rect::new(20.0, 30.0, 200.0, 120.0),
+            1,
+        )
+        .unwrap();
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 0.0, 0.0, 0.0),
+                    bounds: Rect::new(0.0, 0.0, 200.0, 120.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+
+    let hit_id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(root_id),
+            Node {
+                id: hit_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(12.0, 16.0, 140.0, 72.0),
+                    interaction_id: "composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+    compositor.local_composer = Some(LocalComposerState {
+        text: "hello".to_owned(),
+        cursor_byte: 5,
+        selection_anchor: 5,
+        at_capacity: false,
+        node_id: hit_id,
+    });
+
+    let tokens = resolve_composer_overlay_tokens(&std::collections::HashMap::new());
+    let tile = scene.tiles.get(&tile_id).unwrap();
+    let item = compositor
+        .collect_composer_text_item(tile, &scene, 320.0, 200.0, &tokens)
+        .expect("focused composer HitRegion must produce a text item");
+
+    assert_eq!(
+        item.pixel_x, 38.0,
+        "text x must anchor to hit-region x + margin"
+    );
+    assert_eq!(
+        item.pixel_y, 52.0,
+        "text y must anchor to hit-region y + margin"
+    );
+    assert_eq!(
+        item.clip_pixel_y, 46.0,
+        "clip y must use the hit-region top, not the tile bottom strip"
+    );
+    assert_eq!(
+        item.bounds_width, 128.0,
+        "text bounds width must be the hit-region width minus horizontal margins"
+    );
+    assert_eq!(
+        item.bounds_height, 60.0,
+        "text bounds height must be the hit-region height minus vertical margins"
+    );
+}
+
 /// Pure blink-phase logic: `elapsed → caret-visible` must produce a square wave
 /// with period `2 * CARET_BLINK_HALF_PERIOD`, solid in the first half-period so
 /// the caret is solid immediately after a reset (keystroke / caret move).
