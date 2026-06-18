@@ -44,13 +44,18 @@ jobs:
 
       - name: Cross-build canonical app (release, x86_64-pc-windows-gnu)
         run: |
-          cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
+          set -euo pipefail
+          EXE_PATH="$(scripts/build_windows_app.sh \
+            --target x86_64-pc-windows-gnu \
+            --profile release \
+            --skip-toolchain)"
+          echo "TZE_HUD_RELEASE_EXE=${EXE_PATH}" >> "$GITHUB_ENV"
 
       - name: Generate SHA-256 checksum
         id: checksum
         run: |
           set -euo pipefail
-          ART_DIR="$PWD/target/x86_64-pc-windows-gnu/release"
+          ART_DIR="$(dirname "$TZE_HUD_RELEASE_EXE")"
           (
             cd "$ART_DIR"
             # Checksum references the deterministic artifact name `tze_hud.exe`.

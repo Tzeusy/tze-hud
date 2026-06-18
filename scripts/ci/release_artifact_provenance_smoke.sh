@@ -52,9 +52,10 @@ CHECKSUM_PATH="${ARTIFACT_DIR}/${CHECKSUM_NAME}"
 [[ -f "$EXE_PATH" ]] || die "missing release artifact: $EXE_PATH"
 [[ -f "$CHECKSUM_PATH" ]] || die "missing checksum artifact: $CHECKSUM_PATH"
 
-read -r EXPECTED_HASH CHECKSUM_TARGET EXTRA_FIELD < <(awk 'NF { print $1, $2, $3; exit }' "$CHECKSUM_PATH")
+CHECKSUM_RECORD="$(awk 'NF { print $1, $2, $3; exit }' "$CHECKSUM_PATH")"
 
-[[ -n "${EXPECTED_HASH:-}" ]] || die "checksum file is empty: $CHECKSUM_PATH"
+[[ -n "$CHECKSUM_RECORD" ]] || die "checksum file is empty: $CHECKSUM_PATH"
+read -r EXPECTED_HASH CHECKSUM_TARGET EXTRA_FIELD <<< "$CHECKSUM_RECORD"
 [[ -z "${EXTRA_FIELD:-}" ]] || die "checksum file must contain exactly '<sha256>  ${EXE_NAME}'"
 [[ "$EXPECTED_HASH" =~ ^[0-9A-Fa-f]{64}$ ]] || die "malformed SHA-256 digest: $EXPECTED_HASH"
 [[ "$CHECKSUM_TARGET" == "$EXE_NAME" ]] || {

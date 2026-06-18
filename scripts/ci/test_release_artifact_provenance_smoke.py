@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ SCRIPT_PATH = Path(__file__).parent / "release_artifact_provenance_smoke.sh"
 class ReleaseArtifactProvenanceSmokeTests(unittest.TestCase):
     def _fixture_dir(self, payload: bytes = b"release executable fixture\n") -> Path:
         temp_dir = Path(tempfile.mkdtemp(prefix="tze-hud-release-provenance."))
+        self.addCleanup(shutil.rmtree, temp_dir, ignore_errors=True)
         exe_path = temp_dir / "tze_hud.exe"
         exe_path.write_bytes(payload)
         digest = hashlib.sha256(payload).hexdigest()
@@ -53,6 +55,23 @@ class ReleaseArtifactProvenanceSmokeTests(unittest.TestCase):
         result = self._run(artifact_dir)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must reference tze_hud.exe", result.stderr)
+
+    def test_empty_checksum_reports_diagnostic(self) -> None:
+        artifact_dir = self._fixture_dir()
+        (artifact_dir / "tze_hud.exe.sha256").write_text("", encoding="utf-8")
+        result = self._run(artifact_dir)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("checksum file is empty", result.stderr)
+
+    def test_malformed_checksum_reports_diagnostic(self) -> None:
+        artifact_dir = self._fixture_dir()
+        (artifact_dir / "tze_hud.exe.sha256").write_text(
+            "not-a-sha256  tze_hud.exe\n",
+            encoding="utf-8",
+        )
+        result = self._run(artifact_dir)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("malformed SHA-256 digest", result.stderr)
 
 
 if __name__ == "__main__":
