@@ -133,6 +133,9 @@ use crate::widget_runtime_registration::process_pending_widget_svgs;
 use crate::window::{HitRegion, WindowConfig, WindowMode};
 use crate::window::{resolve_window_mode, should_capture_pointer_event};
 
+#[cfg(test)]
+mod test_support;
+
 // ── Drag-to-move: data carried out of the scene-lock for post-lock work ──────
 
 /// Payload returned by [`apply_drag_handle_pointer_event`] when a drag is
@@ -6531,6 +6534,10 @@ fn detect_monitor_size(
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{
+        make_shared_state, make_test_zone, portal_scene_with_focus, scene_with_capture_tile,
+        scene_with_composer_in_nonactive_tab, scene_with_drag_handle_tile,
+    };
     use super::*;
     use tze_hud_scene::NodeData;
 
@@ -6861,45 +6868,6 @@ mod tests {
     }
 
     // ── Content-layer tile HitRegion capture ─────────────────────────────
-
-    /// Helper: build a scene with a single tile that has a HitRegionNode child.
-    fn scene_with_capture_tile() -> (SceneGraph, tze_hud_scene::SceneId) {
-        use tze_hud_scene::{Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId};
-        let mut scene = SceneGraph::new(1920.0, 1080.0);
-        let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease(
-            "portal-agent",
-            60_000,
-            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
-        );
-        let tile_id = scene
-            .create_tile(
-                tab_id,
-                "portal-agent",
-                lease_id,
-                Rect::new(300.0, 400.0, 600.0, 200.0),
-                1,
-            )
-            .unwrap();
-        let node_id = SceneId::new();
-        scene
-            .set_tile_root(
-                tile_id,
-                Node {
-                    id: node_id,
-                    children: vec![],
-                    data: NodeData::HitRegion(HitRegionNode {
-                        bounds: Rect::new(0.0, 0.0, 200.0, 40.0),
-                        interaction_id: "portal-submit".to_string(),
-                        accepts_pointer: true,
-                        accepts_focus: true,
-                        ..Default::default()
-                    }),
-                },
-            )
-            .unwrap();
-        (scene, tile_id)
-    }
 
     /// A content tile with a pointer HitRegionNode must appear in the overlay
     /// capture region set so the OS delivers pointer events to the window rather
@@ -7253,34 +7221,6 @@ mod tests {
     // These tests exercise `start_network_services` directly — no winit window
     // is required. They verify the config-driven endpoint enable/disable
     // behaviour described in the acceptance criteria.
-
-    use tokio::sync::Mutex as TokioMutex;
-
-    fn make_shared_state() -> Arc<TokioMutex<SharedState>> {
-        use tze_hud_protocol::session::{RuntimeDegradationLevel, SessionRegistry};
-        use tze_hud_protocol::token::TokenStore;
-        use tze_hud_scene::graph::SceneGraph;
-        let scene = Arc::new(TokioMutex::new(SceneGraph::new(1920.0, 1080.0)));
-        let sessions = SessionRegistry::new("test-psk");
-        Arc::new(TokioMutex::new(SharedState {
-            scene,
-            sessions,
-            resource_store: tze_hud_resource::ResourceStore::new(
-                tze_hud_resource::ResourceStoreConfig::default(),
-            ),
-            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
-            runtime_widget_store: None,
-            element_store: tze_hud_scene::element_store::ElementStore::default(),
-            element_store_path: None,
-            safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            active_tab_mirror: Arc::new(std::sync::Mutex::new(None)),
-            token_store: TokenStore::new(),
-            freeze_active: false,
-            degradation_level: RuntimeDegradationLevel::Normal,
-            media_ingress_active: None,
-            input_capture_tx: None,
-        }))
-    }
 
     /// Regression (hud-dwcr7): composer keystroke echo must apply to the draft
     /// even while the scene mutex is held by a gRPC mutation batch.
@@ -8162,32 +8102,7 @@ redaction_style = "blank"
 
     // ── Zone interaction: dismiss hit wiring (hud-ltgk.6) ────────────────────
 
-    use tze_hud_scene::types::{
-        ContentionPolicy, GeometryPolicy, LayerAttachment, NotificationPayload, Rect,
-        RenderingPolicy, SceneId, ZoneDefinition, ZoneHitRegion, ZoneMediaType,
-    };
-
-    fn make_test_zone(name: &str) -> ZoneDefinition {
-        ZoneDefinition {
-            id: SceneId::new(),
-            name: name.to_string(),
-            description: format!("test zone: {name}"),
-            geometry_policy: GeometryPolicy::Relative {
-                x_pct: 0.0,
-                y_pct: 0.0,
-                width_pct: 1.0,
-                height_pct: 0.1,
-            },
-            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
-            rendering_policy: RenderingPolicy::default(),
-            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
-            max_publishers: 8,
-            transport_constraint: None,
-            auto_clear_ms: None,
-            ephemeral: false,
-            layer_attachment: LayerAttachment::Chrome,
-        }
-    }
+    use tze_hud_scene::types::{NotificationPayload, Rect, ZoneHitRegion};
 
     /// Pointer-up on a zone dismiss hit-region must remove the notification from
     /// `zone_registry.active_publishes`.
@@ -8476,78 +8391,6 @@ redaction_style = "blank"
     }
 
     // ── Drag-to-move: long-press drag moves a text stream portal tile [hud-9yfce] ──
-
-    /// Build a scene with a single text-stream-portal-like tile plus the
-    /// corresponding drag handle hit region registered in the chrome layer.
-    ///
-    /// Returns `(scene, tile_id, element_id, interaction_id)`.
-    fn scene_with_drag_handle_tile(
-        initial_x: f32,
-        initial_y: f32,
-        tile_w: f32,
-        tile_h: f32,
-    ) -> (
-        SceneGraph,
-        tze_hud_scene::SceneId,
-        tze_hud_scene::SceneId,
-        String,
-    ) {
-        use tze_hud_scene::types::DragHandleElementKind;
-        use tze_hud_scene::{Capability, DragHandleHitRegion, HitRegionNode};
-
-        let mut scene = SceneGraph::new(1920.0, 1080.0);
-        let tab_id = scene.create_tab("Main", 0).expect("tab must be created");
-        let lease_id = scene.grant_lease(
-            "portal-agent",
-            60_000,
-            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
-        );
-        let tile_id = scene
-            .create_tile(
-                tab_id,
-                "portal-agent",
-                lease_id,
-                Rect::new(initial_x, initial_y, tile_w, tile_h),
-                1,
-            )
-            .expect("tile must be created");
-
-        // The element_id for a tile is its scene id (used in drag handle).
-        let element_id = tile_id;
-
-        // Register a drag handle hit region above the tile (as the compositor would).
-        let interaction_id = format!(
-            "drag-handle:{:032x}",
-            element_id
-                .to_bytes_le()
-                .iter()
-                .fold(0u128, |acc, &b| (acc << 8) | b as u128)
-        );
-        let handle_bounds = Rect::new(
-            initial_x + tile_w / 2.0 - 20.0, // centred above tile
-            initial_y - 10.0,
-            40.0,
-            20.0,
-        );
-        scene
-            .overlay
-            .drag_handle_hit_regions
-            .push(DragHandleHitRegion {
-                element_id,
-                element_kind: DragHandleElementKind::Tile,
-                bounds: handle_bounds,
-                interaction_id: interaction_id.clone(),
-                hit_region: HitRegionNode {
-                    bounds: handle_bounds,
-                    interaction_id: interaction_id.clone(),
-                    accepts_pointer: true,
-                    ..Default::default()
-                },
-                tab_order: 0,
-            });
-
-        (scene, tile_id, element_id, interaction_id)
-    }
 
     /// A long-press drag on a tile's drag handle must move the tile's bounds and
     /// return a `DragReleasedData` payload when the pointer is released.
@@ -9178,66 +9021,6 @@ redaction_style = "blank"
 
     // ── Click-to-focus tab resolution (hud-dwcr7) ───────────────────────────
 
-    /// Build a scene with a composer tile (accepts_focus + accepts_composer_input)
-    /// living in `portal_tab`, while `scene.active_tab` is set to `other_tab`.
-    /// Returns (scene, portal_tab, composer_tile, composer_node, pointer x/y).
-    fn scene_with_composer_in_nonactive_tab() -> (
-        tze_hud_scene::graph::SceneGraph,
-        tze_hud_scene::SceneId,
-        tze_hud_scene::SceneId,
-        tze_hud_scene::SceneId,
-        f32,
-        f32,
-    ) {
-        use tze_hud_scene::types::HitRegionNode;
-        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
-
-        let mut scene = SceneGraph::new(1920.0, 1080.0);
-        // Two tabs: an "other" tab that is active, and the portal tab that owns
-        // the composer tile.  This reproduces the live failure where the global
-        // active_tab is NOT the tab the operator clicked (hud-dwcr7).
-        let other_tab = scene.create_tab("Other", 0).unwrap(); // auto-activates
-        let portal_tab = scene.create_tab("Portal", 1).unwrap();
-        assert_eq!(scene.active_tab, Some(other_tab));
-
-        let lease_id = scene.grant_lease(
-            "portal-agent",
-            60_000,
-            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
-        );
-        let tile_id = scene
-            .create_tile(
-                portal_tab,
-                "portal-agent",
-                lease_id,
-                Rect::new(100.0, 100.0, 400.0, 300.0),
-                1,
-            )
-            .unwrap();
-
-        let node_id = SceneId::new();
-        scene
-            .set_tile_root(
-                tile_id,
-                Node {
-                    id: node_id,
-                    children: vec![],
-                    data: NodeData::HitRegion(HitRegionNode {
-                        bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
-                        interaction_id: "portal-composer-focus".to_string(),
-                        accepts_focus: true,
-                        accepts_pointer: true,
-                        accepts_composer_input: true,
-                        ..Default::default()
-                    }),
-                },
-            )
-            .unwrap();
-
-        // Pointer lands inside the composer tile (tile origin 100,100).
-        (scene, portal_tab, tile_id, node_id, 150.0, 150.0)
-    }
-
     /// Regression: click-to-focus must acquire focus on a composer tile whose
     /// tab is NOT the global active_tab.  Keying focus off the stale active_tab
     /// (the pre-fix behavior) drops the focus transition at FocusManager::on_click
@@ -9311,57 +9094,6 @@ redaction_style = "blank"
     }
 
     // ── Pointer-affordance portal resize ─────────────────────────────────────
-
-    /// Helper: build a minimal portal scene with a scrollable tile focused in
-    /// the FocusManager, and return (scene, tab_id, tile_id, focus_manager).
-    fn portal_scene_with_focus() -> (
-        tze_hud_scene::graph::SceneGraph,
-        tze_hud_scene::SceneId,
-        tze_hud_scene::SceneId,
-        tze_hud_input::FocusManager,
-    ) {
-        use tze_hud_input::{FocusManager, FocusRequest};
-        use tze_hud_scene::{Capability, Rect, SceneGraph};
-
-        let mut scene = SceneGraph::new(1920.0, 1080.0);
-        let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease(
-            "portal-agent",
-            60_000,
-            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
-        );
-        let tile_id = scene
-            .create_tile(
-                tab_id,
-                "portal-agent",
-                lease_id,
-                // Place tile well inside the display so affordances don't hit boundaries.
-                Rect::new(100.0, 100.0, 400.0, 300.0),
-                1,
-            )
-            .unwrap();
-
-        // Mark the tile as scrollable so tile_scroll_config returns Some.
-        let _ = scene.register_tile_scroll_config(
-            tile_id,
-            tze_hud_scene::types::TileScrollConfig::vertical(),
-        );
-
-        // Set focus to this tile so apply_portal_resize_pointer_event resolves it.
-        let mut fm = FocusManager::new();
-        fm.request_focus(
-            FocusRequest {
-                tile_id,
-                node_id: None,
-                steal: true,
-                requesting_namespace: "portal-agent".to_string(),
-            },
-            tab_id,
-            &scene,
-        );
-
-        (scene, tab_id, tile_id, fm)
-    }
 
     /// A pointer-down on a resize affordance starts the gesture:
     ///   - `gesture_active()` becomes true.
