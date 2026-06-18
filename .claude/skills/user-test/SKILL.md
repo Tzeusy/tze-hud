@@ -963,6 +963,11 @@ resident session, so normal exit and Ctrl-C cleanup remove the portal tiles
 without requiring a HUD restart. Use `--leave-lease-on-exit` only when
 deliberately testing orphan/grace behavior.
 
+Resize maxima in this exemplar are derived from the live `SceneSnapshot`
+`display_area`. The runtime does not yet expose a portal-specific lease maximum
+to the script, so display-area bounds are the interim harness limit while still
+preserving the token-defined minimum legible size where the display can fit it.
+
 Optional `--phases` values:
 
 | Phase | What it exercises | Operator-visible proof |

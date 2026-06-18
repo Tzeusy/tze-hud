@@ -14,6 +14,44 @@ import text_stream_portal_exemplar as portal  # noqa: E402
 
 
 class TextStreamPortalExemplarTests(unittest.TestCase):
+    def test_large_display_size_clamp_uses_scene_bounds_not_demo_cap(self) -> None:
+        w, h = portal.clamp_portal_size(2200.0, 1400.0, 3840.0, 2160.0)
+
+        self.assertEqual((w, h), (2200.0, 1400.0))
+        self.assertGreater(w, 1280.0)
+        self.assertGreater(h, 960.0)
+
+    def test_large_display_default_size_regression_exceeds_old_cap(self) -> None:
+        w, h = portal.default_portal_size(3840.0, 2160.0)
+
+        self.assertEqual((w, h), (1720.0, 1360.0))
+        self.assertGreater(w, 1280.0)
+        self.assertGreater(h, 960.0)
+
+    def test_profile_swap_expanded_stays_larger_than_large_display_standard(self) -> None:
+        standard_w, standard_h = portal.default_portal_size(3840.0, 2160.0)
+        profiles = portal.profile_swap_dimensions(standard_w, standard_h)
+        expanded = next(profile for profile in profiles if profile[0] == "expanded")
+
+        expanded_w, expanded_h = portal.clamp_portal_size(
+            expanded[1],
+            expanded[2],
+            3840.0,
+            2160.0,
+        )
+        self.assertGreater(expanded_w, standard_w)
+        self.assertGreater(expanded_h, standard_h)
+
+    def test_portal_size_clamp_keeps_geometry_on_screen(self) -> None:
+        self.assertEqual(
+            portal.clamp_portal_size(5000.0, 3000.0, 3840.0, 2160.0),
+            (3840.0, 2160.0),
+        )
+        self.assertEqual(
+            portal.clamp_portal_size(100.0, 100.0, 3840.0, 2160.0),
+            (portal.PORTAL_MIN_W, portal.PORTAL_MIN_H),
+        )
+
     def test_caret_advance_matches_explicit_wrap_advance_at_line_end(self) -> None:
         max_width = portal.composer_wrap_area_width_px()
         chars_on_line = math.floor(max_width / portal.COMPOSER_WRAP_CHAR_W)
