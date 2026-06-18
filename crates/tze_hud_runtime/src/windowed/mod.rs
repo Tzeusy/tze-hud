@@ -1678,8 +1678,8 @@ struct WindowedRuntimeState {
     /// `INPUT_EVENTS` subscription.
     input_event_tx:
         Option<tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>>,
-    /// Delivery context (namespace, node_id_bytes) captured at the moment a
-    /// composer node loses focus (blur transition).
+    /// Delivery context (namespace, node_id_bytes, tile_id) captured at the
+    /// moment a composer node loses focus (blur transition).
     ///
     /// When `InputProcessor::process_with_focus` processes a focus-lost event
     /// for a composer region it calls `ComposerDraftManager::on_focus_lost()`,
@@ -1697,7 +1697,7 @@ struct WindowedRuntimeState {
     ///
     /// Cleared on focus-gain to prevent stale context from leaking across
     /// focus boundaries.
-    pending_blur_delivery_context: Option<(String, [u8; 16])>,
+    pending_blur_delivery_context: Option<(String, [u8; 16], tze_hud_scene::SceneId)>,
     /// Per-portal resize state machines keyed by tile `SceneId`.
     ///
     /// Holds `PortalResizeState` for every portal tile that has been focused
@@ -3046,7 +3046,7 @@ impl WinitApp {
                             "click-to-focus: focus lost"
                         );
                         // Capture the composer delivery context (namespace +
-                        // node_id) while both are still known.  If this blur
+                        // node_id + tile_id) while all are still known.  If this blur
                         // triggered a composer flush (InputProcessor stored a
                         // pending_flushed_batch), composer_focused_node() is now
                         // None, so composer_delivery_context() can no longer
@@ -3055,7 +3055,7 @@ impl WinitApp {
                         // terminal draft batch (§4.3 flush guarantee on blur).
                         if let Some(node_id) = ev.node_id {
                             self.state.pending_blur_delivery_context =
-                                Some((ns.clone(), *node_id.as_uuid().as_bytes()));
+                                Some((ns.clone(), *node_id.as_uuid().as_bytes(), ev.tile_id));
                         }
                         // Mark that the local echo should be cleared after this
                         // borrow scope ends (cannot call clear_local_composer_echo
@@ -3606,7 +3606,9 @@ impl WinitApp {
             if let Some(b) = batch {
                 key_down_is_terminal = b.cancel.is_some() || b.submission.is_some();
                 // Resolve delivery context before the batch is consumed.
-                if let Some((namespace, node_id_bytes)) = self.composer_delivery_context() {
+                if let Some((namespace, node_id_bytes, tile_id)) = self.composer_delivery_context()
+                {
+                    self.route_portal_composer_batch(tile_id, &b);
                     deliver_composer_batch(
                         &self.state.input_event_tx,
                         namespace,
@@ -3848,7 +3850,9 @@ impl WinitApp {
                     // Submit or cancel: clear the local echo overlay.
                     self.clear_local_composer_echo();
                 }
-                if let Some((namespace, node_id_bytes)) = self.composer_delivery_context() {
+                if let Some((namespace, node_id_bytes, tile_id)) = self.composer_delivery_context()
+                {
+                    self.route_portal_composer_batch(tile_id, &b);
                     deliver_composer_batch(
                         &self.state.input_event_tx,
                         namespace,
@@ -3953,7 +3957,8 @@ impl WinitApp {
             .composer_delivery_context()
             .or_else(|| self.state.pending_blur_delivery_context.take());
         if let Some(batch) = self.state.input_processor.try_flush_composer_draft() {
-            if let Some((namespace, node_id_bytes)) = ctx {
+            if let Some((namespace, node_id_bytes, tile_id)) = ctx {
+                self.route_portal_composer_batch(tile_id, &batch);
                 deliver_composer_batch(
                     &self.state.input_event_tx,
                     namespace,
@@ -4406,7 +4411,7 @@ impl WinitApp {
         true // hotkey consumed
     }
 
-    /// Resolve the (namespace, node_id_bytes) pair for the currently focused
+    /// Resolve the (namespace, node_id_bytes, tile_id) tuple for the currently focused
     /// composer region.
     ///
     /// Returns `None` when no composer region is focused or the owning tile
@@ -4414,8 +4419,8 @@ impl WinitApp {
     ///
     /// Used by `dispatch_key_down_event`, `dispatch_character_event`, and
     /// `flush_composer_draft_at_settle` to supply the delivery context to
-    /// `deliver_composer_batch`.
-    fn composer_delivery_context(&self) -> Option<(String, [u8; 16])> {
+    /// `deliver_composer_batch` and the projection-authority input bridge.
+    fn composer_delivery_context(&self) -> Option<(String, [u8; 16], tze_hud_scene::SceneId)> {
         let node_id = self.state.input_processor.composer_focused_node()?;
         let node_id_bytes = *node_id.as_uuid().as_bytes();
 
@@ -4431,7 +4436,40 @@ impl WinitApp {
         let tab_id = self.active_tab_for_keyboard_dispatch()??;
         let tile_id = self.state.focus_manager.current_owner(tab_id).tile_id()?;
         let namespace = self.namespace_for_keyboard_tile(tile_id)??;
-        Some((namespace, node_id_bytes))
+        Some((namespace, node_id_bytes, tile_id))
+    }
+
+    /// Route submitted focused-portal composer text into the in-process
+    /// projection authority before the legacy namespace broadcast is emitted.
+    fn route_portal_composer_batch(
+        &mut self,
+        tile_id: tze_hud_scene::SceneId,
+        batch: &tze_hud_input::DraftNotificationBatch,
+    ) {
+        let submitted_at_wall_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+
+        if let Some(feedback) = self
+            .state
+            .portal_projection_driver
+            .submit_composer_batch_for_tile(
+                tile_id,
+                batch,
+                submitted_at_wall_us.max(1),
+                None,
+                tze_hud_projection::ContentClassification::Private,
+            )
+        {
+            tracing::debug!(
+                tile_id = ?tile_id,
+                pending_input_count = feedback.pending_input_count,
+                feedback_state = ?feedback.feedback_state,
+                "composer: routed portal submission to projection authority"
+            );
+        }
     }
 
     /// Push the current composer draft snapshot to the compositor thread for

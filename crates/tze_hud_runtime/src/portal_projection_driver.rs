@@ -50,13 +50,14 @@
 use std::collections::HashMap;
 
 use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
-use tze_hud_input::InputProcessor;
+use tze_hud_input::{DraftNotificationBatch, InputProcessor};
 pub use tze_hud_mcp::portal_op::{PendingInputBatch, PendingInputEntry, PortalOp};
 use tze_hud_projection::{
-    AcknowledgeInputRequest, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
+    AcknowledgeInputRequest, AdapterDraftBatch, AdapterDraftCancel, AdapterDraftNotification,
+    AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
     ContentClassification, DetachRequest, GetPendingInputRequest, InputAckState, OperationEnvelope,
-    OutputKind, PendingInputItem, ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds,
-    ProjectionOperation, ProviderKind, PublishOutputRequest,
+    OutputKind, PendingInputItem, PortalInputFeedback, ProjectedPortalPolicy, ProjectionAuthority,
+    ProjectionBounds, ProjectionOperation, ProviderKind, PublishOutputRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -155,6 +156,31 @@ fn parse_ack_state(raw: &str) -> Result<InputAckState, String> {
     serde_json::from_value(serde_json::Value::String(raw.to_string())).map_err(|_| {
         format!("invalid ack_state {raw:?}: expected one of handled, deferred, rejected")
     })
+}
+
+fn adapter_draft_batch_from_runtime(batch: &DraftNotificationBatch) -> AdapterDraftBatch {
+    AdapterDraftBatch {
+        latest: batch
+            .latest
+            .as_ref()
+            .map(|latest| AdapterDraftNotification {
+                text: latest.text.clone(),
+                cursor: latest.cursor,
+                selection_anchor: latest.selection_anchor,
+                at_capacity: latest.at_capacity,
+                sequence: latest.sequence,
+            }),
+        submission: batch
+            .submission
+            .as_ref()
+            .map(|submission| AdapterDraftSubmission {
+                text: submission.text.clone(),
+                sequence: submission.sequence,
+            }),
+        cancel: batch.cancel.as_ref().map(|cancel| AdapterDraftCancel {
+            sequence: cancel.sequence,
+        }),
+    }
 }
 
 /// Map an authority [`PendingInputItem`] into the transport-layer
@@ -400,6 +426,49 @@ impl InProcessPortalDriver {
 
         self.authority
             .push_geometry_snapshot(&projection_id, adapter_snapshot)
+    }
+
+    /// Route a focused portal composer batch into the owning projection state.
+    ///
+    /// The gRPC input-event broadcast is still emitted by `windowed`, but a
+    /// cooperative projection owner polls input from [`ProjectionAuthority`],
+    /// not from that namespace-keyed broadcast bus. This bridge is the
+    /// production submit path: it resolves the focused portal tile back to the
+    /// attached projection, lets the resident adapter consume the draft batch,
+    /// and maps any transactional submission into the authority pending-input
+    /// queue.
+    ///
+    /// Returns `None` when `tile_id` is not owned by an attached in-process
+    /// projection, or when the batch contains no transactional submission.
+    pub fn submit_composer_batch_for_tile(
+        &mut self,
+        tile_id: SceneId,
+        batch: &DraftNotificationBatch,
+        submitted_at_wall_us: u64,
+        expires_at_wall_us: Option<u64>,
+        content_classification: ContentClassification,
+    ) -> Option<PortalInputFeedback> {
+        let projection_id = self
+            .drive
+            .entries
+            .iter()
+            .find(|(_, entry)| entry.tile_scene_id == Some(tile_id))
+            .map(|(projection_id, _)| projection_id.clone())?;
+
+        let adapter_batch = adapter_draft_batch_from_runtime(batch);
+        let entry = self.drive.entries.get_mut(&projection_id)?;
+        entry.adapter.consume_draft_batch(&adapter_batch);
+
+        let submission = adapter_batch.submission.as_ref()?;
+        let result = entry.adapter.submit_composer_text(
+            &mut self.authority,
+            &projection_id,
+            submission.text.clone(),
+            submitted_at_wall_us,
+            expires_at_wall_us,
+            content_classification,
+        );
+        Some(result.feedback)
     }
 
     /// Apply a new design-token override map, propagating to all live adapters.
@@ -1203,11 +1272,11 @@ fn now_wall_us() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tze_hud_input::InputProcessor;
+    use tze_hud_input::{DraftNotificationBatch, DraftSubmission, InputProcessor};
     use tze_hud_projection::{
-        AttachRequest, ContentClassification, OperationEnvelope, OutputKind,
-        PORTAL_UPDATE_RATE_WINDOW_WALL_US, ProjectionBounds, ProjectionOperation, ProviderKind,
-        PublishOutputRequest,
+        AcknowledgeInputRequest, AttachRequest, ContentClassification, GetPendingInputRequest,
+        InputAckState, OperationEnvelope, OutputKind, PORTAL_UPDATE_RATE_WINDOW_WALL_US,
+        ProjectionBounds, ProjectionOperation, ProviderKind, PublishOutputRequest,
     };
     use tze_hud_scene::SceneGraph;
 
@@ -1274,6 +1343,115 @@ mod tests {
             ts,
         );
         assert!(resp.accepted, "publish_output must be accepted");
+    }
+
+    #[test]
+    fn portal_composer_submission_enters_pending_input_queue_and_can_be_acknowledged() {
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+        };
+
+        let projection_id = "proj-composer-return";
+        let token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        publish(
+            &mut driver,
+            projection_id,
+            &token,
+            "assistant is ready",
+            100,
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        let tile_id = driver
+            .drive
+            .entries
+            .get(projection_id)
+            .expect("drive entry must exist")
+            .tile_scene_id
+            .expect("drain must create a portal tile");
+
+        let mut batch = DraftNotificationBatch::new();
+        batch.record_submission(DraftSubmission {
+            text: "please summarize the current diff".to_string(),
+            sequence: 7,
+        });
+
+        let feedback = driver
+            .submit_composer_batch_for_tile(
+                tile_id,
+                &batch,
+                1_000,
+                Some(2_000),
+                ContentClassification::Private,
+            )
+            .expect("focused portal tile must map to an attached projection");
+        assert_eq!(
+            feedback.pending_input_count, 1,
+            "submission must create one semantic pending-input item"
+        );
+
+        let poll = driver.authority_mut().handle_get_pending_input(
+            GetPendingInputRequest {
+                envelope: test_envelope(
+                    ProjectionOperation::GetPendingInput,
+                    projection_id,
+                    "poll-composer-input",
+                ),
+                owner_token: token.clone(),
+                max_items: Some(1),
+                max_bytes: Some(4_096),
+            },
+            "codex-session",
+            1_100,
+        );
+        assert!(poll.accepted, "pending-input poll must be accepted");
+        assert_eq!(poll.pending_input.len(), 1);
+        assert_eq!(
+            poll.pending_input[0].submission_text,
+            "please summarize the current diff"
+        );
+
+        let input_id = poll.pending_input[0].input_id.clone();
+        let ack = driver.authority_mut().handle_acknowledge_input(
+            AcknowledgeInputRequest {
+                envelope: test_envelope(
+                    ProjectionOperation::AcknowledgeInput,
+                    projection_id,
+                    "ack-composer-input",
+                ),
+                owner_token: token,
+                input_id,
+                ack_state: InputAckState::Handled,
+                ack_message: None,
+                not_before_wall_us: None,
+            },
+            "codex-session",
+            1_200,
+        );
+        assert!(ack.accepted, "handled acknowledgement must be accepted");
+
+        let state = driver
+            .authority_mut()
+            .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+            .expect("projection state must still exist");
+        assert_eq!(
+            state.pending_input_count,
+            Some(0),
+            "handled input must no longer count as waiting for the agent"
+        );
     }
 
     /// Regression guard for the `notify_tile_content_appended` wiring at the
