@@ -1055,6 +1055,7 @@ def make_hit_region(
     accepts_focus: bool = True,
     auto_capture: bool = False,
     release_on_up: bool = False,
+    accepts_composer_input: bool = False,
     node_id: Optional[bytes] = None,
 ) -> types_pb2.NodeProto:
     data: dict[str, Any] = {
@@ -1064,6 +1065,7 @@ def make_hit_region(
             "accepts_pointer": True,
             "auto_capture": auto_capture,
             "release_on_up": release_on_up,
+            "accepts_composer_input": accepts_composer_input,
         },
         "bounds": [x, y, w, h],
     }
@@ -1389,6 +1391,7 @@ def build_input_scroll_nodes(
     hit = make_hit_region(
         COMPOSER_INTERACTION_ID,
         0.0, 0.0, input_rect.w, hit_h,
+        accepts_composer_input=True,
         node_id=node_ids.get("hit"),
     )
     text_node = make_text_node(

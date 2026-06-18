@@ -2957,6 +2957,7 @@ async fn test_fifo_preserved_when_mutation_arrives_during_drain_window() {
         element_store: tze_hud_scene::element_store::ElementStore::default(),
         element_store_path: None,
         safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        active_tab_mirror: Arc::new(std::sync::Mutex::new(None)),
         token_store: crate::token::TokenStore::new(),
         freeze_active: false, // <-- already unfrozen
         degradation_level: crate::session::RuntimeDegradationLevel::Normal,
@@ -3087,6 +3088,7 @@ async fn test_freeze_retransmit_deduped_applied_exactly_once() {
         element_store: tze_hud_scene::element_store::ElementStore::default(),
         element_store_path: None,
         safe_mode_atomic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        active_tab_mirror: Arc::new(std::sync::Mutex::new(None)),
         token_store: crate::token::TokenStore::new(),
         freeze_active: true, // <-- scene is frozen
         degradation_level: crate::session::RuntimeDegradationLevel::Normal,

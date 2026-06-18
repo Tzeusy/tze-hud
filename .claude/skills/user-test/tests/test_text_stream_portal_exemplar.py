@@ -292,6 +292,69 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertTrue(proc.waited)
 
 
+class ComposerInputModeRoutingTests(unittest.TestCase):
+    """Headless coverage for composer keyboard-routing wiring (hud-dwcr7).
+
+    The runtime only routes keystrokes into the ComposerDraftManager when the
+    focused hit-region carries `accepts_composer_input=True` (types.proto:103,
+    consumed by tze_hud_input::node_accepts_composer_input). Without it, a
+    pointer-down acquires focus but typed characters are dropped — the operator
+    "can't type anything in". These tests pin the wire-level flag so the
+    regression cannot silently return.
+    """
+
+    @staticmethod
+    def _collect_hit_regions(children):
+        regions = {}
+        for node in children:
+            if node.HasField("hit_region"):
+                regions[node.hit_region.interaction_id] = node.hit_region
+        return regions
+
+    def test_composer_hit_region_accepts_composer_input(self) -> None:
+        _root, children = portal.build_input_scroll_nodes("")
+        regions = self._collect_hit_regions(children)
+        self.assertIn(
+            portal.COMPOSER_INTERACTION_ID,
+            regions,
+            "composer tile must expose the composer focus hit-region",
+        )
+        composer = regions[portal.COMPOSER_INTERACTION_ID]
+        self.assertTrue(
+            composer.accepts_focus,
+            "composer hit-region must acquire focus on pointer-down",
+        )
+        self.assertTrue(
+            composer.accepts_composer_input,
+            "composer hit-region must route keystrokes into the runtime draft "
+            "manager (accepts_composer_input=True) or typing is dropped",
+        )
+
+    def test_make_node_forwards_accepts_composer_input(self) -> None:
+        # The client node builder must serialize accepts_composer_input onto the
+        # wire; a stale builder/binding silently drops it (the original bug).
+        node = portal.make_hit_region(
+            "probe", 0.0, 0.0, 10.0, 10.0, accepts_composer_input=True,
+        )
+        self.assertTrue(node.hit_region.accepts_composer_input)
+
+    def test_header_drag_region_does_not_accept_composer_input(self) -> None:
+        _root, children = portal.build_portal_nodes(
+            "title", "subtitle", "body", "footer",
+        )
+        regions = self._collect_hit_regions(children)
+        self.assertIn(
+            portal.PORTAL_DRAG_INTERACTION_ID,
+            regions,
+            "frame chrome must expose the header drag hit-region",
+        )
+        drag = regions[portal.PORTAL_DRAG_INTERACTION_ID]
+        self.assertFalse(
+            drag.accepts_composer_input,
+            "header drag region must not capture composer keystrokes",
+        )
+
+
 class PromotionGateEvidenceSchemaTests(unittest.TestCase):
     """Headless coverage for the RFC 0013 §7.2 promotion-gate evidence schema.
 
