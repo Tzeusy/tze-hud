@@ -17,7 +17,7 @@ Reviewed: 2026-04-09
 | 8 | [Gauge Widget](#8-gauge-widget) | **done** | Automation batch + manual visual sign-off completed on 2026-04-09 (ultra-minimal track, hover-only readout/label, tuned spacing/colors) |
 | 9 | [Progress Bar](#9-progress-bar) | **automation-pass** | Step + color-sweep batches passed on 2026-04-09; manual visual sign-off pending |
 | 10 | [Status Indicator](#10-status-indicator) | **automation-pass** | Enum/theme/label/validation batches passed on 2026-04-09; manual visual sign-off pending |
-| 11 | [Text Stream Portals](#11-text-stream-portals) | **phase-1-evidence-partial** | `hud-ofe76` live exemplar-script evidence ran on 2026-06-19 across markdown, overflow, composer edit, OS-input window management, cadence, profile swap, and cleanup. Cleanup passed; cadence budget failed; human visual confirmation was not collected. |
+| 11 | [Text Stream Portals](#11-text-stream-portals) | **phase-1-evidence-partial** | `hud-ofe76` live exemplar-script evidence ran on 2026-06-19 across markdown, overflow, composer edit, OS-input window management, cadence, profile swap, and cleanup. Cleanup passed; cadence budget failed; human visual confirmation was not collected. `hud-kylt0` cooperative-projection evidence confirmed Windows reachability but found the HTTP MCP facade gated by `resident_mcp` or missing deployed lifecycle methods. |
 
 ---
 
@@ -355,6 +355,23 @@ presented, but 5 exceeded the `16.6ms` runtime-overhead budget (`p95=21.033ms`,
 present for this worker run; structured operator-evidence confirmations remain
 `null`.
 
+**Cooperative-projection evidence update (2026-06-19 / `hud-kylt0`):** the live
+Windows HUD was reachable through SSH, `TzeHudOverlay` was running, Windows
+localhost ports `9090` and `50051` were open, and MCP `list_zones` succeeded
+after recovering the runtime credential from the scheduled-task XML. Sanitized
+evidence is archived at
+`docs/evidence/text-stream-portals/hud-kylt0-cooperative-projection-live-2026-06-19.md`.
+The cooperative-projection facade did not complete the agent-ergonomics
+lifecycle: `portal_projection_attach`, `portal_projection_publish`,
+`portal_projection_get_pending_input`, `portal_projection_acknowledge_input`,
+and `portal_projection_detach` all returned `CAPABILITY_REQUIRED` with
+`hint.required_capability=resident_mcp`; `portal_projection_cleanup`,
+`projection_operation`, and `portal_projection_publish_status` returned
+`Method not found` on the deployed runtime. This matches the local
+`hud-projection` caveat: cooperative projection remains blocked by
+resident-capable ingress and deployed lifecycle method coverage, not by Windows
+reachability.
+
 ### Capability summary
 
 A governed, low-latency **text stream portal** — not a terminal host, not a chat app. Transport-agnostic boundary: generic output streams, bounded viewer input, session identity, and session status metadata. Tmux, chat platforms, and LLM sessions are all valid adapters behind the same contract.
@@ -406,6 +423,7 @@ Integration tests prove structure; these axes still need operator-visible proof 
 | Window management via OS input | Transcript Interaction Contract / Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` PASS with supplemental diagnostic rerun: focus, drag start/end, and output scroll checkpoints captured; human visual confirmation not collected |
 | Cadence with RTT | Low-Latency Text Interaction / Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` FAIL: cadence completed but runtime-overhead budget failed with 5/20 appends over `16.6ms` |
 | Profile swap | Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` machine transcript PASS for compact, standard, expanded, restored-standard; human visual confirmation not collected |
+| Cooperative projection adapter | Cooperative LLM Projection Adapter / Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-kylt0` live reachability PASS, but full agent-ergonomics lifecycle BLOCKED: projection attach/publish/input/detach over HTTP MCP returned `resident_mcp` capability errors, and cleanup/status dispatcher methods were absent on the deployed runtime |
 | Redaction | Governance / Privacy / Override | Portal geometry preserved; transcript content suppressed under viewer policy |
 | Safe mode | Governance / Privacy / Override | Portal updates suspend under safe mode like other content surfaces |
 | Orphan path | Governance / Privacy / Override | PASS for ordinary `/user-test` cleanup; explicit orphan/grace behavior still needs a dedicated run |
