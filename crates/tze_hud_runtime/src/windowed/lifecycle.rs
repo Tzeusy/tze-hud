@@ -25,14 +25,25 @@ use super::input_dispatch::{
     dispatch_portal_geometry_event, dispatch_scroll_offset_event, enqueue_input,
     nanoseconds_since_start,
 };
+use super::keyboard::ComposerDeliveryContext;
 use super::portal::{
     DragReleasedData, PortalResizePointerOutcome, apply_drag_handle_pointer_event,
     apply_portal_resize_pointer_event,
 };
-use super::{ComposerDeliveryContext, WindowedBenchmarkConfig, WinitApp};
+use super::{WindowedBenchmarkConfig, WinitApp};
 
 #[cfg(target_os = "windows")]
-use super::hwnd_for_window;
+fn hwnd_for_window(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::HWND;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(HWND(handle.hwnd.get() as *mut c_void))
+}
 
 pub(super) fn focus_window_for_text_input(window: &Window) {
     window.focus_window();
@@ -565,6 +576,22 @@ impl WindowedBenchmarkRunState {
 }
 
 impl WinitApp {
+    /// Best-effort per-frame reconvergence of the lock-free `active_tab_mirror`
+    /// from the authoritative scene (hud-dwcr7).  Non-blocking: uses `try_lock`
+    /// on both the shared-state and scene mutexes and silently skips this frame
+    /// if either is busy.  This is a safety net — the mirror is primarily kept
+    /// fresh at the point of each active_tab change — so it must never stall the
+    /// event loop.
+    pub(super) fn refresh_active_tab_mirror_opportunistic(&self) {
+        let Ok(state) = self.state.shared_state.try_lock() else {
+            return;
+        };
+        let Ok(scene) = state.scene.try_lock() else {
+            return;
+        };
+        state.refresh_active_tab_mirror(&scene);
+    }
+
     pub(super) fn drain_input_capture_commands(&mut self) {
         while let Ok(command) = self.state.input_capture_rx.try_recv() {
             self.state.pending_input_capture_commands.push_back(command);
