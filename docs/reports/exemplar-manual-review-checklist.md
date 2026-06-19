@@ -17,7 +17,7 @@ Reviewed: 2026-04-09
 | 8 | [Gauge Widget](#8-gauge-widget) | **done** | Automation batch + manual visual sign-off completed on 2026-04-09 (ultra-minimal track, hover-only readout/label, tuned spacing/colors) |
 | 9 | [Progress Bar](#9-progress-bar) | **automation-pass** | Step + color-sweep batches passed on 2026-04-09; manual visual sign-off pending |
 | 10 | [Status Indicator](#10-status-indicator) | **automation-pass** | Enum/theme/label/validation batches passed on 2026-04-09; manual visual sign-off pending |
-| 11 | [Text Stream Portals](#11-text-stream-portals) | **live-refinement** | Phase-0 pilot shipped via epic `hud-t98e`; live `/user-test` now covers two-pane portal, scroll subset, header drag, focus, composer editing, paste, deterministic caret smoke, resize/minimize prototypes, and cleanup. `hud-0ojis` signed off focused caret/Space behavior on 2026-04-29; heavier UX improvement passes remain open. |
+| 11 | [Text Stream Portals](#11-text-stream-portals) | **phase-1-evidence-partial** | `hud-ofe76` live exemplar-script evidence ran on 2026-06-19 across markdown, overflow, composer edit, OS-input window management, cadence, profile swap, and cleanup. Cleanup passed; cadence budget failed; human visual confirmation was not collected. |
 
 ---
 
@@ -337,6 +337,24 @@ _(to be filled during review)_
 
 **Status:** live-refinement / heavy user-iteration mode. Phase-0 raw-tile pilot shipped across `hud-t98e.1` / `.2` / `.3` / `.4` (PRs #427, #429, #432, #435), with follow-up closures `hud-r11x` (PR #437) and `hud-r9u0` (PR #438). Gen-2 reconciliation `hud-fomr` (PR #441) confirmed full 13/13 spec requirement coverage. The live `/user-test` exemplar at `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py` now includes the scroll contract as the OUTPUT transcript pane plus header drag, focus, composer editing, paste, cleanup, deterministic composer caret smoke coverage, center-pane resize, bottom-right portal resize, and minimize-to-icon prototypes. The current caret/Space pass has fresh live transcript evidence, but the portal is explicitly not complete: smooth drag/resize/minimized-icon UX still needs runtime pointer-capture work and more operator-led passes.
 
+**Latest Phase-1 evidence update (2026-06-19 / `hud-ofe76`):** the extended
+exemplar-script adapter run completed on the live Windows HUD and archived
+sanitized transcript evidence at
+`docs/evidence/text-stream-portals/hud-ofe76-exemplar-script-live-2026-06-19.json`
+with a companion summary at
+`docs/evidence/text-stream-portals/hud-ofe76-exemplar-script-live-2026-06-19.md`.
+The main run covered `markdown,overflow,composer-edit,diagnostic-input,cadence,profile-swap,window-mgmt`
+and ended with `cleanup_errors=[]` plus successful explicit lease release. A
+focused diagnostic supplement at
+`docs/evidence/text-stream-portals/hud-ofe76-diagnostic-input-rerun-2026-06-19.json`
+captured the expected OS-input `input:focus-gained`, `drag:start`, `drag:end`,
+and `scroll:output` checkpoints after the full run's diagnostic phase missed
+the drag checkpoints. Cadence remains the blocking axis: 20/20 appends
+presented, but 5 exceeded the `16.6ms` runtime-overhead budget (`p95=21.033ms`,
+`max=56.205ms`, `within_present_budget=false`). Human visual sign-off was not
+present for this worker run; structured operator-evidence confirmations remain
+`null`.
+
 ### Capability summary
 
 A governed, low-latency **text stream portal** — not a terminal host, not a chat app. Transport-agnostic boundary: generic output streams, bounded viewer input, session identity, and session status metadata. Tmux, chat platforms, and LLM sessions are all valid adapters behind the same contract.
@@ -382,6 +400,12 @@ Integration tests prove structure; these axes still need operator-visible proof 
 | Local-first scroll | Transcript Interaction Contract | PASS in live refinement — OUTPUT pane scrolls independently of the overlay window |
 | Bounded viewport | Bounded Transcript Viewport | PASS after scroll clipping/refinement — retained window stays within on-screen bounds as transcript grows |
 | Coalescing coherence | Coherent Transcript Coalescing | Under rapid-publish pressure, retained window never collapses to only latest line |
+| Markdown | Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` machine transcript PASS; human visual confirmation not collected |
+| Overflow | Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` machine transcript PASS; human visual confirmation not collected |
+| Composer edit | Reply Submission / Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` machine transcript PASS across empty, typed, delete, and clear states; human visual confirmation not collected |
+| Window management via OS input | Transcript Interaction Contract / Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` PASS with supplemental diagnostic rerun: focus, drag start/end, and output scroll checkpoints captured; human visual confirmation not collected |
+| Cadence with RTT | Low-Latency Text Interaction / Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` FAIL: cadence completed but runtime-overhead budget failed with 5/20 appends over `16.6ms` |
+| Profile swap | Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` machine transcript PASS for compact, standard, expanded, restored-standard; human visual confirmation not collected |
 | Redaction | Governance / Privacy / Override | Portal geometry preserved; transcript content suppressed under viewer policy |
 | Safe mode | Governance / Privacy / Override | Portal updates suspend under safe mode like other content surfaces |
 | Orphan path | Governance / Privacy / Override | PASS for ordinary `/user-test` cleanup; explicit orphan/grace behavior still needs a dedicated run |
