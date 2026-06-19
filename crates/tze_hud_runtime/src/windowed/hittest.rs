@@ -102,9 +102,12 @@ pub(super) fn refresh_interaction_hit_regions_after_render(
 #[cfg(any(test, target_os = "windows"))]
 fn cursor_refresh_window_origin(
     outer_position: Option<winit::dpi::PhysicalPosition<i32>>,
-    monitor_position: Option<winit::dpi::PhysicalPosition<i32>>,
+    monitor_position: impl FnOnce() -> Option<winit::dpi::PhysicalPosition<i32>>,
 ) -> Option<winit::dpi::PhysicalPosition<i32>> {
-    outer_position.or(monitor_position)
+    match outer_position {
+        Some(position) => Some(position),
+        None => monitor_position(),
+    }
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -136,10 +139,9 @@ impl WinitApp {
                 let Some(window) = &self.state.window else {
                     return;
                 };
-                let window_pos = cursor_refresh_window_origin(
-                    window.outer_position().ok(),
-                    window.current_monitor().map(|monitor| monitor.position()),
-                );
+                let window_pos = cursor_refresh_window_origin(window.outer_position().ok(), || {
+                    window.current_monitor().map(|monitor| monitor.position())
+                });
 
                 let mut pt = POINT { x: 0, y: 0 };
                 // SAFETY: GetCursorPos writes to the provided POINT and has no
@@ -292,13 +294,30 @@ mod tests {
     fn cursor_refresh_origin_falls_back_to_monitor_position() {
         let monitor_origin = winit::dpi::PhysicalPosition::new(2560, 0);
 
-        let origin = cursor_refresh_window_origin(None, Some(monitor_origin));
+        let origin = cursor_refresh_window_origin(None, || Some(monitor_origin));
 
         assert_eq!(
             origin,
             Some(monitor_origin),
             "Windows overlay cursor polling should use the monitor origin if the window origin \
              query fails"
+        );
+    }
+
+    #[test]
+    fn cursor_refresh_origin_does_not_query_monitor_when_window_position_exists() {
+        let window_origin = winit::dpi::PhysicalPosition::new(64, 32);
+        let mut monitor_lookup_count = 0;
+
+        let origin = cursor_refresh_window_origin(Some(window_origin), || {
+            monitor_lookup_count += 1;
+            Some(winit::dpi::PhysicalPosition::new(2560, 0))
+        });
+
+        assert_eq!(origin, Some(window_origin));
+        assert_eq!(
+            monitor_lookup_count, 0,
+            "monitor origin fallback must stay lazy on the hot cursor refresh path"
         );
     }
 
