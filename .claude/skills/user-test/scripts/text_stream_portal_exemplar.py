@@ -804,6 +804,44 @@ def build_diagnostic_input_plan(
     ]
 
 
+def build_resize_hotkey_plan(portal_x: float, portal_y: float) -> list[dict[str, Any]]:
+    """Focus the composer and replay the live Ctrl resize chord stream."""
+    input_rect, _ = portal_pane_rects()
+    composer_x = portal_x + input_rect.x + input_rect.w / 2.0
+    composer_y = portal_y + input_rect.y + min(input_rect.h - 10.0, 72.0)
+    return [
+        {
+            "kind": "click",
+            "label": "focus-composer",
+            "x": composer_x,
+            "y": composer_y,
+        },
+        {
+            "kind": "sleep",
+            "label": "settle-focus",
+            "ms": 800,
+        },
+        {
+            "kind": "keybd-hotkey",
+            "label": "ctrl-equals",
+            "key": "equal",
+            "shift": False,
+        },
+        {
+            "kind": "keybd-hotkey",
+            "label": "ctrl-plus",
+            "key": "plus",
+            "shift": True,
+        },
+        {
+            "kind": "keybd-hotkey",
+            "label": "ctrl-minus",
+            "key": "minus",
+            "shift": False,
+        },
+    ]
+
+
 def windows_diagnostic_input_script(
     actions: list[dict[str, Any]],
     *,
@@ -822,6 +860,7 @@ def windows_diagnostic_input_script(
         "public static class HudDiagnosticInput {",
         "  [DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int X, int Y);",
         "  [DllImport(\"user32.dll\")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);",
+        "  [DllImport(\"user32.dll\")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);",
         "  [DllImport(\"user32.dll\", SetLastError=true)] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);",
         "  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION U; }",
         "  [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; [FieldOffset(0)] public HARDWAREINPUT hi; }",
@@ -884,6 +923,24 @@ def windows_diagnostic_input_script(
         "    Start-Sleep -Milliseconds 25",
         "  }",
         "}",
+        "function Send-KeybdEventKey([byte]$vk, [byte]$scan, [bool]$keyUp) {",
+        "  $flags = 0",
+        "  if ($keyUp) { $flags = $KEYEVENTF_KEYUP }",
+        "  [HudDiagnosticInput]::keybd_event($vk, $scan, $flags, [UIntPtr]::Zero)",
+        "  Start-Sleep -Milliseconds 60",
+        "}",
+        "function Send-KeybdEventCtrlHotkey([byte]$vk, [byte]$scan, [bool]$shift) {",
+        "  Send-KeybdEventKey 0x11 0x1D $false",
+        "  if ($shift) { Send-KeybdEventKey 0x10 0x2A $false }",
+        "  Start-Sleep -Milliseconds 100",
+        "  Send-KeybdEventKey $vk $scan $false",
+        "  Start-Sleep -Milliseconds 100",
+        "  Send-KeybdEventKey $vk $scan $true",
+        "  Start-Sleep -Milliseconds 140",
+        "  if ($shift) { Send-KeybdEventKey 0x10 0x2A $true }",
+        "  Send-KeybdEventKey 0x11 0x1D $true",
+        "  Start-Sleep -Milliseconds 180",
+        "}",
     ]
     for action in actions:
         kind = str(action.get("kind", ""))
@@ -922,6 +979,28 @@ def windows_diagnostic_input_script(
                 f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'text')))}",
                 f"Send-Text {ps_single_quoted(str(action.get('text', '')))}",
                 "Start-Sleep -Milliseconds 120",
+            ])
+        elif kind == "sleep":
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'sleep')))}",
+                f"Start-Sleep -Milliseconds {max(0, int(action.get('ms', 0)))}",
+            ])
+        elif kind == "keybd-hotkey":
+            vk_scan_by_key = {
+                "equal": ("0xBB", "0x0D"),
+                "plus": ("0xBB", "0x0D"),
+                "minus": ("0xBD", "0x0C"),
+            }
+            key_name = str(action.get("key", "")).lower()
+            if key_name not in vk_scan_by_key:
+                raise ValueError(f"unsupported keybd_event hotkey key: {key_name!r}")
+            vk, scan = vk_scan_by_key[key_name]
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'keybd-hotkey')))}",
+                (
+                    f"Send-KeybdEventCtrlHotkey {vk} {scan} "
+                    f"${str(bool(action.get('shift', key_name == 'plus'))).lower()}"
+                ),
             ])
         else:
             raise ValueError(f"unsupported diagnostic action kind: {kind!r}")
@@ -2747,6 +2826,7 @@ async def portal_interaction_loop(
     clipboard_user: str,
     clipboard_ssh_key: str,
     clipboard_timeout_s: float,
+    resize_geometry_queue: Optional[asyncio.Queue[dict[str, float]]] = None,
 ) -> None:
     """Handle live pointer/keyboard input for manual exemplar review."""
     portal_x = initial_portal_x
@@ -3602,6 +3682,14 @@ async def portal_interaction_loop(
                 ev = envelope.composer_draft_cancel
                 await on_composer_draft_cancel(int(ev.sequence))
 
+            elif kind == "element_repositioned":
+                ev = envelope.element_repositioned
+                if resize_geometry_queue is None or bytes(ev.element_id) != tiles.input_scroll:
+                    continue
+                geometry = relative_geometry_dict(ev, tab_width, tab_height)
+                if geometry is not None:
+                    resize_geometry_queue.put_nowait(geometry)
+
         if pending_output_scroll_y is not None:
             if last_output_scroll_y is not None and abs(pending_output_scroll_y - last_output_scroll_y) < 0.5:
                 continue
@@ -4035,6 +4123,174 @@ async def run_diagnostic_input_phase(
         "action": "Windows OS input injector finished",
         "expected_visual": "transcript should include input:focus-gained, drag:start/drag:end, and scroll:output checkpoints",
     }, **result)
+
+
+def relative_geometry_dict(event: Any, tab_width: float, tab_height: float) -> Optional[dict[str, float]]:
+    """Extract relative geometry from an ElementRepositionedEvent."""
+    geometry = event.new_geometry
+    if geometry is None or geometry.WhichOneof("policy") != "relative":
+        return None
+    relative = geometry.relative
+    width_px = float(relative.width_pct) * tab_width
+    height_px = float(relative.height_pct) * tab_height
+    return {
+        "x_pct": float(relative.x_pct),
+        "y_pct": float(relative.y_pct),
+        "width_pct": float(relative.width_pct),
+        "height_pct": float(relative.height_pct),
+        "x_px": float(relative.x_pct) * tab_width,
+        "y_px": float(relative.y_pct) * tab_height,
+        "width_px": width_px,
+        "height_px": height_px,
+    }
+
+
+async def wait_for_resize_geometry(
+    resize_geometry_queue: asyncio.Queue[dict[str, float]],
+    *,
+    timeout_s: float,
+) -> dict[str, float]:
+    try:
+        return await asyncio.wait_for(resize_geometry_queue.get(), timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError("timed out waiting for focused portal resize geometry event") from exc
+
+
+def drain_resize_geometry_queue(resize_geometry_queue: asyncio.Queue[dict[str, float]]) -> None:
+    while True:
+        try:
+            resize_geometry_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+
+
+async def run_resize_hotkeys_phase(
+    client: HudClient,
+    lease_id: bytes,
+    tiles: PortalTiles,
+    body_full: str,
+    transcript: list[dict[str, Any]],
+    resize_geometry_queue: asyncio.Queue[dict[str, float]],
+    *,
+    host: str,
+    user: str,
+    ssh_key: str,
+    portal_x: float,
+    portal_y: float,
+    tab_width: float,
+    tab_height: float,
+    timeout_s: float,
+    connect_timeout_s: float,
+    mutation_lock: asyncio.Lock,
+) -> None:
+    """Replay the live Ctrl resize chord stream and assert geometry."""
+    await publish_portal(
+        client, lease_id, tiles,
+        title="Exemplar Review Portal",
+        subtitle="Focused Ctrl resize hotkeys",
+        body=body_full,
+        footer_meta="resize-hotkeys  •  live Ctrl chord stream",
+        include_tile_setup=True,
+        mutation_lock=mutation_lock,
+    )
+    input_rect, _ = portal_pane_rects()
+    initial_geometry = {
+        "x_px": portal_x + input_rect.x,
+        "y_px": portal_y + input_rect.y,
+        "width_px": input_rect.w,
+        "height_px": input_rect.h,
+    }
+    actions = build_resize_hotkey_plan(portal_x, portal_y)
+    emit_step_event(transcript, 13, "started", {
+        "code": "resize-hotkeys",
+        "title": "Focused portal Ctrl resize hotkeys",
+        "action": "focus composer and inject Ctrl+=, Ctrl++, Ctrl+- through Windows SendInput",
+        "expected_visual": "focused INPUT portal tile grows on Ctrl+= and Ctrl++, then shrinks on Ctrl+-",
+    }, host=host, user=user, action_labels=[a["label"] for a in actions],
+       initial_geometry=initial_geometry)
+    await asyncio.sleep(1.0)
+    drain_resize_geometry_queue(resize_geometry_queue)
+    result = await run_windows_diagnostic_input(
+        host,
+        user=user,
+        ssh_key=ssh_key,
+        actions=actions,
+        timeout_s=timeout_s,
+        connect_timeout_s=connect_timeout_s,
+        scene_width=tab_width,
+        scene_height=tab_height,
+    )
+    if not result.get("ok"):
+        emit_step_event(transcript, 13, "failed", {
+            "code": "resize-hotkeys",
+            "title": "Focused portal Ctrl resize hotkeys",
+            "action": "Windows OS input injector failed before geometry evidence",
+            "expected_visual": "no acceptance claim",
+        }, **result)
+        raise RuntimeError(f"resize-hotkeys input injector failed: {result}")
+    emit_step_event(transcript, 13, "checkpoint", {
+        "code": "resize-hotkeys:input-injector",
+        "title": "Focused portal resize hotkeys injected",
+        "action": "Windows scheduled-task injector clicked the composer and sent Ctrl resize chords",
+        "expected_visual": "geometry events should follow if the focused portal consumed the hotkeys",
+    }, stdout=result.get("stdout", ""), stderr=result.get("stderr", ""))
+
+    geometries: list[dict[str, float]] = []
+    try:
+        for _ in range(3):
+            geometries.append(await wait_for_resize_geometry(
+                resize_geometry_queue,
+                timeout_s=5.0,
+            ))
+    except TimeoutError as exc:
+        emit_step_event(transcript, 13, "failed", {
+            "code": "resize-hotkeys",
+            "title": "Focused portal Ctrl resize hotkeys",
+            "action": "timed out waiting for focused portal geometry after Ctrl resize injection",
+            "expected_visual": "no acceptance claim; focused portal did not visibly resize",
+        }, injector_stdout=result.get("stdout", ""),
+           injector_stderr=result.get("stderr", ""),
+           initial_geometry=initial_geometry,
+           observed_geometries=geometries,
+           error=str(exc))
+        raise
+    checks = {
+        "ctrl_equals_grew": (
+            geometries[0]["width_px"] > initial_geometry["width_px"]
+            and geometries[0]["height_px"] > initial_geometry["height_px"]
+        ),
+        "ctrl_plus_grew": (
+            geometries[1]["width_px"] > geometries[0]["width_px"]
+            and geometries[1]["height_px"] > geometries[0]["height_px"]
+        ),
+        "ctrl_minus_shrank": (
+            geometries[2]["width_px"] < geometries[1]["width_px"]
+            and geometries[2]["height_px"] < geometries[1]["height_px"]
+        ),
+    }
+    passed = all(checks.values())
+    emit_step_event(transcript, 13, "completed" if passed else "failed", {
+        "code": "resize-hotkeys",
+        "title": "Focused portal Ctrl resize hotkeys",
+        "action": "Ctrl hotkey stream produced focused portal geometry events",
+        "expected_visual": "focused portal visibly grew twice and shrank once",
+    }, injector_stdout=result.get("stdout", ""),
+       injector_stderr=result.get("stderr", ""),
+       initial_geometry=initial_geometry,
+       observed_geometries=geometries,
+       checks=checks,
+       operator_evidence=operator_evidence_entry(
+           "resize-hotkeys",
+           "Ctrl+= and Ctrl++ visibly grow the focused portal; Ctrl+- visibly shrinks it",
+           {
+               "initial_geometry": initial_geometry,
+               "observed_geometries": geometries,
+               "checks": checks,
+           },
+       ))
+    if not passed:
+        raise RuntimeError(f"resize-hotkeys geometry checks failed: {checks}")
+    await asyncio.sleep(1.0)
 
 
 # ─── Gate phase runners (task 7.1) ────────────────────────────────────────────
@@ -4631,6 +4887,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
     scene_height = args.tab_height
     cleanup_errors: list[str] = []
     mutation_lock = asyncio.Lock()
+    resize_geometry_queue: asyncio.Queue[dict[str, float]] = asyncio.Queue()
 
     try:
         emit_step_event(transcript, 0, "started", {
@@ -4702,6 +4959,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 clipboard_user=args.clipboard_user,
                 clipboard_ssh_key=args.clipboard_ssh_key,
                 clipboard_timeout_s=args.clipboard_timeout_s,
+                resize_geometry_queue=resize_geometry_queue,
             )
         )
 
@@ -4756,6 +5014,20 @@ async def run_scenario(args: argparse.Namespace) -> int:
                     tab_height=scene_height,
                     timeout_s=args.diagnostic_input_timeout_s,
                     connect_timeout_s=args.diagnostic_input_connect_timeout_s,
+                )
+            elif phase == "resize-hotkeys":
+                await run_resize_hotkeys_phase(
+                    client, lease_id, tiles, body, transcript, resize_geometry_queue,
+                    host=target_host(args.target),
+                    user=args.diagnostic_input_user,
+                    ssh_key=args.diagnostic_input_ssh_key,
+                    portal_x=portal_x,
+                    portal_y=portal_y,
+                    tab_width=scene_width,
+                    tab_height=scene_height,
+                    timeout_s=args.diagnostic_input_timeout_s,
+                    connect_timeout_s=args.diagnostic_input_connect_timeout_s,
+                    mutation_lock=mutation_lock,
                 )
             elif phase == "markdown":
                 await run_markdown(
@@ -5079,7 +5351,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated list of phases to run: "
             "baseline, scroll, streaming, rapid, soak, composer-smoke, diagnostic-input, "
-            "markdown, overflow, composer-edit, cadence, profile-swap, window-mgmt"
+            "resize-hotkeys, markdown, overflow, composer-edit, cadence, profile-swap, window-mgmt"
         ),
     )
     p.add_argument("--baseline-hold-s", type=float, default=20.0)
