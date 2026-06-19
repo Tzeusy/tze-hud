@@ -5625,6 +5625,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windowed_post_render_refresh_updates_drag_handles_before_snapshot() {
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let mut compositor = match Compositor::new_headless(1920, 1080).await {
             Ok(compositor) => compositor,
             Err(e) => {
