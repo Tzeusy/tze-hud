@@ -5,8 +5,20 @@ use tze_hud_input::{
     HotkeyResizeDir, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ShellReservedShortcut,
 };
 
+use super::WinitApp;
 use super::input_dispatch::{dispatch_keyboard_event, dispatch_scroll_offset_event};
-use super::{ComposerDeliveryContext, ComposerDeliveryContextLookup, WinitApp};
+
+pub(super) struct ComposerDeliveryContext {
+    pub(super) namespace: String,
+    pub(super) node_id_bytes: [u8; 16],
+    pub(super) tile_id: tze_hud_scene::SceneId,
+}
+
+pub(super) enum ComposerDeliveryContextLookup {
+    Ready(ComposerDeliveryContext),
+    Busy,
+    Unavailable,
+}
 
 // ── Debug-log preview helpers ─────────────────────────────────────────────────
 

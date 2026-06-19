@@ -6,9 +6,26 @@ use tze_hud_input::{
 use tze_hud_scene::HitResult;
 use tze_hud_scene::types::{DragHandleElementKind, ZoneInteractionKind};
 
-use super::WinitApp;
-use super::input_dispatch::dispatch_portal_geometry_event;
+use super::input_dispatch::{deliver_composer_batch, dispatch_portal_geometry_event};
+use super::keyboard::ComposerDeliveryContext;
 use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire};
+use super::{WindowedConfig, WinitApp};
+
+pub(super) fn build_portal_projection_driver(
+    config: &WindowedConfig,
+) -> Result<
+    crate::portal_projection_driver::InProcessPortalDriver,
+    tze_hud_projection::ProjectionContractError,
+> {
+    let mut driver = crate::portal_projection_driver::InProcessPortalDriver::new();
+    if let Some(operator_authority) = config.projection_operator_authority.as_deref() {
+        driver
+            .authority_mut()
+            .set_operator_authority(operator_authority)?;
+        tracing::info!("portal projection operator authority configured");
+    }
+    Ok(driver)
+}
 
 // ── Drag-to-move: data carried out of the scene-lock for post-lock work ──────
 
@@ -568,6 +585,53 @@ pub(super) fn apply_portal_resize_pointer_event(
 }
 
 impl WinitApp {
+    pub(super) fn route_and_deliver_composer_batch(
+        &mut self,
+        context: ComposerDeliveryContext,
+        batch: tze_hud_input::DraftNotificationBatch,
+    ) {
+        self.route_portal_composer_batch(context.tile_id, &batch);
+        deliver_composer_batch(
+            &self.state.input_event_tx,
+            context.namespace,
+            &context.node_id_bytes,
+            batch,
+        );
+    }
+
+    /// Route submitted focused-portal composer text into the in-process
+    /// projection authority before the legacy namespace broadcast is emitted.
+    fn route_portal_composer_batch(
+        &mut self,
+        tile_id: tze_hud_scene::SceneId,
+        batch: &tze_hud_input::DraftNotificationBatch,
+    ) {
+        let submitted_at_wall_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+
+        if let Some(feedback) = self
+            .state
+            .portal_projection_driver
+            .submit_composer_batch_for_tile(
+                tile_id,
+                batch,
+                submitted_at_wall_us.max(1),
+                None,
+                tze_hud_projection::ContentClassification::Private,
+            )
+        {
+            tracing::debug!(
+                tile_id = ?tile_id,
+                pending_input_count = feedback.pending_input_count,
+                feedback_state = ?feedback.feedback_state,
+                "composer: routed portal submission to projection authority"
+            );
+        }
+    }
+
     /// Persist the geometry override for a completed drag and broadcast an
     /// `ElementRepositionedEvent`.
     ///
