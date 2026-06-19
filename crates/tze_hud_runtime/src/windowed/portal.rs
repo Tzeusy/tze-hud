@@ -411,44 +411,50 @@ pub(super) fn apply_portal_resize_pointer_event(
         }
 
         PointerEventKind::Move => {
-            // Look for any tile with an active gesture for this device.
-            let (tile_id, resize_state) = portal_resize_states
-                .iter_mut()
-                .find(|(_, s)| s.gesture_active())?;
-            let tile_id = *tile_id;
+            let mut active_gesture = None;
+            for (&tile_id, resize_state) in portal_resize_states.iter_mut() {
+                if !resize_state.gesture_active() {
+                    continue;
+                }
 
-            let tile = scene.tiles.get(&tile_id)?;
-            let (lease_max_w, lease_max_h) = scene
-                .leases
-                .get(&tile.lease_id)
-                .map(|l| {
-                    (
-                        l.spatial_budget.max_tile_width_px,
-                        l.spatial_budget.max_tile_height_px,
-                    )
-                })
-                .unwrap_or((0.0, 0.0));
-            let (max_width_px, max_height_px) = compute_portal_max_dims(
-                lease_max_w,
-                lease_max_h,
-                display_w,
-                display_h,
-                tokens.min_width_px,
-                tokens.min_height_px,
-            );
-            let resize_bounds = ResizeBounds {
-                tokens,
-                max_width_px,
-                max_height_px,
-                display_w,
-                display_h,
-            };
+                let Some(tile) = scene.tiles.get(&tile_id) else {
+                    continue;
+                };
+                let (lease_max_w, lease_max_h) = scene
+                    .leases
+                    .get(&tile.lease_id)
+                    .map(|l| {
+                        (
+                            l.spatial_budget.max_tile_width_px,
+                            l.spatial_budget.max_tile_height_px,
+                        )
+                    })
+                    .unwrap_or((0.0, 0.0));
+                let (max_width_px, max_height_px) = compute_portal_max_dims(
+                    lease_max_w,
+                    lease_max_h,
+                    display_w,
+                    display_h,
+                    tokens.min_width_px,
+                    tokens.min_height_px,
+                );
+                let resize_bounds = ResizeBounds {
+                    tokens,
+                    max_width_px,
+                    max_height_px,
+                    display_w,
+                    display_h,
+                };
 
-            let outcome = resize_state.on_pointer_move(device_id, x, y, &resize_bounds);
-            let snapshot = match outcome {
-                ResizeOutcome::GestureUpdate { snapshot } => snapshot,
-                _ => return None,
-            };
+                if let ResizeOutcome::GestureUpdate { snapshot } =
+                    resize_state.on_pointer_move(device_id, x, y, &resize_bounds)
+                {
+                    active_gesture = Some((tile_id, snapshot));
+                    break;
+                }
+            }
+
+            let (tile_id, snapshot) = active_gesture?;
 
             // Apply updated rect immediately (local-first feedback on every move).
             if let Some(tile) = scene.tiles.get_mut(&tile_id) {
@@ -481,44 +487,51 @@ pub(super) fn apply_portal_resize_pointer_event(
         }
 
         PointerEventKind::Up => {
-            // Look for any tile with an active gesture for this device.
-            let (tile_id, resize_state) = portal_resize_states
-                .iter_mut()
-                .find(|(_, s)| s.gesture_active())?;
-            let tile_id = *tile_id;
+            let mut active_gesture = None;
+            for (&tile_id, resize_state) in portal_resize_states.iter_mut() {
+                if !resize_state.gesture_active() {
+                    continue;
+                }
 
-            let tile = scene.tiles.get(&tile_id)?;
-            let (lease_max_w, lease_max_h) = scene
-                .leases
-                .get(&tile.lease_id)
-                .map(|l| {
-                    (
-                        l.spatial_budget.max_tile_width_px,
-                        l.spatial_budget.max_tile_height_px,
-                    )
-                })
-                .unwrap_or((0.0, 0.0));
-            let (max_width_px, max_height_px) = compute_portal_max_dims(
-                lease_max_w,
-                lease_max_h,
-                display_w,
-                display_h,
-                tokens.min_width_px,
-                tokens.min_height_px,
-            );
-            let resize_bounds = ResizeBounds {
-                tokens,
-                max_width_px,
-                max_height_px,
-                display_w,
-                display_h,
-            };
+                let Some(tile) = scene.tiles.get(&tile_id) else {
+                    continue;
+                };
+                let (lease_max_w, lease_max_h) = scene
+                    .leases
+                    .get(&tile.lease_id)
+                    .map(|l| {
+                        (
+                            l.spatial_budget.max_tile_width_px,
+                            l.spatial_budget.max_tile_height_px,
+                        )
+                    })
+                    .unwrap_or((0.0, 0.0));
+                let (max_width_px, max_height_px) = compute_portal_max_dims(
+                    lease_max_w,
+                    lease_max_h,
+                    display_w,
+                    display_h,
+                    tokens.min_width_px,
+                    tokens.min_height_px,
+                );
+                let resize_bounds = ResizeBounds {
+                    tokens,
+                    max_width_px,
+                    max_height_px,
+                    display_w,
+                    display_h,
+                };
 
-            let outcome = resize_state.on_pointer_up(device_id, x, y, &resize_bounds);
-            let snapshot = match outcome {
-                ResizeOutcome::GestureEnded { snapshot } => snapshot,
-                _ => return None,
-            };
+                if let ResizeOutcome::GestureEnded { snapshot } =
+                    resize_state.on_pointer_up(device_id, x, y, &resize_bounds)
+                {
+                    active_gesture =
+                        Some((tile_id, snapshot, resize_state.current_gesture_epoch()));
+                    break;
+                }
+            }
+
+            let (tile_id, snapshot, gesture_epoch) = active_gesture?;
 
             // Apply final clamped rect (local-first).
             if let Some(tile) = scene.tiles.get_mut(&tile_id) {
@@ -539,7 +552,7 @@ pub(super) fn apply_portal_resize_pointer_event(
                 y,
                 final_w = snapshot.rect.width,
                 final_h = snapshot.rect.height,
-                gesture_epoch = resize_state.current_gesture_epoch(),
+                gesture_epoch,
                 "portal resize: pointer-up — gesture ended, final bounds applied"
             );
 
@@ -944,8 +957,8 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
     use tze_hud_input::{
-        FocusManager, InputProcessor, KeyboardProcessor, PointerEvent, PointerEventKind,
-        PortalResizeState, PortalWindowTokens, RawKeyDownEvent,
+        FocusManager, FocusRequest, InputProcessor, KeyboardProcessor, PointerEvent,
+        PointerEventKind, PortalResizeState, PortalWindowTokens, RawKeyDownEvent,
     };
     use tze_hud_telemetry::TelemetryCollector;
 
@@ -1975,6 +1988,179 @@ mod tests {
         assert!(
             final_width > 400.0,
             "tile width must be larger than initial 400px after rightward drag: {final_width}"
+        );
+    }
+
+    /// Move/up routing must find the active resize gesture for the current
+    /// `device_id`, not merely the first portal that has any active gesture.
+    #[test]
+    fn multi_device_resize_move_and_up_route_to_matching_device_gesture() {
+        use tze_hud_scene::types::TileScrollConfig;
+        use tze_hud_scene::{Capability, Rect};
+
+        let (mut scene, tab_id, tile_a, mut fm) = portal_scene_with_focus();
+        let lease_b = scene.grant_lease(
+            "portal-agent-b",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_b = scene
+            .create_tile(
+                tab_id,
+                "portal-agent-b",
+                lease_b,
+                Rect::new(700.0, 100.0, 400.0, 300.0),
+                2,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(tile_b, TileScrollConfig::vertical())
+            .unwrap();
+
+        let mut resize_states = std::collections::HashMap::new();
+        let display_w = 1920.0_f32;
+        let display_h = 1080.0_f32;
+        let tokens = PortalWindowTokens::default();
+
+        let down_a = PointerEvent {
+            x: 496.0,
+            y: 250.0,
+            kind: PointerEventKind::Down,
+            device_id: 1,
+            timestamp: None,
+        };
+        let outcome_a = apply_portal_resize_pointer_event(
+            &down_a,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
+        )
+        .expect("device 1 down must start a resize on tile A");
+        assert_eq!(outcome_a.tile_id, tile_a);
+
+        let (focus_result, _) = fm.request_focus(
+            FocusRequest {
+                tile_id: tile_b,
+                node_id: None,
+                steal: true,
+                requesting_namespace: "portal-agent-b".to_string(),
+            },
+            tab_id,
+            &scene,
+        );
+        assert_eq!(
+            focus_result,
+            tze_hud_input::FocusResult::Granted,
+            "test setup must focus the second portal tile"
+        );
+
+        let down_b = PointerEvent {
+            x: 1096.0,
+            y: 250.0,
+            kind: PointerEventKind::Down,
+            device_id: 2,
+            timestamp: None,
+        };
+        let outcome_b = apply_portal_resize_pointer_event(
+            &down_b,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
+        )
+        .expect("device 2 down must start a resize on tile B");
+        assert_eq!(outcome_b.tile_id, tile_b);
+
+        let active_order = resize_states
+            .iter()
+            .filter(|(_, state)| state.gesture_active())
+            .map(|(&tile_id, _)| tile_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            active_order.len(),
+            2,
+            "test setup must have two concurrently active portal resize gestures"
+        );
+
+        let first_iterated_tile = active_order[0];
+        let target_tile = active_order[1];
+        let (target_device_id, target_left_x, other_tile) = if target_tile == tile_a {
+            (1, 100.0, tile_b)
+        } else {
+            (2, 700.0, tile_a)
+        };
+
+        let target_width_before = scene.tiles[&target_tile].bounds.width;
+        let other_width_before = scene.tiles[&other_tile].bounds.width;
+        let mv = PointerEvent {
+            x: target_left_x + 430.0,
+            y: 250.0,
+            kind: PointerEventKind::Move,
+            device_id: target_device_id,
+            timestamp: None,
+        };
+        let move_outcome = apply_portal_resize_pointer_event(
+            &mv,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
+        )
+        .expect("move must find the portal whose gesture belongs to this device");
+
+        assert_eq!(
+            move_outcome.tile_id, target_tile,
+            "move must update the active portal for the current device"
+        );
+        assert!(
+            scene.tiles[&target_tile].bounds.width > target_width_before,
+            "target portal width must grow after moving its right-edge gesture"
+        );
+        assert_eq!(
+            scene.tiles[&other_tile].bounds.width, other_width_before,
+            "move for one device must not mutate the other active portal"
+        );
+
+        let up = PointerEvent {
+            x: target_left_x + 430.0,
+            y: 250.0,
+            kind: PointerEventKind::Up,
+            device_id: target_device_id,
+            timestamp: None,
+        };
+        let up_outcome = apply_portal_resize_pointer_event(
+            &up,
+            &mut resize_states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
+        )
+        .expect("up must end the portal gesture for the current device");
+
+        assert_eq!(
+            up_outcome.tile_id, target_tile,
+            "up must end the active portal for the current device"
+        );
+        assert!(
+            !resize_states[&target_tile].gesture_active(),
+            "target portal gesture must end after pointer-up"
+        );
+        assert!(
+            resize_states[&first_iterated_tile].gesture_active(),
+            "the other portal gesture must remain active"
         );
     }
 
