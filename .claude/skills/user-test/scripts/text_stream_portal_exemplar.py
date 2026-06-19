@@ -2766,7 +2766,6 @@ async def portal_interaction_loop(
     composer_caret_visible = True
     composer_blink_task: Optional[asyncio.Task[None]] = None
     background_tasks: set[asyncio.Task[None]] = set()
-    owner_task = asyncio.current_task()
     portal_minimized = False
     minimized_attention = False
     minimized_pulse = False
@@ -2777,13 +2776,16 @@ async def portal_interaction_loop(
         task.add_done_callback(background_tasks.discard)
         return task
 
-    def cancel_background_tasks(_done_task: asyncio.Task | None = None) -> None:
-        for task in list(background_tasks):
+    async def cancel_background_tasks() -> None:
+        tasks = list(background_tasks)
+        for task in tasks:
             if not task.done():
                 task.cancel()
-
-    if owner_task is not None:
-        owner_task.add_done_callback(cancel_background_tasks)
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                    raise result
 
     async def render_minimized_icon() -> None:
         root, children = build_minimized_icon_nodes(
@@ -3327,311 +3329,314 @@ async def portal_interaction_loop(
     # the runtime-owned draft. There is no runtime API to inject text from the
     # clipboard into the runtime draft buffer yet — this is a follow-up item.
 
-    while True:
-        try:
-            timeouts: list[float] = []
-            if drag is not None:
-                last_activity_at = float(drag.get("last_activity_at", drag["started_at"]))
-                timeouts.append(
-                    max(0.0, DRAG_IDLE_RELEASE_SECONDS - (time.monotonic() - last_activity_at))
-                )
-            timeout = min(timeouts) if timeouts else None
-            batch = await asyncio.wait_for(client._event_queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
-            if drag is not None:
-                last_activity_at = float(drag.get("last_activity_at", drag["started_at"]))
-                if time.monotonic() - last_activity_at >= DRAG_IDLE_RELEASE_SECONDS:
-                    await finish_drag("idle_release")
-            continue
-        pending_output_scroll_y: Optional[float] = None
-        for envelope in batch.events:
-            kind = envelope.WhichOneof("event")
+    try:
+        while True:
+            try:
+                timeouts: list[float] = []
+                if drag is not None:
+                    last_activity_at = float(drag.get("last_activity_at", drag["started_at"]))
+                    timeouts.append(
+                        max(0.0, DRAG_IDLE_RELEASE_SECONDS - (time.monotonic() - last_activity_at))
+                    )
+                timeout = min(timeouts) if timeouts else None
+                batch = await asyncio.wait_for(client._event_queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                if drag is not None:
+                    last_activity_at = float(drag.get("last_activity_at", drag["started_at"]))
+                    if time.monotonic() - last_activity_at >= DRAG_IDLE_RELEASE_SECONDS:
+                        await finish_drag("idle_release")
+                continue
+            pending_output_scroll_y: Optional[float] = None
+            for envelope in batch.events:
+                kind = envelope.WhichOneof("event")
 
-            if kind == "pointer_down":
-                ev = envelope.pointer_down
-                if ev.tile_id not in own_pointer_tiles:
-                    continue
-                if ev.interaction_id == PORTAL_MINIMIZE_INTERACTION_ID:
-                    if drag is not None:
-                        await finish_drag("superseded:minimize")
-                    await set_portal_minimized(True)
-                    emit_step_event(transcript, 9, "checkpoint", {
-                        "code": "portal:minimize",
-                        "title": "Portal minimized",
-                        "action": "top-left minimize control collapsed the portal to a floating status icon",
-                        "expected_visual": "full portal hides; compact text-stream icon remains clickable",
-                    }, portal_x=portal_x, portal_y=portal_y)
-                elif ev.interaction_id == PORTAL_RESTORE_INTERACTION_ID:
-                    if not portal_minimized:
+                if kind == "pointer_down":
+                    ev = envelope.pointer_down
+                    if ev.tile_id not in own_pointer_tiles:
+                        continue
+                    if ev.interaction_id == PORTAL_MINIMIZE_INTERACTION_ID:
+                        if drag is not None:
+                            await finish_drag("superseded:minimize")
+                        await set_portal_minimized(True)
                         emit_step_event(transcript, 9, "checkpoint", {
-                            "code": "portal:restore-ignored",
-                            "title": "Restore ignored while portal is expanded",
-                            "action": "stale minimized-icon event arrived after restore",
-                            "expected_visual": "expanded portal remains visible",
+                            "code": "portal:minimize",
+                            "title": "Portal minimized",
+                            "action": "top-left minimize control collapsed the portal to a floating status icon",
+                            "expected_visual": "full portal hides; compact text-stream icon remains clickable",
                         }, portal_x=portal_x, portal_y=portal_y)
-                        continue
-                    if drag is not None and str(drag.get("kind", "")) == "icon":
-                        await finish_drag("superseded:restore-click")
-                    await set_portal_minimized(False)
-                    emit_step_event(transcript, 9, "checkpoint", {
-                        "code": "portal:restore",
-                        "title": "Portal restored",
-                        "action": "floating text-stream icon body restored the full portal immediately",
-                        "expected_visual": "portal reappears at the icon anchor",
-                    }, portal_x=portal_x, portal_y=portal_y,
-                       portal_w=PORTAL_W, portal_h=PORTAL_H)
-                elif ev.interaction_id == PORTAL_ICON_DRAG_INTERACTION_ID:
-                    if not portal_minimized:
-                        continue
-                    if drag is not None:
-                        if str(drag.get("kind", "")) == "icon":
+                    elif ev.interaction_id == PORTAL_RESTORE_INTERACTION_ID:
+                        if not portal_minimized:
                             emit_step_event(transcript, 9, "checkpoint", {
-                                "code": "portal-icon:pointer-down-ignored",
-                                "title": "Duplicate icon drag pointer down ignored",
-                                "action": "minimized icon drag grip already has an armed gesture",
-                                "expected_visual": "icon remains ready to move while dragging",
+                                "code": "portal:restore-ignored",
+                                "title": "Restore ignored while portal is expanded",
+                                "action": "stale minimized-icon event arrived after restore",
+                                "expected_visual": "expanded portal remains visible",
                             }, portal_x=portal_x, portal_y=portal_y)
                             continue
-                        await finish_drag("superseded:restore")
-                    drag = {
-                        "kind": "icon",
-                        "device_id": ev.device_id,
-                        "start_x": ev.display_x,
-                        "start_y": ev.display_y,
-                        "portal_x": portal_x,
-                        "portal_y": portal_y,
-                        "icon_dragging": False,
-                        "started_at": time.monotonic(),
-                        "last_activity_at": time.monotonic(),
-                    }
-                    emit_step_event(transcript, 9, "checkpoint", {
-                        "code": "portal-icon:pointer-down",
-                        "title": "Minimized icon drag grip pointer down",
-                        "action": "floating text-stream icon drag grip is ready to move the icon",
-                        "expected_visual": "icon moves only after a deliberate drag from the grip",
-                    }, portal_x=portal_x, portal_y=portal_y,
-                       portal_w=PORTAL_W, portal_h=PORTAL_H)
-                elif ev.interaction_id == PORTAL_DRAG_INTERACTION_ID:
-                    if drag is not None:
-                        await finish_drag("superseded:pointer_down")
-                    drag = {
-                        "kind": "portal",
-                        "device_id": ev.device_id,
-                        "start_x": ev.display_x,
-                        "start_y": ev.display_y,
-                        "portal_x": portal_x,
-                        "portal_y": portal_y,
-                        "started_at": time.monotonic(),
-                        "last_activity_at": time.monotonic(),
-                    }
-                    await set_drag_shield(PORTAL_DRAG_INTERACTION_ID)
-                    emit_step_event(transcript, 9, "checkpoint", {
-                        "code": "drag:start",
-                        "title": "Portal drag started",
-                        "action": "header drag surface received pointer down",
-                        "expected_visual": "portal follows pointer while dragging",
-                    }, display_x=ev.display_x, display_y=ev.display_y)
-                elif ev.interaction_id == PANE_RESIZE_INTERACTION_ID:
-                    if drag is not None:
-                        await finish_drag("superseded:pane_resize")
-                    drag = {
-                        "kind": "pane",
-                        "device_id": ev.device_id,
-                        "start_x": ev.display_x,
-                        "start_y": ev.display_y,
-                        "input_pane_w": INPUT_PANE_W,
-                        "started_at": time.monotonic(),
-                        "last_activity_at": time.monotonic(),
-                    }
-                    await set_drag_shield(PANE_RESIZE_INTERACTION_ID)
-                    emit_step_event(transcript, 9, "checkpoint", {
-                        "code": "pane-resize:start",
-                        "title": "Pane resize started",
-                        "action": "middle divider received pointer down",
-                        "expected_visual": "dragging changes input/output width ratio",
-                    }, display_x=ev.display_x, display_y=ev.display_y,
-                       input_pane_w=INPUT_PANE_W)
-                elif ev.interaction_id == PORTAL_RESIZE_INTERACTION_ID:
-                    if drag is not None:
-                        await finish_drag("superseded:portal_resize")
-                    drag = {
-                        "kind": "resize",
-                        "device_id": ev.device_id,
-                        "start_x": ev.display_x,
-                        "start_y": ev.display_y,
-                        "portal_w": PORTAL_W,
-                        "portal_h": PORTAL_H,
-                        "started_at": time.monotonic(),
-                        "last_activity_at": time.monotonic(),
-                    }
-                    await set_drag_shield(PORTAL_RESIZE_INTERACTION_ID)
-                    emit_step_event(transcript, 9, "checkpoint", {
-                        "code": "portal-resize:start",
-                        "title": "Portal resize started",
-                        "action": "bottom-right resize handle received pointer down",
-                        "expected_visual": "dragging resizes the whole portal surface",
-                    }, display_x=ev.display_x, display_y=ev.display_y,
-                       portal_w=PORTAL_W, portal_h=PORTAL_H)
-                elif ev.interaction_id == COMPOSER_INTERACTION_ID:
-                    if drag is not None:
-                        await finish_drag("superseded:composer_focus")
+                        if drag is not None and str(drag.get("kind", "")) == "icon":
+                            await finish_drag("superseded:restore-click")
+                        await set_portal_minimized(False)
+                        emit_step_event(transcript, 9, "checkpoint", {
+                            "code": "portal:restore",
+                            "title": "Portal restored",
+                            "action": "floating text-stream icon body restored the full portal immediately",
+                            "expected_visual": "portal reappears at the icon anchor",
+                        }, portal_x=portal_x, portal_y=portal_y,
+                           portal_w=PORTAL_W, portal_h=PORTAL_H)
+                    elif ev.interaction_id == PORTAL_ICON_DRAG_INTERACTION_ID:
+                        if not portal_minimized:
+                            continue
+                        if drag is not None:
+                            if str(drag.get("kind", "")) == "icon":
+                                emit_step_event(transcript, 9, "checkpoint", {
+                                    "code": "portal-icon:pointer-down-ignored",
+                                    "title": "Duplicate icon drag pointer down ignored",
+                                    "action": "minimized icon drag grip already has an armed gesture",
+                                    "expected_visual": "icon remains ready to move while dragging",
+                                }, portal_x=portal_x, portal_y=portal_y)
+                                continue
+                            await finish_drag("superseded:restore")
+                        drag = {
+                            "kind": "icon",
+                            "device_id": ev.device_id,
+                            "start_x": ev.display_x,
+                            "start_y": ev.display_y,
+                            "portal_x": portal_x,
+                            "portal_y": portal_y,
+                            "icon_dragging": False,
+                            "started_at": time.monotonic(),
+                            "last_activity_at": time.monotonic(),
+                        }
+                        emit_step_event(transcript, 9, "checkpoint", {
+                            "code": "portal-icon:pointer-down",
+                            "title": "Minimized icon drag grip pointer down",
+                            "action": "floating text-stream icon drag grip is ready to move the icon",
+                            "expected_visual": "icon moves only after a deliberate drag from the grip",
+                        }, portal_x=portal_x, portal_y=portal_y,
+                           portal_w=PORTAL_W, portal_h=PORTAL_H)
+                    elif ev.interaction_id == PORTAL_DRAG_INTERACTION_ID:
+                        if drag is not None:
+                            await finish_drag("superseded:pointer_down")
+                        drag = {
+                            "kind": "portal",
+                            "device_id": ev.device_id,
+                            "start_x": ev.display_x,
+                            "start_y": ev.display_y,
+                            "portal_x": portal_x,
+                            "portal_y": portal_y,
+                            "started_at": time.monotonic(),
+                            "last_activity_at": time.monotonic(),
+                        }
+                        await set_drag_shield(PORTAL_DRAG_INTERACTION_ID)
+                        emit_step_event(transcript, 9, "checkpoint", {
+                            "code": "drag:start",
+                            "title": "Portal drag started",
+                            "action": "header drag surface received pointer down",
+                            "expected_visual": "portal follows pointer while dragging",
+                        }, display_x=ev.display_x, display_y=ev.display_y)
+                    elif ev.interaction_id == PANE_RESIZE_INTERACTION_ID:
+                        if drag is not None:
+                            await finish_drag("superseded:pane_resize")
+                        drag = {
+                            "kind": "pane",
+                            "device_id": ev.device_id,
+                            "start_x": ev.display_x,
+                            "start_y": ev.display_y,
+                            "input_pane_w": INPUT_PANE_W,
+                            "started_at": time.monotonic(),
+                            "last_activity_at": time.monotonic(),
+                        }
+                        await set_drag_shield(PANE_RESIZE_INTERACTION_ID)
+                        emit_step_event(transcript, 9, "checkpoint", {
+                            "code": "pane-resize:start",
+                            "title": "Pane resize started",
+                            "action": "middle divider received pointer down",
+                            "expected_visual": "dragging changes input/output width ratio",
+                        }, display_x=ev.display_x, display_y=ev.display_y,
+                           input_pane_w=INPUT_PANE_W)
+                    elif ev.interaction_id == PORTAL_RESIZE_INTERACTION_ID:
+                        if drag is not None:
+                            await finish_drag("superseded:portal_resize")
+                        drag = {
+                            "kind": "resize",
+                            "device_id": ev.device_id,
+                            "start_x": ev.display_x,
+                            "start_y": ev.display_y,
+                            "portal_w": PORTAL_W,
+                            "portal_h": PORTAL_H,
+                            "started_at": time.monotonic(),
+                            "last_activity_at": time.monotonic(),
+                        }
+                        await set_drag_shield(PORTAL_RESIZE_INTERACTION_ID)
+                        emit_step_event(transcript, 9, "checkpoint", {
+                            "code": "portal-resize:start",
+                            "title": "Portal resize started",
+                            "action": "bottom-right resize handle received pointer down",
+                            "expected_visual": "dragging resizes the whole portal surface",
+                        }, display_x=ev.display_x, display_y=ev.display_y,
+                           portal_w=PORTAL_W, portal_h=PORTAL_H)
+                    elif ev.interaction_id == COMPOSER_INTERACTION_ID:
+                        if drag is not None:
+                            await finish_drag("superseded:composer_focus")
+                        emit_step_event(transcript, 10, "checkpoint", {
+                            "code": "input:focus-attempt",
+                            "title": "Composer pointer down",
+                            "action": "input composer received pointer down",
+                            "expected_visual": "keyboard focus should move to composer",
+                        }, display_x=ev.display_x, display_y=ev.display_y)
+                    else:
+                        emit_step_event(transcript, 9, "checkpoint", {
+                            "code": "input:pointer-down-unhandled",
+                            "title": "Unhandled portal pointer down",
+                            "action": "runtime delivered pointer down for an interaction id without exemplar handling",
+                            "expected_visual": "operator click may appear to do nothing",
+                        }, interaction_id=ev.interaction_id,
+                           display_x=ev.display_x, display_y=ev.display_y)
+
+                elif kind == "pointer_move" and drag is not None:
+                    ev = envelope.pointer_move
+                    if ev.tile_id not in own_pointer_tiles:
+                        continue
+                    if ev.device_id != drag["device_id"]:
+                        continue
+                    now = time.monotonic()
+                    if now - float(drag["started_at"]) > DRAG_MAX_SECONDS:
+                        await finish_drag("watchdog")
+                        continue
+                    drag["last_activity_at"] = now
+                    dx = ev.display_x - float(drag["start_x"])
+                    dy = ev.display_y - float(drag["start_y"])
+                    await apply_drag_delta(dx, dy, rebuild=False)
+
+                elif kind == "pointer_up" and drag is not None:
+                    ev = envelope.pointer_up
+                    if ev.tile_id not in own_pointer_tiles:
+                        continue
+                    if ev.device_id == drag["device_id"]:
+                        await finish_drag("pointer_up", ev.display_x, ev.display_y)
+
+                elif kind == "pointer_cancel" and drag is not None:
+                    ev = envelope.pointer_cancel
+                    if ev.tile_id not in own_pointer_tiles:
+                        continue
+                    if ev.device_id == drag["device_id"]:
+                        await finish_drag("pointer_cancel")
+
+                elif kind == "capture_released" and drag is not None:
+                    ev = envelope.capture_released
+                    if ev.tile_id not in own_pointer_tiles:
+                        continue
+                    if ev.device_id == drag["device_id"]:
+                        reason_name = events_pb2.CaptureReleasedReason.Name(ev.reason)
+                        await finish_drag(f"capture_released:{reason_name}")
+
+                elif kind == "character":
+                    # Character events are observed for logging only. Composer text
+                    # state is now driven exclusively by ComposerDraftStateEvent
+                    # (runtime-owned draft path, spec §4.6).
+                    ev = envelope.character
+                    if ev.tile_id != tiles.input_scroll:
+                        continue
+                    character = normalize_composer_input(ev.character)
                     emit_step_event(transcript, 10, "checkpoint", {
-                        "code": "input:focus-attempt",
-                        "title": "Composer pointer down",
-                        "action": "input composer received pointer down",
-                        "expected_visual": "keyboard focus should move to composer",
-                    }, display_x=ev.display_x, display_y=ev.display_y)
-                else:
-                    emit_step_event(transcript, 9, "checkpoint", {
-                        "code": "input:pointer-down-unhandled",
-                        "title": "Unhandled portal pointer down",
-                        "action": "runtime delivered pointer down for an interaction id without exemplar handling",
-                        "expected_visual": "operator click may appear to do nothing",
-                    }, interaction_id=ev.interaction_id,
-                       display_x=ev.display_x, display_y=ev.display_y)
+                        "code": "input:character",
+                        "title": "Composer character received (observed)",
+                        "action": "runtime delivered character input; state update arrives via composer_draft_state",
+                        "expected_visual": "composer state will update when draft-state event arrives",
+                    }, character=character)
 
-            elif kind == "pointer_move" and drag is not None:
-                ev = envelope.pointer_move
-                if ev.tile_id not in own_pointer_tiles:
+                elif kind == "key_down":
+                    # Key events are observed for logging only. Composer state is
+                    # driven by ComposerDraftStateEvent (runtime-owned, spec §4.6).
+                    # Submit/cancel arrive as ComposerDraftSubmitEvent / ComposerDraftCancelEvent.
+                    ev = envelope.key_down
+                    if ev.tile_id != tiles.input_scroll:
+                        continue
+                    emit_step_event(transcript, 10, "checkpoint", {
+                        "code": "input:key-down",
+                        "title": "Composer key down received (observed)",
+                        "action": "runtime delivered key input; draft state update arrives via composer_draft_state",
+                        "expected_visual": "editing result arrives via runtime-owned draft-state event",
+                    }, key=ev.key, key_code=ev.key_code, repeat=ev.repeat,
+                       ctrl=ev.ctrl, shift=ev.shift, alt=ev.alt, meta=ev.meta)
+
+                elif kind == "key_up":
+                    ev = envelope.key_up
+                    if ev.tile_id != tiles.input_scroll:
+                        continue
+                    emit_step_event(transcript, 10, "checkpoint", {
+                        "code": "input:key-up",
+                        "title": "Composer key up received (observed)",
+                        "action": "runtime delivered key release; used to diagnose OS key delivery",
+                        "expected_visual": "no visible change expected from release alone",
+                    }, key=ev.key, key_code=ev.key_code,
+                       ctrl=ev.ctrl, shift=ev.shift, alt=ev.alt, meta=ev.meta)
+
+                elif kind == "scroll_offset_changed":
+                    ev = envelope.scroll_offset_changed
+                    if ev.tile_id != tiles.output_scroll:
+                        continue
+                    if abs(ev.offset_y) < 0.5:
+                        continue
+                    pending_output_scroll_y = ev.offset_y
+
+                elif kind == "focus_gained":
+                    ev = envelope.focus_gained
+                    if ev.tile_id != tiles.input_scroll:
+                        continue
+                    emit_step_event(transcript, 10, "checkpoint", {
+                        "code": "input:focus-gained",
+                        "title": "Composer focus gained",
+                        "action": "runtime focus manager focused the composer hit region",
+                        "expected_visual": "subsequent keyboard events route to composer",
+                    })
+                    set_composer_focus(True)
+
+                elif kind == "focus_lost":
+                    ev = envelope.focus_lost
+                    if ev.tile_id != tiles.input_scroll:
+                        continue
+                    emit_step_event(transcript, 10, "checkpoint", {
+                        "code": "input:focus-lost",
+                        "title": "Composer focus lost",
+                        "action": "runtime focus manager moved focus away from composer",
+                        "expected_visual": "composer stops receiving keyboard events",
+                    })
+                    set_composer_focus(False)
+
+                elif kind == "composer_draft_state":
+                    # Runtime-owned coalesced draft state (spec §4.6).
+                    ev = envelope.composer_draft_state
+                    await on_composer_draft_state(
+                        ev.text,
+                        int(ev.cursor),
+                        ev.at_capacity,
+                        int(ev.sequence),
+                    )
+
+                elif kind == "composer_draft_submit":
+                    # Runtime-owned transactional submit (spec §4.6).
+                    ev = envelope.composer_draft_submit
+                    await on_composer_draft_submit(ev.text, int(ev.sequence))
+
+                elif kind == "composer_draft_cancel":
+                    # Runtime-owned transactional cancel (spec §4.6).
+                    ev = envelope.composer_draft_cancel
+                    await on_composer_draft_cancel(int(ev.sequence))
+
+            if pending_output_scroll_y is not None:
+                if last_output_scroll_y is not None and abs(pending_output_scroll_y - last_output_scroll_y) < 0.5:
                     continue
-                if ev.device_id != drag["device_id"]:
-                    continue
-                now = time.monotonic()
-                if now - float(drag["started_at"]) > DRAG_MAX_SECONDS:
-                    await finish_drag("watchdog")
-                    continue
-                drag["last_activity_at"] = now
-                dx = ev.display_x - float(drag["start_x"])
-                dy = ev.display_y - float(drag["start_y"])
-                await apply_drag_delta(dx, dy, rebuild=False)
-
-            elif kind == "pointer_up" and drag is not None:
-                ev = envelope.pointer_up
-                if ev.tile_id not in own_pointer_tiles:
-                    continue
-                if ev.device_id == drag["device_id"]:
-                    await finish_drag("pointer_up", ev.display_x, ev.display_y)
-
-            elif kind == "pointer_cancel" and drag is not None:
-                ev = envelope.pointer_cancel
-                if ev.tile_id not in own_pointer_tiles:
-                    continue
-                if ev.device_id == drag["device_id"]:
-                    await finish_drag("pointer_cancel")
-
-            elif kind == "capture_released" and drag is not None:
-                ev = envelope.capture_released
-                if ev.tile_id not in own_pointer_tiles:
-                    continue
-                if ev.device_id == drag["device_id"]:
-                    reason_name = events_pb2.CaptureReleasedReason.Name(ev.reason)
-                    await finish_drag(f"capture_released:{reason_name}")
-
-            elif kind == "character":
-                # Character events are observed for logging only. Composer text
-                # state is now driven exclusively by ComposerDraftStateEvent
-                # (runtime-owned draft path, spec §4.6).
-                ev = envelope.character
-                if ev.tile_id != tiles.input_scroll:
-                    continue
-                character = normalize_composer_input(ev.character)
-                emit_step_event(transcript, 10, "checkpoint", {
-                    "code": "input:character",
-                    "title": "Composer character received (observed)",
-                    "action": "runtime delivered character input; state update arrives via composer_draft_state",
-                    "expected_visual": "composer state will update when draft-state event arrives",
-                }, character=character)
-
-            elif kind == "key_down":
-                # Key events are observed for logging only. Composer state is
-                # driven by ComposerDraftStateEvent (runtime-owned, spec §4.6).
-                # Submit/cancel arrive as ComposerDraftSubmitEvent / ComposerDraftCancelEvent.
-                ev = envelope.key_down
-                if ev.tile_id != tiles.input_scroll:
-                    continue
-                emit_step_event(transcript, 10, "checkpoint", {
-                    "code": "input:key-down",
-                    "title": "Composer key down received (observed)",
-                    "action": "runtime delivered key input; draft state update arrives via composer_draft_state",
-                    "expected_visual": "editing result arrives via runtime-owned draft-state event",
-                }, key=ev.key, key_code=ev.key_code, repeat=ev.repeat,
-                   ctrl=ev.ctrl, shift=ev.shift, alt=ev.alt, meta=ev.meta)
-
-            elif kind == "key_up":
-                ev = envelope.key_up
-                if ev.tile_id != tiles.input_scroll:
-                    continue
-                emit_step_event(transcript, 10, "checkpoint", {
-                    "code": "input:key-up",
-                    "title": "Composer key up received (observed)",
-                    "action": "runtime delivered key release; used to diagnose OS key delivery",
-                    "expected_visual": "no visible change expected from release alone",
-                }, key=ev.key, key_code=ev.key_code,
-                   ctrl=ev.ctrl, shift=ev.shift, alt=ev.alt, meta=ev.meta)
-
-            elif kind == "scroll_offset_changed":
-                ev = envelope.scroll_offset_changed
-                if ev.tile_id != tiles.output_scroll:
-                    continue
-                if abs(ev.offset_y) < 0.5:
-                    continue
-                pending_output_scroll_y = ev.offset_y
-
-            elif kind == "focus_gained":
-                ev = envelope.focus_gained
-                if ev.tile_id != tiles.input_scroll:
-                    continue
-                emit_step_event(transcript, 10, "checkpoint", {
-                    "code": "input:focus-gained",
-                    "title": "Composer focus gained",
-                    "action": "runtime focus manager focused the composer hit region",
-                    "expected_visual": "subsequent keyboard events route to composer",
-                })
-                set_composer_focus(True)
-
-            elif kind == "focus_lost":
-                ev = envelope.focus_lost
-                if ev.tile_id != tiles.input_scroll:
-                    continue
-                emit_step_event(transcript, 10, "checkpoint", {
-                    "code": "input:focus-lost",
-                    "title": "Composer focus lost",
-                    "action": "runtime focus manager moved focus away from composer",
-                    "expected_visual": "composer stops receiving keyboard events",
-                })
-                set_composer_focus(False)
-
-            elif kind == "composer_draft_state":
-                # Runtime-owned coalesced draft state (spec §4.6).
-                ev = envelope.composer_draft_state
-                await on_composer_draft_state(
-                    ev.text,
-                    int(ev.cursor),
-                    ev.at_capacity,
-                    int(ev.sequence),
-                )
-
-            elif kind == "composer_draft_submit":
-                # Runtime-owned transactional submit (spec §4.6).
-                ev = envelope.composer_draft_submit
-                await on_composer_draft_submit(ev.text, int(ev.sequence))
-
-            elif kind == "composer_draft_cancel":
-                # Runtime-owned transactional cancel (spec §4.6).
-                ev = envelope.composer_draft_cancel
-                await on_composer_draft_cancel(int(ev.sequence))
-
-        if pending_output_scroll_y is not None:
-            if last_output_scroll_y is not None and abs(pending_output_scroll_y - last_output_scroll_y) < 0.5:
-                continue
-            last_output_scroll_y = pending_output_scroll_y
-            await render_output_scroll(pending_output_scroll_y)
-            emit_step_event(transcript, 8, "checkpoint", {
-                "code": "scroll:output",
-                "title": "Output transcript scrolled",
-                "action": "portal received local-first scroll offset",
-                "expected_visual": "output text stays clipped inside transcript box",
-            }, scroll_y=pending_output_scroll_y, viewport_start=output_view_start)
+                last_output_scroll_y = pending_output_scroll_y
+                await render_output_scroll(pending_output_scroll_y)
+                emit_step_event(transcript, 8, "checkpoint", {
+                    "code": "scroll:output",
+                    "title": "Output transcript scrolled",
+                    "action": "portal received local-first scroll offset",
+                    "expected_visual": "output text stays clipped inside transcript box",
+                }, scroll_y=pending_output_scroll_y, viewport_start=output_view_start)
+    finally:
+        await cancel_background_tasks()
 
 
 async def run_baseline(
