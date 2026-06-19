@@ -24,10 +24,12 @@ class PresenceCardExemplarTests(unittest.TestCase):
     def test_build_presence_card_mutations_include_tile_setup_and_dismiss_control(self) -> None:
         tile_id = uuid.uuid4().bytes
         root_uuid = uuid.UUID("11111111-2222-7333-8444-555555555555")
+        avatar_resource_id = uuid.UUID("22222222-3333-7444-8555-666666666666").bytes
 
         mutations = presence_card_exemplar.build_presence_card_mutations(
             tile_id=tile_id,
             agent_name="agent-alpha",
+            avatar_resource_id=avatar_resource_id,
             avatar_rgba=(66 / 255.0, 133 / 255.0, 244 / 255.0, 1.0),
             elapsed_seconds=0,
             include_tile_setup=True,
@@ -53,6 +55,10 @@ class PresenceCardExemplarTests(unittest.TestCase):
             "RESIDENT AGENT",
         )
         self.assertEqual(
+            mutations[6].add_node.node.static_image.resource_id,
+            avatar_resource_id,
+        )
+        self.assertEqual(
             mutations[8].add_node.node.text_markdown.content,
             "**agent-alpha**",
         )
@@ -72,10 +78,12 @@ class PresenceCardExemplarTests(unittest.TestCase):
     def test_build_presence_card_mutations_for_update_rebuilds_full_tree(self) -> None:
         tile_id = uuid.uuid4().bytes
         root_uuid = uuid.UUID("aaaaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee")
+        avatar_resource_id = uuid.UUID("bbbbbbbb-cccc-7ddd-8eee-ffffffffffff").bytes
 
         mutations = presence_card_exemplar.build_presence_card_mutations(
             tile_id=tile_id,
             agent_name="agent-gamma",
+            avatar_resource_id=avatar_resource_id,
             avatar_rgba=(251 / 255.0, 188 / 255.0, 4 / 255.0, 1.0),
             elapsed_seconds=90,
             include_tile_setup=False,
@@ -86,6 +94,10 @@ class PresenceCardExemplarTests(unittest.TestCase):
         self.assertEqual(mutations[0].WhichOneof("mutation"), "set_tile_root")
         for mutation in mutations[1:]:
             self.assertEqual(mutation.WhichOneof("mutation"), "add_node")
+        self.assertEqual(
+            mutations[4].add_node.node.static_image.resource_id,
+            avatar_resource_id,
+        )
         self.assertEqual(
             mutations[7].add_node.node.text_markdown.content,
             "Connected • last active 1m ago",
