@@ -256,23 +256,19 @@ impl WinitApp {
             // focused portal tile.  The hotkey is focus-scoped: only the
             // portal that holds keyboard focus consumes it.
             //
-            // COMPOSER PRECEDENCE (§4.4 / Priority 3 above):
-            // When a composer is active, Ctrl+`+`/`=`/`-` are composer
-            // shortcuts and MUST NOT be stolen by the resize intercept.
-            // Skip the resize check entirely; the composer intercept below
-            // will handle the key.
+            // Composer focus is still portal-surface focus.  Run this before
+            // composer draft routing so Ctrl resize chords can resize a
+            // focused text-stream portal without leaking to the agent.
             //
             // The hotkey is consumed (returns early) when applied so it does
             // NOT propagate to the composer or the agent's raw KeyDown path.
-            if !self.state.input_processor.is_composer_active() {
-                if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
-                    if self.apply_portal_resize_hotkey(tab_id, dir) {
-                        tracing::debug!(
-                            key = %str_preview(&raw.key),
-                            "portal resize: Ctrl hotkey consumed (resize applied)"
-                        );
-                        return;
-                    }
+            if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
+                if self.apply_portal_resize_hotkey(tab_id, dir) {
+                    tracing::debug!(
+                        key = %str_preview(&raw.key),
+                        "portal resize: Ctrl hotkey consumed (resize applied)"
+                    );
+                    return;
                 }
             }
         }
