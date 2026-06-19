@@ -1053,7 +1053,7 @@ fn combined_overlay_hit_regions(
     regions
 }
 
-fn refresh_zone_hit_regions_after_render(
+fn refresh_interaction_hit_regions_after_render(
     compositor: &Compositor,
     scene: &mut SceneGraph,
     surface: &dyn CompositorSurface,
@@ -2236,9 +2236,6 @@ impl ApplicationHandler for WinitApp {
                         compositor.update_publication_animations(&scene);
                         compositor.prune_faded_publications(&mut scene);
 
-                        let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
-                        hit_test_snapshot.store(Arc::new(new_snap));
-
                         // ── Commit-time markdown cache prime (hud-380dl) ──
                         // Prime the markdown parse cache here — at scene-commit
                         // time, before the render path executes — so that
@@ -2264,12 +2261,14 @@ impl ApplicationHandler for WinitApp {
                         // ── Stage 5–7: Render Encode + GPU Submit ─────────
                         let scene_commit_at = Instant::now();
                         let compositor_telemetry =
-                            compositor.render_frame(&scene, surface_for_compositor.as_ref());
-                        refresh_zone_hit_regions_after_render(
+                            compositor.render_frame(&mut scene, surface_for_compositor.as_ref());
+                        refresh_interaction_hit_regions_after_render(
                             &compositor,
                             &mut scene,
                             surface_for_compositor.as_ref(),
                         );
+                        let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+                        hit_test_snapshot.store(Arc::new(new_snap));
                         drop(scene); // Release lock before signalling main thread.
 
                         // ── Signal main thread to present ─────────────────
@@ -5171,6 +5170,7 @@ mod tests {
         scene_with_composer_in_nonactive_tab, scene_with_drag_handle_tile,
     };
     use super::*;
+    use tze_hud_compositor::HeadlessSurface;
     use tze_hud_scene::NodeData;
 
     fn make_windowed_keyboard_test_app(
@@ -5620,6 +5620,44 @@ mod tests {
             combined[1],
             HitRegion::new(100.0, 200.0, 20.0, 20.0),
             "zone hit region must be exposed to overlay click-capture"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn windowed_post_render_refresh_updates_drag_handles_before_snapshot() {
+        let mut compositor = match Compositor::new_headless(1920, 1080).await {
+            Ok(compositor) => compositor,
+            Err(e) => {
+                eprintln!("skipping GPU-dependent drag-handle refresh test: {e}");
+                return;
+            }
+        };
+        let surface = HeadlessSurface::new(&compositor.device, 1920, 1080);
+        let (mut scene, tile_id, _element_id, _interaction_id) =
+            scene_with_drag_handle_tile(400.0, 300.0, 600.0, 200.0);
+
+        let tile = scene
+            .tiles
+            .get_mut(&tile_id)
+            .expect("drag-handle test tile must exist");
+        tile.bounds.x = 500.0;
+        tile.bounds.y = 330.0;
+
+        let stale_snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+        assert!(
+            !stale_snapshot.hit_test_drag_handle(800.0, 330.0),
+            "pre-refresh snapshot still carries the previous frame's drag-handle bounds"
+        );
+
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
+        compositor.render_frame(&mut scene, &surface);
+        refresh_interaction_hit_regions_after_render(&compositor, &mut scene, &surface);
+        let refreshed_snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+
+        assert!(
+            refreshed_snapshot.hit_test_drag_handle(800.0, 330.0),
+            "snapshot built after the windowed post-render refresh must match the newly displayed drag-handle geometry"
         );
     }
 
