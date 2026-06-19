@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
 """
 Publish a batch of MCP `publish_to_widget` messages to a running HUD endpoint.
 
