@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "blake3>=1.0.0",
+#   "grpcio>=1.80.0",
+#   "pillow>=11.0.0",
+#   "protobuf>=6.31.1",
+# ]
+# ///
 import asyncio
 import io
 import unittest

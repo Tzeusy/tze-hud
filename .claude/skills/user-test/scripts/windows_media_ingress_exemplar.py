@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "grpcio>=1.80.0",
+#   "protobuf>=6.31.1",
+# ]
+# ///
 """
 Windows media ingress exemplar producer and YouTube source-evidence sidecar.
 

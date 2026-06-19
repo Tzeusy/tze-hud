@@ -1,6 +1,14 @@
 ---
 name: user-test
 description: Use when validating a cross-machine HUD flow where Butler deploys/runs the full Windows app over SSH+SCP (tailnet default host), then publishes configurable test messages to HUD zones via MCP `publish_to_zone`.
+metadata:
+  owner: tze
+  authors:
+    - tze
+    - OpenAI Codex
+    - Claude
+  status: active
+  last_reviewed: "2026-06-20"
 ---
 
 # User Test
@@ -28,6 +36,16 @@ Collect these before executing:
 - `mcp_http_url` (default: `http://windows-host.example:9090`)
 - `mcp_psk_env` (default: `MCP_TEST_PSK`)
 - `messages`: array of zone publishes
+
+## Support File Index
+
+Use these files when the matching workflow section below calls for them:
+
+- Deployment and setup: [scripts/deploy_windows_hud.sh](scripts/deploy_windows_hud.sh), [scripts/windows_setup_hud_automation.ps1](scripts/windows_setup_hud_automation.ps1), [scripts/d18_validation.sh](scripts/d18_validation.sh)
+- Batch publishers and broad zone fixtures: [scripts/publish_zone_batch.py](scripts/publish_zone_batch.py), [scripts/publish_widget_batch.py](scripts/publish_widget_batch.py), [scripts/all-zones-test.json](scripts/all-zones-test.json), [scripts/widget-cleanup.json](scripts/widget-cleanup.json)
+- Widget fixtures: [scripts/gauge_cycle_test.json](scripts/gauge_cycle_test.json), [scripts/progress-bar-step.json](scripts/progress-bar-step.json), [scripts/progress-bar-color-sweep.json](scripts/progress-bar-color-sweep.json), [scripts/progress-bar-rapidfire-100-5s.json](scripts/progress-bar-rapidfire-100-5s.json), [scripts/status-indicator-enum-cycle-test.json](scripts/status-indicator-enum-cycle-test.json), [scripts/status-indicator-theme-cycle-test.json](scripts/status-indicator-theme-cycle-test.json), [scripts/status-indicator-label-update-test.json](scripts/status-indicator-label-update-test.json), [scripts/status-indicator-validation-test.json](scripts/status-indicator-validation-test.json), [scripts/status-indicator-contention-test.json](scripts/status-indicator-contention-test.json), [scripts/status-indicator-theme-status-matrix-test.json](scripts/status-indicator-theme-status-matrix-test.json)
+- Zone exemplars and fixtures: [scripts/subtitle_exemplar.py](scripts/subtitle_exemplar.py), [scripts/subtitle-full-sequence.json](scripts/subtitle-full-sequence.json), [scripts/subtitle-single-line.json](scripts/subtitle-single-line.json), [scripts/subtitle-multiline.json](scripts/subtitle-multiline.json), [scripts/subtitle-rapid-replace.json](scripts/subtitle-rapid-replace.json), [scripts/subtitle-streaming.json](scripts/subtitle-streaming.json), [scripts/subtitle-ttl-expiry.json](scripts/subtitle-ttl-expiry.json), [scripts/notification_exemplar.py](scripts/notification_exemplar.py), [scripts/notification-full-gamut.json](scripts/notification-full-gamut.json), [scripts/alert_banner_exemplar.py](scripts/alert_banner_exemplar.py), [scripts/status_bar_exemplar.py](scripts/status_bar_exemplar.py), [scripts/ambient_background_exemplar.py](scripts/ambient_background_exemplar.py)
+- Resident gRPC, portal, media, and stress helpers: [scripts/hud_grpc_client.py](scripts/hud_grpc_client.py), [scripts/test_hud_grpc_client.py](scripts/test_hud_grpc_client.py), [scripts/presence_card_exemplar.py](scripts/presence_card_exemplar.py), [scripts/text_stream_portal_exemplar.py](scripts/text_stream_portal_exemplar.py), [scripts/windows_media_ingress_exemplar.py](scripts/windows_media_ingress_exemplar.py), [scripts/windows_media_resource_sampler.py](scripts/windows_media_resource_sampler.py), [scripts/stress_test_zones.py](scripts/stress_test_zones.py)
 
 Message shape — `content` is either a plain string (StreamText) or a typed JSON object:
 
