@@ -808,6 +808,13 @@ impl HeadlessRuntime {
 mod tests {
     use super::*;
 
+    /// Serializes GPU-backed headless runtime construction in this module.
+    ///
+    /// On headless Linux with llvmpipe/wgpu, concurrent `HeadlessRuntime::new`
+    /// calls can wedge the default parallel libtest harness even though each
+    /// test passes alone or with `--test-threads=1`.
+    static HEADLESS_RUNTIME_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Verify that grpc_port = 0 does not start a server by default.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_headless_runtime_no_grpc() {
@@ -819,6 +826,7 @@ mod tests {
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         // render_frame should succeed without a gRPC server
         let telemetry = runtime.render_frame().await;
@@ -836,6 +844,7 @@ mod tests {
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         runtime.render_frame().await;
         let pixels = runtime.read_pixels();
@@ -866,6 +875,7 @@ mod tests {
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         runtime.render_frame().await;
         let pixels = runtime.read_pixels();
@@ -915,6 +925,7 @@ mod tests {
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         let _server = runtime.start_grpc_server().await.expect("server start");
 
@@ -1131,6 +1142,7 @@ default_tab = true
             psk: "test".to_string(),
             config_toml: Some(toml.to_string()),
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
         // The compositor's token_map must contain the tokens from config_toml.
@@ -1339,6 +1351,7 @@ default_tab = true
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
         // Without config_toml, the compositor token_map should be empty.
@@ -1562,6 +1575,7 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         let handle = runtime
             .start_grpc_server()
@@ -1597,6 +1611,7 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         let handle = runtime
             .start_grpc_server()
@@ -1632,6 +1647,7 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         let handle = runtime
             .start_grpc_server()
