@@ -595,6 +595,8 @@ pub(super) struct ComposerOverlayTokens {
     pub(super) font_size_px: f32,
 }
 
+const COMPOSER_OVERLAY_DEFAULT_FONT_SIZE_PX: f32 = 16.0;
+
 pub(super) fn resolve_composer_overlay_tokens(
     token_map: &HashMap<String, String>,
 ) -> ComposerOverlayTokens {
@@ -630,12 +632,12 @@ pub(super) fn resolve_composer_overlay_tokens(
         // Default: #3A7BD5 @ ~115/255 alpha (≈ 0.45) — a calm blue selection
         .unwrap_or([0x3A, 0x7B, 0xD5, 0x73]);
 
-    // Font size (default: 13)
+    // Font size (default: portal composer readable fallback)
     let font_size_px = token_map
         .get("portal.composer.font_size")
         .and_then(|v| v.parse::<f32>().ok())
         .filter(|&v| v.is_finite() && v > 0.0)
-        .unwrap_or(13.0);
+        .unwrap_or(COMPOSER_OVERLAY_DEFAULT_FONT_SIZE_PX);
 
     ComposerOverlayTokens {
         bg_r,
