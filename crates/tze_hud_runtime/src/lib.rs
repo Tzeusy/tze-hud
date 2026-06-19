@@ -109,6 +109,8 @@ pub mod session;
 pub mod shell;
 pub mod subscriptions;
 pub mod tab_switch_trigger;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod threads;
 pub mod trace_capture;
 mod widget_hover;

@@ -819,6 +819,7 @@ mod tests {
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         // render_frame should succeed without a gRPC server
         let telemetry = runtime.render_frame().await;
@@ -836,6 +837,7 @@ mod tests {
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         runtime.render_frame().await;
         let pixels = runtime.read_pixels();
@@ -866,6 +868,7 @@ mod tests {
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         runtime.render_frame().await;
         let pixels = runtime.read_pixels();
@@ -915,6 +918,7 @@ mod tests {
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         let _server = runtime.start_grpc_server().await.expect("server start");
 
@@ -1131,6 +1135,7 @@ default_tab = true
             psk: "test".to_string(),
             config_toml: Some(toml.to_string()),
         };
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
         // The compositor's token_map must contain the tokens from config_toml.
@@ -1339,6 +1344,7 @@ default_tab = true
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
         // Without config_toml, the compositor token_map should be empty.
@@ -1562,6 +1568,7 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         let handle = runtime
             .start_grpc_server()
@@ -1597,6 +1604,7 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         let handle = runtime
             .start_grpc_server()
@@ -1632,6 +1640,7 @@ capabilities = ["media_ingress", "publish_zone:media-pip"]
             psk: "test".to_string(),
             config_toml: None,
         };
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         let handle = runtime
             .start_grpc_server()
