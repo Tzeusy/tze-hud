@@ -431,6 +431,41 @@ fn spin_acquire<T>(
     }
 }
 
+fn pointer_down_starts_guaranteed_feedback_gesture(
+    snapshot: &crate::pipeline::HitTestSnapshot,
+    x: f32,
+    y: f32,
+    active_tab: Option<tze_hud_scene::SceneId>,
+    focus_manager: &FocusManager,
+    portal_tokens: PortalWindowTokens,
+) -> bool {
+    if snapshot.hit_test_drag_handle(x, y) {
+        return true;
+    }
+
+    let Some(tab_id) = active_tab else {
+        return false;
+    };
+    let Some(focused_tile_id) = focus_manager.current_owner(tab_id).tile_id() else {
+        return false;
+    };
+
+    let Some(tile) = snapshot.hit_test(x, y) else {
+        return false;
+    };
+    if tile.tile_id_bytes != focused_tile_id.to_bytes_le() || !tile.has_scroll_config {
+        return false;
+    }
+
+    let rect = PortalRect {
+        x: tile.bounds.x,
+        y: tile.bounds.y,
+        width: tile.bounds.width,
+        height: tile.bounds.height,
+    };
+    hit_affordance(x, y, &rect, portal_tokens.affordance_px).is_some()
+}
+
 // The input processor, pointer event, hit result, scene, and display dimensions
 // are all separate concerns that cannot be bundled into a context struct without
 // creating an artificial abstraction; the argument count is genuinely necessary.
@@ -1018,7 +1053,7 @@ fn combined_overlay_hit_regions(
     regions
 }
 
-fn refresh_zone_hit_regions_after_render(
+fn refresh_interaction_hit_regions_after_render(
     compositor: &Compositor,
     scene: &mut SceneGraph,
     surface: &dyn CompositorSurface,
@@ -2201,9 +2236,6 @@ impl ApplicationHandler for WinitApp {
                         compositor.update_publication_animations(&scene);
                         compositor.prune_faded_publications(&mut scene);
 
-                        let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
-                        hit_test_snapshot.store(Arc::new(new_snap));
-
                         // ── Commit-time markdown cache prime (hud-380dl) ──
                         // Prime the markdown parse cache here — at scene-commit
                         // time, before the render path executes — so that
@@ -2229,12 +2261,14 @@ impl ApplicationHandler for WinitApp {
                         // ── Stage 5–7: Render Encode + GPU Submit ─────────
                         let scene_commit_at = Instant::now();
                         let compositor_telemetry =
-                            compositor.render_frame(&scene, surface_for_compositor.as_ref());
-                        refresh_zone_hit_regions_after_render(
+                            compositor.render_frame(&mut scene, surface_for_compositor.as_ref());
+                        refresh_interaction_hit_regions_after_render(
                             &compositor,
                             &mut scene,
                             surface_for_compositor.as_ref(),
                         );
+                        let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+                        hit_test_snapshot.store(Arc::new(new_snap));
                         drop(scene); // Release lock before signalling main thread.
 
                         // ── Signal main thread to present ─────────────────
@@ -2858,17 +2892,15 @@ impl WinitApp {
         // locked block below; consumed after the lock is released to call
         // clear_local_composer_echo() without a borrow conflict (hud-r3ax6).
         let mut composer_focus_lost = false;
-        // An in-flight interactive gesture — an active drag move or a live
-        // pointer-affordance resize — requires guaranteed same-frame local
-        // feedback (local-feedback-first).  For those events, acquire the locks
-        // with a bounded spin instead of a single `try_lock`, so the
-        // `tile.bounds` update is never dropped on contention with the
-        // compositor render thread or a publish handler.  Dropping it is the
-        // root cause of bursty, laggy drag and no-op `Ctrl+`/`-` resize on
-        // continuously-streaming portals (the dropped step otherwise leaks out
-        // only via the adapter geometry roundtrip, lagging the body).  The
-        // phase/gesture flags are read without any lock (owned state).
-        let needs_guaranteed_feedback = matches!(
+        // Interactive gestures require guaranteed same-frame local feedback
+        // (local-feedback-first).  For those events, acquire the locks with a
+        // bounded spin instead of a single `try_lock`, so a contended scene lock
+        // cannot drop the local state/bounds update.  This covers active
+        // Move/Up events from already-started gestures and, narrowly, the
+        // initiating PointerDown for drag handles / portal resize affordances.
+        // Ordinary content PointerDown stays on the single try_lock path to
+        // preserve click-to-focus latency.
+        let active_gesture_needs_guaranteed_feedback = matches!(
             pointer_event.kind,
             PointerEventKind::Move | PointerEventKind::Up
         ) && (self
@@ -2882,6 +2914,34 @@ impl WinitApp {
                 .portal_resize_states
                 .values()
                 .any(|s| s.gesture_active()));
+        let initiating_down_needs_guaranteed_feedback =
+            pointer_event.kind == PointerEventKind::Down && {
+                let snapshot = self.state.pipeline.hit_test_snapshot.load();
+                let active_tab = self
+                    .state
+                    .active_tab_mirror
+                    .lock()
+                    .map(|guard| *guard)
+                    .ok()
+                    .flatten();
+                let portal_part = tze_hud_config::resolve_portal_tokens(&self.state.global_tokens);
+                let portal_tokens = PortalWindowTokens {
+                    min_width_px: portal_part.window_min_width_px,
+                    min_height_px: portal_part.window_min_height_px,
+                    resize_step_px: portal_part.window_resize_step_px,
+                    affordance_px: portal_part.window_resize_affordance_px,
+                };
+                pointer_down_starts_guaranteed_feedback_gesture(
+                    &snapshot,
+                    pointer_event.x,
+                    pointer_event.y,
+                    active_tab,
+                    &self.state.focus_manager,
+                    portal_tokens,
+                )
+            };
+        let needs_guaranteed_feedback =
+            active_gesture_needs_guaranteed_feedback || initiating_down_needs_guaranteed_feedback;
         // Inlined into the if-let scrutinee (not a named `let`) so the guard's
         // borrow of `self` is released at the end of this if-let/else — the
         // post-lock section below needs `&mut self` (drag-release persist,
@@ -5110,6 +5170,7 @@ mod tests {
         scene_with_composer_in_nonactive_tab, scene_with_drag_handle_tile,
     };
     use super::*;
+    use tze_hud_compositor::HeadlessSurface;
     use tze_hud_scene::NodeData;
 
     fn make_windowed_keyboard_test_app(
@@ -5559,6 +5620,44 @@ mod tests {
             combined[1],
             HitRegion::new(100.0, 200.0, 20.0, 20.0),
             "zone hit region must be exposed to overlay click-capture"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn windowed_post_render_refresh_updates_drag_handles_before_snapshot() {
+        let mut compositor = match Compositor::new_headless(1920, 1080).await {
+            Ok(compositor) => compositor,
+            Err(e) => {
+                eprintln!("skipping GPU-dependent drag-handle refresh test: {e}");
+                return;
+            }
+        };
+        let surface = HeadlessSurface::new(&compositor.device, 1920, 1080);
+        let (mut scene, tile_id, _element_id, _interaction_id) =
+            scene_with_drag_handle_tile(400.0, 300.0, 600.0, 200.0);
+
+        let tile = scene
+            .tiles
+            .get_mut(&tile_id)
+            .expect("drag-handle test tile must exist");
+        tile.bounds.x = 500.0;
+        tile.bounds.y = 330.0;
+
+        let stale_snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+        assert!(
+            !stale_snapshot.hit_test_drag_handle(800.0, 330.0),
+            "pre-refresh snapshot still carries the previous frame's drag-handle bounds"
+        );
+
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
+        compositor.render_frame(&mut scene, &surface);
+        refresh_interaction_hit_regions_after_render(&compositor, &mut scene, &surface);
+        let refreshed_snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+
+        assert!(
+            refreshed_snapshot.hit_test_drag_handle(800.0, 330.0),
+            "snapshot built after the windowed post-render refresh must match the newly displayed drag-handle geometry"
         );
     }
 
@@ -7304,6 +7403,61 @@ redaction_style = "blank"
         assert_eq!(
             tile.bounds.y, 300.0,
             "tile Y must not change after a tap on the drag handle"
+        );
+    }
+
+    #[test]
+    fn pointer_down_on_drag_handle_requests_guaranteed_feedback_from_snapshot_gate() {
+        let (scene, _tile_id, _element_id, _interaction_id) =
+            scene_with_drag_handle_tile(400.0, 300.0, 600.0, 200.0);
+        let snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+
+        assert!(
+            pointer_down_starts_guaranteed_feedback_gesture(
+                &snapshot,
+                700.0,
+                300.0,
+                None,
+                &FocusManager::new(),
+                PortalWindowTokens::default(),
+            ),
+            "PointerDown on a drag handle must spin-acquire so the drag state can start under contention"
+        );
+    }
+
+    #[test]
+    fn pointer_down_on_resize_affordance_requests_guaranteed_feedback_from_snapshot_gate() {
+        let (scene, tab_id, _tile_id, fm) = portal_scene_with_focus();
+        let snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+
+        assert!(
+            pointer_down_starts_guaranteed_feedback_gesture(
+                &snapshot,
+                496.0,
+                250.0,
+                Some(tab_id),
+                &fm,
+                PortalWindowTokens::default(),
+            ),
+            "PointerDown on a portal resize affordance must spin-acquire so the resize gesture can start under contention"
+        );
+    }
+
+    #[test]
+    fn ordinary_pointer_down_does_not_request_guaranteed_feedback_spin() {
+        let (scene, _tile_id) = scene_with_capture_tile();
+        let snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+
+        assert!(
+            !pointer_down_starts_guaranteed_feedback_gesture(
+                &snapshot,
+                320.0,
+                420.0,
+                scene.active_tab,
+                &FocusManager::new(),
+                PortalWindowTokens::default(),
+            ),
+            "ordinary content PointerDown must stay on the single try_lock path to preserve click-to-focus latency"
         );
     }
 

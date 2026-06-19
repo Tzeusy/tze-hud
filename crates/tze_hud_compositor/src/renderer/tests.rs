@@ -410,14 +410,16 @@ async fn test_two_pass_with_empty_chrome_cmds() {
 #[tokio::test]
 async fn test_render_frame_via_compositor_surface_trait() {
     let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
-    let scene = SceneGraph::new(256.0, 256.0);
+    let mut scene = SceneGraph::new(256.0, 256.0);
 
     // Prime before render per the Stage-4 commit-time prime contract (hud-380dl / hud-v2z6u).
     compositor.prime_markdown_cache(&scene);
     compositor.prime_truncation_cache(&scene);
     // render_frame takes &dyn CompositorSurface — no special headless branch.
-    let telemetry =
-        compositor.render_frame(&scene, &surface as &dyn crate::surface::CompositorSurface);
+    let telemetry = compositor.render_frame(
+        &mut scene,
+        &surface as &dyn crate::surface::CompositorSurface,
+    );
     assert!(telemetry.frame_time_us > 0, "frame time must be non-zero");
     assert_eq!(telemetry.tile_count, 0, "empty scene has no tiles");
 }

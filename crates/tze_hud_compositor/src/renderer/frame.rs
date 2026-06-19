@@ -226,9 +226,12 @@ impl Compositor {
     /// encoder is created and consumed internally and is not exposed.
     ///
     /// Returns telemetry for this frame.
+    ///
+    /// On a successful present, refreshes drag-handle hit regions in `scene`
+    /// from the same geometry used for rendering.
     pub fn render_frame(
         &mut self,
-        scene: &SceneGraph,
+        scene: &mut SceneGraph,
         surface: &dyn CompositorSurface,
     ) -> FrameTelemetry {
         let frame_start = std::time::Instant::now();
@@ -397,6 +400,10 @@ impl Compositor {
             telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
             return telemetry;
         }
+
+        // Reuse the freshly computed drag-handle geometry so the next input
+        // snapshot matches the frame just presented without a second traversal.
+        self.populate_drag_handle_hit_regions_from(scene, drag_handles);
 
         // Evict terminal video surface entries periodically to prevent unbounded growth.
         self.maybe_prune_terminal_video_surfaces();
