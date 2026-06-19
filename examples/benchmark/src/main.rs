@@ -102,7 +102,7 @@ mod headless_impl {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, oneshot};
     use tracing::{info, warn};
 
     use tze_hud_telemetry::FrameTelemetry;
@@ -818,6 +818,140 @@ mod headless_impl {
     /// reliably overlap a frame attempt under the deterministic handshake below.
     const CONTENTION_HOLD: Duration = Duration::from_micros(400);
 
+    /// CI's Windows performance gate currently runs the benchmark for 180
+    /// frames. The paced production-shaped contention model below schedules 18
+    /// real handler lock holds in that window; the committed ceiling keeps a
+    /// two-miss margin over the observed local result while still rejecting
+    /// saturation-style contention.
+    pub(crate) const PRODUCTION_CONTENTION_CEILING_PER_180_FRAMES: u64 = 20;
+
+    /// A 60Hz frame loop sees 30 frames per half second. The paced model
+    /// schedules one mutation-handler lock hold for each of three resident
+    /// agents in that half-second window (aggregate 6Hz), which is a bounded
+    /// production-shaped fraction rather than a worst-case every-frame hold.
+    const PRODUCTION_CONTENTION_PERIOD_FRAMES: u64 = 30;
+    const PRODUCTION_CONTENTION_FRAME_PHASES: [u64; CONTENTION_MUTATION_TASKS] = [5, 15, 25];
+    const PRODUCTION_CONTENTION_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+    const PRODUCTION_CONTENTION_READY_TIMEOUT: Duration = Duration::from_millis(50);
+    const PACED_CONTENTION_COLS: usize = 3;
+    const PACED_CONTENTION_COL_PITCH: f32 = 384.0;
+    const PACED_CONTENTION_ROW_PITCH: f32 = 540.0;
+    pub(crate) const PACED_CONTENTION_TILE_W: f32 = 380.0;
+    pub(crate) const PACED_CONTENTION_TILE_H: f32 = 536.0;
+    pub(crate) const PACED_CONTENTION_DISPLAY_W: f32 = 1920.0;
+    pub(crate) const PACED_CONTENTION_DISPLAY_H: f32 = 1080.0;
+    const PACED_CONTENTION_JITTER_PX: f32 = 5.0;
+
+    pub(crate) fn production_contention_task_index(frame_idx: u64) -> Option<usize> {
+        let phase = frame_idx % PRODUCTION_CONTENTION_PERIOD_FRAMES;
+        PRODUCTION_CONTENTION_FRAME_PHASES
+            .iter()
+            .position(|candidate| *candidate == phase)
+    }
+
+    pub(crate) fn production_contention_target_frames(frame_count: u64) -> u64 {
+        (0..frame_count)
+            .filter(|frame_idx| production_contention_task_index(*frame_idx).is_some())
+            .count() as u64
+    }
+
+    pub(crate) fn paced_contention_tile_origin(idx: usize, tick: u64) -> (f32, f32) {
+        let col = idx % PACED_CONTENTION_COLS;
+        let row = idx / PACED_CONTENTION_COLS;
+        let jitter = (tick as f32 * 0.13).sin() * PACED_CONTENTION_JITTER_PX;
+        let max_x = PACED_CONTENTION_DISPLAY_W - PACED_CONTENTION_TILE_W;
+        let max_y = PACED_CONTENTION_DISPLAY_H - PACED_CONTENTION_TILE_H;
+        (
+            (col as f32 * PACED_CONTENTION_COL_PITCH + jitter).clamp(0.0, max_x),
+            (row as f32 * PACED_CONTENTION_ROW_PITCH).clamp(0.0, max_y),
+        )
+    }
+
+    async fn wait_for_contention_ready(ready: oneshot::Receiver<()>, frame_idx: u64) {
+        if tokio::time::timeout(PRODUCTION_CONTENTION_READY_TIMEOUT, ready)
+            .await
+            .is_err()
+        {
+            warn!(
+                "paced contention holder did not acquire the scene lock before frame {}",
+                frame_idx
+            );
+        }
+    }
+
+    /// Test-only no-GPU probe for the paced contention model. It uses the same
+    /// `tokio::sync::Mutex::try_lock` acquisition and telemetry rollup as the
+    /// benchmark session, but avoids `HeadlessRuntime` so the model's counter
+    /// behavior stays cheap to test.
+    #[cfg(test)]
+    pub(crate) async fn run_paced_contention_probe_for_test(frame_count: u64) -> u64 {
+        let scene: Arc<Mutex<SceneGraph>> = Arc::new(Mutex::new(SceneGraph::new(1920.0, 1080.0)));
+        let mut scene_lock_miss_count = 0u64;
+        let mut summary = SessionSummary::new();
+
+        for frame_idx in 0..frame_count {
+            let holder = if production_contention_task_index(frame_idx).is_some() {
+                let scene = Arc::clone(&scene);
+                let (ready_tx, ready_rx) = oneshot::channel();
+                let handle = tokio::spawn(async move {
+                    let _guard = scene.lock().await;
+                    let _ = ready_tx.send(());
+                    tokio::time::sleep(CONTENTION_HOLD).await;
+                });
+                wait_for_contention_ready(ready_rx, frame_idx).await;
+                Some(handle)
+            } else {
+                None
+            };
+
+            if scene.try_lock().is_err() {
+                scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
+            }
+
+            let mut telemetry = FrameTelemetry::new(frame_idx);
+            telemetry.scene_lock_miss_count = scene_lock_miss_count;
+            summary.record_frame_correctness(&telemetry);
+
+            if let Some(handle) = holder {
+                let _ = handle.await;
+            }
+        }
+
+        summary.scene_lock_misses
+    }
+
+    fn spawn_paced_contention_holder(
+        scene_arc: Arc<Mutex<SceneGraph>>,
+        tile_ids: Arc<[SceneId]>,
+        task_idx: usize,
+        tick: u64,
+    ) -> (oneshot::Receiver<()>, tokio::task::JoinHandle<bool>) {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let mut scene = scene_arc.lock().await;
+            let mut batch_applied = true;
+            if !tile_ids.is_empty() {
+                let idx = (tick as usize + task_idx) % tile_ids.len();
+                let (x, y) = paced_contention_tile_origin(idx, tick);
+                let batch = MutationBatch {
+                    batch_id: SceneId::new(),
+                    agent_namespace: "paced_contention_bench".to_string(),
+                    mutations: vec![SceneMutation::UpdateTileBounds {
+                        tile_id: tile_ids[idx],
+                        bounds: Rect::new(x, y, PACED_CONTENTION_TILE_W, PACED_CONTENTION_TILE_H),
+                    }],
+                    timing_hints: None,
+                    lease_id: None,
+                };
+                batch_applied = scene.apply_batch(&batch).applied;
+            }
+            let _ = ready_tx.send(());
+            tokio::time::sleep(CONTENTION_HOLD).await;
+            batch_applied
+        });
+        (ready_rx, handle)
+    }
+
     /// Run the "scene-lock contention" scenario (hud-iky7b).
     ///
     /// This is the *other half* of the hud-ipmj0/hud-ukq66 work: it produces a
@@ -1049,6 +1183,167 @@ mod headless_impl {
         }
     }
 
+    /// Run the gated, production-shaped scene-lock contention scenario.
+    ///
+    /// Unlike `scene_lock_contention`, this does **not** force a lock hold on
+    /// every frame. It models a 60Hz frame loop with three resident
+    /// mutation-handler streams applying accepted scene batches at a bounded
+    /// aggregate cadence (three contended frames per 30-frame half-second).
+    /// Each scheduled hold still races the real `tokio::sync::Mutex::try_lock`
+    /// frame-loop path and rolls misses through `FrameTelemetry` into
+    /// `SessionSummary`; the difference is the production-shaped frequency.
+    pub async fn run_scene_lock_paced_contention(frame_count: u64) -> ScenarioResult {
+        info!(
+            "Running paced scene-lock contention scenario ({} frames, {} targeted holds; CI ceiling <= {} per 180 frames)",
+            frame_count,
+            production_contention_target_frames(frame_count),
+            PRODUCTION_CONTENTION_CEILING_PER_180_FRAMES,
+        );
+
+        let config = benchmark_config("paced_contention_bench");
+        let runtime = HeadlessRuntime::new(config)
+            .await
+            .expect("HeadlessRuntime::new failed");
+
+        let tab_id;
+        let lease_id;
+        let mut tile_ids = Vec::new();
+        {
+            let scene_arc = scene_handle(&runtime).await;
+            let mut scene = scene_arc.lock().await;
+            tab_id = scene
+                .create_tab("paced_contention_bench", 0)
+                .expect("create_tab");
+            lease_id = scene.grant_lease(
+                "paced_contention_bench",
+                300_000,
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+            );
+            if let Some(lease) = scene.leases.get_mut(&lease_id) {
+                lease.resource_budget.max_tiles = 15;
+            }
+            for i in 0..6usize {
+                let (x, y) = paced_contention_tile_origin(i, 0);
+                let bounds = Rect::new(x, y, PACED_CONTENTION_TILE_W, PACED_CONTENTION_TILE_H);
+                if let Ok(tile_id) = scene.create_tile(
+                    tab_id,
+                    "paced_contention_bench",
+                    lease_id,
+                    bounds,
+                    (i + 1) as u32,
+                ) {
+                    tile_ids.push(tile_id);
+                    if i == 0 {
+                        let root_id = SceneId::new();
+                        let node = Node {
+                            id: root_id,
+                            children: vec![],
+                            data: NodeData::SolidColor(SolidColorNode {
+                                color: Rgba::new(0.25, 0.5, 0.75, 1.0),
+                                bounds: Rect::new(
+                                    0.0,
+                                    0.0,
+                                    PACED_CONTENTION_TILE_W,
+                                    PACED_CONTENTION_TILE_H,
+                                ),
+                                radius: None,
+                            }),
+                        };
+                        let _ = scene.set_tile_root(tile_id, node);
+                        let _ =
+                            scene.add_node_to_tile(tile_id, Some(root_id), benchmark_hit_region());
+                    }
+                }
+            }
+        }
+
+        if tile_ids.is_empty() {
+            warn!("run_scene_lock_paced_contention: no tiles created; cannot run scenario");
+            return ScenarioResult {
+                name: "scene_lock_paced_contention".to_string(),
+                summary: SessionSummary::new(),
+            };
+        }
+
+        let tile_ids: Arc<[SceneId]> = tile_ids.into();
+        let scene_arc = scene_handle(&runtime).await;
+        let mut scene_lock_miss_count: u64 = 0;
+        let session_start = Instant::now();
+        let mut summary = SessionSummary::new();
+
+        for frame_idx in 0..frame_count {
+            let holder = if let Some(task_idx) = production_contention_task_index(frame_idx) {
+                let (ready, handle) = spawn_paced_contention_holder(
+                    Arc::clone(&scene_arc),
+                    Arc::clone(&tile_ids),
+                    task_idx,
+                    frame_idx,
+                );
+                wait_for_contention_ready(ready, frame_idx).await;
+                Some(handle)
+            } else {
+                None
+            };
+
+            let frame_start = Instant::now();
+            let frame_time_us;
+            let tile_count;
+            match scene_arc.try_lock() {
+                Ok(scene) => {
+                    tile_count = scene.tiles.len() as u32;
+                    drop(scene);
+                    frame_time_us = frame_start.elapsed().as_micros() as u64;
+                }
+                Err(_) => {
+                    scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
+                    tile_count = summary.peak_tile_count;
+                    frame_time_us = frame_start.elapsed().as_micros() as u64;
+                }
+            }
+            let invariant_violations_this_frame = if let Some(handle) = holder {
+                match handle.await {
+                    Ok(true) => 0,
+                    Ok(false) => 1,
+                    Err(err) => {
+                        warn!("paced contention holder failed to join: {}", err);
+                        1
+                    }
+                }
+            } else {
+                0
+            };
+
+            let mut telemetry = FrameTelemetry::new(frame_idx);
+            telemetry.frame_time_us = frame_time_us;
+            telemetry.tile_count = tile_count;
+            attach_frame_correctness(
+                &mut telemetry,
+                invariant_violations_this_frame,
+                scene_lock_miss_count,
+            );
+            summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
+            summary.record_frame_correctness(&telemetry);
+            summary
+                .input_to_next_present
+                .record(telemetry.frame_time_us);
+
+            tokio::time::sleep(PRODUCTION_CONTENTION_FRAME_INTERVAL).await;
+        }
+
+        summary.elapsed_us = session_start.elapsed().as_micros() as u64;
+        summary.finalize();
+
+        info!(
+            "  scene_lock_paced_contention: total_frames={}, scene_lock_misses={}",
+            summary.total_frames, summary.scene_lock_misses,
+        );
+
+        ScenarioResult {
+            name: "scene_lock_paced_contention".to_string(),
+            summary,
+        }
+    }
+
     // ── Entry point ───────────────────────────────────────────────────────────
 
     pub async fn run() {
@@ -1163,6 +1458,19 @@ mod headless_impl {
             scene_lock_contention.summary.scene_lock_misses,
         );
 
+        // Production-shaped paced scene-lock contention: this is the gated
+        // non-zero counter session. It uses the same real try_lock path as the
+        // saturation reference above, but schedules contention on a bounded
+        // 60Hz-shaped fraction of frames so the CI checker can enforce a
+        // data-derived ceiling without weakening the zero baseline for
+        // steady_state_render / high_mutation.
+        let scene_lock_paced_contention = run_scene_lock_paced_contention(args.frames).await;
+        info!(
+            "  scene_lock_paced_contention: total_frames={}, scene_lock_misses={}",
+            scene_lock_paced_contention.summary.total_frames,
+            scene_lock_paced_contention.summary.scene_lock_misses,
+        );
+
         // ── Phase 3: Validation ───────────────────────────────────────────────
         info!("Phase 3: Layer-3 budget validation");
 
@@ -1211,7 +1519,12 @@ mod headless_impl {
                 upload: upload_result,
                 factors,
             },
-            sessions: vec![steady_state, high_mutation, scene_lock_contention],
+            sessions: vec![
+                steady_state,
+                high_mutation,
+                scene_lock_contention,
+                scene_lock_paced_contention,
+            ],
             validation,
         };
 
@@ -1443,5 +1756,71 @@ mod contention_tests {
             summary.scene_lock_misses, 0,
             "uncontended try_lock loop must report a genuine zero",
         );
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+mod paced_contention_model_tests {
+    use crate::headless_impl::{
+        PACED_CONTENTION_DISPLAY_H, PACED_CONTENTION_DISPLAY_W, PACED_CONTENTION_TILE_H,
+        PACED_CONTENTION_TILE_W, PRODUCTION_CONTENTION_CEILING_PER_180_FRAMES,
+        paced_contention_tile_origin, production_contention_target_frames,
+        production_contention_task_index, run_paced_contention_probe_for_test,
+    };
+
+    #[test]
+    fn paced_contention_model_targets_bounded_fraction_of_ci_frames() {
+        let target_frames = production_contention_target_frames(180);
+
+        assert_eq!(
+            target_frames, 18,
+            "the CI-shaped 180-frame benchmark should target 10% of frames",
+        );
+        assert!(
+            target_frames < 180,
+            "paced contention must not reproduce the saturation scenario",
+        );
+        assert!(
+            target_frames <= PRODUCTION_CONTENTION_CEILING_PER_180_FRAMES,
+            "the data ceiling must cover the model's scheduled contention frames",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn paced_contention_probe_yields_bounded_nonzero_try_lock_misses() {
+        let observed = run_paced_contention_probe_for_test(180).await;
+
+        assert!(
+            observed > 0,
+            "paced contention should still produce a real non-zero try_lock miss signal",
+        );
+        assert!(
+            observed <= PRODUCTION_CONTENTION_CEILING_PER_180_FRAMES,
+            "paced contention observed {observed} misses, exceeding the committed ceiling",
+        );
+        assert!(
+            observed < 180,
+            "paced contention must not saturate every frame like scene_lock_contention",
+        );
+    }
+
+    #[test]
+    fn paced_contention_holder_bounds_stay_inside_display() {
+        for frame_idx in 0..180 {
+            let Some(task_idx) = production_contention_task_index(frame_idx) else {
+                continue;
+            };
+            let idx = (frame_idx as usize + task_idx) % 6;
+            let (x, y) = paced_contention_tile_origin(idx, frame_idx);
+
+            assert!(
+                x >= 0.0 && x + PACED_CONTENTION_TILE_W <= PACED_CONTENTION_DISPLAY_W,
+                "frame {frame_idx} produced out-of-display x bounds: x={x}",
+            );
+            assert!(
+                y >= 0.0 && y + PACED_CONTENTION_TILE_H <= PACED_CONTENTION_DISPLAY_H,
+                "frame {frame_idx} produced out-of-display y bounds: y={y}",
+            );
+        }
     }
 }
