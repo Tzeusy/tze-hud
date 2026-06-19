@@ -10,4 +10,3 @@ The assignment expression is not valid. The input to an assignment operator must
 assignments, such as a variable or a property.
     + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
     + FullyQualifiedErrorId : InvalidLeftHandSide
-

@@ -63,6 +63,50 @@ function Wait-Port($port, $expectOpen, $seconds) {
     return $false
 }
 
+function Wait-ProcessGone($processId, $seconds) {
+    if (-not $processId) {
+        return $true
+    }
+    $deadline = (Get-Date).AddSeconds($seconds)
+    do {
+        $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if (-not $proc) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Clear-StaleGpuLockForPid($processId, $label) {
+    $lockPath = 'C:\ProgramData\tze_hud\gpu.lock'
+    if (-not $processId) {
+        Add-Step $label 'skipped' 'no_pid'
+        return $false
+    }
+    if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+        Add-Step $label 'skipped' "pid_${processId}_still_live=True"
+        return $false
+    }
+    if (-not (Test-Path $lockPath)) {
+        Add-Step $label 'ok' 'gpu_lock=absent'
+        return $false
+    }
+    $lockLines = @(Get-Content -Path $lockPath -ErrorAction SilentlyContinue)
+    $lockPidLine = $lockLines | Where-Object { $_ -match '^PID=' } | Select-Object -First 1
+    $lockPid = $null
+    if ($lockPidLine -match '^PID=(\d+)$') {
+        $lockPid = [int]$Matches[1]
+    }
+    if ($lockPid -eq $processId) {
+        Remove-Item -Path $lockPath -Force -ErrorAction SilentlyContinue
+        Add-Step $label 'ok' "removed_stale_gpu_lock_pid=$processId"
+        return $true
+    }
+    Add-Step $label 'skipped' "gpu_lock_pid_mismatch=$lockPid"
+    return $false
+}
+
 try {
     $overlayXml = (& schtasks /Query /TN TzeHudOverlay /XML 2>$null) -join "`n"
     $pskMatch = [regex]::Match($overlayXml, '--psk\s+([^\s"<]+)')
@@ -95,6 +139,17 @@ try {
         throw 'Timed out waiting for production gRPC port 50051 to close'
     }
     Add-Step 'stop-production' 'ok' '50051_closed=True'
+
+    $prodGone = Wait-ProcessGone $prodPid 20
+    $result.production_process_gone = [bool]$prodGone
+    $result.gpu_lock_after_production_stop = Get-LockLines
+    if (-not $prodGone) {
+        Add-Step 'wait-production-exit' 'timeout' "pid_${prodPid}_gone=False"
+        throw "Timed out waiting for production PID $prodPid to exit"
+    }
+    Add-Step 'wait-production-exit' 'ok' "pid_${prodPid}_gone=True"
+    $result.removed_stale_production_gpu_lock = Clear-StaleGpuLockForPid $prodPid 'clear-stale-production-gpu-lock'
+    $result.gpu_lock_after_production_lock_cleanup = Get-LockLines
 
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     $psk = $pskMatch.Groups[1].Value

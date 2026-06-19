@@ -262,6 +262,12 @@ def build_ssh_command(args: argparse.Namespace) -> list[str]:
     return cmd
 
 
+def compute_sampler_timeout_s(*, connect_timeout_s: int, samples: int, interval_s: int) -> int:
+    sample_window_s = samples * max(1, interval_s)
+    command_overhead_s = samples * 10 + 120
+    return connect_timeout_s + max(10, sample_window_s + command_overhead_s)
+
+
 def collect_samples(args: argparse.Namespace) -> dict[str, Any]:
     script = build_remote_sample_script(
         grpc_port=args.grpc_port,
@@ -269,7 +275,11 @@ def collect_samples(args: argparse.Namespace) -> dict[str, Any]:
         interval_s=args.interval_s,
     )
     cmd = build_ssh_command(args)
-    timeout_s = args.connect_timeout_s + max(10, args.samples * max(1, args.interval_s) + 30)
+    timeout_s = compute_sampler_timeout_s(
+        connect_timeout_s=args.connect_timeout_s,
+        samples=args.samples,
+        interval_s=args.interval_s,
+    )
     result = subprocess.run(
         cmd,
         input=script + "\n",

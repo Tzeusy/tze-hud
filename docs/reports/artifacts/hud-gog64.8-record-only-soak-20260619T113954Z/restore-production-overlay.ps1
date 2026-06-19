@@ -61,15 +61,80 @@ function Wait-Port($port, $expectOpen, $seconds) {
     return $false
 }
 
+function Wait-ProcessGone($processId, $seconds) {
+    if (-not $processId) {
+        return $true
+    }
+    $deadline = (Get-Date).AddSeconds($seconds)
+    do {
+        $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if (-not $proc) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Clear-StaleGpuLockForPid($processId, $label) {
+    $lockPath = 'C:\ProgramData\tze_hud\gpu.lock'
+    if (-not $processId) {
+        Add-Step $label 'skipped' 'no_pid'
+        return $false
+    }
+    if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+        Add-Step $label 'skipped' "pid_${processId}_still_live=True"
+        return $false
+    }
+    if (-not (Test-Path $lockPath)) {
+        Add-Step $label 'ok' 'gpu_lock=absent'
+        return $false
+    }
+    $lockLines = @(Get-Content -Path $lockPath -ErrorAction SilentlyContinue)
+    $lockPidLine = $lockLines | Where-Object { $_ -match '^PID=' } | Select-Object -First 1
+    $lockPid = $null
+    if ($lockPidLine -match '^PID=(\d+)$') {
+        $lockPid = [int]$Matches[1]
+    }
+    if ($lockPid -eq $processId) {
+        Remove-Item -Path $lockPath -Force -ErrorAction SilentlyContinue
+        Add-Step $label 'ok' "removed_stale_gpu_lock_pid=$processId"
+        return $true
+    }
+    Add-Step $label 'skipped' "gpu_lock_pid_mismatch=$lockPid"
+    return $false
+}
+
 $isolatedPids = @(Get-NetTCPConnection -State Listen -LocalPort $GrpcPort, $McpPort -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique)
-foreach ($pid in $isolatedPids) {
-    Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+foreach ($isolatedProcessId in $isolatedPids) {
+    Stop-Process -Id $isolatedProcessId -Force -ErrorAction SilentlyContinue
 }
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 $isolatedClosed = Wait-Port $GrpcPort $false 10
 Add-Step 'stop-isolated-media-hud' 'ok' "grpc_${GrpcPort}_closed=$isolatedClosed"
+$isolatedGone = $true
+foreach ($isolatedProcessId in $isolatedPids) {
+    if (-not (Wait-ProcessGone $isolatedProcessId 20)) {
+        $isolatedGone = $false
+    }
+}
+$result.isolated_processes_gone = [bool]$isolatedGone
+$result.gpu_lock_after_isolated_stop = Get-LockLines
+if ($isolatedGone) {
+    Add-Step 'wait-isolated-exit' 'ok' 'isolated_pids_gone=True'
+} else {
+    Add-Step 'wait-isolated-exit' 'timeout' 'isolated_pids_gone=False'
+}
+$removedIsolatedLock = $false
+foreach ($isolatedProcessId in $isolatedPids) {
+    if (Clear-StaleGpuLockForPid $isolatedProcessId 'clear-stale-isolated-gpu-lock') {
+        $removedIsolatedLock = $true
+    }
+}
+$result.removed_stale_isolated_gpu_lock = [bool]$removedIsolatedLock
+$result.gpu_lock_after_isolated_lock_cleanup = Get-LockLines
 
 Start-ScheduledTask -TaskName TzeHudOverlay -ErrorAction SilentlyContinue
 $restoredGrpc = Wait-Port 50051 $true 25

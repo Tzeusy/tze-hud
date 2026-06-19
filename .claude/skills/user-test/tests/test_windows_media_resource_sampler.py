@@ -25,9 +25,9 @@ class WindowsMediaResourceSamplerTests(unittest.TestCase):
     def test_ssh_command_streams_script_over_stdin(self) -> None:
         args = Namespace(
             connect_timeout_s=10,
-            ssh_key="~/.ssh/ecdsa_home",
-            win_user="tzeus",
-            win_host="tzehouse-windows.parrot-hen.ts.net",
+            ssh_key="~/.ssh/hud-ssh-key",
+            win_user="admin-user",
+            win_host="windows-host.example",
         )
 
         command = sampler.build_ssh_command(args)
@@ -35,6 +35,15 @@ class WindowsMediaResourceSamplerTests(unittest.TestCase):
         self.assertIn("-Command", command)
         self.assertEqual(command[-1], "-")
         self.assertNotIn("-EncodedCommand", command)
+
+    def test_sampler_timeout_includes_counter_overhead(self) -> None:
+        timeout_s = sampler.compute_sampler_timeout_s(
+            connect_timeout_s=10,
+            samples=21,
+            interval_s=30,
+        )
+
+        self.assertEqual(timeout_s, 970)
 
     def test_summarize_samples_reports_cpu_gpu_and_memory(self) -> None:
         raw = {

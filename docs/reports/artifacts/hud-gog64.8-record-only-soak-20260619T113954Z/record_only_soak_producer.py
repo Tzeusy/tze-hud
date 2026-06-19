@@ -199,7 +199,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", default="tzehouse-windows.parrot-hen.ts.net:50052")
+    parser.add_argument("--target", default="windows-host.example:50052")
     parser.add_argument("--psk-env", default="TZE_HUD_PSK")
     parser.add_argument("--agent-id", default="windows-local-media-producer")
     parser.add_argument("--zone-name", default="media-pip")

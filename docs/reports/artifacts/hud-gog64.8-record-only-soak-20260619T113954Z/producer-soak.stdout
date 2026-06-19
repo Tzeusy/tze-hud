@@ -54,7 +54,7 @@
     }
   ],
   "stream_epoch": 1,
-  "target": "tzehouse-windows.parrot-hen.ts.net:50052",
+  "target": "windows-host.example:50052",
   "time_to_admission_ms": 550.699,
   "video_only": true,
   "zone_name": "media-pip"
