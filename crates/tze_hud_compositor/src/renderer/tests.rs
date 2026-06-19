@@ -9974,6 +9974,20 @@ fn composer_overlay_tokens_defaults_are_valid() {
     }
 }
 
+#[test]
+fn composer_overlay_default_font_size_matches_readable_portal_default() {
+    use std::collections::HashMap;
+
+    let tokens: HashMap<String, String> = HashMap::new();
+    let resolved = resolve_composer_overlay_tokens(&tokens);
+
+    assert!(
+        resolved.font_size_px >= 16.0,
+        "focused composer overlay default font must match the readable portal composer default; got {}px",
+        resolved.font_size_px
+    );
+}
+
 /// The at-capacity color token must be distinct from the background color
 /// so it provides a visible signal when the composer draft reaches its byte cap.
 ///

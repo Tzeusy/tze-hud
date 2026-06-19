@@ -69,8 +69,8 @@ use tze_hud_scene::types::Rgba;
 /// | `typography.heading.N.scale` | Font-size multiplier for heading level N |
 /// | `typography.emphasis.italic` | Whether emphasis uses italic (always true) |
 /// | `typography.line_height.multiplier` | Line-height = font_size_px × this value; default 1.4 |
-/// | `spacing.heading.top` | Blank-line multiplier above headings; default 1.0 |
-/// | `spacing.heading.bottom` | Blank-line multiplier below headings; default 0.5 |
+/// | `spacing.heading.top` | Blank-line multiplier above headings; default 0.0 |
+/// | `spacing.heading.bottom` | Blank-line multiplier below headings; default 0.0 |
 /// | `spacing.list.item` | Blank-line multiplier between list items; default 0.0 (tight) |
 #[derive(Clone, Debug)]
 pub struct MarkdownTokens {
@@ -110,13 +110,13 @@ pub struct MarkdownTokens {
     /// Blank-line multiplier applied **above** each heading block.
     ///
     /// `spacing.heading.top`: a value of `1.0` inserts one blank line; `0.0`
-    /// suppresses spacing.  Default `1.0`.  Must be in `[0.0, 4.0]`.
+    /// suppresses spacing.  Default `0.0`.  Must be in `[0.0, 4.0]`.
     pub heading_margin_top: f32,
     /// Blank-line multiplier applied **below** each heading block.
     ///
     /// `spacing.heading.bottom`: a value of `0.5` inserts a half-blank line;
-    /// values ≥ `1.0` insert a full blank line.  Default `0.5`.  Must be
-    /// in `[0.0, 4.0]`.
+    /// values ≥ `1.0` insert a full blank line.  Default `0.0` keeps streamed
+    /// transcript blocks tight.  Must be in `[0.0, 4.0]`.
     pub heading_margin_bottom: f32,
     /// Blank-line multiplier between consecutive list items.
     ///
@@ -140,8 +140,8 @@ impl Default for MarkdownTokens {
             code_color: None,
             code_background: None,
             line_height_multiplier: crate::text::LINE_HEIGHT_MULTIPLIER,
-            heading_margin_top: 1.0,
-            heading_margin_bottom: 0.5,
+            heading_margin_top: 0.0,
+            heading_margin_bottom: 0.0,
             list_item_spacing: 0.0,
         }
     }
@@ -3509,19 +3509,41 @@ mod tests {
             tokens.line_height_multiplier
         );
         assert!(
-            (tokens.heading_margin_top - 1.0).abs() < 0.001,
-            "default heading_margin_top must be 1.0; got {}",
+            tokens.heading_margin_top.abs() < 0.001,
+            "default heading_margin_top must be 0.0; got {}",
             tokens.heading_margin_top
         );
         assert!(
-            (tokens.heading_margin_bottom - 0.5).abs() < 0.001,
-            "default heading_margin_bottom must be 0.5; got {}",
+            tokens.heading_margin_bottom.abs() < 0.001,
+            "default heading_margin_bottom must be 0.0; got {}",
             tokens.heading_margin_bottom
         );
         assert!(
             (tokens.list_item_spacing - 0.0).abs() < 0.001,
             "default list_item_spacing must be 0.0; got {}",
             tokens.list_item_spacing
+        );
+    }
+
+    #[test]
+    fn default_markdown_block_spacing_is_compact_for_streamed_transcripts() {
+        let tokens = MarkdownTokens::default();
+        assert!(
+            tokens.heading_margin_top.abs() < 0.001,
+            "streamed transcript headings should not insert an extra blank line by default; got top margin {}",
+            tokens.heading_margin_top
+        );
+        assert!(
+            tokens.heading_margin_bottom.abs() < 0.001,
+            "streamed transcript headings should not insert an extra blank line below by default; got bottom margin {}",
+            tokens.heading_margin_bottom
+        );
+
+        let md = parse_markdown_subset("Intro\n# Heading\n- first\n- second", &tokens);
+        assert_eq!(
+            md.plain_text.as_ref(),
+            "Intro\nHeading\n• first\n• second",
+            "default portal markdown should keep transcript block flow compact"
         );
     }
 
@@ -3584,19 +3606,16 @@ mod tests {
     /// extra blank line before it in `plain_text`.
     #[test]
     fn heading_top_margin_emits_blank_line_before_heading() {
-        // Use a token map with top margin >= 1.0 (default is 1.0 so `parse()` works).
+        let tokens = MarkdownTokens {
+            heading_margin_top: 1.0,
+            ..MarkdownTokens::default()
+        };
         let input = "Some text\n# Heading";
-        let md = parse(input); // default tokens have heading_margin_top = 1.0
-        // The blank line should appear between the paragraph text and the heading.
-        let plain = &md.plain_text;
-        // Check that there are two consecutive newlines before the heading text.
-        assert!(
-            plain.contains("\n\n") || plain.contains("Heading"),
-            "heading with top margin must be preceded by extra whitespace; got: {plain:?}",
-        );
-        assert!(
-            plain.contains("Heading"),
-            "heading text must still appear in output; got: {plain:?}",
+        let md = parse_markdown_subset(input, &tokens);
+        assert_eq!(
+            md.plain_text.as_ref(),
+            "Some text\n\nHeading",
+            "heading with explicit top margin must be preceded by extra whitespace",
         );
     }
 

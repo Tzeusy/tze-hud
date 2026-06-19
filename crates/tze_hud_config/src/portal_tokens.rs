@@ -158,17 +158,17 @@ mod defaults {
     pub const FRAME_BORDER_COLOR: &str = "#2A3344";
 
     pub const HEADER_TEXT_COLOR: &str = "#F5F8FF";
-    pub const HEADER_FONT_SIZE: &str = "14";
+    pub const HEADER_FONT_SIZE: &str = "16";
 
     pub const COMPOSER_BACKGROUND: &str = "#0F1418";
     pub const COMPOSER_TEXT_COLOR: &str = "#E0E8F4";
-    pub const COMPOSER_FONT_SIZE: &str = "13";
+    pub const COMPOSER_FONT_SIZE: &str = "16";
     /// Muted amber — conveys "limit reached" without alarming the user.
     pub const COMPOSER_AT_CAPACITY_COLOR: &str = "#B87333";
 
     pub const TRANSCRIPT_BACKGROUND: &str = "#0A0D11";
     pub const TRANSCRIPT_TEXT_COLOR: &str = "#E6EFFA";
-    pub const TRANSCRIPT_FONT_SIZE: &str = "13";
+    pub const TRANSCRIPT_FONT_SIZE: &str = "16";
 
     // Degraded / disconnect treatment (§2/§3). Dim text/background read as
     // "inactive" relative to the live transcript palette above; the stale
@@ -182,7 +182,7 @@ mod defaults {
 
     pub const COLLAPSED_BACKGROUND: &str = "#1A1F28";
     pub const COLLAPSED_TEXT_COLOR: &str = "#C8D6E8";
-    pub const COLLAPSED_FONT_SIZE: &str = "12";
+    pub const COLLAPSED_FONT_SIZE: &str = "14";
 
     pub const TRANSITION_IN_MS: &str = "120";
     pub const TRANSITION_OUT_MS: &str = "80";
@@ -603,6 +603,32 @@ mod tests {
         // §6b scroll indicator fields
         assert!(tokens.scroll_indicator_width_px > 0.0);
         assert!(tokens.scroll_indicator_min_height_px > 0.0);
+    }
+
+    #[test]
+    fn default_portal_text_sizes_are_readable_without_focus_resize() {
+        let tokens = resolve_portal_tokens(&empty_map());
+
+        assert!(
+            tokens.header_font_size_px >= 16.0,
+            "header default font must be comfortably readable without hotkey resize; got {}px",
+            tokens.header_font_size_px
+        );
+        assert!(
+            tokens.transcript_font_size_px >= 16.0,
+            "transcript default font must be comfortably readable without hotkey resize; got {}px",
+            tokens.transcript_font_size_px
+        );
+        assert!(
+            tokens.composer_font_size_px >= 16.0,
+            "composer default font must be comfortably readable without hotkey resize; got {}px",
+            tokens.composer_font_size_px
+        );
+        assert!(
+            tokens.collapsed_font_size_px >= 14.0,
+            "collapsed-card default font must remain readable in compact mode; got {}px",
+            tokens.collapsed_font_size_px
+        );
     }
 
     // ── Profile-scoped override propagation ──────────────────────────────

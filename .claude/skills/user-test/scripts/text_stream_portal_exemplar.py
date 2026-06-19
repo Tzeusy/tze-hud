@@ -98,13 +98,13 @@ INPUT_TEXT_RGBA = (0.88, 0.92, 0.98, 0.96)
 INPUT_PLACEHOLDER_RGBA = (0.50, 0.55, 0.64, 0.78)
 HEADER_GRIP_RGBA = (1.0, 1.0, 1.0, 0.66)
 
-TITLE_FONT = 17.0
-SUBTITLE_FONT = 11.0
-BODY_FONT = 13.0
-META_FONT = 11.0
-EYEBROW_FONT = 10.0
-INPUT_FONT = 13.0
-SUBMIT_HINT_FONT = 10.0
+TITLE_FONT = 18.0
+SUBTITLE_FONT = 12.0
+BODY_FONT = 16.0
+META_FONT = 12.0
+EYEBROW_FONT = 11.0
+INPUT_FONT = 16.0
+SUBMIT_HINT_FONT = 11.0
 
 PADDING_X = 18.0
 HEADER_H = 52.0
@@ -264,7 +264,7 @@ def fresh_composer_node_ids() -> dict[str, bytes]:
 SCROLL_TOTAL_LINES = 80
 SCROLL_VISIBLE_LINES = 14
 SCROLL_STEP_PX = 40.0
-SCROLL_LINE_PX = 20.0
+SCROLL_LINE_PX = BODY_FONT * 1.4
 SCROLL_PHASE_PAUSE_S = 2.5
 COMPOSER_LINE_PX = INPUT_FONT * 1.4
 
@@ -639,9 +639,9 @@ def profile_swap_dimensions(
     expanded_h = max(820.0, standard_h * 1.15)
     return [
         # (name, portal_w, portal_h, title_font, body_font)
-        ("compact", 680.0, 520.0, 14.0, 11.0),
+        ("compact", 680.0, 520.0, 16.0, 14.0),
         ("standard", standard_w, standard_h, TITLE_FONT, BODY_FONT),
-        ("expanded", expanded_w, expanded_h, 18.0, 14.0),
+        ("expanded", expanded_w, expanded_h, 20.0, 18.0),
         ("standard", standard_w, standard_h, TITLE_FONT, BODY_FONT),
     ]
 
@@ -4890,6 +4890,16 @@ def run_composer_self_test() -> int:
     script_source = Path(__file__).read_text(encoding="utf-8")
     if stale_doc in script_source:
         failures.append(f"stale checklist path remains in script source: {stale_doc}")
+    if TITLE_FONT < 18.0:
+        failures.append(f"TITLE_FONT={TITLE_FONT} is below the readable default floor 18.0")
+    if BODY_FONT < 16.0:
+        failures.append(f"BODY_FONT={BODY_FONT} is below the readable default floor 16.0")
+    if INPUT_FONT < 16.0:
+        failures.append(f"INPUT_FONT={INPUT_FONT} is below the readable default floor 16.0")
+    if SCROLL_LINE_PX < BODY_FONT * 1.35:
+        failures.append(
+            f"SCROLL_LINE_PX={SCROLL_LINE_PX} is too tight for BODY_FONT={BODY_FONT}"
+        )
 
     fallback = composer_key_fallback_text("Space")
     if fallback != " ":
