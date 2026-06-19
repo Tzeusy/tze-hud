@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import sys
+from contextlib import redirect_stdout
+from tempfile import TemporaryDirectory
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -106,6 +109,91 @@ class WindowsMediaResourceSamplerTests(unittest.TestCase):
         self.assertEqual(summary["valid_sample_count"], 0)
         self.assertIsNone(summary["private_memory_drift_bytes"])
         self.assertEqual(summary["cpu_percent"]["count"], 0)
+
+    def test_summarize_samples_ignores_pid_mismatch_for_cpu_and_drift(self) -> None:
+        raw = {
+            "samples": [
+                {
+                    "elapsed_s": 0.0,
+                    "listener_pid": 1234,
+                    "cpu_seconds": 10.0,
+                    "working_set_bytes": 1000,
+                    "private_memory_bytes": 2000,
+                    "gpu_3d_utilization_pct_sum": 3.0,
+                    "nvidia_gpu_utilization_pct": 12.0,
+                    "nvidia_gpu_memory_used_mb": 500.0,
+                },
+                {
+                    "elapsed_s": 10.0,
+                    "listener_pid": 5678,
+                    "cpu_seconds": 12.0,
+                    "working_set_bytes": 1100,
+                    "private_memory_bytes": 2600,
+                    "gpu_3d_utilization_pct_sum": 5.0,
+                    "nvidia_gpu_utilization_pct": 16.0,
+                    "nvidia_gpu_memory_used_mb": 520.0,
+                },
+            ],
+            "logical_processors": 4,
+            "errors": [],
+        }
+
+        summary = sampler.summarize_samples(raw)
+
+        self.assertEqual(summary["cpu_percent"]["count"], 0)
+        self.assertIsNone(summary["cpu_percent"]["avg"])
+        self.assertIsNone(summary["private_memory_drift_bytes"])
+        self.assertIsNone(summary["working_set_drift_bytes"])
+
+    def test_main_fails_when_any_requested_sample_is_invalid(self) -> None:
+        original_collect_samples = sampler.collect_samples
+        raw = {
+            "samples": [
+                {
+                    "elapsed_s": 0.0,
+                    "listener_pid": 1234,
+                    "cpu_seconds": 10.0,
+                    "working_set_bytes": 1000,
+                    "private_memory_bytes": 2000,
+                    "gpu_3d_utilization_pct_sum": 3.0,
+                },
+                {
+                    "elapsed_s": 10.0,
+                    "listener_pid": None,
+                    "cpu_seconds": None,
+                    "working_set_bytes": None,
+                    "private_memory_bytes": None,
+                    "gpu_3d_utilization_pct_sum": None,
+                },
+            ],
+            "logical_processors": 4,
+            "errors": [],
+        }
+
+        def collect_samples(_args: Namespace) -> dict[str, object]:
+            return raw
+
+        sampler.collect_samples = collect_samples
+        try:
+            with TemporaryDirectory() as temp_dir:
+                raw_output = Path(temp_dir) / "raw.json"
+                summary_output = Path(temp_dir) / "summary.json"
+
+                with redirect_stdout(io.StringIO()):
+                    status = sampler.main(
+                        [
+                            "--samples",
+                            "2",
+                            "--raw-output",
+                            str(raw_output),
+                            "--summary-output",
+                            str(summary_output),
+                        ]
+                    )
+        finally:
+            sampler.collect_samples = original_collect_samples
+
+        self.assertEqual(status, 1)
 
 
 if __name__ == "__main__":

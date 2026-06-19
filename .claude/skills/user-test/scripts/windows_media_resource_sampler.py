@@ -180,6 +180,8 @@ def _cpu_percent_samples(
         return []
     values: list[float] = []
     for previous, current in zip(valid_samples, valid_samples[1:]):
+        if previous.get("listener_pid") != current.get("listener_pid"):
+            continue
         previous_cpu = previous.get("cpu_seconds")
         current_cpu = current.get("cpu_seconds")
         previous_elapsed = previous.get("elapsed_s")
@@ -207,6 +209,8 @@ def summarize_samples(raw: dict[str, Any]) -> dict[str, Any]:
 
     def drift_bytes(key: str) -> int | None:
         if not first_valid or not last_valid:
+            return None
+        if first_valid.get("listener_pid") != last_valid.get("listener_pid"):
             return None
         first = first_valid.get(key)
         last = last_valid.get(key)
@@ -327,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
     write_json(args.raw_output, raw)
     write_json(args.summary_output, summary)
     print(json.dumps(summary, sort_keys=True))
-    return 0 if summary["valid_sample_count"] > 0 else 1
+    return 0 if summary["valid_sample_count"] == args.samples else 1
 
 
 if __name__ == "__main__":
