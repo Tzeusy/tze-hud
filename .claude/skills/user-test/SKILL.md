@@ -146,6 +146,29 @@ TZE_HUD_PSK="$PSK" python3 .claude/skills/user-test/scripts/windows_media_ingres
   --evidence-json build/windows-media-ingress/local-producer-evidence.json
 ```
 
+Operator-disabled proof must still launch a reachable gRPC HUD and reject the
+authenticated producer at admission time. Use the same approved media-ingress
+config with `operator_disabled = true`; when swapping the production HUD for an
+isolated validation HUD, wait for the stopped `tze_hud.exe` PID to disappear
+before launching the isolated task. If `C:\ProgramData\tze_hud\gpu.lock` still
+names that now-dead PID, remove only that verified-stale lock. Then run:
+
+```bash
+TZE_HUD_PSK="$PSK" python3 .claude/skills/user-test/scripts/windows_media_ingress_exemplar.py \
+  local-producer \
+  --target windows-host.example:50052 \
+  --agent-id windows-local-media-producer \
+  --zone-name media-pip \
+  --source-label synthetic-color-bars \
+  --hold-s 0 \
+  --expect-reject-code MEDIA_DISABLED \
+  --evidence-json build/windows-media-ingress/operator-disabled-evidence.json
+```
+
+Accepted evidence has `admitted=false`, `stream_epoch=0`, and
+`reject_code=MEDIA_DISABLED`. Connection refusal is a launch/runtime mismatch,
+not an acceptable operator-disabled result.
+
 YouTube source evidence is separate from HUD frame-ingress proof. Launch video ID `O0FGCxkHM-U` through the official embedded-player URL; do not bridge raw YouTube frames into the HUD runtime:
 
 ```bash

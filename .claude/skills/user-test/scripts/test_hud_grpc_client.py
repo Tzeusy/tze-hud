@@ -198,6 +198,33 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
         mutation_resp = await client._wait_for("mutation_result", timeout=0.1)
         self.assertEqual(mutation_resp.mutation_result.batch_id, b"\x01" * 16)
 
+    async def test_open_media_ingress_can_return_expected_rejection(self):
+        client = HudClient("example.invalid:50051", psk="test-key")
+        client._response_queue = asyncio.Queue()
+        client._send = AsyncMock()
+        await client._response_queue.put(
+            session_pb2.ServerMessage(
+                media_ingress_open_result=session_pb2.MediaIngressOpenResult(
+                    client_stream_id=b"\x01" * 16,
+                    admitted=False,
+                    stream_epoch=0,
+                    reject_code="MEDIA_DISABLED",
+                    reject_reason="media ingress is disabled by runtime configuration",
+                )
+            )
+        )
+
+        result = await client.open_media_ingress(
+            client_stream_id=b"\x01" * 16,
+            agent_sdp_offer=b"v=0\r\n",
+            allow_rejected=True,
+            timeout=0.1,
+        )
+
+        self.assertFalse(result.admitted)
+        self.assertEqual(result.reject_code, "MEDIA_DISABLED")
+        client._send.assert_awaited_once()
+
     async def test_wait_for_matcher_does_not_replay_wrong_deferred_payload(self):
         client = HudClient("example.invalid:50051", psk="test-key")
         client._response_queue = asyncio.Queue()

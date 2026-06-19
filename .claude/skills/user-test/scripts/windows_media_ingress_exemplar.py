@@ -301,6 +301,7 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
     if not psk:
         raise RuntimeError(f"set {args.psk_env} or pass --psk")
     zone_name = validate_approved_media_zone(args.zone_name)
+    expected_reject_code = getattr(args, "expect_reject_code", None)
 
     stream_uuid = uuid.uuid4()
     sdp_offer = build_video_only_sdp_offer(
@@ -324,8 +325,38 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
             content_classification=args.content_classification,
             declared_peak_kbps=args.declared_peak_kbps,
             codec_preference=[session_pb2.VIDEO_H264_BASELINE],
+            allow_rejected=bool(expected_reject_code),
             timeout=args.timeout_s,
         )
+        response_at = int(time.time())
+        if not result.admitted:
+            if result.reject_code != expected_reject_code:
+                raise RuntimeError(
+                    f"Media ingress rejected [{result.reject_code}]: {result.reject_reason}"
+                )
+            return {
+                "lane": "hud-media-ingress-local-producer",
+                "target": args.target,
+                "agent_id": args.agent_id,
+                "source_label": args.source_label,
+                "video_only": True,
+                "audio_route_to_hud": "none",
+                "zone_name": zone_name,
+                "content_classification": args.content_classification,
+                "declared_peak_kbps": args.declared_peak_kbps,
+                "client_stream_id": stream_uuid.hex,
+                "admitted": False,
+                "stream_epoch": result.stream_epoch,
+                "reject_code": result.reject_code,
+                "reject_reason": result.reject_reason,
+                "expected_reject_code": expected_reject_code,
+                "sdp_offer_bytes": len(sdp_offer),
+                "response_at_unix": response_at,
+            }
+        if expected_reject_code:
+            raise RuntimeError(
+                f"Expected media ingress rejection {expected_reject_code}, but admission succeeded"
+            )
         started_at = int(time.time())
         if args.hold_s > 0:
             await asyncio.sleep(args.hold_s)
@@ -567,6 +598,10 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--declared-peak-kbps", type=int, default=2_000)
     local.add_argument("--hold-s", type=float, default=10.0)
     local.add_argument("--timeout-s", type=float, default=10.0)
+    local.add_argument(
+        "--expect-reject-code",
+        help="treat this MediaIngressOpen reject_code as expected evidence",
+    )
     add_common_evidence_arg(local)
 
     youtube = sub.add_parser("youtube-sidecar", help="launch official YouTube embed evidence")

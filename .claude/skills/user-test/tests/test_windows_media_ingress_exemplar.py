@@ -15,6 +15,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(SCRIPT_DIR / "proto_gen"))
 
 import windows_media_ingress_exemplar as media  # noqa: E402
+from proto_gen import session_pb2  # noqa: E402
 
 
 class WindowsMediaIngressExemplarTests(unittest.TestCase):
@@ -128,6 +129,93 @@ class WindowsMediaIngressExemplarTests(unittest.TestCase):
         self.assertIsNone(evidence["http_origin"])
         # Dry-run HTML must not contain an ?origin= param (no server was started).
         self.assertNotIn("?origin=", html)
+
+
+class LocalProducerRejectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expected_media_disabled_rejection_records_evidence_without_close(self) -> None:
+        args = media.build_parser().parse_args(
+            [
+                "local-producer",
+                "--target",
+                "example.invalid:50052",
+                "--psk",
+                "test-psk",
+                "--hold-s",
+                "0",
+                "--expect-reject-code",
+                "MEDIA_DISABLED",
+            ]
+        )
+
+        class FakeHudClient:
+            def __init__(self, *args, **kwargs) -> None:
+                self.close_called = False
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def open_media_ingress(self, **kwargs):
+                return session_pb2.MediaIngressOpenResult(
+                    client_stream_id=kwargs["client_stream_id"],
+                    admitted=False,
+                    stream_epoch=0,
+                    reject_code="MEDIA_DISABLED",
+                    reject_reason="media ingress is disabled by runtime configuration",
+                )
+
+            async def close_media_ingress(self, *args, **kwargs):
+                self.close_called = True
+                raise AssertionError("expected rejection path must not close stream_epoch 0")
+
+        with mock.patch.object(media, "HudClient", FakeHudClient):
+            evidence = await media.run_local_producer(args)
+
+        self.assertFalse(evidence["admitted"])
+        self.assertEqual(evidence["reject_code"], "MEDIA_DISABLED")
+        self.assertEqual(evidence["expected_reject_code"], "MEDIA_DISABLED")
+        self.assertEqual(evidence["stream_epoch"], 0)
+        self.assertNotIn("close_reason", evidence)
+
+    async def test_unexpected_rejection_still_fails(self) -> None:
+        args = media.build_parser().parse_args(
+            [
+                "local-producer",
+                "--target",
+                "example.invalid:50052",
+                "--psk",
+                "test-psk",
+                "--hold-s",
+                "0",
+                "--expect-reject-code",
+                "MEDIA_DISABLED",
+            ]
+        )
+
+        class FakeHudClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def open_media_ingress(self, **kwargs):
+                return session_pb2.MediaIngressOpenResult(
+                    client_stream_id=kwargs["client_stream_id"],
+                    admitted=False,
+                    stream_epoch=0,
+                    reject_code="CAPABILITY_REQUIRED",
+                    reject_reason="session does not hold media_ingress capability",
+                )
+
+        with mock.patch.object(media, "HudClient", FakeHudClient):
+            with self.assertRaisesRegex(RuntimeError, "CAPABILITY_REQUIRED"):
+                await media.run_local_producer(args)
 
 
 class LocalHttpServerTests(unittest.TestCase):

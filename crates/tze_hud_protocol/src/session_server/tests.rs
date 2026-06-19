@@ -645,6 +645,42 @@ async fn media_ingress_disabled_gate_rejects_without_admission() {
 }
 
 #[tokio::test]
+async fn media_ingress_operator_disabled_rejects_authenticated_open() {
+    let mut config = media_ingress_config(true);
+    config.operator_disabled = true;
+    let (mut client, _server, _revocation_tx) = setup_media_ingress_test(config).await;
+    let (tx, mut stream) = media_handshake(
+        &mut client,
+        "media-agent",
+        vec![
+            "media_ingress".to_string(),
+            "publish_zone:media-pip".to_string(),
+        ],
+    )
+    .await;
+
+    tx.send(ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+            "media-pip",
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let result = next_non_state_change(&mut stream).await;
+    match result.payload {
+        Some(ServerPayload::MediaIngressOpenResult(result)) => {
+            assert!(!result.admitted);
+            assert_eq!(result.stream_epoch, 0);
+            assert_eq!(result.reject_code, "MEDIA_DISABLED");
+        }
+        other => panic!("expected rejected MediaIngressOpenResult, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn media_ingress_rejects_second_stream_wrong_zone_missing_classification_and_audio() {
     let (mut client, _server, _revocation_tx) =
         setup_media_ingress_test(media_ingress_config(true)).await;

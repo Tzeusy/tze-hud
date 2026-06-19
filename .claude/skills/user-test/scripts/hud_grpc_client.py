@@ -827,9 +827,14 @@ class HudClient:
         declared_peak_kbps: int = 2_000,
         codec_preference: Optional[list[int]] = None,
         expires_at_wall_us: int = 0,
+        allow_rejected: bool = False,
         timeout: float = 10.0,
     ) -> session_pb2.MediaIngressOpenResult:
-        """Open a video-only media ingress stream on the approved media zone."""
+        """Open a video-only media ingress stream on the approved media zone.
+
+        By default, rejected admissions raise. Set ``allow_rejected`` for proof
+        paths that intentionally validate deterministic policy denials.
+        """
         if not hasattr(session_pb2, "MediaIngressOpen"):
             raise RuntimeError(
                 "session_pb2 is missing MediaIngressOpen; regenerate user-test proto stubs"
@@ -861,6 +866,8 @@ class HudClient:
         resp = await self._wait_for("media_ingress_open_result", timeout=timeout)
         result = resp.media_ingress_open_result
         if not result.admitted:
+            if allow_rejected:
+                return result
             raise RuntimeError(
                 f"Media ingress rejected [{result.reject_code}]: {result.reject_reason}"
             )
