@@ -65,8 +65,9 @@ Promotion, when its gate passes, permits a dedicated portal surface or node type
   - `crates/tze_hud_compositor/src/text.rs` (markdown styled runs, overflow/ellipsis measurement)
   - `crates/tze_hud_compositor/src/renderer.rs`
   - `crates/tze_hud_scene/src/types.rs` (styled-run cache types if needed; no new node types pre-promotion)
-  - `crates/tze_hud_runtime/src/windowed.rs` (composer draft buffer, paste cap enforcement)
-  - `crates/tze_hud_runtime/` input/focus routing for draft editing events
+  - `crates/tze_hud_runtime/src/windowed/keyboard.rs` (composer draft buffer)
+  - `crates/tze_hud_runtime/src/windowed/lifecycle.rs` (paste injection and OS input lifecycle)
+  - `crates/tze_hud_runtime/src/windowed/portal.rs` and `crates/tze_hud_runtime/src/windowed/input_dispatch.rs` (portal routing and focus/input dispatch)
   - `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py` (new live phases: markdown, overflow, composer-edit, cadence, profile-swap)
   - `tests/integration/text_stream_portal_*.rs` (new coverage per requirement)
 - Affected docs:

@@ -18,9 +18,9 @@ What is actually wired today:
   The runtime's MCP server passes accepted portal ops over an mpsc channel
   (`portal_op_tx` → `portal_op_rx`) that the windowed event loop drains each frame
   via `drain_portal_ops` → `InProcessPortalDriver::dispatch_portal_op`
-  (`drain_portal_ops` at `crates/tze_hud_runtime/src/windowed.rs` ~3746-3788; the
-  channel/driver are created at ~4924-5106; `crates/tze_hud_runtime/src/mcp.rs`
-  ~96-100).
+  (`drain_portal_ops` in `crates/tze_hud_runtime/src/windowed/portal.rs`; the
+  channel/driver are created in `crates/tze_hud_runtime/src/windowed/mod.rs`;
+  MCP ingress is in `crates/tze_hud_runtime/src/mcp.rs`).
 - The standalone `projection_authority` binary
   (`crates/tze_hud_projection/src/bin/projection_authority.rs`) is a **stdio dev
   harness**: it retains `ProjectionAuthority` state only for its own process
@@ -284,4 +284,3 @@ A cooperative projection MAY be represented by a zone, widget, or leased text-st
 - **WHEN** a projected session routes transcript or questions to a text-stream/raw-tile portal
 - **THEN** the route SHALL acquire or reuse a lease only within the authenticated session capability set
 - **AND** detach, revocation, expiry, or cleanup SHALL remove stale projected tiles through existing lease cleanup behavior
-

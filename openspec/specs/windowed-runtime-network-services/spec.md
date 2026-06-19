@@ -4,7 +4,7 @@ Status: implemented
 ## Purpose
 Defines network service initialization, MCP listener lifecycle, and authentication enforcement inside the canonical windowed runtime process.
 
-Implementation: crates/tze_hud_runtime/src/windowed.rs; crates/tze_hud_runtime/src/mcp.rs
+Implementation: crates/tze_hud_runtime/src/windowed/mod.rs; crates/tze_hud_runtime/src/windowed/network.rs; crates/tze_hud_runtime/src/windowed/config.rs; crates/tze_hud_runtime/src/mcp.rs
 
 ## Requirements
 ### Requirement: Windowed Runtime Network Service Initialization

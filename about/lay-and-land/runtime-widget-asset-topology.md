@@ -85,7 +85,7 @@ Platform defaults (`platform_default_store_path`):
 Startup call chain:
 
 1. Runtime startup resolves widget asset store config
-   - windowed: `crates/tze_hud_runtime/src/windowed.rs`
+   - windowed: `crates/tze_hud_runtime/src/windowed/mod.rs`
    - headless: `crates/tze_hud_runtime/src/headless.rs`
 2. Runtime opens durable store
    - `RuntimeWidgetStore::open(...)`

@@ -198,9 +198,13 @@ OS / winit           tze_hud_runtime::windowed      tze_hud_input              C
 Rollback: only on explicit agent rejection (100ms reverse). Silence/latency
 does not trigger rollback.
 
-**Key files:** `windowed.rs`, `dispatch.rs` (`DispatchProcessor`), `hit_test.rs`,
-`local_feedback.rs`, `events.rs`, `event_queue.rs`, `coalescing.rs`, `batching.rs`,
-`pipeline.rs` (`HitTestSnapshot`), `channels.rs`.
+**Key files:** `crates/tze_hud_runtime/src/windowed/lifecycle.rs`,
+`crates/tze_hud_runtime/src/windowed/input_dispatch.rs`,
+`crates/tze_hud_runtime/src/windowed/keyboard.rs`,
+`crates/tze_hud_runtime/src/windowed/hittest.rs`, `dispatch.rs`
+(`DispatchProcessor`), `hit_test.rs`, `local_feedback.rs`, `events.rs`,
+`event_queue.rs`, `coalescing.rs`, `batching.rs`, `pipeline.rs`
+(`HitTestSnapshot`), `channels.rs`.
 
 ---
 
@@ -267,7 +271,10 @@ Important current seams:
 
 **Key files:** `.claude/skills/user-test/scripts/text_stream_portal_exemplar.py`,
 `.claude/skills/user-test/scripts/hud_grpc_client.py`,
-`crates/tze_hud_runtime/src/windowed.rs`,
+`crates/tze_hud_runtime/src/windowed/portal.rs`,
+`crates/tze_hud_runtime/src/windowed/keyboard.rs`,
+`crates/tze_hud_runtime/src/windowed/lifecycle.rs`,
+`crates/tze_hud_runtime/src/windowed/input_dispatch.rs`,
 `crates/tze_hud_protocol/src/session_server.rs`,
 `crates/tze_hud_protocol/src/convert.rs`.
 

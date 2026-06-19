@@ -110,6 +110,25 @@ tze_hud_runtime
 └── [platform] libc (Linux), windows (Windows)
 ```
 
+### Windowed runtime decomposition
+
+The former `crates/tze_hud_runtime/src/windowed.rs` hotspot is now a
+`crates/tze_hud_runtime/src/windowed/` module tree. Line counts below were
+verified with `wc -l crates/tze_hud_runtime/src/windowed/*.rs` on 2026-06-20.
+
+| Module | Lines | Responsibility |
+|---|---:|---|
+| `windowed/mod.rs` | 1,873 | Windowed runtime facade: public config re-exports, `WindowedRuntimeState`, `WinitApp`, `ApplicationHandler`, `WindowedRuntime::run`, runtime startup wiring. |
+| `windowed/config.rs` | 412 | `WindowedConfig`, `WindowedBenchmarkConfig`, bind-host selection, and config-focused tests. |
+| `windowed/network.rs` | 499 | Runtime context construction and gRPC network service startup. |
+| `windowed/hittest.rs` | 545 | Display-area synchronization, overlay hit-region aggregation, cursor hittest refresh. |
+| `windowed/input_dispatch.rs` | 1,215 | Event dispatch helpers for pointer, keyboard, focus, capture release, portal geometry, and input enqueue normalization. |
+| `windowed/keyboard.rs` | 905 | Keyboard event dispatch, composer delivery context, deferred keyboard retry, focused composer draft handling. |
+| `windowed/lifecycle.rs` | 1,684 | OS window/input lifecycle helpers, mouse capture, clipboard, benchmark scene setup, pointer/scroll enqueue, mode switch and presentation. |
+| `windowed/portal.rs` | 2,849 | Portal projection driver construction, drag/resize routing, portal drain, geometry persistence, and portal-focused tests. |
+| `windowed/widgets.rs` | 465 | Local composer echo, widget hover tracking, drag-handle context menu behavior. |
+| `windowed/test_support.rs` | 1,604 | Test-only scene builders and decomposed runtime test support. |
+
 ## Boundary Contracts
 
 ### MCP ingress boundary
