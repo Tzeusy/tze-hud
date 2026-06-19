@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import sys
 import unittest
@@ -637,6 +638,187 @@ class SoakPhaseTests(unittest.TestCase):
             portal.scenario_lease_ttl_ms("baseline,scroll", baseline_hold_s=20.0, soak_duration_s=3600.0),
             600_000,
         )
+
+
+class _InteractionCleanupClient:
+    def __init__(self) -> None:
+        self._event_queue: asyncio.Queue = asyncio.Queue()
+
+    async def submit_mutation_batch(self, lease_id, mutations, timeout=5.0):
+        class _Result:
+            accepted = True
+            error_code = 0
+            error_message = ""
+            batch_id = b""
+            created_ids: list[bytes] = []
+
+        return _Result()
+
+
+class _InteractionCleanupErrorClient(_InteractionCleanupClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.render_started = asyncio.Event()
+
+    async def submit_mutation_batch(self, lease_id, mutations, timeout=5.0):
+        self.render_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("composer render cleanup failed") from exc
+
+
+def _pending_portal_background_tasks() -> list[asyncio.Task]:
+    names = {
+        "portal_interaction_loop.<locals>.composer_blink_worker",
+        "portal_interaction_loop.<locals>.composer_render_worker",
+    }
+    return [
+        task for task in asyncio.all_tasks()
+        if not task.done() and task.get_coro().__qualname__ in names
+    ]
+
+
+class InteractionCleanupTests(unittest.TestCase):
+    def test_cancelled_interaction_loop_cancels_composer_background_tasks(self) -> None:
+        async def run() -> None:
+            client = _InteractionCleanupClient()
+            tiles = _portal_tiles()
+            old_blink_seconds = portal.COMPOSER_CARET_BLINK_SECONDS
+            portal.COMPOSER_CARET_BLINK_SECONDS = 60.0
+            loop_task = asyncio.create_task(
+                portal.portal_interaction_loop(
+                    client=client,
+                    lease_id=b"lease",
+                    tiles=tiles,
+                    transcript=[],
+                    body_full="body",
+                    initial_portal_x=0.0,
+                    initial_portal_y=0.0,
+                    tab_width=portal.PORTAL_W,
+                    tab_height=portal.PORTAL_H,
+                    mutation_lock=asyncio.Lock(),
+                    clipboard_host="windows-host.example",
+                    clipboard_user="hud-user",
+                    clipboard_ssh_key="/tmp/no-key",
+                    clipboard_timeout_s=0.1,
+                )
+            )
+            try:
+                await client._event_queue.put(
+                    portal.events_pb2.EventBatch(
+                        events=[
+                            portal.events_pb2.InputEnvelope(
+                                focus_gained=portal.events_pb2.FocusGainedEvent(
+                                    tile_id=tiles.input_scroll,
+                                )
+                            )
+                        ]
+                    )
+                )
+                for _ in range(20):
+                    if _pending_portal_background_tasks():
+                        break
+                    await asyncio.sleep(0)
+                self.assertTrue(
+                    _pending_portal_background_tasks(),
+                    "focus should arm a composer background task before cancellation",
+                )
+
+                loop_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await loop_task
+                await asyncio.sleep(0)
+
+                self.assertEqual(
+                    _pending_portal_background_tasks(),
+                    [],
+                    "interaction-loop cancellation must cancel detached composer tasks",
+                )
+            finally:
+                portal.COMPOSER_CARET_BLINK_SECONDS = old_blink_seconds
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop_task
+                for task in _pending_portal_background_tasks():
+                    task.cancel()
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+    def test_cancelled_interaction_loop_surfaces_composer_cleanup_errors(self) -> None:
+        async def run() -> None:
+            client = _InteractionCleanupErrorClient()
+            tiles = _portal_tiles()
+            old_blink_seconds = portal.COMPOSER_CARET_BLINK_SECONDS
+            old_debounce_seconds = portal.COMPOSER_RENDER_DEBOUNCE_SECONDS
+            old_runtime_node_ids = dict(portal.COMPOSER_RUNTIME_NODE_IDS)
+            portal.COMPOSER_CARET_BLINK_SECONDS = 60.0
+            portal.COMPOSER_RENDER_DEBOUNCE_SECONDS = 0.0
+            portal.COMPOSER_RUNTIME_NODE_IDS.clear()
+            portal.COMPOSER_RUNTIME_NODE_IDS.update(
+                {
+                    **{
+                        key: f"{key}-node".encode("utf-8")
+                        for key in portal.COMPOSER_LINE_KEYS
+                    },
+                    "caret": b"caret-node",
+                }
+            )
+            loop_task = asyncio.create_task(
+                portal.portal_interaction_loop(
+                    client=client,
+                    lease_id=b"lease",
+                    tiles=tiles,
+                    transcript=[],
+                    body_full="body",
+                    initial_portal_x=0.0,
+                    initial_portal_y=0.0,
+                    tab_width=portal.PORTAL_W,
+                    tab_height=portal.PORTAL_H,
+                    mutation_lock=asyncio.Lock(),
+                    clipboard_host="windows-host.example",
+                    clipboard_user="hud-user",
+                    clipboard_ssh_key="/tmp/no-key",
+                    clipboard_timeout_s=0.1,
+                )
+            )
+            try:
+                await client._event_queue.put(
+                    portal.events_pb2.EventBatch(
+                        events=[
+                            portal.events_pb2.InputEnvelope(
+                                focus_gained=portal.events_pb2.FocusGainedEvent(
+                                    tile_id=tiles.input_scroll,
+                                )
+                            )
+                        ]
+                    )
+                )
+                await asyncio.wait_for(client.render_started.wait(), timeout=1.0)
+
+                loop_task.cancel()
+                with self.assertRaisesRegex(RuntimeError, "composer render cleanup failed"):
+                    await loop_task
+
+                self.assertEqual(
+                    _pending_portal_background_tasks(),
+                    [],
+                    "failed composer cleanup must not leak detached tasks",
+                )
+            finally:
+                portal.COMPOSER_CARET_BLINK_SECONDS = old_blink_seconds
+                portal.COMPOSER_RENDER_DEBOUNCE_SECONDS = old_debounce_seconds
+                portal.COMPOSER_RUNTIME_NODE_IDS.clear()
+                portal.COMPOSER_RUNTIME_NODE_IDS.update(old_runtime_node_ids)
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await loop_task
+                for task in _pending_portal_background_tasks():
+                    task.cancel()
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
 
 
 # ── Steady-state publish atomicity (hud-ooeam flicker fix) ────────────────────
