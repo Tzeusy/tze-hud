@@ -5,7 +5,8 @@ use tze_hud_scene::types::{DragHandleContextMenuState, WidgetParameterValue};
 
 use super::hittest::combined_overlay_hit_regions;
 use super::input_dispatch::nanoseconds_since_start;
-use super::{HitRegion, WinitApp, record_pending_input_latency};
+use super::lifecycle::record_pending_input_latency;
+use super::{HitRegion, WinitApp};
 use crate::widget_hover::{
     WidgetHoverTracker, build_hover_trackers, hidden_mutations_for_removed, tick_hover_trackers,
 };

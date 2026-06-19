@@ -6,8 +6,9 @@ use tze_hud_input::{
 use tze_hud_scene::HitResult;
 use tze_hud_scene::types::{DragHandleElementKind, ZoneInteractionKind};
 
+use super::WinitApp;
 use super::input_dispatch::dispatch_portal_geometry_event;
-use super::{INTERACTION_LOCK_BUDGET, WinitApp, spin_acquire};
+use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire};
 
 // ── Drag-to-move: data carried out of the scene-lock for post-lock work ──────
 
@@ -962,14 +963,12 @@ mod tests {
     };
     use tze_hud_telemetry::TelemetryCollector;
 
+    use super::super::lifecycle::pointer_down_starts_guaranteed_feedback_gesture;
     use super::super::test_support::{
         make_shared_state, portal_scene_with_focus, scene_with_capture_tile,
         scene_with_drag_handle_tile,
     };
-    use super::super::{
-        WindowedConfig, WindowedRuntimeState, WinitApp,
-        pointer_down_starts_guaranteed_feedback_gesture,
-    };
+    use super::super::{WindowedConfig, WindowedRuntimeState, WinitApp};
     use super::*;
     use crate::channels::{INPUT_EVENT_CAPACITY, frame_ready_channel};
     use crate::pipeline::FramePipeline;
