@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "grpcio>=1.80.0",
+#   "protobuf>=6.31.1",
+# ]
+# ///
 """
 Text Stream Portal exemplar user-test scenario.
 
@@ -175,7 +182,7 @@ class ComposerLineWindow:
 
 DEFAULT_PSK_ENV = "TZE_HUD_PSK"
 DEFAULT_TARGET = "windows-host.example:50051"
-DEFAULT_DOC = "docs/exemplar-manual-review-checklist.md"
+DEFAULT_DOC = "docs/reports/exemplar-manual-review-checklist.md"
 DEFAULT_TRANSCRIPT_PATH = "test_results/text-stream-portal-latest.json"
 DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/hud-ssh-key")
 MAX_MARKDOWN_BYTES = 65535
@@ -2872,7 +2879,7 @@ async def portal_interaction_loop(
                 lease_id,
                 tiles.frame,
                 "Exemplar Review Portal",
-                "docs/exemplar-manual-review-checklist.md",
+                DEFAULT_DOC,
                 visible_body,
                 f"restored  •  input {INPUT_PANE_W:.0f}px / output {output_rect.w:.0f}px",
             )
@@ -3041,7 +3048,7 @@ async def portal_interaction_loop(
                 lease_id,
                 tiles.frame,
                 "Exemplar Review Portal",
-                "docs/exemplar-manual-review-checklist.md",
+                DEFAULT_DOC,
                 visible_body,
                 f"resized  •  input {INPUT_PANE_W:.0f}px / output {output_rect.w:.0f}px",
                 live_only=False,
@@ -3623,7 +3630,7 @@ async def run_baseline(
     await publish_portal(
         client, lease_id, tiles,
         title="Exemplar Review Portal",
-        subtitle="docs/exemplar-manual-review-checklist.md",
+        subtitle=DEFAULT_DOC,
         body=body_full,
         footer_meta=f"lines 1-{total_lines}  •  content-layer  •  live",
         include_tile_setup=True,
@@ -3786,7 +3793,7 @@ async def run_streaming(
         await publish_portal(
             client, lease_id, tiles,
             title="Exemplar Review Portal",
-            subtitle="docs/exemplar-manual-review-checklist.md",
+            subtitle=DEFAULT_DOC,
             body=partial,
             footer_meta=f"streaming  •  lines 1-{end} / {len(lines)}",
             include_tile_setup=False,
@@ -3824,7 +3831,7 @@ async def run_rapid(
         await publish_portal(
             client, lease_id, tiles,
             title="Exemplar Review Portal",
-            subtitle="docs/exemplar-manual-review-checklist.md",
+            subtitle=DEFAULT_DOC,
             body=body,
             footer_meta=f"rapid  •  cycle {i+1}/{cycles}",
             include_tile_setup=False,
@@ -3834,7 +3841,7 @@ async def run_rapid(
     await publish_portal(
         client, lease_id, tiles,
         title="Exemplar Review Portal",
-        subtitle="docs/exemplar-manual-review-checklist.md",
+        subtitle=DEFAULT_DOC,
         body=body_full,
         footer_meta=f"rapid-settled  •  lines 1-{len(lines)}",
         include_tile_setup=False,
@@ -4874,6 +4881,16 @@ def run_composer_self_test() -> int:
     width = composer_wrap_area_width_px()
     failures: list[str] = []
 
+    expected_doc = "docs/reports/exemplar-manual-review-checklist.md"
+    stale_doc = "docs/" + "exemplar-manual-review-checklist.md"
+    if DEFAULT_DOC != expected_doc:
+        failures.append(f"DEFAULT_DOC is {DEFAULT_DOC!r}, expected {expected_doc!r}")
+    if not Path(DEFAULT_DOC).is_file():
+        failures.append(f"DEFAULT_DOC path does not exist: {DEFAULT_DOC}")
+    script_source = Path(__file__).read_text(encoding="utf-8")
+    if stale_doc in script_source:
+        failures.append(f"stale checklist path remains in script source: {stale_doc}")
+
     fallback = composer_key_fallback_text("Space")
     if fallback != " ":
         failures.append(f"Space fallback returned {fallback!r}")
@@ -5035,7 +5052,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--target", default=DEFAULT_TARGET)
     p.add_argument("--psk-env", default=DEFAULT_PSK_ENV)
     p.add_argument("--agent-id", default="agent-alpha")
-    p.add_argument("--doc", default=DEFAULT_DOC)
+    p.add_argument(
+        "--doc",
+        default=DEFAULT_DOC,
+        help=f"Markdown document to render (default: {DEFAULT_DOC})",
+    )
     p.add_argument("--max-lines", type=int, default=120)
     p.add_argument("--tab-width", type=float, default=1920.0)
     p.add_argument("--tab-height", type=float, default=1080.0)
