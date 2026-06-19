@@ -235,7 +235,7 @@ def summarize_samples(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_ssh_command(args: argparse.Namespace, encoded_script: str) -> list[str]:
+def build_ssh_command(args: argparse.Namespace) -> list[str]:
     cmd = [
         "ssh",
         "-o",
@@ -255,8 +255,8 @@ def build_ssh_command(args: argparse.Namespace, encoded_script: str) -> list[str
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
-            "-EncodedCommand",
-            encoded_script,
+            "-Command",
+            "-",
         ]
     )
     return cmd
@@ -268,9 +268,15 @@ def collect_samples(args: argparse.Namespace) -> dict[str, Any]:
         samples=args.samples,
         interval_s=args.interval_s,
     )
-    cmd = build_ssh_command(args, encode_powershell_command(script))
+    cmd = build_ssh_command(args)
     timeout_s = args.connect_timeout_s + max(10, args.samples * max(1, args.interval_s) + 30)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    result = subprocess.run(
+        cmd,
+        input=script + "\n",
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+    )
     if result.returncode != 0:
         raise RuntimeError(
             "remote sampler failed "

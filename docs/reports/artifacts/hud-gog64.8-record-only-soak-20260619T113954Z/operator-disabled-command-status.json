@@ -1,1 +1,4 @@
-{"producer_status":1,"expected_rejection":"MEDIA_DISABLED"}
+{
+  "producer_status": 1,
+  "expected_rejection": "MEDIA_DISABLED"
+}

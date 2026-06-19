@@ -14,7 +14,7 @@
   "first_frame_time_note": "No decoded-frame transport is active in this record-only slice; live MediaIngressState samples reported effective_fps/width/height as zero.",
   "heartbeat_errors": [],
   "hold_seconds_observed": 601.209,
-  "hold_seconds_requested": 600.0,
+  "hold_seconds_requested": 600,
   "lane": "hud-gog64.8-record-only-soak",
   "nonzero_frame_sample_count": 0,
   "opened_at_wall_us": 1781871669286466,

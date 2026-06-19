@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 
@@ -20,6 +21,20 @@ class WindowsMediaResourceSamplerTests(unittest.TestCase):
         self.assertIn("$Samples = 2", script)
         self.assertIn("$IntervalSeconds = 1", script)
         self.assertIn("ConvertTo-Json", script)
+
+    def test_ssh_command_streams_script_over_stdin(self) -> None:
+        args = Namespace(
+            connect_timeout_s=10,
+            ssh_key="~/.ssh/ecdsa_home",
+            win_user="tzeus",
+            win_host="tzehouse-windows.parrot-hen.ts.net",
+        )
+
+        command = sampler.build_ssh_command(args)
+
+        self.assertIn("-Command", command)
+        self.assertEqual(command[-1], "-")
+        self.assertNotIn("-EncodedCommand", command)
 
     def test_summarize_samples_reports_cpu_gpu_and_memory(self) -> None:
         raw = {

@@ -1,18 +1,18 @@
 {
-  "started_at_utc": "2026-06-19T12:32:17.7866402Z",
+  "started_at_utc": "2026-06-19T13:08:40.7047575Z",
   "task": "TzeHudGog648Media",
   "production_task": "TzeHudOverlay",
   "grpc_port": 50052,
   "mcp_port": 9092,
   "steps": [
     {
-      "at_utc": "2026-06-19T12:32:19.2976636Z",
+      "at_utc": "2026-06-19T13:08:42.2491752Z",
       "name": "stop-isolated-media-hud",
       "status": "ok",
       "detail": "grpc_50052_closed=True"
     },
     {
-      "at_utc": "2026-06-19T12:32:20.8085309Z",
+      "at_utc": "2026-06-19T13:08:43.6490486Z",
       "name": "restore-production",
       "status": "ok",
       "detail": "grpc_50051=True; mcp_9090=True"
@@ -23,24 +23,24 @@
     {
       "LocalAddress": "0.0.0.0",
       "LocalPort": 50051,
-      "OwningProcess": 56632
+      "OwningProcess": 35448
     },
     {
       "LocalAddress": "0.0.0.0",
       "LocalPort": 9090,
-      "OwningProcess": 56632
+      "OwningProcess": 35448
     }
   ],
   "restored_processes": {
-    "Id": 56632,
+    "Id": 35448,
     "ProcessName": "tze_hud",
     "Path": "C:\\tze_hud\\tze_hud.exe"
   },
   "gpu_lock_after_restore": [
     "SESSION_TYPE=interactive",
-    "PID=56632",
-    "STARTED_AT=2026-06-19T12:32:19Z",
+    "PID=35448",
+    "STARTED_AT=2026-06-19T13:08:42Z",
     "DESCRIPTION=<redacted-description>"
   ],
-  "finished_at_utc": "2026-06-19T12:32:20.8085309Z"
+  "finished_at_utc": "2026-06-19T13:08:43.6490486Z"
 }
