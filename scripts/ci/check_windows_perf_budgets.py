@@ -34,7 +34,17 @@ REFERENCE_FACTORS = {
     "upload": 0.215,
 }
 
+# Sessions that must satisfy the full Windows timing budget table.
 REQUIRED_SESSIONS = ("steady_state_render", "high_mutation")
+
+# Sessions that must satisfy correctness/contention counter baselines. This is
+# wider than REQUIRED_SESSIONS because `scene_lock_paced_contention` is a
+# counter-only gate: it intentionally does not emit the full latency buckets.
+REQUIRED_COUNTER_SESSIONS = (
+    "steady_state_render",
+    "high_mutation",
+    "scene_lock_paced_contention",
+)
 
 
 @dataclass(frozen=True)
@@ -78,11 +88,13 @@ WINDOWS_HEADLESS_BUDGETS = (
 # `scene_lock_misses` is the cumulative compositor frame-loop `try_lock` miss
 # count (scene-lock contention between the frame loop and concurrent gRPC/MCP
 # scene-mutation handlers). `invariant_violations` is the session aggregate of
-# per-frame scene-commit rejections. Both are expected to be exactly zero on the
-# synthetic headless benchmark; a non-zero value is a real regression.
+# per-frame scene-commit rejections. Zero counters apply unless a specific
+# `(session, counter)` override exists in BASELINE_COUNTERS; this keeps
+# steady/high-mutation at zero while allowing the explicitly contended paced
+# session to carry a documented non-zero ceiling.
 #
-# To raise a baseline (only with data justifying it), move the counter out of
-# ZERO_COUNTERS into BASELINE_COUNTERS with its documented ceiling, and record
+# To raise a baseline (only with data justifying it), add or update a
+# session-scoped BASELINE_COUNTERS entry with its documented ceiling, and record
 # the rationale in about/craft-and-care/engineering-bar.md.
 ZERO_COUNTERS = (
     "lease_violations",
@@ -93,9 +105,13 @@ ZERO_COUNTERS = (
 )
 
 # Counters with a non-zero committed ceiling (baseline + documented margin).
-# `name -> ceiling`. A counter is a regression iff observed > ceiling. Empty
-# today; populate only with data-justified ceilings (see ZERO_COUNTERS note).
-BASELINE_COUNTERS: dict[str, int] = {}
+# `(session_name, counter_name) -> ceiling`. A counter is a regression iff
+# observed > ceiling. Session-scoping keeps the production-shaped steady/high
+# sessions at zero while allowing the explicitly contended paced session to
+# carry a small, data-derived non-zero floor.
+BASELINE_COUNTERS: dict[tuple[str, str], int] = {
+    ("scene_lock_paced_contention", "scene_lock_misses"): 20,
+}
 
 
 def nearest_rank(values: list[int], percentile: float) -> int:
@@ -158,7 +174,8 @@ def session_by_name(artifact: dict[str, Any]) -> dict[str, dict[str, Any]]:
         name = session.get("name") if isinstance(session, dict) else None
         if isinstance(name, str):
             by_name[name] = session
-    missing = [name for name in REQUIRED_SESSIONS if name not in by_name]
+    required = tuple(dict.fromkeys(REQUIRED_SESSIONS + REQUIRED_COUNTER_SESSIONS))
+    missing = [name for name in required if name not in by_name]
     if missing:
         raise SystemExit("benchmark artifact is missing sessions: " + ", ".join(missing))
     return by_name
@@ -225,7 +242,15 @@ def validate_benchmark(artifact: dict[str, Any]) -> tuple[list[dict[str, Any]], 
                     f"TzeHouse factor {reference_factor:.4f})"
                 )
 
+    for session_name in REQUIRED_COUNTER_SESSIONS:
+        summary = sessions[session_name].get("summary", {})
+        if not isinstance(summary, dict):
+            failures.append(f"{session_name}: missing summary")
+            continue
+
         for counter in ZERO_COUNTERS:
+            if (session_name, counter) in BASELINE_COUNTERS:
+                continue
             observed = summary.get(counter)
             passed = observed == 0
             results.append(
@@ -234,21 +259,29 @@ def validate_benchmark(artifact: dict[str, Any]) -> tuple[list[dict[str, Any]], 
                     "metric": counter,
                     "observed": observed,
                     "budget": 0,
+                    "comparison": "eq",
                     "pass": passed,
                 }
             )
             if not passed:
                 failures.append(f"{session_name}.{counter}: expected 0, observed {observed!r}")
 
-        for counter, ceiling in BASELINE_COUNTERS.items():
+        for (budget_session_name, counter), ceiling in BASELINE_COUNTERS.items():
+            if budget_session_name != session_name:
+                continue
             observed = summary.get(counter)
-            passed = isinstance(observed, int) and not isinstance(observed, bool) and observed <= ceiling
+            passed = (
+                isinstance(observed, int)
+                and not isinstance(observed, bool)
+                and observed <= ceiling
+            )
             results.append(
                 {
                     "session": session_name,
                     "metric": counter,
                     "observed": observed,
                     "budget": ceiling,
+                    "comparison": "lte",
                     "pass": passed,
                 }
             )
@@ -290,9 +323,10 @@ def main() -> int:
                 f"{result['observed_us']}us <= {result['effective_budget_us']}us"
             )
         else:
+            comparison = "<=" if result.get("comparison") == "lte" else "=="
             print(
                 f"{status} {result['session']}.{result['metric']}: "
-                f"{result['observed']} == {result['budget']}"
+                f"{result['observed']} {comparison} {result['budget']}"
             )
 
     if failures:

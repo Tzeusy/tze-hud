@@ -41,8 +41,11 @@ class WindowsPerfBudgetCheckerTests(unittest.TestCase):
     # ── scene_lock_misses / invariant_violations zero-baseline gate ─────────
 
     @staticmethod
-    def _artifact_with_summary(summary_overrides: dict) -> dict:
-        """Build a minimal valid benchmark artifact for both required sessions.
+    def _artifact_with_summary(
+        summary_overrides: dict,
+        paced_contention_summary_overrides: dict | None = None,
+    ) -> dict:
+        """Build a minimal valid benchmark artifact for all gated sessions.
 
         Latency buckets carry one well-under-budget sample so the percentile
         checks pass; counter values default to their healthy baseline (0) and
@@ -61,17 +64,28 @@ class WindowsPerfBudgetCheckerTests(unittest.TestCase):
             "scene_lock_misses": 0,
         }
         base_summary.update(summary_overrides)
+        paced_summary = dict(base_summary)
+        paced_summary["scene_lock_misses"] = 18
+        if paced_contention_summary_overrides:
+            paced_summary.update(paced_contention_summary_overrides)
         return {
             "calibration": {"factors": {"cpu": 0.854, "gpu": 0.338, "upload": 0.215}},
             "sessions": [
                 {"name": name, "summary": dict(base_summary)}
                 for name in check_windows_perf_budgets.REQUIRED_SESSIONS
-            ],
+            ]
+            + [{"name": "scene_lock_paced_contention", "summary": paced_summary}],
         }
 
-    def test_scene_lock_misses_in_zero_counters(self) -> None:
+    def test_scene_lock_misses_zero_for_production_sessions(self) -> None:
         self.assertIn("scene_lock_misses", check_windows_perf_budgets.ZERO_COUNTERS)
         self.assertIn("invariant_violations", check_windows_perf_budgets.ZERO_COUNTERS)
+        self.assertEqual(
+            check_windows_perf_budgets.BASELINE_COUNTERS[
+                ("scene_lock_paced_contention", "scene_lock_misses")
+            ],
+            20,
+        )
 
     def test_healthy_counters_pass(self) -> None:
         artifact = self._artifact_with_summary({})
@@ -105,28 +119,36 @@ class WindowsPerfBudgetCheckerTests(unittest.TestCase):
             f"expected a scene_lock_misses failure for missing field, got {failures!r}",
         )
 
-    def test_baseline_counter_ceiling_enforced(self) -> None:
-        # Patch a non-zero ceiling in to exercise the BASELINE_COUNTERS path.
-        original = dict(check_windows_perf_budgets.BASELINE_COUNTERS)
-        check_windows_perf_budgets.BASELINE_COUNTERS["scene_lock_misses"] = 2
-        try:
-            # scene_lock_misses is also in ZERO_COUNTERS; remove it there so the
-            # ceiling path is what we observe for this targeted unit test.
-            zero = check_windows_perf_budgets.ZERO_COUNTERS
-            check_windows_perf_budgets.ZERO_COUNTERS = tuple(
-                c for c in zero if c != "scene_lock_misses"
-            )
-            under = self._artifact_with_summary({"scene_lock_misses": 2})
-            _r, failures_under = check_windows_perf_budgets.validate_benchmark(under)
-            self.assertEqual(failures_under, [])
+    def test_missing_paced_contention_session_fails(self) -> None:
+        artifact = self._artifact_with_summary({})
+        artifact["sessions"] = [
+            session
+            for session in artifact["sessions"]
+            if session["name"] != "scene_lock_paced_contention"
+        ]
 
-            over = self._artifact_with_summary({"scene_lock_misses": 3})
-            _r, failures_over = check_windows_perf_budgets.validate_benchmark(over)
-            self.assertTrue(any("scene_lock_misses" in f for f in failures_over))
-        finally:
-            check_windows_perf_budgets.BASELINE_COUNTERS.clear()
-            check_windows_perf_budgets.BASELINE_COUNTERS.update(original)
-            check_windows_perf_budgets.ZERO_COUNTERS = zero
+        with self.assertRaises(SystemExit) as raised:
+            check_windows_perf_budgets.validate_benchmark(artifact)
+
+        self.assertIn("scene_lock_paced_contention", str(raised.exception))
+
+    def test_paced_contention_scene_lock_misses_ceiling_enforced(self) -> None:
+        under = self._artifact_with_summary(
+            {},
+            paced_contention_summary_overrides={"scene_lock_misses": 20},
+        )
+        _r, failures_under = check_windows_perf_budgets.validate_benchmark(under)
+        self.assertEqual(failures_under, [])
+
+        over = self._artifact_with_summary(
+            {},
+            paced_contention_summary_overrides={"scene_lock_misses": 21},
+        )
+        _r, failures_over = check_windows_perf_budgets.validate_benchmark(over)
+        self.assertTrue(
+            any("scene_lock_paced_contention.scene_lock_misses" in f for f in failures_over),
+            f"expected paced contention scene_lock_misses ceiling failure, got {failures_over!r}",
+        )
 
 
 if __name__ == "__main__":
