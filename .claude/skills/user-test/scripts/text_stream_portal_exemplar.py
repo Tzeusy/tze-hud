@@ -2765,10 +2765,25 @@ async def portal_interaction_loop(
     composer_last_dirty_at = 0.0
     composer_caret_visible = True
     composer_blink_task: Optional[asyncio.Task[None]] = None
+    background_tasks: set[asyncio.Task[None]] = set()
+    owner_task = asyncio.current_task()
     portal_minimized = False
     minimized_attention = False
     minimized_pulse = False
     last_drag_apply_at = 0.0
+
+    def track_background_task(task: asyncio.Task[None]) -> asyncio.Task[None]:
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+        return task
+
+    def cancel_background_tasks(_done_task: asyncio.Task | None = None) -> None:
+        for task in list(background_tasks):
+            if not task.done():
+                task.cancel()
+
+    if owner_task is not None:
+        owner_task.add_done_callback(cancel_background_tasks)
 
     async def render_minimized_icon() -> None:
         root, children = build_minimized_icon_nodes(
@@ -3140,7 +3155,9 @@ async def portal_interaction_loop(
         composer_render_dirty = True
         composer_last_dirty_at = time.monotonic()
         if composer_render_task is None or composer_render_task.done():
-            composer_render_task = asyncio.create_task(composer_render_worker())
+            composer_render_task = track_background_task(
+                asyncio.create_task(composer_render_worker())
+            )
 
     async def composer_blink_worker() -> None:
         nonlocal composer_blink_task, composer_caret_visible
@@ -3162,7 +3179,9 @@ async def portal_interaction_loop(
         composer_caret_visible = True
         request_composer_render()
         if focused and (composer_blink_task is None or composer_blink_task.done()):
-            composer_blink_task = asyncio.create_task(composer_blink_worker())
+            composer_blink_task = track_background_task(
+                asyncio.create_task(composer_blink_worker())
+            )
 
     own_pointer_tiles = {
         tiles.capture_backstop,
