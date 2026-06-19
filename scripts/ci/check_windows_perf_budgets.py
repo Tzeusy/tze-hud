@@ -108,9 +108,16 @@ ZERO_COUNTERS = (
 # `(session_name, counter_name) -> ceiling`. A counter is a regression iff
 # observed > ceiling. Session-scoping keeps the production-shaped steady/high
 # sessions at zero while allowing the explicitly contended paced session to
-# carry a small, data-derived non-zero floor.
+# carry a small, data-derived non-zero ceiling.
 BASELINE_COUNTERS: dict[tuple[str, str], int] = {
     ("scene_lock_paced_contention", "scene_lock_misses"): 20,
+}
+
+# Counters that must also prove the modeled path is live. A zero paced
+# contention count means the scenario stopped contending, so the ceiling check
+# alone would be a false pass.
+BASELINE_COUNTER_MINIMUMS: dict[tuple[str, str], int] = {
+    ("scene_lock_paced_contention", "scene_lock_misses"): 1,
 }
 
 
@@ -270,26 +277,35 @@ def validate_benchmark(artifact: dict[str, Any]) -> tuple[list[dict[str, Any]], 
             if budget_session_name != session_name:
                 continue
             observed = summary.get(counter)
+            floor = BASELINE_COUNTER_MINIMUMS.get((session_name, counter))
             passed = (
                 isinstance(observed, int)
                 and not isinstance(observed, bool)
+                and (floor is None or observed >= floor)
                 and observed <= ceiling
             )
-            results.append(
-                {
-                    "session": session_name,
-                    "metric": counter,
-                    "observed": observed,
-                    "budget": ceiling,
-                    "comparison": "lte",
-                    "pass": passed,
-                }
-            )
+            result = {
+                "session": session_name,
+                "metric": counter,
+                "observed": observed,
+                "budget": ceiling,
+                "comparison": "range" if floor is not None else "lte",
+                "pass": passed,
+            }
+            if floor is not None:
+                result["minimum"] = floor
+            results.append(result)
             if not passed:
-                failures.append(
-                    f"{session_name}.{counter}: observed {observed!r} exceeds "
-                    f"committed baseline ceiling {ceiling}"
-                )
+                if floor is not None:
+                    failures.append(
+                        f"{session_name}.{counter}: expected {floor} <= observed <= "
+                        f"{ceiling}, observed {observed!r}"
+                    )
+                else:
+                    failures.append(
+                        f"{session_name}.{counter}: observed {observed!r} exceeds "
+                        f"committed baseline ceiling {ceiling}"
+                    )
 
     return results, failures
 
@@ -323,11 +339,17 @@ def main() -> int:
                 f"{result['observed_us']}us <= {result['effective_budget_us']}us"
             )
         else:
-            comparison = "<=" if result.get("comparison") == "lte" else "=="
-            print(
-                f"{status} {result['session']}.{result['metric']}: "
-                f"{result['observed']} {comparison} {result['budget']}"
-            )
+            if result.get("comparison") == "range":
+                print(
+                    f"{status} {result['session']}.{result['metric']}: "
+                    f"{result['minimum']} <= {result['observed']} <= {result['budget']}"
+                )
+            else:
+                comparison = "<=" if result.get("comparison") == "lte" else "=="
+                print(
+                    f"{status} {result['session']}.{result['metric']}: "
+                    f"{result['observed']} {comparison} {result['budget']}"
+                )
 
     if failures:
         print("\nWindows performance budget failures:", file=sys.stderr)

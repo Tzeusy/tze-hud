@@ -86,6 +86,12 @@ class WindowsPerfBudgetCheckerTests(unittest.TestCase):
             ],
             20,
         )
+        self.assertEqual(
+            check_windows_perf_budgets.BASELINE_COUNTER_MINIMUMS[
+                ("scene_lock_paced_contention", "scene_lock_misses")
+            ],
+            1,
+        )
 
     def test_healthy_counters_pass(self) -> None:
         artifact = self._artifact_with_summary({})
@@ -133,6 +139,13 @@ class WindowsPerfBudgetCheckerTests(unittest.TestCase):
         self.assertIn("scene_lock_paced_contention", str(raised.exception))
 
     def test_paced_contention_scene_lock_misses_ceiling_enforced(self) -> None:
+        floor = self._artifact_with_summary(
+            {},
+            paced_contention_summary_overrides={"scene_lock_misses": 1},
+        )
+        _r, failures_floor = check_windows_perf_budgets.validate_benchmark(floor)
+        self.assertEqual(failures_floor, [])
+
         under = self._artifact_with_summary(
             {},
             paced_contention_summary_overrides={"scene_lock_misses": 20},
@@ -148,6 +161,17 @@ class WindowsPerfBudgetCheckerTests(unittest.TestCase):
         self.assertTrue(
             any("scene_lock_paced_contention.scene_lock_misses" in f for f in failures_over),
             f"expected paced contention scene_lock_misses ceiling failure, got {failures_over!r}",
+        )
+
+    def test_paced_contention_scene_lock_misses_zero_fails(self) -> None:
+        artifact = self._artifact_with_summary(
+            {},
+            paced_contention_summary_overrides={"scene_lock_misses": 0},
+        )
+        _r, failures = check_windows_perf_budgets.validate_benchmark(artifact)
+        self.assertTrue(
+            any("expected 1 <= observed <= 20" in f for f in failures),
+            f"expected paced contention lower-bound failure, got {failures!r}",
         )
 
 

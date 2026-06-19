@@ -833,8 +833,16 @@ mod headless_impl {
     const PRODUCTION_CONTENTION_FRAME_PHASES: [u64; CONTENTION_MUTATION_TASKS] = [5, 15, 25];
     const PRODUCTION_CONTENTION_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
     const PRODUCTION_CONTENTION_READY_TIMEOUT: Duration = Duration::from_millis(50);
+    const PACED_CONTENTION_COLS: usize = 3;
+    const PACED_CONTENTION_COL_PITCH: f32 = 384.0;
+    const PACED_CONTENTION_ROW_PITCH: f32 = 540.0;
+    pub(crate) const PACED_CONTENTION_TILE_W: f32 = 380.0;
+    pub(crate) const PACED_CONTENTION_TILE_H: f32 = 536.0;
+    pub(crate) const PACED_CONTENTION_DISPLAY_W: f32 = 1920.0;
+    pub(crate) const PACED_CONTENTION_DISPLAY_H: f32 = 1080.0;
+    const PACED_CONTENTION_JITTER_PX: f32 = 5.0;
 
-    fn production_contention_task_index(frame_idx: u64) -> Option<usize> {
+    pub(crate) fn production_contention_task_index(frame_idx: u64) -> Option<usize> {
         let phase = frame_idx % PRODUCTION_CONTENTION_PERIOD_FRAMES;
         PRODUCTION_CONTENTION_FRAME_PHASES
             .iter()
@@ -845,6 +853,18 @@ mod headless_impl {
         (0..frame_count)
             .filter(|frame_idx| production_contention_task_index(*frame_idx).is_some())
             .count() as u64
+    }
+
+    pub(crate) fn paced_contention_tile_origin(idx: usize, tick: u64) -> (f32, f32) {
+        let col = idx % PACED_CONTENTION_COLS;
+        let row = idx / PACED_CONTENTION_COLS;
+        let jitter = (tick as f32 * 0.13).sin() * PACED_CONTENTION_JITTER_PX;
+        let max_x = PACED_CONTENTION_DISPLAY_W - PACED_CONTENTION_TILE_W;
+        let max_y = PACED_CONTENTION_DISPLAY_H - PACED_CONTENTION_TILE_H;
+        (
+            (col as f32 * PACED_CONTENTION_COL_PITCH + jitter).clamp(0.0, max_x),
+            (row as f32 * PACED_CONTENTION_ROW_PITCH).clamp(0.0, max_y),
+        )
     }
 
     async fn wait_for_contention_ready(ready: oneshot::Receiver<()>, frame_idx: u64) {
@@ -902,37 +922,32 @@ mod headless_impl {
 
     fn spawn_paced_contention_holder(
         scene_arc: Arc<Mutex<SceneGraph>>,
-        tile_ids: Vec<SceneId>,
+        tile_ids: Arc<[SceneId]>,
         task_idx: usize,
         tick: u64,
-    ) -> (oneshot::Receiver<()>, tokio::task::JoinHandle<()>) {
+    ) -> (oneshot::Receiver<()>, tokio::task::JoinHandle<bool>) {
         let (ready_tx, ready_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
             let mut scene = scene_arc.lock().await;
+            let mut batch_applied = true;
             if !tile_ids.is_empty() {
                 let idx = (tick as usize + task_idx) % tile_ids.len();
-                let jitter = (tick as f32) * 0.13;
-                let col = idx % 3;
-                let row = idx / 3;
+                let (x, y) = paced_contention_tile_origin(idx, tick);
                 let batch = MutationBatch {
                     batch_id: SceneId::new(),
                     agent_namespace: "paced_contention_bench".to_string(),
                     mutations: vec![SceneMutation::UpdateTileBounds {
                         tile_id: tile_ids[idx],
-                        bounds: Rect::new(
-                            col as f32 * 384.0 + jitter.sin() * 5.0,
-                            row as f32 * 540.0,
-                            380.0,
-                            536.0,
-                        ),
+                        bounds: Rect::new(x, y, PACED_CONTENTION_TILE_W, PACED_CONTENTION_TILE_H),
                     }],
                     timing_hints: None,
                     lease_id: None,
                 };
-                let _ = scene.apply_batch(&batch);
+                batch_applied = scene.apply_batch(&batch).applied;
             }
             let _ = ready_tx.send(());
             tokio::time::sleep(CONTENTION_HOLD).await;
+            batch_applied
         });
         (ready_rx, handle)
     }
@@ -1208,9 +1223,8 @@ mod headless_impl {
                 lease.resource_budget.max_tiles = 15;
             }
             for i in 0..6usize {
-                let col = i % 3;
-                let row = i / 3;
-                let bounds = Rect::new(col as f32 * 384.0, row as f32 * 540.0, 380.0, 536.0);
+                let (x, y) = paced_contention_tile_origin(i, 0);
+                let bounds = Rect::new(x, y, PACED_CONTENTION_TILE_W, PACED_CONTENTION_TILE_H);
                 if let Ok(tile_id) = scene.create_tile(
                     tab_id,
                     "paced_contention_bench",
@@ -1226,7 +1240,12 @@ mod headless_impl {
                             children: vec![],
                             data: NodeData::SolidColor(SolidColorNode {
                                 color: Rgba::new(0.25, 0.5, 0.75, 1.0),
-                                bounds: Rect::new(0.0, 0.0, 380.0, 536.0),
+                                bounds: Rect::new(
+                                    0.0,
+                                    0.0,
+                                    PACED_CONTENTION_TILE_W,
+                                    PACED_CONTENTION_TILE_H,
+                                ),
                                 radius: None,
                             }),
                         };
@@ -1246,6 +1265,7 @@ mod headless_impl {
             };
         }
 
+        let tile_ids: Arc<[SceneId]> = tile_ids.into();
         let scene_arc = scene_handle(&runtime).await;
         let mut scene_lock_miss_count: u64 = 0;
         let session_start = Instant::now();
@@ -1255,7 +1275,7 @@ mod headless_impl {
             let holder = if let Some(task_idx) = production_contention_task_index(frame_idx) {
                 let (ready, handle) = spawn_paced_contention_holder(
                     Arc::clone(&scene_arc),
-                    tile_ids.clone(),
+                    Arc::clone(&tile_ids),
                     task_idx,
                     frame_idx,
                 );
@@ -1280,20 +1300,33 @@ mod headless_impl {
                     frame_time_us = frame_start.elapsed().as_micros() as u64;
                 }
             }
+            let invariant_violations_this_frame = if let Some(handle) = holder {
+                match handle.await {
+                    Ok(true) => 0,
+                    Ok(false) => 1,
+                    Err(err) => {
+                        warn!("paced contention holder failed to join: {}", err);
+                        1
+                    }
+                }
+            } else {
+                0
+            };
 
             let mut telemetry = FrameTelemetry::new(frame_idx);
             telemetry.frame_time_us = frame_time_us;
             telemetry.tile_count = tile_count;
-            attach_frame_correctness(&mut telemetry, 0, scene_lock_miss_count);
+            attach_frame_correctness(
+                &mut telemetry,
+                invariant_violations_this_frame,
+                scene_lock_miss_count,
+            );
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
             summary.record_frame_correctness(&telemetry);
             summary
                 .input_to_next_present
                 .record(telemetry.frame_time_us);
 
-            if let Some(handle) = holder {
-                let _ = handle.await;
-            }
             tokio::time::sleep(PRODUCTION_CONTENTION_FRAME_INTERVAL).await;
         }
 
@@ -1729,8 +1762,10 @@ mod contention_tests {
 #[cfg(all(test, feature = "headless"))]
 mod paced_contention_model_tests {
     use crate::headless_impl::{
-        PRODUCTION_CONTENTION_CEILING_PER_180_FRAMES, production_contention_target_frames,
-        run_paced_contention_probe_for_test,
+        PACED_CONTENTION_DISPLAY_H, PACED_CONTENTION_DISPLAY_W, PACED_CONTENTION_TILE_H,
+        PACED_CONTENTION_TILE_W, PRODUCTION_CONTENTION_CEILING_PER_180_FRAMES,
+        paced_contention_tile_origin, production_contention_target_frames,
+        production_contention_task_index, run_paced_contention_probe_for_test,
     };
 
     #[test]
@@ -1767,5 +1802,25 @@ mod paced_contention_model_tests {
             observed < 180,
             "paced contention must not saturate every frame like scene_lock_contention",
         );
+    }
+
+    #[test]
+    fn paced_contention_holder_bounds_stay_inside_display() {
+        for frame_idx in 0..180 {
+            let Some(task_idx) = production_contention_task_index(frame_idx) else {
+                continue;
+            };
+            let idx = (frame_idx as usize + task_idx) % 6;
+            let (x, y) = paced_contention_tile_origin(idx, frame_idx);
+
+            assert!(
+                x >= 0.0 && x + PACED_CONTENTION_TILE_W <= PACED_CONTENTION_DISPLAY_W,
+                "frame {frame_idx} produced out-of-display x bounds: x={x}",
+            );
+            assert!(
+                y >= 0.0 && y + PACED_CONTENTION_TILE_H <= PACED_CONTENTION_DISPLAY_H,
+                "frame {frame_idx} produced out-of-display y bounds: y={y}",
+            );
+        }
     }
 }
