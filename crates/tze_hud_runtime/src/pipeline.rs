@@ -121,6 +121,8 @@ pub struct HitTestSnapshot {
     /// Sorted (by z-order descending) list of (tile_id_bytes, bounds) pairs.
     /// Using raw bytes avoids a SceneId dependency in snapshot loading.
     pub tiles: Vec<TileBoundsEntry>,
+    /// Runtime chrome drag-handle bounds used by the main-thread input path.
+    pub drag_handles: Vec<DragHandleBoundsEntry>,
 }
 
 /// One entry in the hit-test snapshot.
@@ -134,12 +136,25 @@ pub struct TileBoundsEntry {
     pub z_order: u32,
     /// Owner namespace (for dispatch routing).
     pub namespace: String,
+    /// Whether this tile has scroll configuration and therefore accepts portal
+    /// resize affordance pointer gestures.
+    pub has_scroll_config: bool,
+}
+
+/// One runtime chrome drag-handle entry in the hit-test snapshot.
+#[derive(Clone, Debug)]
+pub struct DragHandleBoundsEntry {
+    /// Display-space drag-handle bounds.
+    pub bounds: Rect,
 }
 
 impl HitTestSnapshot {
     /// Create an empty snapshot.
     pub fn empty() -> Self {
-        Self { tiles: Vec::new() }
+        Self {
+            tiles: Vec::new(),
+            drag_handles: Vec::new(),
+        }
     }
 
     /// Build a snapshot from the current scene graph.
@@ -152,11 +167,24 @@ impl HitTestSnapshot {
                 bounds: t.bounds,
                 z_order: t.z_order,
                 namespace: t.namespace.clone(),
+                has_scroll_config: scene.tile_scroll_config(t.id).is_some(),
             })
             .collect();
         // Sort descending by z_order for hit-testing (highest z tested first)
         tiles.sort_unstable_by(|a, b| b.z_order.cmp(&a.z_order));
-        Self { tiles }
+        let drag_handles = scene
+            .overlay
+            .drag_handle_hit_regions
+            .iter()
+            .filter(|region| region.hit_region.accepts_pointer)
+            .map(|region| DragHandleBoundsEntry {
+                bounds: region.bounds,
+            })
+            .collect();
+        Self {
+            tiles,
+            drag_handles,
+        }
     }
 
     /// Test whether a display-space point (x, y) hits any tile.
@@ -168,6 +196,13 @@ impl HitTestSnapshot {
                 && y >= t.bounds.y
                 && y < t.bounds.y + t.bounds.height
         })
+    }
+
+    /// Test whether a display-space point hits any runtime drag handle.
+    pub fn hit_test_drag_handle(&self, x: f32, y: f32) -> bool {
+        self.drag_handles
+            .iter()
+            .any(|handle| handle.bounds.contains_point(x, y))
     }
 }
 
