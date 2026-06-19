@@ -17,7 +17,7 @@ Reviewed: 2026-04-09
 | 8 | [Gauge Widget](#8-gauge-widget) | **done** | Automation batch + manual visual sign-off completed on 2026-04-09 (ultra-minimal track, hover-only readout/label, tuned spacing/colors) |
 | 9 | [Progress Bar](#9-progress-bar) | **automation-pass** | Step + color-sweep batches passed on 2026-04-09; manual visual sign-off pending |
 | 10 | [Status Indicator](#10-status-indicator) | **automation-pass** | Enum/theme/label/validation batches passed on 2026-04-09; manual visual sign-off pending |
-| 11 | [Text Stream Portals](#11-text-stream-portals) | **phase-1-evidence-partial** | `hud-ofe76` live exemplar-script evidence ran on 2026-06-19 across markdown, overflow, composer edit, OS-input window management, cadence, profile swap, and cleanup. Cleanup passed; cadence budget failed; human visual confirmation was not collected. `hud-kylt0` cooperative-projection evidence confirmed Windows reachability but found the HTTP MCP facade gated by `resident_mcp` or missing deployed lifecycle methods. |
+| 11 | [Text Stream Portals](#11-text-stream-portals) | **phase-1-gate-failed** | `hud-qfyfg` assessed RFC 0013 section 7.2 on 2026-06-19 and recorded a machine FAIL in `docs/reports/hud-qfyfg-text-stream-portal-phase1-promotion-gate-20260619.md`. `hud-ofe76` live exemplar-script evidence ran across markdown, overflow, composer edit, OS-input window management, cadence, profile swap, and cleanup, but cadence failed and human visual confirmation was not collected. `hud-kylt0` cooperative-projection evidence confirmed Windows reachability but found the HTTP MCP facade gated by `resident_mcp` or missing deployed lifecycle methods. C5/PR #899 landed the soak driver only; no 60-minute <=5 MiB memory-drift artifact is present. |
 
 ---
 
@@ -372,6 +372,25 @@ and `portal_projection_detach` all returned `CAPABILITY_REQUIRED` with
 resident-capable ingress and deployed lifecycle method coverage, not by Windows
 reachability.
 
+**Promotion gate assessment (2026-06-19 / `hud-qfyfg`):** RFC 0013 section
+7.2 does not pass. The machine assessment is archived at
+`docs/reports/hud-qfyfg-text-stream-portal-phase1-promotion-gate-20260619.md`.
+The raw-tile pilot remains the authoritative scope until the failed or missing
+gate inputs are corrected and owner approval is explicitly recorded.
+
+### Phase-1 Promotion Sign-Off
+
+| Gate item | Outcome | Evidence / required follow-up |
+|---|---|---|
+| Overall RFC 0013 section 7.2 promotion decision | **FAIL - machine assessment only** | `docs/reports/hud-qfyfg-text-stream-portal-phase1-promotion-gate-20260619.md`; owner approval is not present. |
+| Exemplar-script adapter six-axis live run | **PARTIAL / FAIL** | `hud-ofe76` reference-tagged run covered the six axes and cleanup, but cadence failed with 5/20 appends over `16.6ms` (`p95=21.033ms`, `max=56.205ms`) and human visual confirmations remain uncollected. |
+| Cooperative-projection adapter + agent ergonomics | **BLOCKED** | `hud-kylt0` proved Windows/HUD reachability, but projection lifecycle calls were blocked by `resident_mcp` or missing deployed methods; no attach -> stream -> poll/ack input -> detach demonstration exists through the vendored skill surface. |
+| C5 sustained soak evidence | **NOT SIGNED OFF** | PR #899 landed the constant-window `soak` phase and tests, but no completed 60-minute reference-host portal soak artifact proves <=5 MiB memory drift. |
+| Repeated raw-tile complexity criterion | **MACHINE PASS, not sufficient** | The exemplar-script path now uses six raw tiles, split root/child mutation batches, capture tiles, drag shields, minimized-icon state, explicit cleanup, and OS-input diagnostics. Promotion still fails because other gate criteria are missing or failed. |
+| Governance stability criterion | **PARTIAL / FAIL for promotion** | Integration tests cover redaction, safe mode, freeze, orphan, chrome exclusion, and ambient attention. Live Phase-1 evidence only proves ordinary cleanup/lease release; redaction, safe mode, freeze, and explicit orphan/grace behavior still need refreshed live confirmation. |
+| Presence-thesis boundary | **MACHINE PASS, owner-gated** | Evidence remains content-layer, lease-governed, bounded, below chrome, and subordinate to the presence model. This is not owner approval. |
+| No terminal semantics | **MACHINE PASS** | No PTY hosting, VT100/xterm compatibility, alternate screen, terminal mouse reporting, terminal keystroke passthrough, dedicated portal transport, or process lifecycle ownership is introduced. |
+
 ### Capability summary
 
 A governed, low-latency **text stream portal** — not a terminal host, not a chat app. Transport-agnostic boundary: generic output streams, bounded viewer input, session identity, and session status metadata. Tmux, chat platforms, and LLM sessions are all valid adapters behind the same contract.
@@ -424,6 +443,8 @@ Integration tests prove structure; these axes still need operator-visible proof 
 | Cadence with RTT | Low-Latency Text Interaction / Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` FAIL: cadence completed but runtime-overhead budget failed with 5/20 appends over `16.6ms` |
 | Profile swap | Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-ofe76` machine transcript PASS for compact, standard, expanded, restored-standard; human visual confirmation not collected |
 | Cooperative projection adapter | Cooperative LLM Projection Adapter / Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-kylt0` live reachability PASS, but full agent-ergonomics lifecycle BLOCKED: projection attach/publish/input/detach over HTTP MCP returned `resident_mcp` capability errors, and cleanup/status dispatcher methods were absent on the deployed runtime |
+| 60-minute sustained soak | Sustained Streaming Cadence / Phase-1 Promotion Evidence Gate | NOT SIGNED OFF: PR #899 landed the `soak` phase and tests, but no completed 60-minute reference-host portal artifact proves `<=5 MiB` memory drift |
+| RFC 0013 section 7.2 promotion gate | Phase-1 Promotion Evidence Gate | 2026-06-19 `hud-qfyfg` FAIL: raw-tile pilot remains authoritative; owner approval is not present |
 | Redaction | Governance / Privacy / Override | Portal geometry preserved; transcript content suppressed under viewer policy |
 | Safe mode | Governance / Privacy / Override | Portal updates suspend under safe mode like other content surfaces |
 | Orphan path | Governance / Privacy / Override | PASS for ordinary `/user-test` cleanup; explicit orphan/grace behavior still needs a dedicated run |
