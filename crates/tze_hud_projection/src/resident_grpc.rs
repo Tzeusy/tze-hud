@@ -1589,4 +1589,25 @@ mod tests {
         assert_eq!(visual.stale_marker_color.b, part.stale_marker_color.b);
         assert_eq!(visual.stale_marker_color.a, part.stale_marker_color.a);
     }
+
+    #[test]
+    fn default_projected_portal_font_sizes_are_readable() {
+        let visual = PortalVisualTokens::default();
+
+        assert!(
+            visual.transcript_font_size_px >= 16.0,
+            "projected portal transcript default font should be readable without resize; got {}px",
+            visual.transcript_font_size_px
+        );
+        assert!(
+            visual.composer_font_size_px >= 16.0,
+            "projected portal composer default font should be readable without resize; got {}px",
+            visual.composer_font_size_px
+        );
+        assert!(
+            visual.collapsed_font_size_px >= 14.0,
+            "projected portal collapsed default font should remain readable; got {}px",
+            visual.collapsed_font_size_px
+        );
+    }
 }

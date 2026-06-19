@@ -203,7 +203,7 @@ right thing (no background rect emitted).
 - Pane divider: `PANE_DIVIDER_W=6.0`, `INPUT_PANE_W = (PORTAL_W -
   PANE_DIVIDER_W) / 2.0 = 427.0`, divider fill `(1,1,1,0.14)`, grip
   `(1,1,1,0.40)` at 2×44px
-- Typography: title 17, subtitle 11, body 13, meta/hint 10–11, eyebrow 10
+- Typography: title 18, subtitle 12, body/input 16, meta 12, hint/eyebrow 11
 
 ## How to resume
 
