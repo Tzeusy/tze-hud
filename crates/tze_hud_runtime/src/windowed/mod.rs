@@ -78,7 +78,7 @@
 //! On `WindowEvent::Resized`, the main thread calls `surface.reconfigure()`.
 //! The compositor thread picks up the new size on the next `surface.size()` call.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
@@ -1546,6 +1546,13 @@ struct WindowedRuntimeState {
     /// abandoned cleanly because the tile is gone; the monotonic counter is
     /// discarded with the entry.
     portal_resize_states: std::collections::HashMap<tze_hud_scene::SceneId, PortalResizeState>,
+    /// Resize key codes whose `KeyDown` was consumed by the focused portal
+    /// hotkey path and whose matching `KeyUp` should be swallowed.
+    ///
+    /// Windows SendInput can produce release-only resize key streams in the
+    /// live portal path. `KeyUp` therefore has a fallback resize route, but
+    /// normal physical key-down/key-up pairs must still resize exactly once.
+    consumed_portal_resize_keydowns: HashSet<String>,
     /// Shared local composer echo state for the compositor thread (hud-r3ax6).
     ///
     /// Written by the input-event thread (this thread) on every keystroke that
@@ -4618,6 +4625,7 @@ impl WindowedRuntime {
             input_event_tx,
             pending_blur_delivery_context: None,
             portal_resize_states: std::collections::HashMap::new(),
+            consumed_portal_resize_keydowns: HashSet::new(),
             // Placeholder; replaced in resumed() with the Arc cloned from the
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
@@ -4906,6 +4914,7 @@ mod tests {
             input_event_tx: Some(input_event_tx),
             pending_blur_delivery_context: None,
             portal_resize_states: std::collections::HashMap::new(),
+            consumed_portal_resize_keydowns: HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
             portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
             portal_op_rx: None,
@@ -6726,6 +6735,22 @@ mod tests {
                     Some(tab_id),
                 );
             };
+        let dispatch_ctrl_key_up =
+            |app: &mut WinitApp, key_code: &str, key: &str, shift: bool, timestamp: u64| {
+                app.dispatch_key_up_event_inner(
+                    &RawKeyUpEvent {
+                        key_code: key_code.to_string(),
+                        key: key.to_string(),
+                        modifiers: KeyboardModifiers {
+                            ctrl: true,
+                            shift,
+                            ..KeyboardModifiers::NONE
+                        },
+                        timestamp_mono_us: tze_hud_scene::MonoUs(timestamp),
+                    },
+                    Some(tab_id),
+                );
+            };
 
         let before_equal = bounds(&app);
         dispatch_ctrl_key(&mut app, "Equal", "=", false, 1);
@@ -6739,19 +6764,29 @@ mod tests {
             after_equal.height > before_equal.height,
             "Ctrl+= must grow the focused portal vertically as well"
         );
+        dispatch_ctrl_key_up(&mut app, "Equal", "=", false, 2);
+        let after_equal_release = bounds(&app);
+        assert_eq!(
+            after_equal_release.width, after_equal.width,
+            "matching Ctrl+= KeyUp must not apply a second resize after KeyDown already resized"
+        );
+        assert_eq!(
+            after_equal_release.height, after_equal.height,
+            "matching Ctrl+= KeyUp must not resize vertically a second time"
+        );
 
-        dispatch_ctrl_key(&mut app, "Equal", "+", true, 2);
+        dispatch_ctrl_key(&mut app, "Equal", "+", true, 3);
         let after_plus = bounds(&app);
         assert!(
-            after_plus.width > after_equal.width,
+            after_plus.width > after_equal_release.width,
             "Ctrl++ must grow the focused portal even when the composer is active"
         );
         assert!(
-            after_plus.height > after_equal.height,
+            after_plus.height > after_equal_release.height,
             "Ctrl++ must grow the focused portal vertically as well"
         );
 
-        dispatch_ctrl_key(&mut app, "Minus", "-", false, 3);
+        dispatch_ctrl_key(&mut app, "Minus", "-", false, 4);
         let after_minus = bounds(&app);
         assert!(
             after_minus.width < after_plus.width,
@@ -6764,6 +6799,132 @@ mod tests {
         assert!(
             input_event_rx.try_recv().is_err(),
             "resize hotkey must be consumed locally, not forwarded as agent keyboard input"
+        );
+    }
+
+    #[test]
+    fn ctrl_resize_keyup_fallback_resizes_when_live_windows_omits_keydown() {
+        use tze_hud_input::{FocusManager, InputProcessor, KeyboardModifiers};
+        use tze_hud_scene::types::{HitRegionNode, TileScrollConfig};
+        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+            .unwrap();
+
+        let composer_id = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: composer_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 400.0, 60.0),
+                        interaction_id: "portal-composer".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        accepts_composer_input: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+        let (_input_result, transition) = processor.process_with_focus(
+            &tze_hud_input::PointerEvent {
+                x: 110.0,
+                y: 110.0,
+                kind: tze_hud_input::PointerEventKind::Down,
+                device_id: 1,
+                timestamp: None,
+            },
+            &mut scene,
+            &mut focus_manager,
+            tab_id,
+        );
+        assert!(
+            transition.and_then(|t| t.gained).is_some(),
+            "pointer down must focus the composer node"
+        );
+
+        let (mut app, mut input_event_rx) =
+            make_windowed_keyboard_test_app(scene, focus_manager, processor);
+
+        let bounds = |app: &WinitApp| {
+            let shared = app
+                .state
+                .shared_state
+                .try_lock()
+                .expect("shared state must be available during key dispatch test");
+            let scene = shared
+                .scene
+                .try_lock()
+                .expect("scene must be available during key dispatch test");
+            scene.tiles.get(&tile_id).unwrap().bounds
+        };
+
+        let dispatch_ctrl_key_up =
+            |app: &mut WinitApp, key_code: &str, key: &str, shift: bool, timestamp: u64| {
+                app.dispatch_key_up_event_inner(
+                    &RawKeyUpEvent {
+                        key_code: key_code.to_string(),
+                        key: key.to_string(),
+                        modifiers: KeyboardModifiers {
+                            ctrl: true,
+                            shift,
+                            ..KeyboardModifiers::NONE
+                        },
+                        timestamp_mono_us: tze_hud_scene::MonoUs(timestamp),
+                    },
+                    Some(tab_id),
+                );
+            };
+
+        let before_equal = bounds(&app);
+        dispatch_ctrl_key_up(&mut app, "Equal", "=", false, 1);
+        let after_equal = bounds(&app);
+        assert!(
+            after_equal.width > before_equal.width,
+            "Ctrl+= release fallback must grow the focused portal when the live OS stream omitted Equal KeyDown"
+        );
+        assert!(
+            after_equal.height > before_equal.height,
+            "Ctrl+= release fallback must grow the focused portal vertically as well"
+        );
+
+        dispatch_ctrl_key_up(&mut app, "Minus", "-", false, 2);
+        let after_minus = bounds(&app);
+        assert!(
+            after_minus.width < after_equal.width,
+            "Ctrl+- release fallback must shrink the focused portal when the live OS stream omitted Minus KeyDown"
+        );
+        assert!(
+            after_minus.height < after_equal.height,
+            "Ctrl+- release fallback must shrink the focused portal vertically as well"
+        );
+        assert!(
+            input_event_rx.try_recv().is_err(),
+            "release-fallback resize hotkey must be consumed locally, not forwarded as agent keyboard input"
         );
     }
 

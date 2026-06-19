@@ -75,6 +75,14 @@ fn keyboard_kind_preview(kind: &tze_hud_input::KeyboardDispatchKind) -> String {
     }
 }
 
+fn portal_resize_key_code(raw_key_code: &str, raw_key: &str) -> String {
+    if raw_key_code.is_empty() {
+        raw_key.to_string()
+    } else {
+        raw_key_code.to_string()
+    }
+}
+
 /// A raw keyboard event deferred from the winit event-loop thread because the
 /// shared-state or scene Tokio mutex was busy at dispatch time (hud-2fz34).
 ///
@@ -264,6 +272,9 @@ impl WinitApp {
             // NOT propagate to the composer or the agent's raw KeyDown path.
             if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
                 if self.apply_portal_resize_hotkey(tab_id, dir) {
+                    self.state
+                        .consumed_portal_resize_keydowns
+                        .insert(portal_resize_key_code(&raw.key_code, &raw.key));
                     tracing::debug!(
                         key = %str_preview(&raw.key),
                         "portal resize: Ctrl hotkey consumed (resize applied)"
@@ -412,6 +423,32 @@ impl WinitApp {
         active_tab: Option<tze_hud_scene::SceneId>,
     ) {
         let Some(tab_id) = active_tab else { return };
+
+        let resize_key_code = portal_resize_key_code(&raw.key_code, &raw.key);
+        if self
+            .state
+            .consumed_portal_resize_keydowns
+            .remove(&resize_key_code)
+        {
+            tracing::debug!(
+                key = %str_preview(&raw.key),
+                key_code = %str_preview(&raw.key_code),
+                "portal resize: matching KeyUp consumed after KeyDown resize"
+            );
+            return;
+        }
+
+        if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl)
+            && self.apply_portal_resize_hotkey(tab_id, dir)
+        {
+            tracing::debug!(
+                key = %str_preview(&raw.key),
+                key_code = %str_preview(&raw.key_code),
+                "portal resize: Ctrl KeyUp fallback consumed (resize applied)"
+            );
+            return;
+        }
+
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
         let ns_lock_busy = std::cell::Cell::new(false);
