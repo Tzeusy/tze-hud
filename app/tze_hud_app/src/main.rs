@@ -735,6 +735,29 @@ mod tests {
     // Pattern mirrors tze_hud_compositor::renderer::ENV_VAR_MUTEX.
     static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn clear_parse_options_env() {
+        // Safety: callers hold ENV_VAR_MUTEX, so no other test mutates these
+        // process-global environment variables while they are cleared.
+        unsafe {
+            for key in [
+                "TZE_HUD_WINDOW_MODE",
+                "TZE_HUD_WINDOW_WIDTH",
+                "TZE_HUD_WINDOW_HEIGHT",
+                "TZE_HUD_GRPC_PORT",
+                "TZE_HUD_MCP_PORT",
+                "TZE_HUD_PSK",
+                "TZE_HUD_PROJECTION_OPERATOR_AUTHORITY",
+                "TZE_HUD_BIND_ALL_INTERFACES",
+                "TZE_HUD_FPS",
+                "TZE_HUD_BENCHMARK_EMIT",
+                "TZE_HUD_BENCHMARK_FRAMES",
+                "TZE_HUD_BENCHMARK_WARMUP_FRAMES",
+            ] {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
     // ── parse_window_mode ────────────────────────────────────────────────────
 
     #[test]
@@ -777,22 +800,7 @@ mod tests {
     #[test]
     fn parse_options_defaults_when_no_args() {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
-        // Safety: single-threaded within ENV_VAR_MUTEX guard; no other test
-        // touches these vars while _guard is held. Rust 2024 requires unsafe
-        // for remove_var.
-        unsafe {
-            std::env::remove_var("TZE_HUD_WINDOW_MODE");
-            std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
-            std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
-            std::env::remove_var("TZE_HUD_GRPC_PORT");
-            std::env::remove_var("TZE_HUD_MCP_PORT");
-            std::env::remove_var("TZE_HUD_PSK");
-            std::env::remove_var("TZE_HUD_PROJECTION_OPERATOR_AUTHORITY");
-            std::env::remove_var("TZE_HUD_FPS");
-            std::env::remove_var("TZE_HUD_BENCHMARK_EMIT");
-            std::env::remove_var("TZE_HUD_BENCHMARK_FRAMES");
-            std::env::remove_var("TZE_HUD_BENCHMARK_WARMUP_FRAMES");
-        }
+        clear_parse_options_env();
 
         let opts = parse_options(&[]).unwrap();
         assert_eq!(opts.window_mode, WindowMode::Fullscreen);
@@ -932,6 +940,8 @@ mod tests {
 
     #[test]
     fn parse_options_config_path() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        clear_parse_options_env();
         let args: Vec<String> = vec![
             "--config".to_string(),
             "/etc/tze_hud/config.toml".to_string(),
@@ -1062,6 +1072,8 @@ profile = "full-display"
 
     #[test]
     fn parse_options_unknown_flag_returns_error() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        clear_parse_options_env();
         let args: Vec<String> = vec!["--unknown-flag".to_string()];
         let err = parse_options(&args).unwrap_err();
         assert!(
@@ -1072,6 +1084,8 @@ profile = "full-display"
 
     #[test]
     fn parse_options_window_mode_missing_value_returns_error() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        clear_parse_options_env();
         let args: Vec<String> = vec!["--window-mode".to_string()];
         let err = parse_options(&args).unwrap_err();
         assert!(
@@ -1094,11 +1108,13 @@ profile = "full-display"
 
     #[test]
     fn parse_options_positional_arg_returns_error() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        clear_parse_options_env();
         let args: Vec<String> = vec!["unexpected".to_string()];
         let err = parse_options(&args).unwrap_err();
         assert!(
             err.contains("unexpected positional argument"),
-            "error should explain positional arg"
+            "error should explain positional arg, got: {err}"
         );
     }
 
