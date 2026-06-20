@@ -324,14 +324,24 @@ impl McpServer {
     /// - Bearer token present, no resident principal configured (or it is
     ///   empty) → a plain bearer context (unchanged behaviour; resident tools
     ///   still return `CAPABILITY_REQUIRED`).
-    /// - Bearer token present and matching the configured resident principal
-    ///   (constant-time compare) → a bearer context carrying `resident_mcp`.
+    /// - Bearer token present, matching the configured resident principal AND
+    ///   the PSK (both constant-time) → a bearer context carrying `resident_mcp`.
     ///
     /// PSK authentication is **not** performed here — it is enforced
     /// independently in [`Self::dispatch`].  Attaching `resident_mcp` only
     /// grants capability; a caller whose token fails the PSK check is still
     /// rejected with `Unauthenticated` before any tool runs, so this can never
     /// weaken auth.
+    ///
+    /// The grant is deliberately tied to a bearer credential that *also* equals
+    /// the PSK.  `dispatch` accepts either the bearer token **or** the in-params
+    /// `_auth` field as valid PSK auth, so granting on a principal match alone
+    /// would let a caller present `Authorization: Bearer <principal>` together
+    /// with body `_auth=<psk>` and reach resident tools off a bearer credential
+    /// that never authenticated (a confused deputy).  In the supported
+    /// single-PSK model `principal == psk`, so this still only requires the one
+    /// operator-listed secret; a *differing* principal simply fails safe (no
+    /// grant) rather than relying on the dispatch auth gate to catch the misuse.
     pub fn caller_context(&self, bearer_token: Option<String>) -> CallerContext {
         let Some(token) = bearer_token else {
             return CallerContext::guest();
@@ -341,8 +351,16 @@ impl McpServer {
             // `with_resident_principal` already strips empty values, but guard
             // again so a directly-constructed config cannot grant on "".
             if !principal.is_empty() {
-                let matches: bool = token.as_bytes().ct_eq(principal.as_bytes()).into();
-                if matches {
+                let matches_principal: bool = token.as_bytes().ct_eq(principal.as_bytes()).into();
+                // Require the bearer to also be the PSK so the grant rides only
+                // a credential that genuinely authenticates (see doc above).
+                let bearer_is_psk: bool = self
+                    .config
+                    .pre_shared_key
+                    .as_deref()
+                    .map(|psk| token.as_bytes().ct_eq(psk.as_bytes()).into())
+                    .unwrap_or(false);
+                if matches_principal && bearer_is_psk {
                     return CallerContext::with_bearer(token).with_resident_mcp();
                 }
             }
@@ -1552,18 +1570,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_resident_grant_never_bypasses_psk_auth() {
-        // Principal differs from the PSK: a caller presenting the principal is
-        // granted resident_mcp by caller_context, but dispatch still rejects it
-        // with Unauthenticated because the token is not the PSK.  PSK auth
-        // remains mandatory — the grant only attaches capability.
+        // Principal differs from the PSK: because the grant is tied to a bearer
+        // that ALSO equals the PSK, caller_context refuses to mint resident_mcp
+        // off the principal-only token — closing the `_auth` confused deputy
+        // (bearer=<principal> + body _auth=<psk>).  And even with the capability
+        // absent, dispatch still rejects the non-PSK token with Unauthenticated.
+        // PSK auth remains mandatory in every path.
         let server = McpServer::new(SceneGraph::new(1920.0, 1080.0)).with_config(
             McpConfig::with_psk("real-psk")
                 .with_resident_principal(Some("resident-token".to_string())),
         );
         let ctx = server.caller_context(Some("resident-token".to_string()));
         assert!(
-            ctx.has_resident_mcp(),
-            "caller_context grants capability on principal match"
+            !ctx.has_resident_mcp(),
+            "a bearer that is not the PSK must never be granted resident_mcp, \
+             even when it matches a differing resident principal"
         );
         let raw = server
             .dispatch(
@@ -1575,6 +1596,32 @@ mod tests {
         assert_eq!(
             resp["error"]["code"], -32004,
             "PSK auth must still reject a token that is not the configured PSK"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resident_grant_rejects_auth_confused_deputy() {
+        // Directly exercise the confused deputy the hardening closes: a
+        // differing-principal config, bearer=<principal> (not the PSK) plus a
+        // valid body `_auth=<psk>`.  dispatch authenticates via `_auth`, but the
+        // resident grant must NOT ride the non-PSK bearer, so the resident tool
+        // stays gated with CAPABILITY_REQUIRED.
+        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0)).with_config(
+            McpConfig::with_psk("real-psk")
+                .with_resident_principal(Some("resident-token".to_string())),
+        );
+        let ctx = server.caller_context(Some("resident-token".to_string()));
+        assert!(!ctx.has_resident_mcp());
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"X","_auth":"real-psk"},"id":73}"#,
+                &ctx,
+            )
+            .await;
+        let resp = parse_response(&raw);
+        assert_eq!(
+            resp["error"]["data"]["error_code"], "CAPABILITY_REQUIRED",
+            "valid _auth must authenticate but must NOT confer resident_mcp via a non-PSK bearer"
         );
     }
 
