@@ -40,6 +40,10 @@
 //! | `portal.transcript.dim_text_color` | transcript body | dimmed text shown while disconnected/stale (RGBA hex) |
 //! | `portal.transcript.dim_background` | transcript body | dimmed backdrop shown while disconnected/stale (RGBA hex) |
 //! | `portal.stale_marker.color` | stale marker | content-free disconnect marker color (RGBA hex) |
+//! | `portal.lifecycle.active_color` | lifecycle affordance | accent for `Active` (RGBA hex) |
+//! | `portal.lifecycle.attached_color` | lifecycle affordance | accent for `Attached`/ready (RGBA hex) |
+//! | `portal.lifecycle.attention_color` | lifecycle affordance | accent for `Degraded`/`HudUnavailable` (RGBA hex) |
+//! | `portal.lifecycle.inactive_color` | lifecycle affordance | accent for `Detached`/`CleanupPending`/`Expired` (RGBA hex) |
 //! | `portal.divider.color` | divider | separator line color (RGBA hex) |
 //! | `portal.collapsed_card.background` | collapsed card | compact view backdrop (RGBA hex) |
 //! | `portal.collapsed_card.text_color` | collapsed card | compact text color (RGBA hex) |
@@ -107,6 +111,32 @@ pub const PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND: &str = "portal.transcript.dim_
 /// "ambient stale state" without escalating attention (spec: going stale does
 /// not self-escalate attention).
 pub const PORTAL_TOKEN_STALE_MARKER_COLOR: &str = "portal.stale_marker.color";
+
+// ── Lifecycle affordance tokens (cooperative-hud-projection §lifecycle) ───────
+//
+// Token-resolved accent colors driving the viewer-facing affordance for a
+// projection's published `lifecycle_state` (active / attached-ready /
+// attention / inactive). Each is ambient by design — the cooperative-projection
+// and text-stream-portal specs require portal activity to stay ambient/gentle and
+// MUST NOT self-escalate interruption class. The adapter maps each
+// `ProjectionLifecycleState` variant onto one of these four semantic accents; no
+// literal color ever appears in the render path (CLAUDE.md "visual identity is
+// modular").
+
+/// Accent shown while the projected session is actively working (`Active`).
+/// Calm teal-green: "live" without demanding attention.
+pub const PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR: &str = "portal.lifecycle.active_color";
+/// Accent shown while the session is attached/ready but not actively producing
+/// output (`Attached`). Soft blue: present and reachable.
+pub const PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR: &str = "portal.lifecycle.attached_color";
+/// Accent shown while the session needs attention — degraded or HUD-unavailable
+/// (`Degraded` / `HudUnavailable`). Ambient amber: "attention earned" without
+/// alarming, consistent with the stale-marker convention.
+pub const PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR: &str = "portal.lifecycle.attention_color";
+/// Accent shown while the session is winding down or gone — detached, cleanup
+/// pending, or expired (`Detached` / `CleanupPending` / `Expired`). Muted slate:
+/// reads as "inactive" without vanishing.
+pub const PORTAL_TOKEN_LIFECYCLE_INACTIVE_COLOR: &str = "portal.lifecycle.inactive_color";
 
 pub const PORTAL_TOKEN_DIVIDER_COLOR: &str = "portal.divider.color";
 
@@ -177,6 +207,14 @@ mod defaults {
     pub const TRANSCRIPT_DIM_TEXT_COLOR: &str = "#6B7689";
     pub const TRANSCRIPT_DIM_BACKGROUND: &str = "#07090C";
     pub const STALE_MARKER_COLOR: &str = "#B87333";
+
+    // Lifecycle affordance accents — ambient, mutually distinct (see token-key
+    // docs above). Active: calm teal-green; attached/ready: soft blue;
+    // attention: amber (distinct from the stale marker); inactive: muted slate.
+    pub const LIFECYCLE_ACTIVE_COLOR: &str = "#4FA88A";
+    pub const LIFECYCLE_ATTACHED_COLOR: &str = "#5A8FC0";
+    pub const LIFECYCLE_ATTENTION_COLOR: &str = "#C28A3D";
+    pub const LIFECYCLE_INACTIVE_COLOR: &str = "#5A6373";
 
     pub const DIVIDER_COLOR: &str = "#2A3344";
 
@@ -251,6 +289,18 @@ pub struct PortalPartTokens {
     /// Color of the content-free stale/disconnect marker (ambient, not alarming).
     pub stale_marker_color: Rgba,
 
+    // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
+    // Each maps a `ProjectionLifecycleState` group onto an ambient accent; the
+    // adapter never hardcodes a lifecycle color.
+    /// Accent for the actively-working state (`Active`).
+    pub lifecycle_active_color: Rgba,
+    /// Accent for the attached/ready state (`Attached`).
+    pub lifecycle_attached_color: Rgba,
+    /// Accent for attention states (`Degraded` / `HudUnavailable`).
+    pub lifecycle_attention_color: Rgba,
+    /// Accent for winding-down states (`Detached` / `CleanupPending` / `Expired`).
+    pub lifecycle_inactive_color: Rgba,
+
     // Divider
     pub divider_color: Rgba,
 
@@ -319,6 +369,15 @@ impl Default for PortalPartTokens {
                 .expect("transcript dim background default is valid hex"),
             stale_marker_color: parse_color_hex(defaults::STALE_MARKER_COLOR)
                 .expect("stale marker color default is valid hex"),
+
+            lifecycle_active_color: parse_color_hex(defaults::LIFECYCLE_ACTIVE_COLOR)
+                .expect("lifecycle active color default is valid hex"),
+            lifecycle_attached_color: parse_color_hex(defaults::LIFECYCLE_ATTACHED_COLOR)
+                .expect("lifecycle attached color default is valid hex"),
+            lifecycle_attention_color: parse_color_hex(defaults::LIFECYCLE_ATTENTION_COLOR)
+                .expect("lifecycle attention color default is valid hex"),
+            lifecycle_inactive_color: parse_color_hex(defaults::LIFECYCLE_INACTIVE_COLOR)
+                .expect("lifecycle inactive color default is valid hex"),
 
             divider_color: parse_color_hex(defaults::DIVIDER_COLOR)
                 .expect("divider color default is valid hex"),
@@ -501,6 +560,23 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
         stale_marker_color: resolve_color!(
             PORTAL_TOKEN_STALE_MARKER_COLOR,
             defaults.stale_marker_color
+        ),
+
+        lifecycle_active_color: resolve_color!(
+            PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
+            defaults.lifecycle_active_color
+        ),
+        lifecycle_attached_color: resolve_color!(
+            PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR,
+            defaults.lifecycle_attached_color
+        ),
+        lifecycle_attention_color: resolve_color!(
+            PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR,
+            defaults.lifecycle_attention_color
+        ),
+        lifecycle_inactive_color: resolve_color!(
+            PORTAL_TOKEN_LIFECYCLE_INACTIVE_COLOR,
+            defaults.lifecycle_inactive_color
         ),
 
         divider_color: resolve_color!(PORTAL_TOKEN_DIVIDER_COLOR, defaults.divider_color),

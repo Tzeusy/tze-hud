@@ -1076,7 +1076,14 @@ impl super::Compositor {
             // miss is observable in production logs.  No debug_assert: the
             // first-frame miss is normal operation, not a bug. [hud-rbf91]
             // In steady-state (commit-time-primed) frames this branch is never taken.
-            let mut item = if tm.color_runs.is_empty() {
+            //
+            // Gate on *pixel-bearing* runs, not `is_empty()`: zero-length
+            // sentinel runs (lifecycle/stale/at-capacity markers) reference no
+            // content bytes, so a node carrying only sentinels stays on the
+            // cached/styled markdown path instead of dropping to the lossy
+            // raw-content constructor.  Only genuine pixel runs (start < end)
+            // force the legacy path. (hud-9v3t6)
+            let mut item = if !crate::text::markdown_node_has_pixel_runs(tm) {
                 let content_key = self
                     .node_key_cache
                     .get(&node_id)
@@ -1116,9 +1123,9 @@ impl super::Compositor {
                     )
                 }
             } else {
-                // color_runs present: use the legacy path that preserves raw
-                // content byte offsets.  The markdown cache is intentionally
-                // bypassed here.
+                // Pixel-bearing color_runs present: use the legacy path that
+                // preserves raw content byte offsets.  The markdown cache is
+                // intentionally bypassed here.
                 TextItem::from_text_markdown_node(
                     tm,
                     tile.bounds.x - scroll_x,
@@ -1215,7 +1222,11 @@ pub(super) fn collect_ellipsis_text_items_from_node(
             // strategy as collect_text_items_from_node.  See that site for the
             // full rationale.  In steady-state (commit-time-primed) frames this
             // branch is never taken.
-            let mut item = if tm.color_runs.is_empty() {
+            //
+            // Gate on *pixel-bearing* runs, not `is_empty()`: zero-length
+            // sentinel runs carry metadata only and must not force the lossy
+            // raw-content path. (hud-9v3t6)
+            let mut item = if !crate::text::markdown_node_has_pixel_runs(tm) {
                 let content_key = node_key_cache
                     .get(&node_id)
                     .copied()

@@ -15,7 +15,7 @@ use thiserror::Error;
 use crate::{
     AdapterDraftBatch, AdapterDraftNotification, ContentClassification, PortalInputFeedback,
     PortalInputSubmission, ProjectedPortalPresentation, ProjectedPortalState, ProjectionAuthority,
-    TranscriptUnit,
+    ProjectionLifecycleState, TranscriptUnit,
 };
 
 /// Content-free disconnect/stale marker line rendered when the portal's driving
@@ -125,6 +125,21 @@ pub struct PortalVisualTokens {
     pub transcript_dim_background: proto::Rgba,
     /// Color of the content-free stale/disconnect marker (ambient, not alarming).
     pub stale_marker_color: proto::Rgba,
+
+    // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
+    //
+    // Drive the viewer-facing affordance for a projection's published
+    // `lifecycle_state`. Each `ProjectionLifecycleState` variant maps onto one of
+    // these four ambient accents via `lifecycle_accent_color`. Source tokens:
+    // `portal.lifecycle.{active,attached,attention,inactive}_color`.
+    /// Accent for the actively-working state (`Active`).
+    pub lifecycle_active_color: proto::Rgba,
+    /// Accent for the attached/ready state (`Attached`).
+    pub lifecycle_attached_color: proto::Rgba,
+    /// Accent for attention states (`Degraded` / `HudUnavailable`).
+    pub lifecycle_attention_color: proto::Rgba,
+    /// Accent for winding-down states (`Detached` / `CleanupPending` / `Expired`).
+    pub lifecycle_inactive_color: proto::Rgba,
 
     // Collapsed card (collapsed presentation)
     pub collapsed_background: proto::Rgba,
@@ -804,14 +819,19 @@ impl ResidentGrpcPortalAdapter {
                     font_size_px,
                     color: Some(text_color),
                     background: Some(background_color),
-                    // color_runs carry the composer at-capacity indicator and the
-                    // disconnect/stale marker color when active. Each is a
-                    // zero-length sentinel run carrying the token color so the
-                    // visual token drives the display without any literal color in
-                    // the render path (§2: token-resolved, never hardcoded).
+                    // color_runs carry the composer at-capacity indicator, the
+                    // disconnect/stale marker color, and the lifecycle-affordance
+                    // accent when active. Each is a zero-length sentinel run
+                    // carrying the token color so the visual token drives the
+                    // display without any literal color in the render path
+                    // (§2/§6.1: token-resolved, never hardcoded).
                     color_runs: {
                         let mut runs =
                             stale_marker_color_runs(state, self.visual_tokens.stale_marker_color);
+                        // Lifecycle affordance: token-resolved accent reflecting the
+                        // published lifecycle_state (active/attached/attention/inactive).
+                        // Redaction-gated via state.lifecycle_state being None.
+                        runs.extend(lifecycle_marker_color_runs(state, &self.visual_tokens));
                         runs.extend(composer_color_runs(
                             state,
                             self.composer_display.as_ref(),
@@ -889,7 +909,13 @@ fn portal_markdown(
         push_line(&mut result, PORTAL_DISCONNECT_MARKER_LINE);
     }
     if let Some(lifecycle) = state.lifecycle_state {
-        push_line(&mut result, &format!("status: {lifecycle:?}"));
+        // Ambient, content-free glyph + exact spelling. The glyph groups states
+        // for at-a-glance scanning (active / ready / attention / inactive); the
+        // accent color is carried separately via `lifecycle_marker_color_runs`.
+        push_line(
+            &mut result,
+            &format!("status: {} {lifecycle:?}", lifecycle_glyph(lifecycle)),
+        );
     }
     if let Some(status_text) = state.status_text.as_deref() {
         push_line(&mut result, &format!("note: {status_text}"));
@@ -1068,6 +1094,83 @@ fn stale_marker_color_runs(
     }]
 }
 
+/// Map a published `ProjectionLifecycleState` onto its ambient affordance accent.
+///
+/// The seven contract variants collapse into four viewer-facing semantic groups,
+/// each with its own token-resolved accent (no literal color here — §6.1):
+///
+/// | Lifecycle state | Group | Accent token |
+/// |---|---|---|
+/// | `Active` | actively working | `lifecycle_active_color` |
+/// | `Attached` | attached / ready | `lifecycle_attached_color` |
+/// | `Degraded`, `HudUnavailable` | needs attention | `lifecycle_attention_color` |
+/// | `Detached`, `CleanupPending`, `Expired` | winding down / gone | `lifecycle_inactive_color` |
+///
+/// The grouping keeps the palette tasteful and ambient (the cooperative-projection
+/// and text-stream-portal specs forbid self-escalating interruption class); the
+/// exact lifecycle spelling still rides the redaction-gated `status:` text line.
+/// Ambient glyph for the lifecycle status line, grouped to match the accent
+/// categories in [`lifecycle_accent_color`]. Content-free: conveys session
+/// state only, never identity or transcript content. The glyphs are deliberately
+/// quiet (no `!`/⚠) so the affordance stays ambient and never self-escalates
+/// interruption class (text-stream-portals / cooperative-hud-projection specs).
+fn lifecycle_glyph(lifecycle: ProjectionLifecycleState) -> char {
+    match lifecycle {
+        ProjectionLifecycleState::Active => '◆',
+        ProjectionLifecycleState::Attached => '◇',
+        ProjectionLifecycleState::Degraded | ProjectionLifecycleState::HudUnavailable => '◈',
+        ProjectionLifecycleState::Detached
+        | ProjectionLifecycleState::CleanupPending
+        | ProjectionLifecycleState::Expired => '○',
+    }
+}
+
+fn lifecycle_accent_color(
+    lifecycle: ProjectionLifecycleState,
+    tokens: &PortalVisualTokens,
+) -> proto::Rgba {
+    match lifecycle {
+        ProjectionLifecycleState::Active => tokens.lifecycle_active_color,
+        ProjectionLifecycleState::Attached => tokens.lifecycle_attached_color,
+        ProjectionLifecycleState::Degraded | ProjectionLifecycleState::HudUnavailable => {
+            tokens.lifecycle_attention_color
+        }
+        ProjectionLifecycleState::Detached
+        | ProjectionLifecycleState::CleanupPending
+        | ProjectionLifecycleState::Expired => tokens.lifecycle_inactive_color,
+    }
+}
+
+/// Build the lifecycle-affordance color run for the portal node.
+///
+/// When the viewer is permitted to see lifecycle state (`state.lifecycle_state`
+/// is `Some` — the authority sets it to `None` under redaction), emits a single
+/// zero-length sentinel run (`[0..0]`) carrying the token-resolved accent for the
+/// current lifecycle group. This mirrors the Phase-1 `stale_marker_color_runs` /
+/// `composer_color_runs` mechanism: the run has no pixel coverage (a non-empty
+/// run would suppress Markdown stripping for the whole single-node portal); its
+/// presence + color is the machine-readable, token-driven signal that the viewer
+/// affordance is active, while the text-visible `status:` line carries the exact
+/// spelling. Precise per-line coloring is deferred to the promotion-era
+/// structured multi-node layout.
+///
+/// Returns an empty vec when lifecycle state is redacted/absent — so a restricted
+/// viewer gets no lifecycle affordance, exactly like the redaction-gated
+/// `status:` line.
+fn lifecycle_marker_color_runs(
+    state: &ProjectedPortalState,
+    tokens: &PortalVisualTokens,
+) -> Vec<proto::TextColorRunProto> {
+    let Some(lifecycle) = state.lifecycle_state else {
+        return Vec::new();
+    };
+    vec![proto::TextColorRunProto {
+        start_byte: 0,
+        end_byte: 0,
+        color: Some(lifecycle_accent_color(lifecycle, tokens)),
+    }]
+}
+
 fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {
     if units.is_empty() {
         return "<empty projection stream>".to_string();
@@ -1190,6 +1293,30 @@ pub fn portal_visual_tokens_from_part_tokens(
             b: part.stale_marker_color.b,
             a: part.stale_marker_color.a,
         },
+        lifecycle_active_color: proto::Rgba {
+            r: part.lifecycle_active_color.r,
+            g: part.lifecycle_active_color.g,
+            b: part.lifecycle_active_color.b,
+            a: part.lifecycle_active_color.a,
+        },
+        lifecycle_attached_color: proto::Rgba {
+            r: part.lifecycle_attached_color.r,
+            g: part.lifecycle_attached_color.g,
+            b: part.lifecycle_attached_color.b,
+            a: part.lifecycle_attached_color.a,
+        },
+        lifecycle_attention_color: proto::Rgba {
+            r: part.lifecycle_attention_color.r,
+            g: part.lifecycle_attention_color.g,
+            b: part.lifecycle_attention_color.b,
+            a: part.lifecycle_attention_color.a,
+        },
+        lifecycle_inactive_color: proto::Rgba {
+            r: part.lifecycle_inactive_color.r,
+            g: part.lifecycle_inactive_color.g,
+            b: part.lifecycle_inactive_color.b,
+            a: part.lifecycle_inactive_color.a,
+        },
         collapsed_background: proto::Rgba {
             r: part.collapsed_background.r,
             g: part.collapsed_background.g,
@@ -1231,7 +1358,7 @@ mod tests {
     use crate::{
         ContentClassification, OutputKind, ProjectedPortalAdapterFamily, ProjectedPortalAttention,
         ProjectedPortalLayer, ProjectedPortalPresentation, ProjectedPortalRuntimeAuthority,
-        ProjectedPortalState,
+        ProjectedPortalState, ProjectionLifecycleState,
     };
 
     /// Build a minimal interaction-enabled expanded portal state for adapter tests.
@@ -1548,6 +1675,159 @@ mod tests {
             stale_marker_color_runs(&live, stale).is_empty(),
             "live state must emit no stale color run"
         );
+    }
+
+    /// §lifecycle: a permitted viewer's published lifecycle_state drives a
+    /// token-resolved accent color run, distinct per affordance group, and absent
+    /// when lifecycle is redacted (`lifecycle_state = None`). No literal color
+    /// appears in the render path — every accent is sourced from `visual_tokens`.
+    #[test]
+    fn lifecycle_state_drives_distinct_token_accent_runs() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let tokens = adapter.visual_tokens().clone();
+
+        // Each variant maps onto its documented token accent.
+        let cases = [
+            (
+                ProjectionLifecycleState::Active,
+                tokens.lifecycle_active_color,
+            ),
+            (
+                ProjectionLifecycleState::Attached,
+                tokens.lifecycle_attached_color,
+            ),
+            (
+                ProjectionLifecycleState::Degraded,
+                tokens.lifecycle_attention_color,
+            ),
+            (
+                ProjectionLifecycleState::HudUnavailable,
+                tokens.lifecycle_attention_color,
+            ),
+            (
+                ProjectionLifecycleState::Detached,
+                tokens.lifecycle_inactive_color,
+            ),
+            (
+                ProjectionLifecycleState::CleanupPending,
+                tokens.lifecycle_inactive_color,
+            ),
+            (
+                ProjectionLifecycleState::Expired,
+                tokens.lifecycle_inactive_color,
+            ),
+        ];
+        for (lifecycle, expected) in cases {
+            let mut state = make_expanded_interaction_state("portal-lifecycle");
+            state.lifecycle_state = Some(lifecycle);
+            let runs = lifecycle_marker_color_runs(&state, &tokens);
+            assert_eq!(
+                runs.len(),
+                1,
+                "lifecycle {lifecycle:?} must emit exactly one accent run"
+            );
+            assert_eq!(
+                runs[0].color.unwrap(),
+                expected,
+                "lifecycle {lifecycle:?} must carry its token-resolved accent"
+            );
+            assert_eq!(runs[0].start_byte, 0, "Phase-1 sentinel run is zero-length");
+            assert_eq!(runs[0].end_byte, 0, "Phase-1 sentinel run is zero-length");
+        }
+
+        // The four affordance groups are mutually distinct so each reads as a
+        // different viewer-facing state.
+        let groups = [
+            tokens.lifecycle_active_color,
+            tokens.lifecycle_attached_color,
+            tokens.lifecycle_attention_color,
+            tokens.lifecycle_inactive_color,
+        ];
+        for i in 0..groups.len() {
+            for j in (i + 1)..groups.len() {
+                assert_ne!(
+                    groups[i], groups[j],
+                    "lifecycle affordance accents {i} and {j} must be visually distinct"
+                );
+            }
+        }
+
+        // Redaction-gated: a viewer without lifecycle clearance gets no affordance.
+        let mut redacted = make_expanded_interaction_state("portal-lifecycle");
+        redacted.lifecycle_state = None;
+        assert!(
+            lifecycle_marker_color_runs(&redacted, &tokens).is_empty(),
+            "redacted lifecycle must emit no accent run"
+        );
+    }
+
+    /// §lifecycle (acceptance #3/#4): a lifecycle_state transition changes the
+    /// rendered portal node — both the color_runs and the text-visible `status:`
+    /// line differ per state. This is the scene change that marks the tile dirty
+    /// (it rides the normal PublishToTile mutation), so the affordance renders
+    /// rather than being swallowed by idle present-gating.
+    #[test]
+    fn portal_node_reflects_lifecycle_transition() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+
+        let mut active = make_expanded_interaction_state("portal-lc-transition");
+        active.lifecycle_state = Some(ProjectionLifecycleState::Active);
+        let active_node = adapter.portal_node(&active, vec![0u8; 16]);
+        let active_tm = text_markdown_node(&active_node);
+
+        let mut detached = make_expanded_interaction_state("portal-lc-transition");
+        detached.lifecycle_state = Some(ProjectionLifecycleState::Detached);
+        let detached_node = adapter.portal_node(&detached, vec![0u8; 16]);
+        let detached_tm = text_markdown_node(&detached_node);
+
+        // The render path reflects each state distinctly.
+        assert_ne!(
+            active_tm.color_runs, detached_tm.color_runs,
+            "lifecycle transition must change the node's color runs (render path reflects state)"
+        );
+        assert_ne!(
+            active_tm.content, detached_tm.content,
+            "lifecycle transition must change the text-visible status line"
+        );
+        assert!(
+            active_tm.content.contains("status:"),
+            "permitted viewer must see the lifecycle status line"
+        );
+    }
+
+    /// The lifecycle `PortalVisualTokens` fields map 1:1 from the source
+    /// `PortalPartTokens` channels (single-source-of-truth invariant).
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_lifecycle_fields() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(
+            visual.lifecycle_active_color.r,
+            part.lifecycle_active_color.r
+        );
+        assert_eq!(
+            visual.lifecycle_attached_color.g,
+            part.lifecycle_attached_color.g
+        );
+        assert_eq!(
+            visual.lifecycle_attention_color.b,
+            part.lifecycle_attention_color.b
+        );
+        assert_eq!(
+            visual.lifecycle_inactive_color.a,
+            part.lifecycle_inactive_color.a
+        );
+        // All four must be visible (non-zero alpha) so the affordance shows.
+        for c in [
+            visual.lifecycle_active_color,
+            visual.lifecycle_attached_color,
+            visual.lifecycle_attention_color,
+            visual.lifecycle_inactive_color,
+        ] {
+            assert!(c.a > 0.0, "lifecycle accent must have non-zero alpha");
+        }
     }
 
     /// §2: live activity/composer signals clear on disconnect — a degraded

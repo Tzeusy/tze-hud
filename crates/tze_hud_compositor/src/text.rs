@@ -1278,6 +1278,19 @@ pub struct ColorRunItem {
     pub color: [u8; 4],
 }
 
+/// Returns true if `node` carries at least one *pixel-bearing* color run —
+/// a run whose `[start_byte, end_byte)` range covers one or more bytes.
+///
+/// Zero-length sentinel runs (`start_byte >= end_byte`) carry metadata only
+/// (e.g. lifecycle/stale/at-capacity markers); they reference no content bytes
+/// and never paint. A node carrying *only* such sentinels is rendering-equivalent
+/// to one with empty `color_runs`, so it can still take the cached/styled
+/// markdown path. Use this predicate — never `color_runs.is_empty()` — to decide
+/// whether the lossy raw-content path is required. (hud-9v3t6)
+pub fn markdown_node_has_pixel_runs(node: &TextMarkdownNode) -> bool {
+    node.color_runs.iter().any(|r| r.start_byte < r.end_byte)
+}
+
 impl TextItem {
     /// Build a `TextItem` from a `TextMarkdownNode` and its tile-relative position.
     ///
@@ -1317,7 +1330,7 @@ impl TextItem {
         // content and stripping would invalidate them.
         // Zero-length sentinel runs (start_byte == end_byte) carry metadata
         // only; they do not reference content offsets, so we can still strip.
-        let has_pixel_runs = node.color_runs.iter().any(|r| r.start_byte < r.end_byte);
+        let has_pixel_runs = markdown_node_has_pixel_runs(node);
         let text: Arc<str> = if has_pixel_runs {
             Arc::from(node.content.as_str())
         } else {
@@ -1431,12 +1444,18 @@ impl TextItem {
         tile_y: f32,
         parsed: &crate::markdown::ParsedMarkdown,
     ) -> Self {
-        // Callers must not invoke this constructor when color_runs is non-empty
-        // (see the # color_runs incompatibility doc comment above).  Assert in
-        // debug builds so misuse is caught early without any release overhead.
+        // Callers must not invoke this constructor when color_runs carries
+        // *pixel-bearing* runs (see the # color_runs incompatibility doc comment
+        // above).  Zero-length sentinel runs (start >= end) are tolerated: they
+        // reference no content bytes and are simply dropped here, exactly as
+        // `from_text_markdown_node` would filter them out.  This lets nodes that
+        // carry only lifecycle/stale sentinels keep the cached/styled markdown
+        // path (hud-9v3t6).  Assert in debug builds so genuine misuse — passing
+        // pixel runs whose offsets index the un-stripped raw content — is caught
+        // early without any release overhead.
         debug_assert!(
-            node.color_runs.is_empty(),
-            "from_text_markdown_cached called with non-empty color_runs; \
+            !markdown_node_has_pixel_runs(node),
+            "from_text_markdown_cached called with pixel-bearing color_runs; \
              use from_text_markdown_node instead"
         );
         use crate::markdown::StyledSpan;
