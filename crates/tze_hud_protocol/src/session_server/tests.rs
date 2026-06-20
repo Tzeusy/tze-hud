@@ -1015,7 +1015,9 @@ async fn media_ingress_session_disconnect_yields_session_disconnected_reason() {
     tx.send(ClientMessage {
         sequence: 2,
         timestamp_wall_us: now_wall_us(),
-        payload: Some(ClientPayload::MediaIngressOpen(valid_media_open("media-pip"))),
+        payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+            "media-pip",
+        ))),
     })
     .await
     .unwrap();
