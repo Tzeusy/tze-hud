@@ -1190,6 +1190,40 @@ def build_diagnostic_input_plan(
     ]
 
 
+def build_resize_hotkey_plan(
+    portal_x: float,
+    portal_y: float,
+    shot_prefix: str,
+    *,
+    grow_steps: int = 6,
+    shrink_steps: int = 12,
+) -> list[dict[str, Any]]:
+    """Build an OS-input plan proving focus-scoped Ctrl +/- portal resize.
+
+    Focuses the portal composer (composer focus == portal-surface focus, so the
+    resize dispatch's focus gate is satisfied), screenshots the baseline, grows
+    via Ctrl+Equal, screenshots, then shrinks past baseline via Ctrl+Minus and
+    screenshots. The before/after PNGs are the operator-visible proof for
+    hud-v4k1h (Ctrl resize hotkeys had no visible effect before PR #937's
+    physical-KeyCode resolution).
+    """
+    _, output_rect = portal_pane_rects()
+    # Focus the OUTPUT/transcript pane: the resize hotkey only fires when the
+    # focused tile carries a scroll config (runtime gate in
+    # apply_portal_resize_hotkey: tile_scroll_config(focused).is_some()), and
+    # in the raw-tile pilot the scroll config lives on the output body tile.
+    focus_x = portal_x + output_rect.x + output_rect.w / 2.0
+    focus_y = portal_y + output_rect.y + output_rect.h / 2.0
+    return [
+        {"kind": "click", "label": "focus-output-pane", "x": focus_x, "y": focus_y},
+        {"kind": "screenshot", "label": "resize-baseline", "path": f"{shot_prefix}-baseline.png"},
+        {"kind": "chord", "label": "resize-grow-ctrl-equal", "mod_vk": 0x11, "key_vk": 0xBB, "count": grow_steps},
+        {"kind": "screenshot", "label": "resize-grow", "path": f"{shot_prefix}-grow.png"},
+        {"kind": "chord", "label": "resize-shrink-ctrl-minus", "mod_vk": 0x11, "key_vk": 0xBD, "count": shrink_steps},
+        {"kind": "screenshot", "label": "resize-shrink", "path": f"{shot_prefix}-shrink.png"},
+    ]
+
+
 def windows_diagnostic_input_script(
     actions: list[dict[str, Any]],
     *,
@@ -1270,6 +1304,34 @@ def windows_diagnostic_input_script(
         "    Start-Sleep -Milliseconds 25",
         "  }",
         "}",
+        # Virtual-key chord (e.g. Ctrl+Equal / Ctrl+Minus) for focus-scoped
+        # portal resize hotkeys. Uses wVk (not Unicode scan) so the runtime sees
+        # the physical KeyCode the resize dispatch resolves (Equal/Minus/numpad).
+        "$VK_CONTROL = 0x11",
+        "$VK_OEM_PLUS = 0xBB",   # '=' / '+' physical key (KeyCode 'Equal')
+        "$VK_OEM_MINUS = 0xBD",  # '-' physical key (KeyCode 'Minus')
+        "function Send-VkChord([uint16]$mod, [uint16]$key) {",
+        "  $inputs = [HudDiagnosticInput+INPUT[]]::new(4)",
+        "  $inputs[0].type = $INPUT_KEYBOARD; $inputs[0].U.ki.wVk = $mod; $inputs[0].U.ki.dwFlags = 0",
+        "  $inputs[1].type = $INPUT_KEYBOARD; $inputs[1].U.ki.wVk = $key; $inputs[1].U.ki.dwFlags = 0",
+        "  $inputs[2].type = $INPUT_KEYBOARD; $inputs[2].U.ki.wVk = $key; $inputs[2].U.ki.dwFlags = $KEYEVENTF_KEYUP",
+        "  $inputs[3].type = $INPUT_KEYBOARD; $inputs[3].U.ki.wVk = $mod; $inputs[3].U.ki.dwFlags = $KEYEVENTF_KEYUP",
+        "  $sent = [HudDiagnosticInput]::SendInput(4, $inputs, $InputSize)",
+        "  if ($sent -ne 4) { Write-Output ('diagnostic-warning:chord SendInput sent=' + $sent) }",
+        "  Start-Sleep -Milliseconds 180",
+        "}",
+        # Capture the composited primary screen (overlay over desktop) to a PNG.
+        # Runs in the interactive session so the layered overlay is included.
+        "function Capture-Screen([string]$path) {",
+        "  Add-Type -AssemblyName System.Drawing",
+        "  $b = $HudDiagnosticBounds",
+        "  $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height",
+        "  $g = [System.Drawing.Graphics]::FromImage($bmp)",
+        "  $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)",
+        "  $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)",
+        "  $g.Dispose(); $bmp.Dispose()",
+        "  Start-Sleep -Milliseconds 120",
+        "}",
     ]
     for action in actions:
         kind = str(action.get("kind", ""))
@@ -1308,6 +1370,20 @@ def windows_diagnostic_input_script(
                 f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'text')))}",
                 f"Send-Text {ps_single_quoted(str(action.get('text', '')))}",
                 "Start-Sleep -Milliseconds 120",
+            ])
+        elif kind == "chord":
+            mod_vk = int(action.get("mod_vk", 0x11))
+            key_vk = int(action["key_vk"])
+            count = max(1, int(action.get("count", 1)))
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'chord')))}",
+                f"for ($i = 0; $i -lt {count}; $i++) {{ Send-VkChord {mod_vk} {key_vk} }}",
+            ])
+        elif kind == "screenshot":
+            path = str(action["path"])
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:screenshot:' + str(action.get('label', 'shot')) + ':' + path)}",
+                f"Capture-Screen {ps_single_quoted(path)}",
             ])
         else:
             raise ValueError(f"unsupported diagnostic action kind: {kind!r}")
@@ -4956,6 +5032,52 @@ async def run_diagnostic_input_phase(
     }, **result)
 
 
+async def run_resize_hotkey_phase(
+    transcript: list[dict[str, Any]],
+    *,
+    host: str,
+    user: str,
+    ssh_key: str,
+    portal_x: float,
+    portal_y: float,
+    tab_width: float,
+    tab_height: float,
+    timeout_s: float,
+    connect_timeout_s: float,
+    shot_prefix: str,
+) -> None:
+    """Prove focus-scoped Ctrl +/- portal resize via OS keyboard injection.
+
+    Focuses the portal composer, then injects Ctrl+Equal (grow) and Ctrl+Minus
+    (shrink) through the real Windows input path, screenshotting baseline/grow/
+    shrink. The PNGs are the operator-visible proof for hud-v4k1h.
+    """
+    actions = build_resize_hotkey_plan(portal_x, portal_y, shot_prefix)
+    emit_step_event(transcript, 6, "started", {
+        "code": "resize-hotkey",
+        "title": "Focus-scoped Ctrl +/- portal resize",
+        "action": "focus composer, then inject Ctrl+Equal (grow) and Ctrl+Minus (shrink) with screenshots",
+        "expected_visual": "portal grows on Ctrl+Equal and shrinks on Ctrl+Minus; PNGs capture the change",
+    }, host=host, user=user, action_labels=[a["label"] for a in actions])
+    result = await run_windows_diagnostic_input(
+        host,
+        user=user,
+        ssh_key=ssh_key,
+        actions=actions,
+        timeout_s=timeout_s,
+        connect_timeout_s=connect_timeout_s,
+        scene_width=tab_width,
+        scene_height=tab_height,
+    )
+    status = "completed" if result.get("ok") else "failed"
+    emit_step_event(transcript, 6, status, {
+        "code": "resize-hotkey",
+        "title": "Focus-scoped Ctrl +/- portal resize",
+        "action": "Windows OS keyboard injector finished",
+        "expected_visual": "stdout lists screenshot paths; baseline→grow→shrink PNGs show the resize",
+    }, **result)
+
+
 # ─── Gate phase runners (task 7.1) ────────────────────────────────────────────
 
 async def run_markdown(
@@ -5783,6 +5905,29 @@ async def run_scenario(args: argparse.Namespace) -> int:
                     timeout_s=args.diagnostic_input_timeout_s,
                     connect_timeout_s=args.diagnostic_input_connect_timeout_s,
                 )
+            elif phase == "resize-hotkey":
+                await publish_portal(
+                    client, lease_id, tiles,
+                    title="Exemplar Review Portal",
+                    subtitle="Focus-scoped Ctrl +/- resize",
+                    body=body,
+                    footer_meta="resize-hotkey  •  Ctrl +/- injector armed",
+                    include_tile_setup=True,
+                    mutation_lock=mutation_lock,
+                )
+                await run_resize_hotkey_phase(
+                    transcript,
+                    host=target_host(args.target),
+                    user=args.diagnostic_input_user,
+                    ssh_key=args.diagnostic_input_ssh_key,
+                    portal_x=portal_x,
+                    portal_y=portal_y,
+                    tab_width=scene_width,
+                    tab_height=scene_height,
+                    timeout_s=args.diagnostic_input_timeout_s,
+                    connect_timeout_s=args.diagnostic_input_connect_timeout_s,
+                    shot_prefix=args.resize_shot_prefix,
+                )
             elif phase == "markdown":
                 await run_markdown(
                     client, lease_id, tiles, body,
@@ -6165,6 +6310,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--diagnostic-input-ssh-key", default=DEFAULT_SSH_KEY)
     p.add_argument("--diagnostic-input-timeout-s", type=float, default=12.0)
     p.add_argument("--diagnostic-input-connect-timeout-s", type=float, default=5.0)
+    p.add_argument(
+        "--resize-shot-prefix",
+        default="C:\\tze_hud\\resize-hotkey",
+        help="Windows path prefix for resize-hotkey phase screenshots "
+        "(<prefix>-baseline.png / -grow.png / -shrink.png)",
+    )
     # Gate phase args (task 7.1)
     p.add_argument(
         "--markdown-hold-s",
