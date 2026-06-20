@@ -185,7 +185,10 @@ mod widgets;
 #[cfg(test)]
 mod test_support;
 
-pub use self::config::{WindowedBenchmarkConfig, WindowedConfig};
+pub use self::config::{
+    ResidentGrpcCredentialSource, ResidentGrpcPortalSettings, WindowedBenchmarkConfig,
+    WindowedConfig,
+};
 use self::hittest::{refresh_interaction_hit_regions_after_render, sync_scene_display_area};
 use self::input_dispatch::{
     enqueue_input, logical_key_to_str, nanoseconds_since_start, normalize_mouse_wheel_delta,
@@ -1915,13 +1918,20 @@ impl WindowedRuntime {
         // `HudSession` stream and driven by the SAME `ProjectionAuthority` the
         // in-process path hosts (via a non-blocking tee on the drain).
         //
-        // Default OFF, fail-closed: only constructed when the operator sets
-        // `TZE_HUD_RESIDENT_GRPC_PORTAL`, the gRPC server is enabled
-        // (`grpc_port != 0`), the network runtime exists, and a non-empty PSK is
-        // configured. Auth posture mirrors #944: the bridge presents the PSK and
-        // is capability-scoped (`create_tiles` + `modify_own_tiles`); the runtime
+        // Default OFF, fail-closed. Enabled when the operator either supplies a
+        // first-class `WindowedConfig::resident_grpc_portal` target (hud-x2e2v)
+        // or sets the legacy `TZE_HUD_RESIDENT_GRPC_PORTAL` env var (preserved as
+        // a force-enable override). Once enabled it still requires a resolvable
+        // endpoint, a live network runtime, and a non-empty resolved credential.
+        // Auth posture mirrors #944: the bridge presents the PSK and is
+        // capability-scoped (`create_tiles` + `modify_own_tiles`); the runtime
         // remains the final authorizer. When OFF, the in-process path is
         // unchanged.
+        //
+        // The first-class config decouples target/identity/credential from this
+        // runtime's own values so an EXTERNAL runtime can be addressed without
+        // env hacks. The env-only path keeps targeting this runtime's loopback
+        // gRPC server with the runtime PSK (its historical behaviour).
         //
         // NOTE (routing follow-up): pointing the bridge at this runtime's own
         // loopback gRPC server materialises the portal a second time in the same
@@ -1930,42 +1940,73 @@ impl WindowedRuntime {
         // simultaneous same-scene dual materialisation needs an authority-level
         // transport-routing decision and is deferred.
         let resident_grpc_bridge = {
-            let enabled = std::env::var("TZE_HUD_RESIDENT_GRPC_PORTAL")
+            let env_enabled = std::env::var("TZE_HUD_RESIDENT_GRPC_PORTAL")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            if enabled && cfg.grpc_port != 0 && !cfg.psk.trim().is_empty() {
-                if let Some(ref rt) = network_rt {
-                    let endpoint = format!("http://127.0.0.1:{}", cfg.grpc_port);
-                    let bridge_cfg = crate::resident_grpc_bridge::ResidentGrpcBridgeConfig::new(
-                        endpoint.clone(),
-                        cfg.psk.clone(),
-                        "resident-grpc-portal",
-                    );
-                    let tokens = crate::portal_tokens::portal_visual_tokens_from_part_tokens(
-                        &tze_hud_config::resolve_portal_tokens(
-                            &tze_hud_config::tokens::resolve_tokens(
-                                &tze_hud_config::tokens::DesignTokenMap::new(),
-                                &tze_hud_config::tokens::DesignTokenMap::new(),
+            let settings = cfg.resident_grpc_portal.clone();
+            if config::resident_grpc_bridge_enabled(settings.is_some(), env_enabled) {
+                // No explicit settings → env force-enable path: loopback
+                // self-target with the runtime PSK (unchanged legacy behaviour).
+                let settings = settings.unwrap_or_default();
+                let endpoint = config::resolve_resident_grpc_endpoint(
+                    settings.endpoint.as_deref(),
+                    cfg.grpc_port,
+                );
+                let psk = config::resolve_resident_grpc_credential(&settings.credential, &cfg.psk);
+                match (endpoint, network_rt.as_ref()) {
+                    _ if psk.trim().is_empty() => {
+                        tracing::warn!(
+                            "resident gRPC portal bridge enabled but resolved credential is \
+                             empty; bridge disabled (fail-closed)"
+                        );
+                        None
+                    }
+                    (None, _) => {
+                        tracing::warn!(
+                            "resident gRPC portal bridge enabled but no endpoint could be \
+                             resolved (no explicit endpoint and gRPC server disabled); bridge \
+                             disabled"
+                        );
+                        None
+                    }
+                    (Some(_), None) => {
+                        tracing::warn!(
+                            "resident gRPC portal bridge enabled but no network runtime; bridge \
+                             disabled"
+                        );
+                        None
+                    }
+                    (Some(endpoint), Some(rt)) => {
+                        let mut bridge_cfg =
+                            crate::resident_grpc_bridge::ResidentGrpcBridgeConfig::new(
+                                endpoint.clone(),
+                                psk,
+                                settings.agent_id.clone(),
+                            );
+                        bridge_cfg.lease_ttl_ms = settings.lease_ttl_ms;
+                        let tokens = crate::portal_tokens::portal_visual_tokens_from_part_tokens(
+                            &tze_hud_config::resolve_portal_tokens(
+                                &tze_hud_config::tokens::resolve_tokens(
+                                    &tze_hud_config::tokens::DesignTokenMap::new(),
+                                    &tze_hud_config::tokens::DesignTokenMap::new(),
+                                ),
                             ),
-                        ),
-                    );
-                    let handle = crate::resident_grpc_bridge::spawn_resident_grpc_bridge(
-                        rt.rt.handle(),
-                        bridge_cfg,
-                        tokens,
-                    );
-                    portal_projection_driver
-                        .set_resident_grpc_bridge_tx(Some(handle.state_sender()));
-                    tracing::info!(
-                        endpoint = %endpoint,
-                        "resident gRPC portal bridge enabled (two adapter families; hud-d7frs)"
-                    );
-                    Some(handle)
-                } else {
-                    tracing::warn!(
-                        "TZE_HUD_RESIDENT_GRPC_PORTAL set but no network runtime; bridge disabled"
-                    );
-                    None
+                        );
+                        let handle = crate::resident_grpc_bridge::spawn_resident_grpc_bridge(
+                            rt.rt.handle(),
+                            bridge_cfg,
+                            tokens,
+                        );
+                        portal_projection_driver
+                            .set_resident_grpc_bridge_tx(Some(handle.state_sender()));
+                        tracing::info!(
+                            endpoint = %endpoint,
+                            agent_id = %settings.agent_id,
+                            lease_ttl_ms = settings.lease_ttl_ms,
+                            "resident gRPC portal bridge enabled (two adapter families; hud-d7frs)"
+                        );
+                        Some(handle)
+                    }
                 }
             } else {
                 None
