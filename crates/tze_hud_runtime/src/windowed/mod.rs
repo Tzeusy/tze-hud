@@ -186,6 +186,7 @@ mod widgets;
 mod test_support;
 
 pub use self::config::{
+    DEFAULT_RESIDENT_GRPC_AGENT_ID, DEFAULT_RESIDENT_GRPC_LEASE_TTL_MS,
     ResidentGrpcCredentialSource, ResidentGrpcPortalSettings, WindowedBenchmarkConfig,
     WindowedConfig,
 };
