@@ -1292,6 +1292,106 @@ async fn test_zone_subtitle_without_outline_text_item() {
     );
 }
 
+/// Render-branch regression guard (hud-9v3t6): a portal carrying a *zero-length
+/// lifecycle sentinel* color run must still take the cached/styled markdown
+/// render path, NOT the lossy `from_text_markdown_node` / `strip_markdown_v1`
+/// path.
+///
+/// Background: `lifecycle_marker_color_runs` (resident_grpc.rs) emits a
+/// zero-length `TextColorRun` ([start..start], no pixel coverage) on every
+/// permitted viewer of a normal active/attached portal.  The render branch used
+/// to gate on `color_runs.is_empty()`, so this sentinel flipped *every* normal
+/// portal onto the lossy/uncached path (losing markdown styling AND the
+/// commit-time markdown cache) while painting no accent pixels.  The fix gates
+/// on `markdown_node_has_pixel_runs` instead.
+///
+/// This asserts at the COMPOSITOR RENDER-BRANCH level (the existing tests only
+/// covered node construction, which is why the regression slipped through):
+/// `collect_text_items` must produce a `TextItem` with populated `styled_runs`
+/// (the cached path's signature; the lossy node path always leaves
+/// `styled_runs` empty).
+#[tokio::test]
+async fn test_lifecycle_sentinel_keeps_cached_markdown_render_path() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    // Markdown content that yields styled spans (heading + bold) — the cached
+    // path emits StyledRunItems for these; the lossy strip path emits none.
+    let content = "# Portal\n**attached** and ready".to_owned();
+
+    let make_node = |runs: Box<[tze_hud_scene::types::TextColorRun]>| Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            content: content.clone(),
+            bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemSansSerif,
+            color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            background: Some(Rgba::new(0.0, 0.0, 0.0, 1.0)),
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            color_runs: runs,
+        }),
+    };
+
+    // Zero-length lifecycle sentinel: start_byte == end_byte (no pixel coverage),
+    // exactly as lifecycle_marker_color_runs emits for a normal active portal.
+    let sentinel = tze_hud_scene::types::TextColorRun {
+        start_byte: 0,
+        end_byte: 0,
+        color: Rgba::new(0.2, 0.8, 0.4, 1.0),
+    };
+    let scene = scene_with_node(make_node(Box::from([sentinel])));
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+
+    let items = compositor.collect_text_items(&scene, 256.0, 256.0);
+    assert_eq!(
+        items.len(),
+        1,
+        "expected exactly one TextItem for the portal node"
+    );
+    let item = &items[0];
+    assert!(
+        !item.styled_runs.is_empty(),
+        "portal with a zero-length lifecycle sentinel must take the cached/styled \
+         markdown path (styled_runs populated), not the lossy strip path"
+    );
+    assert!(
+        item.color_runs.is_empty(),
+        "the zero-length sentinel carries no pixel coverage and must be dropped \
+         (no ColorRunItems) on the cached path"
+    );
+
+    // Control: a genuine *pixel-bearing* color run (start < end) must still force
+    // the legacy from_text_markdown_node path (styled_runs empty), proving the
+    // fix narrowed the gate to pixel runs without disabling the legacy path.
+    let pixel_run = tze_hud_scene::types::TextColorRun {
+        start_byte: 0,
+        end_byte: 4,
+        color: Rgba::new(0.9, 0.1, 0.1, 1.0),
+    };
+    let scene_pixel = scene_with_node(make_node(Box::from([pixel_run])));
+    compositor.prime_markdown_cache(&scene_pixel);
+    compositor.prime_truncation_cache(&scene_pixel);
+    let pixel_items = compositor.collect_text_items(&scene_pixel, 256.0, 256.0);
+    assert_eq!(
+        pixel_items.len(),
+        1,
+        "expected one TextItem for the pixel-run node"
+    );
+    assert!(
+        pixel_items[0].styled_runs.is_empty(),
+        "a pixel-bearing color run must still take the legacy raw-content path \
+         (styled_runs empty), preserving its raw byte offsets"
+    );
+    assert!(
+        !pixel_items[0].color_runs.is_empty(),
+        "the pixel-bearing color run must be preserved as a ColorRunItem"
+    );
+}
+
 /// Notification with opaque backdrop: backdrop_opacity=0.9 overrides
 /// the backdrop color's alpha.  The backdrop quad should be rendered with
 /// effective alpha = 0.9.
