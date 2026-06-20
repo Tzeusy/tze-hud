@@ -66,7 +66,9 @@ tze_hud_compositor = { path = "../tze_hud_compositor", version = "0.1.0" }
 # dev-mode exposes HudSessionImpl::new(scene, psk) for the resident gRPC bridge
 # end-to-end test, which stands up the production session server in-process.
 tze_hud_protocol = { path = "../tze_hud_protocol", version = "0.1.0", features = ["dev-mode"] }
-tokio = { workspace = true }
+# test-util enables tokio's virtual-time control (start_paused/advance) used by
+# the resident gRPC bridge reconnect/backoff + lease-renewal unit tests.
+tokio = { workspace = true, features = ["test-util"] }
 blake3 = { workspace = true }
 proptest = { workspace = true }
 
