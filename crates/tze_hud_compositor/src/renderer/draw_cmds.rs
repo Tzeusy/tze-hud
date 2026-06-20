@@ -610,6 +610,13 @@ pub(super) fn common_prefix_len(a: &str, b: &str) -> usize {
 /// transcript content carries no wire-level breakpoints.
 pub(super) fn derive_word_breakpoints(text: &str, start: usize) -> Vec<usize> {
     let mut bps = Vec::new();
+    // Defensively snap `start` back to a UTF-8 char boundary so the `text[start..]`
+    // slice below can never panic, even if a future caller passes a mid-char
+    // offset. (The current caller already snaps via `common_prefix_len`.)
+    let mut start = start.min(text.len());
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
     if start >= text.len() {
         return bps;
     }

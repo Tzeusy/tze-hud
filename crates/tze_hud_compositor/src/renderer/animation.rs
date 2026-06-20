@@ -10,7 +10,7 @@
 //! This file contains only the `impl Compositor` methods that operate on those
 //! types.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tze_hud_scene::graph::SceneGraph;
@@ -342,9 +342,11 @@ impl Compositor {
             }
         }
 
-        let seen: HashSet<SceneId> = current.iter().map(|(id, _)| *id).collect();
+        // Prune reveal states for tiles no longer present. `current` holds only
+        // a handful of portal tiles, so a direct membership scan avoids the
+        // per-frame heap allocation a temporary `HashSet` would cost.
         self.portal_tile_reveal_states
-            .retain(|tile_id, _| seen.contains(tile_id));
+            .retain(|tile_id, _| current.iter().any(|(id, _)| id == tile_id));
 
         for (tile_id, plain) in current {
             match self.portal_tile_reveal_states.get_mut(&tile_id) {
