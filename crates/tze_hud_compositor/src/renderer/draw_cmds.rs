@@ -225,16 +225,49 @@ impl ZoneAnimationState {
         }
     }
 
-    /// Compute the current interpolated opacity.
+    /// Raw linear progress `∈ [0, 1]` derived from elapsed wall time.
+    ///
+    /// A `duration_ms` of `0` reports `1.0` (already complete). Split out so the
+    /// time source and the interpolation math are independently testable.
+    #[inline]
+    pub fn linear_progress(&self) -> f32 {
+        if self.duration_ms == 0 {
+            return 1.0;
+        }
+        let elapsed_ms = self.transition_start.elapsed().as_millis() as f32;
+        (elapsed_ms / self.duration_ms as f32).clamp(0.0, 1.0)
+    }
+
+    /// **Pure** opacity at the given (already eased or linear) progress `t`.
+    ///
+    /// `opacity_at(linear_progress())` is the linear fade; passing
+    /// `easing.apply(linear_progress())` yields an eased fade.
+    #[inline]
+    pub fn opacity_at(&self, t: f32) -> f32 {
+        self.from_opacity + (self.target_opacity - self.from_opacity) * t.clamp(0.0, 1.0)
+    }
+
+    /// Compute the current interpolated opacity (linear).
     ///
     /// Returns `target_opacity` once the transition has elapsed.
     pub fn current_opacity(&self) -> f32 {
         if self.duration_ms == 0 {
             return self.target_opacity;
         }
-        let elapsed_ms = self.transition_start.elapsed().as_millis() as f32;
-        let t = (elapsed_ms / self.duration_ms as f32).clamp(0.0, 1.0);
-        self.from_opacity + (self.target_opacity - self.from_opacity) * t
+        self.opacity_at(self.linear_progress())
+    }
+
+    /// Compute the current interpolated opacity with an easing curve applied.
+    ///
+    /// Used by the portal tile transition path (hud-bq0gl.10) so collapse/expand
+    /// fades accelerate/decelerate instead of ramping linearly. Zone subtitle
+    /// fades keep [`current_opacity`](Self::current_opacity) (linear) so their
+    /// contention/timing behavior is unchanged.
+    pub fn current_opacity_eased(&self, easing: super::easing::Easing) -> f32 {
+        if self.duration_ms == 0 {
+            return self.target_opacity;
+        }
+        self.opacity_at(easing.apply(self.linear_progress()))
     }
 
     /// Returns `true` if the transition has fully completed.
@@ -408,5 +441,57 @@ impl StreamRevealState {
             self.segment_idx += 1;
         }
         self.segment_idx < self.breakpoints.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::easing::Easing;
+
+    const EPS: f32 = 1e-5;
+
+    #[test]
+    fn opacity_at_interpolates_between_endpoints() {
+        let s = ZoneAnimationState::fade_in(100);
+        assert!((s.opacity_at(0.0) - 0.0).abs() < EPS);
+        assert!((s.opacity_at(1.0) - 1.0).abs() < EPS);
+        assert!((s.opacity_at(0.5) - 0.5).abs() < EPS);
+    }
+
+    #[test]
+    fn opacity_at_respects_from_and_target() {
+        let s = ZoneAnimationState::fade_in_from(100, 0.4);
+        // from=0.4, target=1.0 → at t=0.5 → 0.7.
+        assert!((s.opacity_at(0.5) - 0.7).abs() < EPS);
+        let out = ZoneAnimationState::fade_out(100);
+        // from=1.0, target=0.0 → at t=0.25 → 0.75.
+        assert!((out.opacity_at(0.25) - 0.75).abs() < EPS);
+    }
+
+    #[test]
+    fn eased_opacity_shares_endpoints_but_curves_the_middle() {
+        let s = ZoneAnimationState::fade_in(100);
+        // Endpoints identical regardless of easing (pure-sampler equivalence).
+        assert!((s.opacity_at(Easing::EaseInOut.apply(0.0)) - 0.0).abs() < EPS);
+        assert!((s.opacity_at(Easing::EaseInOut.apply(1.0)) - 1.0).abs() < EPS);
+        // EaseInOut is symmetric → midpoint equals linear midpoint (0.5)...
+        assert!((s.opacity_at(Easing::EaseInOut.apply(0.5)) - 0.5).abs() < EPS);
+        // ...but off-center it diverges from the linear ramp.
+        let linear_quarter = s.opacity_at(0.25);
+        let eased_quarter = s.opacity_at(Easing::EaseInOut.apply(0.25));
+        assert!(
+            eased_quarter < linear_quarter,
+            "ease-in-out should lag linear in the first quarter: {eased_quarter} !< {linear_quarter}"
+        );
+    }
+
+    #[test]
+    fn zero_duration_reports_complete_and_target_opacity() {
+        let s = ZoneAnimationState::fade_in(0);
+        assert!((s.linear_progress() - 1.0).abs() < EPS);
+        assert!((s.current_opacity() - 1.0).abs() < EPS);
+        assert!((s.current_opacity_eased(Easing::EaseInOut) - 1.0).abs() < EPS);
+        assert!(s.is_complete());
     }
 }

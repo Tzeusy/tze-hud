@@ -514,7 +514,7 @@ impl Compositor {
             Some(n) => n,
             None => return,
         };
-        let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
+        let (scroll_x, scroll_y) = self.display_tile_scroll_offset(scene, tile.id);
 
         match &node.data {
             NodeData::SolidColor(sc) => {

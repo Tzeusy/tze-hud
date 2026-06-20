@@ -331,7 +331,7 @@ impl super::Compositor {
                 // Compute scroll offset once per tile and pass it down so text
                 // glyph positions track the scrolled content (Bounded Transcript
                 // Viewport requirement — hud-w5ih).
-                let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
+                let (scroll_x, scroll_y) = self.display_tile_scroll_offset(scene, tile.id);
                 // Determine follow-tail state so Ellipsis TextItems receive the
                 // correct TruncationViewport (TailAnchored vs HeadAnchored).
                 // Uses the shared helper that prime_truncation_cache /

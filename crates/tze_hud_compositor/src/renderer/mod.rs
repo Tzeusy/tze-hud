@@ -40,6 +40,7 @@ use tze_hud_telemetry::FrameTelemetry;
 
 pub mod animation;
 pub mod draw_cmds;
+pub mod easing;
 pub mod encode_pass;
 pub mod frame;
 pub mod hit_regions;
@@ -156,6 +157,25 @@ pub struct Compositor {
     /// replaces the old one (latest-wins), the old reveal state is discarded and
     /// a new one starts from the beginning of the new breakpoints.
     pub(crate) stream_reveal_states: HashMap<String, StreamRevealState>,
+    /// Per-portal-tile smoothed scroll offset (smooth scroll / animated
+    /// follow-tail, hud-bq0gl.10).
+    ///
+    /// Keyed by tile `SceneId`. The adapter/input layer owns the authoritative
+    /// scroll *target* (`SceneGraph::tile_scroll_offset_local`); this eases the
+    /// *displayed* offset toward it each frame. Advanced once per frame by
+    /// [`Compositor::update_scroll_smoothing`]; read via
+    /// [`Compositor::display_tile_scroll_offset`].
+    pub(crate) scroll_smoothers: HashMap<SceneId, easing::ScrollSmoother>,
+    /// Whether scroll smoothing animates (windowed/live) or snaps (headless).
+    ///
+    /// Headless render paths back the deterministic golden tests that assert
+    /// exact scrolled glyph positions, so smoothing is disabled there: the
+    /// displayed offset always equals the scene target.
+    pub(crate) scroll_smoothing_enabled: bool,
+    /// Wall-clock instant of the last [`Compositor::update_scroll_smoothing`]
+    /// call, used to derive the per-frame `dt` for frame-rate-independent
+    /// smoothing. `None` until the first frame.
+    last_scroll_smooth_at: Option<std::time::Instant>,
     /// Resolved design token map, set at startup via `set_token_map`.
     ///
     /// Used to resolve `color.severity.{info,warning,critical}` tokens for
@@ -458,6 +478,10 @@ impl Compositor {
             prev_portal_tile_has_content: HashMap::new(),
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
+            // Headless paths snap scroll (deterministic golden tests).
+            scroll_smoothers: HashMap::new(),
+            scroll_smoothing_enabled: false,
+            last_scroll_smooth_at: None,
             token_map: HashMap::new(),
             markdown_primer: crate::markdown::MarkdownPrimer::new(),
             node_key_cache: HashMap::new(),
@@ -731,6 +755,10 @@ impl Compositor {
             prev_portal_tile_has_content: HashMap::new(),
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
+            // Windowed/live path animates scroll catch-up.
+            scroll_smoothers: HashMap::new(),
+            scroll_smoothing_enabled: true,
+            last_scroll_smooth_at: None,
             token_map: HashMap::new(),
             markdown_primer: crate::markdown::MarkdownPrimer::new(),
             node_key_cache: HashMap::new(),
