@@ -831,7 +831,11 @@ async fn media_ingress_close_and_capability_revoke_emit_state_and_notice() {
     match notice.payload {
         Some(ServerPayload::MediaIngressCloseNotice(notice)) => {
             assert_eq!(notice.stream_epoch, stream_epoch);
-            assert_eq!(notice.reason, 1);
+            assert_eq!(
+                notice.reason,
+                MediaCloseReason::AgentClosed as i32,
+                "explicit MediaIngressClose must yield AGENT_CLOSED"
+            );
         }
         other => panic!("expected close notice, got {other:?}"),
     }
@@ -985,6 +989,67 @@ async fn media_ingress_limit_is_global_and_disconnect_releases_slot() {
         }
         other => panic!("expected admission after disconnect cleanup, got {other:?}"),
     }
+}
+
+/// WHEN a session disconnects without explicit `MediaIngressClose` THEN the
+/// server teardown path must emit `SESSION_DISCONNECTED`, not `AGENT_CLOSED`.
+///
+/// The two close-reason codes have different semantics for the producer:
+/// `AGENT_CLOSED` confirms a clean, producer-initiated teardown; `SESSION_DISCONNECTED`
+/// signals that the server tore down the stream because the session died
+/// (heartbeat timeout, network drop, or process exit).
+#[tokio::test]
+async fn media_ingress_session_disconnect_yields_session_disconnected_reason() {
+    let (mut client, _server, _revocation_tx) =
+        setup_media_ingress_test(media_ingress_config(true)).await;
+    let (tx, mut stream) = media_handshake(
+        &mut client,
+        "media-agent",
+        vec![
+            "media_ingress".to_string(),
+            "publish_zone:media-pip".to_string(),
+        ],
+    )
+    .await;
+
+    tx.send(ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::MediaIngressOpen(valid_media_open("media-pip"))),
+    })
+    .await
+    .unwrap();
+    let stream_epoch = match next_non_state_change(&mut stream).await.payload {
+        Some(ServerPayload::MediaIngressOpenResult(result)) => result.stream_epoch,
+        other => panic!("expected open result, got {other:?}"),
+    };
+    let _admitted = next_non_state_change(&mut stream).await;
+
+    // Drop the sender without sending MediaIngressClose — simulates an abrupt
+    // disconnect (heartbeat timeout, network failure, or process exit).
+    drop(tx);
+
+    let close_notice = tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+        while let Some(Ok(msg)) = stream.next().await {
+            if let Some(ServerPayload::MediaIngressCloseNotice(notice)) = msg.payload {
+                return Some(notice);
+            }
+        }
+        None
+    })
+    .await
+    .expect("timed out waiting for close notice after session disconnect")
+    .expect("stream ended without emitting a close notice");
+
+    assert_eq!(
+        close_notice.stream_epoch, stream_epoch,
+        "close notice must reference the admitted stream epoch"
+    );
+    assert_eq!(
+        close_notice.reason,
+        MediaCloseReason::SessionDisconnected as i32,
+        "session disconnect must yield SESSION_DISCONNECTED, not AGENT_CLOSED"
+    );
 }
 
 #[tokio::test]
