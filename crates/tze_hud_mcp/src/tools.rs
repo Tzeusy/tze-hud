@@ -2265,7 +2265,10 @@ pub async fn handle_portal_projection_attach(
             owner_token: Some(token),
             status_summary: "projection attached".to_string(),
         }),
-        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+            error_code: rejection.error_code,
+            message: rejection.message,
+        }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
         )),
@@ -2379,7 +2382,10 @@ pub async fn handle_portal_projection_publish(
             accepted: true,
             status_summary: "output queued for portal rendering".to_string(),
         }),
-        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+            error_code: rejection.error_code,
+            message: rejection.message,
+        }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
         )),
@@ -2474,7 +2480,10 @@ pub async fn handle_portal_projection_get_pending_input(
             remaining_bytes: batch.remaining_bytes,
             status_summary: "pending input returned".to_string(),
         }),
-        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+            error_code: rejection.error_code,
+            message: rejection.message,
+        }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
         )),
@@ -2577,7 +2586,10 @@ pub async fn handle_portal_projection_acknowledge_input(
             accepted: true,
             status_summary: "input acknowledged".to_string(),
         }),
-        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+            error_code: rejection.error_code,
+            message: rejection.message,
+        }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
         )),
@@ -2660,7 +2672,10 @@ pub async fn handle_portal_projection_detach(
             accepted: true,
             status_summary: "projection detached and private state purged".to_string(),
         }),
-        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+            error_code: rejection.error_code,
+            message: rejection.message,
+        }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
         )),
@@ -2784,7 +2799,10 @@ pub async fn handle_portal_projection_cleanup(
             accepted: true,
             status_summary: "projection cleanup accepted and private state purged".to_string(),
         }),
-        Ok(Err(reason)) => Err(McpError::Internal(reason)),
+        Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+            error_code: rejection.error_code,
+            message: rejection.message,
+        }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
         )),
@@ -6058,6 +6076,54 @@ mod tests {
         assert_eq!(result.items[0].input_id, "i1");
         assert_eq!(result.remaining_count, 3);
         assert_eq!(result.remaining_bytes, 42);
+    }
+
+    /// hud-s8a62 acceptance: a known authority rejection (TOKEN_EXPIRED) must
+    /// reach the MCP layer as the stable `PROJECTION_*` code in
+    /// `error.data.error_code` — not flatten into an opaque `-32603` with no
+    /// actionable code. The skill instructs the LLM to branch on these codes,
+    /// so the structured code must survive the reply-channel hop.
+    #[tokio::test]
+    async fn portal_publish_rejection_surfaces_stable_projection_code() {
+        use tze_hud_projection::ProjectionErrorCode;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        // Authority stand-in: reject the publish with a TOKEN_EXPIRED code.
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("op must be sent") {
+                crate::portal_op::PortalOp::PublishOutput { reply, .. } => {
+                    reply
+                        .send(Err(crate::portal_op::PortalOpRejection::new(
+                            ProjectionErrorCode::ProjectionTokenExpired,
+                            "owner token expired",
+                        )))
+                        .expect("reply must send");
+                }
+                other => panic!("unexpected op: {other:?}"),
+            }
+        });
+
+        let err = handle_portal_projection_publish(
+            json!({ "projection_id": "p1", "owner_token": "t1", "output_text": "hi" }),
+            Some(&tx),
+        )
+        .await
+        .expect_err("a TOKEN_EXPIRED rejection must surface as an error");
+        responder.await.expect("responder task must finish");
+
+        // The structured McpError carries the typed code, not a flattened string.
+        match &err {
+            McpError::ProjectionRejected { error_code, .. } => {
+                assert_eq!(*error_code, ProjectionErrorCode::ProjectionTokenExpired);
+            }
+            other => panic!("expected ProjectionRejected, got {other:?}"),
+        }
+
+        // On the wire: error.data.error_code is the stable PROJECTION_* string.
+        let wire: crate::error::JsonRpcError = err.into();
+        assert_eq!(wire.code, crate::error::codes::INTERNAL_ERROR);
+        let data = wire.data.expect("rejection must carry structured data");
+        assert_eq!(data["error_code"], "PROJECTION_TOKEN_EXPIRED");
     }
 
     #[tokio::test]

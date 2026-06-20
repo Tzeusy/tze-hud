@@ -3984,6 +3984,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tze_hud_projection",
  "tze_hud_scene",
  "uuid",
 ]
