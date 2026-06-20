@@ -116,6 +116,63 @@ use crate::widget_runtime_registration::process_pending_widget_svgs;
 use crate::window::resolve_window_mode;
 use crate::window::{HitRegion, WindowMode};
 
+/// RAII guard that raises the OS timer resolution to 1 ms for its lifetime.
+///
+/// On Windows the default scheduler timer granularity is ~15.6 ms, so the bare
+/// `std::thread::sleep` used for compositor frame pacing overshoots its deadline
+/// by up to a full timer tick. That quantization — not payload size — is the
+/// dominant source of the live present-budget misses recorded in hud-ofe76
+/// (present overhead p95 21 ms / max 56 ms against the 16.6 ms Windows lane
+/// budget, with near-identical payloads ranging 0→56 ms). Holding
+/// `timeBeginPeriod(1)` for the compositor thread's lifetime cuts sleep
+/// granularity to ~1 ms, comfortably within budget; the period is released via
+/// `timeEndPeriod(1)` when the guard drops on any loop-exit path.
+///
+/// No-op on non-Windows targets, whose sleep granularity is already sub-ms.
+#[cfg(windows)]
+struct FramePacingTimerGuard {
+    active: bool,
+}
+
+#[cfg(not(windows))]
+struct FramePacingTimerGuard;
+
+impl FramePacingTimerGuard {
+    fn acquire() -> Self {
+        #[cfg(windows)]
+        {
+            // SAFETY: `timeBeginPeriod` requests a process-global timer
+            // resolution and is paired with `timeEndPeriod(1)` on drop. 1 ms is
+            // the standard media/compositor resolution. Returns TIMERR_NOERROR
+            // (0) on success.
+            let ok = unsafe { windows::Win32::Media::timeBeginPeriod(1) } == 0;
+            if !ok {
+                tracing::warn!(
+                    "timeBeginPeriod(1) failed; frame pacing keeps the default \
+                     ~15.6ms Windows timer resolution"
+                );
+            }
+            Self { active: ok }
+        }
+        #[cfg(not(windows))]
+        {
+            Self
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for FramePacingTimerGuard {
+    fn drop(&mut self) {
+        if self.active {
+            // SAFETY: paired with the `timeBeginPeriod(1)` in `acquire()`.
+            unsafe {
+                let _ = windows::Win32::Media::timeEndPeriod(1);
+            }
+        }
+    }
+}
+
 mod config;
 mod hittest;
 mod input_dispatch;
@@ -792,6 +849,12 @@ impl ApplicationHandler for WinitApp {
                 let mut compositor = compositor;
                 let mut telemetry = telemetry_collector;
 
+                // Hold a 1 ms OS timer resolution for the whole frame loop so the
+                // pacing sleep below does not overshoot the present budget on the
+                // default coarse Windows timer (hud-ofe76). Released when the
+                // guard drops on any loop-exit path.
+                let _frame_timer_guard = FramePacingTimerGuard::acquire();
+
                 let frame_interval =
                     std::time::Duration::from_micros(1_000_000 / cfg.target_fps.max(1) as u64);
                 let mut shutdown_rx = shutdown_tok.subscribe();
@@ -1036,7 +1099,10 @@ impl ApplicationHandler for WinitApp {
                         }
                     }
 
-                    // Frame rate control.
+                    // Frame rate control. Granularity is bounded to ~1 ms by the
+                    // `_frame_timer_guard` (timeBeginPeriod(1)) held above, so
+                    // this sleep lands within the present budget on Windows
+                    // instead of overshooting on the default ~15.6 ms timer.
                     let elapsed = frame_start.elapsed();
                     if elapsed < frame_interval {
                         std::thread::sleep(frame_interval - elapsed);

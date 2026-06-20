@@ -110,6 +110,8 @@ windows = { version = "0.58", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Diagnostics_ToolHelp",
+    # timeBeginPeriod/timeEndPeriod for compositor frame-pacing timer resolution.
+    "Win32_Media",
 ] }
 
 # GStreamer bindings — declared here so crates can reference them via
