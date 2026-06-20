@@ -229,6 +229,33 @@ impl Compositor {
         Some([c.r, c.g, c.b, opacity])
     }
 
+    /// Compute the lifecycle-affordance accent bar geometry+color for a tile, or
+    /// `None` when nothing should paint.
+    ///
+    /// Pure (no GPU / no `self`) so it is unit-testable. The bar hugs the tile's
+    /// left edge and spans the full tile height; its width is the token-resolved
+    /// `accent.width_px` clamped to `[0, tile width]` so an out-of-range token
+    /// value can never push it past the tile edge. The returned color is the
+    /// token-resolved accent color (no literal visual value here, §6.1) with the
+    /// caller-supplied combined tile opacity folded into the alpha channel, so the
+    /// accent fades with the tile (matching the tile background).
+    ///
+    /// Returns `None` for a zero/negative width or non-positive opacity (nothing
+    /// visible to draw). Source: hud-m48i0.
+    pub(super) fn lifecycle_accent_bar_geom(
+        tile_bounds: Rect,
+        accent: LifecycleAccent,
+        opacity: f32,
+    ) -> Option<(f32, [f32; 4])> {
+        let bar_w = accent.width_px.clamp(0.0, tile_bounds.width);
+        if bar_w <= 0.0 || opacity <= 0.0 {
+            return None;
+        }
+        let mut color = accent.color.to_array();
+        color[3] *= opacity;
+        Some((bar_w, color))
+    }
+
     /// Emit geometry for the local composer echo overlay.
     ///
     /// Called from the tile loop (after the content pass) when
@@ -763,5 +790,59 @@ impl Compositor {
         for child_id in &node.children {
             self.render_node(*child_id, tile, scene, vertices, textured_cmds, sw, sh);
         }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_accent_tests {
+    use super::*;
+
+    fn rect(w: f32, h: f32) -> Rect {
+        Rect::new(0.0, 0.0, w, h)
+    }
+
+    /// The accent bar passes the token color through unchanged and clamps its
+    /// width to the tile, folding tile opacity into the alpha (hud-m48i0).
+    #[test]
+    fn accent_bar_clamps_width_and_folds_opacity() {
+        let accent = LifecycleAccent {
+            color: Rgba::new(0.2, 0.4, 0.6, 1.0),
+            width_px: 4.0,
+        };
+        let (w, color) =
+            Compositor::lifecycle_accent_bar_geom(rect(200.0, 150.0), accent, 0.5).unwrap();
+        assert_eq!(w, 4.0, "in-range width is used as-is");
+        assert_eq!(
+            [color[0], color[1], color[2]],
+            [0.2, 0.4, 0.6],
+            "color passes through"
+        );
+        assert!(
+            (color[3] - 0.5).abs() < 1e-6,
+            "tile opacity folds into alpha"
+        );
+
+        // Oversized token width is clamped to the tile width.
+        let wide = LifecycleAccent {
+            color: Rgba::WHITE,
+            width_px: 9999.0,
+        };
+        let (w, _) = Compositor::lifecycle_accent_bar_geom(rect(12.0, 80.0), wide, 1.0).unwrap();
+        assert_eq!(w, 12.0, "width is clamped to the tile edge");
+    }
+
+    /// Zero width or zero opacity paints nothing.
+    #[test]
+    fn accent_bar_none_when_invisible() {
+        let zero_w = LifecycleAccent {
+            color: Rgba::WHITE,
+            width_px: 0.0,
+        };
+        assert!(Compositor::lifecycle_accent_bar_geom(rect(100.0, 50.0), zero_w, 1.0).is_none());
+        let some = LifecycleAccent {
+            color: Rgba::WHITE,
+            width_px: 4.0,
+        };
+        assert!(Compositor::lifecycle_accent_bar_geom(rect(100.0, 50.0), some, 0.0).is_none());
     }
 }

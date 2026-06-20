@@ -266,6 +266,15 @@ pub enum SceneMutation {
         offset_x: f32,
         offset_y: f32,
     },
+    /// Set (or clear) the lifecycle-affordance accent for a tile. Coalescible
+    /// StateStream tile-update (RFC 0005 §3.3 MutationBatch, client→server §3.1):
+    /// reflects the portal's lifecycle
+    /// state and is updated on transition, never re-added per content republish
+    /// (hud-m48i0). `accent = None` clears it (e.g. lifecycle redacted/absent).
+    SetTileLifecycleAccent {
+        tile_id: SceneId,
+        accent: Option<LifecycleAccent>,
+    },
 }
 
 impl SceneMutation {
@@ -297,6 +306,7 @@ impl SceneMutation {
             SceneMutation::LeaveSyncGroup { .. } => "LeaveSyncGroup",
             SceneMutation::RegisterTileScroll { .. } => "RegisterTileScroll",
             SceneMutation::SetScrollOffset { .. } => "SetScrollOffset",
+            SceneMutation::SetTileLifecycleAccent { .. } => "SetTileLifecycleAccent",
         }
     }
 }
@@ -590,7 +600,8 @@ impl SceneGraph {
             | SceneMutation::JoinSyncGroup { tile_id, .. }
             | SceneMutation::LeaveSyncGroup { tile_id }
             | SceneMutation::RegisterTileScroll { tile_id, .. }
-            | SceneMutation::SetScrollOffset { tile_id, .. } => {
+            | SceneMutation::SetScrollOffset { tile_id, .. }
+            | SceneMutation::SetTileLifecycleAccent { tile_id, .. } => {
                 tiles.get(tile_id).map(|t| t.lease_id)
             }
             // Tab mutations, zone mutations, sync group mutations other than
@@ -929,6 +940,25 @@ impl SceneGraph {
                 self.set_tile_scroll_offset_local(*tile_id, *offset_x, *offset_y)?;
                 Ok(vec![])
             }
+            // ── Lifecycle affordance accent ──────────────────────────────
+            SceneMutation::SetTileLifecycleAccent { tile_id, accent } => {
+                let tile = self
+                    .tiles
+                    .get(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                if tile.namespace != namespace {
+                    return Err(ValidationError::NamespaceMismatch {
+                        tile_id: *tile_id,
+                        tile_namespace: tile.namespace.clone(),
+                        agent_namespace: namespace.to_string(),
+                    });
+                }
+                match accent {
+                    Some(a) => self.set_tile_lifecycle_accent(*tile_id, *a)?,
+                    None => self.clear_tile_lifecycle_accent(*tile_id),
+                }
+                Ok(vec![])
+            }
         }
     }
 
@@ -989,6 +1019,167 @@ mod tests {
         assert_eq!(result.created_ids.len(), 1);
         assert_eq!(scene.tile_count(), 1);
         assert!(result.sequence_number.is_some());
+    }
+
+    #[test]
+    fn set_tile_lifecycle_accent_sets_clears_and_cleans_up() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let create = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".to_string(),
+                lease_id,
+                bounds: Rect::new(10.0, 10.0, 200.0, 150.0),
+                z_order: 1,
+            }],
+        );
+        let tile_id = scene.apply_batch(&create).created_ids[0];
+
+        // Set: the accent lands in overlay state, keyed by tile id, and bumps
+        // scene.version so the #943 idle present-gate re-arms for an accent-only
+        // transition (regression guard for hud-m48i0).
+        let accent = LifecycleAccent {
+            color: Rgba::new(0.1, 0.2, 0.3, 1.0),
+            width_px: 4.0,
+        };
+        let set = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileLifecycleAccent {
+                tile_id,
+                accent: Some(accent),
+            }],
+        );
+        let v_before_set = scene.version;
+        assert!(scene.apply_batch(&set).applied);
+        assert_eq!(scene.tile_lifecycle_accent(tile_id), Some(accent));
+        assert!(
+            scene.version > v_before_set,
+            "setting a new accent must bump scene.version so the present-gate repaints"
+        );
+
+        // Redundant set (same accent) is a no-op for the present-gate: version
+        // must NOT change, so a steady-state portal stays idle.
+        let v_before_redundant = scene.version;
+        let set_same = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileLifecycleAccent {
+                tile_id,
+                accent: Some(accent),
+            }],
+        );
+        assert!(scene.apply_batch(&set_same).applied);
+        assert_eq!(
+            scene.version, v_before_redundant,
+            "re-publishing the same accent must not bump version (keeps idle idle)"
+        );
+
+        // Clear: None removes it and bumps version (the redaction-CLEAR path).
+        let clear = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileLifecycleAccent {
+                tile_id,
+                accent: None,
+            }],
+        );
+        let v_before_clear = scene.version;
+        assert!(scene.apply_batch(&clear).applied);
+        assert_eq!(scene.tile_lifecycle_accent(tile_id), None);
+        assert!(
+            scene.version > v_before_clear,
+            "clearing a present accent must bump scene.version (stale accent must repaint away)"
+        );
+
+        // Clearing again (nothing stored) must NOT bump version.
+        let v_before_noop_clear = scene.version;
+        let clear_noop = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileLifecycleAccent {
+                tile_id,
+                accent: None,
+            }],
+        );
+        assert!(scene.apply_batch(&clear_noop).applied);
+        assert_eq!(
+            scene.version, v_before_noop_clear,
+            "clearing an absent accent must not bump version"
+        );
+
+        // Cleanup: deleting the tile drops any accent overlay state.
+        let set_again = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileLifecycleAccent {
+                tile_id,
+                accent: Some(accent),
+            }],
+        );
+        assert!(scene.apply_batch(&set_again).applied);
+        assert_eq!(scene.tile_lifecycle_accent(tile_id), Some(accent));
+        let delete = make_batch("agent", vec![SceneMutation::DeleteTile { tile_id }]);
+        assert!(scene.apply_batch(&delete).applied);
+        assert_eq!(
+            scene.tile_lifecycle_accent(tile_id),
+            None,
+            "accent overlay state must be cleaned up on tile deletion"
+        );
+    }
+
+    /// A `SetTileLifecycleAccent` authored by an agent that does NOT own the tile
+    /// must be rejected with `NamespaceMismatch` and must not mutate the accent
+    /// overlay state — the accent is a per-tile visual owned by the tile's
+    /// namespace, exactly like every other tile mutation (hud-m48i0).
+    #[test]
+    fn set_tile_lifecycle_accent_rejects_cross_namespace() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let owner_lease = scene.grant_lease(
+            "owner",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let create = make_batch(
+            "owner",
+            vec![SceneMutation::CreateTile {
+                tab_id,
+                namespace: "owner".to_string(),
+                lease_id: owner_lease,
+                bounds: Rect::new(10.0, 10.0, 200.0, 150.0),
+                z_order: 1,
+            }],
+        );
+        let tile_id = scene.apply_batch(&create).created_ids[0];
+
+        // Intruder (a different namespace) tries to set the accent on owner's tile.
+        let intruder = make_batch(
+            "intruder",
+            vec![SceneMutation::SetTileLifecycleAccent {
+                tile_id,
+                accent: Some(LifecycleAccent {
+                    color: Rgba::new(0.9, 0.1, 0.1, 1.0),
+                    width_px: 4.0,
+                }),
+            }],
+        );
+        let result = scene.apply_batch(&intruder);
+        assert!(
+            !result.applied,
+            "cross-namespace accent write must be rejected"
+        );
+        let rej = result
+            .rejection
+            .expect("a structured rejection must be present");
+        assert_eq!(rej.errors[0].code, ValidationErrorCode::NamespaceMismatch);
+        assert_eq!(
+            scene.tile_lifecycle_accent(tile_id),
+            None,
+            "rejected cross-namespace write must not mutate accent overlay state"
+        );
     }
 
     #[test]
