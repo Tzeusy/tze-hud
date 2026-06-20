@@ -68,7 +68,7 @@ If you are an LLM session that wants to project itself onto the HUD — to show 
 
 Trigger phrases: "project this session to the HUD", "attach this agent to HUD", "show this LLM session in a text-stream portal", "check HUD input", "publish status to screen".
 
-This is cooperative opt-in projection, not PTY capture or terminal scraping. The `ProjectionAuthority` runs in-process inside the tze_hud runtime; you reach it via MCP tools (`portal_projection_attach`, `portal_projection_publish`) wired in PR #765. For one-shot zone publishing (no session lifecycle), use the **`th-hud-publish`** skill instead.
+This is cooperative opt-in projection, not PTY capture or terminal scraping. The `ProjectionAuthority` runs in-process inside the tze_hud runtime; you reach it via the full set of `portal_projection_*` MCP tools (attach, publish, publish_status, get_pending_input, acknowledge_input, detach, cleanup). These are Resident tools — an external session reaches them as the resident principal (set `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the PSK and send the PSK as the MCP bearer). For one-shot zone publishing (no session lifecycle), use the **`th-hud-publish`** skill instead.
 
 ## Beads Database Routing
 

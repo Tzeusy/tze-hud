@@ -2,7 +2,7 @@
 
 The production projection ingress routes cooperative projection operations into the runtime's in-process `ProjectionAuthority`. It is **not** a standalone external daemon and **not** the runtime v1 MCP zone/widget publishing bridge.
 
-**Current status:** The ingress is **partially wired**. The OUTPUT operations `attach` and `publish_output` are served by the runtime MCP server's portal-projection facade tools `portal_projection_attach` and `portal_projection_publish` (`crates/tze_hud_mcp/src/server.rs` ~556-565), which forward to the in-process authority over `portal_op_tx`. However, those two tools are classified Resident and are rejected with `CAPABILITY_REQUIRED` unless the caller holds `resident_mcp` (`crates/tze_hud_mcp/src/server.rs` ~198-199, ~396), and the runtime's HTTP MCP transport mints only bearer/guest contexts with no capabilities (`crates/tze_hud_runtime/src/mcp.rs` ~256-260) — so a normal external session cannot reach them yet. The resident-capable ingress that closes this gap is tracked by hud-bq0gl.1. The input-return + lifecycle operations (`publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup`) have **no MCP method at all yet** (tracked by hud-bq0gl.1 for production ingress and hud-bq0gl.3 for the operator input-return loop). The boundary requirements below apply to the full facade as it completes.
+**Current status:** The ingress is **fully wired**. All seven operations are served by the runtime MCP server's per-operation `portal_projection_<op>` tools (`crates/tze_hud_mcp/src/server.rs` ~643-683), which forward to the in-process authority over `portal_op_tx`. The tools are classified Resident and require `resident_mcp` (`crates/tze_hud_mcp/src/server.rs` ~218-232); an external session obtains that capability as the **resident principal** — the runtime mints `resident_mcp` only when the MCP bearer matches BOTH the configured `TZE_HUD_MCP_RESIDENT_PRINCIPAL` AND the PSK, each compared constant-time (`caller_context`, ~321-352; `with_resident_principal`, ~187). Wire it by setting `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the PSK (`crates/tze_hud_runtime/src/mcp.rs` ~111, env at ~71-73) and sending the PSK as the bearer. Published output renders on screen for both portal adapter families (exemplar gRPC and the in-process cooperative driver; cooperative render landed in PR #959). hud-bq0gl.1 (production ingress), hud-bq0gl.3 (operator input-return loop), and hud-nu65o (PSK-gated resident principal) are all closed. The boundary requirements below describe the contract this ingress satisfies.
 
 ## Required Boundary
 
@@ -34,29 +34,30 @@ The harness keeps projection state in memory only for the lifetime of that proce
 
 ## Tool Shape
 
-Either shape is acceptable if the payload schema remains the same:
+The facade shipped as **seven per-operation tools** — `portal_projection_attach`, `portal_projection_publish` (for `publish_output`), `portal_projection_publish_status`, `portal_projection_get_pending_input`, `portal_projection_acknowledge_input`, `portal_projection_detach`, and `portal_projection_cleanup` — not a single dispatcher tool. The skill examples use operation JSON payloads that map directly onto these tools' params.
 
-- One dispatcher tool, for example `projection_operation(payload)`.
-- Seven operation tools: `attach`, `publish_output`, `publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, and `cleanup`.
+## Claude-Style MCP Configuration
 
-The skill examples use operation JSON payloads so they work with either facade shape.
-
-## Claude-Style MCP Configuration (Future)
-
-When the production MCP ingress ships (hud-bq0gl.1), adapt `settings.template.json` to point at it:
+The production MCP ingress is live; adapt `settings.template.json` to point at it (set `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the PSK on the runtime, and send the PSK as the bearer):
 
 ```json
 {
   "mcpServers": {
-    "hud-projection-daemon": {
+    "tze-hud-runtime": {
       "type": "url",
-      "url": "http://<PROJECTION_INGRESS_HOST>:<PORT>/mcp",
+      "url": "http://<TZE_HUD_RUNTIME_HOST>:<MCP_PORT>/mcp",
       "headers": {
-        "Authorization": "Bearer ${HUD_PROJECTION_INGRESS_TOKEN}"
+        "Authorization": "Bearer ${TZE_HUD_PSK}"
       }
     }
   }
 }
 ```
 
-Keep the server name explicit (e.g. `hud-projection-daemon`). Avoid names such as `tze-hud` that can be confused with the runtime v1 MCP zone publishing bridge.
+The endpoint is the **runtime's** MCP server (the same server that serves the v1
+zone/widget publishing tools) — the projection facade is in-process, not a
+separate daemon. The bearer is the runtime PSK; the runtime must also be started
+with `TZE_HUD_MCP_RESIDENT_PRINCIPAL` set equal to that PSK so the caller is
+minted `resident_mcp`. The projection facade and the zone-publishing bridge are
+distinguished by which tools you call (`portal_projection_*` vs the zone/widget
+tools), not by separate servers.
