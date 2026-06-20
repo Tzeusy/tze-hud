@@ -196,8 +196,8 @@ use self::input_dispatch::{
 };
 use self::keyboard::{ComposerDeliveryContext, PendingKeyboardEvent};
 use self::lifecycle::{
-    PendingInputLatencySamples, WindowedBenchmarkRunState, begin_os_mouse_capture,
-    detect_monitor_size, drain_pending_input_latency, end_os_mouse_capture,
+    BENCHMARK_NO_PROGRESS_TIMEOUT, PendingInputLatencySamples, WindowedBenchmarkRunState,
+    begin_os_mouse_capture, detect_monitor_size, drain_pending_input_latency, end_os_mouse_capture,
     focus_window_for_text_input, read_windows_clipboard_text, seed_windowed_benchmark_scene,
 };
 use self::network::{build_runtime_context, start_network_services};
@@ -1184,6 +1184,38 @@ impl ApplicationHandler for WinitApp {
                             ));
                             watchdog_logged = true;
                         }
+                    }
+
+                    // Benchmark no-progress watchdog (hud-gcn01): if the benchmark
+                    // is active and no frame has been rendered within the timeout,
+                    // emit a partial/diagnostic artifact and exit non-zero.  This
+                    // catches the Windows fullscreen hang where redraw callbacks
+                    // never fire for a non-foreground window, preventing a silent
+                    // infinite spin that never reaches --benchmark-frames.
+                    let benchmark_stalled = benchmark_state
+                        .as_ref()
+                        .is_some_and(|s| s.is_stalled(BENCHMARK_NO_PROGRESS_TIMEOUT));
+                    if benchmark_stalled {
+                        let finished = benchmark_state
+                            .take()
+                            .expect("stalled implies benchmark_state is Some");
+                        let emit_path = finished.config.emit_path.clone();
+                        match finished.emit_watchdog_abort("no-progress timeout") {
+                            Ok(()) => tracing::warn!(
+                                path = %emit_path.display(),
+                                timeout_secs = BENCHMARK_NO_PROGRESS_TIMEOUT.as_secs(),
+                                "benchmark watchdog: no-progress timeout — \
+                                 partial result emitted; exiting non-zero"
+                            ),
+                            Err(err) => tracing::error!(
+                                error = %err,
+                                path = %emit_path.display(),
+                                "benchmark watchdog: failed to emit partial result"
+                            ),
+                        }
+                        benchmark_failed.store(true, std::sync::atomic::Ordering::Release);
+                        shutdown_tok.trigger(crate::threads::ShutdownReason::Clean);
+                        break;
                     }
 
                     // Frame rate control. Granularity is bounded to ~1 ms by the
