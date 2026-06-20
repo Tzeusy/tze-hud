@@ -140,6 +140,10 @@ pub struct PortalVisualTokens {
     pub lifecycle_attention_color: proto::Rgba,
     /// Accent for winding-down states (`Detached` / `CleanupPending` / `Expired`).
     pub lifecycle_inactive_color: proto::Rgba,
+    /// Width (px) of the left-edge lifecycle accent bar. Geometry only; sizes the
+    /// separate `SolidColorNode` accent element so the adapter holds no literal
+    /// accent dimension. Source token: `portal.lifecycle.accent_width_px`.
+    pub lifecycle_accent_width_px: f32,
 
     // Collapsed card (collapsed presentation)
     pub collapsed_background: proto::Rgba,
@@ -741,6 +745,32 @@ impl ResidentGrpcPortalAdapter {
             },
         ];
 
+        // Lifecycle affordance accent: a token-colored left-edge bar painted as a
+        // SEPARATE sibling draw element (SolidColorNode child of the portal root),
+        // NOT via the markdown node's color_runs — so the cached/styled markdown
+        // path stays untouched (the markdown node still carries only a zero-length
+        // lifecycle sentinel). Redaction-gated: emitted only when lifecycle_state
+        // is permitted (Some). Rides the same PublishToTile republish as the
+        // status line, so it redraws on every lifecycle transition (hud-m48i0).
+        if let Some(accent) = lifecycle_accent_node(
+            state,
+            &self.visual_tokens,
+            self.local_bounds_for_state(state),
+        ) {
+            mutations.push(proto::MutationProto {
+                mutation: Some(proto::mutation_proto::Mutation::AddNode(
+                    proto::AddNodeMutation {
+                        tile_id: tile_id.clone(),
+                        parent_id: root_id_be.clone(),
+                        node: Some(proto::NodeProto {
+                            id: Vec::new(),
+                            data: Some(proto::node_proto::Data::SolidColor(accent)),
+                        }),
+                    },
+                )),
+            });
+        }
+
         // When interaction is enabled, publish a composer hit region as a child
         // of the portal root so the runtime's ComposerDraftManager can activate.
         // Without this AddNodeMutation, accepts_composer_input is never true in
@@ -1141,7 +1171,8 @@ fn lifecycle_accent_color(
     }
 }
 
-/// Build the lifecycle-affordance color run for the portal node.
+/// Build the lifecycle-affordance **machine-readable** color run for the portal
+/// node.
 ///
 /// When the viewer is permitted to see lifecycle state (`state.lifecycle_state`
 /// is `Some` — the authority sets it to `None` under redaction), emits a single
@@ -1151,8 +1182,14 @@ fn lifecycle_accent_color(
 /// run would suppress Markdown stripping for the whole single-node portal); its
 /// presence + color is the machine-readable, token-driven signal that the viewer
 /// affordance is active, while the text-visible `status:` line carries the exact
-/// spelling. Precise per-line coloring is deferred to the promotion-era
-/// structured multi-node layout.
+/// spelling.
+///
+/// The on-screen *pixels* are painted separately by [`lifecycle_accent_node`]
+/// (a sibling `SolidColorNode` accent bar) so this run stays a pure sentinel and
+/// the cached/styled markdown render path is never flipped to the lossy
+/// raw-content path (hud-m48i0). Keeping both is deliberate: the sentinel is the
+/// in-band signal carried on the markdown node; the accent node is the draw
+/// element.
 ///
 /// Returns an empty vec when lifecycle state is redacted/absent — so a restricted
 /// viewer gets no lifecycle affordance, exactly like the redaction-gated
@@ -1169,6 +1206,50 @@ fn lifecycle_marker_color_runs(
         end_byte: 0,
         color: Some(lifecycle_accent_color(lifecycle, tokens)),
     }]
+}
+
+/// Build the lifecycle-affordance accent **draw element** for the portal tile.
+///
+/// Returns a `SolidColorNodeProto` for a thin left-edge bar painted with the
+/// token-resolved accent for the current lifecycle group — a *real, pixel-bearing*
+/// on-screen element rendered as a separate sibling node of the portal's markdown
+/// root (the compositor's `render_node` paints `SolidColor` children as quads).
+///
+/// This is the paint counterpart to [`lifecycle_marker_color_runs`]: the accent
+/// is **not** carried on the markdown node's `color_runs`, so the cached/styled
+/// markdown path stays untouched (a zero-length sentinel run keeps the node on
+/// the cached path; a pixel-bearing run would not). The accent updates on every
+/// lifecycle transition because it rides the same `render_batch` republish that
+/// already redraws the `status:` line.
+///
+/// Geometry: the bar spans the full tile height at the left edge; its width comes
+/// from the `lifecycle_accent_width_px` token (clamped to ≥1px and the tile
+/// width). The color is token-resolved — no literal visual value here (§6.1
+/// "visual identity is modular").
+///
+/// Returns `None` when lifecycle state is redacted/absent, so a restricted viewer
+/// gets no accent element — exactly like the redaction-gated `status:` line.
+fn lifecycle_accent_node(
+    state: &ProjectedPortalState,
+    tokens: &PortalVisualTokens,
+    tile_bounds: proto::Rect,
+) -> Option<proto::SolidColorNodeProto> {
+    let lifecycle = state.lifecycle_state?;
+    let width = tokens
+        .lifecycle_accent_width_px
+        .max(1.0)
+        .min(tile_bounds.width.max(1.0));
+    Some(proto::SolidColorNodeProto {
+        color: Some(lifecycle_accent_color(lifecycle, tokens)),
+        bounds: Some(proto::Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: tile_bounds.height,
+        }),
+        // -1.0 = "radius not set" sentinel → sharp-cornered rect (proto contract).
+        radius: -1.0,
+    })
 }
 
 fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {
@@ -1317,6 +1398,7 @@ pub fn portal_visual_tokens_from_part_tokens(
             b: part.lifecycle_inactive_color.b,
             a: part.lifecycle_inactive_color.a,
         },
+        lifecycle_accent_width_px: part.lifecycle_accent_width_px,
         collapsed_background: proto::Rgba {
             r: part.collapsed_background.r,
             g: part.collapsed_background.g,
@@ -1794,6 +1876,144 @@ mod tests {
         assert!(
             active_tm.content.contains("status:"),
             "permitted viewer must see the lifecycle status line"
+        );
+    }
+
+    /// §lifecycle accent paint (hud-m48i0, acceptance #1/#3/#5): every permitted
+    /// lifecycle state paints its token-resolved accent as a SEPARATE on-screen
+    /// draw element — a sibling `SolidColorNode` left-edge bar — distinct per
+    /// affordance group. The markdown text node carries only zero-length
+    /// sentinels (no pixel-bearing runs), so the cached/styled markdown render
+    /// path is unaffected. A redacted viewer (`lifecycle_state = None`) gets no
+    /// accent element at all.
+    #[test]
+    fn lifecycle_accent_paints_distinct_token_bar_per_state() {
+        // Pull the lifecycle accent SolidColorNode (if present) from a batch.
+        fn accent_of(batch: &proto::session::MutationBatch) -> Option<proto::SolidColorNodeProto> {
+            batch.mutations.iter().find_map(|m| match &m.mutation {
+                Some(proto::mutation_proto::Mutation::AddNode(an)) => {
+                    match an.node.as_ref()?.data.as_ref()? {
+                        proto::node_proto::Data::SolidColor(sc) => Some(*sc),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+        }
+        // Pull the portal markdown node from the PublishToTile mutation.
+        fn markdown_of(batch: &proto::session::MutationBatch) -> proto::TextMarkdownNodeProto {
+            for m in &batch.mutations {
+                if let Some(proto::mutation_proto::Mutation::PublishToTile(p)) = &m.mutation {
+                    if let Some(proto::node_proto::Data::TextMarkdown(tm)) =
+                        p.node.as_ref().and_then(|n| n.data.as_ref())
+                    {
+                        return tm.clone();
+                    }
+                }
+            }
+            panic!("batch must publish a markdown portal node");
+        }
+
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![0u8; 16]);
+        let tokens = adapter.visual_tokens().clone();
+
+        let cases = [
+            (
+                ProjectionLifecycleState::Active,
+                tokens.lifecycle_active_color,
+            ),
+            (
+                ProjectionLifecycleState::Attached,
+                tokens.lifecycle_attached_color,
+            ),
+            (
+                ProjectionLifecycleState::Degraded,
+                tokens.lifecycle_attention_color,
+            ),
+            (
+                ProjectionLifecycleState::HudUnavailable,
+                tokens.lifecycle_attention_color,
+            ),
+            (
+                ProjectionLifecycleState::Detached,
+                tokens.lifecycle_inactive_color,
+            ),
+            (
+                ProjectionLifecycleState::CleanupPending,
+                tokens.lifecycle_inactive_color,
+            ),
+            (
+                ProjectionLifecycleState::Expired,
+                tokens.lifecycle_inactive_color,
+            ),
+        ];
+        for (lifecycle, expected) in cases {
+            let mut state = make_expanded_interaction_state("portal-accent");
+            state.lifecycle_state = Some(lifecycle);
+            let batch = adapter
+                .render_batch(&state)
+                .expect("render_batch must succeed");
+
+            let accent = accent_of(&batch).unwrap_or_else(|| {
+                panic!("lifecycle {lifecycle:?} must paint a SolidColor accent node")
+            });
+            assert_eq!(
+                accent.color.unwrap(),
+                expected,
+                "lifecycle {lifecycle:?} accent must use its token-resolved color"
+            );
+
+            // Geometry: left-edge bar, token-defined width, full tile height.
+            let bounds = accent.bounds.expect("accent node must carry bounds");
+            assert_eq!(bounds.x, 0.0, "accent bar hugs the left edge");
+            assert_eq!(bounds.y, 0.0, "accent bar starts at the tile top");
+            assert!(
+                (bounds.width - tokens.lifecycle_accent_width_px).abs() < 1e-4,
+                "accent bar width must come from the token (no literal dimension)"
+            );
+            assert_eq!(
+                bounds.height, DEFAULT_EXPANDED_H,
+                "accent bar spans the full tile height"
+            );
+
+            // The markdown node must NOT carry pixel-bearing color runs — only the
+            // zero-length lifecycle sentinel — so the cached markdown render path
+            // is unaffected (the #947 regression must not return).
+            let tm = markdown_of(&batch);
+            assert!(
+                tm.color_runs.iter().all(|r| r.start_byte >= r.end_byte),
+                "markdown node must carry only zero-length sentinels (no pixel runs) \
+                 for lifecycle {lifecycle:?} — cached markdown path must be preserved"
+            );
+        }
+
+        // The four affordance groups paint mutually distinct accents.
+        let groups = [
+            tokens.lifecycle_active_color,
+            tokens.lifecycle_attached_color,
+            tokens.lifecycle_attention_color,
+            tokens.lifecycle_inactive_color,
+        ];
+        for i in 0..groups.len() {
+            for j in (i + 1)..groups.len() {
+                assert_ne!(
+                    groups[i], groups[j],
+                    "lifecycle accent groups {i} and {j} must be visually distinct"
+                );
+            }
+        }
+
+        // Redaction-gated: a viewer without lifecycle clearance gets no accent.
+        let mut redacted = make_expanded_interaction_state("portal-accent-redacted");
+        redacted.lifecycle_state = None;
+        let batch = adapter
+            .render_batch(&redacted)
+            .expect("render_batch must succeed");
+        assert!(
+            accent_of(&batch).is_none(),
+            "redacted lifecycle must paint no accent draw element"
         );
     }
 
