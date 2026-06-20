@@ -1217,6 +1217,36 @@ impl InProcessPortalDriver {
                             entry.adapter.record_created_tile(tile_id_le);
                             entry.tile_scene_id = Some(tile_scene_id);
 
+                            // Paint the first publish's content into the freshly
+                            // created tile (hud-utbiy). The authority coalesces rapid
+                            // publishes into one update, and this create drain has
+                            // already consumed that update via `take_due_portal_update`
+                            // above. Before this fix the arm fell through without
+                            // rendering, so the coalesced transcript was lost and the
+                            // tile stayed an empty grey rect forever. Now (the tile
+                            // exists) the adapter renders the content batch and we
+                            // apply it directly to the scene — the same content the
+                            // gRPC family publishes over the wire.
+                            match entry.adapter.render_batch(&state) {
+                                Ok(batch) => {
+                                    tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
+                                        scene,
+                                        tile_scene_id,
+                                        PORTAL_DRIVER_NAMESPACE,
+                                        &batch,
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        proj_id = %proj_id,
+                                        tile_id = ?tile_scene_id,
+                                        error = ?e,
+                                        "portal drain: CreatePortalTile — render_batch failed; \
+                                         tile created but content not painted"
+                                    );
+                                }
+                            }
+
                             tracing::debug!(
                                 proj_id = %proj_id,
                                 tile_id = ?tile_scene_id,
@@ -1250,6 +1280,31 @@ impl InProcessPortalDriver {
                         );
                         continue;
                     };
+
+                    // Paint the coalesced update's content into the existing tile
+                    // (hud-utbiy). The adapter renders the same MutationBatch the
+                    // gRPC family publishes over the wire; we apply it directly to
+                    // the scene. The geometry/scroll tracking below is preserved —
+                    // it consumes the same `update` for follow-tail accounting.
+                    match entry.adapter.render_batch(&state) {
+                        Ok(batch) => {
+                            tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
+                                scene,
+                                tile_scene_id,
+                                PORTAL_DRIVER_NAMESPACE,
+                                &batch,
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                proj_id = %proj_id,
+                                tile_id = ?tile_scene_id,
+                                error = ?e,
+                                "portal drain: RenderPortal — render_batch failed; \
+                                 content not repainted this cycle"
+                            );
+                        }
+                    }
 
                     // Compute append geometry (mirrors drain_and_emit_portal_updates in
                     // projection_authority.rs §1316-1363).
@@ -2534,6 +2589,164 @@ mod tests {
              must flow through drain_inner and set tile_follow_tail_at_tail (spec §3.2); \
              removing the dispatch_portal_op → authority wiring causes this to fail"
         );
+    }
+
+    /// Regression guard (hud-utbiy): the cooperative in-process drain must paint
+    /// the published transcript onto the tile, not just create an empty tile with
+    /// a scroll config.
+    ///
+    /// Before the fix, `drain_inner` created the portal tile and tracked scroll
+    /// geometry but never rendered the transcript content — the coalesced update
+    /// (which carries the text) was consumed by the create arm and discarded,
+    /// leaving a permanent empty grey tile. This test asserts the tile's root
+    /// node is a `TextMarkdown` whose content includes the published output text.
+    ///
+    /// It fails before the fix (the tile has no root node) and passes after.
+    #[test]
+    fn drain_paints_published_transcript_onto_tile() {
+        use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
+        use tze_hud_scene::NodeData;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_paint_content"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        // Attach.
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "paint-proj".to_string(),
+            display_name: "Paint Projection".to_string(),
+            idempotency_key: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("Attach must be accepted");
+
+        // Publish a distinctive transcript line.
+        const PUBLISHED: &str = "UNIQUE-TRANSCRIPT-MARKER-42";
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "paint-proj".to_string(),
+            owner_token: owner_token.clone(),
+            output_text: PUBLISHED.to_string(),
+            logical_unit_id: None,
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            reply: pub_tx,
+        });
+        pub_rx
+            .try_recv()
+            .expect("publish reply must be sent synchronously")
+            .expect("PublishOutput must be accepted");
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.authority_mut().push_geometry_snapshot(
+            "paint-proj",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: 200,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        // First drain: creates the tile AND paints the first publish's content.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let tile_id = driver
+            .drive
+            .entries
+            .get("paint-proj")
+            .expect("drive entry must still exist after drain")
+            .tile_scene_id
+            .expect("drain must create a portal tile in the scene");
+
+        let assert_content_present = |scene: &SceneGraph, ctx: &str| {
+            let root_id = scene
+                .tiles
+                .get(&tile_id)
+                .expect("portal tile must exist in scene")
+                .root_node
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{ctx}: portal tile has no root node — content was never painted \
+                         (the cooperative grey-tile bug)"
+                    )
+                });
+            let root = scene
+                .nodes
+                .get(&root_id)
+                .expect("tile root_node id must resolve to a node");
+            match &root.data {
+                NodeData::TextMarkdown(tm) => {
+                    assert!(
+                        tm.content.contains(PUBLISHED),
+                        "{ctx}: tile root TextMarkdown must contain the published text \
+                         {PUBLISHED:?}; got content: {:?}",
+                        tm.content
+                    );
+                }
+                other => panic!("{ctx}: expected TextMarkdown tile root, got {other:?}"),
+            }
+        };
+
+        // First-publish (create-arm) content must be painted.
+        assert_content_present(&scene, "after create drain");
+
+        // A subsequent publish (RenderPortal arm) must also repaint content.
+        const PUBLISHED_2: &str = "SECOND-TRANSCRIPT-MARKER-99";
+        let (pub_tx2, _rx2) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "paint-proj".to_string(),
+            owner_token,
+            output_text: PUBLISHED_2.to_string(),
+            logical_unit_id: Some("u2".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            reply: pub_tx2,
+        });
+        let drain2_now_us = PORTAL_UPDATE_RATE_WINDOW_WALL_US * 2 + 1;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain2_now_us);
+
+        // The retained transcript window keeps prior lines, so both markers must
+        // be present after the second (RenderPortal) drain.
+        let root_id = scene
+            .tiles
+            .get(&tile_id)
+            .unwrap()
+            .root_node
+            .expect("after render drain: portal tile must still have a painted root node");
+        match &scene.nodes.get(&root_id).unwrap().data {
+            NodeData::TextMarkdown(tm) => {
+                assert!(
+                    tm.content.contains(PUBLISHED_2),
+                    "after render drain: tile root TextMarkdown must contain the second \
+                     published text {PUBLISHED_2:?}; got content: {:?}",
+                    tm.content
+                );
+            }
+            other => panic!("after render drain: expected TextMarkdown tile root, got {other:?}"),
+        }
     }
 
     /// Regression guard: an idempotent re-attach (same `projection_id` +
