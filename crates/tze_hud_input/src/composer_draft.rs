@@ -2403,7 +2403,10 @@ mod tests {
         // Move caret to start, then Ctrl+Shift+Right selects the first word.
         mgr.route_key_down("Home", "Home", false, false, false);
         let (consumed, _) = mgr.route_key_down("ArrowRight", "ArrowRight", true, true, false);
-        assert!(consumed, "Ctrl+Shift+Right must be consumed by the composer");
+        assert!(
+            consumed,
+            "Ctrl+Shift+Right must be consumed by the composer"
+        );
         let draft = mgr.draft().expect("active draft");
         let sel = draft.selection();
         assert_eq!(
@@ -2430,8 +2433,16 @@ mod tests {
         // Re-focusing the same node restores the in-progress text + caret.
         mgr.on_focus_gained(node_a, false);
         let draft = mgr.draft().expect("draft restored on re-focus");
-        assert_eq!(draft.text(), "unsent reply", "blurred draft must be restored");
-        assert_eq!(draft.cursor(), "unsent reply".len(), "caret restored at end");
+        assert_eq!(
+            draft.text(),
+            "unsent reply",
+            "blurred draft must be restored"
+        );
+        assert_eq!(
+            draft.cursor(),
+            "unsent reply".len(),
+            "caret restored at end"
+        );
 
         // A different composer node starts empty (drafts are per-node).
         let node_b = tze_hud_scene::SceneId::new();
