@@ -157,6 +157,17 @@ pub struct Compositor {
     /// replaces the old one (latest-wins), the old reveal state is discarded and
     /// a new one starts from the beginning of the new breakpoints.
     pub(crate) stream_reveal_states: HashMap<String, StreamRevealState>,
+    /// Per-portal-tile streaming-reveal state (hud-bl7yi).
+    ///
+    /// Keyed by tile `SceneId`. Fades **newly-appended** portal-tile transcript
+    /// content in segment-by-segment via [`StreamFadeRamp`] instead of snapping.
+    /// An entry is held for every scrollable (portal) tile with markdown content
+    /// — settled (non-animating) once its current content is fully revealed —
+    /// so the next frame can diff against the prior plain-text snapshot and start
+    /// a fresh reveal when content grows. Pruned when the tile disappears.
+    ///
+    /// [`StreamFadeRamp`]: crate::renderer::easing::StreamFadeRamp
+    pub(crate) portal_tile_reveal_states: HashMap<SceneId, PortalTileStreamReveal>,
     /// Per-portal-tile smoothed scroll offset (smooth scroll / animated
     /// follow-tail, hud-bq0gl.10).
     ///
@@ -489,6 +500,7 @@ impl Compositor {
             prev_portal_tile_has_content: HashMap::new(),
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
+            portal_tile_reveal_states: HashMap::new(),
             // Headless paths snap scroll (deterministic golden tests).
             scroll_smoothers: HashMap::new(),
             scroll_smoothing_enabled: false,
@@ -767,6 +779,7 @@ impl Compositor {
             prev_portal_tile_has_content: HashMap::new(),
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
+            portal_tile_reveal_states: HashMap::new(),
             // Windowed/live path animates scroll catch-up.
             scroll_smoothers: HashMap::new(),
             scroll_smoothing_enabled: true,

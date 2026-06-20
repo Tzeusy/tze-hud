@@ -356,6 +356,20 @@ impl super::Compositor {
                         item.opacity *= portal_anim;
                     }
                 }
+
+                // Per-segment streaming-reveal fade (hud-bl7yi): while a portal
+                // tile's newly-appended content is revealing, ramp the leading
+                // segment's glyph alpha (StreamFadeRamp) instead of snapping it
+                // in. Steady tiles (`is_revealing() == false`) are untouched, so
+                // their draw output is byte-identical to the no-reveal path.
+                if let Some(reveal) = self.portal_tile_reveal_states.get(&tile.id) {
+                    if reveal.is_revealing() {
+                        let ramp = super::easing::StreamFadeRamp::default();
+                        for item in &mut items[items_before..] {
+                            apply_portal_reveal_fade(item, reveal, ramp);
+                        }
+                    }
+                }
             }
         }
 
@@ -1166,6 +1180,108 @@ impl super::Compositor {
 
 // ─── Module-level text helpers ────────────────────────────────────────────────
 
+/// Apply the per-segment streaming-reveal fade to a portal-tile markdown
+/// [`TextItem`], in place (hud-bl7yi).
+///
+/// Rewrites `item.styled_runs` into a *full-coverage* run list so every laid-out
+/// byte carries an explicit alpha, driven by `reveal.alpha_for_byte`:
+/// - pre-existing / already-revealed bytes keep their original style at full
+///   alpha,
+/// - the leading (currently-fading) segment is dimmed by the [`StreamFadeRamp`],
+/// - not-yet-revealed segments are driven to alpha `0` (laid out, invisible).
+///
+/// Full coverage matters because unstyled gaps would otherwise render at the
+/// item's default color (full alpha) and refuse to fade. Style attributes
+/// (weight/italic/monospace/color/size/background) are inherited from the
+/// original run covering each slice (last-writer-wins, matching the renderer's
+/// run precedence); gaps fall back to the item's base color.
+///
+/// No-op unless the item lays out exactly the snapshot the reveal was anchored
+/// to (guards against truncation/mismatch) and is a cached/styled markdown item
+/// (empty `color_runs`). Slices never straddle a breakpoint, so `alpha_for_byte`
+/// at the slice start is the alpha for the whole slice.
+///
+/// [`StreamFadeRamp`]: super::easing::StreamFadeRamp
+fn apply_portal_reveal_fade(
+    item: &mut TextItem,
+    reveal: &super::draw_cmds::PortalTileStreamReveal,
+    ramp: super::easing::StreamFadeRamp,
+) {
+    use crate::text::{StyledRunItem, apply_opacity_to_color};
+
+    if !reveal.is_revealing() {
+        return;
+    }
+    // The reveal's offsets index the plain-text snapshot it was built from; only
+    // apply when this item lays out that exact text.
+    if item.text.as_ref() != reveal.plain_text.as_ref() {
+        return;
+    }
+    // Pixel-bearing color-run items use raw-content offsets (never reached for
+    // portal cached markdown, but stay safe).
+    if !item.color_runs.is_empty() {
+        return;
+    }
+    let n = item.text.len();
+    if n == 0 {
+        return;
+    }
+
+    // Slice boundaries: existing run edges ∪ breakpoints ∪ reveal_start ∪
+    // endpoints. Every breakpoint is a boundary, so no slice crosses a segment
+    // and the alpha is constant across each slice.
+    let mut bounds: Vec<usize> =
+        Vec::with_capacity(item.styled_runs.len() * 2 + reveal.breakpoints.len() + 3);
+    bounds.push(0);
+    bounds.push(n);
+    let push_bound = |bounds: &mut Vec<usize>, off: usize| {
+        let off = off.min(n);
+        if item.text.is_char_boundary(off) {
+            bounds.push(off);
+        }
+    };
+    push_bound(&mut bounds, reveal.reveal_start);
+    for &b in &reveal.breakpoints {
+        push_bound(&mut bounds, b);
+    }
+    for run in item.styled_runs.iter() {
+        push_bound(&mut bounds, run.start_byte);
+        push_bound(&mut bounds, run.end_byte);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let base = item.color;
+    let mut faded: Vec<StyledRunItem> = Vec::with_capacity(bounds.len());
+    for win in bounds.windows(2) {
+        let (s, e) = (win[0], win[1]);
+        if s >= e {
+            continue;
+        }
+        let alpha = reveal.alpha_for_byte(s, ramp);
+        // Last original run covering `s` supplies the style (last-writer-wins).
+        let style = item
+            .styled_runs
+            .iter()
+            .rev()
+            .find(|r| r.start_byte <= s && s < r.end_byte);
+        let src_color = style.and_then(|r| r.color).unwrap_or(base);
+        faded.push(StyledRunItem {
+            start_byte: s,
+            end_byte: e,
+            weight: style.and_then(|r| r.weight),
+            italic: style.map(|r| r.italic).unwrap_or(false),
+            monospace: style.map(|r| r.monospace).unwrap_or(false),
+            color: Some(apply_opacity_to_color(src_color, alpha)),
+            background_color: style
+                .and_then(|r| r.background_color)
+                .map(|c| apply_opacity_to_color(c, alpha)),
+            size_scale: style.and_then(|r| r.size_scale),
+        });
+    }
+    item.styled_runs = faded.into_boxed_slice();
+}
+
 /// Collect [`TextItem`]s for all `TextOverflow::Ellipsis` nodes reachable from
 /// `node_id`, without scroll offset (prime-time geometry).
 ///
@@ -1269,6 +1385,142 @@ pub(super) fn collect_ellipsis_text_items_from_node(
             node_key_cache,
             markdown_tokens,
             items,
+        );
+    }
+}
+
+#[cfg(test)]
+mod portal_reveal_render_tests {
+    use super::super::draw_cmds::{PortalTileStreamReveal, derive_word_breakpoints};
+    use super::super::easing::{Easing, StreamFadeRamp};
+    use super::apply_portal_reveal_fade;
+    use crate::markdown::{ParsedMarkdown, StyleAttr, StyledSpan};
+    use crate::text::TextItem;
+    use std::sync::Arc;
+    use tze_hud_scene::types::{FontFamily, Rect, Rgba, TextAlign, TextMarkdownNode, TextOverflow};
+
+    fn plain_attr() -> StyleAttr {
+        StyleAttr {
+            weight: None,
+            italic: false,
+            monospace: false,
+            color: None,
+            background_color: None,
+            size_scale: None,
+        }
+    }
+
+    /// Build a cached markdown `TextItem` whose laid-out text == `plain`, with a
+    /// single bold span over the leading `bold_prefix` bytes.
+    fn markdown_item(plain: &str, bold_prefix: usize) -> TextItem {
+        let parsed = ParsedMarkdown {
+            plain_text: Arc::from(plain),
+            spans: vec![StyledSpan {
+                start_byte: 0,
+                end_byte: bold_prefix,
+                attr: StyleAttr {
+                    weight: Some(700),
+                    ..plain_attr()
+                },
+            }],
+            code_panels: vec![],
+            list_items: vec![],
+            line_height_multiplier: 1.4,
+        };
+        let node = TextMarkdownNode {
+            content: plain.to_owned(),
+            bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemSansSerif,
+            color: Rgba::WHITE,
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
+        };
+        TextItem::from_text_markdown_cached(&node, 0.0, 0.0, &parsed)
+    }
+
+    /// Alpha (0..=255) of the styled run covering `byte`, or `None` if uncovered.
+    fn alpha_at(item: &TextItem, byte: usize) -> Option<u8> {
+        item.styled_runs
+            .iter()
+            .rev()
+            .find(|r| r.start_byte <= byte && byte < r.end_byte)
+            .and_then(|r| r.color)
+            .map(|c| c[3])
+    }
+
+    #[test]
+    fn fade_dims_leading_segment_and_hides_unrevealed_tail() {
+        let plain = "old new1 new2";
+        let item = markdown_item(plain, 3); // "old" bold
+        let start = super::super::draw_cmds::common_prefix_len("old ", plain);
+        let bps = derive_word_breakpoints(plain, start);
+        let reveal = PortalTileStreamReveal::new(plain.into(), start, bps);
+        let ramp = StreamFadeRamp::new(Easing::Linear);
+
+        let mut faded = item.clone();
+        apply_portal_reveal_fade(&mut faded, &reveal, ramp);
+
+        // Pre-existing prefix stays fully opaque AND keeps its bold weight.
+        assert_eq!(alpha_at(&faded, 0), Some(255), "prefix must stay opaque");
+        let prefix_run = faded
+            .styled_runs
+            .iter()
+            .find(|r| r.start_byte == 0 && r.end_byte > 0)
+            .unwrap();
+        assert_eq!(prefix_run.weight, Some(700), "prefix style must survive");
+
+        // Leading segment (first appended word) is dimmed at t=0 (alpha 0).
+        assert_eq!(
+            alpha_at(&faded, start),
+            Some(0),
+            "leading starts transparent"
+        );
+        // Not-yet-revealed tail word is fully hidden.
+        assert_eq!(alpha_at(&faded, plain.len() - 1), Some(0), "tail hidden");
+    }
+
+    #[test]
+    fn fade_alpha_increases_with_reveal_progress() {
+        let plain = "x ab cd";
+        let item = markdown_item(plain, 0);
+        let bps = derive_word_breakpoints(plain, 0);
+        let mut reveal = PortalTileStreamReveal::new(plain.into(), 0, bps);
+        let ramp = StreamFadeRamp::new(Easing::Linear);
+
+        let mut a = item.clone();
+        apply_portal_reveal_fade(&mut a, &reveal, ramp);
+        let alpha0 = alpha_at(&a, 0).unwrap();
+
+        reveal.advance();
+        reveal.advance();
+        let mut b = item.clone();
+        apply_portal_reveal_fade(&mut b, &reveal, ramp);
+        let alpha1 = alpha_at(&b, 0).unwrap();
+
+        assert!(
+            alpha1 > alpha0,
+            "leading-segment draw alpha must rise with reveal progress: {alpha1} > {alpha0}"
+        );
+    }
+
+    #[test]
+    fn settled_reveal_leaves_item_untouched() {
+        let plain = "old new1 new2";
+        let item = markdown_item(plain, 3);
+        // A settled (fully-revealed) reveal must be a no-op: steady tiles render
+        // identically to the no-reveal path (deliverable #3).
+        let reveal = PortalTileStreamReveal::settled(plain.into());
+        let ramp = StreamFadeRamp::default();
+
+        let mut after = item.clone();
+        apply_portal_reveal_fade(&mut after, &reveal, ramp);
+        assert_eq!(
+            format!("{:?}", item.styled_runs),
+            format!("{:?}", after.styled_runs),
+            "settled reveal must not alter styled runs"
         );
     }
 }

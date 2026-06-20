@@ -193,6 +193,11 @@ impl Compositor {
         // Update streaming word-by-word reveal state.
         self.update_stream_reveals(scene);
 
+        // Update per-portal-tile streaming-reveal fade state (hud-bl7yi): fades
+        // newly-appended portal-tile content in segment-by-segment instead of
+        // snapping. Mirrors the zone reveal above for the portal-tile path.
+        self.update_portal_tile_reveals(scene);
+
         // Content zones render as a batch after all tiles (above background, below chrome).
         self.render_zone_content(
             scene,
