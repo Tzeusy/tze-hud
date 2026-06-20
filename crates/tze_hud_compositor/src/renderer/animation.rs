@@ -511,4 +511,32 @@ impl Compositor {
         }
         scene.tile_scroll_offset_local(tile_id)
     }
+
+    /// Publish the per-tile *displayed* (smoothed/lagged) scroll offsets into the
+    /// scene so the live hit-test path maps pointer coordinates against the same
+    /// offset the renderer drew with (hud-3lynp).
+    ///
+    /// Must be called once per frame, after [`update_scroll_smoothing`] has
+    /// advanced the smoothers (so the published offsets reflect this frame's
+    /// displayed state) and with `&mut SceneGraph` available.
+    ///
+    /// When smoothing is disabled (headless/snap) this clears any published
+    /// overrides so hit-testing falls back to the authoritative offset and
+    /// deterministic golden tests are unaffected (acceptance: behavior unchanged
+    /// when no smoothing is active).
+    ///
+    /// [`update_scroll_smoothing`]: Compositor::update_scroll_smoothing
+    pub(crate) fn publish_displayed_scroll_offsets(&self, scene: &mut SceneGraph) {
+        if !self.scroll_smoothing_enabled {
+            scene.clear_displayed_tile_scroll_offsets();
+            return;
+        }
+        // Drop overrides for tiles that no longer smooth (no longer scrollable /
+        // removed) so a stale displayed offset can never outlive its smoother.
+        scene.retain_displayed_tile_scroll_offsets(|id| self.scroll_smoothers.contains_key(&id));
+        for (tile_id, smoother) in &self.scroll_smoothers {
+            let (x, y) = smoother.displayed();
+            scene.set_displayed_tile_scroll_offset(*tile_id, x, y);
+        }
+    }
 }

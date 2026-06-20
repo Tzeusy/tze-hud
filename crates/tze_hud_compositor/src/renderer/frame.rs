@@ -320,6 +320,13 @@ impl Compositor {
         let (vertices, textured_cmds, bg_vertex_count) =
             self.build_frame_vertices(scene, sw, sh, &mut telemetry);
 
+        // Publish this frame's displayed (smoothed/lagged) scroll offsets into
+        // the scene so the live hit-test path maps pointer coordinates against
+        // the same offset we just drew with (hud-3lynp). build_frame_vertices
+        // advanced the smoothers above; this records their displayed state.
+        // No-op clear in headless/snap mode.
+        self.publish_displayed_scroll_offsets(scene);
+
         let drag_handles = self.collect_drag_handle_entries(scene, sw, sh);
         let mut drag_handle_vertices: Vec<RectVertex> = Vec::new();
         self.append_drag_handle_vertices(scene, &drag_handles, &mut drag_handle_vertices, sw, sh);

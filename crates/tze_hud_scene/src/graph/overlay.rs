@@ -79,6 +79,23 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub tile_scroll_offsets: HashMap<SceneId, (f32, f32)>,
+    /// Displayed (smoothed/lagged) scroll offsets per tile, published by the
+    /// compositor each frame while windowed scroll smoothing is active.
+    ///
+    /// During an in-flight smoothed scroll the renderer draws tile content at
+    /// the *displayed* offset from its `ScrollSmoother`, which lags the
+    /// authoritative target in [`tile_scroll_offsets`](Self::tile_scroll_offsets).
+    /// The hit-test path consults this map (via
+    /// [`SceneGraph::effective_tile_scroll_offset_local`]) so pointer queries
+    /// map against the same rows the operator actually sees mid-animation
+    /// (hud-3lynp).
+    ///
+    /// Empty in headless/snap mode (smoothing disabled): hit-testing then falls
+    /// back to the authoritative offset, leaving deterministic tests unchanged.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub displayed_tile_scroll_offsets: HashMap<SceneId, (f32, f32)>,
     /// Follow-tail anchor state per tile (used by truncation-mode selection).
     ///
     /// `true` = tile viewport is at the tail of its content stream (use
@@ -160,6 +177,7 @@ impl SceneGraph {
     pub fn clear_tile_scroll_config(&mut self, tile_id: SceneId) {
         self.overlay.tile_scroll_configs.remove(&tile_id);
         self.overlay.tile_scroll_offsets.remove(&tile_id);
+        self.overlay.displayed_tile_scroll_offsets.remove(&tile_id);
     }
 
     /// Get the registered local-first scroll config for a tile.
@@ -184,12 +202,69 @@ impl SceneGraph {
     }
 
     /// Get the current runtime-local scroll offset for a tile.
+    ///
+    /// This is the *authoritative* offset — the scroll target the runtime
+    /// committed. During a smoothed scroll animation the renderer draws at the
+    /// lagged displayed offset instead; use
+    /// [`effective_tile_scroll_offset_local`](Self::effective_tile_scroll_offset_local)
+    /// for pointer mapping so input and render agree.
     pub fn tile_scroll_offset_local(&self, tile_id: SceneId) -> (f32, f32) {
         self.overlay
             .tile_scroll_offsets
             .get(&tile_id)
             .copied()
             .unwrap_or((0.0, 0.0))
+    }
+
+    /// Publish the displayed (smoothed/lagged) scroll offset for a tile.
+    ///
+    /// Called by the compositor once per frame, after advancing the per-tile
+    /// `ScrollSmoother`s, so the hit-test path can map pointer coordinates
+    /// against the same offset the renderer drew with (hud-3lynp). Only invoked
+    /// while windowed scroll smoothing is active.
+    pub fn set_displayed_tile_scroll_offset(
+        &mut self,
+        tile_id: SceneId,
+        offset_x: f32,
+        offset_y: f32,
+    ) {
+        self.overlay
+            .displayed_tile_scroll_offsets
+            .insert(tile_id, (offset_x, offset_y));
+    }
+
+    /// Drop all published displayed scroll offsets.
+    ///
+    /// Called by the compositor when scroll smoothing is disabled (headless /
+    /// snap) so hit-testing falls back to the authoritative offset.
+    pub fn clear_displayed_tile_scroll_offsets(&mut self) {
+        self.overlay.displayed_tile_scroll_offsets.clear();
+    }
+
+    /// Retain only the displayed scroll offsets whose tile satisfies `keep`.
+    ///
+    /// Lets the compositor prune overrides for tiles that no longer have an
+    /// active smoother (no longer scrollable / removed) each frame.
+    pub fn retain_displayed_tile_scroll_offsets<F: FnMut(SceneId) -> bool>(&mut self, mut keep: F) {
+        self.overlay
+            .displayed_tile_scroll_offsets
+            .retain(|id, _| keep(*id));
+    }
+
+    /// Get the *effective* tile-local scroll offset for pointer mapping.
+    ///
+    /// Returns the displayed (smoothed/lagged) offset when the compositor has
+    /// published one for this tile (i.e. a smoothed scroll is in flight);
+    /// otherwise falls back to the authoritative
+    /// [`tile_scroll_offset_local`](Self::tile_scroll_offset_local). This is the
+    /// offset the hit-test path uses so input and render agree during animation
+    /// (hud-3lynp).
+    pub fn effective_tile_scroll_offset_local(&self, tile_id: SceneId) -> (f32, f32) {
+        self.overlay
+            .displayed_tile_scroll_offsets
+            .get(&tile_id)
+            .copied()
+            .unwrap_or_else(|| self.tile_scroll_offset_local(tile_id))
     }
 
     // ─── Follow-tail anchor ───────────────────────────────────────────────
