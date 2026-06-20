@@ -1468,6 +1468,159 @@ pub fn proto_to_widget_registry_snapshot(
     }
 }
 
+// ─── In-process portal render-batch apply ──────────────────────────────────────
+
+/// Apply a portal-content [`proto::session::MutationBatch`] directly to a
+/// [`SceneGraph`] for the in-process cooperative projection driver.
+///
+/// The gRPC/wire portal family renders content by *sending*
+/// `ResidentGrpcPortalAdapter::render_batch`'s output over the session stream,
+/// where the session server converts it and calls [`SceneGraph::apply_batch`].
+/// The in-process driver owns the [`SceneGraph`] directly and already knows the
+/// real tile [`SceneId`] (returned from its own `create_tile`) and the owning
+/// `namespace`, so it applies the equivalent scene mutations here — no
+/// element-store lookup, lease decode, or tile-id byte round-trip required. This
+/// is the missing render step that left cooperative projections painting an
+/// empty grey tile (hud-utbiy): the driver created and tracked the tile but
+/// never turned `render_batch` content into scene nodes.
+///
+/// Applied variants are exactly those `render_batch` emits:
+/// - `PublishToTile.node` → [`SceneGraph::set_tile_root_checked`] (the transcript
+///   markdown root — the actual visible content).
+/// - `UpdateTileInputMode` → [`SceneGraph::update_tile_input_mode`].
+/// - `SetTileLifecycleAccent` → [`SceneGraph::set_tile_lifecycle_accent`] /
+///   [`SceneGraph::clear_tile_lifecycle_accent`].
+/// - `AddNode` → [`SceneGraph::add_node_to_tile_checked`] (the composer hit
+///   region, present only when interaction is enabled).
+///
+/// Tile geometry (`PublishToTile.bounds`) is intentionally NOT applied: the
+/// in-process driver owns tile placement and scroll geometry (it sizes the tile
+/// on create and tracks content/viewport height through
+/// `notify_tile_content_appended`). Re-applying the adapter's static config
+/// bounds here would fight that path, so bounds are left to the driver.
+///
+/// The `tile_id` and `namespace` are supplied by the caller and authoritative;
+/// any tile-id bytes carried in the proto mutations are ignored. Per-mutation
+/// failures are logged and skipped rather than aborting the whole batch,
+/// mirroring the session server's per-variant warn-and-skip on malformed input.
+pub fn apply_portal_render_batch_to_scene(
+    scene: &mut SceneGraph,
+    tile_id: SceneId,
+    namespace: &str,
+    batch: &proto::session::MutationBatch,
+) {
+    use crate::proto::mutation_proto::Mutation;
+
+    for m in &batch.mutations {
+        match &m.mutation {
+            Some(Mutation::PublishToTile(pt)) => {
+                // Bounds are deliberately skipped (driver owns geometry). Only the
+                // content root node is applied — this is the transcript paint.
+                let Some(node_proto) = pt.node.as_ref() else {
+                    continue;
+                };
+                match proto_node_to_scene(node_proto) {
+                    Some(node) => {
+                        if let Err(e) = scene.set_tile_root_checked(tile_id, node, namespace) {
+                            tracing::warn!(
+                                ?e,
+                                "portal in-process apply: SetTileRoot failed — content not painted"
+                            );
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "portal in-process apply: PublishToTile node invalid; content skipped"
+                        );
+                    }
+                }
+            }
+            Some(Mutation::UpdateTileInputMode(utim)) => {
+                let input_mode = proto_input_mode_to_scene(
+                    proto::TileInputModeProto::try_from(utim.input_mode)
+                        .unwrap_or(proto::TileInputModeProto::TileInputModeUnspecified),
+                );
+                if let Err(e) = scene.update_tile_input_mode(tile_id, input_mode, namespace) {
+                    tracing::warn!(?e, "portal in-process apply: UpdateTileInputMode failed");
+                }
+            }
+            Some(Mutation::SetTileLifecycleAccent(sla)) => {
+                // Absent / zero-alpha color or non-positive width = clear (mirrors
+                // the session-server SetTileLifecycleAccent conversion).
+                let accent = sla.color.as_ref().and_then(|c| {
+                    (sla.width_px > 0.0 && c.a > 0.0).then(|| LifecycleAccent {
+                        color: proto_rgba_to_scene(c),
+                        width_px: sla.width_px,
+                    })
+                });
+                match accent {
+                    Some(accent) => {
+                        if let Err(e) = scene.set_tile_lifecycle_accent(tile_id, accent) {
+                            tracing::warn!(
+                                ?e,
+                                "portal in-process apply: SetTileLifecycleAccent failed"
+                            );
+                        }
+                    }
+                    None => scene.clear_tile_lifecycle_accent(tile_id),
+                }
+            }
+            Some(Mutation::AddNode(an)) => {
+                // parent_id is big-endian RFC 4122 bytes (render_batch uses the
+                // root node's `as_bytes()`); the root node's own id was encoded
+                // little-endian and decoded as such by `proto_node_to_scene`, so
+                // both resolve to the same UUID and the composer node parents the
+                // markdown root. An empty parent_id means "attach to tile root".
+                let parent_id = if an.parent_id.is_empty() {
+                    None
+                } else {
+                    match scene_id_from_be_bytes(&an.parent_id) {
+                        Some(id) => Some(id),
+                        None => {
+                            tracing::warn!(
+                                parent_id_len = an.parent_id.len(),
+                                "portal in-process apply: AddNode invalid parent_id; skipped"
+                            );
+                            continue;
+                        }
+                    }
+                };
+                let Some(node_proto) = an.node.as_ref() else {
+                    continue;
+                };
+                match proto_node_to_scene(node_proto) {
+                    Some(node) => {
+                        if let Err(e) =
+                            scene.add_node_to_tile_checked(tile_id, parent_id, node, namespace)
+                        {
+                            tracing::warn!(?e, "portal in-process apply: AddNode failed");
+                        }
+                    }
+                    None => {
+                        tracing::warn!("portal in-process apply: AddNode node invalid; skipped");
+                    }
+                }
+            }
+            // `ResidentGrpcPortalAdapter::render_batch` is the SOLE producer of the
+            // batches reaching here and emits only the four variants matched above.
+            // Any other variant is silently ignored: if render_batch ever grows a
+            // new variant, add an explicit arm here (and a paint assertion in
+            // `drain_paints_published_transcript_onto_tile`) so it is not dropped.
+            _ => {}
+        }
+    }
+}
+
+/// Decode a 16-byte big-endian (RFC 4122) UUID into a [`SceneId`].
+///
+/// Returns `None` if `bytes` is not exactly 16 bytes. Mirrors the session
+/// server's `bytes_to_scene_id` (which decodes `parent_id` the same way) so the
+/// in-process apply path resolves AddNode parents identically to the wire path.
+fn scene_id_from_be_bytes(bytes: &[u8]) -> Option<SceneId> {
+    let arr: [u8; 16] = bytes.try_into().ok()?;
+    Some(SceneId::from_uuid(uuid::Uuid::from_bytes(arr)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

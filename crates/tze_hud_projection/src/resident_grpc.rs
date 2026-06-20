@@ -702,7 +702,20 @@ impl ResidentGrpcPortalAdapter {
         }
     }
 
-    fn render_batch(
+    /// Build the portal-content `MutationBatch` for the given projected state.
+    ///
+    /// This is the single render path shared by both adapter families: the
+    /// gRPC/wire family wraps it in a `ClientMessage` (`ensure_portal_tile_message`
+    /// / `render_portal_message`) and sends it over the session stream, while the
+    /// in-process cooperative driver applies it directly to the `SceneGraph` via
+    /// `tze_hud_protocol::convert::apply_portal_render_batch_to_scene`. It is
+    /// `pub` so the runtime driver can ask the adapter to render content rather
+    /// than only counting transcript lines for geometry (the cooperative
+    /// grey-tile fix, hud-utbiy).
+    ///
+    /// Requires `record_created_tile` to have been called first (returns
+    /// [`ResidentGrpcAdapterError::MissingPortalTile`] otherwise).
+    pub fn render_batch(
         &self,
         state: &ProjectedPortalState,
     ) -> Result<session_proto::MutationBatch, ResidentGrpcAdapterError> {
