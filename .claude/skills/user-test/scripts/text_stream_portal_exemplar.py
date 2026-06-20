@@ -2618,9 +2618,20 @@ def build_cadence_rtt_evidence(
 
     Each `appends` entry carries `publish_ms` and (when the runtime reported a
     present) `present_ms`; this derives `present_latency_ms` and the
-    runtime-added `overhead_ms = present_latency_ms - rtt_baseline_ms` (floored
-    at 0). Spec §"runtime overhead beyond transport RTT is bounded and
-    evidenced" requires presented appends to stay within the high_mutation
+    runtime-added ``overhead_ms``.
+
+    Runtime overhead is isolated PER CYCLE: ``overhead_ms = present_latency_ms -
+    rtt_ms`` (this cycle's own measured transport RTT), floored at 0. Subtracting
+    a single FIXED ``rtt_baseline_ms`` instead conflated per-cycle transport RTT
+    jitter with runtime cost — cycles whose transport RTT spiked above the
+    baseline were mis-scored as runtime budget failures even though the runtime
+    added ~0ms above its own per-cycle round-trip (hud-lod76, root-caused in
+    hud-ans49 against hud-ofe76 live evidence). The fixed ``rtt_baseline_ms`` is
+    still reported as ``transport_rtt_baseline_ms`` for context and is used as a
+    fallback only when an append lacks a per-cycle ``rtt_ms`` sample.
+
+    Spec §"runtime overhead beyond transport RTT is bounded and evidenced"
+    requires presented appends to stay within the high_mutation
     input-to-next-present budget; appends with no present (coalesced away) are
     excluded from the budget check per that requirement.
     """
@@ -2640,9 +2651,18 @@ def build_cadence_rtt_evidence(
             coalesced += 1
         else:
             present_latency = max(0.0, float(present_ms) - publish_ms)
-            overhead = max(0.0, present_latency - baseline)
+            # Isolate RUNTIME overhead using THIS cycle's own measured RTT, not
+            # the fixed baseline, so transport jitter is not charged to the
+            # runtime. Fall back to the baseline only when a per-cycle sample is
+            # absent (e.g. legacy evidence with no rtt_ms).
+            cycle_rtt = out.get("rtt_ms")
+            overhead_baseline = (
+                max(0.0, float(cycle_rtt)) if cycle_rtt is not None else baseline
+            )
+            overhead = max(0.0, present_latency - overhead_baseline)
             out["presented"] = True
             out["present_latency_ms"] = round(present_latency, 3)
+            out["overhead_baseline_ms"] = round(overhead_baseline, 3)
             out["overhead_ms"] = round(overhead, 3)
             out["within_present_budget"] = overhead <= present_budget_ms
             presented_overheads.append(overhead)
@@ -4341,6 +4361,9 @@ async def run_cadence(
             "body_lines": end,
             "publish_ms": round(publish_ms, 3),
             "present_ms": round(present_ms, 3),
+            # Per-cycle transport RTT used to isolate runtime overhead from
+            # transport jitter in build_cadence_rtt_evidence (hud-lod76).
+            "rtt_ms": round(rtt_ms, 3),
         })
 
         emit_step_event(transcript, 10, "checkpoint", {
