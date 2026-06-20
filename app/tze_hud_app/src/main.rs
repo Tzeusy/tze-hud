@@ -538,19 +538,16 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
             }
             "--resident-grpc-endpoint" => {
                 i += 1;
-                opts.resident_grpc_endpoint = Some(
-                    args.get(i)
-                        .cloned()
-                        .ok_or_else(|| "--resident-grpc-endpoint requires a URL argument".to_string())?,
-                );
+                opts.resident_grpc_endpoint = Some(args.get(i).cloned().ok_or_else(|| {
+                    "--resident-grpc-endpoint requires a URL argument".to_string()
+                })?);
                 opts.resident_grpc_portal_enabled = true;
             }
             "--resident-grpc-agent-id" => {
                 i += 1;
-                opts.resident_grpc_agent_id = args
-                    .get(i)
-                    .cloned()
-                    .ok_or_else(|| "--resident-grpc-agent-id requires an id argument".to_string())?;
+                opts.resident_grpc_agent_id = args.get(i).cloned().ok_or_else(|| {
+                    "--resident-grpc-agent-id requires an id argument".to_string()
+                })?;
                 opts.resident_grpc_portal_enabled = true;
             }
             "--resident-grpc-lease-ttl" => {
@@ -565,11 +562,10 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
             }
             "--resident-grpc-psk" => {
                 i += 1;
-                opts.resident_grpc_psk = Some(
-                    args.get(i)
-                        .cloned()
-                        .ok_or_else(|| "--resident-grpc-psk requires a key argument".to_string())?,
-                );
+                opts.resident_grpc_psk =
+                    Some(args.get(i).cloned().ok_or_else(|| {
+                        "--resident-grpc-psk requires a key argument".to_string()
+                    })?);
                 opts.resident_grpc_portal_enabled = true;
             }
             flag if flag.starts_with('-') => {
@@ -611,6 +607,26 @@ fn build_resident_grpc_portal_settings(
             .map(ResidentGrpcCredentialSource::Psk)
             .unwrap_or(ResidentGrpcCredentialSource::RuntimePsk),
     })
+}
+
+/// Returns a copy of `args` with the value following `--resident-grpc-psk` replaced
+/// by `<redacted>` so startup diagnostic logs never capture the secret in plain text.
+fn redact_sensitive_args(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--resident-grpc-psk" {
+            out.push(args[i].clone());
+            i += 1;
+            if i < args.len() {
+                out.push("<redacted>".to_string());
+            }
+        } else {
+            out.push(args[i].clone());
+        }
+        i += 1;
+    }
+    out
 }
 
 fn parse_window_mode(s: &str) -> Result<WindowMode, String> {
@@ -841,6 +857,7 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
     };
 
     // Diagnostic: write resolved config to disk so we can verify args were parsed.
+    // PSK is redacted so the log file never captures the secret in plain text.
     let diag = format!(
         "mode={} width={} height={} auto_size={} grpc={} mcp={}\nargs={:?}\n",
         opts.window_mode,
@@ -849,7 +866,7 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
         overlay_auto_size,
         opts.grpc_port,
         opts.mcp_port,
-        std::env::args().collect::<Vec<_>>(),
+        redact_sensitive_args(std::env::args().collect()),
     );
     let _ = std::fs::write("C:\\tze_hud\\logs\\startup_diag.txt", &diag);
 
@@ -1724,7 +1741,10 @@ profile = "full-display"
         };
         let settings = build_resident_grpc_portal_settings(&opts)
             .expect("portal settings must be Some when enabled");
-        assert_eq!(settings.credential, ResidentGrpcCredentialSource::RuntimePsk);
+        assert_eq!(
+            settings.credential,
+            ResidentGrpcCredentialSource::RuntimePsk
+        );
     }
 
     /// Wire-through: portal disabled returns None.
@@ -1732,5 +1752,43 @@ profile = "full-display"
     fn parse_options_resident_grpc_wire_through_disabled_is_none() {
         let opts = StartupOptions::default();
         assert!(build_resident_grpc_portal_settings(&opts).is_none());
+    }
+
+    // ── redact_sensitive_args (hud-9bi85) ─────────────────────────────────────
+
+    /// `--resident-grpc-psk` value is replaced with `<redacted>`.
+    #[test]
+    fn redact_sensitive_args_redacts_psk_value() {
+        let args = vec![
+            "tze_hud".to_string(),
+            "--resident-grpc-psk".to_string(),
+            "super-secret".to_string(),
+            "--resident-grpc-portal".to_string(),
+        ];
+        let redacted = redact_sensitive_args(args);
+        assert_eq!(redacted[1], "--resident-grpc-psk");
+        assert_eq!(redacted[2], "<redacted>");
+        assert_eq!(redacted[3], "--resident-grpc-portal");
+    }
+
+    /// Args without `--resident-grpc-psk` are returned unchanged.
+    #[test]
+    fn redact_sensitive_args_passthrough_when_no_psk() {
+        let args = vec![
+            "tze_hud".to_string(),
+            "--resident-grpc-portal".to_string(),
+            "--resident-grpc-endpoint".to_string(),
+            "http://10.0.0.1:50051".to_string(),
+        ];
+        let expected = args.clone();
+        assert_eq!(redact_sensitive_args(args), expected);
+    }
+
+    /// Trailing `--resident-grpc-psk` with no following value does not panic.
+    #[test]
+    fn redact_sensitive_args_trailing_psk_flag_does_not_panic() {
+        let args = vec!["tze_hud".to_string(), "--resident-grpc-psk".to_string()];
+        let redacted = redact_sensitive_args(args);
+        assert_eq!(redacted, vec!["tze_hud", "--resident-grpc-psk"]);
     }
 }
