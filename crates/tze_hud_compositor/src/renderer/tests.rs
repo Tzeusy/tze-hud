@@ -10777,6 +10777,112 @@ async fn portal_tile_fade_out_starts_on_content_removal() {
     );
 }
 
+/// Interrupting a portal-tile fade-out with a restore must seed the new
+/// fade-in from the **eased (on-screen) opacity**, not the linear
+/// `current_opacity()` (hud-uir0w).
+///
+/// Portal tiles are *displayed* through the EaseInOut curve
+/// (`portal_tile_anim_opacity`). If the interrupt path seeded the fade-in from
+/// the linear value, the next fade-in would start at a different opacity than
+/// the frame just rendered — a visible jump. This test drives a fade-out to a
+/// progress point where the eased opacity and the linear opacity differ
+/// meaningfully (t = 0.25: eased ≈ 0.844 vs linear = 0.750), interrupts it with
+/// a restore, and asserts the new fade-in's start opacity matches the displayed
+/// eased value, not the linear one. The continuity guarantee follows directly:
+/// the new fade-in (also displayed eased) begins at the exact opacity on screen
+/// at interruption.
+///
+/// GPU required (for `Compositor::new_headless`); skips gracefully when no
+/// adapter is available.
+#[tokio::test]
+async fn portal_tile_interrupt_seeds_fade_in_from_eased_opacity() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+    compositor
+        .token_map
+        .insert("portal.transition.in_ms".to_string(), "200".to_string());
+
+    // Scrollable tile WITH content present this frame (content was restored).
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let tab_id = scene.create_tab("portal-interrupt", 0).unwrap();
+    let lease_id = scene.grant_lease("portal-interrupt", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "portal-interrupt",
+            lease_id,
+            Rect::new(0.0, 0.0, 256.0, 256.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+        .unwrap();
+    let node = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::SolidColor(SolidColorNode {
+            color: Rgba::WHITE,
+            radius: None,
+            bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+        }),
+    };
+    scene.set_tile_root(tile_id, node).unwrap();
+
+    // Previous frame: tile had NO content, so this frame is an appear (restore).
+    compositor
+        .prev_portal_tile_has_content
+        .insert(tile_id, false);
+
+    // Seed an in-flight fade-out, back-dated to 25% progress (50 ms of a 200 ms
+    // fade) so eased and linear opacity are clearly distinguishable.
+    let mut fade_out = ZoneAnimationState::fade_out(200);
+    fade_out.transition_start = std::time::Instant::now() - std::time::Duration::from_millis(50);
+    compositor.portal_tile_anim_states.insert(tile_id, fade_out);
+
+    // Opacity actually on screen at interruption (eased) vs the linear value.
+    let displayed_eased = compositor.portal_tile_anim_opacity(tile_id);
+    let linear = compositor.portal_tile_anim_states[&tile_id].current_opacity();
+
+    // Sanity: the two must differ enough for the assertion below to be meaningful.
+    assert!(
+        (displayed_eased - linear).abs() > 0.05,
+        "test setup: eased ({displayed_eased}) and linear ({linear}) opacity must differ"
+    );
+
+    // Interrupt: content restored mid fade-out.
+    compositor.update_portal_tile_animations(&scene);
+
+    let state = compositor
+        .portal_tile_anim_states
+        .get(&tile_id)
+        .expect("portal animation state must exist after interrupt fade-in");
+    assert_eq!(
+        state.target_opacity, 1.0,
+        "interrupt must produce a fade-in (target_opacity 1.0)"
+    );
+
+    // The new fade-in must start from the eased (displayed) opacity, NOT linear.
+    assert!(
+        (state.from_opacity - displayed_eased).abs() < 0.02,
+        "fade-in must seed from eased/displayed opacity ~{displayed_eased}, got {}",
+        state.from_opacity
+    );
+    assert!(
+        (state.from_opacity - linear).abs() > 0.05,
+        "fade-in must NOT seed from linear opacity {linear}, got {}",
+        state.from_opacity
+    );
+
+    // Continuity: the first displayed frame of the new fade-in (eased at t≈0)
+    // equals the opacity that was on screen at interruption — no jump.
+    let post_interrupt_displayed = compositor.portal_tile_anim_opacity(tile_id);
+    assert!(
+        (post_interrupt_displayed - displayed_eased).abs() < 0.02,
+        "displayed opacity must be continuous across interrupt: was {displayed_eased}, now {post_interrupt_displayed}"
+    );
+}
+
 /// Non-scrollable tiles must NOT get portal animation states.
 ///
 /// Ensures `update_portal_tile_animations` only affects tiles with a
