@@ -1119,7 +1119,11 @@ impl InProcessPortalDriver {
             // snapshot is acceptable (state is coalesced/latest-relevant). No-op
             // when the bridge is not wired (default).
             if let Some(tx) = &self.resident_grpc_bridge_tx {
-                let _ = tx.try_send((proj_id.clone(), state.clone()));
+                // Skip the clone+alloc on the hot winit thread when the bridge task
+                // has already exited or never connected (closed receiver).
+                if !tx.is_closed() {
+                    let _ = tx.try_send((proj_id.clone(), state.clone()));
+                }
             }
 
             // Check if the drive entry exists and what kind of command to issue.

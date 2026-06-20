@@ -411,6 +411,14 @@ impl ResidentGrpcPortalBridge {
                 .map_err(|e| ResidentGrpcBridgeError::Transport(e.to_string()))?;
             match msg.payload {
                 Some(ServerPayload::LeaseResponse(resp)) => return Ok(resp),
+                // A terminal session error must fail fast rather than blocking the
+                // read loop forever waiting for a LeaseResponse that will never come.
+                Some(ServerPayload::SessionError(err)) => {
+                    return Err(ResidentGrpcBridgeError::Handshake(format!(
+                        "session error while awaiting LeaseResponse: {}: {}",
+                        err.code, err.message
+                    )));
+                }
                 // LeaseStateChange / SceneSnapshot may interleave; keep reading.
                 _ => continue,
             }
@@ -431,6 +439,14 @@ impl ResidentGrpcPortalBridge {
             match msg.payload {
                 Some(ServerPayload::MutationResult(result)) if result.batch_id == batch_id => {
                     return Ok(result);
+                }
+                // A terminal session error must fail fast rather than blocking the
+                // read loop forever waiting for a MutationResult that will never come.
+                Some(ServerPayload::SessionError(err)) => {
+                    return Err(ResidentGrpcBridgeError::Handshake(format!(
+                        "session error while awaiting MutationResult: {}: {}",
+                        err.code, err.message
+                    )));
                 }
                 _ => continue,
             }
