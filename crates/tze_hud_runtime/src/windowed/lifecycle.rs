@@ -1701,8 +1701,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&contents).expect("output must be valid JSON");
         assert_eq!(
-            json["schema"],
-            "tze_hud.windowed_compositor_benchmark.v1",
+            json["schema"], "tze_hud.windowed_compositor_benchmark.v1",
             "schema field must be present"
         );
         let abort = &json["watchdog_abort"];
