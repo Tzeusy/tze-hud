@@ -24,7 +24,9 @@
 //! Profile selection is frozen at startup. The resolved profile is immutable
 //! once validated. Profile changes require restart. Auto-detection runs once.
 
-use tze_hud_scene::config::{ConfigError, ConfigErrorCode, DisplayProfile};
+use tze_hud_scene::config::{
+    ConfigError, ConfigErrorCode, DEFAULT_MAX_TRUNCATION_INPUT_BYTES, DisplayProfile,
+};
 
 use crate::raw::{RawConfig, RawDisplayProfile};
 
@@ -46,6 +48,7 @@ fn mobile_budget() -> DisplayProfile {
         min_fps: 15,
         allow_background_zones: false,
         allow_chrome_zones: false,
+        max_truncation_input_bytes: DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
     }
 }
 
@@ -197,6 +200,9 @@ pub(crate) fn profile_ceiling_for_validation(raw: &RawConfig) -> Option<DisplayP
                 allow_chrome_zones: dp
                     .and_then(|d| d.allow_chrome_zones)
                     .unwrap_or(base.allow_chrome_zones),
+                max_truncation_input_bytes: dp
+                    .and_then(|d| d.max_truncation_input_bytes)
+                    .unwrap_or(base.max_truncation_input_bytes),
             };
             Some(ceiling)
         }
@@ -465,6 +471,15 @@ fn resolve_custom_profile(raw: &RawConfig) -> Result<DisplayProfile, Vec<ConfigE
             .allow_background_zones
             .unwrap_or(base.allow_background_zones),
         allow_chrome_zones: dp.allow_chrome_zones.unwrap_or(base.allow_chrome_zones),
+        // Per-surface truncation-input tuning knob. Deliberately NOT subject to
+        // budget-escalation validation: unlike resource ceilings (max_tiles,
+        // max_texture_mb) it does not protect other agents' resources — it is a
+        // bidirectional performance knob operators may raise on capable hosts or
+        // lower on constrained ones. Falls back to the base profile's value
+        // (DEFAULT_MAX_TRUNCATION_INPUT_BYTES) when unset.
+        max_truncation_input_bytes: dp
+            .max_truncation_input_bytes
+            .unwrap_or(base.max_truncation_input_bytes),
     };
 
     Ok(resolved)
@@ -614,6 +629,71 @@ mod tests {
         assert_eq!(
             resolved.max_texture_mb, mobile.max_texture_mb,
             "custom extends mobile should use mobile max_texture_mb"
+        );
+    }
+
+    // ── max_truncation_input_bytes (hud-59p2z) ───────────────────────────────
+
+    /// Built-in profiles default the truncation-input bound to 4096.
+    #[test]
+    fn builtin_profiles_default_max_truncation_input_bytes() {
+        assert_eq!(
+            DisplayProfile::full_display().max_truncation_input_bytes,
+            DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+        );
+        assert_eq!(
+            DisplayProfile::headless().max_truncation_input_bytes,
+            DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+        );
+        assert_eq!(DEFAULT_MAX_TRUNCATION_INPUT_BYTES, 4096);
+    }
+
+    /// A custom profile that omits `max_truncation_input_bytes` keeps the base
+    /// profile's default (preserving the historical 4096-byte behaviour).
+    #[test]
+    fn custom_profile_unset_truncation_bytes_preserves_default() {
+        let raw = RawConfig {
+            runtime: Some(RawRuntime {
+                profile: Some("custom".into()),
+                ..Default::default()
+            }),
+            display_profile: Some(RawDisplayProfile {
+                extends: Some("full-display".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve_custom_profile(&raw).expect("should resolve");
+        assert_eq!(
+            resolved.max_truncation_input_bytes, DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+            "unset override must fall back to the base profile default"
+        );
+    }
+
+    /// A custom profile may tune `max_truncation_input_bytes` to a non-default
+    /// value, and the override reaches the resolved profile verbatim.
+    #[test]
+    fn custom_profile_overrides_truncation_bytes() {
+        let raw = RawConfig {
+            runtime: Some(RawRuntime {
+                profile: Some("custom".into()),
+                ..Default::default()
+            }),
+            display_profile: Some(RawDisplayProfile {
+                extends: Some("full-display".into()),
+                max_truncation_input_bytes: Some(16384),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve_custom_profile(&raw).expect("should resolve");
+        assert_eq!(
+            resolved.max_truncation_input_bytes, 16384,
+            "configured override must reach the resolved profile"
+        );
+        assert_ne!(
+            resolved.max_truncation_input_bytes, DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+            "test must exercise a non-default bound"
         );
     }
 

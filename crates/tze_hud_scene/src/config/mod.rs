@@ -106,6 +106,18 @@ pub struct ParseError {
 
 // ─── Built-in Profiles ────────────────────────────────────────────────────────
 
+/// Default per-surface bound on the bytes a single uncached truncation may
+/// shape before the compositor's viewport-adjacent-window fallback engages
+/// (spec.md §324/§331).
+///
+/// This mirrors `tze_hud_compositor::overflow::DEFAULT_MAX_TRUNCATION_INPUT_BYTES`:
+/// the compositor's `TruncationCache` falls back to this same value when no
+/// profile-supplied bound is applied, so an unset `[display_profile]` preserves
+/// the historical 4096-byte behaviour. The value sits well below the ~8 KiB
+/// point where the `overflow_truncate` benchmark first exceeds the Stage-5
+/// Layout Resolve budget (< 1 ms).
+pub const DEFAULT_MAX_TRUNCATION_INPUT_BYTES: u32 = 4096;
+
 /// A resolved display profile with its budget values.
 ///
 /// From spec §Requirement: Display Profile full-display and related.
@@ -124,6 +136,17 @@ pub struct DisplayProfile {
     pub min_fps: u32,
     pub allow_background_zones: bool,
     pub allow_chrome_zones: bool,
+    /// Per-surface bound on the bytes a single uncached truncation may shape
+    /// before the compositor's viewport-adjacent-window fallback restricts the
+    /// shaped input to a viewport-adjacent window of whole source lines
+    /// (spec.md §324/§331).
+    ///
+    /// Operators tune this per surface via `[display_profile]
+    /// max_truncation_input_bytes`: lower it on constrained hosts to keep a
+    /// single uncached truncation inside the Stage-5 Layout Resolve budget, or
+    /// raise it on capable hosts that can afford shaping a larger committed
+    /// transcript. Defaults to [`DEFAULT_MAX_TRUNCATION_INPUT_BYTES`].
+    pub max_truncation_input_bytes: u32,
 }
 
 impl DisplayProfile {
@@ -139,6 +162,7 @@ impl DisplayProfile {
             min_fps: 30,
             allow_background_zones: true,
             allow_chrome_zones: true,
+            max_truncation_input_bytes: DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
         }
     }
 
@@ -154,6 +178,7 @@ impl DisplayProfile {
             min_fps: 1,
             allow_background_zones: false,
             allow_chrome_zones: false,
+            max_truncation_input_bytes: DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
         }
     }
 }

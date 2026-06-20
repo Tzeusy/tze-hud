@@ -199,11 +199,20 @@ impl TruncationCache {
     }
 
     /// Override the `max_truncation_input_bytes` bound for the
-    /// viewport-adjacent-window fallback.  Used by configuration and tests; the
+    /// viewport-adjacent-window fallback.  Called from
+    /// [`super::Compositor::set_max_truncation_input_bytes`] when the runtime
+    /// applies the resolved `DisplayProfile::max_truncation_input_bytes`; the
     /// default is [`overflow::DEFAULT_MAX_TRUNCATION_INPUT_BYTES`].
-    #[allow(dead_code)] // wired by config / exercised in tests
     pub(crate) fn set_max_truncation_input_bytes(&mut self, bytes: usize) {
         self.max_truncation_input_bytes = bytes;
+    }
+
+    /// The current `max_truncation_input_bytes` bound governing the
+    /// viewport-adjacent-window fallback in [`TruncationCache::prime`].
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn max_truncation_input_bytes(&self) -> usize {
+        self.max_truncation_input_bytes
     }
 
     /// Number of cached entries.
@@ -5438,6 +5447,130 @@ mod tests {
             first.y >= pixel_y,
             "hud-9ieev: quad y ({}) must be >= item pixel_y ({pixel_y})",
             first.y
+        );
+    }
+
+    // ── max_truncation_input_bytes wiring (hud-59p2z) ─────────────────────────
+
+    /// The setter updates the cache's bound; a fresh cache starts at the
+    /// compositor default (4096).
+    #[test]
+    fn set_max_truncation_input_bytes_reaches_cache() {
+        let mut cache = TruncationCache::new();
+        assert_eq!(
+            cache.max_truncation_input_bytes(),
+            overflow::DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+            "fresh cache must use the compositor default bound"
+        );
+        cache.set_max_truncation_input_bytes(1024);
+        assert_eq!(
+            cache.max_truncation_input_bytes(),
+            1024,
+            "configured bound must reach the cache"
+        );
+    }
+
+    /// A configured non-default bound changes which input the truncation cache
+    /// shapes: at the default (4096) a sub-4096 transcript is shaped whole, but
+    /// at a smaller configured bound (1024) the viewport-adjacent-window
+    /// fallback restricts the shaped input — and the cache shapes exactly that
+    /// window.
+    #[test]
+    fn configured_bound_changes_truncation_fallback_input() {
+        // A multi-line transcript whose total size sits strictly between the
+        // small configured bound (1024) and the default bound (4096), so the
+        // fallback engages only at the configured bound.
+        let line = "The quick brown fox jumps over the lazy dog and keeps on running.";
+        let content = vec![line; 40].join("\n");
+        assert!(
+            content.len() > 1024 && content.len() < 4096,
+            "fixture must straddle the two bounds; got {} bytes",
+            content.len()
+        );
+
+        let bounds_w = 600.0_f32;
+        let bounds_h = 80.0_f32; // only a few visible lines
+        let font_size = 16.0_f32;
+        let family = FontFamily::SystemSansSerif;
+        let weight = 400u16;
+        let lhm = 1.4_f32;
+        let line_height = font_size * lhm;
+        let vp = TruncationViewport::HeadAnchored;
+
+        // Default bound: input is under 4096 → NOT windowed (whole input shaped).
+        let full_window = overflow::viewport_adjacent_input(
+            &content,
+            bounds_h,
+            line_height,
+            vp,
+            overflow::DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+            overflow::TRUNCATION_OVERSCAN_LINES,
+        );
+        assert_eq!(
+            full_window,
+            content.as_str(),
+            "default bound must not window a sub-4096 transcript"
+        );
+
+        // Configured bound: input exceeds 1024 → windowed to a shorter slice.
+        let small_window = overflow::viewport_adjacent_input(
+            &content,
+            bounds_h,
+            line_height,
+            vp,
+            1024,
+            overflow::TRUNCATION_OVERSCAN_LINES,
+        );
+        assert!(
+            small_window.len() < content.len(),
+            "configured bound must restrict the shaped input (fallback engaged)"
+        );
+
+        // The cache at the configured bound must shape exactly that window:
+        // priming the FULL content at bound 1024 yields the same truncation
+        // result as priming the windowed slice directly at an unbounded cache.
+        let mut fs = FontSystem::new();
+
+        let key_full =
+            TruncationKey::new(&content, bounds_w, bounds_h, font_size, family, weight, vp);
+        let mut configured = TruncationCache::new();
+        configured.set_max_truncation_input_bytes(1024);
+        let via_bound = configured
+            .prime(
+                key_full, &content, bounds_w, bounds_h, font_size, family, weight, vp, lhm, &mut fs,
+            )
+            .clone();
+
+        let key_window = TruncationKey::new(
+            small_window,
+            bounds_w,
+            bounds_h,
+            font_size,
+            family,
+            weight,
+            vp,
+        );
+        let mut unbounded = TruncationCache::new();
+        unbounded.set_max_truncation_input_bytes(usize::MAX);
+        let via_direct = unbounded
+            .prime(
+                key_window,
+                small_window,
+                bounds_w,
+                bounds_h,
+                font_size,
+                family,
+                weight,
+                vp,
+                lhm,
+                &mut fs,
+            )
+            .clone();
+
+        assert_eq!(
+            via_bound.text, via_direct.text,
+            "at the configured bound the cache must shape the viewport-adjacent window, \
+             not the full committed transcript"
         );
     }
 }

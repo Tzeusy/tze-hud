@@ -261,6 +261,17 @@ pub struct Compositor {
     /// scene has actually changed.  Initialized to `u64::MAX` so the first
     /// frame always primes.
     truncation_cache_scene_version: u64,
+    /// Operator-configured per-surface bound (bytes) for the truncation cache's
+    /// viewport-adjacent-window fallback, sourced from the resolved
+    /// `DisplayProfile` via [`Compositor::set_max_truncation_input_bytes`].
+    ///
+    /// `None` until the runtime applies config, in which case the
+    /// [`crate::text::TruncationCache`] keeps its own default
+    /// (`overflow::DEFAULT_MAX_TRUNCATION_INPUT_BYTES`, 4096). Retained on the
+    /// compositor so it is re-applied if [`Compositor::init_text_renderer`] is
+    /// called again (surface resize / format change replaces the rasterizer,
+    /// resetting its cache to the default bound).
+    configured_max_truncation_input_bytes: Option<usize>,
     /// Instant of the last completed `prime_truncation_cache` run.
     ///
     /// Used by the adaptive mid-drag re-truncation cadence gate (hud-ghhxa,
@@ -488,6 +499,7 @@ impl Compositor {
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
             truncation_cache_scene_version: u64::MAX,
+            configured_max_truncation_input_bytes: None,
             resize_reprime_last_at: None,
             resize_reprime_content_bytes: 0,
             image_bytes: HashMap::new(),
@@ -765,6 +777,7 @@ impl Compositor {
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
             truncation_cache_scene_version: u64::MAX,
+            configured_max_truncation_input_bytes: None,
             resize_reprime_last_at: None,
             resize_reprime_content_bytes: 0,
             image_bytes: HashMap::new(),

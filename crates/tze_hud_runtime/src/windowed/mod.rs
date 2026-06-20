@@ -774,6 +774,15 @@ impl ApplicationHandler for WinitApp {
             .format;
         compositor.init_text_renderer(surface_format);
         compositor.init_widget_renderer(surface_format);
+        // Apply the resolved per-surface truncation-input bound so the
+        // viewport-adjacent-window fallback engages at the operator-configured
+        // threshold rather than the compositor's built-in default (hud-59p2z).
+        compositor.set_max_truncation_input_bytes(
+            self.state
+                .runtime_context
+                .profile
+                .max_truncation_input_bytes as usize,
+        );
 
         // Register pending widget SVG assets with the widget renderer.
         process_pending_widget_svgs(
