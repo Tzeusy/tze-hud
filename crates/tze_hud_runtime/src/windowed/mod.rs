@@ -92,8 +92,8 @@ use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{Compositor, LocalComposerStateHandle, WindowSurface};
 use tze_hud_config::resolve_runtime_widget_asset_store;
 use tze_hud_input::{
-    FocusManager, InputProcessor, KeyboardProcessor, PointerEventKind, PortalResizeState,
-    RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
+    CursorIconTracker, FocusManager, InputProcessor, KeyboardProcessor, PointerEventKind,
+    PortalResizeState, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
 };
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::token::TokenStore;
@@ -316,6 +316,12 @@ struct WindowedRuntimeState {
     /// Windows delivers the matching button release even if the cursor leaves the
     /// original hit region.
     left_button_down: bool,
+    /// Last OS cursor-icon applied for portal resize/move affordances.
+    ///
+    /// Gates redundant `Window::set_cursor` calls so a steady stream of
+    /// `PointerMove` events re-applies the platform cursor only when the
+    /// affordance under the pointer actually changes (hud-g5yu1).
+    cursor_tracker: CursorIconTracker,
     /// Winit window handle (Some after window is created).
     window: Option<Arc<Window>>,
     /// Effective window mode after platform fallback resolution.
@@ -1847,6 +1853,7 @@ impl WindowedRuntime {
             cursor_x: 0.0,
             cursor_y: 0.0,
             left_button_down: false,
+            cursor_tracker: CursorIconTracker::new(),
             window: None,
             effective_mode,
             hit_regions: Vec::new(),
