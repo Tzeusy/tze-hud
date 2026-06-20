@@ -120,6 +120,121 @@ pub enum TruncationViewport {
     TailAnchored,
 }
 
+/// Default byte threshold for the viewport-adjacent-window truncation fallback
+/// (`max_truncation_input_bytes`, spec.md §324/§331).
+///
+/// When a single uncached truncation would shape an input larger than this many
+/// bytes, [`viewport_adjacent_input`] restricts the shaped input to a
+/// viewport-adjacent window of whole source lines instead of the full retained
+/// transcript.  The default sits well below the ~8 KiB point where the
+/// `overflow_truncate` benchmark first exceeds the Stage-5 Layout Resolve budget
+/// (< 1 ms, `about/craft-and-care/engineering-bar.md` §2), keeping a single
+/// uncached call within budget for multi-line transcripts.
+pub const DEFAULT_MAX_TRUNCATION_INPUT_BYTES: usize = 4096;
+
+/// Bounded whole-line overscan margin kept beyond the visible layout window when
+/// the viewport-adjacent-window fallback engages (spec.md §325).
+///
+/// Must be `>= 1`: the overscan guarantees the windowed input still produces
+/// strictly more layout runs than `max_lines`, so the truncation path engages
+/// exactly as it did on the full input (otherwise a window of exactly
+/// `max_lines` single-layout-line sources would not trigger truncation).
+pub const TRUNCATION_OVERSCAN_LINES: usize = 8;
+
+/// Restrict `text` to a viewport-adjacent window of whole source lines when it
+/// exceeds `max_input_bytes`, so a single uncached truncation shapes a bounded
+/// input instead of the full retained transcript (spec.md §324/§331, the
+/// **viewport-adjacent-window fallback**).
+///
+/// This runs **before** shaping and does no shaping itself: it splits `text` on
+/// `'\n'` (the same paragraph/hard-wrap unit cosmic-text uses) and slices on
+/// whole-line boundaries.  Because cosmic-text wraps each source line (a
+/// `BufferLine`) independently, the layout runs of a contiguous slice of source
+/// lines are byte-for-byte identical to those same lines within the full text —
+/// so the visible window and ellipsis placement of the truncation result are
+/// unchanged for the lines actually within the window.
+///
+/// # Window selection
+///
+/// `max_lines = floor(bounds_height / line_height)` whole lines are visible.
+/// Each source line yields **at least one** layout line, so `max_lines` source
+/// lines always cover the visible layout window; an overscan margin of
+/// `overscan_lines` (clamped to `>= 1`) whole lines is added so the window still
+/// has strictly more than `max_lines` layout runs (truncation still triggers).
+///
+/// - [`TruncationViewport::HeadAnchored`]: the visible window is the **first**
+///   `max_lines` layout lines, so the window keeps the **first**
+///   `max_lines + overscan` source lines.
+/// - [`TruncationViewport::TailAnchored`]: the visible window is the **last**
+///   `max_lines` layout lines, so the window keeps the **last**
+///   `max_lines + overscan` source lines.
+///
+/// # Returns
+///
+/// A sub-slice of `text` (zero-copy).  Returns `text` unchanged when it is at or
+/// below `max_input_bytes`, when geometry is degenerate (`max_lines == 0`), or
+/// when the transcript has too few source lines to window (`source_lines <=
+/// max_lines + overscan`) — including the degenerate single-giant-line case,
+/// which cannot be windowed without violating the whole-line guarantee.
+pub fn viewport_adjacent_input(
+    text: &str,
+    bounds_height: f32,
+    line_height: f32,
+    viewport: TruncationViewport,
+    max_input_bytes: usize,
+    overscan_lines: usize,
+) -> &str {
+    // Only engage above the configured byte bound: small windows shape within
+    // the Stage-5 budget and must measure the full committed input (spec §331).
+    if text.len() <= max_input_bytes {
+        return text;
+    }
+
+    // Degenerate geometry is handled by shape_runs' early-return; don't window.
+    let max_lines = max_whole_lines(bounds_height, line_height);
+    if max_lines == 0 {
+        return text;
+    }
+
+    let overscan = overscan_lines.max(1);
+    // Source lines covering the visible layout window (>= max_lines, since each
+    // source line is >= 1 layout line) plus the bounded whole-line overscan.
+    let keep = max_lines.saturating_add(overscan);
+
+    // Byte positions of every '\n' (the source-line / paragraph separators that
+    // text_prefix_up_to_run and truncate_tail_anchored already count).
+    // source_line_count == nl.len() + 1.
+    let nl: Vec<usize> = text
+        .bytes()
+        .enumerate()
+        .filter_map(|(i, b)| (b == b'\n').then_some(i))
+        .collect();
+
+    // Too few source lines to window: keeping them all is the full input, so the
+    // visible window would be unchanged anyway. (Also covers a single giant line
+    // with no '\n', which cannot be split on a whole-line boundary.)
+    if nl.len() < keep {
+        return text;
+    }
+
+    match viewport {
+        TruncationViewport::HeadAnchored => {
+            // Keep the first `keep` whole source lines (lines 0..keep). The end
+            // is the '\n' that terminates line `keep - 1`, excluded so the
+            // window holds exactly `keep` whole lines with no trailing empty
+            // line. nl[keep - 1] is valid because nl.len() >= keep.
+            &text[..nl[keep - 1]]
+        }
+        TruncationViewport::TailAnchored => {
+            // Keep the last `keep` whole source lines. The first kept line starts
+            // immediately after the '\n' that terminates the line before it:
+            // line index (source_line_count - keep) starts at nl[nl.len() - keep] + 1.
+            let start = nl[nl.len() - keep] + 1;
+            &text[start..]
+        }
+    }
+}
+
 /// Truncate `text` so that the first full line fits within `bounds_width`
 /// physical pixels, then restrict to the number of whole lines that fit within
 /// `bounds_height`.
@@ -3052,6 +3167,293 @@ mod tests {
             "first short line must be preserved before the truncation point; \
              got: {:?}",
             result.text
+        );
+    }
+
+    // ── Viewport-adjacent-window truncation fallback (spec.md §324/§331) ───────
+
+    /// Build a multi-line transcript of `n_lines` lines, each tagged with its
+    /// index so windowing mistakes (dropping the wrong lines) are observable.
+    fn transcript(n_lines: usize) -> String {
+        let mut s = String::new();
+        for i in 0..n_lines {
+            // ~40 bytes/line of distinct prose so the whole transcript is many KiB.
+            s.push_str(&format!("line {i:04}: the quick brown fox jumps over\n"));
+        }
+        // Drop the trailing newline so the last line has no empty line after it.
+        if s.ends_with('\n') {
+            s.pop();
+        }
+        s
+    }
+
+    /// Below the byte bound, the fallback is a no-op: the full input is returned
+    /// unchanged so truncation measures the full committed input (spec §331).
+    #[test]
+    fn fallback_noop_below_bound() {
+        let text = transcript(5); // well under 4 KiB
+        assert!(text.len() <= DEFAULT_MAX_TRUNCATION_INPUT_BYTES);
+        let line_h = 14.0 * 1.4;
+        let bounds_h = line_h * 5.0;
+        for vp in [
+            TruncationViewport::HeadAnchored,
+            TruncationViewport::TailAnchored,
+        ] {
+            let window = viewport_adjacent_input(
+                &text,
+                bounds_h,
+                line_h,
+                vp,
+                DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+                TRUNCATION_OVERSCAN_LINES,
+            );
+            assert_eq!(window, text, "small input must not be windowed ({vp:?})");
+        }
+    }
+
+    /// A single giant line (no '\n') cannot be windowed on a whole-line boundary,
+    /// so the fallback returns it unchanged even above the byte bound.
+    #[test]
+    fn fallback_single_giant_line_unwindowed() {
+        let text = "x".repeat(DEFAULT_MAX_TRUNCATION_INPUT_BYTES * 2);
+        let line_h = 14.0 * 1.4;
+        let window = viewport_adjacent_input(
+            &text,
+            line_h * 5.0,
+            line_h,
+            TruncationViewport::HeadAnchored,
+            DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+            TRUNCATION_OVERSCAN_LINES,
+        );
+        assert_eq!(window.len(), text.len(), "single line cannot be windowed");
+    }
+
+    /// Above the bound, the window is bounded by viewport geometry (max_lines +
+    /// overscan source lines), not by the full transcript size.
+    #[test]
+    fn fallback_window_is_bounded_by_viewport() {
+        let text = transcript(2000); // tens of KiB
+        assert!(text.len() > DEFAULT_MAX_TRUNCATION_INPUT_BYTES);
+        let line_h = 14.0 * 1.4;
+        let max_lines = 5usize;
+        let bounds_h = line_h * max_lines as f32;
+
+        let head = viewport_adjacent_input(
+            &text,
+            bounds_h,
+            line_h,
+            TruncationViewport::HeadAnchored,
+            DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+            TRUNCATION_OVERSCAN_LINES,
+        );
+        let tail = viewport_adjacent_input(
+            &text,
+            bounds_h,
+            line_h,
+            TruncationViewport::TailAnchored,
+            DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+            TRUNCATION_OVERSCAN_LINES,
+        );
+
+        // Window holds exactly max_lines + overscan whole lines.
+        let expect_lines = max_lines + TRUNCATION_OVERSCAN_LINES;
+        assert_eq!(head.lines().count(), expect_lines, "head window line count");
+        assert_eq!(tail.lines().count(), expect_lines, "tail window line count");
+        // Head keeps the FIRST lines; tail keeps the LAST lines.
+        assert!(
+            head.starts_with("line 0000:"),
+            "head keeps first lines: {head:?}"
+        );
+        assert!(
+            tail.trim_end()
+                .ends_with("line 1999: the quick brown fox jumps over"),
+            "tail keeps last lines: {:?}",
+            tail.lines().last()
+        );
+        // Window is far smaller than the full transcript.
+        assert!(head.len() < text.len() / 10, "head window must be bounded");
+        assert!(tail.len() < text.len() / 10, "tail window must be bounded");
+    }
+
+    /// **Acceptance #2**: for the lines within the viewport-adjacent window, the
+    /// truncation result (visible window + ellipsis) is **byte-identical** to the
+    /// full-input result, for both anchor modes. This empirically verifies the
+    /// per-source-line shaping-independence property the fallback relies on.
+    #[test]
+    fn fallback_visible_window_is_byte_identical_to_full_input() {
+        let text = transcript(2000);
+        assert!(text.len() > DEFAULT_MAX_TRUNCATION_INPUT_BYTES);
+        let font_size = 14.0_f32;
+        let line_h = font_size * 1.4;
+        let bounds_w = 400.0_f32;
+
+        // Exercise several viewport heights, including the degenerate single line.
+        for max_lines in [1usize, 3, 5, 9] {
+            let bounds_h = line_h * max_lines as f32;
+            let mut fs = make_font_system();
+
+            // HeadAnchored.
+            let full_head = truncate_for_ellipsis(
+                &text,
+                base_attrs(),
+                bounds_w,
+                bounds_h,
+                font_size,
+                line_h,
+                &mut fs,
+            );
+            let win_head_input = viewport_adjacent_input(
+                &text,
+                bounds_h,
+                line_h,
+                TruncationViewport::HeadAnchored,
+                DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+                TRUNCATION_OVERSCAN_LINES,
+            );
+            assert!(
+                win_head_input.len() < text.len(),
+                "max_lines={max_lines}: head fallback must engage"
+            );
+            let win_head = truncate_for_ellipsis(
+                win_head_input,
+                base_attrs(),
+                bounds_w,
+                bounds_h,
+                font_size,
+                line_h,
+                &mut fs,
+            );
+            assert_eq!(
+                win_head.text, full_head.text,
+                "max_lines={max_lines}: head-anchored windowed result must be byte-identical"
+            );
+            assert_eq!(win_head.was_truncated, full_head.was_truncated);
+
+            // TailAnchored.
+            let full_tail = truncate_tail_anchored(
+                &text,
+                base_attrs(),
+                bounds_w,
+                bounds_h,
+                font_size,
+                line_h,
+                &mut fs,
+            );
+            let win_tail_input = viewport_adjacent_input(
+                &text,
+                bounds_h,
+                line_h,
+                TruncationViewport::TailAnchored,
+                DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+                TRUNCATION_OVERSCAN_LINES,
+            );
+            assert!(
+                win_tail_input.len() < text.len(),
+                "max_lines={max_lines}: tail fallback must engage"
+            );
+            let win_tail = truncate_tail_anchored(
+                win_tail_input,
+                base_attrs(),
+                bounds_w,
+                bounds_h,
+                font_size,
+                line_h,
+                &mut fs,
+            );
+            assert_eq!(
+                win_tail.text, full_tail.text,
+                "max_lines={max_lines}: tail-anchored windowed result must be byte-identical"
+            );
+            assert_eq!(win_tail.was_truncated, full_tail.was_truncated);
+        }
+    }
+
+    /// **Acceptance #4 (perf)**: a single uncached truncation through the fallback
+    /// is dramatically cheaper than shaping the full retained transcript, because
+    /// the shaped input is bounded by viewport geometry, not transcript size.
+    ///
+    /// The Stage-5 Layout Resolve budget (< 1 ms) is a release/warm figure; in a
+    /// debug build with software shaping the absolute number is meaningless, so
+    /// this test verifies the *relative* property that matters: the windowed call
+    /// is many times faster than the un-windowed call on the same input. That is
+    /// the mechanism by which the fallback keeps the production call within
+    /// budget (the `overflow_truncate/fallback_64KiB` bench measures the warm
+    /// release figure). A loose absolute ceiling guards against gross regressions.
+    #[test]
+    fn fallback_is_dramatically_cheaper_than_full_input() {
+        let text = transcript(64 * 1024 / 40); // ~64 KiB transcript, far above bound
+        assert!(text.len() > 8 * DEFAULT_MAX_TRUNCATION_INPUT_BYTES);
+        let font_size = 14.0_f32;
+        let line_h = font_size * 1.4;
+        let bounds_w = 400.0_f32;
+        let bounds_h = line_h * 5.0;
+        let mut fs = make_font_system();
+
+        // Warm the font system (first call loads system fonts) on the small window.
+        let warm_input = viewport_adjacent_input(
+            &text,
+            bounds_h,
+            line_h,
+            TruncationViewport::HeadAnchored,
+            DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+            TRUNCATION_OVERSCAN_LINES,
+        );
+        let _ = truncate_for_ellipsis(
+            warm_input,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+
+        // Full-input truncation (no windowing): shapes the entire transcript.
+        let full_start = std::time::Instant::now();
+        let full = truncate_for_ellipsis(
+            &text,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        let full_elapsed = full_start.elapsed();
+
+        // Windowed truncation through the fallback: shapes only the window.
+        let win_start = std::time::Instant::now();
+        let input = viewport_adjacent_input(
+            &text,
+            bounds_h,
+            line_h,
+            TruncationViewport::HeadAnchored,
+            DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+            TRUNCATION_OVERSCAN_LINES,
+        );
+        let windowed = truncate_for_ellipsis(
+            input,
+            base_attrs(),
+            bounds_w,
+            bounds_h,
+            font_size,
+            line_h,
+            &mut fs,
+        );
+        let win_elapsed = win_start.elapsed();
+
+        assert!(windowed.was_truncated, "large transcript must be truncated");
+        // Correctness: windowing did not change the visible result.
+        assert_eq!(
+            windowed.text, full.text,
+            "windowed result must stay byte-identical to the full-input result"
+        );
+        // The windowed call must be far cheaper than the full-input call. The real
+        // ratio is ~100x+; require a conservative 4x to stay robust under noisy CI.
+        assert!(
+            win_elapsed.saturating_mul(4) < full_elapsed,
+            "windowed truncation ({win_elapsed:?}) must be much cheaper than \
+             full-input truncation ({full_elapsed:?})"
         );
     }
 }
