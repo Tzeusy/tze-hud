@@ -78,8 +78,13 @@ hotkey:ctrl-minus:done
 ```
 
 The portal transcript also captured keyboard delivery around the same live
-interaction window. The resize key-downs did not produce a visible accepted
-state. The operator submitted this direct portal feedback:
+interaction window. For both resize chords the composer recorded only the
+`Control` key-down and the `=` / `-` key-up events with `ctrl:true`; it never
+recorded an `input:key-down` for `=` or `-` while Ctrl was held. Because the
+resize path is driven from key-down events, the transcript evidences an
+input-delivery (injection) gap for the resize key-downs rather than a runtime
+rejection of delivered key-downs. The operator submitted this direct portal
+feedback:
 
 ```text
 ctrl +/- still doesn't work
@@ -90,7 +95,10 @@ ctrl +/- still doesn't work
 This run does not satisfy `hud-sp8l7` acceptance criteria. The portal was live,
 focused, and running a PR #917-containing Windows build, but the operator did not
 observe visible growth from `Ctrl+plus` / `Ctrl+equals` or visible shrink from
-`Ctrl+minus`.
+`Ctrl+minus`. The transcript localizes the failure to input delivery: the
+resize key-downs never reached the composer (only the Ctrl key-down and the
+`=` / `-` key-ups were recorded), so the next debugging step should target the
+key-down injection/delivery path before the runtime resize-acceptance logic.
 
 ## Follow-Up Candidate
 
