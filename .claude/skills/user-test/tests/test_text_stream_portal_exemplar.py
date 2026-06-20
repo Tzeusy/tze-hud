@@ -6,6 +6,7 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -431,6 +432,55 @@ class PromotionGateEvidenceSchemaTests(unittest.TestCase):
         )
         self.assertTrue(tag["is_reference"])
         self.assertEqual(tag["target_host"], portal.REFERENCE_HOSTNAME)
+
+    def test_reference_run_marks_reference_even_from_nonreference_collector(self) -> None:
+        # The orchestration box is a non-reference Linux collector, but the run
+        # drives the Windows reference target. is_reference must follow the
+        # target, so the legitimate reference run is NOT misread as off-reference.
+        with mock.patch.object(portal.socket, "gethostname", return_value="linux-collector"):
+            tag = portal.reference_hardware_tag(
+                target=portal.REFERENCE_HOSTNAME + ":50051",
+            )
+        self.assertEqual(tag["collected_hostname"], "linux-collector")
+        self.assertEqual(tag["target_host"], portal.REFERENCE_HOSTNAME)
+        self.assertTrue(tag["is_reference"])
+
+    def test_reference_hardware_tag_ignores_collector_host_for_reference(self) -> None:
+        # Even if the collector itself happens to be the reference host, a run
+        # that drives a NON-reference target is informational-only. is_reference
+        # is a property of the target, never the collection host.
+        with mock.patch.object(portal.socket, "gethostname", return_value=portal.REFERENCE_HOSTNAME):
+            tag = portal.reference_hardware_tag(
+                target="some-other-host:50051",
+            )
+        self.assertEqual(tag["collected_hostname"], portal.REFERENCE_HOSTNAME)
+        self.assertEqual(tag["target_host"], "some-other-host")
+        self.assertFalse(tag["is_reference"])
+
+    def test_reference_hardware_tag_without_target_is_not_reference(self) -> None:
+        # No target means nothing to attribute reference status to, even when the
+        # collector is the reference host. Fail-fast: do not silently infer
+        # reference status from the local box.
+        with mock.patch.object(portal.socket, "gethostname", return_value=portal.REFERENCE_HOSTNAME):
+            tag = portal.reference_hardware_tag()
+        self.assertEqual(tag["target_host"], "")
+        self.assertFalse(tag["is_reference"])
+
+    def test_reference_hostname_override_matches_target(self) -> None:
+        # A run may declare the reference host identity explicitly (e.g. the real
+        # TzeHouse tailnet name). is_reference is true only when the target host
+        # matches that declared identity...
+        tag = portal.reference_hardware_tag(
+            hostname="tzehouse.tailnet",
+            target="tzehouse.tailnet:50051",
+        )
+        self.assertTrue(tag["is_reference"])
+        # ...and false when the declared reference host is not the target driven.
+        other = portal.reference_hardware_tag(
+            hostname="tzehouse.tailnet",
+            target="some-other-host:50051",
+        )
+        self.assertFalse(other["is_reference"])
 
     # ── Cadence axis: RTT baseline vs runtime overhead ────────────────────
 

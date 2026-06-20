@@ -2568,22 +2568,31 @@ def reference_hardware_tag(
 ) -> dict[str, Any]:
     """Build the engineering-bar reference-hardware tag for an evidence artifact.
 
-    The local hostname/OS are always collected. The GPU/driver/tag fields come
+    The local hostname/OS are always collected (the orchestration box that runs
+    this harness — typically a Linux collector). The GPU/driver/tag fields come
     from CLI overrides when provided (the runner passes the reference values),
-    else fall back to the canonical reference-host constants. `is_reference`
-    records whether the collected hostname matches the engineering-bar reference
-    host so the gate can tell budget-bearing runs from informational ones.
+    else fall back to the canonical reference-host constants.
+
+    `is_reference` describes the **target** — the HUD host the run is actually
+    driving — NOT the local collection host. A run is reference-grade iff the
+    target host matches the engineering-bar reference host identity (the canonical
+    ``REFERENCE_HOSTNAME`` per craft-and-care/engineering-bar.md §2, or an
+    explicit ``hostname`` override declaring the reference host). This is what
+    lets the gate tell budget-bearing Windows TzeHouse runs from informational
+    off-reference runs even though the collector itself is a non-reference Linux
+    box. ``collected_hostname`` is recorded separately for provenance but never
+    decides reference status.
     """
     collected_hostname = ""
     with contextlib.suppress(Exception):
         collected_hostname = socket.gethostname()
     resolved_hostname = hostname or collected_hostname
     target_host_value = target_host(target) if target else ""
-    is_reference = REFERENCE_HOSTNAME in (
-        resolved_hostname,
-        collected_hostname,
-        target_host_value,
-    )
+    # Reference status is a property of the target host, never the collector.
+    # The reference host identity is the explicit override (when the runner
+    # declares it) or the canonical engineering-bar reference host.
+    reference_identity = hostname or REFERENCE_HOSTNAME
+    is_reference = bool(target_host_value) and target_host_value == reference_identity
     return {
         "tag": tag or REFERENCE_HARDWARE_TAG,
         "hostname": resolved_hostname,
@@ -5196,7 +5205,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--reference-hostname",
         default=None,
-        help="Reference host name; defaults to the local hostname collected at runtime",
+        help=(
+            "Reference host identity the target is matched against to set "
+            "is_reference (default: the canonical engineering-bar reference host). "
+            "The local collection hostname is recorded separately and never sets "
+            "reference status."
+        ),
     )
     p.add_argument(
         "--reference-gpu",
