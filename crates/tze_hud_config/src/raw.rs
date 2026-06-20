@@ -75,6 +75,11 @@ pub struct RawDisplayProfile {
     pub target_fps: Option<u32>,
     /// Override: minimum FPS.
     pub min_fps: Option<u32>,
+    /// Override: per-surface bound (bytes) on the input a single uncached
+    /// truncation may shape before the compositor's viewport-adjacent-window
+    /// fallback engages (spec.md §324/§331). Unset → the resolved profile keeps
+    /// `DEFAULT_MAX_TRUNCATION_INPUT_BYTES` (4096).
+    pub max_truncation_input_bytes: Option<u32>,
 
     /// Override: allow background zones.
     pub allow_background_zones: Option<bool>,

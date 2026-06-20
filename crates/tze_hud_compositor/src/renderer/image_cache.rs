@@ -195,8 +195,40 @@ impl super::Compositor {
     /// Calling this multiple times replaces the existing rasterizer (e.g. on
     /// surface resize or format change).
     pub fn init_text_renderer(&mut self, format: wgpu::TextureFormat) {
-        self.text_rasterizer = Some(TextRasterizer::new(&self.device, &self.queue, format));
+        let mut rasterizer = TextRasterizer::new(&self.device, &self.queue, format);
+        // Re-apply any operator-configured truncation-input bound: a fresh
+        // TextRasterizer starts at the TruncationCache default, so re-init on
+        // resize / format change would otherwise silently revert an applied
+        // per-surface bound.
+        if let Some(bytes) = self.configured_max_truncation_input_bytes {
+            rasterizer
+                .truncation_cache
+                .set_max_truncation_input_bytes(bytes);
+        }
+        self.text_rasterizer = Some(rasterizer);
         tracing::debug!(format = ?format, "text renderer initialized");
+    }
+
+    /// Apply the operator-configured per-surface truncation-input bound.
+    ///
+    /// Sourced from the resolved `DisplayProfile::max_truncation_input_bytes`
+    /// (see `tze_hud_config`), this bounds the bytes a single uncached
+    /// truncation may shape before the viewport-adjacent-window fallback engages
+    /// (spec.md §324/§331).  The value is retained on the compositor so it is
+    /// re-applied across any later [`Compositor::init_text_renderer`] call, and
+    /// forwarded immediately to the live truncation cache when the rasterizer is
+    /// already initialized.
+    ///
+    /// When this is never called, the truncation cache keeps its built-in
+    /// default (`overflow::DEFAULT_MAX_TRUNCATION_INPUT_BYTES`, 4096), preserving
+    /// historical behaviour for configs that omit the override.
+    pub fn set_max_truncation_input_bytes(&mut self, bytes: usize) {
+        self.configured_max_truncation_input_bytes = Some(bytes);
+        if let Some(rasterizer) = &mut self.text_rasterizer {
+            rasterizer
+                .truncation_cache
+                .set_max_truncation_input_bytes(bytes);
+        }
     }
 
     /// Load raw font bytes (TTF or OTF) from an agent upload into glyphon's

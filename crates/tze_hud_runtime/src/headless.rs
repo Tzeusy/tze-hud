@@ -271,7 +271,16 @@ impl HeadlessRuntime {
         // glyphon text rendering is active for all runtime paths (not just tests).
         compositor.init_text_renderer(TextureFormat::Rgba8UnormSrgb);
         compositor.init_widget_renderer(TextureFormat::Rgba8UnormSrgb);
-        tracing::debug!("headless: text + widget renderers initialized");
+        // Apply the resolved per-surface truncation-input bound so the
+        // viewport-adjacent-window fallback engages at the operator-configured
+        // threshold rather than the compositor's built-in default (hud-59p2z).
+        compositor.set_max_truncation_input_bytes(
+            runtime_context.profile.max_truncation_input_bytes as usize,
+        );
+        tracing::debug!(
+            max_truncation_input_bytes = runtime_context.profile.max_truncation_input_bytes,
+            "headless: text + widget renderers initialized"
+        );
 
         // ── Component startup: design tokens + zone registry ──────────────
         // When config_toml is provided, run the full component shape language
