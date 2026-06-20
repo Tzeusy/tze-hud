@@ -187,7 +187,7 @@ mod test_support;
 
 pub use self::config::{
     ResidentGrpcCredentialSource, ResidentGrpcPortalSettings, WindowedBenchmarkConfig,
-    WindowedConfig,
+    WindowedConfig, DEFAULT_RESIDENT_GRPC_AGENT_ID, DEFAULT_RESIDENT_GRPC_LEASE_TTL_MS,
 };
 use self::hittest::{refresh_interaction_hit_regions_after_render, sync_scene_display_area};
 use self::input_dispatch::{
