@@ -63,6 +63,9 @@ windows = { workspace = true }
 [dev-dependencies]
 tze_hud_scene = { path = "../tze_hud_scene", version = "0.1.0" }
 tze_hud_compositor = { path = "../tze_hud_compositor", version = "0.1.0" }
+# dev-mode exposes HudSessionImpl::new(scene, psk) for the resident gRPC bridge
+# end-to-end test, which stands up the production session server in-process.
+tze_hud_protocol = { path = "../tze_hud_protocol", version = "0.1.0", features = ["dev-mode"] }
 tokio = { workspace = true }
 blake3 = { workspace = true }
 proptest = { workspace = true }

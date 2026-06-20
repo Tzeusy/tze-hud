@@ -59,9 +59,9 @@ use tze_hud_projection::{
     AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
     CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
     InputAckState, OperationEnvelope, OutputKind, PendingInputItem, PortalInputFeedback,
-    ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds, ProjectionErrorCode,
-    ProjectionLifecycleState, ProjectionOperation, ProviderKind, PublishOutputRequest,
-    PublishStatusRequest,
+    ProjectedPortalPolicy, ProjectedPortalState, ProjectionAuthority, ProjectionBounds,
+    ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation, ProviderKind,
+    PublishOutputRequest, PublishStatusRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -377,6 +377,17 @@ pub struct InProcessPortalDriver {
     ///
     /// Exposed via [`InProcessPortalDriver::drain_deferral_count`].
     drain_deferral_count: u64,
+    /// Optional tee to the resident gRPC portal bridge (hud-d7frs).
+    ///
+    /// When set (production: only when the resident gRPC bridge is explicitly
+    /// enabled via config), each coalesced `ProjectedPortalState` materialised by
+    /// the in-process drain is *also* forwarded to the bridge, which renders it
+    /// over an authenticated gRPC `HudSession` stream — the "two adapter families,
+    /// one authority" wiring required by the RFC 0013 §7.2 gate. The send is
+    /// non-blocking (`try_send`): a full channel drops the snapshot rather than
+    /// stalling the winit thread. `None` (the default) is a complete no-op, so the
+    /// live in-process path is byte-for-byte unchanged when the bridge is off.
+    resident_grpc_bridge_tx: Option<tokio::sync::mpsc::Sender<(String, ProjectedPortalState)>>,
 }
 
 impl InProcessPortalDriver {
@@ -390,6 +401,7 @@ impl InProcessPortalDriver {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         }
     }
 
@@ -414,6 +426,21 @@ impl InProcessPortalDriver {
     /// for end-to-end latency.
     pub fn drain_deferral_count(&self) -> u64 {
         self.drain_deferral_count
+    }
+
+    /// Install (or clear) the resident gRPC portal bridge tee (hud-d7frs).
+    ///
+    /// When `Some`, every coalesced `ProjectedPortalState` materialised by the
+    /// in-process drain is also forwarded to the resident gRPC bridge, which
+    /// renders it over an authenticated gRPC `HudSession` stream — the second
+    /// adapter family for the RFC 0013 §7.2 gate, driven by the *same* authority.
+    /// `None` (the default) makes the tee a no-op so the live in-process path is
+    /// unchanged.
+    pub fn set_resident_grpc_bridge_tx(
+        &mut self,
+        tx: Option<tokio::sync::mpsc::Sender<(String, ProjectedPortalState)>>,
+    ) {
+        self.resident_grpc_bridge_tx = tx;
     }
 
     /// Attach a new projection session to the driver.
@@ -1086,6 +1113,19 @@ impl InProcessPortalDriver {
                 continue;
             };
 
+            // Two-adapter-families tee (hud-d7frs): forward the same authority-
+            // derived state to the resident gRPC bridge when enabled. Non-blocking
+            // so the winit drain never stalls on a slow/full bridge; a dropped
+            // snapshot is acceptable (state is coalesced/latest-relevant). No-op
+            // when the bridge is not wired (default).
+            if let Some(tx) = &self.resident_grpc_bridge_tx {
+                // Skip the clone+alloc on the hot winit thread when the bridge task
+                // has already exited or never connected (closed receiver).
+                if !tx.is_closed() {
+                    let _ = tx.try_send((proj_id.clone(), state.clone()));
+                }
+            }
+
             // Check if the drive entry exists and what kind of command to issue.
             // We do this before taking a mutable borrow of drive.entries so that
             // `ensure_driver_lease` (which borrows `self` mutably) can be called
@@ -1547,6 +1587,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         let projection_id = "proj-composer-return";
@@ -1670,6 +1711,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-a");
@@ -1795,6 +1837,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-b");
@@ -2029,6 +2072,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-resize");
@@ -2164,6 +2208,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-lat");
@@ -2358,6 +2403,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("test_dispatch_portal_op"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         // ── Step 1: Attach via dispatch_portal_op ──────────────────────────────
@@ -2513,6 +2559,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("test_reattach"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         // ── Step 1: First attach (with an idempotency key) ─────────────────────
@@ -2663,6 +2710,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("test_htrim_runtime"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         let token = attach_and_get_token(&mut driver, "proj-htrim");
@@ -2834,6 +2882,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("test_deferral"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
@@ -3178,6 +3227,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("test_publish_classification"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         let (attach_tx, mut attach_rx) =
@@ -3223,6 +3273,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("test_publish_invalid"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         let (attach_tx, mut attach_rx) =
@@ -3293,6 +3344,7 @@ mod tests {
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
             drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
         };
 
         // Scene backed by a TestClock so we can drive lease grace expiry

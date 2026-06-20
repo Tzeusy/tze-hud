@@ -456,6 +456,11 @@ struct WindowedRuntimeState {
     /// `pending_input_capture_commands` — bounded in practice by the number of
     /// keystrokes that arrive during a single lock-contention window.
     pending_keyboard_events: VecDeque<PendingKeyboardEvent>,
+    /// Resident gRPC portal bridge handle (hud-d7frs), present only when the
+    /// bridge is explicitly enabled (`TZE_HUD_RESIDENT_GRPC_PORTAL`) and the gRPC
+    /// server + PSK are configured. Aborted on teardown so its task/stream is not
+    /// leaked. `None` in the default configuration.
+    resident_grpc_bridge: Option<crate::resident_grpc_bridge::ResidentGrpcBridgeHandle>,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -1902,7 +1907,70 @@ impl WindowedRuntime {
             None
         };
 
-        let portal_projection_driver = build_portal_projection_driver(&cfg)?;
+        let mut portal_projection_driver = build_portal_projection_driver(&cfg)?;
+
+        // ── Resident gRPC portal bridge (hud-d7frs) ────────────────────────────
+        // Second adapter family for the RFC 0013 §7.2 gate: the resident gRPC
+        // text-stream portal adapter, served over a real authenticated gRPC
+        // `HudSession` stream and driven by the SAME `ProjectionAuthority` the
+        // in-process path hosts (via a non-blocking tee on the drain).
+        //
+        // Default OFF, fail-closed: only constructed when the operator sets
+        // `TZE_HUD_RESIDENT_GRPC_PORTAL`, the gRPC server is enabled
+        // (`grpc_port != 0`), the network runtime exists, and a non-empty PSK is
+        // configured. Auth posture mirrors #944: the bridge presents the PSK and
+        // is capability-scoped (`create_tiles` + `modify_own_tiles`); the runtime
+        // remains the final authorizer. When OFF, the in-process path is
+        // unchanged.
+        //
+        // NOTE (routing follow-up): pointing the bridge at this runtime's own
+        // loopback gRPC server materialises the portal a second time in the same
+        // scene (duplicate tiles). The bridge's intended production target is a
+        // separate runtime (the aspirational external authority deployment model);
+        // simultaneous same-scene dual materialisation needs an authority-level
+        // transport-routing decision and is deferred.
+        let resident_grpc_bridge = {
+            let enabled = std::env::var("TZE_HUD_RESIDENT_GRPC_PORTAL")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if enabled && cfg.grpc_port != 0 && !cfg.psk.trim().is_empty() {
+                if let Some(ref rt) = network_rt {
+                    let endpoint = format!("http://127.0.0.1:{}", cfg.grpc_port);
+                    let bridge_cfg = crate::resident_grpc_bridge::ResidentGrpcBridgeConfig::new(
+                        endpoint.clone(),
+                        cfg.psk.clone(),
+                        "resident-grpc-portal",
+                    );
+                    let tokens = crate::portal_tokens::portal_visual_tokens_from_part_tokens(
+                        &tze_hud_config::resolve_portal_tokens(
+                            &tze_hud_config::tokens::resolve_tokens(
+                                &tze_hud_config::tokens::DesignTokenMap::new(),
+                                &tze_hud_config::tokens::DesignTokenMap::new(),
+                            ),
+                        ),
+                    );
+                    let handle = crate::resident_grpc_bridge::spawn_resident_grpc_bridge(
+                        rt.rt.handle(),
+                        bridge_cfg,
+                        tokens,
+                    );
+                    portal_projection_driver
+                        .set_resident_grpc_bridge_tx(Some(handle.state_sender()));
+                    tracing::info!(
+                        endpoint = %endpoint,
+                        "resident gRPC portal bridge enabled (two adapter families; hud-d7frs)"
+                    );
+                    Some(handle)
+                } else {
+                    tracing::warn!(
+                        "TZE_HUD_RESIDENT_GRPC_PORTAL set but no network runtime; bridge disabled"
+                    );
+                    None
+                }
+            } else {
+                None
+            }
+        };
 
         let app_state = WindowedRuntimeState {
             config: cfg,
@@ -1957,6 +2025,7 @@ impl WindowedRuntime {
             portal_projection_driver,
             portal_op_rx: portal_op_rx_opt.take(),
             pending_keyboard_events: VecDeque::new(),
+            resident_grpc_bridge,
         };
 
         let mut app = WinitApp { state: app_state };
@@ -2008,6 +2077,13 @@ impl WindowedRuntime {
         // `shutdown_timeout` gives tasks 500 ms to exit cleanly after the
         // shutdown token was triggered above.  The MCP task exits promptly
         // because it polls the `ShutdownToken`; gRPC tasks were already aborted.
+        // Stop the resident gRPC portal bridge (hud-d7frs) before tearing down the
+        // network runtime so its task/stream is not leaked.
+        if let Some(bridge) = app.state.resident_grpc_bridge.take() {
+            tracing::info!("aborting resident gRPC portal bridge task...");
+            bridge.abort();
+        }
+
         if let Some(network_rt) = app.state.network_rt.take() {
             tracing::info!("shutting down network runtime (gRPC, MCP tasks)...");
             network_rt
