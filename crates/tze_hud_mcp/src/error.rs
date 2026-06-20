@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tze_hud_projection::ProjectionErrorCode;
 
 /// Standard JSON-RPC 2.0 error codes.
 pub mod codes {
@@ -98,6 +99,31 @@ impl JsonRpcError {
         Self::new(codes::UNAUTHENTICATED, "Authentication required")
     }
 
+    /// Projection authority rejection carrying a stable `PROJECTION_*` code.
+    ///
+    /// Mirrors [`Self::capability_required`]: the JSON-RPC `code` stays
+    /// `-32603` (internal error, the resident-MCP convention for denials), but
+    /// the stable code is carried in `data.error_code` so the LLM can branch on
+    /// it (`PROJECTION_TOKEN_EXPIRED` = hard stop, `PROJECTION_RATE_LIMITED` =
+    /// defer) instead of seeing an opaque flattened message (hud-s8a62).
+    ///
+    /// Returns a JSON-RPC 2.0 error with:
+    /// - code: -32603 (Internal error)
+    /// - message: the human-readable rejection detail
+    /// - data.error_code: the stable `PROJECTION_*` string
+    /// - data.message: the same human-readable detail
+    pub fn projection_rejected(
+        error_code: ProjectionErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
+        let data = serde_json::json!({
+            "error_code": error_code.as_str(),
+            "message": message.clone(),
+        });
+        Self::new(codes::INTERNAL_ERROR, message).with_data(data)
+    }
+
     /// Capability-required error per spec §8.3.
     ///
     /// Returns a JSON-RPC 2.0 error with:
@@ -154,6 +180,17 @@ pub enum McpError {
     /// Authentication failed: bad or missing pre-shared key (spec §8.4).
     #[error("authentication required")]
     Unauthenticated,
+
+    /// Projection authority rejected a `portal_projection_*` operation.
+    /// Carries the stable [`ProjectionErrorCode`] so it reaches the wire as
+    /// `data.error_code` instead of flattening to an opaque `-32603` message.
+    #[error("projection rejected ({error_code}): {message}")]
+    ProjectionRejected {
+        /// Stable `PROJECTION_*` code surfaced to the LLM.
+        error_code: ProjectionErrorCode,
+        /// Human-readable rejection detail.
+        message: String,
+    },
 }
 
 impl From<McpError> for JsonRpcError {
@@ -171,6 +208,10 @@ impl From<McpError> for JsonRpcError {
             McpError::Internal(msg) => JsonRpcError::internal(msg),
             McpError::CapabilityRequired(tool) => JsonRpcError::capability_required(&tool),
             McpError::Unauthenticated => JsonRpcError::unauthenticated(),
+            McpError::ProjectionRejected {
+                error_code,
+                message,
+            } => JsonRpcError::projection_rejected(error_code, message),
         }
     }
 }

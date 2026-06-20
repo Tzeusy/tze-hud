@@ -51,14 +51,16 @@ use std::collections::HashMap;
 
 use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
 use tze_hud_input::{DraftNotificationBatch, InputProcessor};
-pub use tze_hud_mcp::portal_op::{PendingInputBatch, PendingInputEntry, PortalOp};
+pub use tze_hud_mcp::portal_op::{
+    PendingInputBatch, PendingInputEntry, PortalOp, PortalOpRejection,
+};
 use tze_hud_projection::{
     AcknowledgeInputRequest, AdapterDraftBatch, AdapterDraftCancel, AdapterDraftNotification,
     AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
     CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
     InputAckState, OperationEnvelope, OutputKind, PendingInputItem, PortalInputFeedback,
-    ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds, ProjectionOperation,
-    ProviderKind, PublishOutputRequest,
+    ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds, ProjectionErrorCode,
+    ProjectionOperation, ProviderKind, PublishOutputRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -573,19 +575,16 @@ impl InProcessPortalDriver {
                     let token = resp.owner_token.unwrap_or_default();
                     let _ = reply.send(Ok(token));
                 } else {
-                    let code = resp
+                    let error_code = resp
                         .error_code
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
                     tracing::warn!(
                         proj_id = %projection_id,
-                        error_code = %code,
+                        error_code = %error_code,
                         "portal_op: Attach denied"
                     );
-                    let _ = reply.send(Err(format!(
-                        "attach denied: {}: {}",
-                        code, resp.status_summary
-                    )));
+                    let _ =
+                        reply.send(Err(PortalOpRejection::new(error_code, resp.status_summary)));
                 }
             }
 
@@ -606,7 +605,10 @@ impl InProcessPortalDriver {
                 let output_kind = match parse_output_kind(output_kind.as_deref()) {
                     Ok(kind) => kind,
                     Err(reason) => {
-                        let _ = reply.send(Err(reason));
+                        let _ = reply.send(Err(PortalOpRejection::new(
+                            ProjectionErrorCode::ProjectionInvalidArgument,
+                            reason,
+                        )));
                         return;
                     }
                 };
@@ -614,7 +616,10 @@ impl InProcessPortalDriver {
                     match parse_content_classification(content_classification.as_deref()) {
                         Ok(classification) => classification,
                         Err(reason) => {
-                            let _ = reply.send(Err(reason));
+                            let _ = reply.send(Err(PortalOpRejection::new(
+                                ProjectionErrorCode::ProjectionInvalidArgument,
+                                reason,
+                            )));
                             return;
                         }
                     };
@@ -644,19 +649,16 @@ impl InProcessPortalDriver {
                     );
                     let _ = reply.send(Ok(()));
                 } else {
-                    let code = resp
+                    let error_code = resp
                         .error_code
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
                     tracing::warn!(
                         proj_id = %projection_id,
-                        error_code = %code,
+                        error_code = %error_code,
                         "portal_op: PublishOutput denied"
                     );
-                    let _ = reply.send(Err(format!(
-                        "publish_output denied: {}: {}",
-                        code, resp.status_summary
-                    )));
+                    let _ =
+                        reply.send(Err(PortalOpRejection::new(error_code, resp.status_summary)));
                 }
             }
 
@@ -701,19 +703,16 @@ impl InProcessPortalDriver {
                     );
                     let _ = reply.send(Ok(batch));
                 } else {
-                    let code = resp
+                    let error_code = resp
                         .error_code
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
                     tracing::warn!(
                         proj_id = %projection_id,
-                        error_code = %code,
+                        error_code = %error_code,
                         "portal_op: GetPendingInput denied"
                     );
-                    let _ = reply.send(Err(format!(
-                        "get_pending_input denied: {}: {}",
-                        code, resp.status_summary
-                    )));
+                    let _ =
+                        reply.send(Err(PortalOpRejection::new(error_code, resp.status_summary)));
                 }
             }
 
@@ -729,7 +728,10 @@ impl InProcessPortalDriver {
                 let ack_state = match parse_ack_state(&ack_state) {
                     Ok(state) => state,
                     Err(reason) => {
-                        let _ = reply.send(Err(reason));
+                        let _ = reply.send(Err(PortalOpRejection::new(
+                            ProjectionErrorCode::ProjectionInvalidArgument,
+                            reason,
+                        )));
                         return;
                     }
                 };
@@ -757,19 +759,16 @@ impl InProcessPortalDriver {
                     );
                     let _ = reply.send(Ok(()));
                 } else {
-                    let code = resp
+                    let error_code = resp
                         .error_code
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
                     tracing::warn!(
                         proj_id = %projection_id,
-                        error_code = %code,
+                        error_code = %error_code,
                         "portal_op: AcknowledgeInput denied"
                     );
-                    let _ = reply.send(Err(format!(
-                        "acknowledge_input denied: {}: {}",
-                        code, resp.status_summary
-                    )));
+                    let _ =
+                        reply.send(Err(PortalOpRejection::new(error_code, resp.status_summary)));
                 }
             }
 
@@ -803,19 +802,16 @@ impl InProcessPortalDriver {
                     );
                     let _ = reply.send(Ok(()));
                 } else {
-                    let code = resp
+                    let error_code = resp
                         .error_code
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
                     tracing::warn!(
                         proj_id = %projection_id,
-                        error_code = %code,
+                        error_code = %error_code,
                         "portal_op: Detach denied"
                     );
-                    let _ = reply.send(Err(format!(
-                        "detach denied: {}: {}",
-                        code, resp.status_summary
-                    )));
+                    let _ =
+                        reply.send(Err(PortalOpRejection::new(error_code, resp.status_summary)));
                 }
             }
 
@@ -830,7 +826,10 @@ impl InProcessPortalDriver {
                 let cleanup_authority = match parse_cleanup_authority(&cleanup_authority) {
                     Ok(authority) => authority,
                     Err(reason) => {
-                        let _ = reply.send(Err(reason));
+                        let _ = reply.send(Err(PortalOpRejection::new(
+                            ProjectionErrorCode::ProjectionInvalidArgument,
+                            reason,
+                        )));
                         return;
                     }
                 };
@@ -859,19 +858,16 @@ impl InProcessPortalDriver {
                     );
                     let _ = reply.send(Ok(()));
                 } else {
-                    let code = resp
+                    let error_code = resp
                         .error_code
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
                     tracing::warn!(
                         proj_id = %projection_id,
-                        error_code = %code,
+                        error_code = %error_code,
                         "portal_op: Cleanup denied"
                     );
-                    let _ = reply.send(Err(format!(
-                        "cleanup denied: {}: {}",
-                        code, resp.status_summary
-                    )));
+                    let _ =
+                        reply.send(Err(PortalOpRejection::new(error_code, resp.status_summary)));
                 }
             }
         }
@@ -2272,7 +2268,8 @@ mod tests {
         };
 
         // ── Step 1: Attach via dispatch_portal_op ──────────────────────────────
-        let (attach_tx, mut attach_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
         driver.dispatch_portal_op(PortalOp::Attach {
             projection_id: "test-proj".to_string(),
             display_name: "Test Projection".to_string(),
@@ -2299,7 +2296,7 @@ mod tests {
         );
 
         // ── Step 2: PublishOutput via dispatch_portal_op ───────────────────────
-        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
         driver.dispatch_portal_op(PortalOp::PublishOutput {
             projection_id: "test-proj".to_string(),
             owner_token: owner_token.clone(),
@@ -2426,7 +2423,8 @@ mod tests {
         };
 
         // ── Step 1: First attach (with an idempotency key) ─────────────────────
-        let (attach_tx, mut attach_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
         driver.dispatch_portal_op(PortalOp::Attach {
             projection_id: "reattach-proj".to_string(),
             display_name: "Reattach Projection".to_string(),
@@ -2439,7 +2437,7 @@ mod tests {
             .expect("first Attach must be accepted");
 
         // ── Step 2: Publish + drain so a tile is materialised ──────────────────
-        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
         driver.dispatch_portal_op(PortalOp::PublishOutput {
             projection_id: "reattach-proj".to_string(),
             owner_token: owner_token.clone(),
@@ -2483,7 +2481,8 @@ mod tests {
         let tile_count_after_first = scene.tile_count();
 
         // ── Step 3: Idempotent re-attach (same id + same key) ──────────────────
-        let (re_tx, mut re_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let (re_tx, mut re_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
         driver.dispatch_portal_op(PortalOp::Attach {
             projection_id: "reattach-proj".to_string(),
             display_name: "Reattach Projection".to_string(),
@@ -3088,7 +3087,8 @@ mod tests {
             drain_deferral_count: 0,
         };
 
-        let (attach_tx, mut attach_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
         driver.dispatch_portal_op(PortalOp::Attach {
             projection_id: "classify-proj".to_string(),
             display_name: "Classify Projection".to_string(),
@@ -3100,7 +3100,7 @@ mod tests {
             .expect("reply sent synchronously")
             .expect("attach accepted");
 
-        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
         driver.dispatch_portal_op(PortalOp::PublishOutput {
             projection_id: "classify-proj".to_string(),
             owner_token,
@@ -3132,7 +3132,8 @@ mod tests {
             drain_deferral_count: 0,
         };
 
-        let (attach_tx, mut attach_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
         driver.dispatch_portal_op(PortalOp::Attach {
             projection_id: "reject-proj".to_string(),
             display_name: "Reject Projection".to_string(),
@@ -3144,7 +3145,7 @@ mod tests {
             .expect("reply sent synchronously")
             .expect("attach accepted");
 
-        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
         driver.dispatch_portal_op(PortalOp::PublishOutput {
             projection_id: "reject-proj".to_string(),
             owner_token,
@@ -3159,7 +3160,16 @@ mod tests {
             .try_recv()
             .expect("reply sent synchronously even on rejection");
         let err = result.expect_err("invalid content_classification must be rejected");
-        assert!(err.contains("invalid content_classification"), "got: {err}");
+        assert_eq!(
+            err.error_code,
+            ProjectionErrorCode::ProjectionInvalidArgument,
+            "a driver-side validation failure carries the stable INVALID_ARGUMENT code"
+        );
+        assert!(
+            err.message.contains("invalid content_classification"),
+            "got: {}",
+            err.message
+        );
     }
 
     /// hud-pk9pz (task 4.6): a session attaching AFTER the prior portal's lease

@@ -17,10 +17,50 @@
 //!
 //! ## Field types
 //!
-//! All fields use plain [`String`] / [`Option<String>`] so this module has no
-//! dependency on `tze_hud_projection`. The runtime converts them to the
-//! appropriate projection types (`ProviderKind`, `OutputKind`, etc.) before
-//! calling the authority.
+//! Request fields use plain [`String`] / [`Option<String>`]; the runtime
+//! converts them to the appropriate projection types (`ProviderKind`,
+//! `OutputKind`, etc.) before calling the authority.
+//!
+//! Reply channels are the one exception: they carry a typed
+//! [`PortalOpRejection`] (wrapping a [`ProjectionErrorCode`]) on the error path
+//! rather than a flattened `String`. This is what lets the stable
+//! `PROJECTION_*` code reach the MCP layer — and the LLM, via JSON-RPC
+//! `error.data.error_code` — instead of collapsing every failure into an opaque
+//! `-32603` message (hud-s8a62). This module therefore depends on
+//! `tze_hud_projection` for that single type; there is no dependency cycle
+//! because the projection crate does not depend on `tze_hud_mcp`.
+
+use tze_hud_projection::ProjectionErrorCode;
+
+/// Structured rejection carried on a [`PortalOp`] reply channel's error path.
+///
+/// Replaces the previous flattened `String` error so the stable
+/// [`ProjectionErrorCode`] survives the hop from the projection authority to
+/// the MCP layer. The MCP tool maps this into a JSON-RPC error whose
+/// `data.error_code` is the stable `PROJECTION_*` string, letting the LLM
+/// branch on it (e.g. `PROJECTION_TOKEN_EXPIRED` = hard stop,
+/// `PROJECTION_RATE_LIMITED` = defer) instead of seeing an opaque `-32603`
+/// message (hud-s8a62).
+#[derive(Debug, Clone)]
+pub struct PortalOpRejection {
+    /// Stable projection error code. Either the authority's own
+    /// `error_code`, or `ProjectionInvalidArgument` for a driver-side
+    /// pre-authority validation failure (unrecognized enum string, etc.).
+    pub error_code: ProjectionErrorCode,
+    /// Human-readable detail (the authority `status_summary` or a driver-side
+    /// validation message).
+    pub message: String,
+}
+
+impl PortalOpRejection {
+    /// Construct a rejection from a stable code and a human-readable message.
+    pub fn new(error_code: ProjectionErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            error_code,
+            message: message.into(),
+        }
+    }
+}
 
 /// An operation dispatched to the in-process projection authority through the
 /// `portal_op_tx` / `portal_op_rx` channel pair (hud-bq0gl.2).
@@ -55,9 +95,9 @@ pub enum PortalOp {
         /// Optional idempotency key for replay-safe re-attach.
         idempotency_key: Option<String>,
         /// One-shot response channel: authority returns the `owner_token` on
-        /// success (needed for subsequent `PublishOutput` calls), or an error
-        /// description on failure.
-        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+        /// success (needed for subsequent `PublishOutput` calls), or a
+        /// [`PortalOpRejection`] carrying the stable error code on failure.
+        reply: tokio::sync::oneshot::Sender<Result<String, PortalOpRejection>>,
     },
     /// Publish output text to an existing projection session.
     PublishOutput {
@@ -84,9 +124,10 @@ pub enum PortalOp {
         /// key collapse in-place into a single transcript unit rather than
         /// appending. `None` means append (no coalescing).
         coalesce_key: Option<String>,
-        /// One-shot response channel: `Ok(())` on success or an error
-        /// description on validation / auth failure.
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        /// One-shot response channel: `Ok(())` on success or a
+        /// [`PortalOpRejection`] carrying the stable error code on
+        /// validation / auth failure.
+        reply: tokio::sync::oneshot::Sender<Result<(), PortalOpRejection>>,
     },
     /// Drain HUD-originated pending input for an existing projection session.
     ///
@@ -109,9 +150,10 @@ pub enum PortalOp {
         max_bytes: Option<usize>,
         /// One-shot response channel. On success the authority returns a
         /// [`PendingInputBatch`] (the delivered items plus remaining-count /
-        /// remaining-bytes back-pressure hints). On failure, an error
-        /// description (invalid / expired token, validation error, etc.).
-        reply: tokio::sync::oneshot::Sender<Result<PendingInputBatch, String>>,
+        /// remaining-bytes back-pressure hints). On failure, a
+        /// [`PortalOpRejection`] carrying the stable error code (invalid /
+        /// expired token, validation error, etc.).
+        reply: tokio::sync::oneshot::Sender<Result<PendingInputBatch, PortalOpRejection>>,
     },
     /// Acknowledge a previously delivered input item for a projection session.
     ///
@@ -136,9 +178,10 @@ pub enum PortalOp {
         /// Optional re-delivery floor (wall-clock µs). Valid only when
         /// `ack_state` is `deferred`; the authority rejects it otherwise.
         not_before_wall_us: Option<u64>,
-        /// One-shot response channel: `Ok(())` on success or an error
-        /// description on validation / auth / conflict failure.
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        /// One-shot response channel: `Ok(())` on success or a
+        /// [`PortalOpRejection`] carrying the stable error code on
+        /// validation / auth / conflict failure.
+        reply: tokio::sync::oneshot::Sender<Result<(), PortalOpRejection>>,
     },
     /// Detach a projection session, purging its private state.
     ///
@@ -152,9 +195,10 @@ pub enum PortalOp {
         owner_token: String,
         /// Human-readable reason recorded in the audit log.
         reason: String,
-        /// One-shot response channel: `Ok(())` on success or an error
-        /// description on validation / auth failure.
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        /// One-shot response channel: `Ok(())` on success or a
+        /// [`PortalOpRejection`] carrying the stable error code on
+        /// validation / auth failure.
+        reply: tokio::sync::oneshot::Sender<Result<(), PortalOpRejection>>,
     },
     /// Cleanup a projection session, purging its private state.
     ///
@@ -173,9 +217,10 @@ pub enum PortalOp {
         operator_authority: Option<String>,
         /// Human-readable reason recorded in the audit log.
         reason: String,
-        /// One-shot response channel: `Ok(())` on success or an error
-        /// description on validation / auth failure.
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        /// One-shot response channel: `Ok(())` on success or a
+        /// [`PortalOpRejection`] carrying the stable error code on
+        /// validation / auth failure.
+        reply: tokio::sync::oneshot::Sender<Result<(), PortalOpRejection>>,
     },
 }
 
