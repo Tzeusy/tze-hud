@@ -141,6 +141,22 @@ pub struct McpConfig {
     /// supply a matching key via bearer token or `_auth` param.  When `None`,
     /// every call is rejected (no bypass — sovereignty enforced by mechanism).
     pub pre_shared_key: Option<String>,
+
+    /// Optional **resident principal** PSK (config-gated, hud-nu65o).
+    ///
+    /// When `Some(non-empty)` and the bearer token a caller presents matches
+    /// this value (constant-time), [`McpServer::caller_context`] mints the call
+    /// with the `resident_mcp` capability so resident tools (e.g.
+    /// `portal_projection_*`) are reachable without a separate session
+    /// handshake.  When `None`, behaviour is unchanged — every caller is a
+    /// guest and resident tools return `CAPABILITY_REQUIRED`.
+    ///
+    /// This does **not** weaken authentication: PSK auth is still enforced
+    /// independently in [`McpServer::dispatch`], so the resident grant only
+    /// has effect for a caller whose token also passes the PSK check.  In the
+    /// single-PSK model that means an operator opts a principal in by setting
+    /// this to the **same secret** as `pre_shared_key`.
+    pub resident_principal: Option<String>,
 }
 
 impl McpConfig {
@@ -148,6 +164,7 @@ impl McpConfig {
     pub fn with_psk(key: impl Into<String>) -> Self {
         Self {
             pre_shared_key: Some(key.into()),
+            resident_principal: None,
         }
     }
 
@@ -159,7 +176,17 @@ impl McpConfig {
     pub fn from_env() -> Self {
         Self {
             pre_shared_key: std::env::var("MCP_TEST_PSK").ok(),
+            resident_principal: None,
         }
+    }
+
+    /// Configure the optional resident-principal PSK (config-gated grant).
+    ///
+    /// An empty value is treated as "unset" so a misconfigured blank secret
+    /// can never silently grant `resident_mcp` to every authenticated caller.
+    pub fn with_resident_principal(mut self, principal: Option<String>) -> Self {
+        self.resident_principal = principal.filter(|p| !p.is_empty());
+        self
     }
 }
 
@@ -285,6 +312,43 @@ impl McpServer {
     /// Borrow the underlying shared scene handle.
     pub fn scene_handle(&self) -> Arc<Mutex<SceneGraph>> {
         Arc::clone(&self.scene)
+    }
+
+    /// Build the per-call [`CallerContext`] from a transport-supplied bearer
+    /// token, applying the config-gated **resident principal** grant (hud-nu65o).
+    ///
+    /// This is the single, auditable place where `resident_mcp` is minted for
+    /// the HTTP transports:
+    ///
+    /// - No bearer token → a guest context (no capabilities).
+    /// - Bearer token present, no resident principal configured (or it is
+    ///   empty) → a plain bearer context (unchanged behaviour; resident tools
+    ///   still return `CAPABILITY_REQUIRED`).
+    /// - Bearer token present and matching the configured resident principal
+    ///   (constant-time compare) → a bearer context carrying `resident_mcp`.
+    ///
+    /// PSK authentication is **not** performed here — it is enforced
+    /// independently in [`Self::dispatch`].  Attaching `resident_mcp` only
+    /// grants capability; a caller whose token fails the PSK check is still
+    /// rejected with `Unauthenticated` before any tool runs, so this can never
+    /// weaken auth.
+    pub fn caller_context(&self, bearer_token: Option<String>) -> CallerContext {
+        let Some(token) = bearer_token else {
+            return CallerContext::guest();
+        };
+
+        if let Some(principal) = self.config.resident_principal.as_deref() {
+            // `with_resident_principal` already strips empty values, but guard
+            // again so a directly-constructed config cannot grant on "".
+            if !principal.is_empty() {
+                let matches: bool = token.as_bytes().ct_eq(principal.as_bytes()).into();
+                if matches {
+                    return CallerContext::with_bearer(token).with_resident_mcp();
+                }
+            }
+        }
+
+        CallerContext::with_bearer(token)
     }
 
     /// Dispatch a raw JSON-RPC 2.0 request body and return the response body.
@@ -661,11 +725,7 @@ impl McpServer {
                         }
                     });
 
-                let ctx = if let Some(token) = bearer_token {
-                    CallerContext::with_bearer(token)
-                } else {
-                    CallerContext::guest()
-                };
+                let ctx = server.caller_context(bearer_token);
 
                 let response_body = server.dispatch(body, &ctx).await;
 
@@ -1382,6 +1442,139 @@ mod tests {
         assert_eq!(
             resp["error"]["code"], -32004,
             "unauthenticated caller must be rejected even for guest tools"
+        );
+    }
+
+    // ── Config-gated resident principal (hud-nu65o) ──────────────────────────
+    //
+    // These prove the PSK-gated `resident_mcp` grant: a bearer token matching
+    // the configured resident principal mints `resident_mcp`; the default
+    // (no principal configured) is unchanged; and the grant never bypasses the
+    // independent PSK check in `dispatch`.
+
+    #[tokio::test]
+    async fn test_caller_context_no_resident_principal_is_guest_bearer() {
+        // Default: no resident principal configured → authenticated callers
+        // remain guests (resident tools stay gated).
+        let server =
+            McpServer::new(SceneGraph::new(1920.0, 1080.0)).with_config(McpConfig::with_psk("k"));
+        let ctx = server.caller_context(Some("k".to_string()));
+        assert!(
+            !ctx.has_resident_mcp(),
+            "no resident principal configured must not grant resident_mcp"
+        );
+        assert_eq!(ctx.bearer_token.as_deref(), Some("k"));
+    }
+
+    #[tokio::test]
+    async fn test_caller_context_matching_principal_grants_resident_mcp() {
+        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0))
+            .with_config(McpConfig::with_psk("k").with_resident_principal(Some("k".to_string())));
+        let ctx = server.caller_context(Some("k".to_string()));
+        assert!(
+            ctx.has_resident_mcp(),
+            "bearer token matching resident principal must grant resident_mcp"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_caller_context_nonmatching_token_no_grant() {
+        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0)).with_config(
+            McpConfig::with_psk("k").with_resident_principal(Some("resident-secret".to_string())),
+        );
+        // A token that is not the resident principal gets no capability.
+        let ctx = server.caller_context(Some("k".to_string()));
+        assert!(
+            !ctx.has_resident_mcp(),
+            "non-matching token must not be granted resident_mcp"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_caller_context_no_token_is_guest() {
+        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0))
+            .with_config(McpConfig::with_psk("k").with_resident_principal(Some("k".to_string())));
+        let ctx = server.caller_context(None);
+        assert!(!ctx.has_resident_mcp());
+        assert!(ctx.bearer_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_empty_resident_principal_never_grants() {
+        // A blank principal must be treated as unset — it can never grant
+        // resident_mcp to a caller presenting an empty token.
+        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0))
+            .with_config(McpConfig::with_psk("k").with_resident_principal(Some(String::new())));
+        let ctx = server.caller_context(Some(String::new()));
+        assert!(
+            !ctx.has_resident_mcp(),
+            "empty resident principal must never grant resident_mcp"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resident_principal_reaches_resident_tool_via_dispatch() {
+        // End-to-end: principal == PSK, caller presents it → resident tool
+        // (create_tab) succeeds with no CAPABILITY_REQUIRED.
+        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0))
+            .with_config(McpConfig::with_psk("k").with_resident_principal(Some("k".to_string())));
+        let ctx = server.caller_context(Some("k".to_string()));
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"Resident"},"id":70}"#,
+                &ctx,
+            )
+            .await;
+        let resp = parse_response(&raw);
+        assert!(
+            resp["error"].is_null(),
+            "resident principal must reach resident tool, got: {resp:#}"
+        );
+        assert_eq!(resp["result"]["name"], "Resident");
+    }
+
+    #[tokio::test]
+    async fn test_default_still_gates_resident_tool_via_dispatch() {
+        // No resident principal configured → same caller is gated (unchanged).
+        let server =
+            McpServer::new(SceneGraph::new(1920.0, 1080.0)).with_config(McpConfig::with_psk("k"));
+        let ctx = server.caller_context(Some("k".to_string()));
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"X"},"id":71}"#,
+                &ctx,
+            )
+            .await;
+        let resp = parse_response(&raw);
+        assert_eq!(resp["error"]["code"], -32603);
+        assert_eq!(resp["error"]["data"]["error_code"], "CAPABILITY_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn test_resident_grant_never_bypasses_psk_auth() {
+        // Principal differs from the PSK: a caller presenting the principal is
+        // granted resident_mcp by caller_context, but dispatch still rejects it
+        // with Unauthenticated because the token is not the PSK.  PSK auth
+        // remains mandatory — the grant only attaches capability.
+        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0)).with_config(
+            McpConfig::with_psk("real-psk")
+                .with_resident_principal(Some("resident-token".to_string())),
+        );
+        let ctx = server.caller_context(Some("resident-token".to_string()));
+        assert!(
+            ctx.has_resident_mcp(),
+            "caller_context grants capability on principal match"
+        );
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"X"},"id":72}"#,
+                &ctx,
+            )
+            .await;
+        let resp = parse_response(&raw);
+        assert_eq!(
+            resp["error"]["code"], -32004,
+            "PSK auth must still reject a token that is not the configured PSK"
         );
     }
 
