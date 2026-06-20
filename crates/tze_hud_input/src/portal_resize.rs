@@ -715,6 +715,34 @@ impl HotkeyResizeDir {
             _ => None,
         }
     }
+
+    /// Parse from a **physical** `KeyCode` string (e.g. `"Equal"`, `"Minus"`,
+    /// `"NumpadAdd"`, `"NumpadSubtract"`) with Ctrl modifier check.
+    ///
+    /// This is the layout- and modifier-independent fallback for [`from_key`].
+    /// Matching the logical key string alone (`from_key`) is fragile under
+    /// modified chords: with Ctrl held, winit on Windows does not reliably
+    /// resolve the logical key to bare `"="`/`"-"`/`"+"`, and `"+"` requires
+    /// Shift on most layouts. The physical key position is stable regardless of
+    /// keyboard layout or held modifiers, so resolving the resize direction from
+    /// the physical `KeyCode` makes `Ctrl+=`/`Ctrl+-` deterministic (root cause
+    /// of hud-v4k1h: Ctrl resize hotkeys had no visible effect on live Windows
+    /// because the logical-key match never fired).
+    ///
+    /// The `Equal` physical key carries both `=` and (shifted) `+`, so it maps
+    /// to `Grow`; `Minus` maps to `Shrink`. The numpad `+`/`-` keys
+    /// (`NumpadAdd`/`NumpadSubtract`) map the same way. Ctrl is still required,
+    /// matching the spec §6b.2 focus-scoped Ctrl-chord contract.
+    pub fn from_key_code(key_code: &str, ctrl: bool) -> Option<Self> {
+        if !ctrl {
+            return None;
+        }
+        match key_code {
+            "Equal" | "NumpadAdd" => Some(Self::Grow),
+            "Minus" | "NumpadSubtract" => Some(Self::Shrink),
+            _ => None,
+        }
+    }
 }
 
 /// Apply a focus-scoped hotkey resize step to the current rect.
@@ -1318,6 +1346,50 @@ mod tests {
             HotkeyResizeDir::from_key("-", false),
             None,
             "bare '-' without Ctrl MUST NOT trigger resize"
+        );
+    }
+
+    #[test]
+    fn hotkey_key_parser_from_key_code_is_layout_independent() {
+        // hud-v4k1h: the physical-KeyCode fallback must resolve the resize
+        // direction even when the logical key string never yields "="/"-"/"+"
+        // (Ctrl held on Windows). Equal carries both '=' and shifted '+'.
+        assert_eq!(
+            HotkeyResizeDir::from_key_code("Equal", true),
+            Some(HotkeyResizeDir::Grow),
+            "Ctrl+Equal (physical) must map to Grow"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key_code("Minus", true),
+            Some(HotkeyResizeDir::Shrink),
+            "Ctrl+Minus (physical) must map to Shrink"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key_code("NumpadAdd", true),
+            Some(HotkeyResizeDir::Grow),
+            "Ctrl+NumpadAdd must map to Grow"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key_code("NumpadSubtract", true),
+            Some(HotkeyResizeDir::Shrink),
+            "Ctrl+NumpadSubtract must map to Shrink"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key_code("KeyA", true),
+            None,
+            "Ctrl+KeyA must return None (not a resize key)"
+        );
+        // Bare (no Ctrl): physical fallback MUST also stay Ctrl-scoped (§6b.2),
+        // otherwise pressing '=' as content would resize a focused portal.
+        assert_eq!(
+            HotkeyResizeDir::from_key_code("Equal", false),
+            None,
+            "bare Equal without Ctrl MUST NOT trigger resize"
+        );
+        assert_eq!(
+            HotkeyResizeDir::from_key_code("Minus", false),
+            None,
+            "bare Minus without Ctrl MUST NOT trigger resize"
         );
     }
 

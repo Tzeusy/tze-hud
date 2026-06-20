@@ -46,11 +46,21 @@
 //! boundary; `EditOutcome::AtCapacity` is returned and no notification leaves
 //! the runtime with content exceeding the cap.
 
+use std::collections::HashMap;
 use tze_hud_scene::SceneId;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Hard ceiling matching the TextMarkdownNode content limit (spec §4.3, §4.5).
 pub const MAX_DRAFT_BYTES: usize = 65_535;
+
+/// Maximum number of unsent per-composer drafts retained across focus loss.
+///
+/// Bounds the memory of the draft-persistence map (each entry is ≤
+/// `DEFAULT_DRAFT_CAP` bytes of text). Portals are lease-governed and few in
+/// practice, so this is a generous safety ceiling rather than an expected
+/// working-set size. When exceeded, the oldest-reachable entry is evicted so
+/// the just-blurred draft is always retained.
+pub const MAX_PERSISTED_DRAFTS: usize = 64;
 
 /// Default lower draft cap (suitable for typical composer inputs).
 pub const DEFAULT_DRAFT_CAP: usize = 4_096;
@@ -576,6 +586,33 @@ impl ComposerDraft {
         EditOutcome::Mutated
     }
 
+    /// Extend the selection to the start of the preceding word
+    /// (Shift+Ctrl+Left / Shift+Alt+Left). Moves the cursor to the word
+    /// boundary **without** collapsing the selection anchor, so the highlighted
+    /// range grows by a whole word rather than a single grapheme.
+    pub fn select_word_left(&mut self) -> EditOutcome {
+        let target = word_delete_start(&self.text, self.cursor);
+        if target == self.cursor {
+            return EditOutcome::Unchanged;
+        }
+        self.cursor = target;
+        self.bump_sequence();
+        EditOutcome::Mutated
+    }
+
+    /// Extend the selection to the end of the next word
+    /// (Shift+Ctrl+Right / Shift+Alt+Right). Moves the cursor to the word
+    /// boundary **without** collapsing the selection anchor.
+    pub fn select_word_right(&mut self) -> EditOutcome {
+        let target = word_delete_end(&self.text, self.cursor);
+        if target == self.cursor {
+            return EditOutcome::Unchanged;
+        }
+        self.cursor = target;
+        self.bump_sequence();
+        EditOutcome::Mutated
+    }
+
     /// Set pointer selection: `anchor` is the click position, `cursor` is the
     /// drag position. Both are raw byte offsets from the UI layer and are
     /// snapped down to the nearest valid UTF-8 character boundary before
@@ -1079,6 +1116,12 @@ pub struct ComposerDraftManager {
     scheduler: DraftScheduler,
     /// The node_id of the currently focused composer region, if any.
     focused_node: Option<SceneId>,
+    /// Unsent drafts retained per composer node across focus loss, so an
+    /// accidental blur (clicking another portal, switching tabs) does not
+    /// destroy in-progress text. Keyed by composer `node_id`. Submitted or
+    /// cancelled drafts are empty and are never stored. Bounded by
+    /// [`MAX_PERSISTED_DRAFTS`].
+    persisted_drafts: HashMap<SceneId, ComposerDraft>,
 }
 
 impl ComposerDraftManager {
@@ -1089,12 +1132,17 @@ impl ComposerDraftManager {
 
     /// Called when a node with `accepts_composer_input = true` gains focus.
     ///
-    /// Creates a new `ComposerDraft` (with `DEFAULT_DRAFT_CAP`) for the region.
-    /// Any previous draft from a stale focus is discarded (focus is exclusive).
-    /// The scheduler is also reset to ensure no pending state from the previous
-    /// node leaks into the new focus window (state hygiene).
+    /// Restores the node's previously-retained unsent draft if one exists
+    /// (preserving its text, caret, and selection), otherwise creates a fresh
+    /// `ComposerDraft` (with `DEFAULT_DRAFT_CAP`). The restored/created draft
+    /// adopts the current `suspended` (safe-mode) state regardless of what it
+    /// was when blurred. The scheduler is reset so no pending state from the
+    /// previous node leaks into the new focus window (state hygiene).
     pub fn on_focus_gained(&mut self, node_id: SceneId, suspended: bool) {
-        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        let mut draft = self
+            .persisted_drafts
+            .remove(&node_id)
+            .unwrap_or_else(|| ComposerDraft::new(DEFAULT_DRAFT_CAP));
         draft.set_suspended(suspended);
         self.draft = Some(draft);
         self.focused_node = Some(node_id);
@@ -1104,15 +1152,43 @@ impl ComposerDraftManager {
     /// Called when the focused composer region loses focus.
     ///
     /// Flushes any pending notification (blur is a settle point per §4.3 flush
-    /// guarantee) then discards the draft buffer.
+    /// guarantee). If the draft still holds unsent text, it is retained per
+    /// node so re-focusing restores it (chat-app draft behaviour); an empty
+    /// draft — including one just submitted or cancelled — is not retained.
     ///
     /// Returns the drained batch, if any (caller delivers to adapter).
     pub fn on_focus_lost(&mut self) -> Option<DraftNotificationBatch> {
         self.scheduler.flush();
         let batch = self.scheduler.take_batch();
-        self.draft = None;
+        if let (Some(node_id), Some(draft)) = (self.focused_node, self.draft.take()) {
+            if draft.text().is_empty() {
+                // Submitted/cancelled/never-typed: drop any stale retained copy.
+                self.persisted_drafts.remove(&node_id);
+            } else {
+                self.retain_draft(node_id, draft);
+            }
+        }
         self.focused_node = None;
         batch
+    }
+
+    /// Store an unsent draft for `node_id`, evicting an arbitrary older entry
+    /// if the retained set is at [`MAX_PERSISTED_DRAFTS`]. The just-blurred
+    /// draft is always retained (eviction targets a *different* node).
+    fn retain_draft(&mut self, node_id: SceneId, draft: ComposerDraft) {
+        if !self.persisted_drafts.contains_key(&node_id)
+            && self.persisted_drafts.len() >= MAX_PERSISTED_DRAFTS
+        {
+            if let Some(evict) = self
+                .persisted_drafts
+                .keys()
+                .find(|k| **k != node_id)
+                .copied()
+            {
+                self.persisted_drafts.remove(&evict);
+            }
+        }
+        self.persisted_drafts.insert(node_id, draft);
     }
 
     /// Route a character event into the active draft buffer.
@@ -1202,6 +1278,8 @@ impl ComposerDraftManager {
     /// - `End` → `draft.move_to_end()` (or `select_to_end` with Shift)
     /// - `Ctrl+ArrowLeft` → `draft.move_word_left()`
     /// - `Ctrl+ArrowRight` → `draft.move_word_right()`
+    /// - `Shift+Ctrl+ArrowLeft` → `draft.select_word_left()` (extend by word)
+    /// - `Shift+Ctrl+ArrowRight` → `draft.select_word_right()` (extend by word)
     /// - `Space` → insert literal space
     /// - `Enter` / `NumpadEnter` → submit (returns batch with submission + clear)
     /// - `Escape` → cancel (returns batch with cancel)
@@ -1246,7 +1324,12 @@ impl ComposerDraftManager {
                 (true, None)
             }
             "ArrowLeft" => {
-                let o = if shift {
+                // Order matters: Shift+Ctrl/Alt extends by word, so it must be
+                // checked before the bare-Shift (one-grapheme) arm — otherwise
+                // Ctrl+Shift+Left would only extend a single character.
+                let o = if shift && (ctrl || alt) {
+                    draft.select_word_left()
+                } else if shift {
                     draft.select_left()
                 } else if ctrl || alt {
                     draft.move_word_left()
@@ -1259,7 +1342,9 @@ impl ComposerDraftManager {
                 (true, None)
             }
             "ArrowRight" => {
-                let o = if shift {
+                let o = if shift && (ctrl || alt) {
+                    draft.select_word_right()
+                } else if shift {
                     draft.select_right()
                 } else if ctrl || alt {
                     draft.move_word_right()
@@ -2280,6 +2365,118 @@ mod tests {
             "blur flush must deliver pending draft state"
         );
         assert!(!mgr.is_active(), "draft must be cleared after focus lost");
+    }
+
+    /// Ctrl+Shift+ArrowLeft extends the selection by a whole word, not one
+    /// grapheme (regression for the shift-before-ctrl routing bug: shift used to
+    /// win and only `select_left` ran).
+    #[test]
+    fn manager_ctrl_shift_arrow_left_extends_selection_by_word() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for ch in "hello world".chars() {
+            mgr.route_character(&ch.to_string());
+        }
+        // Caret at end. Ctrl+Shift+Left must select the whole last word.
+        let (consumed, _) = mgr.route_key_down("ArrowLeft", "ArrowLeft", true, true, false);
+        assert!(consumed, "Ctrl+Shift+Left must be consumed by the composer");
+        let draft = mgr.draft().expect("active draft");
+        assert!(draft.has_selection(), "selection must be non-empty");
+        let sel = draft.selection();
+        assert_eq!(
+            &draft.text()[sel.start..sel.end],
+            "world",
+            "Ctrl+Shift+Left must extend selection by a word, not one char"
+        );
+    }
+
+    /// Ctrl+Shift+ArrowRight extends the selection forward by a whole word.
+    #[test]
+    fn manager_ctrl_shift_arrow_right_extends_selection_by_word() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for ch in "hello world".chars() {
+            mgr.route_character(&ch.to_string());
+        }
+        // Move caret to start, then Ctrl+Shift+Right selects the first word.
+        mgr.route_key_down("Home", "Home", false, false, false);
+        let (consumed, _) = mgr.route_key_down("ArrowRight", "ArrowRight", true, true, false);
+        assert!(
+            consumed,
+            "Ctrl+Shift+Right must be consumed by the composer"
+        );
+        let draft = mgr.draft().expect("active draft");
+        let sel = draft.selection();
+        assert_eq!(
+            &draft.text()[sel.start..sel.end],
+            "hello",
+            "Ctrl+Shift+Right must extend selection forward by a word"
+        );
+    }
+
+    /// An unsent draft survives an accidental blur and is restored on re-focus
+    /// of the same composer node (chat-app draft behaviour).
+    #[test]
+    fn manager_draft_persists_across_focus_loss_and_restores() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_a = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_a, false);
+        for ch in "unsent reply".chars() {
+            mgr.route_character(&ch.to_string());
+        }
+        // Blur without submitting (e.g. clicked another portal).
+        let _ = mgr.on_focus_lost();
+        assert!(!mgr.is_active(), "no active draft after blur");
+
+        // Re-focusing the same node restores the in-progress text + caret.
+        mgr.on_focus_gained(node_a, false);
+        let draft = mgr.draft().expect("draft restored on re-focus");
+        assert_eq!(
+            draft.text(),
+            "unsent reply",
+            "blurred draft must be restored"
+        );
+        assert_eq!(
+            draft.cursor(),
+            "unsent reply".len(),
+            "caret restored at end"
+        );
+
+        // A different composer node starts empty (drafts are per-node).
+        let node_b = tze_hud_scene::SceneId::new();
+        mgr.on_focus_lost();
+        mgr.on_focus_gained(node_b, false);
+        assert_eq!(
+            mgr.draft().expect("node_b draft").text(),
+            "",
+            "a different composer node must not inherit node_a's draft"
+        );
+    }
+
+    /// A submitted draft is empty and must NOT be resurrected on re-focus.
+    #[test]
+    fn manager_submitted_draft_is_not_persisted() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for ch in "send me".chars() {
+            mgr.route_character(&ch.to_string());
+        }
+        // Submit, then blur, then re-focus — must be a clean empty draft.
+        let (_, batch) = mgr.route_key_down("Enter", "Enter", false, false, false);
+        assert!(
+            batch.and_then(|b| b.submission).is_some(),
+            "Enter must submit the draft"
+        );
+        let _ = mgr.on_focus_lost();
+        mgr.on_focus_gained(node_id, false);
+        assert_eq!(
+            mgr.draft().expect("draft").text(),
+            "",
+            "a submitted draft must not be restored on re-focus"
+        );
     }
 
     /// Unknown key codes are not consumed (caller forwards to agent).
