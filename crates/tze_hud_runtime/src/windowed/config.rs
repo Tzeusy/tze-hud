@@ -244,17 +244,20 @@ pub(super) fn resident_grpc_bridge_enabled(settings_present: bool, env_enabled: 
 
 /// Resolve the resident gRPC portal bridge endpoint (hud-x2e2v).
 ///
-/// An explicit operator-configured endpoint wins. Otherwise the loopback
-/// self-target `http://127.0.0.1:<grpc_port>` is derived from the hosting
-/// runtime's own gRPC port — but only when that port is non-zero. Returns
-/// `None` when there is no explicit endpoint and no local gRPC server to derive
-/// one from (the bridge then fails closed rather than dialing a dead port).
+/// A non-empty explicit operator-configured endpoint wins. An explicit endpoint
+/// that is empty or whitespace-only is rejected (`None`) so the bridge fails
+/// closed rather than dialing an invalid URI. Otherwise the loopback self-target
+/// `http://127.0.0.1:<grpc_port>` is derived from the hosting runtime's own gRPC
+/// port — but only when that port is non-zero. Returns `None` when there is no
+/// usable explicit endpoint and no local gRPC server to derive one from (the
+/// bridge then fails closed rather than dialing a dead port).
 pub(super) fn resolve_resident_grpc_endpoint(
     explicit: Option<&str>,
     grpc_port: u16,
 ) -> Option<String> {
     match explicit {
-        Some(endpoint) => Some(endpoint.to_string()),
+        Some(endpoint) if !endpoint.trim().is_empty() => Some(endpoint.to_string()),
+        Some(_) => None,
         None if grpc_port != 0 => Some(format!("http://127.0.0.1:{grpc_port}")),
         None => None,
     }
@@ -599,6 +602,15 @@ mod tests {
     #[test]
     fn resolve_resident_grpc_endpoint_none_when_no_port_and_no_explicit() {
         assert!(resolve_resident_grpc_endpoint(None, 0).is_none());
+    }
+
+    /// An explicit endpoint that is empty or whitespace-only is rejected so the
+    /// bridge fails closed rather than dialing an invalid URI — even when a
+    /// loopback fallback port is available.
+    #[test]
+    fn resolve_resident_grpc_endpoint_rejects_blank_explicit() {
+        assert!(resolve_resident_grpc_endpoint(Some(""), 50051).is_none());
+        assert!(resolve_resident_grpc_endpoint(Some("   "), 50051).is_none());
     }
 
     /// `RuntimePsk` reuses the hosting runtime's PSK.
