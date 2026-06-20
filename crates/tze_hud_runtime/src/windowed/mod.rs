@@ -186,8 +186,9 @@ mod widgets;
 mod test_support;
 
 pub use self::config::{
+    DEFAULT_RESIDENT_GRPC_AGENT_ID, DEFAULT_RESIDENT_GRPC_LEASE_TTL_MS,
     ResidentGrpcCredentialSource, ResidentGrpcPortalSettings, WindowedBenchmarkConfig,
-    WindowedConfig, DEFAULT_RESIDENT_GRPC_AGENT_ID, DEFAULT_RESIDENT_GRPC_LEASE_TTL_MS,
+    WindowedConfig,
 };
 use self::hittest::{refresh_interaction_hit_regions_after_render, sync_scene_display_area};
 use self::input_dispatch::{
