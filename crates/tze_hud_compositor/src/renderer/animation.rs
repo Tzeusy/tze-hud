@@ -549,4 +549,71 @@ impl Compositor {
             scene.set_displayed_tile_scroll_offset(*tile_id, x, y);
         }
     }
+
+    /// Whether any per-frame animation, fade, reveal, or scroll smoothing is
+    /// still in flight — i.e. the next presented frame's pixels would differ
+    /// from the last even though `scene.version` is unchanged.
+    ///
+    /// The windowed frame loop's idle render gate (hud-ilivg) consults this so it
+    /// can skip the build/encode/present pass only when BOTH the scene version is
+    /// unchanged AND nothing is animating. Returning `true` here is what keeps an
+    /// in-flight eased transition, TTL fade-out, word-by-word reveal, or
+    /// smooth-scroll catch-up advancing instead of freezing.
+    ///
+    /// All checks read animation state seeded by a prior rendered frame: the
+    /// scene-version bump that *starts* any animation forces at least one render
+    /// (via the version check), which populates these maps; from then on this
+    /// predicate sustains the animation until it completes and self-prunes.
+    pub fn has_inflight_animation(&self, scene: &SceneGraph) -> bool {
+        // Zone fade-in / fade-out transitions (subtitles, content/chrome zones).
+        // Completed transitions are pruned by `update_zone_animations`, but a
+        // just-completed entry may linger for one frame — `!is_complete()` is the
+        // authoritative in-flight test.
+        if self
+            .zone_animation_states
+            .values()
+            .any(|s| !s.is_complete())
+        {
+            return true;
+        }
+
+        // Portal-tile fade-in / fade-out transitions (§6.3 collapse/expand).
+        if self
+            .portal_tile_anim_states
+            .values()
+            .any(|s| !s.is_complete())
+        {
+            return true;
+        }
+
+        // Per-publication TTL fade-out (Stack notifications). A publication that
+        // has not finished fading is in flight: it is still counting down to its
+        // fade-out start (which must be ticked to begin) or actively fading.
+        if self
+            .pub_animation_states
+            .values()
+            .any(|zone| zone.values().any(|s| !s.is_fade_complete()))
+        {
+            return true;
+        }
+
+        // Streaming word-by-word reveal still progressing through breakpoints.
+        if self.stream_reveal_states.values().any(|s| s.is_revealing()) {
+            return true;
+        }
+
+        // Smooth-scroll / animated follow-tail catch-up still moving toward its
+        // authoritative target. Only meaningful when smoothing is enabled
+        // (windowed); headless snaps and never registers smoothers.
+        if self.scroll_smoothing_enabled {
+            for (&tile_id, smoother) in &self.scroll_smoothers {
+                let (target_x, target_y) = scene.tile_scroll_offset_local(tile_id);
+                if !smoother.is_settled(target_x, target_y) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
 }

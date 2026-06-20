@@ -1091,6 +1091,44 @@ impl Compositor {
         }
     }
 
+    /// Drain the local composer echo slot and report whether the idle render
+    /// gate (hud-ilivg) must render this frame on the composer's behalf.
+    ///
+    /// The windowed frame loop calls this **before** the gate decides whether to
+    /// skip the build/encode/present pass. Two composer effects are driven purely
+    /// off out-of-band state that never bumps `scene.version`, so the gate would
+    /// otherwise freeze them (hud-r3ax6, "Local feedback first"):
+    ///
+    /// 1. **Local draft echo.** A keystroke writes the `local_composer_state`
+    ///    slot; the draft is only applied by draining it (the `local_composer`
+    ///    field is populated *here*, not by the scene diff). Draining before the
+    ///    gate is what makes a pending echo observable to the gate — otherwise it
+    ///    would only ever be drained inside `render_frame`, which the gate may
+    ///    skip (chicken-and-egg).
+    /// 2. **Caret blink.** While a composer is focused the caret toggles off the
+    ///    wall clock ([`caret_visible_at`]). Treating an active composer as dirty
+    ///    keeps it blinking; this is the deliberately simple correctness fix
+    ///    (continuous render only while focused — optimizable later to render
+    ///    only at blink-toggle boundaries).
+    ///
+    /// Returns `true` while a composer is focused/visible (pending echo just
+    /// applied, or caret still blinking) **and** for the single frame on which a
+    /// composer deactivates (so the overlay is cleared from the screen). Returns
+    /// `false` once the composer is gone, so the truly-static idle case (no
+    /// composer focus, no pending echo) still skips render/present.
+    ///
+    /// [`caret_visible_at`]: image_cache::caret_visible_at
+    pub fn drain_local_composer_and_needs_render(&mut self) -> bool {
+        let was_active = self.local_composer.is_some();
+        self.drain_local_composer_state();
+        let is_active = self.local_composer.is_some();
+        // `is_active`  → focused composer: caret blink + any pending echo.
+        // `was_active` → covers the deactivation transition frame: the overlay
+        //                was drawn last frame and must be cleared by one render
+        //                even though `local_composer` is now `None`.
+        is_active || was_active
+    }
+
     /// Prime the markdown parse cache for all [`TextMarkdownNode`] nodes in the scene.
     ///
     /// **Call site**: this must be called by the **runtime at Stage 4 (scene

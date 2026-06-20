@@ -7869,6 +7869,175 @@ async fn publish_displayed_scroll_offsets_mirrors_smoother_and_clears_headless()
     );
 }
 
+/// Idle render gate (hud-ilivg): the compositor frame loop skips the
+/// build/encode/present pass when the scene graph is unchanged since the last
+/// presented frame AND nothing is animating, but renders on any scene-version
+/// bump OR while an animation is in flight.
+///
+/// This pins the exact `dirty` predicate used by the windowed frame loop
+/// (`scene.version != last_rendered_scene_version || has_inflight_animation`)
+/// against all three acceptance cases:
+///   1. idle (no change, no animation)            -> skip
+///   2. scene-version bump                        -> render
+///   3. in-flight animation, version pinned       -> render (no freeze)
+#[tokio::test]
+async fn idle_render_gate_skips_static_scene_renders_on_change_or_animation() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(720, 480).await);
+    // Windowed profile: scroll smoothing active (headless snaps and never
+    // registers a smoother, so enable it explicitly for this gate test).
+    compositor.scroll_smoothing_enabled = true;
+
+    let mut scene = SceneGraph::new(720.0, 480.0);
+    let tab_id = scene.create_tab("gate", 0).unwrap();
+    let lease_id = scene.grant_lease("gate", 120_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "gate",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            tze_hud_scene::types::TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: None,
+                content_height: Some(2000.0),
+            },
+        )
+        .unwrap();
+
+    // Observe the tile once: its smoother starts settled on the current offset
+    // (no initial jump), so nothing is animating.
+    compositor.update_scroll_smoothing(&scene);
+
+    // -- Case 1: idle -- scene unchanged, nothing animating -> SKIP. --
+    assert!(
+        !compositor.has_inflight_animation(&scene),
+        "a freshly-settled scene must report no in-flight animation"
+    );
+    let last_rendered = scene.version;
+    let dirty_idle = scene.version != last_rendered || compositor.has_inflight_animation(&scene);
+    assert!(
+        !dirty_idle,
+        "idle frame (no scene change, no animation) MUST skip render/present"
+    );
+
+    // -- Case 2: scene-version bump -> RENDER. --
+    // A scene diff / mutation bumps scene.version; the gate must not skip it.
+    scene.version += 1;
+    let dirty_versioned =
+        scene.version != last_rendered || compositor.has_inflight_animation(&scene);
+    assert!(
+        dirty_versioned,
+        "a scene-version bump MUST force a render even with no animation"
+    );
+
+    // -- Case 3: in-flight animation, version pinned -> RENDER (no freeze). --
+    // Move the authoritative scroll target far away and advance the smoother one
+    // frame: it is now mid-flight (displayed offset still near 0, target 1500).
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 1500.0)
+        .unwrap();
+    compositor.update_scroll_smoothing(&scene);
+    assert!(
+        compositor.has_inflight_animation(&scene),
+        "a mid-flight smooth-scroll catch-up must report an in-flight animation"
+    );
+    // Pin the gate's last-rendered version to the CURRENT version so the only
+    // possible source of dirtiness is the animation itself.
+    let pinned = scene.version;
+    let dirty_animating = scene.version != pinned || compositor.has_inflight_animation(&scene);
+    assert!(
+        dirty_animating,
+        "an in-flight animation MUST force a render even when scene.version is unchanged"
+    );
+}
+
+/// Idle render gate — composer carve-out (hud-ilivg / hud-r3ax6).
+///
+/// The local draft echo and the caret blink are driven off out-of-band state
+/// that never bumps `scene.version`. Before the idle gate the compositor thread
+/// ran `render_frame` unconditionally, so both worked; with the gate they would
+/// freeze unless `drain_local_composer_and_needs_render` (called before the
+/// gate) (a) applies a pending keystroke and (b) keeps a focused composer dirty.
+///
+/// This pins the gate's composer input across the full lifecycle:
+///   1. no composer                       → needs_render = false  (idle skips)
+///   2. pending echo (slot Some(Some))    → needs_render = true   (renders)
+///   3. focused, no new keystroke         → needs_render = true   (caret blinks)
+///   4. deactivation (slot Some(None))    → needs_render = true   (clears overlay)
+///   5. gone                              → needs_render = false  (idle skips)
+#[tokio::test]
+async fn idle_render_gate_renders_for_composer_echo_and_caret_blink() {
+    use tze_hud_scene::types::SceneId;
+
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(320, 200).await);
+
+    // ── 1. No composer focused, nothing pending → gate must skip. ──
+    assert!(
+        !compositor.drain_local_composer_and_needs_render(),
+        "with no composer focused and no pending echo the gate MUST be able to skip"
+    );
+
+    // ── 2. A keystroke writes the slot → pending echo MUST render. ──
+    let node_id = SceneId::new();
+    {
+        let mut guard = compositor.local_composer_state.lock().unwrap();
+        *guard = Some(Some(LocalComposerState {
+            text: "hi".to_owned(),
+            cursor_byte: 2,
+            selection_anchor: 2,
+            at_capacity: false,
+            node_id,
+        }));
+    }
+    assert!(
+        compositor.drain_local_composer_and_needs_render(),
+        "a pending local-composer echo MUST mark the frame dirty so it renders promptly"
+    );
+    assert!(
+        compositor.local_composer.is_some(),
+        "draining before the gate must have applied the pending draft"
+    );
+
+    // ── 3. No new keystroke, composer still focused → caret keeps blinking. ──
+    // The slot is empty now, but an active composer must keep rendering across
+    // blink-toggle boundaries (treated as always-dirty while focused).
+    assert!(
+        compositor.local_composer_state.lock().unwrap().is_none(),
+        "slot must have been drained to None by the previous call"
+    );
+    assert!(
+        compositor.drain_local_composer_and_needs_render(),
+        "a focused composer with no new keystroke MUST keep rendering so the caret blinks"
+    );
+
+    // ── 4. Deactivation: slot delivers Some(None) → render once to clear. ──
+    {
+        let mut guard = compositor.local_composer_state.lock().unwrap();
+        *guard = Some(None);
+    }
+    assert!(
+        compositor.drain_local_composer_and_needs_render(),
+        "the deactivation transition MUST render one frame to clear the composer overlay"
+    );
+    assert!(
+        compositor.local_composer.is_none(),
+        "deactivation must have cleared the drained composer state"
+    );
+
+    // ── 5. Composer gone → gate must skip again (no 60Hz idle burn). ──
+    assert!(
+        !compositor.drain_local_composer_and_needs_render(),
+        "once the composer is gone the gate MUST be able to skip the static idle frame"
+    );
+}
+
 /// Headless readback regression for the text-stream portal output pane.
 ///
 /// The live exemplar mounts the OUTPUT transcript body as a scrollable tile

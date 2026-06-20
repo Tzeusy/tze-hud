@@ -230,6 +230,19 @@ impl ScrollSmoother {
         (self.displayed_x, self.displayed_y)
     }
 
+    /// Whether the displayed offset has settled onto `(target_x, target_y)`.
+    ///
+    /// "Settled" means both axes are within [`Self::snap_epsilon`] of the
+    /// target, i.e. the next [`advance`](Self::advance) would snap exactly onto
+    /// it and produce no further motion. The idle render gate (hud-ilivg) uses
+    /// this to tell a still-catching-up smoother (must keep rendering) apart
+    /// from a settled one (safe to idle).
+    #[inline]
+    pub fn is_settled(&self, target_x: f32, target_y: f32) -> bool {
+        (target_x - self.displayed_x).abs() <= self.snap_epsilon
+            && (target_y - self.displayed_y).abs() <= self.snap_epsilon
+    }
+
     /// Advance the displayed offset toward `(target_x, target_y)` by one frame
     /// of `dt_ms`, returning the new displayed offset.
     ///
@@ -470,6 +483,34 @@ mod tests {
     fn scroll_smoother_starts_settled() {
         let s = ScrollSmoother::new(12.0, 34.0);
         assert_eq!(s.displayed(), (12.0, 34.0));
+        // Freshly constructed on its offset → settled there (idle render gate).
+        assert!(s.is_settled(12.0, 34.0));
+    }
+
+    #[test]
+    fn scroll_smoother_is_settled_tracks_inflight_state() {
+        // Settled on the construction offset; not settled once the target moves
+        // far away; settles again once the displayed offset converges onto it.
+        // This is the predicate the idle render gate (hud-ilivg) uses to tell a
+        // still-catching-up smoother (keep rendering) from a finished one (idle).
+        let mut s = ScrollSmoother::new(0.0, 0.0);
+        assert!(s.is_settled(0.0, 0.0));
+
+        // Target jumps 500px away: catch-up in flight, not yet settled.
+        s.advance(0.0, 500.0, 16.6);
+        assert!(
+            !s.is_settled(0.0, 500.0),
+            "a mid-flight smoother must not report settled"
+        );
+
+        // Drive it to the target; once within snap_epsilon it reports settled.
+        let mut frames = 0;
+        while !s.is_settled(0.0, 500.0) {
+            s.advance(0.0, 500.0, 16.6);
+            frames += 1;
+            assert!(frames < 240, "did not settle within 240 frames");
+        }
+        assert!(s.is_settled(0.0, 500.0));
     }
 
     #[test]

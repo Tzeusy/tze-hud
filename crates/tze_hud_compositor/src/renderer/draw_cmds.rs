@@ -428,6 +428,17 @@ impl StreamRevealState {
         }
     }
 
+    /// Whether more breakpoint segments remain to be revealed.
+    ///
+    /// `true` while the word-by-word reveal is still progressing; `false` once
+    /// every segment is visible (or there are no breakpoints). The idle render
+    /// gate (hud-ilivg) treats an in-progress reveal as a reason to keep
+    /// rendering so the animation never freezes mid-reveal.
+    #[inline]
+    pub fn is_revealing(&self) -> bool {
+        self.segment_idx < self.breakpoints.len()
+    }
+
     /// Advance the reveal state by one frame.
     ///
     /// Returns `true` if the reveal is still in progress (more segments remain).
@@ -457,6 +468,35 @@ mod tests {
         assert!((s.opacity_at(0.0) - 0.0).abs() < EPS);
         assert!((s.opacity_at(1.0) - 1.0).abs() < EPS);
         assert!((s.opacity_at(0.5) - 0.5).abs() < EPS);
+    }
+
+    #[test]
+    fn stream_reveal_is_revealing_tracks_progress() {
+        // The idle render gate (hud-ilivg) treats a reveal as in-flight only
+        // while breakpoint segments remain. Empty breakpoints reveal instantly
+        // (never in flight); a non-empty reveal is in flight until fully revealed.
+        let key: PubKey = (1, "agent".to_owned());
+
+        // No breakpoints → reveal-all → never in flight.
+        let none = StreamRevealState::new(key.clone(), vec![]);
+        assert!(!none.is_revealing());
+
+        // Two segments → in flight until both are revealed.
+        let mut s = StreamRevealState::new(key, vec![3, 6]);
+        assert!(
+            s.is_revealing(),
+            "fresh multi-segment reveal must be in flight"
+        );
+        // Advance through every dwell frame until fully revealed.
+        let mut frames = 0;
+        while s.advance() {
+            frames += 1;
+            assert!(frames < 1000, "reveal never completed");
+        }
+        assert!(
+            !s.is_revealing(),
+            "a fully-revealed stream must no longer be in flight"
+        );
     }
 
     #[test]

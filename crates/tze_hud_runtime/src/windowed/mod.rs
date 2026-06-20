@@ -527,6 +527,21 @@ impl ApplicationHandler for WinitApp {
         // Prune stale portal_resize_states entries for tiles removed from the
         // scene (hud-kgu8u). Uses try_lock; silently deferred if lock is busy.
         self.prune_portal_resize_states();
+
+        // ── Per-frame ticks + present poll (hud-ilivg) ────────────────────
+        // Moved here from the `RedrawRequested` handler so the main loop no
+        // longer self-perpetuates a `request_redraw` every frame purely to drive
+        // these.  `about_to_wait` already fires every event-loop iteration under
+        // `ControlFlow::Poll` (it hosts the per-iteration portal/input draining
+        // above), so these continue at the same cadence.  `maybe_present_frame`
+        // is a cheap watch-channel poll that presents only when the compositor
+        // signalled a new frame — with the compositor render gate that now
+        // happens only when the scene changed or an animation is in flight.
+        self.inject_windowed_benchmark_input_probe();
+        self.tick_widget_hover_tracking();
+        // Auto-dismiss the drag-handle context menu after 3 seconds.
+        self.tick_context_menu_auto_dismiss();
+        self.maybe_present_frame();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -877,6 +892,12 @@ impl ApplicationHandler for WinitApp {
                 let mut consecutive_misses: u64 = 0;
                 let mut last_present_at = std::time::Instant::now();
                 let mut watchdog_logged = false;
+                // hud-ilivg idle render gate: scene.version of the last frame we
+                // actually built+presented. The loop skips the build/encode/present
+                // pass when scene.version is unchanged AND no animation is in
+                // flight, freeing idle CPU/GPU/streaming budget without dropping any
+                // real change. u64::MAX guarantees the very first frame renders.
+                let mut last_rendered_scene_version: u64 = u64::MAX;
                 crate::diag::diag_write("compositor thread: frame loop STARTED");
 
                 tracing::info!(
@@ -989,94 +1010,137 @@ impl ApplicationHandler for WinitApp {
                         // internally on scene.version; no-op when unchanged.
                         compositor.prime_truncation_cache(&scene);
 
-                        // ── Stage 5–7: Render Encode + GPU Submit ─────────
-                        let scene_commit_at = Instant::now();
-                        let compositor_telemetry =
-                            compositor.render_frame(&mut scene, surface_for_compositor.as_ref());
-                        refresh_interaction_hit_regions_after_render(
-                            &compositor,
-                            &mut scene,
-                            surface_for_compositor.as_ref(),
-                        );
-                        let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
-                        hit_test_snapshot.store(Arc::new(new_snap));
-                        drop(scene); // Release lock before signalling main thread.
+                        // ── Local composer drain (hud-ilivg / hud-r3ax6) ──
+                        // Drain the local composer echo slot BEFORE the gate.  The
+                        // draft echo and the caret blink are driven off out-of-band
+                        // state that never bumps scene.version, so the gate would
+                        // freeze them unless we both (a) apply a pending keystroke
+                        // here — `local_composer` is only populated by this drain,
+                        // so it must run before the gate can observe it — and (b)
+                        // treat a focused composer (blinking caret) as dirty.
+                        // Returns true while a composer is focused/visible or on
+                        // the single deactivation frame; false once it is gone, so
+                        // the truly-static idle case still skips.
+                        let composer_needs_render =
+                            compositor.drain_local_composer_and_needs_render();
 
-                        // ── Signal main thread to present ─────────────────
-                        // Per spec §Compositor Thread Ownership (line 55):
-                        // "compositor thread MUST signal the main thread via
-                        // FrameReadySignal, and only the main thread SHALL call
-                        // surface.present()."
-                        let _ = frame_ready_tx.send(true);
-                        // hud-pi5wx: successful commit+present — reset the stall watchdog.
+                        // ── Idle render gate (hud-ilivg) ──────────────────
+                        // Build/encode/present only when the scene graph changed
+                        // since the last presented frame OR an animation is in
+                        // flight OR a focused/just-deactivated composer needs a
+                        // frame.  The cheap sweeps above (expiry, publication
+                        // tick, prune, cache primes) ALWAYS run, so a fade-out
+                        // start or expiry still bumps scene.version and re-arms the
+                        // gate; an in-flight eased transition / TTL fade / reveal /
+                        // smooth-scroll forces a render so it never freezes.
+                        let dirty = scene.version != last_rendered_scene_version
+                            || compositor.has_inflight_animation(&scene)
+                            || composer_needs_render;
+
+                        // A successful try_lock means we are NOT lock-starved,
+                        // whether or not we present this frame — reset the
+                        // hud-pi5wx stall watchdog here so an idle (skipped) frame
+                        // is never mistaken for present starvation.
                         if watchdog_logged {
                             crate::diag::diag_write(&format!(
                                 "PRESENT-WATCHDOG: RECOVERED after {consecutive_misses} consecutive misses"
                             ));
                         }
                         consecutive_misses = 0;
-                        last_present_at = std::time::Instant::now();
                         watchdog_logged = false;
 
-                        // Telemetry emit (Stage 8)
-                        let mut telem = tze_hud_telemetry::FrameTelemetry::new(
-                            compositor_telemetry.frame_number,
-                        );
-                        telem.frame_time_us = frame_start.elapsed().as_micros() as u64;
-                        telem.stage6_render_encode_us =
-                            compositor_telemetry.stage6_render_encode_us;
-                        telem.stage7_gpu_submit_us = compositor_telemetry.stage7_gpu_submit_us;
-                        telem.tile_count = compositor_telemetry.tile_count;
-                        // Propagate commit-time markdown prime cost (hud-380dl).
-                        // Non-zero only on frames where scene.version changed;
-                        // zero on steady-state frames (cache hit, no parse work).
-                        telem.markdown_prime_us = markdown_prime_us;
-                        // Snapshot the cumulative scene-lock miss count so this
-                        // frame's telemetry record carries contention history
-                        // (hud-3qpgv.2). No extra cost on the success path: plain
-                        // u64 read, no atomics, no cross-thread access.
-                        telem.scene_lock_miss_count = scene_lock_miss_count;
-                        if let Some((local_ack_us, scene_commit_us, next_present_us)) =
-                            drain_pending_input_latency(
-                                &pending_input_latency,
-                                scene_commit_at,
-                                Instant::now(),
-                            )
-                        {
-                            telem.input_to_local_ack_us = local_ack_us;
-                            telem.input_to_scene_commit_us = scene_commit_us;
-                            telem.input_to_next_present_us = next_present_us;
-                        }
-                        telemetry.record(telem);
+                        if !dirty {
+                            // Idle: scene unchanged and nothing animating. Release
+                            // the lock without building vertices, encoding, or
+                            // signalling the main thread to present.
+                            drop(scene);
+                        } else {
+                            // ── Stage 5–7: Render Encode + GPU Submit ─────────
+                            let scene_commit_at = Instant::now();
+                            let compositor_telemetry = compositor
+                                .render_frame(&mut scene, surface_for_compositor.as_ref());
+                            refresh_interaction_hit_regions_after_render(
+                                &compositor,
+                                &mut scene,
+                                surface_for_compositor.as_ref(),
+                            );
+                            let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+                            hit_test_snapshot.store(Arc::new(new_snap));
+                            // Record the version we just presented so an unchanged
+                            // scene idles on the next iteration.
+                            last_rendered_scene_version = scene.version;
+                            drop(scene); // Release lock before signalling main thread.
 
-                        if let Some(state) = benchmark_state.as_mut() {
-                            if let Some(last) = telemetry.records().last() {
-                                if state.record(last) {
-                                    let finished = benchmark_state.take().expect(
-                                        "benchmark_state must still exist when record completes",
-                                    );
-                                    let emit_path = finished.config.emit_path.clone();
-                                    match finished.finish() {
-                                        Ok(()) => {
-                                            tracing::info!(
-                                                path = %emit_path.display(),
-                                                "windowed benchmark artifact written; shutting down"
-                                            );
-                                            shutdown_tok
-                                                .trigger(crate::threads::ShutdownReason::Clean);
-                                            break;
-                                        }
-                                        Err(err) => {
-                                            tracing::error!(
-                                                error = %err,
-                                                path = %emit_path.display(),
-                                                "failed to write windowed benchmark artifact"
-                                            );
-                                            benchmark_failed
-                                                .store(true, std::sync::atomic::Ordering::Release);
-                                            shutdown_tok
-                                                .trigger(crate::threads::ShutdownReason::Clean);
-                                            break;
+                            // ── Signal main thread to present ─────────────────
+                            // Per spec §Compositor Thread Ownership (line 55):
+                            // "compositor thread MUST signal the main thread via
+                            // FrameReadySignal, and only the main thread SHALL call
+                            // surface.present()."
+                            let _ = frame_ready_tx.send(true);
+                            last_present_at = std::time::Instant::now();
+
+                            // Telemetry emit (Stage 8)
+                            let mut telem = tze_hud_telemetry::FrameTelemetry::new(
+                                compositor_telemetry.frame_number,
+                            );
+                            telem.frame_time_us = frame_start.elapsed().as_micros() as u64;
+                            telem.stage6_render_encode_us =
+                                compositor_telemetry.stage6_render_encode_us;
+                            telem.stage7_gpu_submit_us = compositor_telemetry.stage7_gpu_submit_us;
+                            telem.tile_count = compositor_telemetry.tile_count;
+                            // Propagate commit-time markdown prime cost (hud-380dl).
+                            // Non-zero only on frames where scene.version changed;
+                            // zero on steady-state frames (cache hit, no parse work).
+                            telem.markdown_prime_us = markdown_prime_us;
+                            // Snapshot the cumulative scene-lock miss count so this
+                            // frame's telemetry record carries contention history
+                            // (hud-3qpgv.2). No extra cost on the success path: plain
+                            // u64 read, no atomics, no cross-thread access.
+                            telem.scene_lock_miss_count = scene_lock_miss_count;
+                            if let Some((local_ack_us, scene_commit_us, next_present_us)) =
+                                drain_pending_input_latency(
+                                    &pending_input_latency,
+                                    scene_commit_at,
+                                    Instant::now(),
+                                )
+                            {
+                                telem.input_to_local_ack_us = local_ack_us;
+                                telem.input_to_scene_commit_us = scene_commit_us;
+                                telem.input_to_next_present_us = next_present_us;
+                            }
+                            telemetry.record(telem);
+
+                            if let Some(state) = benchmark_state.as_mut() {
+                                if let Some(last) = telemetry.records().last() {
+                                    if state.record(last) {
+                                        let finished = benchmark_state.take().expect(
+                                            "benchmark_state must still exist when record completes",
+                                        );
+                                        let emit_path = finished.config.emit_path.clone();
+                                        match finished.finish() {
+                                            Ok(()) => {
+                                                tracing::info!(
+                                                    path = %emit_path.display(),
+                                                    "windowed benchmark artifact written; shutting down"
+                                                );
+                                                shutdown_tok
+                                                    .trigger(crate::threads::ShutdownReason::Clean);
+                                                break;
+                                            }
+                                            Err(err) => {
+                                                tracing::error!(
+                                                    error = %err,
+                                                    path = %emit_path.display(),
+                                                    "failed to write windowed benchmark artifact"
+                                                );
+                                                benchmark_failed.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::Release,
+                                                );
+                                                shutdown_tok
+                                                    .trigger(crate::threads::ShutdownReason::Clean);
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -1436,21 +1500,15 @@ impl ApplicationHandler for WinitApp {
 
             // ── Redraw ────────────────────────────────────────────────────
             WindowEvent::RedrawRequested => {
-                self.refresh_cursor_position_from_os();
-                self.drain_input_capture_commands();
-                self.inject_windowed_benchmark_input_probe();
-                self.refresh_widget_hover_tracking();
-                self.tick_widget_hover_tracking();
-                self.update_overlay_cursor_hittest();
-                // Auto-dismiss the drag-handle context menu after 3 seconds.
-                self.tick_context_menu_auto_dismiss();
-                // Stage 1/2 bookkeeping: check frame-ready signal and present.
+                // OS-driven repaint (expose / resize / the initial redraw request
+                // in `resumed`).  Per-frame bookkeeping and the present poll now
+                // live in `about_to_wait` (hud-ilivg); here we only service the
+                // present so an OS-requested repaint shows the latest compositor
+                // frame.  The handler no longer self-perpetuates a redraw: the
+                // compositor render gate decides when new frames exist and
+                // `about_to_wait` polls for them every iteration, so an idle scene
+                // no longer drives a continuous 60 Hz redraw/present cycle.
                 self.maybe_present_frame();
-
-                // Request next redraw for continuous rendering.
-                if let Some(window) = &self.state.window {
-                    window.request_redraw();
-                }
             }
 
             _ => {}
