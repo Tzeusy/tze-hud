@@ -10834,10 +10834,17 @@ async fn portal_tile_interrupt_seeds_fade_in_from_eased_opacity() {
         .prev_portal_tile_has_content
         .insert(tile_id, false);
 
-    // Seed an in-flight fade-out, back-dated to 25% progress (50 ms of a 200 ms
-    // fade) so eased and linear opacity are clearly distinguishable.
-    let mut fade_out = ZoneAnimationState::fade_out(200);
-    fade_out.transition_start = std::time::Instant::now() - std::time::Duration::from_millis(50);
+    // Seed an in-flight fade-out, back-dated to 25% progress so eased and linear
+    // opacity are clearly distinguishable. A deliberately LONG duration (15 s of
+    // 60 s) keeps the eased curve nearly flat per millisecond: `displayed_eased`
+    // is sampled here, but the code under test re-samples
+    // `portal_tile_anim_opacity()` against the same live `Instant` a moment
+    // later. At 25% of 60 s the eased fade-out moves < 2e-5/ms, so even tens of
+    // milliseconds of scheduler delay on a loaded runner stay far under the 0.02
+    // assertion tolerance (a short 200 ms duration here would flake — hud-uir0w).
+    let mut fade_out = ZoneAnimationState::fade_out(60_000);
+    fade_out.transition_start =
+        std::time::Instant::now() - std::time::Duration::from_millis(15_000);
     compositor.portal_tile_anim_states.insert(tile_id, fade_out);
 
     // Opacity actually on screen at interruption (eased) vs the linear value.
