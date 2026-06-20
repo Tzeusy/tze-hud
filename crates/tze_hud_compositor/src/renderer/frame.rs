@@ -71,6 +71,11 @@ impl Compositor {
         // alongside zone animations (hud-58rg1). Folded in here so all three
         // render entry points share the single update site.
         self.update_portal_tile_animations(scene);
+        // Smooth scroll / animated follow-tail (hud-bq0gl.10): advance the
+        // per-portal-tile scroll smoothers once per frame, BEFORE the tile loop
+        // and the later text/encode passes read displayed offsets via
+        // `display_tile_scroll_offset`. No-op (snap) in headless mode.
+        self.update_scroll_smoothing(scene);
 
         // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
         // Background zones render first so agent tiles occlude them.
@@ -132,7 +137,7 @@ impl Compositor {
             if let Some(scroll_cfg) = scene.tile_scroll_config(tile.id) {
                 if let Some(content_height) = scroll_cfg.content_height {
                     let viewport_px = tile.bounds.height;
-                    let (_, scroll_offset_y) = scene.tile_scroll_offset_local(tile.id);
+                    let (_, scroll_offset_y) = self.display_tile_scroll_offset(scene, tile.id);
                     if let Some(geom) = tze_hud_input::compute_scroll_indicator(
                         viewport_px,
                         content_height,

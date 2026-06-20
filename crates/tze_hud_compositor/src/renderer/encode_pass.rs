@@ -462,7 +462,7 @@ impl super::Compositor {
                 // Compute scroll offset once per tile rather than on every
                 // recursive node visit — it is constant across all nodes in
                 // the same tile.
-                let (scroll_x, scroll_y) = scene.tile_scroll_offset_local(tile.id);
+                let (scroll_x, scroll_y) = self.display_tile_scroll_offset(scene, tile.id);
                 self.collect_tile_rounded_rect_cmds_from_node(
                     root_id, tile, scene, scroll_x, scroll_y, &mut cmds,
                 );

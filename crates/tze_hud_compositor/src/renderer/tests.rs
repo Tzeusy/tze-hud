@@ -7739,6 +7739,76 @@ async fn test_collect_text_items_applies_tile_scroll_offset() {
     );
 }
 
+// ─── Smooth scroll / animated follow-tail (hud-bq0gl.10) ─────────────────
+
+/// `display_tile_scroll_offset` snaps to the raw scene offset in headless mode
+/// so deterministic golden tests are unaffected, and a freshly-observed tile in
+/// windowed (smoothing-enabled) mode starts *settled* on its current offset
+/// (no initial jump) once `update_scroll_smoothing` has run.
+///
+/// This pins the wiring contract for the smooth-scroll path: the scene's offset
+/// remains the authoritative target (RFC 0013 §3.2 — user scroll authoritative),
+/// and the smoother never introduces a jump on first sight. Easing dynamics are
+/// covered exhaustively by the pure `easing::ScrollSmoother` unit tests.
+#[tokio::test]
+async fn display_tile_scroll_offset_snaps_headless_and_settles_windowed() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(720, 360).await);
+
+    let mut scene = SceneGraph::new(720.0, 360.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("smooth-scroll", 120_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "smooth-scroll",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            tze_hud_scene::types::TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: None,
+                content_height: Some(800.0),
+            },
+        )
+        .unwrap();
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 120.0)
+        .unwrap();
+
+    // Headless default: smoothing disabled → exact raw offset (snap).
+    assert!(!compositor.scroll_smoothing_enabled);
+    let (hx, hy) = compositor.display_tile_scroll_offset(&scene, tile_id);
+    assert_eq!(
+        (hx, hy),
+        (0.0, 120.0),
+        "headless must return the raw offset"
+    );
+
+    // Enable smoothing and advance once: the tile is observed for the first
+    // time, so its smoother starts settled on the current target — no jump.
+    compositor.scroll_smoothing_enabled = true;
+    compositor.update_scroll_smoothing(&scene);
+    let (wx, wy) = compositor.display_tile_scroll_offset(&scene, tile_id);
+    assert!(
+        (wx - 0.0).abs() < 1e-4 && (wy - 120.0).abs() < 1e-4,
+        "freshly-observed tile must start settled on its offset (no jump); got ({wx}, {wy})"
+    );
+
+    // A non-scrollable / unknown tile has no smoother → falls back to raw.
+    let unknown = SceneId::new();
+    assert_eq!(
+        compositor.display_tile_scroll_offset(&scene, unknown),
+        (0.0, 0.0),
+        "tiles without a smoother fall back to the raw scene offset"
+    );
+}
+
 /// Headless readback regression for the text-stream portal output pane.
 ///
 /// The live exemplar mounts the OUTPUT transcript body as a scrollable tile

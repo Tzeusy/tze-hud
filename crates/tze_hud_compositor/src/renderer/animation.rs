@@ -200,11 +200,17 @@ impl Compositor {
     /// Returns `1.0` when no animation is in progress (fully visible).
     /// Used by tile text collection and background rendering to fade portal
     /// tiles in/out using the token-configured duration.
+    ///
+    /// The fade is shaped by [`Easing::EaseInOut`] (hud-bq0gl.10) so portal
+    /// collapse/expand transitions accelerate and decelerate rather than ramping
+    /// linearly. Endpoints (`t=0`, `t=1`) are unchanged, so this is a motion-only
+    /// refinement: a freshly-appearing tile still starts fully transparent and a
+    /// completed transition still rests at full opacity.
     #[inline]
     pub(crate) fn portal_tile_anim_opacity(&self, tile_id: SceneId) -> f32 {
         self.portal_tile_anim_states
             .get(&tile_id)
-            .map(|s| s.current_opacity())
+            .map(|s| s.current_opacity_eased(super::easing::Easing::EaseInOut))
             .unwrap_or(1.0)
     }
 
@@ -439,5 +445,70 @@ impl Compositor {
             .zone_registry
             .active_publishes
             .retain(|_, v| !v.is_empty());
+    }
+
+    /// Advance per-portal-tile scroll smoothing toward the scene's authoritative
+    /// scroll targets (smooth scroll / animated follow-tail, hud-bq0gl.10).
+    ///
+    /// Must be called once per frame, before any render pass reads a tile's
+    /// displayed scroll offset via [`Compositor::display_tile_scroll_offset`].
+    /// The shared frame body ([`Compositor::build_frame_vertices`]) drives it so
+    /// all three render entry points advance the smoothers exactly once.
+    ///
+    /// No-op when [`scroll_smoothing_enabled`](Compositor::scroll_smoothing_enabled)
+    /// is `false` (headless): those paths read the raw scene offset directly so
+    /// deterministic golden tests are unaffected.
+    ///
+    /// A newly-observed tile starts *settled* on its current offset (no initial
+    /// jump); only subsequent target changes — user scroll or follow-tail
+    /// content appends — animate. User scroll stays authoritative (RFC 0013
+    /// §3.2): only the visual catch-up is eased, never the target.
+    pub fn update_scroll_smoothing(&mut self, scene: &SceneGraph) {
+        if !self.scroll_smoothing_enabled {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let dt_ms = self
+            .last_scroll_smooth_at
+            .map(|t| now.duration_since(t).as_secs_f32() * 1_000.0)
+            .unwrap_or(0.0);
+        self.last_scroll_smooth_at = Some(now);
+
+        for tile in scene.tiles.values() {
+            // Only portal (scrollable) tiles smooth their scroll offset.
+            if scene.tile_scroll_config(tile.id).is_none() {
+                continue;
+            }
+            let (target_x, target_y) = scene.tile_scroll_offset_local(tile.id);
+            self.scroll_smoothers
+                .entry(tile.id)
+                .or_insert_with(|| super::easing::ScrollSmoother::new(target_x, target_y))
+                .advance(target_x, target_y, dt_ms);
+        }
+
+        // Prune smoothers for tiles that are no longer scrollable / present.
+        self.scroll_smoothers
+            .retain(|id, _| scene.tile_scroll_config(*id).is_some());
+    }
+
+    /// Return the *displayed* (smoothed) scroll offset for a tile.
+    ///
+    /// When smoothing is enabled (windowed) and a smoother exists for the tile,
+    /// returns the eased displayed offset; otherwise returns the scene's raw
+    /// authoritative offset. The fallback keeps non-portal tiles and the
+    /// headless path exact.
+    #[inline]
+    pub(crate) fn display_tile_scroll_offset(
+        &self,
+        scene: &SceneGraph,
+        tile_id: SceneId,
+    ) -> (f32, f32) {
+        if self.scroll_smoothing_enabled {
+            if let Some(smoother) = self.scroll_smoothers.get(&tile_id) {
+                return smoother.displayed();
+            }
+        }
+        scene.tile_scroll_offset_local(tile_id)
     }
 }
