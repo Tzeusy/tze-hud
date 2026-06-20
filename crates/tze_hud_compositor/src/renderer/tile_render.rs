@@ -247,7 +247,10 @@ impl Compositor {
         accent: LifecycleAccent,
         opacity: f32,
     ) -> Option<(f32, [f32; 4])> {
-        let bar_w = accent.width_px.clamp(0.0, tile_bounds.width);
+        // Sanitize the dynamic upper bound: f32::clamp panics when min > max, so a
+        // negative (or NaN) tile width would otherwise crash the frame loop. `.max(0.0)`
+        // pins it to a valid `[0, _]` range before clamping the token-resolved width.
+        let bar_w = accent.width_px.clamp(0.0, tile_bounds.width.max(0.0));
         if bar_w <= 0.0 || opacity <= 0.0 {
             return None;
         }

@@ -1601,16 +1601,17 @@ mod tests {
             .render_batch(&state)
             .expect("render_batch must succeed with interaction_enabled");
 
-        // Should be 3 mutations: PublishToTile, UpdateTileInputMode, AddNode.
+        // Should be 4 mutations: PublishToTile, UpdateTileInputMode,
+        // SetTileLifecycleAccent (always emitted, hud-m48i0), AddNode.
         assert_eq!(
             batch.mutations.len(),
-            3,
-            "interaction_enabled=true must produce PublishToTile + UpdateTileInputMode + AddNode \
-             (composer hit region)"
+            4,
+            "interaction_enabled=true must produce PublishToTile + UpdateTileInputMode + \
+             SetTileLifecycleAccent + AddNode (composer hit region)"
         );
 
-        // The third mutation must be AddNode with accepts_composer_input=true.
-        let add_node_mutation = &batch.mutations[2];
+        // The fourth mutation must be AddNode with accepts_composer_input=true.
+        let add_node_mutation = &batch.mutations[3];
         match &add_node_mutation.mutation {
             Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
                 assert_eq!(
@@ -1643,7 +1644,7 @@ mod tests {
                     other => panic!("AddNode node data must be HitRegion, got {other:?}"),
                 }
             }
-            other => panic!("Third mutation must be AddNode (composer hit region), got {other:?}"),
+            other => panic!("Fourth mutation must be AddNode (composer hit region), got {other:?}"),
         }
     }
 
@@ -1662,11 +1663,13 @@ mod tests {
             .render_batch(&state)
             .expect("render_batch must succeed");
 
-        // Should be 2 mutations only: PublishToTile + UpdateTileInputMode.
+        // Should be 3 mutations: PublishToTile + UpdateTileInputMode +
+        // SetTileLifecycleAccent (always emitted, hud-m48i0). No AddNode.
         assert_eq!(
             batch.mutations.len(),
-            2,
-            "interaction_enabled=false must produce exactly 2 mutations (no AddNode)"
+            3,
+            "interaction_enabled=false must produce exactly 3 mutations \
+             (PublishToTile + UpdateTileInputMode + SetTileLifecycleAccent, no AddNode)"
         );
     }
 
@@ -1695,7 +1698,8 @@ mod tests {
                 );
                 // The AddNodeMutation's parent_id must match the same UUID (different encoding).
                 // Both are 16 bytes; the relationship is verified by the runtime.
-                match &batch.mutations[2].mutation {
+                // Index 3: SetTileLifecycleAccent occupies index 2 (hud-m48i0).
+                match &batch.mutations[3].mutation {
                     Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
                         assert_eq!(an.parent_id.len(), 16, "parent_id must be 16 bytes");
                         // Verify they're NOT byte-equal (they encode the same UUID
@@ -1706,7 +1710,7 @@ mod tests {
                              for the same UUID — same UUID, different wire encodings"
                         );
                     }
-                    other => panic!("Third mutation must be AddNode, got {other:?}"),
+                    other => panic!("Fourth mutation must be AddNode, got {other:?}"),
                 }
             }
             other => panic!("First mutation must be PublishToTile, got {other:?}"),
