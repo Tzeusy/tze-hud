@@ -485,11 +485,11 @@ class PromotionGateEvidenceSchemaTests(unittest.TestCase):
     # ── Cadence axis: RTT baseline vs runtime overhead ────────────────────
 
     def test_cadence_evidence_separates_runtime_overhead_from_rtt(self) -> None:
-        # Two presented appends: present latency 30ms over a 20ms RTT baseline
-        # ⇒ runtime overhead 10ms each (within the present budget).
+        # Two presented appends: present latency 30ms over each cycle's own 20ms
+        # transport RTT ⇒ runtime overhead 10ms each (within the present budget).
         appends = [
-            {"cycle": 1, "publish_ms": 0.0, "present_ms": 30.0},
-            {"cycle": 2, "publish_ms": 100.0, "present_ms": 130.0},
+            {"cycle": 1, "publish_ms": 0.0, "present_ms": 30.0, "rtt_ms": 20.0},
+            {"cycle": 2, "publish_ms": 100.0, "present_ms": 130.0, "rtt_ms": 20.0},
         ]
         ev = portal.build_cadence_rtt_evidence(
             20.0, appends, cadence_cycles=2, cadence_interval_ms=100,
@@ -500,10 +500,40 @@ class PromotionGateEvidenceSchemaTests(unittest.TestCase):
         for entry in ev["appends"]:
             self.assertTrue(entry["presented"])
             self.assertAlmostEqual(entry["present_latency_ms"], 30.0)
+            # Overhead is isolated against THIS cycle's RTT, not the baseline.
+            self.assertAlmostEqual(entry["overhead_baseline_ms"], 20.0)
             self.assertAlmostEqual(entry["overhead_ms"], 10.0)
             self.assertTrue(entry["within_present_budget"])
         self.assertEqual(ev["runtime_overhead_ms"]["over_budget_count"], 0)
         self.assertTrue(ev["within_present_budget"])
+
+    def test_cadence_overhead_uses_per_cycle_rtt_not_fixed_baseline(self) -> None:
+        # Regression for hud-lod76 (root-cause hud-ans49 / live evidence
+        # hud-ofe76): a cycle whose transport RTT spiked to 56ms — with the
+        # publish→present latency tracking that same spike — must score ~0
+        # RUNTIME overhead and PASS the budget. The discredited fixed-baseline
+        # calc (present_latency - 22.008ms) would instead report ~34ms overhead
+        # and falsely FAIL the 16.6ms runtime budget, charging transport jitter
+        # to the runtime.
+        fixed_baseline = 22.008
+        appends = [
+            {"cycle": 1, "publish_ms": 0.0, "present_ms": 56.04, "rtt_ms": 56.0},
+        ]
+        ev = portal.build_cadence_rtt_evidence(
+            fixed_baseline, appends, cadence_cycles=1, cadence_interval_ms=100,
+        )
+        entry = ev["appends"][0]
+        # Per-cycle isolation: overhead = present_latency(56.04) - this RTT(56.0).
+        self.assertAlmostEqual(entry["overhead_baseline_ms"], 56.0)
+        self.assertAlmostEqual(entry["overhead_ms"], 0.04, places=3)
+        self.assertTrue(entry["within_present_budget"])
+        self.assertTrue(ev["within_present_budget"])
+        self.assertEqual(ev["runtime_overhead_ms"]["over_budget_count"], 0)
+        # The transport baseline is still recorded for context...
+        self.assertEqual(ev["transport_rtt_baseline_ms"], fixed_baseline)
+        # ...but the old fixed-baseline calc would have falsely failed the gate.
+        old_overhead = entry["present_latency_ms"] - fixed_baseline
+        self.assertGreater(old_overhead, portal.HIGH_MUTATION_PRESENT_BUDGET_MS)
 
     def test_cadence_evidence_records_per_append_publish_present_timestamps(self) -> None:
         appends = [{"cycle": 1, "publish_ms": 5.0, "present_ms": 12.0}]
@@ -535,8 +565,9 @@ class PromotionGateEvidenceSchemaTests(unittest.TestCase):
         self.assertNotIn("within_present_budget", coalesced)
 
     def test_cadence_evidence_flags_over_budget_runtime_overhead(self) -> None:
-        # Present latency 40ms over a 5ms baseline ⇒ 35ms overhead > 16.6ms budget.
-        appends = [{"cycle": 1, "publish_ms": 0.0, "present_ms": 40.0}]
+        # Genuine runtime overhead: present latency 40ms while THIS cycle's
+        # transport RTT was only 5ms ⇒ 35ms runtime overhead > 16.6ms budget.
+        appends = [{"cycle": 1, "publish_ms": 0.0, "present_ms": 40.0, "rtt_ms": 5.0}]
         ev = portal.build_cadence_rtt_evidence(
             5.0, appends, cadence_cycles=1, cadence_interval_ms=100,
         )
