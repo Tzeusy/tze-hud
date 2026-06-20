@@ -1177,6 +1177,12 @@ impl WinitApp {
         if composer_focus_lost {
             self.clear_local_composer_echo();
         }
+
+        // Update the OS resize/move cursor to reflect the affordance under the
+        // pointer (hud-g5yu1).  Runs after the gesture state machines above so
+        // `active_edge`/`drag_active` reflect the event we just processed; the
+        // CursorIconTracker suppresses redundant winit calls on the move stream.
+        self.update_portal_cursor_icon();
     }
 
     /// Enqueue and process a local-first scroll event.

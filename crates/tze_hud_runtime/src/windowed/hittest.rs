@@ -1,8 +1,26 @@
 use tze_hud_compositor::{Compositor, CompositorSurface};
+use tze_hud_input::{PortalCursor, PortalRect, portal_hover_cursor};
 use tze_hud_scene::graph::SceneGraph;
+use winit::window::CursorIcon;
 
 use super::WinitApp;
 use crate::window::{HitRegion, WindowMode, should_capture_pointer_event};
+
+/// Map a backend-agnostic [`PortalCursor`] onto a concrete winit cursor icon.
+///
+/// Kept as a total `match` (no wildcard arm) so adding a `PortalCursor` variant
+/// is a compile error here until the winit mapping is supplied.
+fn portal_cursor_to_winit(cursor: PortalCursor) -> CursorIcon {
+    match cursor {
+        PortalCursor::Default => CursorIcon::Default,
+        PortalCursor::EwResize => CursorIcon::EwResize,
+        PortalCursor::NsResize => CursorIcon::NsResize,
+        PortalCursor::NeswResize => CursorIcon::NeswResize,
+        PortalCursor::NwseResize => CursorIcon::NwseResize,
+        PortalCursor::Grab => CursorIcon::Grab,
+        PortalCursor::Grabbing => CursorIcon::Grabbing,
+    }
+}
 
 pub(super) fn sync_scene_display_area(scene: &mut SceneGraph, width: u32, height: u32) {
     if width == 0 || height == 0 {
@@ -182,6 +200,87 @@ impl WinitApp {
                     capture = should_capture,
                     "overlay: set_cursor_hittest failed"
                 );
+            }
+        }
+    }
+
+    /// Resolve the focused portal tile's display-space rect from the lock-free
+    /// hit-test snapshot, if a scrollable (portal) tile is focused on the active
+    /// tab.
+    ///
+    /// Returns `None` when no tab is active, no tile is focused, or the focused
+    /// tile is not a portal (so non-portal focus never shows resize cursors).
+    fn focused_portal_rect(&self) -> Option<PortalRect> {
+        let active_tab = self.state.active_tab_mirror.lock().ok().and_then(|g| *g)?;
+        let focused_tile = self
+            .state
+            .focus_manager
+            .current_owner(active_tab)
+            .tile_id()?;
+        let target = focused_tile.to_bytes_le();
+        let snapshot = self.state.pipeline.hit_test_snapshot.load();
+        let entry = snapshot
+            .tiles
+            .iter()
+            .find(|t| t.has_scroll_config && t.tile_id_bytes == target)?;
+        Some(PortalRect {
+            x: entry.bounds.x,
+            y: entry.bounds.y,
+            width: entry.bounds.width,
+            height: entry.bounds.height,
+        })
+    }
+
+    /// Update the OS cursor shape to reflect the portal resize/move affordance
+    /// under the pointer (hud-g5yu1).
+    ///
+    /// Called on pointer events. Computes the desired [`PortalCursor`] from the
+    /// focused portal's affordance hit-test, any active resize/drag gesture, and
+    /// the drag-handle hover state, then issues `Window::set_cursor` only when
+    /// the shape actually changes (via [`CursorIconTracker`]). Restores the
+    /// arrow when the pointer leaves every affordance.
+    ///
+    /// [`CursorIconTracker`]: tze_hud_input::CursorIconTracker
+    pub(super) fn update_portal_cursor_icon(&mut self) {
+        let x = self.state.cursor_x;
+        let y = self.state.cursor_y;
+
+        let focused_portal = self.focused_portal_rect();
+
+        let snapshot = self.state.pipeline.hit_test_snapshot.load();
+        let over_drag_handle = snapshot.hit_test_drag_handle(x, y);
+
+        // An active resize gesture pins its edge cursor; an active drag-to-move
+        // shows the closed hand. These outrank hover hit-testing so the cursor
+        // does not flicker when the pointer leaves the affordance mid-gesture.
+        let active_edge = self
+            .state
+            .portal_resize_states
+            .values()
+            .find_map(|s| s.active_edge());
+        let drag_active = self
+            .state
+            .input_processor
+            .drag_states
+            .values()
+            .any(|s| s.phase == tze_hud_input::DragPhase::Activated);
+
+        let portal_part = tze_hud_config::resolve_portal_tokens(&self.state.global_tokens);
+        let affordance_px = portal_part.window_resize_affordance_px;
+
+        let desired = portal_hover_cursor(
+            x,
+            y,
+            focused_portal,
+            affordance_px,
+            over_drag_handle,
+            active_edge,
+            drag_active,
+        );
+
+        if let Some(next) = self.state.cursor_tracker.update(desired) {
+            if let Some(window) = &self.state.window {
+                window.set_cursor(portal_cursor_to_winit(next));
             }
         }
     }

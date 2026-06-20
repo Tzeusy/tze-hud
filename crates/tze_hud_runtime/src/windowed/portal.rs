@@ -1107,6 +1107,7 @@ mod tests {
             cursor_x: 0.0,
             cursor_y: 0.0,
             left_button_down: false,
+            cursor_tracker: tze_hud_input::CursorIconTracker::new(),
             window: None,
             effective_mode: WindowMode::Fullscreen,
             hit_regions: Vec::new(),

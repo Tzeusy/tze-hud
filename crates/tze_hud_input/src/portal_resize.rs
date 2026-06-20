@@ -207,6 +207,134 @@ impl ResizeEdge {
     pub fn affects_bottom(&self) -> bool {
         matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
     }
+
+    /// The OS resize cursor that communicates the drag axis of this edge/corner.
+    ///
+    /// Backend-agnostic ([`PortalCursor`] carries no winit dependency); the
+    /// windowed runtime maps the result onto `winit::window::CursorIcon`. The
+    /// mapping follows the standard bidirectional-arrow convention:
+    /// - left/right edges → horizontal (`EwResize`),
+    /// - top/bottom edges → vertical (`NsResize`),
+    /// - top-left / bottom-right corners → `NwseResize` (`╲` diagonal),
+    /// - top-right / bottom-left corners → `NeswResize` (`╱` diagonal).
+    pub fn cursor(&self) -> PortalCursor {
+        match self {
+            Self::Left | Self::Right => PortalCursor::EwResize,
+            Self::Top | Self::Bottom => PortalCursor::NsResize,
+            Self::TopLeft | Self::BottomRight => PortalCursor::NwseResize,
+            Self::TopRight | Self::BottomLeft => PortalCursor::NeswResize,
+        }
+    }
+}
+
+// ─── Portal cursor feedback ───────────────────────────────────────────────────
+
+/// Backend-agnostic cursor shape for portal resize/move affordances.
+///
+/// Decouples the affordance hit-test (pure, here in `tze_hud_input`) from the
+/// windowing backend: the windowed runtime maps each variant onto the
+/// corresponding `winit::window::CursorIcon` before calling `set_cursor`.
+/// `Default` is the ordinary arrow shown when the pointer is over no affordance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PortalCursor {
+    /// Ordinary arrow — pointer is not over any portal affordance.
+    #[default]
+    Default,
+    /// Horizontal double-arrow — left/right edge resize.
+    EwResize,
+    /// Vertical double-arrow — top/bottom edge resize.
+    NsResize,
+    /// `╱` diagonal double-arrow — top-right / bottom-left corner resize.
+    NeswResize,
+    /// `╲` diagonal double-arrow — top-left / bottom-right corner resize.
+    NwseResize,
+    /// Open hand — hovering a move/drag handle (header) before grabbing.
+    Grab,
+    /// Closed hand — an active drag-to-move gesture is in progress.
+    Grabbing,
+}
+
+/// Resolve the cursor shape for the current pointer location over the focused
+/// portal, applying gesture and hover precedence.
+///
+/// Precedence (highest first):
+/// 1. **Active resize gesture** (`active_edge`): keep the edge's resize cursor
+///    pinned for the whole drag, even if the pointer leaves the affordance band.
+/// 2. **Active drag-to-move** (`drag_active`): show the closed-hand `Grabbing`.
+/// 3. **Hover over a resize affordance** of the focused portal: the edge cursor.
+/// 4. **Hover over a move/drag handle** (`over_drag_handle`): the open-hand `Grab`.
+/// 5. Otherwise the ordinary arrow (`Default`).
+///
+/// Edge hover takes priority over the drag handle so the thin 8px resize band at
+/// the top of a header still resizes (matching OS window behavior) rather than
+/// being masked by the move affordance underneath it.
+///
+/// `focused_portal` is `None` when no portal is focused; in that case only the
+/// active-gesture cases (which do not depend on a hovered rect) can apply.
+pub fn portal_hover_cursor(
+    x: f32,
+    y: f32,
+    focused_portal: Option<PortalRect>,
+    affordance_px: f32,
+    over_drag_handle: bool,
+    active_edge: Option<ResizeEdge>,
+    drag_active: bool,
+) -> PortalCursor {
+    if let Some(edge) = active_edge {
+        return edge.cursor();
+    }
+    if drag_active {
+        return PortalCursor::Grabbing;
+    }
+    if let Some(rect) = focused_portal {
+        if let Some(edge) = hit_affordance(x, y, &rect, affordance_px) {
+            return edge.cursor();
+        }
+    }
+    if over_drag_handle {
+        return PortalCursor::Grab;
+    }
+    PortalCursor::Default
+}
+
+/// Hysteresis gate for OS cursor-icon updates.
+///
+/// winit's `set_cursor` issues a platform call on every invocation, so the
+/// runtime must avoid re-setting the same icon on every `PointerMove`. The
+/// tracker remembers the last applied shape and yields a new icon only when it
+/// actually changes (including the restore-to-`Default` transition when the
+/// pointer leaves an affordance).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CursorIconTracker {
+    last: PortalCursor,
+}
+
+impl CursorIconTracker {
+    /// Construct a tracker whose last-applied shape is the ordinary arrow.
+    pub fn new() -> Self {
+        Self {
+            last: PortalCursor::Default,
+        }
+    }
+
+    /// The most recently applied cursor shape.
+    pub fn current(&self) -> PortalCursor {
+        self.last
+    }
+
+    /// Record `desired` as the new target shape.
+    ///
+    /// Returns `Some(desired)` (and updates internal state) only when it differs
+    /// from the last applied shape — the caller should issue the OS cursor call
+    /// exactly when this returns `Some`. Returns `None` when the shape is
+    /// unchanged, so redundant platform calls are suppressed.
+    pub fn update(&mut self, desired: PortalCursor) -> Option<PortalCursor> {
+        if self.last == desired {
+            return None;
+        }
+        self.last = desired;
+        Some(desired)
+    }
 }
 
 // ─── Portal geometry ──────────────────────────────────────────────────────────
@@ -507,6 +635,19 @@ impl PortalResizeState {
         self.device_states
             .values()
             .any(|s| s.phase == ResizePhase::Active)
+    }
+
+    /// The edge/corner of the first active resize gesture, if any.
+    ///
+    /// Used by the windowed runtime to keep the OS resize cursor pinned to the
+    /// gesture's affordance while the pointer drags (the pointer can leave the
+    /// 8px affordance band mid-resize, so hover hit-testing alone would flicker
+    /// the cursor back to the arrow).
+    pub fn active_edge(&self) -> Option<ResizeEdge> {
+        self.device_states
+            .values()
+            .find(|s| s.phase == ResizePhase::Active)
+            .map(|s| s.edge)
     }
 
     /// Sample the current gesture epoch.
@@ -1697,6 +1838,210 @@ mod tests {
         assert!(
             !ShellReservedShortcut::is_reserved("Enter", true, false, false),
             "Ctrl+Enter must NOT be reserved"
+        );
+    }
+
+    // ─── Cursor feedback: edge → cursor mapping ──────────────────────────────
+
+    #[test]
+    fn edge_cursor_mapping_covers_all_eight_zones() {
+        // Edges: horizontal vs vertical double-arrows.
+        assert_eq!(ResizeEdge::Left.cursor(), PortalCursor::EwResize);
+        assert_eq!(ResizeEdge::Right.cursor(), PortalCursor::EwResize);
+        assert_eq!(ResizeEdge::Top.cursor(), PortalCursor::NsResize);
+        assert_eq!(ResizeEdge::Bottom.cursor(), PortalCursor::NsResize);
+        // Corners: the two diagonals. TopLeft/BottomRight share the `╲` axis;
+        // TopRight/BottomLeft share the `╱` axis.
+        assert_eq!(ResizeEdge::TopLeft.cursor(), PortalCursor::NwseResize);
+        assert_eq!(ResizeEdge::BottomRight.cursor(), PortalCursor::NwseResize);
+        assert_eq!(ResizeEdge::TopRight.cursor(), PortalCursor::NeswResize);
+        assert_eq!(ResizeEdge::BottomLeft.cursor(), PortalCursor::NeswResize);
+    }
+
+    #[test]
+    fn opposite_edges_share_a_cursor_axis() {
+        // Property: an edge and its geometric opposite are dragged along the
+        // same axis, so they must present the same double-arrow cursor.
+        for (a, b) in [
+            (ResizeEdge::Left, ResizeEdge::Right),
+            (ResizeEdge::Top, ResizeEdge::Bottom),
+            (ResizeEdge::TopLeft, ResizeEdge::BottomRight),
+            (ResizeEdge::TopRight, ResizeEdge::BottomLeft),
+        ] {
+            assert_eq!(
+                a.cursor(),
+                b.cursor(),
+                "{a:?} and {b:?} are opposite edges and must share a cursor axis"
+            );
+        }
+    }
+
+    // ─── Cursor feedback: hover precedence ───────────────────────────────────
+
+    fn portal_400x300() -> PortalRect {
+        PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        }
+    }
+
+    #[test]
+    fn hover_over_right_edge_yields_ew_resize() {
+        let rect = portal_400x300();
+        // Right edge band is x in [492, 500), vertically interior.
+        let cursor = portal_hover_cursor(497.0, 250.0, Some(rect), 8.0, false, None, false);
+        assert_eq!(cursor, PortalCursor::EwResize);
+    }
+
+    #[test]
+    fn hover_over_top_left_corner_yields_nwse_resize() {
+        let rect = portal_400x300();
+        // Top-left corner: both x and y inside the 8px band of the origin.
+        let cursor = portal_hover_cursor(102.0, 102.0, Some(rect), 8.0, false, None, false);
+        assert_eq!(cursor, PortalCursor::NwseResize);
+    }
+
+    #[test]
+    fn hover_interior_with_no_affordance_yields_default_arrow() {
+        let rect = portal_400x300();
+        // Dead center — no affordance, no handle.
+        let cursor = portal_hover_cursor(300.0, 250.0, Some(rect), 8.0, false, None, false);
+        assert_eq!(cursor, PortalCursor::Default);
+    }
+
+    #[test]
+    fn hover_over_drag_handle_without_edge_yields_grab() {
+        let rect = portal_400x300();
+        // Interior point reported as over the drag handle (header move region).
+        let cursor = portal_hover_cursor(300.0, 250.0, Some(rect), 8.0, true, None, false);
+        assert_eq!(cursor, PortalCursor::Grab);
+    }
+
+    #[test]
+    fn resize_edge_takes_priority_over_drag_handle() {
+        let rect = portal_400x300();
+        // On the top edge AND flagged over the drag handle: the thin resize band
+        // must win so the header's top edge still resizes (OS convention).
+        let cursor = portal_hover_cursor(300.0, 102.0, Some(rect), 8.0, true, None, false);
+        assert_eq!(cursor, PortalCursor::NsResize);
+    }
+
+    #[test]
+    fn active_resize_gesture_pins_edge_cursor_even_off_band() {
+        // Pointer dragged far outside the portal during an active right-edge
+        // resize: the cursor stays EwResize (no flicker back to arrow).
+        let cursor = portal_hover_cursor(
+            2000.0,
+            2000.0,
+            None,
+            8.0,
+            false,
+            Some(ResizeEdge::Right),
+            false,
+        );
+        assert_eq!(cursor, PortalCursor::EwResize);
+    }
+
+    #[test]
+    fn active_resize_gesture_outranks_drag_active() {
+        // If both an active resize and an active drag were somehow signalled,
+        // resize (the more specific affordance gesture) wins.
+        let cursor = portal_hover_cursor(
+            300.0,
+            250.0,
+            Some(portal_400x300()),
+            8.0,
+            true,
+            Some(ResizeEdge::TopLeft),
+            true,
+        );
+        assert_eq!(cursor, PortalCursor::NwseResize);
+    }
+
+    #[test]
+    fn active_drag_yields_grabbing() {
+        // Drag-to-move in progress, no resize gesture: closed-hand cursor.
+        let cursor = portal_hover_cursor(300.0, 250.0, None, 8.0, false, None, true);
+        assert_eq!(cursor, PortalCursor::Grabbing);
+    }
+
+    #[test]
+    fn no_focused_portal_and_no_gesture_yields_default() {
+        // Nothing focused, nothing active: ordinary arrow.
+        let cursor = portal_hover_cursor(300.0, 250.0, None, 8.0, false, None, false);
+        assert_eq!(cursor, PortalCursor::Default);
+    }
+
+    // ─── Cursor feedback: hysteresis tracker ─────────────────────────────────
+
+    #[test]
+    fn tracker_starts_at_default_and_suppresses_redundant_default() {
+        let mut tracker = CursorIconTracker::new();
+        assert_eq!(tracker.current(), PortalCursor::Default);
+        // Re-applying Default (the starting shape) must not issue an OS call.
+        assert_eq!(tracker.update(PortalCursor::Default), None);
+    }
+
+    #[test]
+    fn tracker_emits_only_on_change() {
+        let mut tracker = CursorIconTracker::new();
+        // First non-default shape emits.
+        assert_eq!(
+            tracker.update(PortalCursor::EwResize),
+            Some(PortalCursor::EwResize)
+        );
+        // Same shape again is suppressed.
+        assert_eq!(tracker.update(PortalCursor::EwResize), None);
+        // A different shape emits.
+        assert_eq!(
+            tracker.update(PortalCursor::NsResize),
+            Some(PortalCursor::NsResize)
+        );
+        assert_eq!(tracker.current(), PortalCursor::NsResize);
+    }
+
+    #[test]
+    fn tracker_restores_to_default_exactly_once() {
+        let mut tracker = CursorIconTracker::new();
+        assert_eq!(
+            tracker.update(PortalCursor::NwseResize),
+            Some(PortalCursor::NwseResize)
+        );
+        // Leaving the affordance restores the arrow — emitted once.
+        assert_eq!(
+            tracker.update(PortalCursor::Default),
+            Some(PortalCursor::Default)
+        );
+        // Still on the arrow — suppressed.
+        assert_eq!(tracker.update(PortalCursor::Default), None);
+    }
+
+    // ─── Cursor feedback: active-edge accessor ───────────────────────────────
+
+    #[test]
+    fn active_edge_none_when_idle_then_some_while_gesturing() {
+        let mut state = PortalResizeState::new(7);
+        assert_eq!(state.active_edge(), None, "idle portal has no active edge");
+        let bounds = default_bounds();
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        state.on_pointer_down(1, ResizeEdge::Right, 500.0, 250.0, rect, &bounds);
+        assert_eq!(
+            state.active_edge(),
+            Some(ResizeEdge::Right),
+            "active gesture exposes its edge for cursor pinning"
+        );
+        state.on_pointer_up(1, 510.0, 250.0, &bounds);
+        assert_eq!(
+            state.active_edge(),
+            None,
+            "edge clears once the gesture ends"
         );
     }
 }
