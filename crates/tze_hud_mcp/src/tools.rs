@@ -2392,6 +2392,115 @@ pub async fn handle_portal_projection_publish(
     }
 }
 
+// ─── portal_projection_publish_status ────────────────────────────────────────
+
+/// Parameters for `portal_projection_publish_status`.
+#[derive(Debug, Deserialize)]
+pub struct PortalProjectionPublishStatusParams {
+    /// Projection identifier from a prior `portal_projection_attach` call.
+    pub projection_id: String,
+    /// Owner token returned by the successful `portal_projection_attach` response.
+    pub owner_token: String,
+    /// Lifecycle state as a snake_case string (`attached`, `active`, `degraded`,
+    /// `hud_unavailable`, `detached`, `cleanup_pending`, `expired`). This is how
+    /// the LLM signals waiting/blocked/active to the viewer. An unrecognized
+    /// value is rejected.
+    pub lifecycle_state: String,
+    /// Optional human-readable status detail recorded with the lifecycle state
+    /// (e.g. what the session is waiting on). Rejected if it exceeds the
+    /// authority's configured `max_status_text_bytes`.
+    #[serde(default)]
+    pub status_text: Option<String>,
+}
+
+/// Response from `portal_projection_publish_status`.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionPublishStatusResult {
+    /// `true` when the authority accepted and applied the lifecycle state.
+    pub accepted: bool,
+    /// Human-readable status summary.
+    pub status_summary: String,
+    /// The applied lifecycle state echoed back as a snake_case string — the
+    /// observable round-trip confirming the viewer-facing state the authority
+    /// now holds for this projection.
+    pub lifecycle_state: String,
+}
+
+/// Publish a lifecycle status to an existing projection session (hud-y8h3m).
+///
+/// This is step 3 of the cooperative projection workflow and the only way the
+/// owning LLM signals its lifecycle state — `active`, `degraded` (blocked),
+/// `attached` (waiting for input), etc. — to the viewer. The status drives
+/// earned-urgency and ambient-attention affordances on the portal. It stays on
+/// the existing MCP transport and is ambient, not interruptive.
+///
+/// Forwards the request through the portal-op channel to the winit event-loop
+/// thread. On the next `about_to_wait` iteration the driver parses the
+/// snake_case `lifecycle_state` into the projection enum and calls
+/// `handle_publish_status`, which applies it to the session and echoes the
+/// applied state back.
+///
+/// # Errors
+///
+/// - `invalid_params` if `projection_id`, `owner_token`, or `lifecycle_state` is empty.
+/// - `internal` if the portal authority is not wired.
+/// - `ProjectionRejected` if the authority rejected the status (invalid / expired
+///   token, unrecognized `lifecycle_state`, oversized `status_text`, etc.), carrying
+///   the stable `PROJECTION_*` code in `error.data.error_code`.
+pub async fn handle_portal_projection_publish_status(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+) -> McpResult<PortalProjectionPublishStatusResult> {
+    let p: PortalProjectionPublishStatusParams = parse_params(params)?;
+
+    if p.projection_id.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "projection_id must be non-empty".to_string(),
+        ));
+    }
+    if p.owner_token.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "owner_token must be non-empty".to_string(),
+        ));
+    }
+    if p.lifecycle_state.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "lifecycle_state must be non-empty".to_string(),
+        ));
+    }
+
+    let tx = portal_op_tx.ok_or_else(|| {
+        McpError::Internal(
+            "portal authority not wired — runtime must enable portal_op channel".to_string(),
+        )
+    })?;
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::portal_op::PortalOp::PublishStatus {
+        projection_id: p.projection_id,
+        owner_token: p.owner_token,
+        lifecycle_state: p.lifecycle_state,
+        status_text: p.status_text,
+        reply: reply_tx,
+    })
+    .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+    match reply_rx.await {
+        Ok(Ok(lifecycle_state)) => Ok(PortalProjectionPublishStatusResult {
+            accepted: true,
+            status_summary: "lifecycle status applied".to_string(),
+            lifecycle_state,
+        }),
+        Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+            error_code: rejection.error_code,
+            message: rejection.message,
+        }),
+        Err(_) => Err(McpError::Internal(
+            "portal authority did not respond (channel dropped)".to_string(),
+        )),
+    }
+}
+
 // ─── portal_projection_get_pending_input ─────────────────────────────────────
 
 /// Parameters for `portal_projection_get_pending_input`.
@@ -6122,6 +6231,107 @@ mod tests {
         // On the wire: error.data.error_code is the stable PROJECTION_* string.
         let wire: crate::error::JsonRpcError = err.into();
         assert_eq!(wire.code, crate::error::codes::INTERNAL_ERROR);
+        let data = wire.data.expect("rejection must carry structured data");
+        assert_eq!(data["error_code"], "PROJECTION_TOKEN_EXPIRED");
+    }
+
+    #[tokio::test]
+    async fn portal_publish_status_rejects_empty_fields() {
+        for params in [
+            json!({ "projection_id": "", "owner_token": "t", "lifecycle_state": "active" }),
+            json!({ "projection_id": "p", "owner_token": "", "lifecycle_state": "active" }),
+            json!({ "projection_id": "p", "owner_token": "t", "lifecycle_state": "" }),
+        ] {
+            let err = handle_portal_projection_publish_status(params, None)
+                .await
+                .expect_err("empty required field must be rejected");
+            assert!(matches!(err, McpError::InvalidParams(_)), "got {err:?}");
+        }
+    }
+
+    /// hud-y8h3m acceptance (4): a `publish_status` call must drive through the
+    /// MCP method to the authority over the portal-op channel, forwarding the
+    /// lifecycle_state + status_text, and the applied state must round-trip back.
+    #[tokio::test]
+    async fn portal_publish_status_forwards_op_and_echoes_state() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        // Authority stand-in: assert the forwarded fields, echo the applied state.
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("op must be sent") {
+                crate::portal_op::PortalOp::PublishStatus {
+                    projection_id,
+                    owner_token,
+                    lifecycle_state,
+                    status_text,
+                    reply,
+                } => {
+                    assert_eq!(projection_id, "p1");
+                    assert_eq!(owner_token, "t1");
+                    assert_eq!(lifecycle_state, "degraded");
+                    assert_eq!(status_text.as_deref(), Some("blocked on input"));
+                    // Echo the applied lifecycle state, as the real driver does.
+                    reply.send(Ok(lifecycle_state)).expect("reply must send");
+                }
+                other => panic!("unexpected op: {other:?}"),
+            }
+        });
+
+        let result = handle_portal_projection_publish_status(
+            json!({
+                "projection_id": "p1",
+                "owner_token": "t1",
+                "lifecycle_state": "degraded",
+                "status_text": "blocked on input"
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("publish_status must succeed");
+        responder.await.expect("responder task must finish");
+        assert!(result.accepted);
+        assert_eq!(
+            result.lifecycle_state, "degraded",
+            "the applied lifecycle state must round-trip back to the MCP caller"
+        );
+    }
+
+    /// A `publish_status` authority rejection must surface as a structured
+    /// `ProjectionRejected` carrying the stable `PROJECTION_*` code (hud-y8h3m
+    /// reuses the hud-s8a62 typed-rejection channel).
+    #[tokio::test]
+    async fn portal_publish_status_rejection_surfaces_stable_projection_code() {
+        use tze_hud_projection::ProjectionErrorCode;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("op must be sent") {
+                crate::portal_op::PortalOp::PublishStatus { reply, .. } => {
+                    reply
+                        .send(Err(crate::portal_op::PortalOpRejection::new(
+                            ProjectionErrorCode::ProjectionTokenExpired,
+                            "owner token expired",
+                        )))
+                        .expect("reply must send");
+                }
+                other => panic!("unexpected op: {other:?}"),
+            }
+        });
+
+        let err = handle_portal_projection_publish_status(
+            json!({ "projection_id": "p1", "owner_token": "t1", "lifecycle_state": "active" }),
+            Some(&tx),
+        )
+        .await
+        .expect_err("a TOKEN_EXPIRED rejection must surface as an error");
+        responder.await.expect("responder task must finish");
+
+        match &err {
+            McpError::ProjectionRejected { error_code, .. } => {
+                assert_eq!(*error_code, ProjectionErrorCode::ProjectionTokenExpired);
+            }
+            other => panic!("expected ProjectionRejected, got {other:?}"),
+        }
+        let wire: crate::error::JsonRpcError = err.into();
         let data = wire.data.expect("rejection must carry structured data");
         assert_eq!(data["error_code"], "PROJECTION_TOKEN_EXPIRED");
     }

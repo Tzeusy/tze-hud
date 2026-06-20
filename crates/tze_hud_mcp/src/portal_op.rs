@@ -129,6 +129,33 @@ pub enum PortalOp {
         /// validation / auth failure.
         reply: tokio::sync::oneshot::Sender<Result<(), PortalOpRejection>>,
     },
+    /// Publish a lifecycle status to an existing projection session.
+    ///
+    /// This is step 3 of the cooperative workflow and the only way the owning
+    /// LLM signals its lifecycle state (e.g. `active`, `degraded`/blocked,
+    /// `attached`/waiting-for-input) to the viewer, driving earned-urgency and
+    /// ambient-attention affordances on the portal. It stays on the existing
+    /// MCP transport and is ambient, not interruptive.
+    PublishStatus {
+        /// Projection identifier matching a prior successful `Attach`.
+        projection_id: String,
+        /// Owner token returned by the `Attach` response.
+        owner_token: String,
+        /// Lifecycle state as a snake_case string (`attached`, `active`,
+        /// `degraded`, `hud_unavailable`, `detached`, `cleanup_pending`,
+        /// `expired`). The runtime parses this into `ProjectionLifecycleState`;
+        /// an unrecognized value is rejected before the authority sees it.
+        lifecycle_state: String,
+        /// Optional human-readable status detail recorded with the lifecycle
+        /// state. The authority rejects text exceeding its configured
+        /// `max_status_text_bytes`.
+        status_text: Option<String>,
+        /// One-shot response channel. On success the authority returns the
+        /// applied lifecycle state as a snake_case string (the round-trip echo),
+        /// or a [`PortalOpRejection`] carrying the stable error code on
+        /// validation / auth failure.
+        reply: tokio::sync::oneshot::Sender<Result<String, PortalOpRejection>>,
+    },
     /// Drain HUD-originated pending input for an existing projection session.
     ///
     /// This is the LLM-facing poll: the owning session asks the authority for
