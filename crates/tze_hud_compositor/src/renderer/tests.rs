@@ -7958,6 +7958,86 @@ async fn idle_render_gate_skips_static_scene_renders_on_change_or_animation() {
     );
 }
 
+/// Idle render gate — composer carve-out (hud-ilivg / hud-r3ax6).
+///
+/// The local draft echo and the caret blink are driven off out-of-band state
+/// that never bumps `scene.version`. Before the idle gate the compositor thread
+/// ran `render_frame` unconditionally, so both worked; with the gate they would
+/// freeze unless `drain_local_composer_and_needs_render` (called before the
+/// gate) (a) applies a pending keystroke and (b) keeps a focused composer dirty.
+///
+/// This pins the gate's composer input across the full lifecycle:
+///   1. no composer                       → needs_render = false  (idle skips)
+///   2. pending echo (slot Some(Some))    → needs_render = true   (renders)
+///   3. focused, no new keystroke         → needs_render = true   (caret blinks)
+///   4. deactivation (slot Some(None))    → needs_render = true   (clears overlay)
+///   5. gone                              → needs_render = false  (idle skips)
+#[tokio::test]
+async fn idle_render_gate_renders_for_composer_echo_and_caret_blink() {
+    use tze_hud_scene::types::SceneId;
+
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(320, 200).await);
+
+    // ── 1. No composer focused, nothing pending → gate must skip. ──
+    assert!(
+        !compositor.drain_local_composer_and_needs_render(),
+        "with no composer focused and no pending echo the gate MUST be able to skip"
+    );
+
+    // ── 2. A keystroke writes the slot → pending echo MUST render. ──
+    let node_id = SceneId::new();
+    {
+        let mut guard = compositor.local_composer_state.lock().unwrap();
+        *guard = Some(Some(LocalComposerState {
+            text: "hi".to_owned(),
+            cursor_byte: 2,
+            selection_anchor: 2,
+            at_capacity: false,
+            node_id,
+        }));
+    }
+    assert!(
+        compositor.drain_local_composer_and_needs_render(),
+        "a pending local-composer echo MUST mark the frame dirty so it renders promptly"
+    );
+    assert!(
+        compositor.local_composer.is_some(),
+        "draining before the gate must have applied the pending draft"
+    );
+
+    // ── 3. No new keystroke, composer still focused → caret keeps blinking. ──
+    // The slot is empty now, but an active composer must keep rendering across
+    // blink-toggle boundaries (treated as always-dirty while focused).
+    assert!(
+        compositor.local_composer_state.lock().unwrap().is_none(),
+        "slot must have been drained to None by the previous call"
+    );
+    assert!(
+        compositor.drain_local_composer_and_needs_render(),
+        "a focused composer with no new keystroke MUST keep rendering so the caret blinks"
+    );
+
+    // ── 4. Deactivation: slot delivers Some(None) → render once to clear. ──
+    {
+        let mut guard = compositor.local_composer_state.lock().unwrap();
+        *guard = Some(None);
+    }
+    assert!(
+        compositor.drain_local_composer_and_needs_render(),
+        "the deactivation transition MUST render one frame to clear the composer overlay"
+    );
+    assert!(
+        compositor.local_composer.is_none(),
+        "deactivation must have cleared the drained composer state"
+    );
+
+    // ── 5. Composer gone → gate must skip again (no 60Hz idle burn). ──
+    assert!(
+        !compositor.drain_local_composer_and_needs_render(),
+        "once the composer is gone the gate MUST be able to skip the static idle frame"
+    );
+}
+
 /// Headless readback regression for the text-stream portal output pane.
 ///
 /// The live exemplar mounts the OUTPUT transcript body as a scrollable tile

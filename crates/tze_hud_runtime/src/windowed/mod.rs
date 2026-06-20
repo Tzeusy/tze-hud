@@ -1010,16 +1010,32 @@ impl ApplicationHandler for WinitApp {
                         // internally on scene.version; no-op when unchanged.
                         compositor.prime_truncation_cache(&scene);
 
+                        // ── Local composer drain (hud-ilivg / hud-r3ax6) ──
+                        // Drain the local composer echo slot BEFORE the gate.  The
+                        // draft echo and the caret blink are driven off out-of-band
+                        // state that never bumps scene.version, so the gate would
+                        // freeze them unless we both (a) apply a pending keystroke
+                        // here — `local_composer` is only populated by this drain,
+                        // so it must run before the gate can observe it — and (b)
+                        // treat a focused composer (blinking caret) as dirty.
+                        // Returns true while a composer is focused/visible or on
+                        // the single deactivation frame; false once it is gone, so
+                        // the truly-static idle case still skips.
+                        let composer_needs_render =
+                            compositor.drain_local_composer_and_needs_render();
+
                         // ── Idle render gate (hud-ilivg) ──────────────────
                         // Build/encode/present only when the scene graph changed
                         // since the last presented frame OR an animation is in
-                        // flight.  The cheap sweeps above (expiry, publication
+                        // flight OR a focused/just-deactivated composer needs a
+                        // frame.  The cheap sweeps above (expiry, publication
                         // tick, prune, cache primes) ALWAYS run, so a fade-out
                         // start or expiry still bumps scene.version and re-arms the
                         // gate; an in-flight eased transition / TTL fade / reveal /
                         // smooth-scroll forces a render so it never freezes.
                         let dirty = scene.version != last_rendered_scene_version
-                            || compositor.has_inflight_animation(&scene);
+                            || compositor.has_inflight_animation(&scene)
+                            || composer_needs_render;
 
                         // A successful try_lock means we are NOT lock-starved,
                         // whether or not we present this frame — reset the
