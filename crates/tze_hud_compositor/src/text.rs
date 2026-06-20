@@ -167,18 +167,43 @@ impl TruncationKey {
 /// make that nearest-stale lookup O(1) on the render path.
 ///
 /// [`prime`]: TruncationCache::prime
-#[derive(Default)]
 pub(crate) struct TruncationCache {
     entries: HashMap<TruncationKey, TruncationResult>,
     /// Maps `content_hash` → the most-recently-primed [`TruncationKey`] for that
     /// content.  Used by [`TruncationCache::get_stale_by_content`] to serve a
     /// nearest-geometry truncation on a cadence-deferred render-path miss.
     by_content: HashMap<[u8; 32], TruncationKey>,
+    /// `max_truncation_input_bytes` bound for the viewport-adjacent-window
+    /// truncation fallback (spec.md §324/§331).  When a single uncached
+    /// truncation would shape more than this many bytes, [`TruncationCache::prime`]
+    /// restricts the shaped input to a viewport-adjacent window of whole source
+    /// lines (`overflow::viewport_adjacent_input`) instead of the full retained
+    /// transcript, keeping a single uncached call within the Stage-5 Layout
+    /// Resolve budget (< 1 ms).
+    max_truncation_input_bytes: usize,
+}
+
+impl Default for TruncationCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            by_content: HashMap::new(),
+            max_truncation_input_bytes: overflow::DEFAULT_MAX_TRUNCATION_INPUT_BYTES,
+        }
+    }
 }
 
 impl TruncationCache {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Override the `max_truncation_input_bytes` bound for the
+    /// viewport-adjacent-window fallback.  Used by configuration and tests; the
+    /// default is [`overflow::DEFAULT_MAX_TRUNCATION_INPUT_BYTES`].
+    #[allow(dead_code)] // wired by config / exercised in tests
+    pub(crate) fn set_max_truncation_input_bytes(&mut self, bytes: usize) {
+        self.max_truncation_input_bytes = bytes;
     }
 
     /// Number of cached entries.
@@ -263,6 +288,7 @@ impl TruncationCache {
         // geometry's truncation instead of shaping inline (hud-n3mq0).  Updated
         // on every prime call (hit or miss) so the freshest geometry wins.
         self.by_content.insert(key.content_hash(), key);
+        let max_truncation_input_bytes = self.max_truncation_input_bytes;
         self.entries.entry(key).or_insert_with(|| {
             let family = match font_family {
                 FontFamily::SystemSansSerif => Family::SansSerif,
@@ -272,12 +298,29 @@ impl TruncationCache {
             let weight = Weight(font_weight.clamp(100, 900));
             let base_attrs = Attrs::new().family(family).weight(weight);
             let line_height = font_size_px * line_height_multiplier;
+            // Viewport-adjacent-window fallback (spec.md §324/§331): when the
+            // committed content would shape an input larger than the configured
+            // `max_truncation_input_bytes` bound, restrict the shaped input to a
+            // viewport-adjacent window of whole source lines so a single uncached
+            // truncation stays within the Stage-5 Layout Resolve budget.  This is
+            // byte-identical to the full-input result for the lines within the
+            // window because cosmic-text wraps each source line independently
+            // (see overflow::viewport_adjacent_input). It is a no-op for inputs
+            // within the bound.
+            let shaped_input = overflow::viewport_adjacent_input(
+                content,
+                bounds_height,
+                line_height,
+                viewport,
+                max_truncation_input_bytes,
+                overflow::TRUNCATION_OVERSCAN_LINES,
+            );
             // Dispatch to the correct truncation algorithm via TruncationViewport.
             // TailAnchored shows the LAST max_lines runs (newest content visible).
             // HeadAnchored shows the FIRST max_lines runs (default / scrolled-back).
             match viewport {
                 TruncationViewport::TailAnchored => overflow::truncate_tail_anchored(
-                    content,
+                    shaped_input,
                     base_attrs,
                     bounds_width,
                     bounds_height,
@@ -286,7 +329,7 @@ impl TruncationCache {
                     font_system,
                 ),
                 TruncationViewport::HeadAnchored => overflow::truncate_for_ellipsis(
-                    content,
+                    shaped_input,
                     base_attrs,
                     bounds_width,
                     bounds_height,
