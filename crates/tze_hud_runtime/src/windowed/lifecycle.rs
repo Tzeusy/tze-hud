@@ -313,6 +313,15 @@ const OVERLAY_COMPOSITE_DELTA_TARGET_US: i64 = 500;
 const WINDOWED_BENCHMARK_INPUT_X: f32 = 16.0;
 const WINDOWED_BENCHMARK_INPUT_Y: f32 = 16.0;
 
+/// No-progress timeout for the windowed benchmark watchdog (hud-gcn01).
+///
+/// If the compositor renders no frames (warmup or measured) within this window,
+/// the watchdog emits a partial/diagnostic artifact and exits non-zero. This
+/// prevents a silent infinite hang when fullscreen window redraw callbacks never
+/// fire for a non-foreground window on Windows.
+pub(super) const BENCHMARK_NO_PROGRESS_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PendingInputLatencySample {
     input_started_at: Instant,
@@ -473,6 +482,9 @@ pub(super) struct WindowedBenchmarkRunState {
     measured_seen: u64,
     measured_start: Option<Instant>,
     pub(super) summary: SessionSummary,
+    /// Instant of the last recorded frame (warmup or measured).
+    /// Reset by `record()`; read by `is_stalled()` to detect no-progress hangs.
+    last_frame_at: Instant,
 }
 
 impl WindowedBenchmarkRunState {
@@ -495,10 +507,12 @@ impl WindowedBenchmarkRunState {
             measured_seen: 0,
             measured_start: None,
             summary: SessionSummary::new(),
+            last_frame_at: Instant::now(),
         }
     }
 
     pub(super) fn record(&mut self, telemetry: &tze_hud_telemetry::FrameTelemetry) -> bool {
+        self.last_frame_at = Instant::now();
         if self.warmup_seen < self.config.warmup_frames {
             self.warmup_seen += 1;
             return false;
@@ -571,6 +585,62 @@ impl WindowedBenchmarkRunState {
             &self.config.emit_path,
             serde_json::to_vec_pretty(&report)
                 .expect("windowed benchmark report JSON serialization must succeed"),
+        )
+    }
+
+    /// Returns `true` when no `record()` call has landed within `timeout`.
+    ///
+    /// The compositor benchmark watchdog calls this every frame loop iteration.
+    /// When it fires, the caller should emit a partial result and exit non-zero
+    /// instead of hanging indefinitely.
+    pub(super) fn is_stalled(&self, timeout: std::time::Duration) -> bool {
+        self.last_frame_at.elapsed() > timeout
+    }
+
+    /// Emit a partial/diagnostic JSON artifact for a watchdog-aborted benchmark.
+    ///
+    /// Writes the same schema as [`finish`] but adds a `watchdog_abort` object
+    /// carrying `reason`, `timeout_secs`, and frame-progress counters so harnesses
+    /// can distinguish a watchdog exit from a normal completion.
+    ///
+    /// The caller must set `benchmark_failed` and trigger shutdown so the process
+    /// exits with a non-zero code.
+    pub(super) fn emit_watchdog_abort(mut self, reason: &str) -> std::io::Result<()> {
+        if let Some(start) = self.measured_start {
+            self.summary.elapsed_us = start.elapsed().as_micros() as u64;
+        }
+        self.summary.finalize();
+        let report = serde_json::json!({
+            "schema": "tze_hud.windowed_compositor_benchmark.v1",
+            "scene": WINDOWED_BENCHMARK_SCENE,
+            "watchdog_abort": {
+                "reason": reason,
+                "timeout_secs": BENCHMARK_NO_PROGRESS_TIMEOUT.as_secs(),
+                "warmup_frames_seen": self.warmup_seen,
+                "measured_frames_seen": self.measured_seen,
+            },
+            "requested_mode": self.requested_mode.to_string(),
+            "effective_mode": self.effective_mode.to_string(),
+            "window": {
+                "width": self.width,
+                "height": self.height,
+                "target_fps": self.target_fps,
+            },
+            "benchmark": {
+                "warmup_frames": self.config.warmup_frames,
+                "measured_frames": self.config.frames,
+                "recorded_frames": self.summary.total_frames,
+            },
+        });
+        if let Some(parent) = self.config.emit_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(
+            &self.config.emit_path,
+            serde_json::to_vec_pretty(&report)
+                .expect("windowed benchmark watchdog JSON serialization must succeed"),
         )
     }
 }
@@ -1546,6 +1616,116 @@ mod tests {
                 .expect("sample drains");
 
         assert_eq!(local_ack, 1);
+    }
+
+    fn make_benchmark_state(warmup: u64, frames: u64) -> WindowedBenchmarkRunState {
+        let config = WindowedBenchmarkConfig {
+            warmup_frames: warmup,
+            frames,
+            emit_path: std::env::temp_dir().join(format!(
+                "windowed-benchmark-test-{}.json",
+                warmup * 1000 + frames
+            )),
+        };
+        WindowedBenchmarkRunState::new(
+            config,
+            WindowMode::Fullscreen,
+            WindowMode::Fullscreen,
+            1920,
+            1080,
+            60,
+        )
+    }
+
+    #[test]
+    fn benchmark_watchdog_fires_when_no_frame_recorded_past_timeout() {
+        let state = make_benchmark_state(0, 10);
+        // Sleep long enough that elapsed() > the test timeout.
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            state.is_stalled(Duration::from_millis(1)),
+            "watchdog must fire when no frame recorded past the timeout"
+        );
+    }
+
+    #[test]
+    fn benchmark_watchdog_does_not_fire_immediately_after_record() {
+        let mut state = make_benchmark_state(0, 10);
+        // Age the creation timestamp well past a short threshold.
+        std::thread::sleep(Duration::from_millis(5));
+        let mut telem = tze_hud_telemetry::FrameTelemetry::new(1);
+        telem.frame_time_us = 8_000;
+        state.record(&telem);
+        // Immediately after record(), last_frame_at is fresh — generous threshold.
+        assert!(
+            !state.is_stalled(Duration::from_millis(100)),
+            "watchdog must not fire immediately after a frame is recorded"
+        );
+    }
+
+    #[test]
+    fn benchmark_watchdog_resets_on_warmup_frame() {
+        let mut state = make_benchmark_state(1, 10);
+        // Age the creation timestamp.
+        std::thread::sleep(Duration::from_millis(5));
+        let mut telem = tze_hud_telemetry::FrameTelemetry::new(1);
+        telem.frame_time_us = 8_000;
+        let done = state.record(&telem); // this is a warmup frame
+        assert!(!done, "warmup frame must not complete the benchmark");
+        assert!(
+            !state.is_stalled(Duration::from_millis(100)),
+            "watchdog must reset on warmup frames too"
+        );
+    }
+
+    #[test]
+    fn benchmark_watchdog_emit_abort_writes_diagnostic_json() {
+        let emit_path = std::env::temp_dir().join("windowed-benchmark-watchdog-abort-test.json");
+        let config = WindowedBenchmarkConfig {
+            warmup_frames: 2,
+            frames: 10,
+            emit_path: emit_path.clone(),
+        };
+        let state = WindowedBenchmarkRunState::new(
+            config,
+            WindowMode::Fullscreen,
+            WindowMode::Fullscreen,
+            1920,
+            1080,
+            60,
+        );
+        state
+            .emit_watchdog_abort("no-progress timeout")
+            .expect("emit_watchdog_abort must succeed");
+        let contents = std::fs::read_to_string(&emit_path).expect("file must be written");
+        let json: serde_json::Value =
+            serde_json::from_str(&contents).expect("output must be valid JSON");
+        assert_eq!(
+            json["schema"],
+            "tze_hud.windowed_compositor_benchmark.v1",
+            "schema field must be present"
+        );
+        let abort = &json["watchdog_abort"];
+        assert_eq!(
+            abort["reason"], "no-progress timeout",
+            "abort reason must be preserved"
+        );
+        assert_eq!(
+            abort["warmup_frames_seen"], 0,
+            "no warmup frames were recorded"
+        );
+        assert_eq!(
+            abort["measured_frames_seen"], 0,
+            "no measured frames were recorded"
+        );
+        assert!(
+            abort["timeout_secs"].as_u64().unwrap_or(0) > 0,
+            "timeout_secs must be positive"
+        );
+        assert!(
+            json.get("frame_time").is_none(),
+            "watchdog abort must not include frame_time (no frames recorded)"
+        );
     }
 
     #[test]
