@@ -916,6 +916,14 @@ impl ProjectionAuthority {
                 ProjectionAuditCategory::BoundsDenied,
             );
         }
+        // Collect (projection_id, sequence, submitted_at) for cadence coalescer
+        // wiring after the session borrow is released. Set to `Some(...)` only on
+        // an accepted status update so the portal is marked due and the drain loop
+        // re-materialises the viewer-facing lifecycle/status — a status-only
+        // publish carries no transcript content, so without this the new state
+        // would stay invisible until some unrelated publish/input made the portal
+        // due (mirrors the content-less refresh in `handle_input_ack`).
+        let mut cadence_append: Option<(String, u64, u64)> = None;
         let response = match self.authorize_owner(
             &request.envelope,
             &request.owner_token,
@@ -925,6 +933,11 @@ impl ProjectionAuthority {
             Ok(session) => {
                 session.lifecycle_state = request.lifecycle_state;
                 session.latest_status_text = request.status_text;
+                cadence_append = Some((
+                    request.envelope.projection_id.clone(),
+                    schedule_portal_state_update(session),
+                    server_timestamp_wall_us,
+                ));
                 let mut response = ProjectionResponse::accepted(
                     &request.envelope.request_id,
                     &request.envelope.projection_id,
@@ -942,6 +955,18 @@ impl ProjectionAuthority {
                 "owner authorization failed",
             ),
         };
+        // Register the status refresh for cross-portal fairness scheduling. The
+        // payload is empty — the coalescer is a scheduling oracle only; the
+        // lifecycle/status is read from the session on drain. submitted_at_us is
+        // recorded for publish→present latency measurement.
+        if let Some((projection_id, sequence, submitted_at_wall_us)) = cadence_append {
+            self.cadence_coalescer.record_append(
+                &projection_id,
+                Vec::new(),
+                sequence,
+                submitted_at_wall_us,
+            );
+        }
         self.audit_from_response(
             &request.envelope,
             caller_identity,

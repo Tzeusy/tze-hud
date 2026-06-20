@@ -60,7 +60,8 @@ use tze_hud_projection::{
     CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
     InputAckState, OperationEnvelope, OutputKind, PendingInputItem, PortalInputFeedback,
     ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds, ProjectionErrorCode,
-    ProjectionOperation, ProviderKind, PublishOutputRequest,
+    ProjectionLifecycleState, ProjectionOperation, ProviderKind, PublishOutputRequest,
+    PublishStatusRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -159,6 +160,37 @@ fn parse_ack_state(raw: &str) -> Result<InputAckState, String> {
     serde_json::from_value(serde_json::Value::String(raw.to_string())).map_err(|_| {
         format!("invalid ack_state {raw:?}: expected one of handled, deferred, rejected")
     })
+}
+
+/// Parse a snake_case `lifecycle_state` string into [`ProjectionLifecycleState`].
+///
+/// Accepts exactly the wire spellings of `serde(rename_all = "snake_case")`
+/// (`attached`, `active`, `degraded`, `hud_unavailable`, `detached`,
+/// `cleanup_pending`, `expired`). There is no default: the lifecycle state is
+/// the whole point of `publish_status`, so an empty or unrecognized value yields
+/// an `Err` that the caller forwards to the requester before the authority sees
+/// it.
+fn parse_lifecycle_state(raw: &str) -> Result<ProjectionLifecycleState, String> {
+    serde_json::from_value(serde_json::Value::String(raw.to_string())).map_err(|_| {
+        format!(
+            "invalid lifecycle_state {raw:?}: expected one of attached, active, \
+             degraded, hud_unavailable, detached, cleanup_pending, expired"
+        )
+    })
+}
+
+/// Serialize a [`ProjectionLifecycleState`] back to its snake_case wire string.
+///
+/// Used to echo the authority's applied lifecycle state back through the
+/// `publish_status` reply channel so the round-trip is observable by the MCP
+/// caller. The enum is a fixed `serde(rename_all = "snake_case")` set, so
+/// serialization is infallible in practice; an unexpected failure falls back to
+/// the internal-error code spelling rather than panicking.
+fn lifecycle_state_wire(state: ProjectionLifecycleState) -> String {
+    match serde_json::to_value(state) {
+        Ok(serde_json::Value::String(s)) => s,
+        _ => "active".to_string(),
+    }
 }
 
 /// Parse a snake_case cleanup authority string into [`CleanupAuthority`].
@@ -656,6 +688,67 @@ impl InProcessPortalDriver {
                         proj_id = %projection_id,
                         error_code = %error_code,
                         "portal_op: PublishOutput denied"
+                    );
+                    let _ =
+                        reply.send(Err(PortalOpRejection::new(error_code, resp.status_summary)));
+                }
+            }
+
+            PortalOp::PublishStatus {
+                projection_id,
+                owner_token,
+                lifecycle_state,
+                status_text,
+                reply,
+            } => {
+                // Parse the snake_case lifecycle string before the authority sees
+                // it. There is no default — the lifecycle state is the payload of
+                // publish_status — so an unrecognized value is rejected with the
+                // stable invalid-argument code.
+                let lifecycle_state = match parse_lifecycle_state(&lifecycle_state) {
+                    Ok(state) => state,
+                    Err(reason) => {
+                        let _ = reply.send(Err(PortalOpRejection::new(
+                            ProjectionErrorCode::ProjectionInvalidArgument,
+                            reason,
+                        )));
+                        return;
+                    }
+                };
+                let request_id = uuid::Uuid::now_v7().to_string();
+                let req = PublishStatusRequest {
+                    envelope: OperationEnvelope {
+                        operation: ProjectionOperation::PublishStatus,
+                        projection_id: projection_id.clone(),
+                        request_id,
+                        client_timestamp_wall_us: now_us.max(1),
+                    },
+                    owner_token,
+                    lifecycle_state,
+                    status_text,
+                };
+                let resp = self
+                    .authority
+                    .handle_publish_status(req, "mcp-portal", now_us);
+                if resp.accepted {
+                    // Echo the authority's applied lifecycle state back so the MCP
+                    // caller can observe the round-trip. Fall back to the request
+                    // state if the response omits it (it always sets it on accept).
+                    let applied = resp.lifecycle_state.unwrap_or(lifecycle_state);
+                    tracing::debug!(
+                        proj_id = %projection_id,
+                        lifecycle = ?applied,
+                        "portal_op: PublishStatus accepted"
+                    );
+                    let _ = reply.send(Ok(lifecycle_state_wire(applied)));
+                } else {
+                    let error_code = resp
+                        .error_code
+                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
+                    tracing::warn!(
+                        proj_id = %projection_id,
+                        error_code = %error_code,
+                        "portal_op: PublishStatus denied"
                     );
                     let _ =
                         reply.send(Err(PortalOpRejection::new(error_code, resp.status_summary)));
@@ -3474,6 +3567,139 @@ mod tests {
         assert!(
             after.is_err(),
             "publishing to a detached projection must be denied"
+        );
+    }
+
+    /// End-to-end `publish_status` round-trip through `dispatch_portal_op`
+    /// (hud-y8h3m). This is the production MCP ingress path for step 3 of the
+    /// cooperative workflow: the LLM signals its lifecycle state to the viewer.
+    ///
+    /// Drives Attach → PublishStatus(active) → PublishStatus(degraded) and
+    /// asserts that (a) the authority's session lifecycle state is updated, (b)
+    /// the applied state is echoed back through the reply channel (the
+    /// observable round-trip), (c) an unrecognized lifecycle string is rejected
+    /// before the authority is touched, and (d) the owner-token auth gate holds.
+    #[test]
+    fn dispatch_portal_op_publish_status_round_trip() {
+        let mut driver = InProcessPortalDriver::new();
+        let proj = "proj-status";
+
+        // Attach to obtain the owner token.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj.to_string(),
+            display_name: "Status Test".to_string(),
+            idempotency_key: None,
+            reply: tx,
+        });
+        let token = rx
+            .blocking_recv()
+            .expect("attach reply must arrive")
+            .expect("attach must be accepted");
+
+        // A fresh attach (no publish traffic yet) is in the `Attached` state.
+        assert_eq!(
+            driver
+                .authority_mut()
+                .state_summary(proj)
+                .expect("session must exist")
+                .lifecycle_state,
+            ProjectionLifecycleState::Attached,
+        );
+
+        // PublishStatus(active) — accepted, echoes the applied state back.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishStatus {
+            projection_id: proj.to_string(),
+            owner_token: token.clone(),
+            lifecycle_state: "active".to_string(),
+            status_text: Some("working".to_string()),
+            reply: tx,
+        });
+        let applied = rx
+            .blocking_recv()
+            .expect("publish_status reply must arrive")
+            .expect("publish_status must be accepted");
+        assert_eq!(
+            applied, "active",
+            "the applied lifecycle state must round-trip back as snake_case"
+        );
+        assert_eq!(
+            driver
+                .authority_mut()
+                .state_summary(proj)
+                .expect("session must exist")
+                .lifecycle_state,
+            ProjectionLifecycleState::Active,
+        );
+
+        // PublishStatus(degraded) — the "blocked" signal; updates the session.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishStatus {
+            projection_id: proj.to_string(),
+            owner_token: token.clone(),
+            lifecycle_state: "degraded".to_string(),
+            status_text: None,
+            reply: tx,
+        });
+        let applied = rx
+            .blocking_recv()
+            .expect("publish_status reply must arrive")
+            .expect("publish_status must be accepted");
+        assert_eq!(applied, "degraded");
+        assert_eq!(
+            driver
+                .authority_mut()
+                .state_summary(proj)
+                .expect("session must exist")
+                .lifecycle_state,
+            ProjectionLifecycleState::Degraded,
+            "the authority must hold the newly published lifecycle state",
+        );
+
+        // An unrecognized lifecycle string is rejected before the authority is
+        // touched — the session keeps its prior (Degraded) state.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishStatus {
+            projection_id: proj.to_string(),
+            owner_token: token.clone(),
+            lifecycle_state: "bogus".to_string(),
+            status_text: None,
+            reply: tx,
+        });
+        let rejected = rx
+            .blocking_recv()
+            .expect("publish_status reply must arrive");
+        let rejection = rejected.expect_err("an unrecognized lifecycle_state must be rejected");
+        assert_eq!(
+            rejection.error_code,
+            ProjectionErrorCode::ProjectionInvalidArgument,
+        );
+        assert_eq!(
+            driver
+                .authority_mut()
+                .state_summary(proj)
+                .expect("session must exist")
+                .lifecycle_state,
+            ProjectionLifecycleState::Degraded,
+            "a rejected status must not mutate the session lifecycle state",
+        );
+
+        // Auth gate: a wrong owner token must be denied.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishStatus {
+            projection_id: proj.to_string(),
+            owner_token: "not-the-real-token".to_string(),
+            lifecycle_state: "active".to_string(),
+            status_text: None,
+            reply: tx,
+        });
+        let denied = rx
+            .blocking_recv()
+            .expect("publish_status reply must arrive");
+        assert!(
+            denied.is_err(),
+            "publish_status with a bad owner token must be denied"
         );
     }
 

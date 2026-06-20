@@ -1549,6 +1549,74 @@ fn owner_degraded_lifecycle_is_not_overwritten_by_connection_or_output() {
     );
 }
 
+/// Regression (PR #945 review, hud-y8h3m): a status-only `publish_status`
+/// must schedule a portal refresh so the drain loop re-materialises the
+/// viewer-facing lifecycle/status. Without the cadence-coalescer wiring the new
+/// state would stay invisible until some unrelated publish/input made the portal
+/// due — `publish_status` would not be end-to-end for status-only updates.
+#[test]
+fn status_only_publish_marks_portal_due_for_refresh() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // Drain any attach-induced pending update so we have a clean idle baseline,
+    // isolating the effect of the status publish from attach scheduling.
+    while let Some(id) = authority.next_due_projection_id() {
+        let _ = authority.take_due_portal_update(&id, 10);
+    }
+    assert!(
+        authority.next_due_projection_id().is_none(),
+        "baseline must be idle before the status publish"
+    );
+
+    // A status-only publish (no transcript output) must make the portal due.
+    let accepted = authority.handle_publish_status(
+        PublishStatusRequest {
+            envelope: envelope(
+                ProjectionOperation::PublishStatus,
+                "projection-a",
+                "req-status-due",
+            ),
+            owner_token: owner_token.clone(),
+            lifecycle_state: ProjectionLifecycleState::Degraded,
+            status_text: Some("blocked on input".to_string()),
+        },
+        "caller-a",
+        20,
+    );
+    assert!(accepted.accepted);
+    assert_eq!(
+        authority.next_due_projection_id().as_deref(),
+        Some("projection-a"),
+        "a status-only publish must mark the portal due so the viewer is refreshed"
+    );
+
+    // Drain it back to idle, then confirm a DENIED status (bad owner token) does
+    // not schedule a refresh.
+    while let Some(id) = authority.next_due_projection_id() {
+        let _ = authority.take_due_portal_update(&id, 21);
+    }
+    let denied = authority.handle_publish_status(
+        PublishStatusRequest {
+            envelope: envelope(
+                ProjectionOperation::PublishStatus,
+                "projection-a",
+                "req-status-denied",
+            ),
+            owner_token: "not-the-real-token".to_string(),
+            lifecycle_state: ProjectionLifecycleState::Active,
+            status_text: None,
+        },
+        "caller-a",
+        22,
+    );
+    assert!(!denied.accepted);
+    assert!(
+        authority.next_due_projection_id().is_none(),
+        "a denied status publish must not schedule a portal refresh"
+    );
+}
+
 #[test]
 fn acknowledgement_and_detach_cleanup_update_projected_portal_state() {
     let mut authority = ProjectionAuthority::default();

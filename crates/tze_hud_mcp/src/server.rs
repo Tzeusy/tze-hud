@@ -225,6 +225,7 @@ fn classify_tool(method: &str) -> ToolClass {
         // to trusted callers that already hold the resident_mcp capability.
         | "portal_projection_attach"
         | "portal_projection_publish"
+        | "portal_projection_publish_status"
         | "portal_projection_get_pending_input"
         | "portal_projection_acknowledge_input"
         | "portal_projection_detach"
@@ -647,6 +648,14 @@ impl McpServer {
             "portal_projection_publish" => {
                 let r = tools::handle_portal_projection_publish(params, self.portal_op_tx.as_ref())
                     .await?;
+                serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
+            }
+            "portal_projection_publish_status" => {
+                let r = tools::handle_portal_projection_publish_status(
+                    params,
+                    self.portal_op_tx.as_ref(),
+                )
+                .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             "portal_projection_get_pending_input" => {
