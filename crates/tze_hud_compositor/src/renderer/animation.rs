@@ -157,15 +157,25 @@ impl Compositor {
 
             if has_content && !had_content {
                 // Tile just received content — start fade-in.
-                // Interrupt semantics mirror zone animation: start from current
-                // opacity if a fade-out is in progress (no blank frame).
+                // Interrupt semantics mirror zone animation: start from the
+                // current opacity if a fade-out is in progress (no blank frame).
+                //
+                // Portal tiles are *displayed* through the EaseInOut curve (see
+                // `portal_tile_anim_opacity`), so the interrupted fade-in MUST be
+                // seeded from the eased (on-screen) opacity rather than the linear
+                // `current_opacity()`. Seeding from the linear value would make the
+                // new fade-in start at a different opacity than the frame just
+                // rendered, producing a visible jump (hud-uir0w). Reusing
+                // `portal_tile_anim_opacity` keeps the seed tied to the exact
+                // displayed value, so the easing curve can never drift between the
+                // two paths.
                 if transition_in_ms > 0 {
                     let new_state =
                         if let Some(existing) = self.portal_tile_anim_states.get(&tile_id) {
                             if existing.target_opacity == 0.0 {
                                 ZoneAnimationState::fade_in_from(
                                     transition_in_ms,
-                                    existing.current_opacity(),
+                                    self.portal_tile_anim_opacity(tile_id),
                                 )
                             } else {
                                 ZoneAnimationState::fade_in(transition_in_ms)
