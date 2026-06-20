@@ -274,10 +274,19 @@ impl WinitApp {
             //
             // The hotkey is consumed (returns early) when applied so it does
             // NOT propagate to the composer or the agent's raw KeyDown path.
-            if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl) {
+            // Resolve the resize direction from the logical key first, then fall
+            // back to the **physical** KeyCode. The logical match is fragile
+            // under Ctrl on Windows (winit may not resolve bare `=`/`-`/`+`, and
+            // `+` needs Shift), which is the root cause of hud-v4k1h — the
+            // physical fallback (`Equal`/`Minus`/numpad) makes the chord
+            // deterministic regardless of layout or held modifiers.
+            if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl)
+                .or_else(|| HotkeyResizeDir::from_key_code(&raw.key_code, raw.modifiers.ctrl))
+            {
                 if self.apply_portal_resize_hotkey(tab_id, dir) {
                     tracing::debug!(
                         key = %str_preview(&raw.key),
+                        key_code = %str_preview(&raw.key_code),
                         "portal resize: Ctrl hotkey consumed (resize applied)"
                     );
                     return;
