@@ -1,5 +1,5 @@
 use tze_hud_compositor::{Compositor, CompositorSurface};
-use tze_hud_input::{PortalCursor, PortalRect, portal_hover_cursor};
+use tze_hud_input::{PortalCursor, PortalRect, hit_affordance, portal_hover_cursor};
 use tze_hud_scene::graph::SceneGraph;
 use winit::window::CursorIcon;
 
@@ -20,6 +20,39 @@ fn portal_cursor_to_winit(cursor: PortalCursor) -> CursorIcon {
         PortalCursor::Grab => CursorIcon::Grab,
         PortalCursor::Grabbing => CursorIcon::Grabbing,
     }
+}
+
+/// Decide whether the pointer is over a portal-move drag-handle or the focused
+/// portal's resize-affordance bands, for the overlay capture decision. Pure so
+/// it is unit testable; the
+/// [`WinitApp::cursor_over_focused_portal_affordance`] method wires the live
+/// focus/snapshot/token inputs.
+///
+/// Two distinct cases capture:
+/// - `over_drag_handle` is the caller's snapshot-wide drag-handle hit (any
+///   element's move handle, not just the focused portal). It captures
+///   regardless of focus or geometry, mirroring [`portal_hover_cursor`], which
+///   shows the `Grab` hand over any drag-handle. Scoping this to the focused
+///   portal would desync cursor-shape from capture (a `Grab` cursor over a
+///   non-focused handle with no capture is the original passthrough bug) and
+///   would block click-to-focus/drag of a non-focused portal.
+/// - The resize bands are scoped to `focused_portal`: a `None` (or non-portal)
+///   focus never captures via the resize path, so resize capture never widens
+///   passthrough beyond the focused portal's own bands.
+fn pointer_over_portal_affordance(
+    focused_portal: Option<PortalRect>,
+    x: f32,
+    y: f32,
+    affordance_px: f32,
+    over_drag_handle: bool,
+) -> bool {
+    if over_drag_handle {
+        return true;
+    }
+    matches!(
+        focused_portal.map(|rect| hit_affordance(x, y, &rect, affordance_px)),
+        Some(Some(_))
+    )
 }
 
 pub(super) fn sync_scene_display_area(scene: &mut SceneGraph, width: u32, height: u32) {
@@ -192,7 +225,8 @@ impl WinitApp {
             self.state.cursor_x,
             self.state.cursor_y,
             &self.state.hit_regions,
-        ) || self.state.left_button_down;
+        ) || self.state.left_button_down
+            || self.cursor_over_focused_portal_affordance();
         if let Some(window) = &self.state.window {
             if let Err(e) = window.set_cursor_hittest(should_capture) {
                 tracing::trace!(
@@ -229,6 +263,40 @@ impl WinitApp {
             width: entry.bounds.width,
             height: entry.bounds.height,
         })
+    }
+
+    /// True when the pointer is over the focused portal's resize-affordance
+    /// bands or drag-handle.
+    ///
+    /// In overlay passthrough mode `combined_overlay_hit_regions` only covers
+    /// static + zone + content-tile regions, so a focused portal's resize bands
+    /// and drag-handle are NOT capture regions. Without this, the window stays
+    /// click-through over those affordances: the cursor shape set by
+    /// [`WinitApp::update_portal_cursor_icon`] has no visible effect (the
+    /// desktop owns the cursor) and resize/drag gestures never reach the
+    /// runtime. ORing this into the overlay capture decision makes a focused
+    /// portal's affordances behave like every other interactive region in
+    /// overlay mode (hud-adh61, follow-up to hud-g5yu1).
+    ///
+    /// Note: the resize bands are scoped to the focused portal, but the
+    /// drag-handle term is the snapshot-wide
+    /// [`HitTestSnapshot::hit_test_drag_handle`] (any element's move handle).
+    /// This deliberately matches the snapshot-wide drag-handle input that
+    /// [`portal_hover_cursor`] uses for the `Grab` cursor, so cursor-shape and
+    /// capture stay in lockstep over every handle.
+    fn cursor_over_focused_portal_affordance(&self) -> bool {
+        let focused_portal = self.focused_portal_rect();
+        let x = self.state.cursor_x;
+        let y = self.state.cursor_y;
+        let affordance_px = tze_hud_config::resolve_portal_tokens(&self.state.global_tokens)
+            .window_resize_affordance_px;
+        let over_drag_handle = self
+            .state
+            .pipeline
+            .hit_test_snapshot
+            .load()
+            .hit_test_drag_handle(x, y);
+        pointer_over_portal_affordance(focused_portal, x, y, affordance_px, over_drag_handle)
     }
 
     /// Update the OS cursor shape to reflect the portal resize/move affordance
@@ -619,6 +687,63 @@ mod tests {
             300.0,
             300.0,
             &regions
+        ));
+    }
+
+    #[test]
+    fn overlay_capture_includes_focused_portal_affordances() {
+        // hud-adh61: in overlay passthrough mode the focused portal's resize
+        // bands + drag-handle must still capture, or the cursor shape never
+        // shows and gestures never reach.
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 200.0,
+            height: 150.0,
+        };
+        let aff = 10.0;
+
+        // Over the right resize band (mid-height) -> captured.
+        assert!(pointer_over_portal_affordance(
+            Some(rect),
+            299.0,
+            175.0,
+            aff,
+            false
+        ));
+        // Over the top-left corner -> captured.
+        assert!(pointer_over_portal_affordance(
+            Some(rect),
+            101.0,
+            101.0,
+            aff,
+            false
+        ));
+        // Interior (no band, no handle) -> NOT captured: passthrough preserved.
+        assert!(!pointer_over_portal_affordance(
+            Some(rect),
+            200.0,
+            175.0,
+            aff,
+            false
+        ));
+        // Over the drag-handle -> captured even off the resize bands.
+        assert!(pointer_over_portal_affordance(
+            Some(rect),
+            200.0,
+            175.0,
+            aff,
+            true
+        ));
+        // No focused portal, no drag handle -> never widens passthrough.
+        assert!(!pointer_over_portal_affordance(
+            None, 101.0, 101.0, aff, false
+        ));
+        // No focused portal but over a drag handle -> still captured: the
+        // snapshot-wide drag-handle hit lets the user grab/focus any portal,
+        // matching the `Grab` cursor `portal_hover_cursor` shows there.
+        assert!(pointer_over_portal_affordance(
+            None, 101.0, 101.0, aff, true
         ));
     }
 
