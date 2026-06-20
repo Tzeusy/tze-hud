@@ -111,7 +111,11 @@ impl SceneGraph {
             // Chrome tile absorbs the hit.  If it has a HitRegionNode, report
             // its node_id as the element_id for richer routing; otherwise use
             // the tile id.
-            let (scroll_x, scroll_y) = self.tile_scroll_offset_local(tile.id);
+            // Use the displayed (smoothed/lagged) offset when a scroll
+            // animation is in flight so pointer mapping matches the rows the
+            // renderer drew; falls back to the authoritative offset otherwise
+            // (hud-3lynp).
+            let (scroll_x, scroll_y) = self.effective_tile_scroll_offset_local(tile.id);
             let local_x = x - tile.bounds.x + scroll_x;
             let local_y = y - tile.bounds.y + scroll_y;
             let element_id = tile
@@ -127,7 +131,9 @@ impl SceneGraph {
             if tile.input_mode == InputMode::Passthrough {
                 continue; // Skip passthrough tiles per spec.
             }
-            let (scroll_x, scroll_y) = self.tile_scroll_offset_local(tile.id);
+            // Displayed (smoothed/lagged) offset during an in-flight scroll
+            // animation; authoritative offset otherwise (hud-3lynp).
+            let (scroll_x, scroll_y) = self.effective_tile_scroll_offset_local(tile.id);
             let local_x = x - tile.bounds.x + scroll_x;
             let local_y = y - tile.bounds.y + scroll_y;
 

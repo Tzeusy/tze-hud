@@ -186,6 +186,124 @@ fn test_hit_test_applies_tile_scroll_offset() {
     );
 }
 
+/// During an in-flight smoothed scroll, `hit_test` must map pointer coordinates
+/// using the *displayed* (lagged) offset the renderer drew with — not the
+/// authoritative scroll target (hud-3lynp). When no displayed offset is
+/// published (headless / snap), hit-testing falls back to the authoritative
+/// offset and behavior is unchanged.
+#[test]
+fn test_hit_test_uses_displayed_scroll_offset_during_animation() {
+    let mut scene = SceneGraph::new(800.0, 600.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease(
+        "scroll-agent",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    // Tile anchored at the origin so screen coords == tile-local coords (before
+    // the scroll offset is applied), keeping the arithmetic easy to follow.
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "scroll-agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 200.0, 200.0),
+            1,
+        )
+        .unwrap();
+
+    // Two stacked, non-overlapping content rows:
+    //   row A occupies content y ∈ [0, 100)
+    //   row B occupies content y ∈ [100, 200)
+    let row_a = SceneId::new();
+    let row_b = SceneId::new();
+    let root = SceneId::new();
+    scene.nodes.insert(
+        row_a,
+        Node {
+            id: row_a,
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                interaction_id: "row-a".to_string(),
+                accepts_focus: false,
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        },
+    );
+    scene.nodes.insert(
+        row_b,
+        Node {
+            id: row_b,
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, 100.0, 200.0, 100.0),
+                interaction_id: "row-b".to_string(),
+                accepts_focus: false,
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        },
+    );
+    scene.nodes.insert(
+        root,
+        Node {
+            id: root,
+            children: vec![row_a, row_b],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::TRANSPARENT,
+                bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                radius: None,
+            }),
+        },
+    );
+    scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(root);
+
+    // Authoritative scroll target is fully scrolled to content y=100: with no
+    // displayed override, screen y=50 maps to content y=150 → row B.
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 100.0)
+        .unwrap();
+    assert_eq!(
+        scene.hit_test(50.0, 50.0),
+        HitResult::NodeHit {
+            tile_id,
+            node_id: row_b,
+            interaction_id: "row-b".to_string(),
+        },
+        "with no displayed offset published, hit_test uses the authoritative offset"
+    );
+
+    // Now simulate an in-flight smoothed scroll: the renderer is still drawing
+    // at the lagged displayed offset y=0 (animation has not caught up to the
+    // y=100 target). screen y=50 must map to content y=50 → row A, matching the
+    // row the operator actually sees.
+    scene.set_displayed_tile_scroll_offset(tile_id, 0.0, 0.0);
+    assert_eq!(
+        scene.hit_test(50.0, 50.0),
+        HitResult::NodeHit {
+            tile_id,
+            node_id: row_a,
+            interaction_id: "row-a".to_string(),
+        },
+        "during animation, hit_test must use the displayed (lagged) offset, not the authoritative one"
+    );
+
+    // Once the animation settles (or smoothing is disabled), clearing the
+    // displayed offsets restores authoritative behavior — row B again.
+    scene.clear_displayed_tile_scroll_offsets();
+    assert_eq!(
+        scene.hit_test(50.0, 50.0),
+        HitResult::NodeHit {
+            tile_id,
+            node_id: row_b,
+            interaction_id: "row-b".to_string(),
+        },
+        "clearing displayed offsets restores authoritative hit-testing"
+    );
+}
+
 #[test]
 fn test_hit_test_zone_regions_without_active_tab() {
     let mut scene = SceneGraph::new(1920.0, 1080.0);

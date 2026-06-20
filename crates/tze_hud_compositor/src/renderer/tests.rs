@@ -7809,6 +7809,66 @@ async fn display_tile_scroll_offset_snaps_headless_and_settles_windowed() {
     );
 }
 
+/// `publish_displayed_scroll_offsets` records exactly the offset the renderer
+/// draws with (`display_tile_scroll_offset`) into the scene so the live
+/// hit-test path agrees with the rendered rows during a smoothed scroll
+/// (hud-3lynp). When smoothing is disabled (headless/snap) it clears any
+/// published overrides so hit-testing falls back to the authoritative offset.
+#[tokio::test]
+async fn publish_displayed_scroll_offsets_mirrors_smoother_and_clears_headless() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(720, 360).await);
+
+    let mut scene = SceneGraph::new(720.0, 360.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("smooth-scroll", 120_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "smooth-scroll",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            tze_hud_scene::types::TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: None,
+                content_height: Some(800.0),
+            },
+        )
+        .unwrap();
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 120.0)
+        .unwrap();
+
+    // Windowed: advance the smoother, then publish. The published displayed
+    // offset must equal display_tile_scroll_offset (the value the renderer drew)
+    // and become the effective offset the hit-test path consults.
+    compositor.scroll_smoothing_enabled = true;
+    compositor.update_scroll_smoothing(&scene);
+    let drawn = compositor.display_tile_scroll_offset(&scene, tile_id);
+    compositor.publish_displayed_scroll_offsets(&mut scene);
+    assert_eq!(
+        scene.effective_tile_scroll_offset_local(tile_id),
+        drawn,
+        "hit-test path must see the same displayed offset the renderer drew with"
+    );
+
+    // Headless/snap: publishing clears the override so hit-testing falls back to
+    // the authoritative offset (deterministic golden tests unaffected).
+    compositor.scroll_smoothing_enabled = false;
+    compositor.publish_displayed_scroll_offsets(&mut scene);
+    assert_eq!(
+        scene.effective_tile_scroll_offset_local(tile_id),
+        (0.0, 120.0),
+        "with smoothing disabled the effective offset falls back to authoritative"
+    );
+}
+
 /// Headless readback regression for the text-stream portal output pane.
 ///
 /// The live exemplar mounts the OUTPUT transcript body as a scrollable tile
