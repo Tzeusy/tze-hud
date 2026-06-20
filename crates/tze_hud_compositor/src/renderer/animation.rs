@@ -10,15 +10,17 @@
 //! This file contains only the `impl Compositor` methods that operate on those
 //! types.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 
 use super::Compositor;
 use super::draw_cmds::{
-    NOTIFICATION_DEFAULT_TTL_MS, NOTIFICATION_FADE_OUT_MS, PubKey, PublicationAnimationState,
-    StreamRevealState, ZoneAnimationState,
+    NOTIFICATION_DEFAULT_TTL_MS, NOTIFICATION_FADE_OUT_MS, PortalTileStreamReveal, PubKey,
+    PublicationAnimationState, StreamRevealState, ZoneAnimationState, common_prefix_len,
+    derive_word_breakpoints,
 };
 
 impl Compositor {
@@ -298,6 +300,116 @@ impl Compositor {
                 state.advance();
             }
         }
+    }
+
+    /// Update per-portal-tile streaming-reveal state (hud-bl7yi).
+    ///
+    /// Must be called once per frame (after `update_portal_tile_animations`),
+    /// the portal-tile analogue of [`Compositor::update_stream_reveals`].
+    ///
+    /// For each scrollable (portal) tile whose root subtree contains a markdown
+    /// content node:
+    /// - **First sight** of the tile → record a *settled* anchor so pre-existing
+    ///   content is not faded in (the whole-tile appear fade in
+    ///   `update_portal_tile_animations` already covers first appearance).
+    /// - **Unchanged** plain-text → advance any in-flight reveal by one frame.
+    /// - **Grown** plain-text (a genuine append) → start a fresh reveal that
+    ///   fades the `[common_prefix, new_len)` region in segment-by-segment.
+    /// - **Other change** (same-length edit / shrink such as caret blink or a
+    ///   head-trim) → re-anchor settled, with no fade, so same-length churn never
+    ///   re-triggers an animation.
+    ///
+    /// Plain-text is sourced from the commit-time-primed markdown cache so the
+    /// reveal's byte offsets line up exactly with the `styled_runs` the renderer
+    /// lays out. Tiles whose content node carries pixel-bearing color runs (the
+    /// legacy raw path) are skipped — their offsets index raw content, not the
+    /// stripped plain-text, so a fade cannot be aligned safely.
+    pub fn update_portal_tile_reveals(&mut self, scene: &SceneGraph) {
+        // Phase 1: snapshot (tile_id, plain_text) for every portal tile. Done in
+        // a separate pass so the immutable cache/scene borrow is released before
+        // we mutate `self.portal_tile_reveal_states`.
+        let cache = self.markdown_cache();
+        let mut current: Vec<(SceneId, Arc<str>)> = Vec::new();
+        for tile in scene.tiles.values() {
+            if scene.tile_scroll_config(tile.id).is_none() {
+                continue; // not a portal/scrollable tile
+            }
+            let Some(root) = tile.root_node else {
+                continue;
+            };
+            if let Some(plain) = self.portal_tile_plain_text(scene, root, &cache) {
+                current.push((tile.id, plain));
+            }
+        }
+
+        let seen: HashSet<SceneId> = current.iter().map(|(id, _)| *id).collect();
+        self.portal_tile_reveal_states
+            .retain(|tile_id, _| seen.contains(tile_id));
+
+        for (tile_id, plain) in current {
+            match self.portal_tile_reveal_states.get_mut(&tile_id) {
+                None => {
+                    // First sight — anchor without fading pre-existing content.
+                    self.portal_tile_reveal_states
+                        .insert(tile_id, PortalTileStreamReveal::settled(plain));
+                }
+                Some(state) => {
+                    if state.plain_text.as_ref() == plain.as_ref() {
+                        // No content change — advance any in-flight reveal.
+                        state.advance();
+                    } else if plain.len() > state.plain_text.len() {
+                        // Content grew → fade in the appended (changed-suffix)
+                        // region. `common_prefix_len` locates where the new
+                        // snapshot diverges; everything after fades segment-by-
+                        // segment. (Transcript lines land mid-string before the
+                        // trailing composer line, so we reveal the changed suffix
+                        // rather than requiring a strict tail append.)
+                        let start = common_prefix_len(state.plain_text.as_ref(), plain.as_ref());
+                        let breakpoints = derive_word_breakpoints(plain.as_ref(), start);
+                        *state = PortalTileStreamReveal::new(plain, start, breakpoints);
+                    } else {
+                        // Same-length or shrinking change (caret blink, status
+                        // edit, head-trim) → re-anchor settled, no fade.
+                        *state = PortalTileStreamReveal::settled(plain);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve the markdown *plain-text* for the first `TextMarkdownNode` in the
+    /// subtree rooted at `node_id`, using the commit-time-primed markdown cache.
+    ///
+    /// Returns `None` when the subtree has no eligible markdown node, the node
+    /// carries pixel-bearing color runs (legacy raw path — offsets index raw
+    /// content, not plain-text), or the cache has no entry for it yet (a cold
+    /// first frame; the next frame will pick it up). The returned `Arc<str>` is a
+    /// refcount bump on the cache's shared plain-text — no string copy.
+    fn portal_tile_plain_text(
+        &self,
+        scene: &SceneGraph,
+        node_id: SceneId,
+        cache: &crate::markdown::MarkdownCache,
+    ) -> Option<Arc<str>> {
+        let node = scene.nodes.get(&node_id)?;
+        if let NodeData::TextMarkdown(tm) = &node.data {
+            if !crate::text::markdown_node_has_pixel_runs(tm) {
+                let key = self
+                    .node_key_cache
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or_else(|| crate::markdown::MarkdownCache::compute_key(&tm.content));
+                if let Some(parsed) = cache.get_by_key(&key) {
+                    return Some(Arc::clone(&parsed.plain_text));
+                }
+            }
+        }
+        for child_id in &node.children {
+            if let Some(plain) = self.portal_tile_plain_text(scene, *child_id, cache) {
+                return Some(plain);
+            }
+        }
+        None
     }
 
     /// Update per-publication fade-out animation state for Stack zone publications.
@@ -599,6 +711,17 @@ impl Compositor {
 
         // Streaming word-by-word reveal still progressing through breakpoints.
         if self.stream_reveal_states.values().any(|s| s.is_revealing()) {
+            return true;
+        }
+
+        // Portal-tile per-segment streaming-reveal fade still in flight
+        // (hud-bl7yi). An active StreamFadeRamp must keep the tile rendering so
+        // the fade advances instead of freezing mid-reveal (#943).
+        if self
+            .portal_tile_reveal_states
+            .values()
+            .any(|s| s.is_revealing())
+        {
             return true;
         }
 

@@ -455,10 +455,187 @@ impl StreamRevealState {
     }
 }
 
+/// Per-portal-tile streaming-reveal state: fades **newly-appended** transcript
+/// content into view segment-by-segment via [`StreamFadeRamp`], instead of
+/// snapping the whole new chunk to full opacity in one frame.
+///
+/// Where [`StreamRevealState`] (the zone path) hard-*truncates* the visible text
+/// at the current breakpoint — so each segment pops in at full opacity — this
+/// keeps every byte laid out and instead ramps the **leading** (just-revealed)
+/// segment's alpha from `0 → 1` across its dwell window. Already-revealed
+/// segments render at full opacity; not-yet-revealed segments render fully
+/// transparent (alpha `0`), so the reveal still advances word-by-word while the
+/// active word *fades* rather than snaps (hud-bl7yi, deliverable #1/#3).
+///
+/// All offsets are byte offsets into [`Self::plain_text`] — the markdown
+/// *plain-text* (post-strip) string the renderer actually lays out, so they line
+/// up 1:1 with the `styled_runs` produced by
+/// [`TextItem::from_text_markdown_cached`]. The state anchors to the exact
+/// `plain_text` snapshot it was built from; the per-frame update re-anchors only
+/// when that snapshot grows (a genuine append), so same-length churn (caret
+/// blink, status edits) never re-triggers a fade.
+#[derive(Clone, Debug)]
+pub struct PortalTileStreamReveal {
+    /// The plain-text snapshot this reveal is anchored to. Content growth is
+    /// detected by diffing the next frame's plain-text against this.
+    pub plain_text: std::sync::Arc<str>,
+    /// Byte offset (into `plain_text`) where the revealing (fading) region
+    /// starts — the common-prefix boundary with the previous snapshot. Bytes
+    /// before this are pre-existing content and always render at full opacity.
+    pub reveal_start: usize,
+    /// Absolute byte offsets within `(reveal_start, plain_text.len()]`, one per
+    /// word-segment boundary, strictly increasing, with the final entry equal to
+    /// `plain_text.len()`. Empty ⇒ nothing to reveal (a settled tile).
+    pub breakpoints: Vec<usize>,
+    /// Index into `breakpoints` of the currently-fading (leading) segment.
+    /// `breakpoints.len()` means the reveal is complete (steady state).
+    pub segment_idx: usize,
+    /// Frame counter within the current segment's dwell window.
+    pub frames_in_segment: u32,
+}
+
+impl PortalTileStreamReveal {
+    /// Build a reveal that fades the `[reveal_start, plain_text.len())` region in
+    /// segment-by-segment, using `breakpoints` (absolute, increasing, last ==
+    /// `plain_text.len()`).
+    pub fn new(
+        plain_text: std::sync::Arc<str>,
+        reveal_start: usize,
+        breakpoints: Vec<usize>,
+    ) -> Self {
+        Self {
+            plain_text,
+            reveal_start,
+            breakpoints,
+            segment_idx: 0,
+            frames_in_segment: 0,
+        }
+    }
+
+    /// Build a *settled* (fully-revealed, non-animating) anchor for `plain_text`.
+    ///
+    /// Used on first sight of a tile so pre-existing content is **not** faded in,
+    /// and after a non-append change (edit/shrink) so the renderer shows the new
+    /// content immediately. `is_revealing()` is `false`.
+    pub fn settled(plain_text: std::sync::Arc<str>) -> Self {
+        let len = plain_text.len();
+        Self::new(plain_text, len, Vec::new())
+    }
+
+    /// Whether more segments remain to fade in.
+    ///
+    /// `true` while the per-segment reveal is still progressing; `false` once
+    /// every segment is fully revealed (or there is nothing to reveal). The idle
+    /// present-gate (#943) treats an in-flight reveal as a reason to keep
+    /// rendering so the fade never freezes mid-reveal.
+    #[inline]
+    pub fn is_revealing(&self) -> bool {
+        self.segment_idx < self.breakpoints.len()
+    }
+
+    /// Advance the reveal by one frame. Returns `true` while still in flight.
+    ///
+    /// Mirrors [`StreamRevealState::advance`]: dwell each segment for
+    /// [`STREAM_REVEAL_FRAMES_PER_SEGMENT`] frames before moving to the next.
+    pub fn advance(&mut self) -> bool {
+        if self.segment_idx >= self.breakpoints.len() {
+            return false; // already fully revealed
+        }
+        self.frames_in_segment += 1;
+        if self.frames_in_segment >= STREAM_REVEAL_FRAMES_PER_SEGMENT {
+            self.frames_in_segment = 0;
+            self.segment_idx += 1;
+        }
+        self.segment_idx < self.breakpoints.len()
+    }
+
+    /// Eased alpha for the byte at `pos`, using `ramp` for the leading segment.
+    ///
+    /// - `pos < reveal_start` → `1.0` (pre-existing content, always opaque).
+    /// - segment fully revealed → `1.0`.
+    /// - leading (currently-fading) segment → `ramp.alpha(frames, window)`.
+    /// - not-yet-revealed segment → `0.0` (laid out but invisible).
+    ///
+    /// Returns `1.0` for every byte once the reveal is complete, so a settled
+    /// tile is byte-for-byte identical to the no-reveal path (deliverable #3).
+    #[inline]
+    pub fn alpha_for_byte(&self, pos: usize, ramp: super::easing::StreamFadeRamp) -> f32 {
+        if !self.is_revealing() || pos < self.reveal_start {
+            return 1.0;
+        }
+        // Segment index k owning `pos`: the count of breakpoints <= pos, since
+        // segment k spans [prev_breakpoint, breakpoints[k]).
+        let k = self.breakpoints.partition_point(|&b| b <= pos);
+        if k < self.segment_idx {
+            1.0
+        } else if k == self.segment_idx {
+            ramp.alpha(self.frames_in_segment, STREAM_REVEAL_FRAMES_PER_SEGMENT)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Length (bytes) of the longest common prefix of `a` and `b`, snapped back to a
+/// UTF-8 character boundary in `a`.
+///
+/// Used to locate where a grown portal-tile transcript diverges from its prior
+/// snapshot — everything from this offset to the new end is the freshly-appended
+/// region that should fade in.
+pub(super) fn common_prefix_len(a: &str, b: &str) -> usize {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let n = ab.len().min(bb.len());
+    let mut i = 0;
+    while i < n && ab[i] == bb[i] {
+        i += 1;
+    }
+    // Back off to a char boundary so downstream slicing/offsets stay valid.
+    while i > 0 && !a.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Derive word-segment breakpoints over `text[start..]`.
+///
+/// Emits one absolute byte offset at the end of each whitespace-delimited word
+/// (the boundary *before* the trailing whitespace), plus a final entry equal to
+/// `text.len()`. Leading whitespace before a word is absorbed into that word's
+/// segment. All offsets fall on UTF-8 character boundaries (they come from
+/// [`str::char_indices`]). Returns empty when `start >= text.len()`.
+///
+/// This is the portal-tile analogue of the publisher-supplied zone breakpoints:
+/// the compositor derives them locally for the appended region since portal
+/// transcript content carries no wire-level breakpoints.
+pub(super) fn derive_word_breakpoints(text: &str, start: usize) -> Vec<usize> {
+    let mut bps = Vec::new();
+    if start >= text.len() {
+        return bps;
+    }
+    let mut in_word = false;
+    for (i, ch) in text[start..].char_indices() {
+        if ch.is_whitespace() {
+            if in_word {
+                bps.push(start + i);
+                in_word = false;
+            }
+        } else {
+            in_word = true;
+        }
+    }
+    let end = text.len();
+    if bps.last().copied() != Some(end) {
+        bps.push(end);
+    }
+    bps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::renderer::easing::Easing;
+    use crate::renderer::easing::StreamFadeRamp;
 
     const EPS: f32 = 1e-5;
 
@@ -533,5 +710,100 @@ mod tests {
         assert!((s.current_opacity() - 1.0).abs() < EPS);
         assert!((s.current_opacity_eased(Easing::EaseInOut) - 1.0).abs() < EPS);
         assert!(s.is_complete());
+    }
+
+    // ── PortalTileStreamReveal ──────────────────────────────────────────────
+
+    #[test]
+    fn common_prefix_len_basic_and_char_boundary() {
+        assert_eq!(common_prefix_len("hello world", "hello there"), 6); // "hello "
+        assert_eq!(common_prefix_len("abc", "abc"), 3);
+        assert_eq!(common_prefix_len("", "abc"), 0);
+        // Multi-byte: "é" is 2 bytes; a divergence mid-char must snap back.
+        // "café" vs "cafx": bytes diverge inside 'é' → prefix snaps to 3 ("caf").
+        assert_eq!(common_prefix_len("café", "cafx"), 3);
+    }
+
+    #[test]
+    fn derive_word_breakpoints_splits_on_whitespace_and_ends_at_len() {
+        let text = "alpha beta gamma";
+        let bps = derive_word_breakpoints(text, 0);
+        // Boundaries after "alpha" (5) and "beta" (10), final == len (16).
+        assert_eq!(bps, vec![5, 10, text.len()]);
+        assert_eq!(*bps.last().unwrap(), text.len());
+    }
+
+    #[test]
+    fn derive_word_breakpoints_only_covers_region_after_start() {
+        let text = "old new1 new2";
+        // Reveal only the appended region starting at byte 4 ("new1 new2").
+        let bps = derive_word_breakpoints(text, 4);
+        assert!(bps.iter().all(|&b| b > 4), "all breakpoints after start");
+        assert_eq!(*bps.last().unwrap(), text.len());
+        // Empty when nothing to reveal.
+        assert!(derive_word_breakpoints(text, text.len()).is_empty());
+    }
+
+    #[test]
+    fn portal_reveal_settled_is_not_revealing_and_fully_opaque() {
+        let r = PortalTileStreamReveal::settled("hello".into());
+        assert!(!r.is_revealing());
+        let ramp = StreamFadeRamp::default();
+        for pos in 0..5 {
+            assert!((r.alpha_for_byte(pos, ramp) - 1.0).abs() < EPS);
+        }
+    }
+
+    #[test]
+    fn portal_reveal_leading_segment_fades_others_snap() {
+        let text = "old new1 new2";
+        let plain: std::sync::Arc<str> = text.into();
+        let bps = derive_word_breakpoints(text, 4); // region "new1 new2"
+        let r = PortalTileStreamReveal::new(plain, 4, bps);
+        let ramp = StreamFadeRamp::new(Easing::Linear);
+
+        // Fresh reveal (frames_in_segment == 0): leading segment alpha == 0,
+        // pre-existing prefix == 1, not-yet-revealed segment == 0.
+        assert!(
+            (r.alpha_for_byte(0, ramp) - 1.0).abs() < EPS,
+            "prefix opaque"
+        );
+        assert!(r.alpha_for_byte(4, ramp).abs() < EPS, "leading starts at 0");
+        // A byte in the second (not-yet-revealed) segment is fully hidden.
+        let second = 9; // inside "new2"
+        assert!(r.alpha_for_byte(second, ramp).abs() < EPS, "tail hidden");
+    }
+
+    #[test]
+    fn portal_reveal_progress_increases_leading_alpha_then_completes() {
+        let text = "x ab cd"; // start at 0: words "x","ab","cd"
+        let plain: std::sync::Arc<str> = text.into();
+        let bps = derive_word_breakpoints(text, 0);
+        let mut r = PortalTileStreamReveal::new(plain, 0, bps);
+        let ramp = StreamFadeRamp::new(Easing::Linear);
+
+        let a0 = r.alpha_for_byte(0, ramp);
+        // Advance a few frames within the first segment → leading alpha rises.
+        r.advance();
+        r.advance();
+        let a1 = r.alpha_for_byte(0, ramp);
+        assert!(
+            a1 > a0,
+            "leading-segment alpha must rise with progress: {a1} > {a0}"
+        );
+
+        // Drive to completion; every byte then renders fully opaque (steady).
+        let mut guard = 0;
+        while r.is_revealing() {
+            r.advance();
+            guard += 1;
+            assert!(guard < 10_000, "reveal never completed");
+        }
+        for pos in 0..text.len() {
+            assert!(
+                (r.alpha_for_byte(pos, ramp) - 1.0).abs() < EPS,
+                "settled reveal must be fully opaque at byte {pos}"
+            );
+        }
     }
 }
