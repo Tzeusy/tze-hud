@@ -137,6 +137,11 @@ pub const PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR: &str = "portal.lifecycle.atten
 /// pending, or expired (`Detached` / `CleanupPending` / `Expired`). Muted slate:
 /// reads as "inactive" without vanishing.
 pub const PORTAL_TOKEN_LIFECYCLE_INACTIVE_COLOR: &str = "portal.lifecycle.inactive_color";
+/// Width (px) of the lifecycle affordance accent bar painted along the portal
+/// tile's left edge. Geometry only — the accent *color* is token-resolved via the
+/// four `portal.lifecycle.*_color` keys above; this token sizes the bar so the
+/// adapter/compositor never hardcodes a literal width either (hud-m48i0).
+pub const PORTAL_TOKEN_LIFECYCLE_ACCENT_WIDTH_PX: &str = "portal.lifecycle.accent_width_px";
 
 pub const PORTAL_TOKEN_DIVIDER_COLOR: &str = "portal.divider.color";
 
@@ -215,6 +220,9 @@ mod defaults {
     pub const LIFECYCLE_ATTACHED_COLOR: &str = "#5A8FC0";
     pub const LIFECYCLE_ATTENTION_COLOR: &str = "#C28A3D";
     pub const LIFECYCLE_INACTIVE_COLOR: &str = "#5A6373";
+    /// Left-edge accent bar width (px). Slim enough to read as a margin marker
+    /// (like an editor's gutter indicator) without crowding the transcript text.
+    pub const LIFECYCLE_ACCENT_WIDTH_PX: &str = "4";
 
     pub const DIVIDER_COLOR: &str = "#2A3344";
 
@@ -300,6 +308,10 @@ pub struct PortalPartTokens {
     pub lifecycle_attention_color: Rgba,
     /// Accent for winding-down states (`Detached` / `CleanupPending` / `Expired`).
     pub lifecycle_inactive_color: Rgba,
+    /// Width (px) of the left-edge lifecycle accent bar. Geometry only — the bar
+    /// *color* comes from the four accents above; this keeps the adapter and
+    /// compositor free of any literal accent dimension (hud-m48i0).
+    pub lifecycle_accent_width_px: f32,
 
     // Divider
     pub divider_color: Rgba,
@@ -378,6 +390,8 @@ impl Default for PortalPartTokens {
                 .expect("lifecycle attention color default is valid hex"),
             lifecycle_inactive_color: parse_color_hex(defaults::LIFECYCLE_INACTIVE_COLOR)
                 .expect("lifecycle inactive color default is valid hex"),
+            lifecycle_accent_width_px: parse_numeric(defaults::LIFECYCLE_ACCENT_WIDTH_PX)
+                .expect("lifecycle accent width default is valid numeric"),
 
             divider_color: parse_color_hex(defaults::DIVIDER_COLOR)
                 .expect("divider color default is valid hex"),
@@ -577,6 +591,10 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
         lifecycle_inactive_color: resolve_color!(
             PORTAL_TOKEN_LIFECYCLE_INACTIVE_COLOR,
             defaults.lifecycle_inactive_color
+        ),
+        lifecycle_accent_width_px: resolve_f32!(
+            PORTAL_TOKEN_LIFECYCLE_ACCENT_WIDTH_PX,
+            defaults.lifecycle_accent_width_px
         ),
 
         divider_color: resolve_color!(PORTAL_TOKEN_DIVIDER_COLOR, defaults.divider_color),
@@ -1054,6 +1072,31 @@ mod tests {
         assert!(
             tokens.scroll_indicator_color.b.abs() < 1e-2,
             "scroll indicator color blue channel must be 0"
+        );
+    }
+
+    /// The lifecycle accent-bar width resolves to a positive default and a
+    /// profile-scoped override propagates — the bar geometry is token-driven so
+    /// neither the adapter nor the compositor hardcodes the accent dimension
+    /// (hud-m48i0).
+    #[test]
+    fn lifecycle_accent_width_default_and_override() {
+        let defaults = resolve_portal_tokens(&empty_map());
+        assert!(
+            defaults.lifecycle_accent_width_px > 0.0,
+            "lifecycle accent bar must have a positive default width so it is visible"
+        );
+
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_LIFECYCLE_ACCENT_WIDTH_PX.to_string(),
+            "9".to_string(),
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+        assert!(
+            (tokens.lifecycle_accent_width_px - 9.0).abs() < 1e-4,
+            "lifecycle accent width override must propagate"
         );
     }
 

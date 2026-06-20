@@ -140,6 +140,10 @@ pub struct PortalVisualTokens {
     pub lifecycle_attention_color: proto::Rgba,
     /// Accent for winding-down states (`Detached` / `CleanupPending` / `Expired`).
     pub lifecycle_inactive_color: proto::Rgba,
+    /// Width (px) of the left-edge lifecycle accent bar. Geometry only; sizes the
+    /// `SetTileLifecycleAccent` overlay state the compositor paints from, so the
+    /// adapter holds no literal accent dimension. Token: `portal.lifecycle.accent_width_px`.
+    pub lifecycle_accent_width_px: f32,
 
     // Collapsed card (collapsed presentation)
     pub collapsed_background: proto::Rgba,
@@ -741,6 +745,37 @@ impl ResidentGrpcPortalAdapter {
             },
         ];
 
+        // Lifecycle affordance accent (hud-m48i0): a coalescible StateStream
+        // tile-update carrying the token-resolved accent color + width. The
+        // runtime stores it as per-tile overlay state and the compositor paints a
+        // left-edge bar from it. This is deliberately NOT an AddNode: a
+        // per-republish AddNode classifies the whole batch Transactional and flips
+        // non-interactive lifecycle-visible portals off the coalescible path
+        // (hud-mzk74). Stored as overlay state, the accent also survives the
+        // PublishToTile content republish above (which replaces the node tree).
+        //
+        // Redaction-gated: when lifecycle_state is None (authority redacted),
+        // color is None / width 0 → the mutation CLEARS the accent, exactly like
+        // the redaction-gated `status:` line. Emitted every render so the latest
+        // lifecycle color coalesces; the markdown node keeps only its zero-length
+        // lifecycle sentinel run, so the cached markdown path is untouched (#947).
+        let (accent_color, accent_width) = match state.lifecycle_state {
+            Some(lifecycle) => (
+                Some(lifecycle_accent_color(lifecycle, &self.visual_tokens)),
+                self.visual_tokens.lifecycle_accent_width_px,
+            ),
+            None => (None, 0.0),
+        };
+        mutations.push(proto::MutationProto {
+            mutation: Some(proto::mutation_proto::Mutation::SetTileLifecycleAccent(
+                proto::SetTileLifecycleAccentMutation {
+                    tile_id: tile_id.clone(),
+                    color: accent_color,
+                    width_px: accent_width,
+                },
+            )),
+        });
+
         // When interaction is enabled, publish a composer hit region as a child
         // of the portal root so the runtime's ComposerDraftManager can activate.
         // Without this AddNodeMutation, accepts_composer_input is never true in
@@ -1317,6 +1352,7 @@ pub fn portal_visual_tokens_from_part_tokens(
             b: part.lifecycle_inactive_color.b,
             a: part.lifecycle_inactive_color.a,
         },
+        lifecycle_accent_width_px: part.lifecycle_accent_width_px,
         collapsed_background: proto::Rgba {
             r: part.collapsed_background.r,
             g: part.collapsed_background.g,
@@ -1393,6 +1429,159 @@ mod tests {
         }
     }
 
+    // ── Lifecycle affordance accent (hud-m48i0) ──────────────────────────────
+
+    /// hud-m48i0 acceptance #1/#2/#3/#4/#5: a **non-interactive**
+    /// lifecycle-visible portal paints its accent via the coalescible StateStream
+    /// `SetTileLifecycleAccent` tile-update — NOT a per-republish `AddNode`:
+    ///
+    /// 1. each lifecycle group emits its distinct token-resolved accent color and
+    ///    the token-resolved width (no literal visual constants);
+    /// 2. the batch contains NO `AddNode` mutation (so `classify_inbound_batch`
+    ///    keeps it StateStream — the hud-mzk74 regression cannot return);
+    /// 3. the markdown node carries only zero-length sentinel `color_runs` (no
+    ///    pixel-bearing runs), so the cached/styled markdown path is preserved
+    ///    (#947 must not regress);
+    /// 4. a redacted viewer (`lifecycle_state = None`) emits a *clearing* accent
+    ///    mutation (color None / width 0) and still no `AddNode`.
+    #[test]
+    fn lifecycle_accent_rides_state_stream_tile_update_not_add_node() {
+        fn accent_of(
+            batch: &session_proto::MutationBatch,
+        ) -> Option<proto::SetTileLifecycleAccentMutation> {
+            batch.mutations.iter().find_map(|m| match &m.mutation {
+                Some(proto::mutation_proto::Mutation::SetTileLifecycleAccent(a)) => Some(a.clone()),
+                _ => None,
+            })
+        }
+        fn has_add_node(batch: &session_proto::MutationBatch) -> bool {
+            batch.mutations.iter().any(|m| {
+                matches!(
+                    &m.mutation,
+                    Some(proto::mutation_proto::Mutation::AddNode(_))
+                )
+            })
+        }
+        fn markdown_of(batch: &session_proto::MutationBatch) -> proto::TextMarkdownNodeProto {
+            for m in &batch.mutations {
+                if let Some(proto::mutation_proto::Mutation::PublishToTile(p)) = &m.mutation {
+                    if let Some(proto::node_proto::Data::TextMarkdown(tm)) =
+                        p.node.as_ref().and_then(|n| n.data.as_ref())
+                    {
+                        return tm.clone();
+                    }
+                }
+            }
+            panic!("batch must publish a markdown portal node");
+        }
+
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![0u8; 16]);
+        let tokens = adapter.visual_tokens().clone();
+
+        let cases = [
+            (
+                ProjectionLifecycleState::Active,
+                tokens.lifecycle_active_color,
+            ),
+            (
+                ProjectionLifecycleState::Attached,
+                tokens.lifecycle_attached_color,
+            ),
+            (
+                ProjectionLifecycleState::Degraded,
+                tokens.lifecycle_attention_color,
+            ),
+            (
+                ProjectionLifecycleState::HudUnavailable,
+                tokens.lifecycle_attention_color,
+            ),
+            (
+                ProjectionLifecycleState::Detached,
+                tokens.lifecycle_inactive_color,
+            ),
+            (
+                ProjectionLifecycleState::CleanupPending,
+                tokens.lifecycle_inactive_color,
+            ),
+            (
+                ProjectionLifecycleState::Expired,
+                tokens.lifecycle_inactive_color,
+            ),
+        ];
+        for (lifecycle, expected) in cases {
+            // Non-interactive: this is the portal class hud-mzk74 protected — it
+            // must NOT be flipped Transactional by the accent.
+            let mut state = make_expanded_interaction_state("portal-accent");
+            state.interaction_enabled = false;
+            state.lifecycle_state = Some(lifecycle);
+            let batch = adapter
+                .render_batch(&state)
+                .expect("render_batch must succeed");
+
+            assert!(
+                !has_add_node(&batch),
+                "lifecycle {lifecycle:?}: non-interactive portal must emit NO AddNode \
+                 (would flip the batch Transactional — hud-mzk74)"
+            );
+
+            let accent = accent_of(&batch).unwrap_or_else(|| {
+                panic!("lifecycle {lifecycle:?} must emit a SetTileLifecycleAccent mutation")
+            });
+            assert_eq!(
+                accent
+                    .color
+                    .expect("permitted lifecycle must carry a color"),
+                expected,
+                "lifecycle {lifecycle:?} accent must use its token-resolved color"
+            );
+            assert!(
+                (accent.width_px - tokens.lifecycle_accent_width_px).abs() < 1e-4,
+                "accent width must come from the token (no literal dimension)"
+            );
+
+            // #947 guard: the markdown node carries only zero-length sentinels.
+            let tm = markdown_of(&batch);
+            assert!(
+                tm.color_runs.iter().all(|r| r.start_byte >= r.end_byte),
+                "markdown node must carry only zero-length sentinels (no pixel runs) \
+                 for lifecycle {lifecycle:?} — cached markdown path must be preserved"
+            );
+        }
+
+        // The four affordance groups paint mutually distinct accents.
+        let groups = [
+            tokens.lifecycle_active_color,
+            tokens.lifecycle_attached_color,
+            tokens.lifecycle_attention_color,
+            tokens.lifecycle_inactive_color,
+        ];
+        for i in 0..groups.len() {
+            for j in (i + 1)..groups.len() {
+                assert_ne!(
+                    groups[i], groups[j],
+                    "lifecycle accent groups {i} and {j} must be visually distinct"
+                );
+            }
+        }
+
+        // Redaction-gated: lifecycle_state = None emits a CLEARING accent (no
+        // color, zero width) and still no AddNode.
+        let mut redacted = make_expanded_interaction_state("portal-accent-redacted");
+        redacted.interaction_enabled = false;
+        redacted.lifecycle_state = None;
+        let batch = adapter
+            .render_batch(&redacted)
+            .expect("render_batch must succeed");
+        assert!(!has_add_node(&batch));
+        let accent = accent_of(&batch).expect("a clearing accent mutation is still emitted");
+        assert!(
+            accent.color.is_none() && accent.width_px <= 0.0,
+            "redacted lifecycle must clear the accent (no color / zero width)"
+        );
+    }
+
     // ── Composer hit region activation (hud-hxe91) ────────────────────────────
 
     /// render_batch must emit an AddNodeMutation with a HitRegionNodeProto
@@ -1412,16 +1601,17 @@ mod tests {
             .render_batch(&state)
             .expect("render_batch must succeed with interaction_enabled");
 
-        // Should be 3 mutations: PublishToTile, UpdateTileInputMode, AddNode.
+        // Should be 4 mutations: PublishToTile, UpdateTileInputMode,
+        // SetTileLifecycleAccent (always emitted, hud-m48i0), AddNode.
         assert_eq!(
             batch.mutations.len(),
-            3,
-            "interaction_enabled=true must produce PublishToTile + UpdateTileInputMode + AddNode \
-             (composer hit region)"
+            4,
+            "interaction_enabled=true must produce PublishToTile + UpdateTileInputMode + \
+             SetTileLifecycleAccent + AddNode (composer hit region)"
         );
 
-        // The third mutation must be AddNode with accepts_composer_input=true.
-        let add_node_mutation = &batch.mutations[2];
+        // The fourth mutation must be AddNode with accepts_composer_input=true.
+        let add_node_mutation = &batch.mutations[3];
         match &add_node_mutation.mutation {
             Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
                 assert_eq!(
@@ -1454,7 +1644,7 @@ mod tests {
                     other => panic!("AddNode node data must be HitRegion, got {other:?}"),
                 }
             }
-            other => panic!("Third mutation must be AddNode (composer hit region), got {other:?}"),
+            other => panic!("Fourth mutation must be AddNode (composer hit region), got {other:?}"),
         }
     }
 
@@ -1473,11 +1663,13 @@ mod tests {
             .render_batch(&state)
             .expect("render_batch must succeed");
 
-        // Should be 2 mutations only: PublishToTile + UpdateTileInputMode.
+        // Should be 3 mutations: PublishToTile + UpdateTileInputMode +
+        // SetTileLifecycleAccent (always emitted, hud-m48i0). No AddNode.
         assert_eq!(
             batch.mutations.len(),
-            2,
-            "interaction_enabled=false must produce exactly 2 mutations (no AddNode)"
+            3,
+            "interaction_enabled=false must produce exactly 3 mutations \
+             (PublishToTile + UpdateTileInputMode + SetTileLifecycleAccent, no AddNode)"
         );
     }
 
@@ -1506,7 +1698,8 @@ mod tests {
                 );
                 // The AddNodeMutation's parent_id must match the same UUID (different encoding).
                 // Both are 16 bytes; the relationship is verified by the runtime.
-                match &batch.mutations[2].mutation {
+                // Index 3: SetTileLifecycleAccent occupies index 2 (hud-m48i0).
+                match &batch.mutations[3].mutation {
                     Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
                         assert_eq!(an.parent_id.len(), 16, "parent_id must be 16 bytes");
                         // Verify they're NOT byte-equal (they encode the same UUID
@@ -1517,7 +1710,7 @@ mod tests {
                              for the same UUID — same UUID, different wire encodings"
                         );
                     }
-                    other => panic!("Third mutation must be AddNode, got {other:?}"),
+                    other => panic!("Fourth mutation must be AddNode, got {other:?}"),
                 }
             }
             other => panic!("First mutation must be PublishToTile, got {other:?}"),

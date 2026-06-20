@@ -252,6 +252,27 @@ impl Rgba {
     }
 }
 
+/// Runtime-owned lifecycle-affordance accent for a portal tile.
+///
+/// Painted by the compositor as a thin token-colored bar along the tile's left
+/// edge to signal the portal's lifecycle state (active / waiting-for-input /
+/// blocked / degraded / detached). Stored as overlay state keyed by tile id
+/// (see [`crate::graph::overlay`]) rather than as a scene node, so it survives
+/// `SetTileRoot`/`PublishToTile` content republishes and is updated via the
+/// coalescible StateStream `SetTileLifecycleAccent` mutation — never a
+/// per-republish `AddNode` (hud-m48i0 / hud-mzk74).
+///
+/// Color and width are token-resolved by the producer (the portal adapter
+/// reads `portal.lifecycle.*` design tokens); no literal visual value lives in
+/// the compositor.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LifecycleAccent {
+    /// Token-resolved accent color for the current lifecycle group.
+    pub color: Rgba,
+    /// Bar width in pixels (left edge, full tile height). Always > 0 when stored.
+    pub width_px: f32,
+}
+
 // ─── Enums ──────────────────────────────────────────────────────────────────
 
 /// How image content is fitted within the node's bounds.

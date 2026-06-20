@@ -397,6 +397,39 @@ fn convert_proto_mutations(
                     }
                 }
             }
+            Some(crate::proto::mutation_proto::Mutation::SetTileLifecycleAccent(sla)) => {
+                match bytes_to_scene_id(&sla.tile_id) {
+                    Ok(tile_id) => {
+                        // Absent/zero-alpha color or non-positive width = clear.
+                        let accent = sla.color.as_ref().and_then(|c| {
+                            if sla.width_px > 0.0 && c.a > 0.0 {
+                                Some(LifecycleAccent {
+                                    color: convert::proto_rgba_to_scene(c),
+                                    width_px: sla.width_px,
+                                })
+                            } else {
+                                None
+                            }
+                        });
+                        scene_mutations
+                            .push(SceneMutation::SetTileLifecycleAccent { tile_id, accent });
+                        // No `pending_touch_ids` entry: the accent is runtime
+                        // overlay state, not a published element, so it must not
+                        // bump the tile's element-store `last_published_at`. The
+                        // #943 present-gate redraw is armed by the version bump in
+                        // `set/clear_tile_lifecycle_accent` (overlay.rs), which
+                        // fires for any accent transition independent of whether a
+                        // content mutation co-travels.
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = sla.tile_id.len(),
+                            "SetTileLifecycleAccent{log_suffix}: invalid tile_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
             None => {}
         }
     }

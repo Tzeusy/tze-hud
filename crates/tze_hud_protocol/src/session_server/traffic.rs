@@ -139,6 +139,12 @@ pub(super) fn classify_inbound_batch(batch: &MutationBatch) -> TrafficClass {
                     return TrafficClass::Transactional;
                 }
                 Mutation::SetScrollOffset(_) => {}
+                // Lifecycle accent is a content/state update — StateStream. It
+                // reflects the portal's lifecycle and coalesces under pressure;
+                // it must NOT mark the batch Transactional (hud-m48i0 / hud-mzk74),
+                // which is what flipped lifecycle-visible portals off the
+                // coalescible path when the accent was a per-republish AddNode.
+                Mutation::SetTileLifecycleAccent(_) => {}
             }
         }
     }
@@ -147,5 +153,78 @@ pub(super) fn classify_inbound_batch(batch: &MutationBatch) -> TrafficClass {
         TrafficClass::Ephemeral
     } else {
         TrafficClass::StateStream
+    }
+}
+
+#[cfg(test)]
+mod inbound_tests {
+    use super::*;
+    use crate::proto::mutation_proto::Mutation;
+    use crate::proto::{MutationProto, SetTileLifecycleAccentMutation};
+
+    fn batch(mutations: Vec<Mutation>) -> MutationBatch {
+        MutationBatch {
+            batch_id: vec![0u8; 16],
+            lease_id: vec![0u8; 16],
+            mutations: mutations
+                .into_iter()
+                .map(|m| MutationProto { mutation: Some(m) })
+                .collect(),
+            timing: None,
+        }
+    }
+
+    /// hud-m48i0 acceptance #2: a lifecycle-accent update riding an otherwise
+    /// StateStream portal republish (PublishToTile + UpdateTileInputMode) must
+    /// stay StateStream — the accent mutation must NOT mark the batch
+    /// Transactional. This is the regression guard for hud-mzk74: the rejected
+    /// per-republish `AddNode` accent flipped non-interactive lifecycle-visible
+    /// portals off the coalescible path.
+    #[test]
+    fn lifecycle_accent_update_stays_state_stream() {
+        let b = batch(vec![
+            Mutation::PublishToTile(Default::default()),
+            Mutation::UpdateTileInputMode(Default::default()),
+            Mutation::SetTileLifecycleAccent(SetTileLifecycleAccentMutation {
+                tile_id: vec![0u8; 16],
+                color: None,
+                width_px: 4.0,
+            }),
+        ]);
+        assert_eq!(
+            classify_inbound_batch(&b),
+            TrafficClass::StateStream,
+            "non-interactive lifecycle-visible portal republish must remain coalescible StateStream"
+        );
+    }
+
+    /// A lifecycle-accent mutation on its own is a pure content update →
+    /// StateStream (coalescible), never Transactional.
+    #[test]
+    fn lifecycle_accent_alone_is_state_stream() {
+        let b = batch(vec![Mutation::SetTileLifecycleAccent(
+            SetTileLifecycleAccentMutation {
+                tile_id: vec![0u8; 16],
+                color: None,
+                width_px: 0.0,
+            },
+        )]);
+        assert_eq!(classify_inbound_batch(&b), TrafficClass::StateStream);
+    }
+
+    /// Sanity: a genuine structural `AddNode` still dominates the batch as
+    /// Transactional even when a lifecycle accent rides alongside — the accent
+    /// classification does not weaken structural-mutation guarantees.
+    #[test]
+    fn add_node_still_dominates_as_transactional() {
+        let b = batch(vec![
+            Mutation::SetTileLifecycleAccent(SetTileLifecycleAccentMutation {
+                tile_id: vec![0u8; 16],
+                color: None,
+                width_px: 4.0,
+            }),
+            Mutation::AddNode(Default::default()),
+        ]);
+        assert_eq!(classify_inbound_batch(&b), TrafficClass::Transactional);
     }
 }

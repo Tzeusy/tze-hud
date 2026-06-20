@@ -125,6 +125,37 @@ impl Compositor {
                 );
             }
 
+            // ── Lifecycle affordance accent (hud-m48i0) ────────────────────
+            // A token-colored bar along the tile's left edge signalling the
+            // portal's lifecycle state. Painted from runtime overlay state
+            // (`tile_lifecycle_accents`) — set via the coalescible StateStream
+            // `SetTileLifecycleAccent` mutation — so it survives the transcript's
+            // `PublishToTile` content republishes and never rides a per-republish
+            // `AddNode`. Geometry-only; carries no transcript content (redaction
+            // is enforced at the producer: a redacted viewer gets no accent). The
+            // color is token-resolved upstream — no literal visual value here.
+            if let Some(accent) = scene.tile_lifecycle_accent(tile.id) {
+                // Fold the tile's effective + portal-transition opacity so the
+                // accent fades with the tile (matches the tile background).
+                let opacity = (Self::effective_tile_opacity(tile, scene)
+                    * self.portal_tile_anim_opacity(tile.id))
+                .clamp(0.0, 1.0);
+                if let Some((bar_w, color)) =
+                    Self::lifecycle_accent_bar_geom(tile.bounds, accent, opacity)
+                {
+                    let accent_verts = rect_vertices(
+                        tile.bounds.x,
+                        tile.bounds.y,
+                        bar_w,
+                        tile.bounds.height,
+                        sw,
+                        sh,
+                        self.gpu_color_raw(color),
+                    );
+                    vertices.extend_from_slice(&accent_verts);
+                }
+            }
+
             // ── Scroll indicator (§6b.5) ───────────────────────────────────
             // Rendered on top of the tile content. Geometry-only; carries no
             // transcript text. Redaction-safe: the indicator reveals only that

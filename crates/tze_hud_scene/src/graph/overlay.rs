@@ -109,6 +109,22 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub tile_follow_tail_at_tail: HashMap<SceneId, bool>,
+    /// Runtime-owned lifecycle-affordance accents per tile.
+    ///
+    /// Set by the [`SceneMutation::SetTileLifecycleAccent`] apply path (driven by
+    /// the coalescible StateStream `SetTileLifecycleAccent` wire mutation) and
+    /// read by the compositor, which paints a token-colored left-edge bar.
+    ///
+    /// Lives here, keyed by tile id, rather than as a scene node so it survives
+    /// `SetTileRoot`/`PublishToTile` content republishes (which replace the whole
+    /// node tree). This is what keeps lifecycle-visible portals coalescible —
+    /// the accent is never re-added as a per-republish `AddNode` (hud-m48i0).
+    ///
+    /// [`SceneMutation::SetTileLifecycleAccent`]: crate::mutation::SceneMutation::SetTileLifecycleAccent
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_lifecycle_accents: HashMap<SceneId, LifecycleAccent>,
     /// Tile IDs removed since the last runtime drain.
     ///
     /// Populated by [`SceneGraph::remove_tile_and_nodes`] on every tile
@@ -183,6 +199,50 @@ impl SceneGraph {
     /// Get the registered local-first scroll config for a tile.
     pub fn tile_scroll_config(&self, tile_id: SceneId) -> Option<TileScrollConfig> {
         self.overlay.tile_scroll_configs.get(&tile_id).copied()
+    }
+
+    /// Set the lifecycle-affordance accent for a tile (latest-wins; coalescible).
+    ///
+    /// Bumps `scene.version` only when the stored accent actually changes, so an
+    /// accent-only transition re-arms the #943 idle present-gate (which repaints
+    /// on `scene.version != last_rendered`) and the new color paints even when no
+    /// content mutation co-travels in the batch. A redundant re-publish of the
+    /// same accent leaves the version untouched, keeping a steady-state portal
+    /// idle.
+    pub fn set_tile_lifecycle_accent(
+        &mut self,
+        tile_id: SceneId,
+        accent: LifecycleAccent,
+    ) -> Result<(), ValidationError> {
+        if !self.tiles.contains_key(&tile_id) {
+            return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+        if self.overlay.tile_lifecycle_accents.get(&tile_id) != Some(&accent) {
+            self.overlay.tile_lifecycle_accents.insert(tile_id, accent);
+            self.version += 1;
+        }
+        Ok(())
+    }
+
+    /// Clear the lifecycle-affordance accent for a tile (no-op if unset).
+    ///
+    /// Bumps `scene.version` only when an accent was actually present, so a
+    /// redaction-CLEAR transition re-arms the present-gate and the stale accent
+    /// is removed on screen; a clear with nothing stored stays idle.
+    pub fn clear_tile_lifecycle_accent(&mut self, tile_id: SceneId) {
+        if self
+            .overlay
+            .tile_lifecycle_accents
+            .remove(&tile_id)
+            .is_some()
+        {
+            self.version += 1;
+        }
+    }
+
+    /// Get the lifecycle-affordance accent for a tile, if any.
+    pub fn tile_lifecycle_accent(&self, tile_id: SceneId) -> Option<LifecycleAccent> {
+        self.overlay.tile_lifecycle_accents.get(&tile_id).copied()
     }
 
     /// Set the tile-local scroll offset used by runtime local feedback.
