@@ -704,6 +704,10 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
         monitor_index: opts.monitor_index,
         benchmark,
         bind_all_interfaces: opts.bind_all_interfaces,
+        // Default OFF (hud-x2e2v). The resident gRPC portal bridge is reachable
+        // via the legacy `TZE_HUD_RESIDENT_GRPC_PORTAL` env override; first-class
+        // CLI/TOML surfacing of the external-target settings is a follow-up.
+        resident_grpc_portal: None,
     };
 
     // Diagnostic: write resolved config to disk so we can verify args were parsed.
