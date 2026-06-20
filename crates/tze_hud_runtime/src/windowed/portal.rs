@@ -1126,6 +1126,7 @@ mod tests {
             portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
             portal_op_rx: None,
             pending_keyboard_events: VecDeque::new(),
+            resident_grpc_bridge: None,
         };
 
         drop(input_capture_tx);

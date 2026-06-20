@@ -104,6 +104,7 @@ pub mod portal_projection_driver;
 pub mod portal_tokens;
 pub mod quiet_hours;
 pub mod reload_triggers;
+pub mod resident_grpc_bridge;
 pub mod runtime_context;
 pub mod session;
 pub mod shell;
