@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use tze_hud_mcp::{CallerContext, McpConfig, McpServer};
+use tze_hud_mcp::{McpConfig, McpServer};
 use tze_hud_scene::graph::SceneGraph;
 
 use crate::threads::ShutdownToken;
@@ -54,6 +54,23 @@ pub struct McpServerConfig {
     /// in production.  To reject all calls unconditionally, do not start the
     /// MCP server (set `mcp_port = 0` in `WindowedConfig`).
     pub psk: String,
+
+    /// Optional **resident principal** PSK (config-gated grant, hud-nu65o).
+    ///
+    /// When `Some(non-empty)`, a caller whose bearer token matches this value
+    /// (constant-time) is minted with the `resident_mcp` capability, so
+    /// resident tools (notably `portal_projection_*`) are reachable without a
+    /// separate session handshake.  When `None`, behaviour is unchanged: every
+    /// caller is a guest and resident tools return `CAPABILITY_REQUIRED`.
+    ///
+    /// PSK authentication stays mandatory in every path — this only attaches
+    /// capability to an already-authenticated, config-listed principal.  In the
+    /// single-PSK model an operator opts a principal in by setting this to the
+    /// **same secret** as [`Self::psk`].
+    ///
+    /// Surfaced operationally via the `TZE_HUD_MCP_RESIDENT_PRINCIPAL`
+    /// environment variable (see `windowed`).
+    pub resident_principal: Option<String>,
 }
 
 /// Start the MCP HTTP server task on the calling Tokio runtime.
@@ -90,8 +107,9 @@ pub async fn start_mcp_http_server(
         "MCP HTTP listener bound"
     );
 
-    let mut server_builder =
-        McpServer::with_shared_scene(scene).with_config(McpConfig::with_psk(&config.psk));
+    let mut server_builder = McpServer::with_shared_scene(scene).with_config(
+        McpConfig::with_psk(&config.psk).with_resident_principal(config.resident_principal.clone()),
+    );
     if let Some(tx) = paste_inject_tx {
         server_builder = server_builder.with_paste_inject_tx(tx);
     }
@@ -252,11 +270,10 @@ async fn handle_connection(
 
     let body = std::str::from_utf8(&buf[body_start..buf.len().min(body_end)]).unwrap_or("");
 
-    let ctx = if let Some(token) = bearer_token {
-        CallerContext::with_bearer(token)
-    } else {
-        CallerContext::guest()
-    };
+    // Apply the config-gated resident-principal grant (hud-nu65o).  This is the
+    // only place the production HTTP transport decides capabilities; the actual
+    // PSK check still happens independently inside `dispatch`.
+    let ctx = server.caller_context(bearer_token);
 
     let response_body = server.dispatch(body, &ctx).await;
 
@@ -288,6 +305,7 @@ mod tests {
         McpServerConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
             psk: psk.to_string(),
+            resident_principal: None,
         }
     }
 
@@ -345,6 +363,7 @@ mod tests {
         let config = McpServerConfig {
             bind_addr: addr,
             psk: "test-key".to_string(),
+            resident_principal: None,
         };
         let shutdown = ShutdownToken::new();
 
@@ -384,6 +403,7 @@ mod tests {
         let config = McpServerConfig {
             bind_addr: addr,
             psk: "real-key".to_string(),
+            resident_principal: None,
         };
         let shutdown = ShutdownToken::new();
 
@@ -418,6 +438,7 @@ mod tests {
         let config = McpServerConfig {
             bind_addr: addr,
             psk: "correct-key".to_string(),
+            resident_principal: None,
         };
         let shutdown = ShutdownToken::new();
 
@@ -485,6 +506,7 @@ mod tests {
         let config = McpServerConfig {
             bind_addr: addr,
             psk: "test-key".to_string(),
+            resident_principal: None,
         };
         let shutdown = ShutdownToken::new();
 
@@ -520,6 +542,7 @@ mod tests {
         let config = McpServerConfig {
             bind_addr: addr,
             psk: "key".to_string(),
+            resident_principal: None,
         };
         let shutdown = ShutdownToken::new();
 
@@ -536,5 +559,112 @@ mod tests {
             result.is_ok(),
             "MCP server task did not exit within 2s after shutdown"
         );
+    }
+
+    // ── Config-gated resident principal over the production HTTP path (hud-nu65o)
+
+    /// Bind a server on a free loopback port and return its address.
+    fn free_loopback_addr() -> SocketAddr {
+        use std::net::TcpListener as StdListener;
+        let std_listener = StdListener::bind("127.0.0.1:0").unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        drop(std_listener);
+        addr
+    }
+
+    #[tokio::test]
+    async fn mcp_http_resident_principal_reaches_resident_tool() {
+        // PSK == resident principal: an authenticated caller is minted with
+        // resident_mcp and can call a resident tool (create_tab) with no
+        // CAPABILITY_REQUIRED — the live failure mode from hud-kylt0.
+        let addr = free_loopback_addr();
+        let scene = make_scene();
+        let config = McpServerConfig {
+            bind_addr: addr,
+            psk: "resident-psk".to_string(),
+            resident_principal: Some("resident-psk".to_string()),
+        };
+        let shutdown = ShutdownToken::new();
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+            .await
+            .expect("bind");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let body =
+            r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"Resident"},"id":80}"#;
+        let resp = http_post(addr, body, Some("resident-psk")).await;
+
+        assert!(resp.contains("HTTP/1.1 200"));
+        assert!(
+            !resp.contains("CAPABILITY_REQUIRED"),
+            "resident principal must not get CAPABILITY_REQUIRED, got: {resp}"
+        );
+        assert!(
+            resp.contains("\"result\""),
+            "expected a successful result, got: {resp}"
+        );
+
+        shutdown.trigger(crate::threads::ShutdownReason::Clean);
+        handle.await.expect("task");
+    }
+
+    #[tokio::test]
+    async fn mcp_http_no_resident_principal_still_gates_resident_tool() {
+        // No resident principal configured → unchanged: an authenticated guest
+        // still gets CAPABILITY_REQUIRED on a resident tool.
+        let addr = free_loopback_addr();
+        let scene = make_scene();
+        let config = McpServerConfig {
+            bind_addr: addr,
+            psk: "plain-psk".to_string(),
+            resident_principal: None,
+        };
+        let shutdown = ShutdownToken::new();
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+            .await
+            .expect("bind");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let body = r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"X"},"id":81}"#;
+        let resp = http_post(addr, body, Some("plain-psk")).await;
+
+        assert!(resp.contains("HTTP/1.1 200"));
+        assert!(
+            resp.contains("CAPABILITY_REQUIRED"),
+            "default config must still gate resident tools, got: {resp}"
+        );
+
+        shutdown.trigger(crate::threads::ShutdownReason::Clean);
+        handle.await.expect("task");
+    }
+
+    #[tokio::test]
+    async fn mcp_http_resident_principal_does_not_weaken_psk_auth() {
+        // PSK stays mandatory even when a resident principal is configured: a
+        // wrong bearer token is rejected before any tool runs.
+        let addr = free_loopback_addr();
+        let scene = make_scene();
+        let config = McpServerConfig {
+            bind_addr: addr,
+            psk: "resident-psk".to_string(),
+            resident_principal: Some("resident-psk".to_string()),
+        };
+        let shutdown = ShutdownToken::new();
+        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+            .await
+            .expect("bind");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let body = r#"{"jsonrpc":"2.0","method":"list_zones","params":{},"id":82}"#;
+        let resp = http_post(addr, body, Some("wrong-key")).await;
+
+        assert!(resp.contains("HTTP/1.1 200"));
+        assert!(
+            resp.contains("\"error\""),
+            "wrong PSK must still be rejected, got: {resp}"
+        );
+
+        shutdown.trigger(crate::threads::ShutdownReason::Clean);
+        handle.await.expect("task");
     }
 }

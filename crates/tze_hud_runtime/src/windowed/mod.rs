@@ -1728,11 +1728,27 @@ impl WindowedRuntime {
                     mcp_bind_host,
                     "MCP HTTP: bind address selected (hud-1aswu.1)"
                 );
+                // Config-gated resident principal (hud-nu65o): when set to a
+                // non-empty secret, a PSK-authenticated caller presenting this
+                // value is minted with `resident_mcp` so external LLMs can reach
+                // `portal_projection_*` without a separate session handshake.
+                // PSK auth stays mandatory; this only attaches capability.  In
+                // the single-PSK model, set this to the same value as the PSK.
+                let resident_principal = std::env::var("TZE_HUD_MCP_RESIDENT_PRINCIPAL")
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty());
+                if resident_principal.is_some() {
+                    tracing::info!(
+                        "MCP: resident principal configured (PSK-gated resident_mcp grant enabled) (hud-nu65o)"
+                    );
+                }
                 let mcp_config = McpServerConfig {
                     bind_addr: format!("{mcp_bind_host}:{}", cfg.mcp_port)
                         .parse()
                         .expect("valid MCP bind addr"),
                     psk: cfg.psk.clone(),
+                    resident_principal,
                 };
                 let mcp_shutdown = shutdown.clone();
                 match rt.rt.block_on(start_mcp_http_server(
