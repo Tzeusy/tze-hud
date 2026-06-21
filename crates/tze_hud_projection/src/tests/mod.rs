@@ -990,8 +990,13 @@ fn accepted_portal_input_echoes_viewer_unit_into_transcript() {
         .take_due_portal_update("projection-a", 31)
         .expect("projection exists")
         .expect("portal update must be drainable after viewer submit");
-    // The viewer echo appears as a transcript unit, so unread_output_count == 1.
-    assert_eq!(update.unread_output_count, 1);
+    // The viewer echo is the viewer's own already-seen text: it appears in the
+    // transcript WITHOUT raising unread (text-stream-portals "Viewer Reply Echo" —
+    // SHALL NOT increment the unread-output count or escalate attention).
+    assert_eq!(
+        update.unread_output_count, 0,
+        "viewer echo must not raise unread (Viewer Reply Echo / ambient-attention doctrine)"
+    );
     assert_eq!(
         update.visible_transcript.len(),
         1,

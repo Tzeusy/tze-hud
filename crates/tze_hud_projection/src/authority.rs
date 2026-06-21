@@ -1855,7 +1855,11 @@ fn append_transcript_unit(
                     max_visible_transcript_bytes,
                 );
                 promote_to_active_if_recovering(session);
-                session.unread_output_count += 1;
+                // Viewer echoes are the viewer's own already-seen text, so they do
+                // not raise unread/attention (text-stream-portals "Viewer Reply Echo").
+                if request.output_kind != OutputKind::Viewer {
+                    session.unread_output_count += 1;
+                }
                 // Bump next_transcript_sequence so the coalescer receives a
                 // strictly-increasing sequence that clears the post-drain
                 // stale-sequence guard (defect fix: hud-endkj).
@@ -1883,7 +1887,11 @@ fn append_transcript_unit(
         max_visible_transcript_bytes,
     );
     promote_to_active_if_recovering(session);
-    session.unread_output_count += 1;
+    // Viewer echoes are the viewer's own already-seen text, so they do not raise
+    // unread/attention (text-stream-portals "Viewer Reply Echo").
+    if request.output_kind != OutputKind::Viewer {
+        session.unread_output_count += 1;
+    }
     session.next_transcript_sequence - 1
 }
 
