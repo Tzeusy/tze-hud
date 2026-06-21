@@ -59,10 +59,9 @@ use tze_hud_projection::{
     AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
     CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
     HudConnectionMetadata, InputAckState, OperationEnvelope, OutputKind, PendingInputItem,
-    PortalInputFeedback,
-    ProjectedPortalPolicy, ProjectedPortalState, ProjectionAuthority, ProjectionBounds,
-    ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation, ProviderKind,
-    PublishOutputRequest, PublishStatusRequest,
+    PortalInputFeedback, ProjectedPortalPolicy, ProjectedPortalState, ProjectionAuthority,
+    ProjectionBounds, ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation,
+    ProviderKind, PublishOutputRequest, PublishStatusRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -609,7 +608,10 @@ impl InProcessPortalDriver {
             connected_at_wall_us: now,
             last_reconnect_wall_us: now,
         };
-        match self.authority.record_hud_connection(projection_id, metadata) {
+        match self
+            .authority
+            .record_hud_connection(projection_id, metadata)
+        {
             Ok(()) => {
                 entry.hud_disconnected = false;
                 tracing::info!(
