@@ -4421,7 +4421,13 @@ mod tests {
         let projection_id = "proj-grace";
         let token = attach_and_get_token(&mut driver, projection_id);
         driver.attach_projection(projection_id, Vec::new());
-        publish(&mut driver, projection_id, &token, "committed before drop", 100);
+        publish(
+            &mut driver,
+            projection_id,
+            &token,
+            "committed before drop",
+            100,
+        );
 
         // Scene backed by a TestClock so grace expiry is deterministic. The scene
         // clock (ms) is independent of the drain rate-window clock (`now_us`).
