@@ -28,6 +28,7 @@
 
 pub mod error;
 pub mod portal_op;
+pub mod schema;
 pub mod server;
 pub mod tools;
 pub mod types;

@@ -451,6 +451,27 @@ impl McpServer {
             return serde_json::to_string(&resp).unwrap_or_default();
         }
 
+        // ── MCP lifecycle + introspection methods ────────────────────────────
+        //
+        // `initialize` (handshake) and `tools/list` (schema discovery) are MCP
+        // protocol methods, not scene tools. They require valid PSK auth (above)
+        // but carry no per-tool capability, so any authenticated caller can
+        // negotiate the protocol and introspect the tool surface. Handle them
+        // before the capability gate and tool router: their `name/` style method
+        // names are not registered tools and would otherwise fall through to
+        // MethodNotFound.
+        match request.method.as_str() {
+            "initialize" => {
+                let resp = McpResponse::ok(request.id.clone(), crate::schema::initialize_result());
+                return serde_json::to_string(&resp).unwrap_or_default();
+            }
+            "tools/list" => {
+                let resp = McpResponse::ok(request.id.clone(), crate::schema::tools_list_result());
+                return serde_json::to_string(&resp).unwrap_or_default();
+            }
+            _ => {}
+        }
+
         // ── Auto-grant widget capabilities to authenticated callers ──────────
         //
         // PSK-authenticated callers are trusted principals.  Grant
@@ -2180,5 +2201,155 @@ mod tests {
         let inst = &instances[0];
         assert_eq!(inst["instance_name"], "gauge");
         assert_eq!(inst["widget_type"], "gauge");
+    }
+
+    // ── initialize + tools/list introspection (hud-l9lf6) ────────────────────
+
+    #[tokio::test]
+    async fn test_initialize_returns_well_formed_result() {
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
+        let req = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test-client", "version": "0.0.0" }
+            },
+            "id": 1
+        });
+        let raw = server.dispatch(&req.to_string(), &resident()).await;
+        let resp = parse_response(&raw);
+
+        assert!(resp.get("error").is_none(), "unexpected error: {resp}");
+        let result = &resp["result"];
+        // Protocol version is a non-empty string.
+        assert!(
+            result["protocolVersion"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "missing protocolVersion: {result}"
+        );
+        // serverInfo carries name + version.
+        assert_eq!(result["serverInfo"]["name"], "tze_hud_mcp");
+        assert!(
+            result["serverInfo"]["version"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "missing serverInfo.version: {result}"
+        );
+        // capabilities is an object declaring tools.
+        assert!(
+            result["capabilities"].is_object(),
+            "capabilities not an object"
+        );
+        assert!(result["capabilities"]["tools"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_requires_auth() {
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
+        let req = json!({ "jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1 });
+        // Guest with no bearer token (unauthenticated) is rejected.
+        let raw = server
+            .dispatch(&req.to_string(), &CallerContext::guest())
+            .await;
+        let resp = parse_response(&raw);
+        assert!(resp.get("result").is_none(), "initialize must require auth");
+        assert!(resp.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_returns_all_tools_with_schemas() {
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
+        let req = json!({ "jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 7 });
+        let raw = server.dispatch(&req.to_string(), &resident()).await;
+        let resp = parse_response(&raw);
+
+        assert!(resp.get("error").is_none(), "unexpected error: {resp}");
+        let tools = resp["result"]["tools"]
+            .as_array()
+            .expect("tools must be an array");
+        assert!(!tools.is_empty(), "tools list must be non-empty");
+
+        // Index by name and validate every descriptor is well-formed.
+        let mut by_name = std::collections::HashMap::new();
+        for t in tools {
+            let name = t["name"].as_str().expect("tool must have a name");
+            assert!(
+                t["description"].as_str().is_some_and(|s| !s.is_empty()),
+                "tool {name} missing description"
+            );
+            let schema = &t["inputSchema"];
+            assert_eq!(
+                schema["type"], "object",
+                "tool {name} inputSchema not object"
+            );
+            assert!(
+                schema["properties"].is_object(),
+                "tool {name} inputSchema missing properties"
+            );
+            assert!(
+                schema["required"].is_array(),
+                "tool {name} inputSchema missing required array"
+            );
+            by_name.insert(name.to_string(), t.clone());
+        }
+
+        // AC(1): every portal_projection_* tool is present with a valid schema.
+        for name in [
+            "portal_projection_attach",
+            "portal_projection_publish",
+            "portal_projection_publish_status",
+            "portal_projection_get_pending_input",
+            "portal_projection_acknowledge_input",
+            "portal_projection_detach",
+            "portal_projection_cleanup",
+        ] {
+            assert!(by_name.contains_key(name), "missing portal tool: {name}");
+        }
+
+        // AC(3): get_pending_input schema reflects the actual poll-budget fields
+        // (the *Params struct exposes max_items / max_bytes, not wait_ms).
+        let gpi = &by_name["portal_projection_get_pending_input"]["inputSchema"];
+        assert!(
+            gpi["properties"]["max_items"].is_object(),
+            "get_pending_input schema missing max_items"
+        );
+        assert!(
+            gpi["properties"]["max_bytes"].is_object(),
+            "get_pending_input schema missing max_bytes"
+        );
+        let gpi_required: Vec<&str> = gpi["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(gpi_required.contains(&"projection_id"));
+        assert!(gpi_required.contains(&"owner_token"));
+
+        // AC(3): publish schema includes the output_kind field.
+        let pub_schema = &by_name["portal_projection_publish"]["inputSchema"];
+        assert!(
+            pub_schema["properties"]["output_kind"].is_object(),
+            "publish schema missing output_kind"
+        );
+
+        // attach schema reflects whatever fields exist in PortalProjectionAttachParams
+        // at HEAD: projection_id + display_name required, idempotency_key optional.
+        let attach = &by_name["portal_projection_attach"]["inputSchema"];
+        assert!(attach["properties"]["projection_id"].is_object());
+        assert!(attach["properties"]["display_name"].is_object());
+        assert!(attach["properties"]["idempotency_key"].is_object());
+        let attach_required: Vec<&str> = attach["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(attach_required.contains(&"projection_id"));
+        assert!(attach_required.contains(&"display_name"));
+        assert!(!attach_required.contains(&"idempotency_key"));
     }
 }
