@@ -2310,7 +2310,8 @@ mod tests {
         }
 
         // AC(3): get_pending_input schema reflects the actual poll-budget fields
-        // (the *Params struct exposes max_items / max_bytes, not wait_ms).
+        // (the *Params struct exposes max_items / max_bytes plus the long-poll
+        // wait_ms field added once PR #967 merged — hud-yqe79).
         let gpi = &by_name["portal_projection_get_pending_input"]["inputSchema"];
         assert!(
             gpi["properties"]["max_items"].is_object(),
@@ -2319,6 +2320,10 @@ mod tests {
         assert!(
             gpi["properties"]["max_bytes"].is_object(),
             "get_pending_input schema missing max_bytes"
+        );
+        assert!(
+            gpi["properties"]["wait_ms"].is_object(),
+            "get_pending_input schema missing wait_ms"
         );
         let gpi_required: Vec<&str> = gpi["required"]
             .as_array()

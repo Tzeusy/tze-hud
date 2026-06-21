@@ -294,6 +294,7 @@ fn tool_descriptors() -> Vec<Value> {
                 "owner_token": p("string", "Owner token returned by the successful attach."),
                 "max_items": p("integer", "Optional cap on items returned; clamped to the authority's max_poll_items."),
                 "max_bytes": p("integer", "Optional cap on response byte budget; clamped to the authority's max_poll_response_bytes."),
+                "wait_ms": p("integer", "Optional long-poll wait in milliseconds (clamped to 30000). When set, the call blocks until at least one input item is available or the wait elapses; omit (or 0) for return-immediately behavior."),
             }),
             &["projection_id", "owner_token"],
         ),
