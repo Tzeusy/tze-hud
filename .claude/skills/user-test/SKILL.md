@@ -43,11 +43,20 @@ zone, widget parameter types, and `widget_name` instance-discovery semantics
 (`list_widgets`), see
 [references/message-payloads.md](references/message-payloads.md).
 
+## Subskills
+
+- **portal-hud-deploy** ([subskills/portal-hud-deploy/SKILL.md](subskills/portal-hud-deploy/SKILL.md)) —
+  one deterministic command to deploy a freshly-built `tze_hud.exe`, kill the
+  stale instance, launch the **transparent overlay** HUD (exe-direct scheduled
+  task), and verify gRPC + MCP ports + reachability. Use this instead of the
+  generic `deploy_windows_hud.sh` when you need the overlay/portal launch with
+  port verification.
+
 ## Support File Index
 
 Use these files when the matching workflow section below calls for them:
 
-- Deployment and setup: [scripts/deploy_windows_hud.sh](scripts/deploy_windows_hud.sh), [scripts/windows_setup_hud_automation.ps1](scripts/windows_setup_hud_automation.ps1), [scripts/d18_validation.sh](scripts/d18_validation.sh)
+- Deployment and setup: [scripts/deploy_windows_hud.sh](scripts/deploy_windows_hud.sh), [scripts/windows_setup_hud_automation.ps1](scripts/windows_setup_hud_automation.ps1), [scripts/d18_validation.sh](scripts/d18_validation.sh), [subskills/portal-hud-deploy/scripts/deploy_portal_hud.sh](subskills/portal-hud-deploy/scripts/deploy_portal_hud.sh)
 - Batch publishers and broad zone fixtures: [scripts/publish_zone_batch.py](scripts/publish_zone_batch.py), [scripts/publish_widget_batch.py](scripts/publish_widget_batch.py), [scripts/all-zones-test.json](scripts/all-zones-test.json), [scripts/widget-cleanup.json](scripts/widget-cleanup.json)
 - Widget fixtures: [scripts/gauge_cycle_test.json](scripts/gauge_cycle_test.json), [scripts/progress-bar-step.json](scripts/progress-bar-step.json), [scripts/progress-bar-color-sweep.json](scripts/progress-bar-color-sweep.json), [scripts/progress-bar-rapidfire-100-5s.json](scripts/progress-bar-rapidfire-100-5s.json), [scripts/status-indicator-enum-cycle-test.json](scripts/status-indicator-enum-cycle-test.json), [scripts/status-indicator-theme-cycle-test.json](scripts/status-indicator-theme-cycle-test.json), [scripts/status-indicator-label-update-test.json](scripts/status-indicator-label-update-test.json), [scripts/status-indicator-validation-test.json](scripts/status-indicator-validation-test.json), [scripts/status-indicator-contention-test.json](scripts/status-indicator-contention-test.json), [scripts/status-indicator-theme-status-matrix-test.json](scripts/status-indicator-theme-status-matrix-test.json)
 - Zone exemplars and fixtures: [scripts/subtitle_exemplar.py](scripts/subtitle_exemplar.py), [scripts/subtitle-full-sequence.json](scripts/subtitle-full-sequence.json), [scripts/subtitle-single-line.json](scripts/subtitle-single-line.json), [scripts/subtitle-multiline.json](scripts/subtitle-multiline.json), [scripts/subtitle-rapid-replace.json](scripts/subtitle-rapid-replace.json), [scripts/subtitle-streaming.json](scripts/subtitle-streaming.json), [scripts/subtitle-ttl-expiry.json](scripts/subtitle-ttl-expiry.json), [scripts/notification_exemplar.py](scripts/notification_exemplar.py), [scripts/notification-full-gamut.json](scripts/notification-full-gamut.json), [scripts/alert_banner_exemplar.py](scripts/alert_banner_exemplar.py), [scripts/status_bar_exemplar.py](scripts/status_bar_exemplar.py), [scripts/ambient_background_exemplar.py](scripts/ambient_background_exemplar.py)
