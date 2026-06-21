@@ -766,6 +766,12 @@ impl WinitApp {
             &mut self.state.input_processor,
             tab_id,
         );
+        // The driver activates a tab when a cooperative portal needs to render
+        // and none was active (hud-obw3q). Keep the lock-free keyboard-dispatch
+        // mirror in sync so keyboard routing targets the newly active tab.
+        if scene.active_tab != tab_id {
+            state.refresh_active_tab_mirror(&scene);
+        }
     }
 
     /// Remove stale entries from `portal_resize_states` for tiles that no
