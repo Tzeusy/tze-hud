@@ -38,3 +38,37 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 ## 5. Evidence
 
 - [ ] 5.1 Add a live/integration disconnect→stale→reconnect→resume run to the text-stream-portal evidence package, recording the degraded treatment and resume continuity (headless integration proof landed by `disconnect_then_reconnect_within_grace_resumes_same_surface_without_duplication` in `crates/tze_hud_runtime/src/portal_projection_driver.rs`: drop → degraded → reconnect within grace → resume on the SAME tile with both committed units present exactly once, degraded cleared, interaction re-enabled. NOTE: live-Windows evidence package run is still owed — this is the headless integration proof, not the on-device capture)
+
+## 6. Reconciliation — Wave-2 (portal audit 2026-06-21)
+
+The 2026-06-21 portal audit found that several §2/§3 tasks were marked done as
+*spec-delta-complete* but their runtime behavior was **dormant**: the degraded
+bookkeeping existed with no production trigger, and the "geometry-only disconnect
+indicator" (2.3) was a zero-width sentinel run that painted nothing a viewer could see.
+Wave-2 of epic `hud-wse80` (sub-epic `hud-3jxfr`) supplies the trigger wiring; the
+*visible* half is only partially landed (see 6.2):
+
+- [x] 6.1 Production trigger for the degraded transition (completes the runtime side of 3.1):
+  `hud-5i16d` (PR #973, merged) wires `mark_all_projections_disconnected` from the MCP
+  portal_op channel-close path so an ungraceful upstream drop actually flips
+  `connection_degraded`. Clean detach does not. **Follow-ups:** per-session resident gRPC
+  bidi stream-end detection is `hud-b2llg`; the in-process forced repaint that makes the
+  flip *visible* on a pure drop is `hud-h3mvo` (see 6.2).
+- [ ] 6.2 Visible degraded treatment (the viewer side of 2.1/2.3) is **NOT yet landed**.
+  Two gaps remain: (a) the token-styled geometry badge replacing the zero-width stale
+  sentinel — bead `hud-jgf41`, which did NOT ship (it over-scoped into a proto/scene-graph
+  node-type change and was left as blocked local WIP, no PR); and (b) **confirmed P1**
+  `hud-h3mvo`: on a pure portal drop with no subsequent publish, `mark_hud_disconnected`
+  flips the latch but nothing re-renders, so the tile keeps live colors indefinitely
+  (verified in the #973 review). Until both land, the degraded state is bookkept but not
+  reliably perceivable.
+- [x] 6.3 Grace-expiry removal + resume verification (covers 3.2 headlessly, complements
+  the already-done 4.6): `hud-xlx1r` (PR #974, merged) adds the grace-expiry-removal and
+  disconnect→resume integration tests (see the §3.2/§5.1 test notes above).
+- [ ] 6.4 Task 5.1 live evidence remains owed — the live Windows disconnect→resume run is
+  blocked on the same reference-hardware/credentials gap as the resize live-verify
+  (`hud-v4k1h` / `hud-0yrix`). Do NOT archive this change until 5.1 lands.
+
+Net: keep this change OPEN until the visible degraded treatment lands (`hud-h3mvo` P1 +
+`hud-jgf41`) and 5.1 live evidence is recorded. The trigger wiring (6.1) and headless
+grace/resume proofs (6.3) are merged; the spec delta itself is sound and unchanged.
