@@ -1037,6 +1037,41 @@ impl InProcessPortalDriver {
         }
     }
 
+    /// Resolve the tab a new portal tile should be created in when no tab is
+    /// active (hud-obw3q).
+    ///
+    /// Cooperative projections must render even when `scene.active_tab` is `None`
+    /// — e.g. a config whose default tab carries no widgets boots with no active
+    /// tab (`windowed/lifecycle.rs`). Without this, an accepted publish would be
+    /// silently dropped and nothing would paint.
+    ///
+    /// Preference order, mirroring the active-tab fallback in `delete_tab`
+    /// (`tze_hud_scene`):
+    /// 1. Activate the lowest-`display_order` existing tab (e.g. the config's
+    ///    default "Main" tab) via `switch_active_tab`, which sets `active_tab`
+    ///    and bumps `scene.version` so the compositor re-renders.
+    /// 2. If there are no tabs at all, create a default "Main" tab (`create_tab`
+    ///    makes it active when none exists).
+    ///
+    /// Returns `None` only if there are no tabs and creation fails (e.g. tab
+    /// budget exhausted), in which case the caller defers this cycle.
+    fn resolve_portal_host_tab(scene: &mut SceneGraph) -> Option<SceneId> {
+        if let Some(tab_id) = scene
+            .tabs
+            .values()
+            .min_by_key(|t| t.display_order)
+            .map(|t| t.id)
+        {
+            // Existing tab present but not active — activate it so the portal
+            // tile created below is on the visible (active) tab.
+            if scene.switch_active_tab(tab_id).is_ok() {
+                return Some(tab_id);
+            }
+            // switch failed unexpectedly (tab vanished mid-call); fall through.
+        }
+        scene.create_tab("Main", 0).ok()
+    }
+
     /// Inner drain implementation.
     ///
     /// `now_us` is the caller-supplied wall-clock timestamp in microseconds
@@ -1151,13 +1186,31 @@ impl InProcessPortalDriver {
 
             match command_kind {
                 ResidentGrpcPortalCommandKind::CreatePortalTile => {
-                    // Requires an active tab to host the new tile.
-                    let Some(active_tab) = tab_id else {
-                        tracing::warn!(
-                            proj_id = %proj_id,
-                            "portal drain: no active tab — CreatePortalTile deferred"
-                        );
-                        continue;
+                    // A portal tile needs a host tab. Cooperative projections must
+                    // render even when no tab is active (hud-obw3q): a config whose
+                    // default tab carries no widgets boots with `active_tab == None`
+                    // (windowed/lifecycle.rs), and `take_due_portal_update` above has
+                    // already consumed this projection's coalesced update — so the
+                    // old `continue` here dropped the published content AND never
+                    // created a tile, leaving an accepted publish silently invisible.
+                    // Resolve a host tab instead: use the active tab if set, else
+                    // activate an existing tab / create a default one so the content
+                    // actually paints.
+                    let resolved_tab = tab_id.or_else(|| Self::resolve_portal_host_tab(scene));
+                    let active_tab = match resolved_tab {
+                        Some(t) => t,
+                        None => {
+                            // Only reachable if there are no tabs AND a default tab
+                            // could not be created (e.g. tab budget exhausted). Rare;
+                            // the update is lost this cycle but the projection stays
+                            // attached and retries on its next publish.
+                            tracing::warn!(
+                                proj_id = %proj_id,
+                                "portal drain: no tab available and could not create \
+                                 one — CreatePortalTile deferred"
+                            );
+                            continue;
+                        }
                     };
 
                     // Ensure the driver has an active lease in the scene.
@@ -2746,6 +2799,136 @@ mod tests {
                 );
             }
             other => panic!("after render drain: expected TextMarkdown tile root, got {other:?}"),
+        }
+    }
+
+    /// Regression guard (hud-obw3q): a cooperative portal must render even when
+    /// `scene.active_tab` is `None` — e.g. a config whose default tab carries no
+    /// widgets boots with no active tab (`windowed/lifecycle.rs`). Before the
+    /// fix, `CreatePortalTile` deferred AND the coalesced update (already
+    /// consumed by `take_due_portal_update`) was dropped, so an accepted publish
+    /// painted nothing. The driver must instead activate an existing tab (or
+    /// create one) and paint the content there.
+    #[test]
+    fn drain_with_no_active_tab_activates_tab_and_paints() {
+        use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
+        use tze_hud_scene::NodeData;
+
+        // Build a driver with one attached projection that has published `text`
+        // and a geometry snapshot, ready to drain.
+        fn make_driver(proj: &str, text: &str) -> InProcessPortalDriver {
+            let mut driver = InProcessPortalDriver {
+                authority: ProjectionAuthority::new(ProjectionBounds {
+                    max_portal_updates_per_second: 100,
+                    ..ProjectionBounds::default()
+                })
+                .unwrap(),
+                drive: InProcessPortalDriveState::new(),
+                lease_id: None,
+                portal_publish_to_present_latency: LatencyBucket::new("test_no_tab"),
+                drain_deferral_count: 0,
+                resident_grpc_bridge_tx: None,
+            };
+            let (atx, mut arx) =
+                tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+            driver.dispatch_portal_op(PortalOp::Attach {
+                projection_id: proj.to_string(),
+                display_name: "P".to_string(),
+                idempotency_key: None,
+                reply: atx,
+            });
+            let token = arx
+                .try_recv()
+                .expect("attach reply")
+                .expect("attach accepted");
+            let (ptx, mut prx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+            driver.dispatch_portal_op(PortalOp::PublishOutput {
+                projection_id: proj.to_string(),
+                owner_token: token,
+                output_text: text.to_string(),
+                logical_unit_id: None,
+                output_kind: None,
+                content_classification: None,
+                coalesce_key: None,
+                reply: ptx,
+            });
+            prx.try_recv()
+                .expect("publish reply")
+                .expect("publish accepted");
+            driver.authority_mut().push_geometry_snapshot(
+                proj,
+                AdapterGeometrySnapshot {
+                    rect: AdapterPortalRect {
+                        x_px: 0,
+                        y_px: 0,
+                        width_px: 600,
+                        height_px: 200,
+                    },
+                    gesture_active: false,
+                    sequence: 1,
+                },
+            );
+            driver
+        }
+
+        let assert_painted =
+            |driver: &InProcessPortalDriver, scene: &SceneGraph, proj: &str, marker: &str| {
+                let tile_id = driver
+                    .drive
+                    .entries
+                    .get(proj)
+                    .expect("drive entry")
+                    .tile_scene_id
+                    .expect("drain must create a portal tile even with no active tab");
+                let root_id = scene
+                    .tiles
+                    .get(&tile_id)
+                    .expect("tile in scene")
+                    .root_node
+                    .expect("tile must have a painted root node (content not dropped)");
+                match &scene.nodes.get(&root_id).unwrap().data {
+                    NodeData::TextMarkdown(tm) => assert!(
+                        tm.content.contains(marker),
+                        "content {marker:?} not painted; got {:?}",
+                        tm.content
+                    ),
+                    other => panic!("expected TextMarkdown tile root, got {other:?}"),
+                }
+            };
+
+        // Case 1: a tab exists (the config's default "Main") but is NOT active —
+        // the driver must activate it and paint there.
+        {
+            const MARK: &str = "NO-ACTIVE-TAB-MARKER-1";
+            let mut driver = make_driver("p1", MARK);
+            let mut scene = SceneGraph::new(1920.0, 1080.0);
+            let main = scene.create_tab("Main", 0).unwrap();
+            scene.active_tab = None; // simulate widget-less default-tab boot
+            let mut processor = InputProcessor::new();
+            driver.drain_inner(&mut scene, &mut processor, None, 200);
+            assert_eq!(
+                scene.active_tab,
+                Some(main),
+                "the existing tab must be activated, not left None"
+            );
+            assert_painted(&driver, &scene, "p1", MARK);
+        }
+
+        // Case 2: NO tabs at all — the driver must create + activate one and paint.
+        {
+            const MARK: &str = "NO-TABS-MARKER-2";
+            let mut driver = make_driver("p2", MARK);
+            let mut scene = SceneGraph::new(1920.0, 1080.0);
+            assert!(scene.tabs.is_empty());
+            assert_eq!(scene.active_tab, None);
+            let mut processor = InputProcessor::new();
+            driver.drain_inner(&mut scene, &mut processor, None, 200);
+            assert!(
+                scene.active_tab.is_some(),
+                "a default tab must be created and activated"
+            );
+            assert_eq!(scene.tabs.len(), 1, "exactly one default tab created");
+            assert_painted(&driver, &scene, "p2", MARK);
         }
     }
 
