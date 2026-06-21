@@ -123,7 +123,7 @@ fn parse_output_kind(raw: Option<&str>) -> Result<OutputKind, String> {
             .map_err(|_| {
                 format!(
                     "invalid output_kind {value:?}: expected one of \
-                     assistant, tool, status, error, other"
+                     assistant, tool, status, error, other, viewer"
                 )
             }),
     }
@@ -3565,6 +3565,7 @@ mod tests {
         assert_eq!(parse_output_kind(Some("status")), Ok(OutputKind::Status));
         assert_eq!(parse_output_kind(Some("error")), Ok(OutputKind::Error));
         assert_eq!(parse_output_kind(Some("other")), Ok(OutputKind::Other));
+        assert_eq!(parse_output_kind(Some("viewer")), Ok(OutputKind::Viewer));
     }
 
     #[test]

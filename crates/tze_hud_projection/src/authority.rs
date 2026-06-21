@@ -1006,6 +1006,11 @@ impl ProjectionAuthority {
 
     /// Submit HUD composer text into the cooperative pending-input inbox and
     /// return bounded local-first feedback for the portal surface.
+    ///
+    /// On success, the submission text is also echoed into the session
+    /// transcript as an [`OutputKind::Viewer`] unit so the portal surface
+    /// renders a complete conversation rather than a structurally one-sided
+    /// agent-only view.
     pub fn submit_portal_input(
         &mut self,
         projection_id: &str,
@@ -1013,6 +1018,9 @@ impl ProjectionAuthority {
     ) -> PortalInputFeedback {
         let input_id = submission.input_id.clone();
         let submitted_at_wall_us = submission.submitted_at_wall_us;
+        // Capture before submission fields are consumed by the PendingInputItem move.
+        let submission_text = submission.submission_text.clone();
+        let content_classification = submission.content_classification;
         let result = match submission.effective_expires_at_wall_us() {
             Ok(expires_at_wall_us) => self.enqueue_input_item(
                 projection_id,
@@ -1030,13 +1038,36 @@ impl ProjectionAuthority {
             ),
             Err(code) => Err(code),
         };
+        // On success, echo the viewer's text into the transcript via the same
+        // append path used by `handle_publish_output`.
+        let max_retained_transcript_bytes = self.bounds.max_retained_transcript_bytes;
+        let max_visible_transcript_bytes = self.bounds.max_visible_transcript_bytes;
+        let max_portal_updates_per_second = self.bounds.max_portal_updates_per_second;
         let cadence_append = if result.is_ok() {
             self.sessions.get_mut(projection_id).map(|session| {
-                (
-                    projection_id.to_string(),
-                    schedule_portal_state_update(session),
+                let viewer_request = PublishOutputRequest {
+                    envelope: OperationEnvelope {
+                        operation: ProjectionOperation::PublishOutput,
+                        projection_id: projection_id.to_string(),
+                        request_id: "viewer-echo".to_string(),
+                        client_timestamp_wall_us: submitted_at_wall_us,
+                    },
+                    owner_token: String::new(),
+                    output_text: submission_text,
+                    output_kind: OutputKind::Viewer,
+                    content_classification,
+                    logical_unit_id: None,
+                    coalesce_key: None,
+                };
+                let sequence = append_transcript_unit(
+                    session,
+                    &viewer_request,
                     submitted_at_wall_us,
-                )
+                    max_retained_transcript_bytes,
+                    max_visible_transcript_bytes,
+                    max_portal_updates_per_second,
+                );
+                (projection_id.to_string(), sequence, submitted_at_wall_us)
             })
         } else {
             None
