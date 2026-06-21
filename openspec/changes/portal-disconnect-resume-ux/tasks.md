@@ -54,14 +54,17 @@ Wave-2 of epic `hud-wse80` (sub-epic `hud-3jxfr`) supplies the trigger wiring; t
   `connection_degraded`. Clean detach does not. **Follow-ups:** per-session resident gRPC
   bidi stream-end detection is `hud-b2llg`; the in-process forced repaint that makes the
   flip *visible* on a pure drop is `hud-h3mvo` (see 6.2).
-- [ ] 6.2 Visible degraded treatment (the viewer side of 2.1/2.3) is **NOT yet landed**.
-  Two gaps remain: (a) the token-styled geometry badge replacing the zero-width stale
-  sentinel — bead `hud-jgf41`, which did NOT ship (it over-scoped into a proto/scene-graph
-  node-type change and was left as blocked local WIP, no PR); and (b) **confirmed P1**
-  `hud-h3mvo`: on a pure portal drop with no subsequent publish, `mark_hud_disconnected`
-  flips the latch but nothing re-renders, so the tile keeps live colors indefinitely
-  (verified in the #973 review). Until both land, the degraded state is bookkept but not
-  reliably perceivable.
+- [ ] 6.2 Visible degraded treatment (the viewer side of 2.1/2.3) is **partially landed**.
+  (b) is now done: **confirmed P1** `hud-h3mvo` shipped via **PR #978** (merged) — a pure
+  portal drop with no subsequent publish now forces a one-shot degraded repaint in
+  `drain_inner` (flag set on the disconnect transition, re-rendered under the scene lock
+  after the due-loop), so the tile dims within one frame instead of keeping live colors
+  indefinitely; regression-locked by `pure_drop_forces_degraded_repaint_without_subsequent_publish`.
+  (a) remains the only open gap: the token-styled geometry badge replacing the zero-width
+  stale sentinel — bead `hud-jgf41` (P2), which did NOT ship (it over-scoped into a
+  proto/scene-graph node-type change and was left as blocked local WIP, no PR). The badge
+  will ride the same forced-repaint path once it lands. Until `hud-jgf41` lands the dim is
+  perceivable on a drop but the dedicated badge affordance is not.
 - [x] 6.3 Grace-expiry removal + resume verification (covers 3.2 headlessly, complements
   the already-done 4.6): `hud-xlx1r` (PR #974, merged) adds the grace-expiry-removal and
   disconnect→resume integration tests (see the §3.2/§5.1 test notes above).
@@ -69,6 +72,7 @@ Wave-2 of epic `hud-wse80` (sub-epic `hud-3jxfr`) supplies the trigger wiring; t
   blocked on the same reference-hardware/credentials gap as the resize live-verify
   (`hud-v4k1h` / `hud-0yrix`). Do NOT archive this change until 5.1 lands.
 
-Net: keep this change OPEN until the visible degraded treatment lands (`hud-h3mvo` P1 +
-`hud-jgf41`) and 5.1 live evidence is recorded. The trigger wiring (6.1) and headless
+Net: keep this change OPEN until the remaining visible-treatment gap lands (`hud-jgf41`
+badge — `hud-h3mvo` repaint is now merged via PR #978) and 5.1 live evidence is recorded.
+The trigger wiring (6.1), forced-repaint visibility (`hud-h3mvo`), and headless
 grace/resume proofs (6.3) are merged; the spec delta itself is sound and unchanged.
