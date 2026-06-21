@@ -12,7 +12,7 @@
 //! `*Params` struct changes, update the matching descriptor below — the
 //! `tools/list` introspection contract is only as honest as this file.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// MCP protocol revision advertised by `initialize`.
 ///
@@ -154,18 +154,8 @@ fn tool_descriptors() -> Vec<Value> {
             }),
             &["zone_name", "content"],
         ),
-        tool(
-            "list_zones",
-            "List all registered zones.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "list_scene",
-            "List the scene's tabs.",
-            json!({}),
-            &[],
-        ),
+        tool("list_zones", "List all registered zones.", json!({}), &[]),
+        tool("list_scene", "List the scene's tabs.", json!({}), &[]),
         tool(
             "list_elements",
             "List addressable elements (tiles, zones, widgets).",
@@ -220,7 +210,12 @@ fn tool_descriptors() -> Vec<Value> {
                 "payload": p("string", "Optional payload bytes as UTF-8 text (raw SVG XML)."),
                 "metadata_only_preflight": p("boolean", "When true, run metadata-only dedup preflight."),
             }),
-            &["widget_type_id", "svg_filename", "content_hash_blake3", "total_size_bytes"],
+            &[
+                "widget_type_id",
+                "svg_filename",
+                "content_hash_blake3",
+                "total_size_bytes",
+            ],
         ),
         tool(
             "publish_to_element",

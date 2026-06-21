@@ -462,13 +462,11 @@ impl McpServer {
         // MethodNotFound.
         match request.method.as_str() {
             "initialize" => {
-                let resp =
-                    McpResponse::ok(request.id.clone(), crate::schema::initialize_result());
+                let resp = McpResponse::ok(request.id.clone(), crate::schema::initialize_result());
                 return serde_json::to_string(&resp).unwrap_or_default();
             }
             "tools/list" => {
-                let resp =
-                    McpResponse::ok(request.id.clone(), crate::schema::tools_list_result());
+                let resp = McpResponse::ok(request.id.clone(), crate::schema::tools_list_result());
                 return serde_json::to_string(&resp).unwrap_or_default();
             }
             _ => {}
@@ -2227,17 +2225,24 @@ mod tests {
         let result = &resp["result"];
         // Protocol version is a non-empty string.
         assert!(
-            result["protocolVersion"].as_str().is_some_and(|s| !s.is_empty()),
+            result["protocolVersion"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
             "missing protocolVersion: {result}"
         );
         // serverInfo carries name + version.
         assert_eq!(result["serverInfo"]["name"], "tze_hud_mcp");
         assert!(
-            result["serverInfo"]["version"].as_str().is_some_and(|s| !s.is_empty()),
+            result["serverInfo"]["version"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
             "missing serverInfo.version: {result}"
         );
         // capabilities is an object declaring tools.
-        assert!(result["capabilities"].is_object(), "capabilities not an object");
+        assert!(
+            result["capabilities"].is_object(),
+            "capabilities not an object"
+        );
         assert!(result["capabilities"]["tools"].is_object());
     }
 
@@ -2276,7 +2281,10 @@ mod tests {
                 "tool {name} missing description"
             );
             let schema = &t["inputSchema"];
-            assert_eq!(schema["type"], "object", "tool {name} inputSchema not object");
+            assert_eq!(
+                schema["type"], "object",
+                "tool {name} inputSchema not object"
+            );
             assert!(
                 schema["properties"].is_object(),
                 "tool {name} inputSchema missing properties"
