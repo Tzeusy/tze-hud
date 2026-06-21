@@ -116,14 +116,23 @@ const MAX_PORTAL_DRAIN_ITERATIONS_PER_CYCLE: u32 = 1024;
 /// `serde(rename_all = "snake_case")` exactly. An unrecognized value yields an
 /// `Err` describing the rejection, which the caller forwards to the requester
 /// rather than silently coercing to a default.
+///
+/// `"viewer"` is explicitly reserved: it is appended internally by
+/// `submit_portal_input` to echo viewer-submitted text into the portal
+/// transcript and MUST NOT be publishable by an external agent.
 fn parse_output_kind(raw: Option<&str>) -> Result<OutputKind, String> {
     match raw {
         None => Ok(OutputKind::default()),
+        Some("viewer") => Err(
+            "output_kind \"viewer\" is reserved for viewer-submitted input \
+             and cannot be published by an agent"
+                .to_string(),
+        ),
         Some(value) => serde_json::from_value(serde_json::Value::String(value.to_string()))
             .map_err(|_| {
                 format!(
                     "invalid output_kind {value:?}: expected one of \
-                     assistant, tool, status, error, other, viewer"
+                     assistant, tool, status, error, other"
                 )
             }),
     }
@@ -3565,7 +3574,13 @@ mod tests {
         assert_eq!(parse_output_kind(Some("status")), Ok(OutputKind::Status));
         assert_eq!(parse_output_kind(Some("error")), Ok(OutputKind::Error));
         assert_eq!(parse_output_kind(Some("other")), Ok(OutputKind::Other));
-        assert_eq!(parse_output_kind(Some("viewer")), Ok(OutputKind::Viewer));
+        // "viewer" is reserved for viewer-submitted input; external agents must
+        // not be able to publish it.
+        let viewer_err = parse_output_kind(Some("viewer")).unwrap_err();
+        assert!(
+            viewer_err.contains("reserved"),
+            "expected 'reserved' in error, got: {viewer_err}"
+        );
     }
 
     #[test]
