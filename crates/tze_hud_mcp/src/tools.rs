@@ -2200,6 +2200,27 @@ pub struct PortalProjectionAttachParams {
     /// after a network interruption.
     #[serde(default)]
     pub idempotency_key: Option<String>,
+    /// LLM provider kind as a snake_case string (`codex`, `claude`, `opencode`,
+    /// `other`). Omitting defaults to `other`. An unrecognized value is rejected.
+    #[serde(default)]
+    pub provider_kind: Option<String>,
+    /// Viewer-facing content classification as a snake_case string (`public`,
+    /// `household`, `private`, `sensitive`). Omitting defaults to `private`
+    /// (safe-by-default). An unrecognized value is rejected.
+    #[serde(default)]
+    pub content_classification: Option<String>,
+    /// Optional human-readable workspace hint (e.g. project directory).
+    #[serde(default)]
+    pub workspace_hint: Option<String>,
+    /// Optional human-readable repository hint (e.g. repo URL or name).
+    #[serde(default)]
+    pub repository_hint: Option<String>,
+    /// Optional icon profile hint for visual identity selection.
+    #[serde(default)]
+    pub icon_profile_hint: Option<String>,
+    /// Optional HUD target hint for multi-display routing.
+    #[serde(default)]
+    pub hud_target: Option<String>,
 }
 
 /// Response from `portal_projection_attach`.
@@ -2255,6 +2276,12 @@ pub async fn handle_portal_projection_attach(
         projection_id: p.projection_id,
         display_name: p.display_name,
         idempotency_key: p.idempotency_key,
+        provider_kind: p.provider_kind,
+        content_classification: p.content_classification,
+        workspace_hint: p.workspace_hint,
+        repository_hint: p.repository_hint,
+        icon_profile_hint: p.icon_profile_hint,
+        hud_target: p.hud_target,
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
