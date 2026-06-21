@@ -4730,6 +4730,12 @@ mod tests {
             projection_id: proj.to_string(),
             display_name: format!("Test {proj}"),
             idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: tx,
         });
         rx.blocking_recv()
@@ -4850,6 +4856,12 @@ mod tests {
             projection_id: proj.to_string(),
             display_name: "Reattach Clear".to_string(),
             idempotency_key: Some(key.to_string()),
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: tx,
         });
         rx.blocking_recv()
@@ -4866,6 +4878,12 @@ mod tests {
             projection_id: proj.to_string(),
             display_name: "Reattach Clear".to_string(),
             idempotency_key: Some(key.to_string()),
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: tx,
         });
         rx.blocking_recv()
