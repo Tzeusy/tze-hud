@@ -316,6 +316,19 @@ struct DriveEntry {
     /// re-deriving that from authority state every publish (which would inflate
     /// the reconnect bookkeeping on normal, non-recovery publishes).
     hud_disconnected: bool,
+    /// One-shot request to repaint this projection's tile on the next drain,
+    /// independent of the cadence coalescer (hud-5i16d).
+    ///
+    /// Latching `connection_degraded` (via `mark_hud_disconnected`) does **not**
+    /// enqueue a coalescer entry, so `next_due_projection_id` never returns the
+    /// projection and the work-conserving drain loop would never re-render the
+    /// tile — leaving it showing live colours/composer indefinitely. Set when an
+    /// ungraceful drop is latched on a projection that already has a scene tile;
+    /// the forced-repaint pass at the end of `drain_inner` re-renders the tile
+    /// once (so the dim/stale degraded treatment actually paints) and clears it.
+    /// The reconnect path clears it because a publish/re-attach re-renders the
+    /// tile through the normal coalescer path anyway.
+    needs_forced_repaint: bool,
 }
 
 /// In-process state for the portal projection drive loop.
@@ -359,6 +372,7 @@ impl InProcessPortalDriveState {
                 tile_scene_id: None,
                 prev_content_height_px: 0.0,
                 hud_disconnected: false,
+                needs_forced_repaint: false,
             },
         );
     }
@@ -562,6 +576,14 @@ impl InProcessPortalDriver {
         {
             Ok(()) => {
                 entry.hud_disconnected = true;
+                // Force a one-shot repaint so the degraded treatment actually
+                // paints: the latch alone enqueues no coalescer update, so the
+                // work-conserving drain loop would otherwise never re-render the
+                // tile. Only meaningful once a tile exists — before that the
+                // create-arm renders the (already-degraded) state on first paint.
+                if entry.tile_scene_id.is_some() {
+                    entry.needs_forced_repaint = true;
+                }
                 tracing::info!(
                     proj_id = %projection_id,
                     "portal: upstream dropped ungracefully — connection marked degraded"
@@ -614,6 +636,10 @@ impl InProcessPortalDriver {
         {
             Ok(()) => {
                 entry.hud_disconnected = false;
+                // The publish / re-attach that drove this reconnect re-renders
+                // the tile through the normal coalescer path, so drop any pending
+                // forced repaint to avoid a redundant second render this cycle.
+                entry.needs_forced_repaint = false;
                 tracing::info!(
                     proj_id = %projection_id,
                     "portal: upstream reconnected — connection restored, degraded cleared"
@@ -1747,6 +1773,59 @@ impl InProcessPortalDriver {
 
             // Count each successfully materialised update (hud-bq0gl.14).
             cycle_updates = cycle_updates.saturating_add(1);
+        }
+
+        // Forced-repaint pass (hud-5i16d): re-render any tile whose connection was
+        // just latched as ungracefully disconnected. `mark_hud_disconnected`
+        // enqueues no coalescer update, so the work-conserving due-loop above
+        // never revisits these tiles — without this pass the dim/stale degraded
+        // treatment would never paint and the surface would keep its live
+        // colours/composer indefinitely. The flag is one-shot (cleared here), so a
+        // steady-state degraded portal is repainted exactly once per drop, never
+        // busy-rendered every cycle.
+        let forced_repaints: Vec<String> = self
+            .drive
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.needs_forced_repaint && entry.tile_scene_id.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for proj_id in forced_repaints {
+            // Resolve the (now-degraded) state first; the borrow is released before
+            // the disjoint `drive` borrow below.
+            let state = self.authority.projected_portal_state(&proj_id, &policy);
+            let Some(entry) = self.drive.entries.get_mut(&proj_id) else {
+                continue;
+            };
+            // Clear up front so a missing-state or render failure cannot wedge the
+            // pass into retrying every cycle; the next genuine drop re-arms it.
+            entry.needs_forced_repaint = false;
+            let (Some(state), Some(tile_scene_id)) = (state, entry.tile_scene_id) else {
+                continue;
+            };
+            match entry.adapter.render_batch(&state) {
+                Ok(batch) => {
+                    tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
+                        scene,
+                        tile_scene_id,
+                        PORTAL_DRIVER_NAMESPACE,
+                        &batch,
+                    );
+                    tracing::debug!(
+                        proj_id = %proj_id,
+                        tile_id = ?tile_scene_id,
+                        "portal drain: forced degraded repaint applied"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        proj_id = %proj_id,
+                        tile_id = ?tile_scene_id,
+                        error = ?e,
+                        "portal drain: forced degraded repaint render_batch failed"
+                    );
+                }
+            }
         }
 
         // Portal health snapshot — emitted at debug level after each drain cycle
@@ -4955,6 +5034,107 @@ mod tests {
             connection_degraded(&mut driver, proj_b),
             Some(true),
             "channel close must degrade the second attached portal"
+        );
+    }
+
+    /// hud-5i16d (Codex P1 on PR #973): the forced-repaint pass actually paints
+    /// the dim/stale degraded treatment onto the existing scene tile after an
+    /// ungraceful drop. Latching `connection_degraded` enqueues no coalescer
+    /// update, so the work-conserving drain loop never revisits the tile — without
+    /// this pass the surface would keep its live content indefinitely.
+    #[test]
+    fn forced_repaint_paints_degraded_treatment_onto_tile_after_drop() {
+        use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect};
+        use tze_hud_scene::NodeData;
+
+        // Unique, ASCII-only fragment of the content-free disconnect marker
+        // (resident_grpc::PORTAL_DISCONNECT_MARKER_LINE = "⊘ disconnected — stream stale").
+        const DISCONNECT_MARKER: &str = "stream stale";
+
+        let mut driver = InProcessPortalDriver::new();
+        let proj = "proj-forced-repaint";
+        let token = dispatch_attach_and_get_token(&mut driver, proj);
+        dispatch_publish(&mut driver, proj, &token, "LIVE-LINE-1");
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.authority_mut().push_geometry_snapshot(
+            proj,
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: 200,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        // First drain creates + paints the tile with live content.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        let tile_id = driver
+            .drive
+            .entries
+            .get(proj)
+            .expect("drive entry must exist")
+            .tile_scene_id
+            .expect("drain must create a portal tile");
+
+        let tile_markdown = |scene: &SceneGraph| -> String {
+            let root_id = scene
+                .tiles
+                .get(&tile_id)
+                .expect("portal tile must exist")
+                .root_node
+                .expect("portal tile must have a painted root node");
+            match &scene.nodes.get(&root_id).unwrap().data {
+                NodeData::TextMarkdown(tm) => tm.content.clone(),
+                other => panic!("expected TextMarkdown tile root, got {other:?}"),
+            }
+        };
+
+        // A live tile must NOT carry the disconnect marker.
+        assert!(
+            !tile_markdown(&scene).contains(DISCONNECT_MARKER),
+            "a live portal tile must not show the disconnect marker; got: {:?}",
+            tile_markdown(&scene)
+        );
+
+        // Ungraceful drop latches degraded and arms the forced repaint.
+        assert!(
+            driver.mark_projection_disconnected_at(proj, 5_000),
+            "the drop must flip the live projection to disconnected"
+        );
+
+        // The drop alone must NOT repaint — no drain has run yet.
+        assert!(
+            !tile_markdown(&scene).contains(DISCONNECT_MARKER),
+            "marking disconnected must not paint before a drain runs"
+        );
+
+        // The next drain's forced-repaint pass paints the degraded treatment onto
+        // the retained tile — even though no publish (hence no coalescer update)
+        // occurred for this projection.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 6_000);
+        assert!(
+            tile_markdown(&scene).contains(DISCONNECT_MARKER),
+            "the forced-repaint pass must paint the disconnect marker onto the tile; got: {:?}",
+            tile_markdown(&scene)
+        );
+        // The retained transcript window is preserved under the degraded treatment.
+        assert!(
+            tile_markdown(&scene).contains("LIVE-LINE-1"),
+            "the degraded tile must retain the last coherent transcript window"
+        );
+
+        // The forced repaint is one-shot: the entry flag is cleared after the pass,
+        // so a steady-state degraded portal is never busy-rendered every cycle.
+        assert!(
+            !driver.drive.entries.get(proj).unwrap().needs_forced_repaint,
+            "the forced-repaint flag must be cleared after the pass runs"
         );
     }
 
