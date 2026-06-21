@@ -973,7 +973,7 @@ fn portal_composer_submission_is_transactional_bounded_inbox_feedback() {
 }
 
 #[test]
-fn accepted_portal_input_schedules_state_render_without_output() {
+fn accepted_portal_input_echoes_viewer_unit_into_transcript() {
     let mut authority = ProjectionAuthority::default();
     attach(&mut authority, "projection-a");
 
@@ -984,17 +984,22 @@ fn accepted_portal_input_schedules_state_render_without_output() {
     assert_eq!(
         authority.next_due_projection_id().as_deref(),
         Some("projection-a"),
-        "accepted HUD input must schedule a portal state render even without output"
+        "accepted HUD input must schedule a portal state render"
     );
     let update = authority
         .take_due_portal_update("projection-a", 31)
         .expect("projection exists")
-        .expect("state-only portal update must be drainable");
-    assert_eq!(update.unread_output_count, 0);
-    assert!(
-        update.visible_transcript.is_empty(),
-        "input feedback render must not invent transcript output"
+        .expect("portal update must be drainable after viewer submit");
+    // The viewer echo appears as a transcript unit, so unread_output_count == 1.
+    assert_eq!(update.unread_output_count, 1);
+    assert_eq!(
+        update.visible_transcript.len(),
+        1,
+        "submit_portal_input echoes viewer text into the transcript"
     );
+    let viewer_unit = &update.visible_transcript[0];
+    assert_eq!(viewer_unit.output_kind, OutputKind::Viewer);
+    assert_eq!(viewer_unit.output_text, "ok");
 }
 
 #[test]
@@ -1053,8 +1058,11 @@ fn acknowledged_portal_input_schedules_state_render_without_output() {
         .take_due_portal_update("projection-a", 42)
         .expect("projection exists")
         .expect("ack state update must be drainable");
+    // No new output since the previous drain; viewer echo was already counted there.
     assert_eq!(update.unread_output_count, 0);
-    assert!(update.visible_transcript.is_empty());
+    // The viewer echo unit stays in the retained window; the ack does not clear it.
+    assert_eq!(update.visible_transcript.len(), 1);
+    assert_eq!(update.visible_transcript[0].output_kind, OutputKind::Viewer);
 }
 
 #[test]
@@ -1131,6 +1139,82 @@ fn collapsed_redacted_projection_preserves_geometry_and_suppresses_private_affor
         !serde_json::to_string(&state)
             .unwrap()
             .contains("private projected transcript")
+    );
+}
+
+// ── hud-o7h1r: viewer reply echoed into portal transcript ─────────────────
+
+/// A successful `submit_portal_input` appends a `Viewer`-kind transcript unit
+/// carrying the submitted text and the submission timestamp, making the
+/// conversation visible on both sides of the portal surface.
+#[test]
+fn submit_portal_input_echoes_viewer_text_into_transcript() {
+    let mut authority = ProjectionAuthority::default();
+    attach(&mut authority, "projection-a");
+
+    let submission = PortalInputSubmission {
+        input_id: "input-viewer-1".to_string(),
+        submission_text: "hello from the viewer".to_string(),
+        submitted_at_wall_us: 50,
+        expires_at_wall_us: Some(1_000),
+        content_classification: ContentClassification::Private,
+    };
+    let feedback = authority.submit_portal_input("projection-a", submission);
+    assert_eq!(
+        feedback.feedback_state,
+        PortalInputFeedbackState::Accepted,
+        "submission must be accepted"
+    );
+
+    let transcript = authority
+        .visible_transcript_window("projection-a")
+        .expect("projection must exist");
+    assert_eq!(
+        transcript.len(),
+        1,
+        "accepted submit must echo exactly one viewer unit into the transcript"
+    );
+    let unit = &transcript[0];
+    assert_eq!(
+        unit.output_kind,
+        OutputKind::Viewer,
+        "output_kind must be Viewer"
+    );
+    assert_eq!(
+        unit.output_text, "hello from the viewer",
+        "viewer unit must carry the submitted text"
+    );
+    assert_eq!(
+        unit.appended_at_wall_us, 50,
+        "viewer unit timestamp must match submitted_at_wall_us"
+    );
+}
+
+/// A rejected `submit_portal_input` (e.g. timestamp overflow) must NOT append
+/// a viewer unit to the transcript.
+#[test]
+fn submit_portal_input_rejected_does_not_append_transcript_unit() {
+    let mut authority = ProjectionAuthority::default();
+    attach(&mut authority, "projection-a");
+
+    let feedback = authority.submit_portal_input(
+        "projection-a",
+        PortalInputSubmission {
+            input_id: "input-rejected".to_string(),
+            submission_text: "help".to_string(),
+            submitted_at_wall_us: u64::MAX,
+            expires_at_wall_us: None,
+            content_classification: ContentClassification::Private,
+        },
+    );
+    assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Rejected);
+
+    let transcript = authority
+        .visible_transcript_window("projection-a")
+        .expect("projection must exist");
+    assert!(
+        transcript.is_empty(),
+        "rejected submit must not add a viewer unit to the transcript"
     );
 }
 

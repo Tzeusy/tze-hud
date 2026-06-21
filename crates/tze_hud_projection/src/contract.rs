@@ -129,6 +129,10 @@ pub enum OutputKind {
     Status,
     Error,
     Other,
+    /// Text submitted by the on-screen viewer via the HUD composer. Echoed into
+    /// the transcript by `submit_portal_input` so the conversation is not
+    /// structurally one-sided on the portal surface.
+    Viewer,
 }
 
 /// Acknowledgement state accepted from the owning LLM session.
