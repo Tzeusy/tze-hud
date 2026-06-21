@@ -2657,7 +2657,14 @@ pub async fn handle_portal_projection_get_pending_input(
         };
 
         let now = tokio::time::Instant::now();
-        if !batch.items.is_empty() || now >= deadline {
+        // Return as soon as there is *any* pending input to surface. A non-empty
+        // batch is the obvious case; an empty batch with `remaining_count > 0` is
+        // budget backpressure — input exists but did not fit this caller's
+        // max_items/max_bytes budget. Re-polling cannot make an over-budget item
+        // fit, so suppressing that signal until the wait expires would stall the
+        // caller for up to 30s; surface it immediately so it can raise its cap
+        // and re-call (hud-p4ufx review follow-up).
+        if !batch.items.is_empty() || batch.remaining_count > 0 || now >= deadline {
             return Ok(PortalProjectionGetPendingInputResult {
                 accepted: true,
                 items: batch.items,
@@ -6351,6 +6358,58 @@ mod tests {
             polls.load(Ordering::SeqCst) >= 2,
             "a 400ms wait at a 150ms poll interval must re-poll at least twice (got {})",
             polls.load(Ordering::SeqCst)
+        );
+        drop(tx);
+        responder.await.expect("responder task must finish");
+    }
+
+    /// Long-poll (hud-p4ufx review follow-up): when input is pending but does not
+    /// fit the caller's budget, the authority returns an empty batch with
+    /// `remaining_count > 0`. That is backpressure, not "no input yet" — the call
+    /// must return immediately (after a single poll) so the caller can raise its
+    /// cap, rather than stalling for the full wait re-polling an over-budget item
+    /// that can never fit.
+    #[tokio::test]
+    async fn portal_get_pending_input_long_poll_returns_immediately_on_budget_backpressure() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let polls_seen = polls.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                if let crate::portal_op::PortalOp::GetPendingInput { reply, .. } = op {
+                    polls_seen.fetch_add(1, Ordering::SeqCst);
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: vec![],
+                            remaining_count: 1,
+                            remaining_bytes: 4096,
+                        }))
+                        .expect("reply must send");
+                }
+            }
+        });
+        let result = handle_portal_projection_get_pending_input(
+            json!({ "projection_id": "p1", "owner_token": "t1", "wait_ms": 5000, "max_bytes": 8 }),
+            Some(&tx),
+        )
+        .await
+        .expect("poll must succeed");
+        assert!(result.accepted);
+        assert!(
+            result.items.is_empty(),
+            "an over-budget item yields an empty batch"
+        );
+        assert_eq!(
+            result.remaining_count, 1,
+            "backpressure must surface the pending-but-unfit item count"
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "budget backpressure must end the long-poll after a single poll, not stall for the full wait"
         );
         drop(tx);
         responder.await.expect("responder task must finish");
