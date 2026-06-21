@@ -158,6 +158,24 @@ fn parse_content_classification(raw: Option<&str>) -> Result<ContentClassificati
     }
 }
 
+/// Parse an optional snake_case `provider_kind` string into [`ProviderKind`].
+///
+/// `None` defaults to [`ProviderKind::Other`]. An unrecognized value yields an
+/// `Err` describing the rejection, which the caller forwards to the requester
+/// rather than silently coercing to a default.
+fn parse_provider_kind(raw: Option<&str>) -> Result<ProviderKind, String> {
+    match raw {
+        None => Ok(ProviderKind::Other),
+        Some(value) => serde_json::from_value(serde_json::Value::String(value.to_string()))
+            .map_err(|_| {
+                format!(
+                    "invalid provider_kind {value:?}: expected one of \
+                     codex, claude, opencode, other"
+                )
+            }),
+    }
+}
+
 /// Parse a snake_case `ack_state` string into [`InputAckState`].
 ///
 /// Accepts exactly the wire spellings of `serde(rename_all = "snake_case")`
@@ -577,10 +595,16 @@ impl InProcessPortalDriver {
     ///
     /// ## `Attach` behaviour
     ///
-    /// 1. Calls `ProjectionAuthority::handle_attach` with a generated envelope.
-    /// 2. On success, calls `self.attach_projection` so the drive state is ready
+    /// 1. Parses optional identity fields (`provider_kind`, `content_classification`)
+    ///    from snake_case strings into projection enums. Missing fields default
+    ///    safely (`provider_kind` → `other`; `content_classification` → `private`).
+    ///    An unrecognized enum value is rejected via the reply channel before the
+    ///    authority is called. String-typed hints (`workspace_hint`,
+    ///    `repository_hint`, `icon_profile_hint`, `hud_target`) are forwarded as-is.
+    /// 2. Calls `ProjectionAuthority::handle_attach` with a generated envelope.
+    /// 3. On success, calls `self.attach_projection` so the drive state is ready
     ///    for the upcoming `drain()` iteration.
-    /// 3. Returns the owner token through the reply channel.
+    /// 4. Returns the owner token through the reply channel.
     ///
     /// ## `PublishOutput` behaviour
     ///
@@ -602,8 +626,35 @@ impl InProcessPortalDriver {
                 projection_id,
                 display_name,
                 idempotency_key,
+                provider_kind,
+                content_classification,
+                workspace_hint,
+                repository_hint,
+                icon_profile_hint,
+                hud_target,
                 reply,
             } => {
+                let provider_kind = match parse_provider_kind(provider_kind.as_deref()) {
+                    Ok(kind) => kind,
+                    Err(reason) => {
+                        let _ = reply.send(Err(PortalOpRejection::new(
+                            ProjectionErrorCode::ProjectionInvalidArgument,
+                            reason,
+                        )));
+                        return;
+                    }
+                };
+                let content_classification =
+                    match parse_content_classification(content_classification.as_deref()) {
+                        Ok(classification) => classification,
+                        Err(reason) => {
+                            let _ = reply.send(Err(PortalOpRejection::new(
+                                ProjectionErrorCode::ProjectionInvalidArgument,
+                                reason,
+                            )));
+                            return;
+                        }
+                    };
                 let request_id = uuid::Uuid::now_v7().to_string();
                 let req = AttachRequest {
                     envelope: OperationEnvelope {
@@ -612,13 +663,13 @@ impl InProcessPortalDriver {
                         request_id,
                         client_timestamp_wall_us: now_us.max(1),
                     },
-                    provider_kind: ProviderKind::Other,
+                    provider_kind,
                     display_name,
-                    workspace_hint: None,
-                    repository_hint: None,
-                    icon_profile_hint: None,
-                    content_classification: ContentClassification::Private,
-                    hud_target: None,
+                    workspace_hint,
+                    repository_hint,
+                    icon_profile_hint,
+                    content_classification,
+                    hud_target,
                     idempotency_key,
                 };
                 let resp = self.authority.handle_attach(req, "mcp-portal", now_us);
@@ -2559,6 +2610,12 @@ mod tests {
             projection_id: "test-proj".to_string(),
             display_name: "Test Projection".to_string(),
             idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: attach_tx,
         });
 
@@ -2718,6 +2775,12 @@ mod tests {
             projection_id: "paint-proj".to_string(),
             display_name: "Paint Projection".to_string(),
             idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: attach_tx,
         });
         let owner_token = attach_rx
@@ -2873,6 +2936,12 @@ mod tests {
                 projection_id: proj.to_string(),
                 display_name: "P".to_string(),
                 idempotency_key: None,
+                provider_kind: None,
+                content_classification: None,
+                workspace_hint: None,
+                repository_hint: None,
+                icon_profile_hint: None,
+                hud_target: None,
                 reply: atx,
             });
             let token = arx
@@ -3062,6 +3131,12 @@ mod tests {
             projection_id: "reattach-proj".to_string(),
             display_name: "Reattach Projection".to_string(),
             idempotency_key: Some("key-1".to_string()),
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: attach_tx,
         });
         let owner_token = attach_rx
@@ -3120,6 +3195,12 @@ mod tests {
             projection_id: "reattach-proj".to_string(),
             display_name: "Reattach Projection".to_string(),
             idempotency_key: Some("key-1".to_string()),
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: re_tx,
         });
         re_rx
@@ -3710,6 +3791,211 @@ mod tests {
         assert!(err.contains("invalid content_classification"), "got: {err}");
     }
 
+    // ── hud-acy4o: attach identity fields round-trip / defaults / rejection ────
+
+    #[test]
+    fn parse_provider_kind_defaults_and_variants() {
+        assert_eq!(parse_provider_kind(None), Ok(ProviderKind::Other));
+        assert_eq!(parse_provider_kind(Some("codex")), Ok(ProviderKind::Codex));
+        assert_eq!(
+            parse_provider_kind(Some("claude")),
+            Ok(ProviderKind::Claude)
+        );
+        assert_eq!(
+            parse_provider_kind(Some("opencode")),
+            Ok(ProviderKind::Opencode)
+        );
+        assert_eq!(parse_provider_kind(Some("other")), Ok(ProviderKind::Other));
+    }
+
+    #[test]
+    fn parse_provider_kind_rejects_unknown() {
+        let err = parse_provider_kind(Some("Claude")).unwrap_err();
+        assert!(err.contains("invalid provider_kind"), "got: {err}");
+        assert!(parse_provider_kind(Some("gpt4")).is_err());
+    }
+
+    /// Identity fields supplied at attach must round-trip into the authority
+    /// session state (hud-acy4o).
+    ///
+    /// Verifies:
+    /// - `provider_kind=claude` is reflected in `projection_identity`.
+    /// - `content_classification=household` is reflected in the identity summary.
+    /// - `workspace_hint` and `icon_profile_hint` pass through as-is.
+    /// - Omitted fields keep safe defaults (`classification` → `private`).
+    #[test]
+    fn dispatch_attach_identity_fields_round_trip() {
+        use tze_hud_projection::{ContentClassification, ProjectionBounds, ProviderKind};
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds::default()).unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_attach_identity"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        // Attach with explicit identity fields.
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "id-proj".to_string(),
+            display_name: "Identity Test".to_string(),
+            idempotency_key: None,
+            provider_kind: Some("claude".to_string()),
+            content_classification: Some("household".to_string()),
+            workspace_hint: Some("/home/agent/project".to_string()),
+            repository_hint: Some("https://github.com/org/repo".to_string()),
+            icon_profile_hint: Some("claude-code".to_string()),
+            hud_target: Some("primary".to_string()),
+            reply: tx,
+        });
+        rx.try_recv()
+            .expect("reply sent synchronously")
+            .expect("attach must be accepted");
+
+        let identity = driver
+            .authority_mut()
+            .projection_identity("id-proj")
+            .expect("identity must exist after successful attach");
+        assert_eq!(
+            identity.provider_kind,
+            ProviderKind::Claude,
+            "provider_kind=claude must be reflected in session identity"
+        );
+        assert_eq!(
+            identity.content_classification,
+            ContentClassification::Household,
+            "content_classification=household must be reflected in session identity"
+        );
+
+        // Attach with omitted optional fields — classification must default to private.
+        let (tx2, mut rx2) = tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "id-proj-defaults".to_string(),
+            display_name: "Defaults Test".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: tx2,
+        });
+        rx2.try_recv()
+            .expect("reply sent synchronously")
+            .expect("attach with omitted fields must be accepted");
+
+        let identity2 = driver
+            .authority_mut()
+            .projection_identity("id-proj-defaults")
+            .expect("identity must exist for defaults projection");
+        assert_eq!(
+            identity2.provider_kind,
+            ProviderKind::Other,
+            "omitted provider_kind must default to Other"
+        );
+        assert_eq!(
+            identity2.content_classification,
+            ContentClassification::Private,
+            "omitted content_classification must default to Private (safe-by-default)"
+        );
+    }
+
+    /// An unrecognized `provider_kind` on attach must be rejected at the driver
+    /// before the authority is called (hud-acy4o).
+    #[test]
+    fn dispatch_attach_rejects_invalid_provider_kind() {
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds::default()).unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_attach_invalid_kind"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "bad-kind-proj".to_string(),
+            display_name: "Bad Kind".to_string(),
+            idempotency_key: None,
+            provider_kind: Some("GPT-4".to_string()),
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: tx,
+        });
+        let err = rx
+            .try_recv()
+            .expect("reply sent synchronously")
+            .expect_err("invalid provider_kind must be rejected");
+        assert_eq!(
+            err.error_code,
+            ProjectionErrorCode::ProjectionInvalidArgument,
+            "a driver-side validation failure carries the stable INVALID_ARGUMENT code"
+        );
+        assert!(
+            err.message.contains("invalid provider_kind"),
+            "got: {}",
+            err.message
+        );
+        // Authority must never have seen the request.
+        assert!(
+            !driver.authority_mut().has_projection("bad-kind-proj"),
+            "rejected attach must not create a session in the authority"
+        );
+    }
+
+    /// An unrecognized `content_classification` on attach must be rejected at
+    /// the driver (hud-acy4o).
+    #[test]
+    fn dispatch_attach_rejects_invalid_content_classification() {
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds::default()).unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_attach_invalid_class"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "bad-class-proj".to_string(),
+            display_name: "Bad Class".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: Some("top-secret".to_string()),
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: tx,
+        });
+        let err = rx
+            .try_recv()
+            .expect("reply sent synchronously")
+            .expect_err("invalid content_classification must be rejected");
+        assert_eq!(
+            err.error_code,
+            ProjectionErrorCode::ProjectionInvalidArgument,
+            "a driver-side validation failure carries the stable INVALID_ARGUMENT code"
+        );
+        assert!(
+            err.message.contains("invalid content_classification"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            !driver.authority_mut().has_projection("bad-class-proj"),
+            "rejected attach must not create a session in the authority"
+        );
+    }
+
     /// An explicit, valid `output_kind` / `content_classification` plus a
     /// `coalesce_key` must thread through `dispatch_portal_op(PublishOutput)`
     /// into the authority and be accepted (hud-m7w3g).
@@ -3736,6 +4022,12 @@ mod tests {
             projection_id: "classify-proj".to_string(),
             display_name: "Classify Projection".to_string(),
             idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: attach_tx,
         });
         let owner_token = attach_rx
@@ -3782,6 +4074,12 @@ mod tests {
             projection_id: "reject-proj".to_string(),
             display_name: "Reject Projection".to_string(),
             idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: attach_tx,
         });
         let owner_token = attach_rx
@@ -3965,6 +4263,12 @@ mod tests {
             projection_id: proj.to_string(),
             display_name: "Ingress Test".to_string(),
             idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: tx,
         });
         let token = rx
@@ -4142,6 +4446,12 @@ mod tests {
             projection_id: proj.to_string(),
             display_name: "Status Test".to_string(),
             idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: tx,
         });
         let token = rx
@@ -4269,6 +4579,12 @@ mod tests {
             projection_id: proj.to_string(),
             display_name: "Cleanup Test".to_string(),
             idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
             reply: tx,
         });
         rx.blocking_recv()

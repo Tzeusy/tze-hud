@@ -94,6 +94,22 @@ pub enum PortalOp {
         display_name: String,
         /// Optional idempotency key for replay-safe re-attach.
         idempotency_key: Option<String>,
+        /// LLM provider kind as a snake_case string (`codex`, `claude`,
+        /// `opencode`, `other`). `None` defaults to `other`. An unrecognized
+        /// value is rejected by the driver before the authority is called.
+        provider_kind: Option<String>,
+        /// Viewer-facing content classification as a snake_case string
+        /// (`public`, `household`, `private`, `sensitive`). `None` defaults
+        /// to `private` (safe-by-default). An unrecognized value is rejected.
+        content_classification: Option<String>,
+        /// Optional human-readable workspace hint (e.g. project directory).
+        workspace_hint: Option<String>,
+        /// Optional human-readable repository hint (e.g. repo URL or name).
+        repository_hint: Option<String>,
+        /// Optional icon profile hint for visual identity selection.
+        icon_profile_hint: Option<String>,
+        /// Optional HUD target hint for multi-display routing.
+        hud_target: Option<String>,
         /// One-shot response channel: authority returns the `owner_token` on
         /// success (needed for subsequent `PublishOutput` calls), or a
         /// [`PortalOpRejection`] carrying the stable error code on failure.
