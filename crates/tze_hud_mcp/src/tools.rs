@@ -2330,6 +2330,10 @@ pub struct PortalProjectionPublishResult {
 /// `private` / no-coalesce when omitted. Privacy stays safe-by-default: an
 /// omitted classification is treated as `private`.
 ///
+/// Accepted `output_kind` values (snake_case): `assistant` (default), `tool`,
+/// `status`, `error`, `other`. Any other value is rejected with
+/// `PROJECTION_INVALID_ARGUMENT`.
+///
 /// # Errors
 ///
 /// - `invalid_params` if `projection_id`, `owner_token`, or `output_text` is empty.
@@ -2439,6 +2443,10 @@ pub struct PortalProjectionPublishStatusResult {
 /// snake_case `lifecycle_state` into the projection enum and calls
 /// `handle_publish_status`, which applies it to the session and echoes the
 /// applied state back.
+///
+/// Accepted `lifecycle_state` values (snake_case): `attached`, `active`,
+/// `degraded`, `hud_unavailable`, `detached`, `cleanup_pending`, `expired`.
+/// Any other value is rejected with `PROJECTION_INVALID_ARGUMENT`.
 ///
 /// # Errors
 ///
