@@ -67,6 +67,7 @@ Successful attach responses include `owner_token`, `request_id`, `projection_id`
 
 Accepted `output_kind` values: `assistant` *(default)*, `tool`, `status`, `error`, `other`.
 Any other value is rejected. Omit `output_kind` to get the `assistant` default.
+`viewer` is runtime-reserved (the operator-reply echo) and rejected if published by an adapter.
 
 ```json
 {

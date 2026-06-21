@@ -2318,6 +2318,8 @@ pub struct PortalProjectionPublishParams {
     pub logical_unit_id: Option<String>,
     /// Optional output kind (`assistant`, `tool`, `status`, `error`, `other`).
     /// Defaults to `assistant` when omitted. An unrecognized value is rejected.
+    /// `viewer` is reserved for the runtime's echo of the operator's own reply
+    /// and is rejected if published by an adapter.
     #[serde(default)]
     pub output_kind: Option<String>,
     /// Optional viewer-facing content classification (`public`, `household`,
@@ -2432,10 +2434,13 @@ pub struct PortalProjectionPublishStatusParams {
     pub projection_id: String,
     /// Owner token returned by the successful `portal_projection_attach` response.
     pub owner_token: String,
-    /// Lifecycle state as a snake_case string (`attached`, `active`, `degraded`,
-    /// `hud_unavailable`, `detached`, `cleanup_pending`, `expired`). This is how
-    /// the LLM signals waiting/blocked/active to the viewer. An unrecognized
-    /// value is rejected.
+    /// Lifecycle state as a snake_case string. Accepted values are exactly
+    /// `attached`, `active`, `degraded`, `hud_unavailable`, `detached`,
+    /// `cleanup_pending`, `expired`; an unrecognized value is rejected. This is
+    /// how the LLM signals its session lifecycle to the viewer (e.g. `active`
+    /// while working, `degraded`/`hud_unavailable` when impaired, `detached` when
+    /// done). There is no `waiting`/`blocked` state — use `status_text` for that
+    /// detail, or an `output_kind: status` transcript line.
     pub lifecycle_state: String,
     /// Optional human-readable status detail recorded with the lifecycle state
     /// (e.g. what the session is waiting on). Rejected if it exceeds the
