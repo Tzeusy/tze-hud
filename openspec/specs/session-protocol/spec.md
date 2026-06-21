@@ -604,6 +604,25 @@ Scope: v1-mandatory
 
 ---
 
+### Requirement: MCP Server Protocol Introspection
+The MCP server SHALL implement the standard `initialize` and `tools/list` JSON-RPC methods to enable protocol negotiation and tool discovery by standard MCP clients. Both methods SHALL be dispatched after PSK authentication but before the per-tool `resident_mcp` capability gate, so any authenticated caller (guest or resident) can negotiate and introspect without holding elevated capabilities.
+
+The `initialize` method SHALL return: `protocolVersion` (the negotiated MCP protocol version string), `serverInfo` containing `name` and `version`, and `capabilities` containing `tools` with `listChanged: false`. The `tools/list` method SHALL return the complete list of registered MCP tools, with each entry carrying `name`, `description`, and `inputSchema` (a valid JSON Schema object enumerating all accepted parameters, their types, and which are `required`). The `inputSchema` SHALL faithfully reflect the actual accepted parameters of each tool at the time of the call.
+Source: crates/tze_hud_mcp/src/server.rs; crates/tze_hud_mcp/src/schema.rs
+Scope: v1-mandatory
+
+#### Scenario: initialize handshake returns server capabilities
+- **WHEN** an authenticated MCP client (guest or resident) sends an `initialize` request
+- **THEN** the runtime SHALL respond with a well-formed result containing `protocolVersion`, `serverInfo.name`, `serverInfo.version`, and `capabilities.tools.listChanged`
+- **AND** the response SHALL NOT require the caller to hold the `resident_mcp` capability
+
+#### Scenario: tools/list returns every tool with an inputSchema
+- **WHEN** an authenticated MCP client (guest or resident) calls `tools/list`
+- **THEN** the runtime SHALL return the full list of registered tools including all `portal_projection_*` tools and all zone/scene/widget tools
+- **AND** each returned tool entry SHALL include a `name`, `description`, and `inputSchema` identifying accepted properties and marking non-optional fields as `required`
+
+---
+
 ### Requirement: MCP Error Model
 MCP errors SHALL use JSON-RPC 2.0 error objects with a structured data field matching the RuntimeError proto (error_code, message, context, hint). Error codes SHALL be the same stable codes used in gRPC RuntimeError responses.
 Source: RFC 0005 §8.5
