@@ -316,6 +316,19 @@ struct DriveEntry {
     /// re-deriving that from authority state every publish (which would inflate
     /// the reconnect bookkeeping on normal, non-recovery publishes).
     hud_disconnected: bool,
+    /// One-shot flag requesting a forced degraded repaint on the next drain
+    /// (hud-h3mvo).
+    ///
+    /// A pure upstream drop (no subsequent publish) latches `hud_disconnected`
+    /// and flips the authority's `connection_degraded`, but adds no coalescer
+    /// update — so the round-robin due-loop in [`InProcessPortalDriver::drain_inner`]
+    /// never revisits this projection and the scene tile keeps its un-dimmed
+    /// paint until the *next* publish happens to arrive. Set here on the
+    /// disconnect transition so a post-due-loop pass repaints the tile once
+    /// (dim + any degraded affordance) within one frame; cleared after that
+    /// repaint, on any normal render, and on reconnect — so the pass is
+    /// one-shot rather than re-rendering an idle degraded tile every drain.
+    needs_degraded_repaint: bool,
 }
 
 /// In-process state for the portal projection drive loop.
@@ -359,6 +372,7 @@ impl InProcessPortalDriveState {
                 tile_scene_id: None,
                 prev_content_height_px: 0.0,
                 hud_disconnected: false,
+                needs_degraded_repaint: false,
             },
         );
     }
@@ -562,6 +576,11 @@ impl InProcessPortalDriver {
         {
             Ok(()) => {
                 entry.hud_disconnected = true;
+                // Request a forced degraded repaint (hud-h3mvo): a pure drop
+                // adds no coalescer update, so without this the due-loop never
+                // revisits the tile and it stays un-dimmed until the next
+                // publish. The post-due-loop pass in `drain_inner` consumes it.
+                entry.needs_degraded_repaint = true;
                 tracing::info!(
                     proj_id = %projection_id,
                     "portal: upstream dropped ungracefully — connection marked degraded"
@@ -614,6 +633,11 @@ impl InProcessPortalDriver {
         {
             Ok(()) => {
                 entry.hud_disconnected = false;
+                // The reconnect signal arrives with owner traffic (publish /
+                // re-attach), which produces a due update that re-renders the
+                // tile un-dimmed via the normal path — so any pending forced
+                // degraded repaint is now moot (hud-h3mvo).
+                entry.needs_degraded_repaint = false;
                 tracing::info!(
                     proj_id = %projection_id,
                     "portal: upstream reconnected — connection restored, degraded cleared"
@@ -1592,6 +1616,12 @@ impl InProcessPortalDriver {
                                 PORTAL_DRIVER_NAMESPACE,
                                 &batch,
                             );
+                            // This render already reflects the current degraded
+                            // state (render_batch reads `connection_degraded`),
+                            // so any pending forced repaint is satisfied — clear
+                            // it so the post-due-loop pass does not double-paint
+                            // (hud-h3mvo).
+                            entry.needs_degraded_repaint = false;
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -1747,6 +1777,75 @@ impl InProcessPortalDriver {
 
             // Count each successfully materialised update (hud-bq0gl.14).
             cycle_updates = cycle_updates.saturating_add(1);
+        }
+
+        // Forced degraded-repaint pass (hud-h3mvo).
+        //
+        // A pure upstream drop latches `connection_degraded` but enqueues no
+        // coalescer update, so the round-robin due-loop above never revisits the
+        // dropped portal and its tile keeps its live (un-dimmed) paint until the
+        // next publish happens to arrive — the disconnect is invisible. Here we
+        // repaint each flagged entry exactly once, under the same scene lock, so
+        // a drop visibly dims within one frame without a subsequent publish. The
+        // flag is one-shot (set on the disconnect transition, cleared here and on
+        // any normal render / reconnect), so an idle degraded tile is not
+        // re-rendered every drain.
+        let degraded_repaint_ids: Vec<String> = self
+            .drive
+            .entries
+            .iter()
+            .filter(|(_, e)| e.needs_degraded_repaint && e.tile_scene_id.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for proj_id in degraded_repaint_ids {
+            // Re-derive state so the repaint reflects the current (degraded)
+            // connection latch. If the session vanished between the drop and
+            // here, drop the now-orphaned drive entry instead of repainting.
+            let Some(state) = self.authority.projected_portal_state(&proj_id, &policy) else {
+                self.detach_projection(&proj_id);
+                continue;
+            };
+            // Mirror the two-adapter-families tee (hud-d7frs) so the resident
+            // gRPC family also dims on a pure drop, not just the in-process scene.
+            if let Some(tx) = &self.resident_grpc_bridge_tx {
+                if !tx.is_closed() {
+                    let _ = tx.try_send((proj_id.clone(), state.clone()));
+                }
+            }
+            let Some(entry) = self.drive.entries.get_mut(&proj_id) else {
+                continue;
+            };
+            // Clear first: a render failure must not leave the entry flagged for
+            // a retry on every subsequent drain (the next genuine publish will
+            // repaint it regardless).
+            entry.needs_degraded_repaint = false;
+            let Some(tile_scene_id) = entry.tile_scene_id else {
+                continue;
+            };
+            match entry.adapter.render_batch(&state) {
+                Ok(batch) => {
+                    tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
+                        scene,
+                        tile_scene_id,
+                        PORTAL_DRIVER_NAMESPACE,
+                        &batch,
+                    );
+                    tracing::debug!(
+                        proj_id = %proj_id,
+                        tile_id = ?tile_scene_id,
+                        "portal drain: forced degraded repaint on pure drop (hud-h3mvo)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        proj_id = %proj_id,
+                        tile_id = ?tile_scene_id,
+                        error = ?e,
+                        "portal drain: degraded repaint render_batch failed; \
+                         tile not dimmed this cycle"
+                    );
+                }
+            }
         }
 
         // Portal health snapshot — emitted at debug level after each drain cycle
@@ -4955,6 +5054,110 @@ mod tests {
             connection_degraded(&mut driver, proj_b),
             Some(true),
             "channel close must degrade the second attached portal"
+        );
+    }
+
+    /// hud-h3mvo: a pure upstream drop (no subsequent publish) must visibly
+    /// repaint the portal tile to its degraded treatment within one drain,
+    /// rather than waiting for the next publish-driven render.
+    ///
+    /// Before the fix, `mark_projection_disconnected_at` latched
+    /// `connection_degraded` but enqueued no coalescer update, so the
+    /// round-robin due-loop in `drain_inner` never revisited the tile — the
+    /// disconnect stayed invisible until the next publish. The forced
+    /// degraded-repaint pass repaints the flagged entry once.
+    #[test]
+    fn pure_drop_forces_degraded_repaint_without_subsequent_publish() {
+        let mut driver = InProcessPortalDriver::new();
+        // Wire the resident-gRPC tee so we can observe that the drop-only drain
+        // re-rendered the dropped entry, and that it carried degraded state.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let proj = "proj-pure-drop";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Drain 1: publish + drain → tile created and painted with live colors.
+        publish(&mut driver, proj, &token, "live line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .tile_scene_id
+                .is_some(),
+            "tile must exist after the first drain"
+        );
+        // The live render must not be degraded; drain the tee for those snapshots.
+        while let Ok((_, st)) = rx.try_recv() {
+            assert!(
+                !st.connection_degraded,
+                "a live (pre-drop) render must not be marked degraded"
+            );
+        }
+        let version_after_live = scene.version;
+
+        // Pure drop: latch disconnected with NO subsequent publish.
+        assert!(
+            driver.mark_projection_disconnected_at(proj, 9_000),
+            "a pure drop must latch the entry disconnected"
+        );
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .needs_degraded_repaint,
+            "the drop must flag the entry for a forced degraded repaint"
+        );
+
+        // Drain with no new publish: the post-due-loop pass must repaint the tile.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 10_000);
+
+        // The scene was repainted — version advances only because the tile root
+        // was replaced (a no-op drain would leave it unchanged).
+        assert!(
+            scene.version > version_after_live,
+            "a pure-drop drain must repaint the tile (scene version must advance) \
+             without waiting for a publish"
+        );
+        // The repaint forwarded the degraded state to the resident-gRPC family.
+        let mut saw_degraded = false;
+        while let Ok((id, st)) = rx.try_recv() {
+            if id == proj && st.connection_degraded {
+                saw_degraded = true;
+            }
+        }
+        assert!(
+            saw_degraded,
+            "the drop-only drain must re-render the dropped portal with degraded state"
+        );
+        // One-shot: the flag is consumed so an idle degraded tile is not
+        // re-rendered on every subsequent drain.
+        assert!(
+            !driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .needs_degraded_repaint,
+            "the forced degraded repaint must clear its flag (one-shot, not every drain)"
+        );
+
+        // A second drain with nothing new must be a no-op (no further repaint).
+        let version_after_degraded = scene.version;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 11_000);
+        assert_eq!(
+            scene.version, version_after_degraded,
+            "an idle degraded tile must not be repainted again on the next drain"
         );
     }
 
