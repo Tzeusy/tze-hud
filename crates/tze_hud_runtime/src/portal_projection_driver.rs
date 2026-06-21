@@ -1063,6 +1063,15 @@ impl InProcessPortalDriver {
     /// default "Main" tab via `scene.create_tab`; that call auto-activates the
     /// new tab when `active_tab` is `None` (SceneGraph semantics), so no
     /// deferred switch is needed for that path.
+    ///
+    /// # Known Limitation
+    ///
+    /// `scene.active_tab == None` is ambiguous: the boot case (default tab has
+    /// no widgets) and an operator deliberately blanking the HUD both present
+    /// identically.  Safe mode (RFC 0008 §3.4) is the v1 coarse suppression
+    /// mechanism.  A scene-level suppression flag (Option A in
+    /// `docs/design/portal-operator-blank-hud-suppression.md`) is deferred to
+    /// hud-yafc7.
     fn find_portal_host_tab(scene: &SceneGraph) -> Option<SceneId> {
         scene
             .tabs
@@ -1207,6 +1216,8 @@ impl InProcessPortalDriver {
                     } else if let Some(candidate) = Self::find_portal_host_tab(scene) {
                         // An existing tab is present but not yet active.  Note it
                         // for deferred activation; do NOT mutate active_tab here.
+                        // NOTE: fires for both the boot case and an operator-blanked HUD
+                        // — see find_portal_host_tab's KNOWN LIMITATION doc + hud-yafc7.
                         pending_tab_activation = Some(candidate);
                         Some(candidate)
                     } else {
