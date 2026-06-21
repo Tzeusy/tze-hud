@@ -735,6 +735,13 @@ impl WinitApp {
                     tracing::warn!(
                         "portal_op channel disconnected — MCP portal tools will no longer function"
                     );
+                    // The ingress that feeds portal ops went away without per-
+                    // projection clean Detach ops — an ungraceful upstream drop.
+                    // Latch every still-attached projection to the degraded
+                    // treatment so the surfaces stop looking live (hud-5i16d).
+                    self.state
+                        .portal_projection_driver
+                        .mark_all_projections_disconnected();
                     self.state.portal_op_rx = None;
                     break;
                 }

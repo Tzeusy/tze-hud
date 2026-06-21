@@ -58,10 +58,10 @@ use tze_hud_projection::{
     AcknowledgeInputRequest, AdapterDraftBatch, AdapterDraftCancel, AdapterDraftNotification,
     AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
     CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
-    InputAckState, OperationEnvelope, OutputKind, PendingInputItem, PortalInputFeedback,
-    ProjectedPortalPolicy, ProjectedPortalState, ProjectionAuthority, ProjectionBounds,
-    ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation, ProviderKind,
-    PublishOutputRequest, PublishStatusRequest,
+    HudConnectionMetadata, InputAckState, OperationEnvelope, OutputKind, PendingInputItem,
+    PortalInputFeedback, ProjectedPortalPolicy, ProjectedPortalState, ProjectionAuthority,
+    ProjectionBounds, ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation,
+    ProviderKind, PublishOutputRequest, PublishStatusRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -298,6 +298,24 @@ struct DriveEntry {
     /// This is the height-only condition, mirroring the fix in
     /// `projection_authority.rs` (hud-hkaw2 / PR #779).
     prev_content_height_px: f32,
+    /// Whether the driver has latched this projection's upstream as ungracefully
+    /// dropped (hud-5i16d).
+    ///
+    /// Set by [`InProcessPortalDriver::mark_projection_disconnected_at`] when an
+    /// ungraceful upstream drop is detected (e.g. the MCP `portal_op` channel
+    /// closes without a clean `Detach`/`Cleanup`).  While set, the authority's
+    /// `connection_degraded` latch is true and the surface presents the degraded
+    /// treatment.  Cleared by
+    /// [`InProcessPortalDriver::clear_projection_disconnect_at`] on the next owner
+    /// publish / re-attach (the reconnect signal), which calls
+    /// `record_hud_connection`.
+    ///
+    /// This mirrors the authority's own latch — the driver is the sole caller of
+    /// `mark_hud_disconnected`/`record_hud_connection` for the in-process path —
+    /// so it tracks whether a reconnect must restore the connection rather than
+    /// re-deriving that from authority state every publish (which would inflate
+    /// the reconnect bookkeeping on normal, non-recovery publishes).
+    hud_disconnected: bool,
 }
 
 /// In-process state for the portal projection drive loop.
@@ -340,6 +358,7 @@ impl InProcessPortalDriveState {
                 adapter,
                 tile_scene_id: None,
                 prev_content_height_px: 0.0,
+                hud_disconnected: false,
             },
         );
     }
@@ -482,6 +501,132 @@ impl InProcessPortalDriver {
     /// Detach a projection session from the driver.
     pub fn detach_projection(&mut self, projection_id: &str) {
         self.drive.detach(projection_id);
+    }
+
+    /// Latch a single attached projection's upstream as ungracefully dropped
+    /// (hud-5i16d), flipping it to the degraded treatment.
+    ///
+    /// This is the production caller for [`ProjectionAuthority::mark_hud_disconnected`]
+    /// that the disconnect/degraded failure-UX needs but never had — without it
+    /// an ungraceful adapter/session drop left the surface looking live. Unlike a
+    /// clean `Detach`/`Cleanup` (which removes the drive entry and queues tile
+    /// removal), a drop **retains** the entry and its scene tile so the last
+    /// coherent transcript window stays on screen under the degraded treatment
+    /// (Portal Disconnect Presentation: dim + stale marker, no blanking). Only
+    /// the authority's connection latch flips, so the next
+    /// `projected_portal_state` carries `connection_degraded = true`.
+    ///
+    /// Idempotent: a projection already latched as disconnected is left untouched
+    /// so repeated drop signals do not advance the disconnect timestamp. Returns
+    /// `true` iff this call flipped a live projection to disconnected.
+    ///
+    /// Returns `false` for an unknown projection_id — a cleanly-detached
+    /// projection is already gone from the drive map, so a late drop signal can
+    /// never resurrect a degraded surface for it (AC: clean detach does not
+    /// degrade).
+    pub fn mark_projection_disconnected(&mut self, projection_id: &str) -> bool {
+        self.mark_projection_disconnected_at(projection_id, now_wall_us())
+    }
+
+    /// Latch **all** attached projections as ungracefully dropped (hud-5i16d).
+    ///
+    /// Called when the shared upstream feeding the in-process driver closes
+    /// without per-projection clean `Detach` ops — e.g. the MCP `portal_op`
+    /// channel disconnects because its ingress task died
+    /// (`windowed/portal.rs::drain_portal_ops`). Cleanly-detached projections are
+    /// already absent from the drive map and so are unaffected.
+    pub fn mark_all_projections_disconnected(&mut self) {
+        let now = now_wall_us();
+        let ids: Vec<String> = self.drive.entries.keys().cloned().collect();
+        for id in ids {
+            self.mark_projection_disconnected_at(&id, now);
+        }
+    }
+
+    /// Timestamp-injecting core of [`Self::mark_projection_disconnected`].
+    ///
+    /// Production callers pass `now_wall_us()`; tests pass a deterministic value
+    /// so the disconnect timestamp is reproducible (mirrors `drain`/`drain_inner`).
+    fn mark_projection_disconnected_at(&mut self, projection_id: &str, now_wall_us: u64) -> bool {
+        let Some(entry) = self.drive.entries.get_mut(projection_id) else {
+            return false;
+        };
+        if entry.hud_disconnected {
+            return false;
+        }
+        // `mark_hud_disconnected` rejects a zero timestamp; clamp to 1 to stay
+        // well-defined even if the wall clock reads epoch.
+        match self
+            .authority
+            .mark_hud_disconnected(projection_id, now_wall_us.max(1))
+        {
+            Ok(()) => {
+                entry.hud_disconnected = true;
+                tracing::info!(
+                    proj_id = %projection_id,
+                    "portal: upstream dropped ungracefully — connection marked degraded"
+                );
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    proj_id = %projection_id,
+                    ?error,
+                    "portal: mark_hud_disconnected rejected — session gone, dropping drive entry"
+                );
+                self.detach_projection(projection_id);
+                false
+            }
+        }
+    }
+
+    /// Clear a previously-latched ungraceful disconnect on the next owner traffic
+    /// (publish / re-attach) — the reconnect/resume signal (hud-5i16d).
+    ///
+    /// `record_hud_connection` restores `hud_connection = Some(..)`, which is the
+    /// only thing that clears the authority's `connection_degraded` latch (an
+    /// owner publish alone does not — see `projected_portal_state`). The
+    /// synthesized metadata identifies the in-process MCP ingress as the
+    /// connection; a stable `connection_id` keeps `record_hud_connection` from
+    /// resetting the advisory lease, while the `now_wall_us`-derived
+    /// `last_reconnect_wall_us` lets the authority count genuine reconnects.
+    ///
+    /// No-op unless the projection is currently latched as disconnected, so
+    /// normal (non-recovery) publishes never touch the reconnect bookkeeping.
+    fn clear_projection_disconnect_at(&mut self, projection_id: &str, now_wall_us: u64) {
+        let Some(entry) = self.drive.entries.get_mut(projection_id) else {
+            return;
+        };
+        if !entry.hud_disconnected {
+            return;
+        }
+        let now = now_wall_us.max(1);
+        let metadata = HudConnectionMetadata {
+            connection_id: format!("mcp-portal:{projection_id}"),
+            authenticated_session_id: format!("mcp-portal:{projection_id}"),
+            granted_capabilities: Vec::new(),
+            connected_at_wall_us: now,
+            last_reconnect_wall_us: now,
+        };
+        match self
+            .authority
+            .record_hud_connection(projection_id, metadata)
+        {
+            Ok(()) => {
+                entry.hud_disconnected = false;
+                tracing::info!(
+                    proj_id = %projection_id,
+                    "portal: upstream reconnected — connection restored, degraded cleared"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    proj_id = %projection_id,
+                    ?error,
+                    "portal: record_hud_connection rejected on reconnect — degraded latch retained"
+                );
+            }
+        }
     }
 
     /// Get a mutable reference to the hosted [`ProjectionAuthority`].
@@ -687,6 +832,11 @@ impl InProcessPortalDriver {
                     if !self.drive.entries.contains_key(&projection_id) {
                         self.attach_projection(&projection_id, Vec::new());
                     }
+                    // Re-attach is the reconnect signal: if this projection was
+                    // latched as ungracefully disconnected, restore the connection
+                    // so the degraded treatment clears (hud-5i16d). A no-op for a
+                    // first attach or a still-live projection.
+                    self.clear_projection_disconnect_at(&projection_id, now_us);
                     tracing::info!(
                         proj_id = %projection_id,
                         "portal_op: Attach accepted — drive entry ensured"
@@ -761,6 +911,12 @@ impl InProcessPortalDriver {
                     .authority
                     .handle_publish_output(req, "mcp-portal", now_us);
                 if resp.accepted {
+                    // A successful owner publish after an ungraceful drop is the
+                    // reconnect signal: restore the connection so the degraded
+                    // treatment clears (hud-5i16d). Guarded to a no-op unless the
+                    // projection is currently latched disconnected, so normal
+                    // publishes never perturb the reconnect bookkeeping.
+                    self.clear_projection_disconnect_at(&projection_id, now_us);
                     tracing::debug!(
                         proj_id = %projection_id,
                         coalesced = resp.coalesced_output_count,
@@ -4562,6 +4718,243 @@ mod tests {
         assert!(
             denied.is_err(),
             "publish_status with a bad owner token must be denied"
+        );
+    }
+
+    /// Capture an owner token via the production `dispatch_portal_op` Attach
+    /// ingress (the path that wires the reconnect-clear hook), rather than calling
+    /// the authority directly.
+    fn dispatch_attach_and_get_token(driver: &mut InProcessPortalDriver, proj: &str) -> String {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj.to_string(),
+            display_name: format!("Test {proj}"),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("attach reply must arrive")
+            .expect("attach must be accepted")
+    }
+
+    /// Publish through the production `dispatch_portal_op` ingress (the path that
+    /// wires the reconnect-clear hook).
+    fn dispatch_publish(driver: &mut InProcessPortalDriver, proj: &str, token: &str, text: &str) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: proj.to_string(),
+            owner_token: token.to_string(),
+            output_text: text.to_string(),
+            logical_unit_id: None,
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("publish reply must arrive")
+            .expect("publish must be accepted");
+    }
+
+    fn connection_degraded(driver: &mut InProcessPortalDriver, proj: &str) -> Option<bool> {
+        driver
+            .authority_mut()
+            .projected_portal_state(proj, &ProjectedPortalPolicy::permit_all())
+            .map(|state| state.connection_degraded)
+    }
+
+    /// hud-5i16d: the dormant disconnect/degraded failure-UX is now wired into the
+    /// driver. A headless drive of drop → degraded → reconnect → clear, plus the
+    /// negative cases (clean detach never degrades; the latch is idempotent; a
+    /// normal publish does not degrade).
+    #[test]
+    fn ungraceful_drop_degrades_and_reconnect_clears() {
+        let mut driver = InProcessPortalDriver::new();
+        let proj = "proj-disconnect";
+        let token = dispatch_attach_and_get_token(&mut driver, proj);
+
+        // A freshly-attached, never-disconnected portal is "connecting", not
+        // degraded.
+        assert_eq!(
+            connection_degraded(&mut driver, proj),
+            Some(false),
+            "a fresh attach must not present as degraded"
+        );
+
+        // A normal publish (no prior drop) must not flip the surface to degraded
+        // and must not perturb the connection latch.
+        dispatch_publish(&mut driver, proj, &token, "live line");
+        assert_eq!(
+            connection_degraded(&mut driver, proj),
+            Some(false),
+            "a normal publish must not degrade the surface"
+        );
+
+        // (1) Ungraceful drop flips connection_degraded true.
+        assert!(
+            driver.mark_projection_disconnected_at(proj, 5_000),
+            "the first drop must flip a live projection to disconnected"
+        );
+        assert_eq!(
+            connection_degraded(&mut driver, proj),
+            Some(true),
+            "an ungraceful drop must make the next projected_portal_state degraded"
+        );
+        // The drive entry and tile mapping are RETAINED (degraded ≠ detach): the
+        // retained transcript window stays on screen under the degraded treatment.
+        assert!(
+            driver.drive.entries.contains_key(proj),
+            "an ungraceful drop must retain the drive entry (not detach the surface)"
+        );
+
+        // The latch is idempotent — a repeated drop signal is a no-op.
+        assert!(
+            !driver.mark_projection_disconnected_at(proj, 6_000),
+            "a repeated drop on an already-disconnected projection must be a no-op"
+        );
+        assert_eq!(connection_degraded(&mut driver, proj), Some(true));
+
+        // (3) Reconnect via the next publish clears the degraded treatment.
+        dispatch_publish(&mut driver, proj, &token, "resumed line");
+        assert_eq!(
+            connection_degraded(&mut driver, proj),
+            Some(false),
+            "a publish after a drop must restore the connection and clear degraded"
+        );
+
+        // Drop again, then reconnect via a second publish (re-publish is the
+        // reliable reconnect signal — a still-attached session keeps its owner
+        // token and resumes publishing rather than re-attaching).
+        assert!(driver.mark_projection_disconnected_at(proj, 7_000));
+        assert_eq!(connection_degraded(&mut driver, proj), Some(true));
+        dispatch_publish(&mut driver, proj, &token, "resumed again");
+        assert_eq!(
+            connection_degraded(&mut driver, proj),
+            Some(false),
+            "a second publish after a re-drop must clear the degraded treatment again"
+        );
+    }
+
+    /// hud-5i16d: an idempotent re-attach replay (matching `idempotency_key`) is
+    /// the attach-path reconnect signal and clears the degraded treatment. (A
+    /// plain re-attach of a still-attached projection is rejected as
+    /// already-attached, so only the idempotent replay exercises this hook.)
+    #[test]
+    fn idempotent_reattach_clears_degraded() {
+        let mut driver = InProcessPortalDriver::new();
+        let proj = "proj-reattach-clear";
+        let key = "idem-key-1";
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj.to_string(),
+            display_name: "Reattach Clear".to_string(),
+            idempotency_key: Some(key.to_string()),
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("attach reply must arrive")
+            .expect("attach must be accepted");
+
+        assert!(driver.mark_projection_disconnected_at(proj, 5_000));
+        assert_eq!(connection_degraded(&mut driver, proj), Some(true));
+
+        // Idempotent replay (same projection_id + idempotency_key) is accepted
+        // and runs the reconnect-clear hook.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj.to_string(),
+            display_name: "Reattach Clear".to_string(),
+            idempotency_key: Some(key.to_string()),
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("attach replay reply must arrive")
+            .expect("idempotent attach replay must be accepted");
+
+        assert_eq!(
+            connection_degraded(&mut driver, proj),
+            Some(false),
+            "an idempotent re-attach replay after a drop must clear the degraded treatment"
+        );
+    }
+
+    /// hud-5i16d: (2) a clean detach must NOT trigger degraded, and a late drop
+    /// signal must not resurrect a degraded surface for a detached projection.
+    #[test]
+    fn clean_detach_does_not_degrade() {
+        let mut driver = InProcessPortalDriver::new();
+        let proj = "proj-clean-detach";
+        let token = dispatch_attach_and_get_token(&mut driver, proj);
+        dispatch_publish(&mut driver, proj, &token, "line before detach");
+
+        // Clean detach through the production ingress.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Detach {
+            projection_id: proj.to_string(),
+            owner_token: token.clone(),
+            reason: "clean shutdown".to_string(),
+            reply: tx,
+        });
+        rx.blocking_recv()
+            .expect("detach reply must arrive")
+            .expect("clean detach must be accepted");
+
+        // The session is purged — there is no degraded surface to present.
+        assert_eq!(
+            connection_degraded(&mut driver, proj),
+            None,
+            "a clean detach purges the session — no degraded surface remains"
+        );
+        // A late drop signal must not resurrect a degraded surface: the entry is
+        // already gone, so the latch reports nothing flipped.
+        assert!(
+            !driver.mark_projection_disconnected_at(proj, 9_000),
+            "a drop signal after a clean detach must not resurrect a degraded surface"
+        );
+        assert_eq!(connection_degraded(&mut driver, proj), None);
+    }
+
+    /// hud-5i16d: the channel-close production path — `mark_all_projections_disconnected`
+    /// latches every still-attached projection to degraded (the MCP `portal_op`
+    /// channel disconnecting without per-projection clean Detach ops).
+    #[test]
+    fn mark_all_projections_disconnected_degrades_every_attached_portal() {
+        let mut driver = InProcessPortalDriver::new();
+        let proj_a = "proj-all-a";
+        let proj_b = "proj-all-b";
+        let _ = dispatch_attach_and_get_token(&mut driver, proj_a);
+        let _ = dispatch_attach_and_get_token(&mut driver, proj_b);
+
+        driver.mark_all_projections_disconnected();
+
+        assert_eq!(
+            connection_degraded(&mut driver, proj_a),
+            Some(true),
+            "channel close must degrade the first attached portal"
+        );
+        assert_eq!(
+            connection_degraded(&mut driver, proj_b),
+            Some(true),
+            "channel close must degrade the second attached portal"
         );
     }
 
