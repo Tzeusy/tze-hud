@@ -37,7 +37,7 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 
 ## 5. Evidence
 
-- [ ] 5.1 Add a live/integration disconnect→stale→reconnect→resume run to the text-stream-portal evidence package, recording the degraded treatment and resume continuity (headless integration proof landed by `disconnect_then_reconnect_within_grace_resumes_same_surface_without_duplication` in `crates/tze_hud_runtime/src/portal_projection_driver.rs`: drop → degraded → reconnect within grace → resume on the SAME tile with both committed units present exactly once, degraded cleared, interaction re-enabled. NOTE: live-Windows evidence package run is still owed — this is the headless integration proof, not the on-device capture)
+- [x] 5.1 Add a live/integration disconnect→stale→reconnect→resume run to the text-stream-portal evidence package, recording the degraded treatment and resume continuity. DONE two ways: (a) headless integration proof `disconnect_then_reconnect_within_grace_resumes_same_surface_without_duplication` in `crates/tze_hud_runtime/src/portal_projection_driver.rs` (drop → degraded → reconnect within grace → resume on the SAME tile with both committed units present exactly once, degraded cleared, interaction re-enabled); (b) **on-device live capture** `docs/evidence/text-stream-portals/liveverify-20260621-205600/` against the real Windows HUD (`tzehouse-windows`) on a binary built from `main`@aa67a6e5 — baseline (active, units A/B/C) → degraded (`hud_unavailable` + "upstream link lost", transcript preserved) → resume (active, A/B/C persist + new unit D, no loss/dup). FIDELITY CAVEAT (in the package README): the live capture drives the lifecycle-state disconnect/resume presentation path (`publish_status`); the separate `connection_degraded` latch (upstream link loss → transcript dim + hud-h3mvo forced repaint) is not reachable from a stateless MCP HTTP call and stays headless-verified (`pure_drop_forces_degraded_repaint_without_subsequent_publish`, PR #978).
 
 ## 6. Reconciliation — Wave-2 (portal audit 2026-06-21)
 
@@ -68,11 +68,16 @@ Wave-2 of epic `hud-wse80` (sub-epic `hud-3jxfr`) supplies the trigger wiring; t
 - [x] 6.3 Grace-expiry removal + resume verification (covers 3.2 headlessly, complements
   the already-done 4.6): `hud-xlx1r` (PR #974, merged) adds the grace-expiry-removal and
   disconnect→resume integration tests (see the §3.2/§5.1 test notes above).
-- [ ] 6.4 Task 5.1 live evidence remains owed — the live Windows disconnect→resume run is
-  blocked on the same reference-hardware/credentials gap as the resize live-verify
-  (`hud-v4k1h` / `hud-0yrix`). Do NOT archive this change until 5.1 lands.
+- [x] 6.4 Task 5.1 live evidence — DONE 2026-06-21: live Windows disconnect→resume capture
+  landed at `docs/evidence/text-stream-portals/liveverify-20260621-205600/` (reference HUD
+  `tzehouse-windows`, current-main binary). The earlier reference-hardware/credentials gap was
+  cleared (SSH as `tzeus@tzehouse-windows`, deploy via user-test portal-hud-deploy). The
+  on-device **resize** hotkey re-verify (`hud-v4k1h`) still needs a human at the display — the
+  current binary with the resize fix is now deployed and running, so the keyboard/visual check
+  can be done directly.
 
 Net: keep this change OPEN until the remaining visible-treatment gap lands (`hud-jgf41`
-badge — `hud-h3mvo` repaint is now merged via PR #978) and 5.1 live evidence is recorded.
-The trigger wiring (6.1), forced-repaint visibility (`hud-h3mvo`), and headless
-grace/resume proofs (6.3) are merged; the spec delta itself is sound and unchanged.
+badge — `hud-h3mvo` repaint is now merged via PR #978). 5.1/6.4 live evidence is now recorded;
+the trigger wiring (6.1), forced-repaint visibility (`hud-h3mvo`), headless grace/resume
+proofs (6.3), and the live disconnect→resume capture are all in. The spec delta is sound and
+unchanged. (hud-jgf41 is the sole remaining blocker before archive.)
