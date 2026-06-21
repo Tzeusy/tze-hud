@@ -1008,6 +1008,59 @@ fn accepted_portal_input_echoes_viewer_unit_into_transcript() {
 }
 
 #[test]
+fn rate_limited_viewer_echo_is_drained_and_stays_unread_zero() {
+    // Regression (gemini/codex review on #979): a viewer echo correctly does not
+    // raise unread, but it must still be DRAINABLE. When the echo append is
+    // rate-limited (the portal update slot is already spent), the session must
+    // flag the update pending so take_due_portal_update's `unread==0 && !pending`
+    // early return does not strand the viewer's own text.
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        max_portal_updates_per_second: 1,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // Spend the single rate slot with an agent publish at wall 20, then drain it
+    // so the session returns to unread==0 && !pending.
+    let publish = output_request("projection-a", &owner_token, "req-output-1");
+    assert!(
+        authority
+            .handle_publish_output(publish, "caller-a", 20)
+            .accepted
+    );
+    let drained = authority
+        .take_due_portal_update("projection-a", 20)
+        .unwrap()
+        .expect("agent publish is immediately materializable");
+    assert_eq!(drained.unread_output_count, 1);
+
+    // Submit a viewer reply in the same rate window (portal_submission uses wall
+    // 30); its echo append is therefore rate-limited.
+    let feedback =
+        authority.submit_portal_input("projection-a", portal_submission("input-1", "ok"));
+    assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
+
+    // The rate-limited viewer echo must still drain (not be stranded) and must
+    // not raise unread.
+    let update = authority
+        .take_due_portal_update("projection-a", 30)
+        .unwrap()
+        .expect("rate-limited viewer echo must still be drainable, not stranded");
+    assert_eq!(
+        update.unread_output_count, 0,
+        "viewer echo must not raise unread even when rate-limited"
+    );
+    assert!(
+        update
+            .visible_transcript
+            .iter()
+            .any(|u| u.output_kind == OutputKind::Viewer && u.output_text == "ok"),
+        "the viewer echo must appear in the drained transcript"
+    );
+}
+
+#[test]
 fn acknowledged_portal_input_schedules_state_render_without_output() {
     let mut authority = ProjectionAuthority::default();
     let owner_token = attach(&mut authority, "projection-a");
