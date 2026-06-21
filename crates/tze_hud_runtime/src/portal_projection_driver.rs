@@ -1046,39 +1046,29 @@ impl InProcessPortalDriver {
         }
     }
 
-    /// Resolve the tab a new portal tile should be created in when no tab is
-    /// active (hud-obw3q).
+    /// Find the tab a new portal tile should be hosted in, **without activating
+    /// it** (hud-zccuf).
     ///
-    /// Cooperative projections must render even when `scene.active_tab` is `None`
-    /// — e.g. a config whose default tab carries no widgets boots with no active
-    /// tab (`windowed/lifecycle.rs`). Without this, an accepted publish would be
-    /// silently dropped and nothing would paint.
+    /// Returns the ID of the lowest-`display_order` existing tab, or `None` if
+    /// there are no tabs at all.
     ///
-    /// Preference order, mirroring the active-tab fallback in `delete_tab`
-    /// (`tze_hud_scene`):
-    /// 1. Activate the lowest-`display_order` existing tab (e.g. the config's
-    ///    default "Main" tab) via `switch_active_tab`, which sets `active_tab`
-    ///    and bumps `scene.version` so the compositor re-renders.
-    /// 2. If there are no tabs at all, create a default "Main" tab (`create_tab`
-    ///    makes it active when none exists).
+    /// This is the read-only first step of the two-phase tab resolution used by
+    /// the `CreatePortalTile` drain arm.  The caller is responsible for calling
+    /// `switch_active_tab` on the returned ID — but only **after** both
+    /// `ensure_driver_lease` and `create_tile` have succeeded.  Deferring the
+    /// switch ensures that a failing cycle leaves `scene.active_tab` unchanged
+    /// (the projection stays attached and self-heals on its next publish).
     ///
-    /// Returns `None` only if there are no tabs and creation fails (e.g. tab
-    /// budget exhausted), in which case the caller defers this cycle.
-    fn resolve_portal_host_tab(scene: &mut SceneGraph) -> Option<SceneId> {
-        if let Some(tab_id) = scene
+    /// When this returns `None` (no tabs exist), the caller must create a
+    /// default "Main" tab via `scene.create_tab`; that call auto-activates the
+    /// new tab when `active_tab` is `None` (SceneGraph semantics), so no
+    /// deferred switch is needed for that path.
+    fn find_portal_host_tab(scene: &SceneGraph) -> Option<SceneId> {
+        scene
             .tabs
             .values()
             .min_by_key(|t| t.display_order)
             .map(|t| t.id)
-        {
-            // Existing tab present but not active — activate it so the portal
-            // tile created below is on the visible (active) tab.
-            if scene.switch_active_tab(tab_id).is_ok() {
-                return Some(tab_id);
-            }
-            // switch failed unexpectedly (tab vanished mid-call); fall through.
-        }
-        scene.create_tab("Main", 0).ok()
     }
 
     /// Inner drain implementation.
@@ -1202,17 +1192,37 @@ impl InProcessPortalDriver {
                     // already consumed this projection's coalesced update — so the
                     // old `continue` here dropped the published content AND never
                     // created a tile, leaving an accepted publish silently invisible.
-                    // Resolve a host tab instead: use the active tab if set, else
-                    // activate an existing tab / create a default one so the content
-                    // actually paints.
-                    let resolved_tab = tab_id.or_else(|| Self::resolve_portal_host_tab(scene));
-                    let active_tab = match resolved_tab {
+                    //
+                    // Tab activation is DEFERRED (hud-zccuf): we find/create the
+                    // host tab here but only call `switch_active_tab` after both
+                    // `ensure_driver_lease` and `create_tile` succeed.  A failing
+                    // cycle must not leave a premature `active_tab` mutation — the
+                    // projection stays attached and self-heals on its next publish.
+                    let pending_tab_activation; // committed in the Ok arm below
+                    let host_tab = if let Some(already_active) = tab_id {
+                        // Outer frame already has an active tab — use it directly,
+                        // no deferred switch needed.
+                        pending_tab_activation = None;
+                        Some(already_active)
+                    } else if let Some(candidate) = Self::find_portal_host_tab(scene) {
+                        // An existing tab is present but not yet active.  Note it
+                        // for deferred activation; do NOT mutate active_tab here.
+                        pending_tab_activation = Some(candidate);
+                        Some(candidate)
+                    } else {
+                        // No tabs at all: create a default one.  `create_tab`
+                        // auto-activates when `active_tab` is `None` (SceneGraph
+                        // semantics), so no deferred switch is needed for this path.
+                        pending_tab_activation = None;
+                        scene.create_tab("Main", 0).ok()
+                    };
+                    let active_tab = match host_tab {
                         Some(t) => t,
                         None => {
-                            // Only reachable if there are no tabs AND a default tab
-                            // could not be created (e.g. tab budget exhausted). Rare;
-                            // the update is lost this cycle but the projection stays
-                            // attached and retries on its next publish.
+                            // Only reachable if there are no tabs AND `create_tab`
+                            // failed (e.g. tab budget exhausted).  Rare; the update
+                            // is lost this cycle but the projection stays attached
+                            // and retries on its next publish.
                             tracing::warn!(
                                 proj_id = %proj_id,
                                 "portal drain: no tab available and could not create \
@@ -1307,6 +1317,14 @@ impl InProcessPortalDriver {
                                          tile created but content not painted"
                                     );
                                 }
+                            }
+
+                            // Tile creation succeeded — commit the deferred tab
+                            // activation now (hud-zccuf).  For the `tab_id.is_some()`
+                            // and `create_tab` paths `pending_tab_activation` is
+                            // `None` so this is a no-op in those cases.
+                            if let Some(tab_to_activate) = pending_tab_activation {
+                                let _ = scene.switch_active_tab(tab_to_activate);
                             }
 
                             tracing::debug!(
@@ -2939,6 +2957,65 @@ mod tests {
             assert_eq!(scene.tabs.len(), 1, "exactly one default tab created");
             assert_painted(&driver, &scene, "p2", MARK);
         }
+    }
+
+    /// Regression guard (hud-zccuf): if `create_tile` fails in the
+    /// `CreatePortalTile` drain arm, the deferred tab activation must NOT have
+    /// been committed — `scene.active_tab` stays unchanged for that cycle.
+    ///
+    /// We trigger a `create_tile` failure by using a 1×1 scene: the default
+    /// portal bounds (~720×360) exceed the display area, so `create_tile`
+    /// returns `BoundsOutOfRange` without creating a tile.  The projection stays
+    /// attached and self-heals on the next publish once the display area is
+    /// corrected.
+    #[test]
+    fn create_portal_tile_failure_does_not_mutate_active_tab() {
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_deferred_tab_activation"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let proj = "proj-deferred-tab-activation";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        publish(&mut driver, proj, &token, "hello", 100);
+
+        // 1×1 scene: create_tile will fail (bounds ~720×360 exceed display area).
+        // Tab exists but active_tab is None — the hud-obw3q no-active-tab-on-boot
+        // scenario where deferred activation matters.
+        let mut scene = SceneGraph::new(1.0, 1.0);
+        let main_tab = scene.create_tab("Main", 0).unwrap();
+        scene.active_tab = None; // simulate widget-less default-tab boot
+        let mut processor = InputProcessor::new();
+
+        driver.drain_inner(&mut scene, &mut processor, None, 200);
+
+        // create_tile failed → the deferred switch_active_tab must NOT have fired.
+        assert_eq!(
+            scene.active_tab, None,
+            "active_tab must not be mutated when create_tile fails (hud-zccuf)"
+        );
+        assert!(
+            scene.tabs.contains_key(&main_tab),
+            "the existing tab must still be in the scene"
+        );
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .and_then(|e| e.tile_scene_id)
+                .is_none(),
+            "tile_scene_id must remain None when create_tile fails"
+        );
     }
 
     /// Regression guard: an idempotent re-attach (same `projection_id` +
