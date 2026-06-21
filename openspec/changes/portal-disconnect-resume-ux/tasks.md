@@ -22,7 +22,7 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 ## 3. Degradation contract
 
 - [x] 3.1 Wire the degraded threshold (liveness gap) to the existing `ProjectionLifecycleState::Degraded`/`HudUnavailable` transition and `mark_hud_disconnected` bookkeeping
-- [x] 3.2 Bound the degraded window by lease grace; remove the surface on grace expiry via the existing orphan path (headless-covered by `disconnected_portal_surface_removed_on_grace_expiry_yields_no_further_state` in `crates/tze_hud_runtime/src/portal_projection_driver.rs`: a portal held disconnected until lease grace has its tile removed by `SceneGraph::expire_leases` and then produces no further `ProjectedPortalState`. Production trigger that drives liveness-gap → `mark_hud_disconnected` → scene orphan → `expire_projection` is wired separately by hud-5i16d)
+- [ ] 3.2 Bound the degraded window by lease grace; remove the surface on grace expiry via the existing orphan path (scene+authority contract headless-covered by `disconnected_portal_surface_removed_on_grace_expiry_yields_no_further_state` in `crates/tze_hud_runtime/src/portal_projection_driver.rs`: a portal held disconnected until lease grace has its tile removed by `SceneGraph::expire_leases` and then produces no further `ProjectedPortalState`. Production trigger that drives liveness-gap → `mark_hud_disconnected` → scene orphan → `expire_projection` is wired separately by hud-5i16d)
 - [x] 3.3 Keep degraded-transition presentation timing runtime-owned; clock-domain typed metadata only
 
 ## 4. Reconnect and resume presentation
@@ -37,4 +37,4 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 
 ## 5. Evidence
 
-- [x] 5.1 Add a live/integration disconnect→stale→reconnect→resume run to the text-stream-portal evidence package, recording the degraded treatment and resume continuity (headless-covered by `disconnect_then_reconnect_within_grace_resumes_same_surface_without_duplication` in `crates/tze_hud_runtime/src/portal_projection_driver.rs`: drop → degraded → reconnect within grace → resume on the SAME tile with both committed units present exactly once, degraded cleared, interaction re-enabled. NOTE: live-Windows evidence package run is still owed — this is the headless integration proof, not the on-device capture)
+- [ ] 5.1 Add a live/integration disconnect→stale→reconnect→resume run to the text-stream-portal evidence package, recording the degraded treatment and resume continuity (headless integration proof landed by `disconnect_then_reconnect_within_grace_resumes_same_surface_without_duplication` in `crates/tze_hud_runtime/src/portal_projection_driver.rs`: drop → degraded → reconnect within grace → resume on the SAME tile with both committed units present exactly once, degraded cleared, interaction re-enabled. NOTE: live-Windows evidence package run is still owed — this is the headless integration proof, not the on-device capture)
