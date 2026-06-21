@@ -77,6 +77,7 @@ Read `references/operation-examples.md` for compact JSON examples of every opera
    - `status` — status or progress update
    - `error` — error output
    - `other` — any other kind
+   - `viewer` — *reserved for the runtime's echo of the operator's own reply; rejected if published by an adapter*
 4. **Poll HUD input compactly.** Call `get_pending_input` with small `max_items` and `max_bytes`. Treat returned input as semantic operator-submitted text, not terminal keystrokes.
 5. **Acknowledge every input item.** Use `acknowledge_input` with `handled`, `deferred`, or `rejected`. Use `not_before_wall_us` only with `deferred`.
 6. **Detach on normal exit.** Call `detach` with a bounded reason when the session is done projecting.

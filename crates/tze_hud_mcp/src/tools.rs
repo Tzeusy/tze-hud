@@ -2318,6 +2318,8 @@ pub struct PortalProjectionPublishParams {
     pub logical_unit_id: Option<String>,
     /// Optional output kind (`assistant`, `tool`, `status`, `error`, `other`).
     /// Defaults to `assistant` when omitted. An unrecognized value is rejected.
+    /// `viewer` is reserved for the runtime's echo of the operator's own reply
+    /// and is rejected if published by an adapter.
     #[serde(default)]
     pub output_kind: Option<String>,
     /// Optional viewer-facing content classification (`public`, `household`,
@@ -2432,10 +2434,13 @@ pub struct PortalProjectionPublishStatusParams {
     pub projection_id: String,
     /// Owner token returned by the successful `portal_projection_attach` response.
     pub owner_token: String,
-    /// Lifecycle state as a snake_case string (`attached`, `active`, `degraded`,
-    /// `hud_unavailable`, `detached`, `cleanup_pending`, `expired`). This is how
-    /// the LLM signals waiting/blocked/active to the viewer. An unrecognized
-    /// value is rejected.
+    /// Lifecycle state as a snake_case string. Accepted values are exactly
+    /// `attached`, `active`, `degraded`, `hud_unavailable`, `detached`,
+    /// `cleanup_pending`, `expired`; an unrecognized value is rejected. This is
+    /// how the LLM signals its session lifecycle to the viewer (e.g. `active`
+    /// while working, `degraded`/`hud_unavailable` when impaired, `detached` when
+    /// done). There is no `waiting`/`blocked` state — use `status_text` for that
+    /// detail, or an `output_kind: status` transcript line.
     pub lifecycle_state: String,
     /// Optional human-readable status detail recorded with the lifecycle state
     /// (e.g. what the session is waiting on). Rejected if it exceeds the
@@ -2554,6 +2559,15 @@ pub struct PortalProjectionGetPendingInputParams {
     /// authority default.
     #[serde(default)]
     pub max_bytes: Option<usize>,
+    /// Optional long-poll wait in milliseconds (clamped to 30000). When set, the
+    /// call blocks until at least one input item is available or the wait
+    /// elapses, instead of returning immediately — so the LLM can await the
+    /// viewer's reply with one call rather than a busy-poll loop. Omit (or `0`)
+    /// for the legacy return-immediately behavior. The wait is served on the MCP
+    /// side and never blocks the runtime; delivery latency is bounded by a short
+    /// internal poll interval.
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
 }
 
 /// Response from `portal_projection_get_pending_input`.
@@ -2606,31 +2620,63 @@ pub async fn handle_portal_projection_get_pending_input(
         )
     })?;
 
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    tx.send(crate::portal_op::PortalOp::GetPendingInput {
-        projection_id: p.projection_id,
-        owner_token: p.owner_token,
-        max_items: p.max_items,
-        max_bytes: p.max_bytes,
-        reply: reply_tx,
-    })
-    .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+    // Long-poll bound. The wait is served here on the async MCP side, NOT in the
+    // windowed drain loop, so the runtime event loop is never blocked. Each
+    // iteration is an ordinary poll; empty polls are side-effect-free (the
+    // authority only transitions items to Delivered when it actually returns
+    // them), so re-polling cannot drop or double-deliver input.
+    const MAX_WAIT_MS: u64 = 30_000;
+    const POLL_INTERVAL_MS: u64 = 150;
+    let wait_ms = p.wait_ms.unwrap_or(0).min(MAX_WAIT_MS);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
 
-    match reply_rx.await {
-        Ok(Ok(batch)) => Ok(PortalProjectionGetPendingInputResult {
-            accepted: true,
-            items: batch.items,
-            remaining_count: batch.remaining_count,
-            remaining_bytes: batch.remaining_bytes,
-            status_summary: "pending input returned".to_string(),
-        }),
-        Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
-            error_code: rejection.error_code,
-            message: rejection.message,
-        }),
-        Err(_) => Err(McpError::Internal(
-            "portal authority did not respond (channel dropped)".to_string(),
-        )),
+    loop {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(crate::portal_op::PortalOp::GetPendingInput {
+            projection_id: p.projection_id.clone(),
+            owner_token: p.owner_token.clone(),
+            max_items: p.max_items,
+            max_bytes: p.max_bytes,
+            reply: reply_tx,
+        })
+        .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+        let batch = match reply_rx.await {
+            Ok(Ok(batch)) => batch,
+            Ok(Err(rejection)) => {
+                return Err(McpError::ProjectionRejected {
+                    error_code: rejection.error_code,
+                    message: rejection.message,
+                });
+            }
+            Err(_) => {
+                return Err(McpError::Internal(
+                    "portal authority did not respond (channel dropped)".to_string(),
+                ));
+            }
+        };
+
+        let now = tokio::time::Instant::now();
+        // Return as soon as there is *any* pending input to surface. A non-empty
+        // batch is the obvious case; an empty batch with `remaining_count > 0` is
+        // budget backpressure — input exists but did not fit this caller's
+        // max_items/max_bytes budget. Re-polling cannot make an over-budget item
+        // fit, so suppressing that signal until the wait expires would stall the
+        // caller for up to 30s; surface it immediately so it can raise its cap
+        // and re-call (hud-p4ufx review follow-up).
+        if !batch.items.is_empty() || batch.remaining_count > 0 || now >= deadline {
+            return Ok(PortalProjectionGetPendingInputResult {
+                accepted: true,
+                items: batch.items,
+                remaining_count: batch.remaining_count,
+                remaining_bytes: batch.remaining_bytes,
+                status_summary: "pending input returned".to_string(),
+            });
+        }
+
+        // No input yet and time remains: sleep a short interval, then re-poll.
+        let remaining = deadline - now;
+        tokio::time::sleep(remaining.min(std::time::Duration::from_millis(POLL_INTERVAL_MS))).await;
     }
 }
 
@@ -6220,6 +6266,153 @@ mod tests {
         assert_eq!(result.items[0].input_id, "i1");
         assert_eq!(result.remaining_count, 3);
         assert_eq!(result.remaining_bytes, 42);
+    }
+
+    /// Long-poll (hud-p4ufx): with `wait_ms` set, a poll that immediately finds
+    /// an item returns at once — it must NOT keep polling for the full wait.
+    #[tokio::test]
+    async fn portal_get_pending_input_long_poll_returns_immediately_when_items_present() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let polls_seen = polls.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                if let crate::portal_op::PortalOp::GetPendingInput { reply, .. } = op {
+                    polls_seen.fetch_add(1, Ordering::SeqCst);
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: vec![crate::portal_op::PendingInputEntry {
+                                input_id: "i1".to_string(),
+                                projection_id: "p1".to_string(),
+                                submission_text: "hi".to_string(),
+                                submitted_at_wall_us: 1,
+                                expires_at_wall_us: 2,
+                                delivery_state: "delivered".to_string(),
+                                content_classification: "household".to_string(),
+                            }],
+                            remaining_count: 0,
+                            remaining_bytes: 0,
+                        }))
+                        .expect("reply must send");
+                }
+            }
+        });
+        let result = handle_portal_projection_get_pending_input(
+            json!({ "projection_id": "p1", "owner_token": "t1", "wait_ms": 5000 }),
+            Some(&tx),
+        )
+        .await
+        .expect("poll must succeed");
+        assert!(result.accepted);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "an immediately-available item must end the long-poll after a single poll"
+        );
+        drop(tx);
+        responder.await.expect("responder task must finish");
+    }
+
+    /// Long-poll (hud-p4ufx): with no input available, the call re-polls until
+    /// the wait elapses and returns an empty batch — without busy-spinning. We
+    /// assert >=2 polls occurred (proving the bounded wait loop ran) rather than
+    /// asserting wall-clock time, which would be flaky.
+    #[tokio::test]
+    async fn portal_get_pending_input_long_poll_repolls_then_returns_empty() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let polls_seen = polls.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                if let crate::portal_op::PortalOp::GetPendingInput { reply, .. } = op {
+                    polls_seen.fetch_add(1, Ordering::SeqCst);
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: vec![],
+                            remaining_count: 0,
+                            remaining_bytes: 0,
+                        }))
+                        .expect("reply must send");
+                }
+            }
+        });
+        let result = handle_portal_projection_get_pending_input(
+            json!({ "projection_id": "p1", "owner_token": "t1", "wait_ms": 400 }),
+            Some(&tx),
+        )
+        .await
+        .expect("poll must succeed");
+        assert!(result.accepted);
+        assert!(
+            result.items.is_empty(),
+            "long-poll with no input must return an empty batch, not block forever"
+        );
+        assert!(
+            polls.load(Ordering::SeqCst) >= 2,
+            "a 400ms wait at a 150ms poll interval must re-poll at least twice (got {})",
+            polls.load(Ordering::SeqCst)
+        );
+        drop(tx);
+        responder.await.expect("responder task must finish");
+    }
+
+    /// Long-poll (hud-p4ufx review follow-up): when input is pending but does not
+    /// fit the caller's budget, the authority returns an empty batch with
+    /// `remaining_count > 0`. That is backpressure, not "no input yet" — the call
+    /// must return immediately (after a single poll) so the caller can raise its
+    /// cap, rather than stalling for the full wait re-polling an over-budget item
+    /// that can never fit.
+    #[tokio::test]
+    async fn portal_get_pending_input_long_poll_returns_immediately_on_budget_backpressure() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let polls_seen = polls.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                if let crate::portal_op::PortalOp::GetPendingInput { reply, .. } = op {
+                    polls_seen.fetch_add(1, Ordering::SeqCst);
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: vec![],
+                            remaining_count: 1,
+                            remaining_bytes: 4096,
+                        }))
+                        .expect("reply must send");
+                }
+            }
+        });
+        let result = handle_portal_projection_get_pending_input(
+            json!({ "projection_id": "p1", "owner_token": "t1", "wait_ms": 5000, "max_bytes": 8 }),
+            Some(&tx),
+        )
+        .await
+        .expect("poll must succeed");
+        assert!(result.accepted);
+        assert!(
+            result.items.is_empty(),
+            "an over-budget item yields an empty batch"
+        );
+        assert_eq!(
+            result.remaining_count, 1,
+            "backpressure must surface the pending-but-unfit item count"
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "budget backpressure must end the long-poll after a single poll, not stall for the full wait"
+        );
+        drop(tx);
+        responder.await.expect("responder task must finish");
     }
 
     /// hud-s8a62 acceptance: a known authority rejection (TOKEN_EXPIRED) must

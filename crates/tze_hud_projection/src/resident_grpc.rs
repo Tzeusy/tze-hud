@@ -14,8 +14,9 @@ use thiserror::Error;
 
 use crate::{
     AdapterDraftBatch, AdapterDraftNotification, ContentClassification, PortalInputFeedback,
-    PortalInputSubmission, ProjectedPortalPresentation, ProjectedPortalState, ProjectionAuthority,
-    ProjectionLifecycleState, TranscriptUnit,
+    PortalInputFeedbackState, PortalInputSubmission, ProjectedPortalPresentation,
+    ProjectedPortalState, ProjectionAuthority, ProjectionErrorCode, ProjectionLifecycleState,
+    TranscriptUnit,
 };
 
 /// Content-free disconnect/stale marker line rendered when the portal's driving
@@ -1008,12 +1009,44 @@ fn portal_markdown(
         push_line(&mut result, &format!("pending HUD input: {pending}"));
     }
     if let Some(feedback) = &state.last_input_feedback {
-        push_line(
-            &mut result,
-            &format!("last composer: {:?}", feedback.feedback_state),
-        );
+        push_line(&mut result, &composer_feedback_line(feedback));
     }
     truncate_utf8(result, MAX_PORTAL_MARKDOWN_BYTES)
+}
+
+/// Human-legible one-line status for the last composer submission.
+///
+/// Replaces the old `Debug`-formatted enum (`last composer: Rejected`) with a
+/// reason the viewer can act on. On rejection we map the machine error code to
+/// a friendly sentence, falling back to the authority's `status_summary`
+/// (already populated, e.g. "PROJECTION_HUD_UNAVAILABLE: portal input rejected")
+/// when the code is absent (hud-phdkd).
+fn composer_feedback_line(feedback: &PortalInputFeedback) -> String {
+    match feedback.feedback_state {
+        PortalInputFeedbackState::Accepted => "✓ sent".to_string(),
+        PortalInputFeedbackState::Rejected => {
+            let reason = match feedback.error_code {
+                Some(ProjectionErrorCode::ProjectionHudUnavailable) => {
+                    "the agent is disconnected".to_string()
+                }
+                Some(ProjectionErrorCode::ProjectionInputQueueFull) => {
+                    "too many replies waiting — try again shortly".to_string()
+                }
+                Some(ProjectionErrorCode::ProjectionInputTooLarge) => {
+                    "message too long".to_string()
+                }
+                Some(ProjectionErrorCode::ProjectionRateLimited) => {
+                    "sending too fast — try again shortly".to_string()
+                }
+                Some(
+                    ProjectionErrorCode::ProjectionTokenExpired
+                    | ProjectionErrorCode::ProjectionUnauthorized,
+                ) => "the projection session expired".to_string(),
+                _ => clamp_one_line(&feedback.status_summary, 160),
+            };
+            format!("⚠ not sent — {reason}")
+        }
+    }
 }
 
 /// Build the composer region line for the expanded portal node.

@@ -67,6 +67,7 @@ Successful attach responses include `owner_token`, `request_id`, `projection_id`
 
 Accepted `output_kind` values: `assistant` *(default)*, `tool`, `status`, `error`, `other`.
 Any other value is rejected. Omit `output_kind` to get the `assistant` default.
+`viewer` is runtime-reserved (the operator-reply echo) and rejected if published by an adapter.
 
 ```json
 {
@@ -110,11 +111,14 @@ Accepted `lifecycle_state` values: `attached`, `active`, `degraded`, `hud_unavai
   "client_timestamp_wall_us": 1777400003000000,
   "owner_token": "<owner-token-from-attach>",
   "max_items": 4,
-  "max_bytes": 4096
+  "max_bytes": 4096,
+  "wait_ms": 15000
 }
 ```
 
 Handle only the bounded input items returned. If more input is queued, the response should report compact remaining counts instead of returning unbounded inbox history.
+
+> `wait_ms` (optional, max 30000): long-poll — the call blocks until a reply arrives or the wait elapses, so you can await the operator with one call instead of busy-polling. Omit (or `0`) to return immediately.
 
 ## Acknowledge Input
 

@@ -65,6 +65,8 @@ Successful attach responses include `owner_token`, `request_id`, `projection_id`
 
 ## Publish Output
 
+> Accepted `output_kind`: `assistant` (default), `tool`, `status`, `error`, `other`. `viewer` is runtime-reserved (the operator-reply echo) and rejected if published.
+
 ```json
 {
   "operation": "publish_output",
@@ -73,7 +75,7 @@ Successful attach responses include `owner_token`, `request_id`, `projection_id`
   "client_timestamp_wall_us": 1777400001000000,
   "owner_token": "<owner-token-from-attach>",
   "output_text": "Implemented the HUD projection skill package and mirror docs.",
-  "output_kind": "assistant_message",
+  "output_kind": "assistant",
   "content_classification": "private",
   "logical_unit_id": "turn-42",
   "coalesce_key": "latest-summary"
@@ -81,6 +83,8 @@ Successful attach responses include `owner_token`, `request_id`, `projection_id`
 ```
 
 ## Publish Status
+
+> Accepted `lifecycle_state`: `attached`, `active`, `degraded`, `hud_unavailable`, `detached`, `cleanup_pending`, `expired`.
 
 ```json
 {
@@ -104,11 +108,14 @@ Successful attach responses include `owner_token`, `request_id`, `projection_id`
   "client_timestamp_wall_us": 1777400003000000,
   "owner_token": "<owner-token-from-attach>",
   "max_items": 4,
-  "max_bytes": 4096
+  "max_bytes": 4096,
+  "wait_ms": 15000
 }
 ```
 
 Handle only the bounded input items returned. If more input is queued, the response should report compact remaining counts instead of returning unbounded inbox history.
+
+> `wait_ms` (optional, max 30000): long-poll — the call blocks until a reply arrives or the wait elapses, so you can await the operator with one call instead of busy-polling. Omit (or `0`) to return immediately.
 
 ## Acknowledge Input
 

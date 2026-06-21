@@ -414,6 +414,15 @@ struct WindowedRuntimeState {
     /// abandoned cleanly because the tile is gone; the monotonic counter is
     /// discarded with the entry.
     portal_resize_states: std::collections::HashMap<tze_hud_scene::SceneId, PortalResizeState>,
+    /// Resize chord identities whose `KeyDown` was consumed by the focused-portal
+    /// hotkey path and whose matching `KeyUp` must therefore be swallowed.
+    ///
+    /// Live Windows (SendInput) can deliver release-only resize key streams, so
+    /// `dispatch_key_up_event_inner` resizes on key-up as a fallback (hud-v4k1h).
+    /// This set keeps a normal physical down/up pair to exactly one resize: the
+    /// key-down inserts the chord here, the matching key-up removes it instead of
+    /// resizing again.
+    consumed_portal_resize_keydowns: std::collections::HashSet<String>,
     /// Shared local composer echo state for the compositor thread (hud-r3ax6).
     ///
     /// Written by the input-event thread (this thread) on every keystroke that
@@ -2093,6 +2102,7 @@ impl WindowedRuntime {
             input_event_tx,
             pending_blur_delivery_context: None,
             portal_resize_states: std::collections::HashMap::new(),
+            consumed_portal_resize_keydowns: std::collections::HashSet::new(),
             // Placeholder; replaced in resumed() with the Arc cloned from the
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
