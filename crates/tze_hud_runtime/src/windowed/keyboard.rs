@@ -87,6 +87,21 @@ fn keyboard_kind_preview(kind: &tze_hud_input::KeyboardDispatchKind) -> String {
     }
 }
 
+/// Stable identity for a portal-resize chord, used to pair a consumed `KeyDown`
+/// with its later `KeyUp` so the key-up fallback (below) never double-resizes a
+/// normal physical key-down/key-up pair.
+///
+/// Prefer the physical `key_code` (layout- and modifier-independent: `Equal`,
+/// `Minus`, `NumpadAdd`, …); fall back to the logical `key` only when the OS
+/// did not supply a code.
+fn portal_resize_key_code(raw_key_code: &str, raw_key: &str) -> String {
+    if raw_key_code.is_empty() {
+        raw_key.to_string()
+    } else {
+        raw_key_code.to_string()
+    }
+}
+
 /// A raw keyboard event deferred from the winit event-loop thread because the
 /// shared-state or scene Tokio mutex was busy at dispatch time (hud-2fz34).
 ///
@@ -284,6 +299,14 @@ impl WinitApp {
                 .or_else(|| HotkeyResizeDir::from_key_code(&raw.key_code, raw.modifiers.ctrl))
             {
                 if self.apply_portal_resize_hotkey(tab_id, dir) {
+                    // Remember this chord so its matching `KeyUp` is swallowed by
+                    // the key-up fallback instead of resizing a second time
+                    // (hud-v4k1h: live Windows can deliver key-up-only streams, so
+                    // the key-up path also resizes — this dedup keeps a normal
+                    // down/up pair to exactly one resize).
+                    self.state
+                        .consumed_portal_resize_keydowns
+                        .insert(portal_resize_key_code(&raw.key_code, &raw.key));
                     tracing::debug!(
                         key = %str_preview(&raw.key),
                         key_code = %str_preview(&raw.key_code),
@@ -433,6 +456,48 @@ impl WinitApp {
         active_tab: Option<tze_hud_scene::SceneId>,
     ) {
         let Some(tab_id) = active_tab else { return };
+
+        // ── Portal resize hotkey: KeyUp fallback (hud-v4k1h) ──────────────
+        //
+        // On live Windows, SendInput-driven Ctrl chords can deliver ONLY the
+        // `KeyUp` for `=`/`-`/`+` (the `KeyDown` never arrives while Ctrl is
+        // held), so a key-down-only resize intercept silently does nothing.
+        // We therefore also resize on key-up.
+        //
+        // Two cases, in order:
+        //   1. The matching `KeyDown` already resized → swallow this `KeyUp`
+        //      (dedup) so a normal physical down/up pair resizes exactly once.
+        //   2. No `KeyDown` was consumed → treat this `KeyUp` as the resize
+        //      trigger (the release-only live stream).
+        //
+        // Direction resolution mirrors the key-down path: logical key first,
+        // then the physical `KeyCode` fallback (PR #937) so the chord is
+        // deterministic regardless of layout or held modifiers.
+        let resize_key_code = portal_resize_key_code(&raw.key_code, &raw.key);
+        if self
+            .state
+            .consumed_portal_resize_keydowns
+            .remove(&resize_key_code)
+        {
+            tracing::debug!(
+                key = %str_preview(&raw.key),
+                key_code = %str_preview(&raw.key_code),
+                "portal resize: matching KeyUp consumed after KeyDown resize"
+            );
+            return;
+        }
+        if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl)
+            .or_else(|| HotkeyResizeDir::from_key_code(&raw.key_code, raw.modifiers.ctrl))
+            && self.apply_portal_resize_hotkey(tab_id, dir)
+        {
+            tracing::debug!(
+                key = %str_preview(&raw.key),
+                key_code = %str_preview(&raw.key_code),
+                "portal resize: Ctrl KeyUp fallback consumed (resize applied)"
+            );
+            return;
+        }
+
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
         let ns_lock_busy = std::cell::Cell::new(false);
