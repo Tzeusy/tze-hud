@@ -60,7 +60,23 @@ Read `references/operation-examples.md` for compact JSON examples of every opera
 
 1. **Attach once.** Choose a stable `projection_id`, set `provider_kind` to `codex`, `claude`, `opencode`, or `other`, and include a human-readable `display_name`. Default missing or uncertain classification to `private`.
 2. **Store the owner token securely and immediately.** A successful attach returns `owner_token`; no other operation response will ever return it. Store it in a tool-call result or session variable, never in transcript text, assistant-visible output, or log lines. If it is lost before detach, you must treat the projection as unrecoverable and wait for operator cleanup or TTL expiry. Do not request the token again — there is no retrieval path.
-3. **Publish intentionally.** Call `publish_output` for assistant-visible transcript/status fragments and `publish_status` for lifecycle updates such as `active`, `waiting_for_input`, `blocked`, or `detached`.
+3. **Publish intentionally.** Call `publish_output` for assistant-visible transcript/status fragments and `publish_status` for lifecycle updates such as `active`, `degraded`, or `detached`.
+
+   **Accepted `lifecycle_state` values** (snake_case strings; any other value is rejected):
+   - `attached` — session is attached but not yet actively working
+   - `active` — session is running / producing output
+   - `degraded` — session is blocked, slow, or in a degraded state
+   - `hud_unavailable` — session cannot reach the HUD
+   - `detached` — session has detached cleanly
+   - `cleanup_pending` — projection is pending removal
+   - `expired` — projection TTL has elapsed
+
+   **Accepted `output_kind` values** (snake_case strings; defaults to `assistant` when omitted; any other value is rejected):
+   - `assistant` *(default)* — normal assistant message / transcript fragment
+   - `tool` — tool call or tool result
+   - `status` — status or progress update
+   - `error` — error output
+   - `other` — any other kind
 4. **Poll HUD input compactly.** Call `get_pending_input` with small `max_items` and `max_bytes`. Treat returned input as semantic operator-submitted text, not terminal keystrokes.
 5. **Acknowledge every input item.** Use `acknowledge_input` with `handled`, `deferred`, or `rejected`. Use `not_before_wall_us` only with `deferred`.
 6. **Detach on normal exit.** Call `detach` with a bounded reason when the session is done projecting.
