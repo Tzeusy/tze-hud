@@ -8,14 +8,14 @@ beads below.
 ## 1. Contract and review
 
 - [x] 1.1 Validate this change with `openspec validate portal-composer-interaction-completeness --strict`
-- [ ] 1.2 Confirm doctrine alignment: "one scene model, two profiles" (pointer-less Mobile Presence Node must be operable), "local feedback first", and focus reuse of runtime-owned rules (CLAUDE.md, RFC 0004, RFC 0013 §4.3)
-- [ ] 1.3 Confirm the deltas add no new transport/input plane and do not change focus scoping, latency budgets, draft bounds, or IME status (v1-reserved)
+- [x] 1.2 Confirm doctrine alignment: "one scene model, two profiles" (pointer-less Mobile Presence Node must be operable), "local feedback first", and focus reuse of runtime-owned rules (CLAUDE.md, RFC 0004, RFC 0013 §4.3)
+- [x] 1.3 Confirm the deltas add no new transport/input plane and do not change focus scoping, latency budgets, draft bounds, or IME status (v1-reserved)
 
-## 2. Implement — pointer-independent focus (`hud-v0cal`)
+## 2. Implement — pointer-independent focus (`hud-v0cal`) — DONE (PR #980)
 
-- [ ] 2.1 Wire a keyboard focus-traversal path (focus-advance/retreat key + token-defined focus chord) into the windowed key-down path BEFORE agent dispatch, routing to the runtime focus manager to focus the composer hit region. Coordinate with the promotion epic (`hud-g1ena`, composer render-path ownership).
-- [ ] 2.2 Keep focus scoping intact: traversal respects chrome/shell precedence and safe-mode capture; an unfocused portal still does not consume composer keystrokes.
-- [ ] 2.3 Test: composer becomes focusable and editable with no pointer events (glasses/no-pointer path).
+- [x] 2.1 Wire a keyboard focus-traversal path (Tab/Shift+Tab) into `dispatch_key_down_event_inner` BEFORE composer/agent routing, driving the existing `FocusManager::navigate_next`/`navigate_prev`. Landed INPUT-PATH only (no renderer touch) so no promotion coordination was needed; shared `InputProcessor::apply_focus_transition_side_effects` keeps the keyboard and pointer click-to-focus paths in sync.
+- [x] 2.2 Focus scoping intact: traversal runs after safe-mode capture + shell-reserved + resize hotkey and before composer/agent; Ctrl/Alt/Meta chords excluded (Win/Cmd+Tab reach the OS); the consumed Tab key-down AND its matching key-up are swallowed so Tab is never raw input.
+- [x] 2.3 Test: composer acquires focus + edits with no pointer events (regression test added); existing pointer click-to-focus test still passes after the shared-helper extraction.
 
 ## 3. Implement — horizontal caret-follow (`hud-zlfi4`)
 
