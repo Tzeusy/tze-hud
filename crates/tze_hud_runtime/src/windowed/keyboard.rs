@@ -3,11 +3,15 @@ use std::ops::ControlFlow;
 use std::time::Instant;
 
 use tze_hud_input::{
-    HotkeyResizeDir, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ShellReservedShortcut,
+    HotkeyResizeDir, KeyboardModifiers, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
+    ShellReservedShortcut,
 };
 
 use super::WinitApp;
-use super::input_dispatch::{dispatch_keyboard_event, dispatch_scroll_offset_event};
+use super::input_dispatch::{
+    dispatch_focus_event, dispatch_keyboard_event, dispatch_scroll_offset_event,
+};
+use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire};
 
 pub(super) struct ComposerDeliveryContext {
     pub(super) namespace: String,
@@ -103,6 +107,22 @@ fn portal_resize_key_code(raw_key_code: &str, raw_key: &str) -> String {
     }
 }
 
+/// Whether a key event is the bare Tab / Shift+Tab focus-traversal chord
+/// (hud-v0cal).
+///
+/// `true` only for `Tab` with no Ctrl / Alt / Meta held — the exact chord that
+/// drives keyboard focus traversal.  Shift is allowed (Shift+Tab = reverse
+/// traversal).  Ctrl+Tab / Ctrl+Shift+Tab are shell-reserved (tab switching);
+/// Alt+Tab and Win/Cmd+Tab are OS window switchers — all excluded.
+///
+/// Used to keep the key-down intercept (`dispatch_key_down_event_inner`) and the
+/// key-up swallow (`dispatch_key_up_event_inner`) in lockstep: a bare Tab
+/// key-down is consumed for traversal, so its matching key-up must be swallowed
+/// too, never reaching the composer or agent as a raw release.
+fn is_bare_tab_chord(key: &str, modifiers: &KeyboardModifiers) -> bool {
+    key == "Tab" && !modifiers.ctrl && !modifiers.alt && !modifiers.meta
+}
+
 /// A raw keyboard event deferred from the winit event-loop thread because the
 /// shared-state or scene Tokio mutex was busy at dispatch time (hud-2fz34).
 ///
@@ -115,6 +135,19 @@ pub(super) enum PendingKeyboardEvent {
     KeyDown(RawKeyDownEvent),
     KeyUp(RawKeyUpEvent),
     Character(RawCharacterEvent),
+}
+
+/// Outcome of a Tab / Shift+Tab keyboard focus-traversal attempt (hud-v0cal).
+///
+/// `Done` — the traversal ran (the FocusManager cycle advanced, or was empty)
+/// and the Tab event was consumed.
+/// `Busy` — a required lock (shared-state / scene) stayed contended past the
+/// bounded `INTERACTION_LOCK_BUDGET` spin; the caller defers the Tab event to
+/// the next `about_to_wait` drain (the overrun fallback).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TabFocusOutcome {
+    Done,
+    Busy,
 }
 
 fn restore_front_requeued_event(
@@ -351,6 +384,35 @@ impl WinitApp {
             }
         }
 
+        // ── Keyboard focus traversal: Tab / Shift+Tab (hud-v0cal) ─────────
+        //
+        // Tab advances keyboard focus to the next focusable affordance and
+        // Shift+Tab to the previous one, so the composer (and any focusable
+        // region) is reachable WITHOUT a pointer — the no-pointer surfaces this
+        // contract targets (smart glasses / Mobile Presence Node).  Spec change
+        // `portal-composer-interaction-completeness`, "Transcript Interaction
+        // Contract", scenario "composer is focusable without a pointer".
+        //
+        // Scoping precedence: this runs AFTER the safe-mode capture (outer fn),
+        // the shell/chrome-reserved set, and the portal-resize hotkey, and
+        // BEFORE composer/agent routing.  Ctrl+Tab / Ctrl+Shift+Tab are
+        // shell-reserved (tab switching, handled at the chrome layer) and are
+        // excluded here by the `!ctrl` guard; only the bare Tab / Shift+Tab
+        // chord drives focus traversal.  Alt+Tab (OS window switcher) and
+        // Meta+Tab (Win+Tab on Windows / Cmd+Tab on macOS — also OS window
+        // switchers) are likewise excluded.  The Tab key is always consumed so
+        // it is never forwarded to the composer draft or the agent as raw input.
+        if is_bare_tab_chord(&raw.key, &raw.modifiers) {
+            if self.navigate_portal_focus(tab_id, raw.modifiers.shift) == TabFocusOutcome::Busy {
+                // A required lock was busy — defer and retry on the next drain,
+                // mirroring the composer/namespace busy-defer paths below.
+                self.state
+                    .pending_keyboard_events
+                    .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+            }
+            return;
+        }
+
         // ── Composer draft intercept (§4.4) ──────────────────────────────
         if self.state.input_processor.is_composer_active() {
             let delivery_context = match self.composer_delivery_context_for_tab(tab_id) {
@@ -437,6 +499,100 @@ impl WinitApp {
         }
     }
 
+    /// Advance keyboard focus by one step for a Tab / Shift+Tab key-down
+    /// (hud-v0cal) and broadcast the resulting focus transition.
+    ///
+    /// Drives [`tze_hud_input::InputProcessor::navigate_focus`] — the no-pointer
+    /// analogue of the pointer click-to-focus path — so the composer (and any
+    /// focusable region) is reachable without a pointer.  The composer
+    /// activation / hit-region-focus bookkeeping is handled inside
+    /// `navigate_focus`; this method mirrors the pointer path's transition
+    /// handling in `lifecycle.rs` (FocusGained/FocusLost broadcast over the
+    /// FOCUS_EVENTS channel, plus the composer blur delivery-context capture and
+    /// local-echo clear).
+    ///
+    /// Returns [`TabFocusOutcome::Busy`] when the shared-state or scene lock
+    /// stays contended past [`INTERACTION_LOCK_BUDGET`], so the caller can defer
+    /// the Tab event to the next drain (the overrun fallback).
+    fn navigate_portal_focus(
+        &mut self,
+        tab_id: tze_hud_scene::SceneId,
+        reverse: bool,
+    ) -> TabFocusOutcome {
+        // A Tab / Shift+Tab focus traversal is a discrete, deliberate user action
+        // that must produce visible feedback this frame, so acquire with a bounded
+        // spin (INTERACTION_LOCK_BUDGET) rather than a single try_lock — the same
+        // strategy `apply_portal_resize_hotkey` uses for the resize hotkey, also a
+        // discrete keyboard action.  A single contended try_lock (compositor /
+        // streaming publish holding the scene) would otherwise force a full
+        // about_to_wait round-trip before the focus moves.  navigate_focus needs
+        // &mut scene to update hit_region_states focus flags; on a true overrun we
+        // fall back to deferring the event via TabFocusOutcome::Busy.
+        let transition = {
+            let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+            else {
+                tracing::trace!("tab focus traversal deferred: shared_state lock budget elapsed");
+                return TabFocusOutcome::Busy;
+            };
+            let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
+                tracing::trace!("tab focus traversal deferred: scene lock budget elapsed");
+                return TabFocusOutcome::Busy;
+            };
+            self.state.input_processor.navigate_focus(
+                &mut self.state.focus_manager,
+                &mut scene,
+                tab_id,
+                reverse,
+            )
+        };
+
+        // Mirror the pointer path's transition handling (lifecycle.rs
+        // process_with_focus broadcast block).  The locks are already released.
+        let mut composer_focus_lost = false;
+        if let Some((ev, ns)) = &transition.gained {
+            tracing::debug!(
+                namespace = %str_preview(ns),
+                tile_id = ?ev.tile_id,
+                node_id = ?ev.node_id,
+                source = ?ev.source,
+                reverse,
+                "tab focus traversal: focus gained"
+            );
+            // A new focus-gain clears any stale blur delivery context.
+            self.state.pending_blur_delivery_context = None;
+        }
+        if let Some((ev, ns)) = &transition.lost {
+            tracing::debug!(
+                namespace = %str_preview(ns),
+                tile_id = ?ev.tile_id,
+                node_id = ?ev.node_id,
+                reason = ?ev.reason,
+                "tab focus traversal: focus lost"
+            );
+            // Capture the composer delivery context while namespace + node_id +
+            // tile_id are all still known, so a blur-triggered terminal draft
+            // batch can still be delivered at the next settle (§4.3 flush
+            // guarantee on blur).
+            if let Some(node_id) = ev.node_id {
+                self.state.pending_blur_delivery_context = Some(ComposerDeliveryContext {
+                    namespace: ns.clone(),
+                    node_id_bytes: *node_id.as_uuid().as_bytes(),
+                    tile_id: ev.tile_id,
+                });
+            }
+            composer_focus_lost = true;
+        }
+
+        dispatch_focus_event(&self.state.input_event_tx, transition);
+
+        // Clear the local composer echo overlay if focus left a composer region.
+        if composer_focus_lost {
+            self.clear_local_composer_echo();
+        }
+
+        TabFocusOutcome::Done
+    }
+
     /// Translate a raw key-up event through the `KeyboardProcessor`, log it,
     /// and broadcast it over the `INPUT_EVENTS` gRPC channel.
     ///
@@ -490,6 +646,21 @@ impl WinitApp {
         active_tab: Option<tze_hud_scene::SceneId>,
     ) {
         let Some(tab_id) = active_tab else { return };
+
+        // ── Keyboard focus traversal: swallow the matching Tab KeyUp (hud-v0cal) ──
+        //
+        // A bare Tab / Shift+Tab KeyDown is unconditionally consumed by focus
+        // traversal in `dispatch_key_down_event_inner` (never forwarded as raw
+        // input).  Its matching KeyUp must therefore also be swallowed: otherwise
+        // the agent that just gained focus would receive a raw Tab release with no
+        // preceding KeyDown — an impossible key sequence that contradicts the
+        // "Tab is never forwarded as raw input" contract.  The modifier guard
+        // matches the KeyDown intercept exactly (Ctrl / Alt / Meta excluded), so a
+        // shell-reserved Ctrl+Tab or OS Alt/Meta+Tab release still routes normally.
+        if is_bare_tab_chord(&raw.key, &raw.modifiers) {
+            tracing::debug!("tab focus traversal: matching KeyUp swallowed (KeyDown consumed)");
+            return;
+        }
 
         // ── Portal resize hotkey: KeyUp fallback (hud-v4k1h) ──────────────
         //
@@ -969,7 +1140,77 @@ mod tests {
     use tze_hud_input::{KeyboardModifiers, RawKeyDownEvent};
     use tze_hud_scene::MonoUs;
 
-    use super::{PendingKeyboardEvent, drain_keyboard_queue_bounded, restore_front_requeued_event};
+    use super::{
+        PendingKeyboardEvent, drain_keyboard_queue_bounded, is_bare_tab_chord,
+        restore_front_requeued_event,
+    };
+
+    /// hud-v0cal: the bare Tab / Shift+Tab focus-traversal chord is recognised,
+    /// and the modifier-laden Tab variants (shell-reserved Ctrl+Tab, OS Alt/Meta
+    /// window switchers) are NOT — for BOTH the key-down intercept and the key-up
+    /// swallow, which share this predicate.
+    ///
+    /// This guards the key-up contract: because a bare Tab key-down is always
+    /// consumed for traversal (never forwarded), `dispatch_key_up_event_inner`
+    /// must early-return on the same predicate so the matching bare Tab key-UP is
+    /// never delivered to the composer or agent as a raw release.  A regression
+    /// that narrowed/loosened either guard would diverge them and surface here.
+    #[test]
+    fn bare_tab_chord_predicate_matches_keydown_and_keyup_intercepts() {
+        let bare = KeyboardModifiers::NONE;
+        let shift = KeyboardModifiers {
+            shift: true,
+            ..KeyboardModifiers::NONE
+        };
+        let ctrl = KeyboardModifiers {
+            ctrl: true,
+            ..KeyboardModifiers::NONE
+        };
+        let ctrl_shift = KeyboardModifiers {
+            ctrl: true,
+            shift: true,
+            ..KeyboardModifiers::NONE
+        };
+        let alt = KeyboardModifiers {
+            alt: true,
+            ..KeyboardModifiers::NONE
+        };
+        let meta = KeyboardModifiers {
+            meta: true,
+            ..KeyboardModifiers::NONE
+        };
+
+        // Bare Tab and Shift+Tab ARE focus traversal → consumed on key-down and
+        // swallowed on key-up (never delivered to composer/agent).
+        assert!(is_bare_tab_chord("Tab", &bare), "Tab → traversal");
+        assert!(
+            is_bare_tab_chord("Tab", &shift),
+            "Shift+Tab → reverse traversal"
+        );
+
+        // Modifier-laden Tab variants are NOT traversal → routed normally
+        // (Ctrl+Tab/Ctrl+Shift+Tab shell-reserved; Alt/Meta+Tab OS switchers).
+        assert!(
+            !is_bare_tab_chord("Tab", &ctrl),
+            "Ctrl+Tab is shell-reserved"
+        );
+        assert!(
+            !is_bare_tab_chord("Tab", &ctrl_shift),
+            "Ctrl+Shift+Tab is shell-reserved"
+        );
+        assert!(
+            !is_bare_tab_chord("Tab", &alt),
+            "Alt+Tab is the OS switcher"
+        );
+        assert!(
+            !is_bare_tab_chord("Tab", &meta),
+            "Win/Cmd+Tab is the OS switcher"
+        );
+
+        // Non-Tab keys are never affected by the traversal guards.
+        assert!(!is_bare_tab_chord("a", &bare), "plain character is not Tab");
+        assert!(!is_bare_tab_chord("Enter", &bare), "Enter is not Tab");
+    }
 
     fn key_down(key: &str, timestamp_mono_us: u64) -> PendingKeyboardEvent {
         PendingKeyboardEvent::KeyDown(RawKeyDownEvent {

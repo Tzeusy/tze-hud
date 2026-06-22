@@ -639,37 +639,7 @@ impl InputProcessor {
             } = hit
             {
                 let transition = focus_manager.on_click(tab_id, tile_id, Some(node_id), scene);
-                // Update focused local state in hit_region_states based on transition.
-                // Clear the node that lost focus (if any) and set the one that gained.
-                if let Some((lost_ev, _)) = &transition.lost {
-                    if let Some(lost_node_id) = lost_ev.node_id {
-                        if let Some(state) = scene.hit_region_states.get_mut(&lost_node_id) {
-                            state.focused = false;
-                        }
-                        // If the node that lost focus was a composer region, notify the manager.
-                        // `on_focus_lost` flushes any pending draft state (blur is a settle point)
-                        // and returns that batch.  Store it in `pending_flushed_batch` so the
-                        // next `try_flush_composer_draft` call can deliver the terminal state.
-                        if self.composer_draft_manager.focused_node() == Some(lost_node_id) {
-                            self.pending_flushed_batch =
-                                self.composer_draft_manager.on_focus_lost();
-                        }
-                    }
-                }
-                if let Some((gained_ev, _)) = &transition.gained {
-                    if let Some(gained_node_id) = gained_ev.node_id {
-                        if let Some(state) = scene.hit_region_states.get_mut(&gained_node_id) {
-                            state.focused = true;
-                        }
-                        // If the newly focused node accepts composer input, activate the manager.
-                        // `suspended = false` initially; safe-mode governance is applied
-                        // separately via `composer_draft_manager.set_suspended()`.
-                        if node_accepts_composer_input(scene, gained_node_id) {
-                            self.composer_draft_manager
-                                .on_focus_gained(gained_node_id, false);
-                        }
-                    }
-                }
+                self.apply_focus_transition_side_effects(&transition, scene);
                 if transition.gained.is_some() || transition.lost.is_some() {
                     Some(transition)
                 } else {
@@ -684,6 +654,82 @@ impl InputProcessor {
 
         let result = self.process(event, scene);
         (result, focus_transition)
+    }
+
+    /// Apply the local-state side effects of a [`FocusTransition`] to the scene
+    /// and composer draft manager.
+    ///
+    /// Shared by the pointer click path ([`Self::process_with_focus`]) and the
+    /// keyboard focus-traversal path ([`Self::navigate_focus`]) so both routes
+    /// keep `hit_region_states.focused` and composer activation/flush in sync.
+    ///
+    /// - The node that lost focus has its `focused` flag cleared; if it was the
+    ///   active composer region, `on_focus_lost` flushes any pending draft state
+    ///   (blur is a settle point) into `pending_flushed_batch` for the next
+    ///   `try_flush_composer_draft`.
+    /// - The node that gained focus has its `focused` flag set; if it accepts
+    ///   composer input, the draft manager is activated via `on_focus_gained`
+    ///   (`suspended = false`; safe-mode governance is applied separately).
+    fn apply_focus_transition_side_effects(
+        &mut self,
+        transition: &FocusTransition,
+        scene: &mut SceneGraph,
+    ) {
+        if let Some((lost_ev, _)) = &transition.lost {
+            if let Some(lost_node_id) = lost_ev.node_id {
+                if let Some(state) = scene.hit_region_states.get_mut(&lost_node_id) {
+                    state.focused = false;
+                }
+                if self.composer_draft_manager.focused_node() == Some(lost_node_id) {
+                    self.pending_flushed_batch = self.composer_draft_manager.on_focus_lost();
+                }
+            }
+        }
+        if let Some((gained_ev, _)) = &transition.gained {
+            if let Some(gained_node_id) = gained_ev.node_id {
+                if let Some(state) = scene.hit_region_states.get_mut(&gained_node_id) {
+                    state.focused = true;
+                }
+                if node_accepts_composer_input(scene, gained_node_id) {
+                    self.composer_draft_manager
+                        .on_focus_gained(gained_node_id, false);
+                }
+            }
+        }
+    }
+
+    /// Advance keyboard focus to the next (`reverse = false`) or previous
+    /// (`reverse = true`) focusable affordance and synchronize composer +
+    /// hit-region-focus side effects.
+    ///
+    /// This is the no-pointer analogue of [`Self::process_with_focus`]: it drives
+    /// the already-implemented focus cycling
+    /// ([`FocusManager::navigate_next`] / [`FocusManager::navigate_prev`],
+    /// RFC 0004 §1.3) and then applies the same composer-activation /
+    /// hit-region-focus bookkeeping the pointer click path applies, so the
+    /// composer (and any focusable region) is reachable and editable without a
+    /// pointer — e.g. on smart glasses / a Mobile Presence Node.
+    ///
+    /// Returns the resulting [`FocusTransition`]; the caller broadcasts its
+    /// `FocusGained`/`FocusLost` events over the focus-events channel exactly as
+    /// the pointer path does.
+    ///
+    /// Spec: `portal-composer-interaction-completeness` — "Transcript Interaction
+    /// Contract", scenario "composer is focusable without a pointer".
+    pub fn navigate_focus(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        scene: &mut SceneGraph,
+        tab_id: SceneId,
+        reverse: bool,
+    ) -> FocusTransition {
+        let transition = if reverse {
+            focus_manager.navigate_prev(tab_id, scene)
+        } else {
+            focus_manager.navigate_next(tab_id, scene)
+        };
+        self.apply_focus_transition_side_effects(&transition, scene);
+        transition
     }
 
     /// Route a raw key-down event to the composer draft manager if a composer
@@ -3614,6 +3660,84 @@ mod tests {
             processor.composer_draft_manager.focused_node(),
             Some(composer_id),
             "focused_node must be the composer node_id"
+        );
+    }
+
+    /// Regression (hud-v0cal): the composer must be focusable and editable
+    /// WITHOUT a pointer.  A Tab key-down (keyboard focus traversal) must route
+    /// focus onto the composer region and activate the draft manager, and a
+    /// subsequent character key must edit the draft — exactly the pointerless
+    /// flow the `portal-composer-interaction-completeness` change requires for
+    /// no-pointer surfaces (smart glasses / Mobile Presence Node).
+    ///
+    /// Spec change `portal-composer-interaction-completeness`, requirement
+    /// "Transcript Interaction Contract", scenario "composer is focusable
+    /// without a pointer".
+    #[test]
+    fn tab_traversal_focuses_composer_without_pointer() {
+        let (mut scene, tab_id, _tile_id, composer_id, plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        assert!(
+            !processor.is_composer_active(),
+            "composer must be idle before any focus traversal"
+        );
+
+        // NO pointer event has been processed — only a Tab key-down, which the
+        // windowed keyboard path maps to navigate_focus(reverse = false).
+        let transition = processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+
+        let (gained, _ns) = transition
+            .gained
+            .expect("Tab must move focus onto the first focusable element");
+        assert_eq!(
+            gained.node_id,
+            Some(composer_id),
+            "Tab focus must land on the composer node (first focusable in z-order/DFS)"
+        );
+        assert_eq!(
+            gained.source,
+            FocusSource::TabKey,
+            "keyboard traversal must report FocusSource::TabKey"
+        );
+        assert!(
+            processor.is_composer_active(),
+            "composer draft manager must activate from keyboard focus (no pointer)"
+        );
+
+        // A subsequent character key edits the draft (the composer is now the
+        // keystroke sink — §4.1 keystroke routing).
+        let (outcome, _batch) = processor.route_character_to_composer("x");
+        assert_eq!(
+            outcome,
+            EditOutcome::Mutated,
+            "a character key must edit the composer draft after Tab focus"
+        );
+        let snapshot = processor
+            .composer_draft_snapshot()
+            .expect("composer draft snapshot must exist while active");
+        assert_eq!(
+            snapshot.0, "x",
+            "the typed character must appear in the composer draft (pointerless edit)"
+        );
+
+        // Scoping: a second Tab advances to the next focusable region (the plain
+        // node, which does NOT accept composer input), so the composer
+        // deactivates — traversal respects per-node focus scoping.
+        let next = processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+        let (gained2, _ns2) = next
+            .gained
+            .expect("a second Tab must advance focus to the next focusable element");
+        assert_eq!(
+            gained2.node_id,
+            Some(plain_id),
+            "second Tab must advance to the next focusable (non-composer) region"
+        );
+        assert!(
+            !processor.is_composer_active(),
+            "composer must deactivate once focus leaves the composer region"
         );
     }
 
