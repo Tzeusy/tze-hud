@@ -5,7 +5,6 @@ Status: implemented
 Defines transport-agnostic text stream portal behavior for resident raw-tile pilots, including output rendering, bounded input, session metadata, and cooperative projection integration points.
 
 Implementation: crates/tze_hud_projection/; crates/tze_hud_runtime/src/portal_projection_driver.rs; crates/tze_hud_compositor/src/markdown.rs; crates/tze_hud_compositor/src/overflow.rs; crates/tze_hud_input/src/composer_draft.rs; crates/tze_hud_input/src/portal_resize.rs; crates/tze_hud_projection/src/portal_cadence.rs; crates/tze_hud_config/src/portal_tokens.rs
-
 ## Requirements
 ### Requirement: Transport-Agnostic Stream Boundary
 
@@ -431,9 +430,9 @@ Source: RFC 0013 §4.3 (bounded input), scene-graph spec TextMarkdownNode conten
 
 ### Requirement: Portal Window Management
 
-Expanded portal surfaces SHALL support viewer-driven move and resize with local-first feedback. Move continues through the existing header drag affordance. Resize SHALL be available through both (a) pointer-driven resize affordances on the portal frame (corner or edge capture regions in the content layer) and (b) focus-scoped keyboard shortcuts: while the portal surface holds keyboard focus, Ctrl+`+` (and its unshifted form Ctrl+`=`) SHALL grow and Ctrl+`-` SHALL shrink the portal by a token-defined step. Shortcuts MUST be focus-scoped: a portal that does not hold focus MUST NOT consume them, chrome- and shell-reserved shortcuts take precedence, and safe-mode input capture overrides them entirely. Geometry feedback during a move or resize gesture SHALL render locally within the input-to-local-ack budget (`about/craft-and-care/engineering-bar.md` §2); the owning adapter SHALL observe geometry changes only as coalescible state-stream snapshots and MUST NOT veto or reposition the surface mid-gesture. Resize SHALL clamp to token-defined minimum legible bounds and to maxima within the portal's lease bounds and scene budgets. At every intermediate and final geometry, pane layout SHALL re-resolve under the Transcript Overflow and Ellipsis Contract: no partially clipped glyphs. When transcript or composer content overflows its pane, the surface SHALL show a token-styled scroll-position indicator; the indicator conveys geometry only and SHALL remain present under redaction without revealing content.
+Expanded portal surfaces SHALL support viewer-driven move and resize with local-first feedback. Move continues through the existing header drag affordance. Resize SHALL be available through both (a) pointer-driven resize affordances on the portal frame (corner or edge capture regions in the content layer) and (b) focus-scoped keyboard shortcuts: while the portal surface holds keyboard focus, Ctrl+`+` (and its unshifted form Ctrl+`=`) SHALL grow and Ctrl+`-` SHALL shrink the portal by a token-defined step. Shortcuts MUST be focus-scoped: a portal that does not hold focus MUST NOT consume them, chrome- and shell-reserved shortcuts take precedence, and safe-mode input capture overrides them entirely. Resize-shortcut handling SHALL be robust to release-only key delivery: when the host input source delivers the resize chord as a key release with no preceding matching resize key press — as Windows `SendInput` does for a held-modifier `=`/`-` chord — the runtime SHALL apply the resize step on the key release as a fallback, and SHALL deduplicate consumed press/release pairs so a normal physical key-down/key-up cycle resizes exactly once. Geometry feedback during a move or resize gesture SHALL render locally within the input-to-local-ack budget (`about/craft-and-care/engineering-bar.md` §2); the owning adapter SHALL observe geometry changes only as coalescible state-stream snapshots and MUST NOT veto or reposition the surface mid-gesture. Resize SHALL clamp to token-defined minimum legible bounds and to maxima within the portal's lease bounds and scene budgets. At every intermediate and final geometry, pane layout SHALL re-resolve under the Transcript Overflow and Ellipsis Contract: no partially clipped glyphs. When transcript or composer content overflows its pane, the surface SHALL show a token-styled scroll-position indicator; the indicator conveys geometry only and SHALL remain present under redaction without revealing content.
 
-Source: RFC 0013 §4.1 and §4.2, RFC 0004 (input model, focus), `about/craft-and-care/engineering-bar.md` §2, CLAUDE.md core rules "local feedback first" and "screen is sovereign"
+Source: RFC 0013 §4.1 and §4.2, RFC 0004 (input model, focus, key press/release semantics), `about/craft-and-care/engineering-bar.md` §2, CLAUDE.md core rules "local feedback first" and "screen is sovereign"
 
 #### Scenario: pointer resize is local-first
 
@@ -452,6 +451,12 @@ Source: RFC 0013 §4.1 and §4.2, RFC 0004 (input model, focus), `about/craft-an
 - **WHEN** the viewer presses Ctrl+`+` or Ctrl+`-` while no portal surface holds keyboard focus
 - **THEN** no portal SHALL change size
 - **AND** the key events SHALL remain available to chrome and other focus targets per the existing input-routing contract
+
+#### Scenario: resize is robust to release-only key streams
+
+- **WHEN** a focused portal receives a resize chord (Ctrl+`=`/`+` or Ctrl+`-`) as a key release with no preceding matching resize key press, as occurs with Windows `SendInput` for a held-modifier chord
+- **THEN** the runtime SHALL apply the resize step on the key release as a fallback so the focused portal still grows or shrinks
+- **AND** a normal physical key-down/key-up cycle SHALL resize exactly once, because consumed press/release pairs are deduplicated rather than double-applied
 
 #### Scenario: resize clamps to bounds
 
@@ -579,3 +584,4 @@ Source: RFC 0013 §1.2, §4.4, §7.2, `about/heart-and-soul/v1.md`
 - **WHEN** promotion-era implementation proposes PTY hosting, a portal transport stream, chrome-layer portal affordances, scene-graph transcript history, or runtime control of adapter processes
 - **THEN** reviewers SHALL reject that work as outside this change and outside the promotion approval
 - **AND** such scope SHALL require a new RFC-level decision per RFC 0013 §4.4
+
