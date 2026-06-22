@@ -3,7 +3,8 @@ use std::ops::ControlFlow;
 use std::time::Instant;
 
 use tze_hud_input::{
-    HotkeyResizeDir, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ShellReservedShortcut,
+    HotkeyResizeDir, KeyboardModifiers, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
+    ShellReservedShortcut,
 };
 
 use super::WinitApp;
@@ -104,6 +105,22 @@ fn portal_resize_key_code(raw_key_code: &str, raw_key: &str) -> String {
     } else {
         raw_key_code.to_string()
     }
+}
+
+/// Whether a key event is the bare Tab / Shift+Tab focus-traversal chord
+/// (hud-v0cal).
+///
+/// `true` only for `Tab` with no Ctrl / Alt / Meta held — the exact chord that
+/// drives keyboard focus traversal.  Shift is allowed (Shift+Tab = reverse
+/// traversal).  Ctrl+Tab / Ctrl+Shift+Tab are shell-reserved (tab switching);
+/// Alt+Tab and Win/Cmd+Tab are OS window switchers — all excluded.
+///
+/// Used to keep the key-down intercept (`dispatch_key_down_event_inner`) and the
+/// key-up swallow (`dispatch_key_up_event_inner`) in lockstep: a bare Tab
+/// key-down is consumed for traversal, so its matching key-up must be swallowed
+/// too, never reaching the composer or agent as a raw release.
+fn is_bare_tab_chord(key: &str, modifiers: &KeyboardModifiers) -> bool {
+    key == "Tab" && !modifiers.ctrl && !modifiers.alt && !modifiers.meta
 }
 
 /// A raw keyboard event deferred from the winit event-loop thread because the
@@ -385,7 +402,7 @@ impl WinitApp {
         // Meta+Tab (Win+Tab on Windows / Cmd+Tab on macOS — also OS window
         // switchers) are likewise excluded.  The Tab key is always consumed so
         // it is never forwarded to the composer draft or the agent as raw input.
-        if raw.key == "Tab" && !raw.modifiers.ctrl && !raw.modifiers.alt && !raw.modifiers.meta {
+        if is_bare_tab_chord(&raw.key, &raw.modifiers) {
             if self.navigate_portal_focus(tab_id, raw.modifiers.shift) == TabFocusOutcome::Busy {
                 // A required lock was busy — defer and retry on the next drain,
                 // mirroring the composer/namespace busy-defer paths below.
@@ -640,7 +657,7 @@ impl WinitApp {
         // "Tab is never forwarded as raw input" contract.  The modifier guard
         // matches the KeyDown intercept exactly (Ctrl / Alt / Meta excluded), so a
         // shell-reserved Ctrl+Tab or OS Alt/Meta+Tab release still routes normally.
-        if raw.key == "Tab" && !raw.modifiers.ctrl && !raw.modifiers.alt && !raw.modifiers.meta {
+        if is_bare_tab_chord(&raw.key, &raw.modifiers) {
             tracing::debug!("tab focus traversal: matching KeyUp swallowed (KeyDown consumed)");
             return;
         }
@@ -1123,7 +1140,77 @@ mod tests {
     use tze_hud_input::{KeyboardModifiers, RawKeyDownEvent};
     use tze_hud_scene::MonoUs;
 
-    use super::{PendingKeyboardEvent, drain_keyboard_queue_bounded, restore_front_requeued_event};
+    use super::{
+        PendingKeyboardEvent, drain_keyboard_queue_bounded, is_bare_tab_chord,
+        restore_front_requeued_event,
+    };
+
+    /// hud-v0cal: the bare Tab / Shift+Tab focus-traversal chord is recognised,
+    /// and the modifier-laden Tab variants (shell-reserved Ctrl+Tab, OS Alt/Meta
+    /// window switchers) are NOT — for BOTH the key-down intercept and the key-up
+    /// swallow, which share this predicate.
+    ///
+    /// This guards the key-up contract: because a bare Tab key-down is always
+    /// consumed for traversal (never forwarded), `dispatch_key_up_event_inner`
+    /// must early-return on the same predicate so the matching bare Tab key-UP is
+    /// never delivered to the composer or agent as a raw release.  A regression
+    /// that narrowed/loosened either guard would diverge them and surface here.
+    #[test]
+    fn bare_tab_chord_predicate_matches_keydown_and_keyup_intercepts() {
+        let bare = KeyboardModifiers::NONE;
+        let shift = KeyboardModifiers {
+            shift: true,
+            ..KeyboardModifiers::NONE
+        };
+        let ctrl = KeyboardModifiers {
+            ctrl: true,
+            ..KeyboardModifiers::NONE
+        };
+        let ctrl_shift = KeyboardModifiers {
+            ctrl: true,
+            shift: true,
+            ..KeyboardModifiers::NONE
+        };
+        let alt = KeyboardModifiers {
+            alt: true,
+            ..KeyboardModifiers::NONE
+        };
+        let meta = KeyboardModifiers {
+            meta: true,
+            ..KeyboardModifiers::NONE
+        };
+
+        // Bare Tab and Shift+Tab ARE focus traversal → consumed on key-down and
+        // swallowed on key-up (never delivered to composer/agent).
+        assert!(is_bare_tab_chord("Tab", &bare), "Tab → traversal");
+        assert!(
+            is_bare_tab_chord("Tab", &shift),
+            "Shift+Tab → reverse traversal"
+        );
+
+        // Modifier-laden Tab variants are NOT traversal → routed normally
+        // (Ctrl+Tab/Ctrl+Shift+Tab shell-reserved; Alt/Meta+Tab OS switchers).
+        assert!(
+            !is_bare_tab_chord("Tab", &ctrl),
+            "Ctrl+Tab is shell-reserved"
+        );
+        assert!(
+            !is_bare_tab_chord("Tab", &ctrl_shift),
+            "Ctrl+Shift+Tab is shell-reserved"
+        );
+        assert!(
+            !is_bare_tab_chord("Tab", &alt),
+            "Alt+Tab is the OS switcher"
+        );
+        assert!(
+            !is_bare_tab_chord("Tab", &meta),
+            "Win/Cmd+Tab is the OS switcher"
+        );
+
+        // Non-Tab keys are never affected by the traversal guards.
+        assert!(!is_bare_tab_chord("a", &bare), "plain character is not Tab");
+        assert!(!is_bare_tab_chord("Enter", &bare), "Enter is not Tab");
+    }
 
     fn key_down(key: &str, timestamp_mono_us: u64) -> PendingKeyboardEvent {
         PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
