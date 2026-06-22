@@ -380,10 +380,11 @@ impl WinitApp {
         // BEFORE composer/agent routing.  Ctrl+Tab / Ctrl+Shift+Tab are
         // shell-reserved (tab switching, handled at the chrome layer) and are
         // excluded here by the `!ctrl` guard; only the bare Tab / Shift+Tab
-        // chord drives focus traversal.  Alt+Tab is the OS window switcher and
-        // is likewise excluded.  The Tab key is always consumed so it is never
-        // forwarded to the composer draft or the agent as raw input.
-        if raw.key == "Tab" && !raw.modifiers.ctrl && !raw.modifiers.alt {
+        // chord drives focus traversal.  Alt+Tab (OS window switcher) and
+        // Meta+Tab (Win+Tab on Windows / Cmd+Tab on macOS — also OS window
+        // switchers) are likewise excluded.  The Tab key is always consumed so
+        // it is never forwarded to the composer draft or the agent as raw input.
+        if raw.key == "Tab" && !raw.modifiers.ctrl && !raw.modifiers.alt && !raw.modifiers.meta {
             if self.navigate_portal_focus(tab_id, raw.modifiers.shift) == TabFocusOutcome::Busy {
                 // A required lock was busy — defer and retry on the next drain,
                 // mirroring the composer/namespace busy-defer paths below.
