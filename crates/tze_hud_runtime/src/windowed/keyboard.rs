@@ -10,6 +10,7 @@ use super::WinitApp;
 use super::input_dispatch::{
     dispatch_focus_event, dispatch_keyboard_event, dispatch_scroll_offset_event,
 };
+use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire};
 
 pub(super) struct ComposerDeliveryContext {
     pub(super) namespace: String,
@@ -123,9 +124,9 @@ pub(super) enum PendingKeyboardEvent {
 ///
 /// `Done` — the traversal ran (the FocusManager cycle advanced, or was empty)
 /// and the Tab event was consumed.
-/// `Busy` — a required lock (shared-state / scene) was momentarily contended;
-/// the caller should defer the Tab event to the next `about_to_wait` drain,
-/// matching the sibling busy-defer paths in this file.
+/// `Busy` — a required lock (shared-state / scene) stayed contended past the
+/// bounded `INTERACTION_LOCK_BUDGET` spin; the caller defers the Tab event to
+/// the next `about_to_wait` drain (the overrun fallback).
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum TabFocusOutcome {
     Done,
@@ -493,24 +494,31 @@ impl WinitApp {
     /// FOCUS_EVENTS channel, plus the composer blur delivery-context capture and
     /// local-echo clear).
     ///
-    /// Returns [`TabFocusOutcome::Busy`] when the shared-state or scene lock is
-    /// momentarily contended so the caller can defer the Tab event, matching the
-    /// sibling busy-defer paths in this file.
+    /// Returns [`TabFocusOutcome::Busy`] when the shared-state or scene lock
+    /// stays contended past [`INTERACTION_LOCK_BUDGET`], so the caller can defer
+    /// the Tab event to the next drain (the overrun fallback).
     fn navigate_portal_focus(
         &mut self,
         tab_id: tze_hud_scene::SceneId,
         reverse: bool,
     ) -> TabFocusOutcome {
-        // Acquire the scene under the same lock-free-friendly try_lock pattern
-        // used elsewhere on the event-loop thread.  navigate_focus needs &mut
-        // scene to update hit_region_states focus flags; on contention we defer.
+        // A Tab / Shift+Tab focus traversal is a discrete, deliberate user action
+        // that must produce visible feedback this frame, so acquire with a bounded
+        // spin (INTERACTION_LOCK_BUDGET) rather than a single try_lock — the same
+        // strategy `apply_portal_resize_hotkey` uses for the resize hotkey, also a
+        // discrete keyboard action.  A single contended try_lock (compositor /
+        // streaming publish holding the scene) would otherwise force a full
+        // about_to_wait round-trip before the focus moves.  navigate_focus needs
+        // &mut scene to update hit_region_states focus flags; on a true overrun we
+        // fall back to deferring the event via TabFocusOutcome::Busy.
         let transition = {
-            let Ok(state) = self.state.shared_state.try_lock() else {
-                tracing::trace!("tab focus traversal deferred: shared_state lock busy");
+            let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+            else {
+                tracing::trace!("tab focus traversal deferred: shared_state lock budget elapsed");
                 return TabFocusOutcome::Busy;
             };
-            let Ok(mut scene) = state.scene.try_lock() else {
-                tracing::trace!("tab focus traversal deferred: scene lock busy");
+            let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
+                tracing::trace!("tab focus traversal deferred: scene lock budget elapsed");
                 return TabFocusOutcome::Busy;
             };
             self.state.input_processor.navigate_focus(
@@ -621,6 +629,21 @@ impl WinitApp {
         active_tab: Option<tze_hud_scene::SceneId>,
     ) {
         let Some(tab_id) = active_tab else { return };
+
+        // ── Keyboard focus traversal: swallow the matching Tab KeyUp (hud-v0cal) ──
+        //
+        // A bare Tab / Shift+Tab KeyDown is unconditionally consumed by focus
+        // traversal in `dispatch_key_down_event_inner` (never forwarded as raw
+        // input).  Its matching KeyUp must therefore also be swallowed: otherwise
+        // the agent that just gained focus would receive a raw Tab release with no
+        // preceding KeyDown — an impossible key sequence that contradicts the
+        // "Tab is never forwarded as raw input" contract.  The modifier guard
+        // matches the KeyDown intercept exactly (Ctrl / Alt / Meta excluded), so a
+        // shell-reserved Ctrl+Tab or OS Alt/Meta+Tab release still routes normally.
+        if raw.key == "Tab" && !raw.modifiers.ctrl && !raw.modifiers.alt && !raw.modifiers.meta {
+            tracing::debug!("tab focus traversal: matching KeyUp swallowed (KeyDown consumed)");
+            return;
+        }
 
         // ── Portal resize hotkey: KeyUp fallback (hud-v4k1h) ──────────────
         //
