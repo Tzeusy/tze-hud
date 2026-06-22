@@ -7,7 +7,9 @@ use tze_hud_input::{
 };
 
 use super::WinitApp;
-use super::input_dispatch::{dispatch_keyboard_event, dispatch_scroll_offset_event};
+use super::input_dispatch::{
+    dispatch_focus_event, dispatch_keyboard_event, dispatch_scroll_offset_event,
+};
 
 pub(super) struct ComposerDeliveryContext {
     pub(super) namespace: String,
@@ -115,6 +117,19 @@ pub(super) enum PendingKeyboardEvent {
     KeyDown(RawKeyDownEvent),
     KeyUp(RawKeyUpEvent),
     Character(RawCharacterEvent),
+}
+
+/// Outcome of a Tab / Shift+Tab keyboard focus-traversal attempt (hud-v0cal).
+///
+/// `Done` — the traversal ran (the FocusManager cycle advanced, or was empty)
+/// and the Tab event was consumed.
+/// `Busy` — a required lock (shared-state / scene) was momentarily contended;
+/// the caller should defer the Tab event to the next `about_to_wait` drain,
+/// matching the sibling busy-defer paths in this file.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TabFocusOutcome {
+    Done,
+    Busy,
 }
 
 fn restore_front_requeued_event(
@@ -351,6 +366,34 @@ impl WinitApp {
             }
         }
 
+        // ── Keyboard focus traversal: Tab / Shift+Tab (hud-v0cal) ─────────
+        //
+        // Tab advances keyboard focus to the next focusable affordance and
+        // Shift+Tab to the previous one, so the composer (and any focusable
+        // region) is reachable WITHOUT a pointer — the no-pointer surfaces this
+        // contract targets (smart glasses / Mobile Presence Node).  Spec change
+        // `portal-composer-interaction-completeness`, "Transcript Interaction
+        // Contract", scenario "composer is focusable without a pointer".
+        //
+        // Scoping precedence: this runs AFTER the safe-mode capture (outer fn),
+        // the shell/chrome-reserved set, and the portal-resize hotkey, and
+        // BEFORE composer/agent routing.  Ctrl+Tab / Ctrl+Shift+Tab are
+        // shell-reserved (tab switching, handled at the chrome layer) and are
+        // excluded here by the `!ctrl` guard; only the bare Tab / Shift+Tab
+        // chord drives focus traversal.  Alt+Tab is the OS window switcher and
+        // is likewise excluded.  The Tab key is always consumed so it is never
+        // forwarded to the composer draft or the agent as raw input.
+        if raw.key == "Tab" && !raw.modifiers.ctrl && !raw.modifiers.alt {
+            if self.navigate_portal_focus(tab_id, raw.modifiers.shift) == TabFocusOutcome::Busy {
+                // A required lock was busy — defer and retry on the next drain,
+                // mirroring the composer/namespace busy-defer paths below.
+                self.state
+                    .pending_keyboard_events
+                    .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+            }
+            return;
+        }
+
         // ── Composer draft intercept (§4.4) ──────────────────────────────
         if self.state.input_processor.is_composer_active() {
             let delivery_context = match self.composer_delivery_context_for_tab(tab_id) {
@@ -435,6 +478,93 @@ impl WinitApp {
                 .pending_keyboard_events
                 .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
         }
+    }
+
+    /// Advance keyboard focus by one step for a Tab / Shift+Tab key-down
+    /// (hud-v0cal) and broadcast the resulting focus transition.
+    ///
+    /// Drives [`tze_hud_input::InputProcessor::navigate_focus`] — the no-pointer
+    /// analogue of the pointer click-to-focus path — so the composer (and any
+    /// focusable region) is reachable without a pointer.  The composer
+    /// activation / hit-region-focus bookkeeping is handled inside
+    /// `navigate_focus`; this method mirrors the pointer path's transition
+    /// handling in `lifecycle.rs` (FocusGained/FocusLost broadcast over the
+    /// FOCUS_EVENTS channel, plus the composer blur delivery-context capture and
+    /// local-echo clear).
+    ///
+    /// Returns [`TabFocusOutcome::Busy`] when the shared-state or scene lock is
+    /// momentarily contended so the caller can defer the Tab event, matching the
+    /// sibling busy-defer paths in this file.
+    fn navigate_portal_focus(
+        &mut self,
+        tab_id: tze_hud_scene::SceneId,
+        reverse: bool,
+    ) -> TabFocusOutcome {
+        // Acquire the scene under the same lock-free-friendly try_lock pattern
+        // used elsewhere on the event-loop thread.  navigate_focus needs &mut
+        // scene to update hit_region_states focus flags; on contention we defer.
+        let transition = {
+            let Ok(state) = self.state.shared_state.try_lock() else {
+                tracing::trace!("tab focus traversal deferred: shared_state lock busy");
+                return TabFocusOutcome::Busy;
+            };
+            let Ok(mut scene) = state.scene.try_lock() else {
+                tracing::trace!("tab focus traversal deferred: scene lock busy");
+                return TabFocusOutcome::Busy;
+            };
+            self.state.input_processor.navigate_focus(
+                &mut self.state.focus_manager,
+                &mut scene,
+                tab_id,
+                reverse,
+            )
+        };
+
+        // Mirror the pointer path's transition handling (lifecycle.rs
+        // process_with_focus broadcast block).  The locks are already released.
+        let mut composer_focus_lost = false;
+        if let Some((ev, ns)) = &transition.gained {
+            tracing::debug!(
+                namespace = %str_preview(ns),
+                tile_id = ?ev.tile_id,
+                node_id = ?ev.node_id,
+                source = ?ev.source,
+                reverse,
+                "tab focus traversal: focus gained"
+            );
+            // A new focus-gain clears any stale blur delivery context.
+            self.state.pending_blur_delivery_context = None;
+        }
+        if let Some((ev, ns)) = &transition.lost {
+            tracing::debug!(
+                namespace = %str_preview(ns),
+                tile_id = ?ev.tile_id,
+                node_id = ?ev.node_id,
+                reason = ?ev.reason,
+                "tab focus traversal: focus lost"
+            );
+            // Capture the composer delivery context while namespace + node_id +
+            // tile_id are all still known, so a blur-triggered terminal draft
+            // batch can still be delivered at the next settle (§4.3 flush
+            // guarantee on blur).
+            if let Some(node_id) = ev.node_id {
+                self.state.pending_blur_delivery_context = Some(ComposerDeliveryContext {
+                    namespace: ns.clone(),
+                    node_id_bytes: *node_id.as_uuid().as_bytes(),
+                    tile_id: ev.tile_id,
+                });
+            }
+            composer_focus_lost = true;
+        }
+
+        dispatch_focus_event(&self.state.input_event_tx, transition);
+
+        // Clear the local composer echo overlay if focus left a composer region.
+        if composer_focus_lost {
+            self.clear_local_composer_echo();
+        }
+
+        TabFocusOutcome::Done
     }
 
     /// Translate a raw key-up event through the `KeyboardProcessor`, log it,
