@@ -61,6 +61,25 @@ from proto_gen import session_pb2, session_pb2_grpc, types_pb2
 
 
 # ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class MediaIngressRejected(RuntimeError):
+    """Raised when MediaIngressOpen is answered with admitted=false.
+
+    Subclasses RuntimeError so existing ``except RuntimeError`` callers keep
+    working, while admission-rejection callers can inspect the structured
+    ``reject_code`` (e.g. ``MEDIA_DISABLED``) and ``reject_reason``.
+    """
+
+    def __init__(self, reject_code: str, reject_reason: str) -> None:
+        self.reject_code = reject_code
+        self.reject_reason = reject_reason
+        super().__init__(f"Media ingress rejected [{reject_code}]: {reject_reason}")
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -870,9 +889,7 @@ class HudClient:
         resp = await self._wait_for("media_ingress_open_result", timeout=timeout)
         result = resp.media_ingress_open_result
         if not result.admitted:
-            raise RuntimeError(
-                f"Media ingress rejected [{result.reject_code}]: {result.reject_reason}"
-            )
+            raise MediaIngressRejected(result.reject_code, result.reject_reason)
         print(
             "  [grpc] Media ingress admitted: "
             f"epoch={result.stream_epoch} surface={result.assigned_surface_id.hex()} "
