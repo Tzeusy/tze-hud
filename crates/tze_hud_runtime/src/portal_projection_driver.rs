@@ -1656,13 +1656,19 @@ impl InProcessPortalDriver {
 
                     let new_content_height_px = total_lines as f32 * line_height_px;
 
-                    // Prefer the live geometry snapshot (most accurate after a resize),
-                    // fall back to adapter configured bounds for the current presentation.
+                    // Prefer the live (transient) geometry snapshot, then the
+                    // DURABLE resized bounds, and only then the adapter config.
+                    // The transient geometry_batch is consumed after delivery,
+                    // so a transcript append arriving AFTER a resize would
+                    // otherwise compute follow-tail/max-scroll against the stale
+                    // config height while the body renders at the resized height
+                    // (hud-v4k1h: resized_bounds is the persistent size source).
                     let viewport_height_px = state
                         .geometry_batch
                         .as_ref()
                         .and_then(|gb| gb.latest)
                         .map(|snap| snap.rect.height_px as f32)
+                        .or_else(|| state.resized_bounds.map(|r| r.height_px as f32))
                         .unwrap_or_else(|| {
                             entry.adapter.config_viewport_height(state.presentation)
                         });

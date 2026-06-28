@@ -921,9 +921,18 @@ impl ResidentGrpcPortalAdapter {
                 // Expanded-only affordance), so the override is Expanded-scoped.
                 if let Some(resized) = state.resized_bounds {
                     if resized.width_px > 0 && resized.height_px > 0 {
+                        // Preserve the resized ORIGIN as well as the size: a
+                        // left/top edge pointer-drag keeps the opposite edge
+                        // stationary (DeviceResizeState::compute_rect), so the
+                        // snapshot carries a shifted x/y. bounds_for_state feeds
+                        // the per-render PublishToTile bounds, so returning the
+                        // static config origin here would snap the tile back to
+                        // the configured position on the next publish while
+                        // keeping the new size. local_bounds_for_state still
+                        // zeroes x/y for the tile-local node bounds.
                         return proto::Rect {
-                            x: self.config.expanded_bounds.x,
-                            y: self.config.expanded_bounds.y,
+                            x: resized.x_px as f32,
+                            y: resized.y_px as f32,
                             width: resized.width_px as f32,
                             height: resized.height_px as f32,
                         };
@@ -1743,12 +1752,16 @@ mod tests {
         let mut adapter = ResidentGrpcPortalAdapter::new(config);
         adapter.record_created_tile(vec![0u8; 16]);
 
-        // A portal grown taller than the default expanded height.
+        // A portal grown taller than the default expanded height AND moved to a
+        // non-config origin (e.g. left/top edge drag keeps the opposite edge
+        // stationary, shifting x/y).
         let grown_h = DEFAULT_EXPANDED_H + 240.0;
+        let moved_x = 120.0;
+        let moved_y = 80.0;
         let mut state = make_expanded_interaction_state("portal-resize-test");
         state.resized_bounds = Some(crate::AdapterPortalRect::from_f32(
-            0.0,
-            0.0,
+            moved_x,
+            moved_y,
             DEFAULT_EXPANDED_W,
             grown_h,
         ));
@@ -1756,6 +1769,19 @@ mod tests {
         let batch = adapter
             .render_batch(&state)
             .expect("render_batch must succeed with resized bounds");
+
+        // The PublishToTile bounds (1st mutation) must carry the resized ORIGIN
+        // and size, not the static config origin — otherwise the tile snaps back
+        // to the configured position on the next publish.
+        match &batch.mutations[0].mutation {
+            Some(tze_hud_protocol::proto::mutation_proto::Mutation::PublishToTile(pt)) => {
+                let b = pt.bounds.as_ref().expect("PublishToTile must carry bounds");
+                assert_eq!(b.x, moved_x, "tile bounds must keep the resized x origin");
+                assert_eq!(b.y, moved_y, "tile bounds must keep the resized y origin");
+                assert_eq!(b.height, grown_h, "tile bounds must use the resized height");
+            }
+            other => panic!("First mutation must be PublishToTile, got {other:?}"),
+        }
 
         // The composer hit region (4th mutation) must cover the grown height —
         // proving the body bounds followed the resize, not the config size.
