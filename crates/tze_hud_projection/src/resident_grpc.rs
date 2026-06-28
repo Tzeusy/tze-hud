@@ -809,7 +809,18 @@ impl ResidentGrpcPortalAdapter {
                                     bounds: Some(composer_bounds),
                                     interaction_id: composer_interaction_id,
                                     accepts_focus: true,
-                                    accepts_pointer: false,
+                                    // accepts_pointer MUST be true for click-to-focus
+                                    // (hud-v4k1h). SceneGraph::hit_test only returns
+                                    // HitResult::NodeHit for HitRegion nodes with
+                                    // accepts_pointer = true; InputProcessor::process_with_focus
+                                    // only acquires keyboard focus on a NodeHit. With this
+                                    // false, a pointer-down on the composer fell through to a
+                                    // bare TileHit, so the portal never gained focus and every
+                                    // keystroke / Ctrl+= resize chord was silently dropped even
+                                    // though the OS delivered it. The three local-render composer
+                                    // sites in windowed/portal.rs already set this true; the
+                                    // wire-driven projection path had diverged.
+                                    accepts_pointer: true,
                                     auto_capture: false,
                                     release_on_up: false,
                                     accepts_composer_input: true,
@@ -900,7 +911,35 @@ impl ResidentGrpcPortalAdapter {
 
     fn bounds_for_state(&self, state: &ProjectedPortalState) -> proto::Rect {
         match state.presentation {
-            ProjectedPortalPresentation::Expanded => self.config.expanded_bounds,
+            ProjectedPortalPresentation::Expanded => {
+                // hud-v4k1h: an Expanded portal that has been resized renders its
+                // body + composer at the durable resized size, not the fixed
+                // config size. The runtime grows the tile bounds locally on
+                // resize; without honoring that here, the body stayed config-
+                // sized and the grown tile area showed an empty "shadow-body".
+                // Collapsed always uses compact_bounds (resize is an
+                // Expanded-only affordance), so the override is Expanded-scoped.
+                if let Some(resized) = state.resized_bounds {
+                    if resized.width_px > 0 && resized.height_px > 0 {
+                        // Preserve the resized ORIGIN as well as the size: a
+                        // left/top edge pointer-drag keeps the opposite edge
+                        // stationary (DeviceResizeState::compute_rect), so the
+                        // snapshot carries a shifted x/y. bounds_for_state feeds
+                        // the per-render PublishToTile bounds, so returning the
+                        // static config origin here would snap the tile back to
+                        // the configured position on the next publish while
+                        // keeping the new size. local_bounds_for_state still
+                        // zeroes x/y for the tile-local node bounds.
+                        return proto::Rect {
+                            x: resized.x_px as f32,
+                            y: resized.y_px as f32,
+                            width: resized.width_px as f32,
+                            height: resized.height_px as f32,
+                        };
+                    }
+                }
+                self.config.expanded_bounds
+            }
             ProjectedPortalPresentation::Collapsed => self.config.compact_bounds,
         }
     }
@@ -1472,6 +1511,7 @@ mod tests {
             last_input_feedback: None,
             draft_batch: None,
             geometry_batch: None,
+            resized_bounds: None,
         }
     }
 
@@ -1676,6 +1716,13 @@ mod tests {
                             hr.accepts_focus,
                             "composer hit region must have accepts_focus=true"
                         );
+                        // hud-v4k1h: click-to-focus requires accepts_pointer=true so
+                        // SceneGraph::hit_test yields a NodeHit that process_with_focus
+                        // can focus. A false here silently breaks pointer focus + typing.
+                        assert!(
+                            hr.accepts_pointer,
+                            "composer hit region must have accepts_pointer=true (click-to-focus)"
+                        );
                         assert!(
                             hr.interaction_id.contains("portal-composer-test"),
                             "interaction_id must contain the portal_id: got '{}'",
@@ -1691,6 +1738,92 @@ mod tests {
                 }
             }
             other => panic!("Fourth mutation must be AddNode (composer hit region), got {other:?}"),
+        }
+    }
+
+    /// hud-v4k1h resize follow-up: once a portal has been resized, the rendered
+    /// body + composer hit region must size to the durable resized bounds, not
+    /// the fixed config bounds. Without this the body kept rendering at the
+    /// config size while the runtime grew the tile, leaving an empty
+    /// "shadow-body" region in the grown tile.
+    #[test]
+    fn render_batch_sizes_body_to_resized_bounds_when_present() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![0u8; 16]);
+
+        // A portal grown taller than the default expanded height AND moved to a
+        // non-config origin (e.g. left/top edge drag keeps the opposite edge
+        // stationary, shifting x/y).
+        let grown_h = DEFAULT_EXPANDED_H + 240.0;
+        let moved_x = 120.0;
+        let moved_y = 80.0;
+        let mut state = make_expanded_interaction_state("portal-resize-test");
+        state.resized_bounds = Some(crate::AdapterPortalRect::from_f32(
+            moved_x,
+            moved_y,
+            DEFAULT_EXPANDED_W,
+            grown_h,
+        ));
+
+        let batch = adapter
+            .render_batch(&state)
+            .expect("render_batch must succeed with resized bounds");
+
+        // The PublishToTile bounds (1st mutation) must carry the resized ORIGIN
+        // and size, not the static config origin — otherwise the tile snaps back
+        // to the configured position on the next publish.
+        match &batch.mutations[0].mutation {
+            Some(tze_hud_protocol::proto::mutation_proto::Mutation::PublishToTile(pt)) => {
+                let b = pt.bounds.as_ref().expect("PublishToTile must carry bounds");
+                assert_eq!(b.x, moved_x, "tile bounds must keep the resized x origin");
+                assert_eq!(b.y, moved_y, "tile bounds must keep the resized y origin");
+                assert_eq!(b.height, grown_h, "tile bounds must use the resized height");
+            }
+            other => panic!("First mutation must be PublishToTile, got {other:?}"),
+        }
+
+        // The composer hit region (4th mutation) must cover the grown height —
+        // proving the body bounds followed the resize, not the config size.
+        let add_node_mutation = &batch.mutations[3];
+        match &add_node_mutation.mutation {
+            Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
+                let node = an.node.as_ref().expect("AddNode must carry a NodeProto");
+                match &node.data {
+                    Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(hr)) => {
+                        let bounds = hr.bounds.as_ref().expect("composer must carry bounds");
+                        assert_eq!(
+                            bounds.height, grown_h,
+                            "composer/body must size to the resized height {grown_h}, got {}",
+                            bounds.height
+                        );
+                    }
+                    other => panic!("AddNode node data must be HitRegion, got {other:?}"),
+                }
+            }
+            other => panic!("Fourth mutation must be AddNode (composer hit region), got {other:?}"),
+        }
+
+        // Sanity: an Expanded state with NO resized_bounds still uses config height.
+        let mut plain = make_expanded_interaction_state("portal-noresize-test");
+        plain.resized_bounds = None;
+        let plain_batch = adapter
+            .render_batch(&plain)
+            .expect("render_batch must succeed without resized bounds");
+        if let Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) =
+            &plain_batch.mutations[3].mutation
+        {
+            let hr = match &an.node.as_ref().unwrap().data {
+                Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(hr)) => hr,
+                other => panic!("expected HitRegion, got {other:?}"),
+            };
+            assert_eq!(
+                hr.bounds.as_ref().unwrap().height,
+                DEFAULT_EXPANDED_H,
+                "without resized_bounds the body must keep the config height"
+            );
+        } else {
+            panic!("expected AddNode composer mutation");
         }
     }
 

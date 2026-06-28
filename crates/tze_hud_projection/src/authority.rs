@@ -68,6 +68,13 @@ struct ProjectionSession {
     ///
     /// `None` until the first snapshot arrives (no resize has occurred).
     pending_geometry_batch: Option<AdapterGeometryBatch>,
+    /// Durable latest resized geometry (hud-v4k1h follow-up). Unlike
+    /// `pending_geometry_batch`, this is NOT consumed after delivery — it
+    /// persists so every subsequent render sizes the portal body + composer to
+    /// the resized bounds via `ProjectedPortalState::resized_bounds`. Without it
+    /// the body snaps back to the fixed config size one frame after each resize,
+    /// leaving the empty "shadow-body" region in the grown tile.
+    latest_geometry: Option<AdapterGeometrySnapshot>,
 }
 
 struct ProjectionAuditEvent<'a> {
@@ -216,6 +223,16 @@ impl ProjectionAuthority {
         let Some(session) = self.sessions.get_mut(projection_id) else {
             return false;
         };
+        // Persist the durable resized geometry (latest-wins by sequence) so the
+        // rendered body follows the resize on EVERY subsequent frame, not just
+        // the one delivery the transient `pending_geometry_batch` survives
+        // (hud-v4k1h follow-up — fixes the "shadow-body" left in the grown tile).
+        if session
+            .latest_geometry
+            .is_none_or(|existing| snapshot.sequence > existing.sequence)
+        {
+            session.latest_geometry = Some(snapshot);
+        }
         match &mut session.pending_geometry_batch {
             Some(batch) => {
                 // Coalesce: only accept if sequence is strictly newer.
@@ -764,6 +781,7 @@ impl ProjectionAuthority {
                 last_input_feedback: None,
                 portal_update_pending: false,
                 pending_geometry_batch: None,
+                latest_geometry: None,
             },
         );
 
@@ -1738,6 +1756,10 @@ fn projected_portal_state(
         // MUST call `consume_geometry_batch` after delivery to clear it.
         // `None` until the first resize gesture or hotkey resize occurs.
         geometry_batch: session.pending_geometry_batch.clone(),
+        // Durable resized bounds: drives the rendered body/composer size every
+        // frame (preserve_geometry is always true on this path), so the portal
+        // body grows with the tile instead of leaving a "shadow" (hud-v4k1h).
+        resized_bounds: session.latest_geometry.map(|snapshot| snapshot.rect),
     }
 }
 

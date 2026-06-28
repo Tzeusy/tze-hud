@@ -989,6 +989,17 @@ pub struct ProjectedPortalState {
     /// gesture end."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_batch: Option<AdapterGeometryBatch>,
+    /// Persistent resized portal bounds (hud-v4k1h follow-up). Unlike
+    /// `geometry_batch` — a transient, consume-after-delivery notification to the
+    /// owning adapter — this is the **durable** size the portal was last resized
+    /// to (pointer gesture or Ctrl+= / Ctrl+- hotkey). The runtime updates the
+    /// tile bounds locally on resize, but the rendered portal body + composer are
+    /// sized from `bounds_for_state`; without a persistent override that body
+    /// keeps re-rendering at the fixed config size, leaving an empty "shadow"
+    /// region in the grown tile. `bounds_for_state` prefers this (Expanded only)
+    /// so the body follows the resize. `None` until the first resize occurs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resized_bounds: Option<AdapterPortalRect>,
 }
 
 // ─── Composer draft notification types (hud-5jbra.4) ─────────────────────────
