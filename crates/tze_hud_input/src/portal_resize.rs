@@ -917,8 +917,6 @@ pub fn apply_hotkey_resize(
         HotkeyResizeDir::Shrink => -step,
     };
 
-    // Clamp new dimensions first so origin shift is based on the actual size
-    // change — this keeps the center stationary even when clamping applies.
     let min_w = bounds.tokens.min_width_px;
     let max_w = bounds.max_width_px.max(min_w);
     let min_h = bounds.tokens.min_height_px;
@@ -926,10 +924,15 @@ pub fn apply_hotkey_resize(
     let new_w = (current_rect.width + delta).clamp(min_w, max_w);
     let new_h = (current_rect.height + delta).clamp(min_h, max_h);
 
-    // Shift origin by half of the *actual* dimension change so the center
-    // of the portal remains fixed regardless of clamping.
-    let new_x = current_rect.x + (current_rect.width - new_w) / 2.0;
-    let new_y = current_rect.y + (current_rect.height - new_h) / 2.0;
+    // Anchor the TOP-LEFT corner: the origin stays put and only width/height
+    // change, so grow/shrink extends toward the bottom-right (hud-v4k1h
+    // follow-up). The earlier center-anchored behavior shifted the origin by
+    // half the size delta, making the portal appear to grow radially in all
+    // four directions, which was disorienting. `clamped()` below still nudges
+    // the origin back on-screen if a grow would push the bottom/right edge
+    // past the display bound.
+    let new_x = current_rect.x;
+    let new_y = current_rect.y;
 
     let new_rect = PortalRect {
         x: new_x,
@@ -1366,9 +1369,46 @@ mod tests {
         };
         assert!(snap.rect.width > rect.width, "grow must increase width");
         assert!(snap.rect.height > rect.height, "grow must increase height");
+        // hud-v4k1h: top-left anchored — the origin must NOT move on grow, so
+        // the portal extends toward the bottom-right rather than radially.
+        assert_eq!(snap.rect.x, rect.x, "grow must keep the left edge anchored");
+        assert_eq!(snap.rect.y, rect.y, "grow must keep the top edge anchored");
         assert!(
             !snap.gesture_active,
             "hotkey resize must never set gesture_active"
+        );
+    }
+
+    #[test]
+    fn hotkey_shrink_keeps_top_left_anchored() {
+        let bounds = default_bounds();
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 600.0,
+            height: 400.0,
+        };
+        let mut state = PortalResizeState::new(0xdeadbeef);
+
+        let result = apply_hotkey_resize(true, HotkeyResizeDir::Shrink, rect, &bounds, &mut state);
+        let snap = match result {
+            HotkeyResizeOutcome::Applied { snapshot } => snapshot,
+            _ => panic!("expected Applied"),
+        };
+        // Shrink also anchors top-left: the origin stays put and the bottom-
+        // right edge moves inward (no radial/centered shrink).
+        assert_eq!(
+            snap.rect.x, rect.x,
+            "shrink must keep the left edge anchored"
+        );
+        assert_eq!(
+            snap.rect.y, rect.y,
+            "shrink must keep the top edge anchored"
+        );
+        assert!(snap.rect.width < rect.width, "shrink must decrease width");
+        assert!(
+            snap.rect.height < rect.height,
+            "shrink must decrease height"
         );
     }
 

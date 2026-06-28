@@ -88,7 +88,12 @@ try {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     $argline = "--config $ConfigPath --window-mode overlay --bind-all-interfaces --grpc-port $GrpcPort --mcp-port $McpPort --psk $psk"
     $action = New-ScheduledTaskAction -Execute $ExePath -Argument $argline -WorkingDirectory $WorkingDir
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+    # ExecutionTimeLimit MUST be unlimited (PT0S) — the overlay is a long-lived
+    # presence runtime, not a batch job. A finite limit makes Windows TERMINATE
+    # the process when it elapses (the prior 30-minute cap killed the HUD mid-
+    # session, surfacing as the compositor's "frame loop EXITED (HB-2)" ~30 min
+    # after launch). TimeSpan::Zero disables the "stop if runs longer than" gate.
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
     Register-ScheduledTask -TaskName $TaskName -Action $action -Settings $settings -Force | Out-Null
 
     # ── Launch and wait for both ports to bind ───────────────────────────────
