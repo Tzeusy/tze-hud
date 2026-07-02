@@ -52,14 +52,25 @@ pub(super) struct DragReleasedData {
 
 // ── Portal-resize pointer: geometry carried out of scene lock ────────────────
 
+/// Per-member geometry update produced by a whole-portal resize step.
+///
+/// A portal is composed of several constituent surfaces; a single resize step
+/// scales all of them, so the outcome carries one snapshot per member for the
+/// caller to broadcast.
+pub(super) struct PortalMemberGeometry {
+    /// Constituent-surface tile whose bounds were updated.
+    pub(super) tile_id: tze_hud_scene::SceneId,
+    /// Geometry snapshot carrying this member's scaled rect.
+    pub(super) snapshot: tze_hud_input::GeometrySnapshot,
+}
+
 /// Outcome of a pointer-driven portal resize step, carried out of the scene
 /// lock so that [`dispatch_portal_geometry_event`] can be called without
 /// holding locks (fire-and-forget gRPC send).
 pub(super) struct PortalResizePointerOutcome {
-    /// Tile whose bounds were updated.
-    pub(super) tile_id: tze_hud_scene::SceneId,
-    /// Geometry snapshot from the resize state machine.
-    pub(super) snapshot: tze_hud_input::GeometrySnapshot,
+    /// Per-member geometry updates to broadcast (includes the anchor/frame,
+    /// whose snapshot carries the whole-portal rect).
+    pub(super) members: Vec<PortalMemberGeometry>,
     /// Display width at the time of the event (for geometry normalisation).
     pub(super) display_w: f32,
     /// Display height at the time of the event.
@@ -299,6 +310,209 @@ fn compute_portal_max_dims(
     (max_w, max_h)
 }
 
+// ── Portal-group resolution (hud-fb3en) ──────────────────────────────────────
+
+/// A resolved portal group: the constituent scene tiles that move and resize as
+/// one coherent unit.
+///
+/// A text-stream portal is composed of several independent scene tiles that
+/// share a single lease (frame, transcript/output pane, composer/input pane,
+/// minimized icon, capture backstop, drag shield). The runtime has no explicit
+/// portal-group field on [`tze_hud_scene::types::Tile`], so the group is resolved
+/// structurally: the frame is the largest-area lease member (the portal-sized
+/// frame / capture backstop), and its top-left is the fixed anchor for
+/// grow/shrink (matching the top-left anchor semantics from PR #981). Members
+/// are the lease's tiles whose bounds lie within the frame rect.
+///
+/// This deliberately EXCLUDES the drag shield, which the client parks in a far
+/// display corner and which must not scale with the portal — mirroring the
+/// client-side `portal_bounds_mutations` layout, which omits the drag shield
+/// from the visible-portal geometry.
+///
+/// A single-tile lease resolves to a one-member group (the tile is its own
+/// anchor), preserving the pre-fix single-surface behavior.
+pub(super) struct PortalGroup {
+    /// The frame/anchor tile — its bounds are the whole-portal rect.
+    pub(super) anchor_tile_id: tze_hud_scene::SceneId,
+    /// Whole-portal rect (anchor frame bounds) at resolution time.
+    pub(super) portal_rect: PortalRect,
+    /// All member tile ids that scale with the portal (includes the anchor).
+    pub(super) member_ids: Vec<tze_hud_scene::SceneId>,
+    /// Stable per-portal hash (from the anchor tile) for `PortalResizeState`.
+    pub(super) portal_id_hash: u64,
+}
+
+/// Return true when `inner` lies within `outer`, allowing a small epsilon so
+/// sub-pixel rounding at pane edges does not drop a legitimate member.
+fn rect_contains(outer: &tze_hud_scene::Rect, inner: &tze_hud_scene::Rect, eps: f32) -> bool {
+    inner.x >= outer.x - eps
+        && inner.y >= outer.y - eps
+        && inner.x + inner.width <= outer.x + outer.width + eps
+        && inner.y + inner.height <= outer.y + outer.height + eps
+}
+
+/// Resolve the whole-portal group that owns `member_tile_id`.
+///
+/// Works from ANY member tile — a focused pane on the hotkey / pointer-down
+/// path, or the stored anchor tile on the pointer-move / pointer-up path: it
+/// looks up the shared lease, picks the largest-area lease member as the
+/// frame/anchor, then collects the lease members spatially contained within the
+/// frame rect (plus the seed tile itself, defensively).
+///
+/// Returns `None` if the tile does not exist.
+fn resolve_portal_group(
+    scene: &tze_hud_scene::graph::SceneGraph,
+    member_tile_id: tze_hud_scene::SceneId,
+) -> Option<PortalGroup> {
+    let seed = scene.tiles.get(&member_tile_id)?;
+    let lease_id = seed.lease_id;
+
+    // Largest-area lease member is the frame/anchor. Ties are broken by lowest
+    // id for determinism (an equal-area frame + capture backstop share
+    // identical bounds, so either choice yields the same portal rect).
+    let mut anchor_id = member_tile_id;
+    let mut anchor_bounds = seed.bounds;
+    let mut anchor_area = seed.bounds.width * seed.bounds.height;
+    for (id, tile) in scene.tiles.iter() {
+        if tile.lease_id != lease_id {
+            continue;
+        }
+        let area = tile.bounds.width * tile.bounds.height;
+        if area > anchor_area || (area == anchor_area && *id < anchor_id) {
+            anchor_area = area;
+            anchor_id = *id;
+            anchor_bounds = tile.bounds;
+        }
+    }
+
+    // Members = lease tiles spatially within the frame rect. The far-corner
+    // drag shield falls outside the frame and is excluded. The seed and anchor
+    // are always included.
+    let eps = 1.0_f32;
+    let mut member_ids: Vec<tze_hud_scene::SceneId> = scene
+        .tiles
+        .iter()
+        .filter(|(id, tile)| {
+            tile.lease_id == lease_id
+                && (**id == member_tile_id
+                    || **id == anchor_id
+                    || rect_contains(&anchor_bounds, &tile.bounds, eps))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    member_ids.sort();
+
+    let portal_rect = PortalRect {
+        x: anchor_bounds.x,
+        y: anchor_bounds.y,
+        width: anchor_bounds.width,
+        height: anchor_bounds.height,
+    };
+    let portal_id_hash = anchor_id.as_uuid().as_u128() as u64;
+
+    Some(PortalGroup {
+        anchor_tile_id: anchor_id,
+        portal_rect,
+        member_ids,
+        portal_id_hash,
+    })
+}
+
+/// Compute new bounds for every group member under a top-left-anchored uniform
+/// scale from `old_rect` → `new_rect`.
+///
+/// The portal's top-left (`new_rect` origin) is the fixed anchor. Each member's
+/// offset from the anchor and its size scale by the per-axis ratio, preserving
+/// relative layout. Returns `(tile_id, new_rect)` pairs for members that still
+/// exist in the scene.
+fn scale_portal_members(
+    scene: &tze_hud_scene::graph::SceneGraph,
+    group: &PortalGroup,
+    old_rect: PortalRect,
+    new_rect: PortalRect,
+) -> Vec<(tze_hud_scene::SceneId, tze_hud_scene::Rect)> {
+    let r_w = if old_rect.width > 0.0 {
+        new_rect.width / old_rect.width
+    } else {
+        1.0
+    };
+    let r_h = if old_rect.height > 0.0 {
+        new_rect.height / old_rect.height
+    } else {
+        1.0
+    };
+    let mut updates = Vec::with_capacity(group.member_ids.len());
+    for &tile_id in &group.member_ids {
+        let Some(tile) = scene.tiles.get(&tile_id) else {
+            continue;
+        };
+        // The anchor/frame IS the whole-portal rect: assign it exactly rather
+        // than round-tripping through the scale ratio. This keeps a single-tile
+        // portal bit-identical to the new rect (no float drift), which matters
+        // for the `scene.version` size-change guard driving the compositor's
+        // truncation-cache re-prime cadence.
+        let new_bounds = if tile_id == group.anchor_tile_id {
+            tze_hud_scene::Rect::new(new_rect.x, new_rect.y, new_rect.width, new_rect.height)
+        } else {
+            let b = tile.bounds;
+            tze_hud_scene::Rect::new(
+                new_rect.x + (b.x - old_rect.x) * r_w,
+                new_rect.y + (b.y - old_rect.y) * r_h,
+                b.width * r_w,
+                b.height * r_h,
+            )
+        };
+        updates.push((tile_id, new_bounds));
+    }
+    updates
+}
+
+/// Apply a resolved whole-portal resize to the scene: write each member's scaled
+/// bounds, bump the scene version once if any geometry changed, and build the
+/// per-member geometry snapshots to broadcast.
+///
+/// `primary` is the whole-portal geometry snapshot produced by the resize state
+/// machine (its `rect` is the new anchor/frame rect). Each returned member
+/// snapshot carries the same sequence / gesture flag but with that member's own
+/// scaled rect, so per-member `ElementRepositionedEvent`s report correct
+/// geometry.
+fn commit_portal_group_resize(
+    scene: &mut tze_hud_scene::graph::SceneGraph,
+    group: &PortalGroup,
+    old_rect: PortalRect,
+    primary: tze_hud_input::GeometrySnapshot,
+) -> Vec<PortalMemberGeometry> {
+    let new_rect = primary.rect;
+    let updates = scale_portal_members(scene, group, old_rect, new_rect);
+    let mut any_changed = false;
+    let mut members = Vec::with_capacity(updates.len());
+    for (tile_id, new_bounds) in updates {
+        if let Some(tile) = scene.tiles.get_mut(&tile_id) {
+            if tile.bounds.width != new_bounds.width || tile.bounds.height != new_bounds.height {
+                any_changed = true;
+            }
+            tile.bounds = new_bounds;
+        }
+        let snapshot = tze_hud_input::GeometrySnapshot {
+            rect: PortalRect {
+                x: new_bounds.x,
+                y: new_bounds.y,
+                width: new_bounds.width,
+                height: new_bounds.height,
+            },
+            ..primary
+        };
+        members.push(PortalMemberGeometry { tile_id, snapshot });
+    }
+    // The scene version drives the compositor's truncation-cache re-prime at the
+    // new (intermediate) geometry; bump once per whole-portal step, guarded on a
+    // real size change so a clamped-at-boundary press does not churn the cache.
+    if any_changed {
+        scene.version += 1;
+    }
+    members
+}
+
 /// Pointer-driven portal resize state machine step.
 ///
 /// Called from [`WinitApp::enqueue_pointer_event`] while the scene lock is held.
@@ -349,25 +563,12 @@ pub(super) fn apply_portal_resize_pointer_event(
     let tab_id = active_tab?;
     let focused_tile_id = focus_manager.current_owner(tab_id).tile_id()?;
 
-    match pointer_event.kind {
-        PointerEventKind::Down => {
-            // Hit-test the focused portal's affordance strip.
-            let tile = scene.tiles.get(&focused_tile_id)?;
-            // Only scrollable (portal) tiles accept resize affordances.
-            scene.tile_scroll_config(focused_tile_id)?;
-            let current_rect = PortalRect {
-                x: tile.bounds.x,
-                y: tile.bounds.y,
-                width: tile.bounds.width,
-                height: tile.bounds.height,
-            };
-            let edge: ResizeEdge = hit_affordance(x, y, &current_rect, tokens.affordance_px)?;
-
-            // Resolve spatial budget from the authoritative lease entry.
-            // The tile's embedded `resource_budget` is always default (0.0 = unconstrained).
+    // Build the clamping bounds for a whole-portal rect owned by `anchor_lease`.
+    let resize_bounds_for_lease =
+        |scene: &tze_hud_scene::graph::SceneGraph, anchor_lease: tze_hud_scene::SceneId| {
             let (lease_max_w, lease_max_h) = scene
                 .leases
-                .get(&tile.lease_id)
+                .get(&anchor_lease)
                 .map(|l| {
                     (
                         l.spatial_budget.max_tile_width_px,
@@ -383,46 +584,58 @@ pub(super) fn apply_portal_resize_pointer_event(
                 tokens.min_width_px,
                 tokens.min_height_px,
             );
-            let resize_bounds = ResizeBounds {
+            ResizeBounds {
                 tokens,
                 max_width_px,
                 max_height_px,
                 display_w,
                 display_h,
-            };
-            let portal_id_hash = focused_tile_id.as_uuid().as_u128() as u64;
+            }
+        };
+
+    match pointer_event.kind {
+        PointerEventKind::Down => {
+            // Only scrollable (portal) tiles accept resize affordances — same
+            // gate as hotkey resize; keeps the drag shield / frame from acting
+            // as the resize target.
+            scene.tile_scroll_config(focused_tile_id)?;
+            // Resolve the whole portal; the affordance strip lives on the frame.
+            let group = resolve_portal_group(scene, focused_tile_id)?;
+            let old_rect = group.portal_rect;
+            let edge: ResizeEdge = hit_affordance(x, y, &old_rect, tokens.affordance_px)?;
+
+            // Spatial budget from the anchor/frame's lease (the whole-portal
+            // rect clamps against the portal's lease budget).
+            let anchor_lease = scene.tiles.get(&group.anchor_tile_id)?.lease_id;
+            let resize_bounds = resize_bounds_for_lease(scene, anchor_lease);
+
             let resize_state = portal_resize_states
-                .entry(focused_tile_id)
-                .or_insert_with(|| PortalResizeState::new(portal_id_hash));
+                .entry(group.anchor_tile_id)
+                .or_insert_with(|| PortalResizeState::new(group.portal_id_hash));
 
             let outcome =
-                resize_state.on_pointer_down(device_id, edge, x, y, current_rect, &resize_bounds);
+                resize_state.on_pointer_down(device_id, edge, x, y, old_rect, &resize_bounds);
             let snapshot = match outcome {
                 ResizeOutcome::GestureStarted { snapshot } => snapshot,
                 _ => return None,
             };
+            let gesture_epoch = resize_state.current_gesture_epoch();
 
-            // Apply initial (clamped) rect immediately — local-first.
-            if let Some(tile) = scene.tiles.get_mut(&focused_tile_id) {
-                tile.bounds.x = snapshot.rect.x;
-                tile.bounds.y = snapshot.rect.y;
-                tile.bounds.width = snapshot.rect.width;
-                tile.bounds.height = snapshot.rect.height;
-                // No version bump on gesture start; rect is unchanged (clamped initial).
-            }
+            // Apply initial (clamped) rect to the whole portal — local-first.
+            let members = commit_portal_group_resize(scene, &group, old_rect, snapshot);
 
             tracing::debug!(
-                tile_id = ?focused_tile_id,
+                anchor_tile_id = ?group.anchor_tile_id,
+                members = members.len(),
                 ?edge,
                 x,
                 y,
-                gesture_epoch = resize_state.current_gesture_epoch(),
-                "portal resize: pointer-down on affordance — gesture started"
+                gesture_epoch,
+                "portal resize: pointer-down on affordance — whole-portal gesture started"
             );
 
             Some(PortalResizePointerOutcome {
-                tile_id: focused_tile_id,
-                snapshot,
+                members,
                 display_w,
                 display_h,
             })
@@ -430,75 +643,41 @@ pub(super) fn apply_portal_resize_pointer_event(
 
         PointerEventKind::Move => {
             let mut active_gesture = None;
-            for (&tile_id, resize_state) in portal_resize_states.iter_mut() {
+            for (&anchor_id, resize_state) in portal_resize_states.iter_mut() {
                 if !resize_state.gesture_active() {
                     continue;
                 }
-
-                let Some(tile) = scene.tiles.get(&tile_id) else {
+                let Some(anchor_lease) = scene.tiles.get(&anchor_id).map(|t| t.lease_id) else {
                     continue;
                 };
-                let (lease_max_w, lease_max_h) = scene
-                    .leases
-                    .get(&tile.lease_id)
-                    .map(|l| {
-                        (
-                            l.spatial_budget.max_tile_width_px,
-                            l.spatial_budget.max_tile_height_px,
-                        )
-                    })
-                    .unwrap_or((0.0, 0.0));
-                let (max_width_px, max_height_px) = compute_portal_max_dims(
-                    lease_max_w,
-                    lease_max_h,
-                    display_w,
-                    display_h,
-                    tokens.min_width_px,
-                    tokens.min_height_px,
-                );
-                let resize_bounds = ResizeBounds {
-                    tokens,
-                    max_width_px,
-                    max_height_px,
-                    display_w,
-                    display_h,
-                };
-
+                let resize_bounds = resize_bounds_for_lease(scene, anchor_lease);
                 if let ResizeOutcome::GestureUpdate { snapshot } =
                     resize_state.on_pointer_move(device_id, x, y, &resize_bounds)
                 {
-                    active_gesture = Some((tile_id, snapshot));
+                    active_gesture = Some((anchor_id, snapshot));
                     break;
                 }
             }
 
-            let (tile_id, snapshot) = active_gesture?;
+            let (anchor_id, snapshot) = active_gesture?;
+            let group = resolve_portal_group(scene, anchor_id)?;
+            let old_rect = group.portal_rect;
 
-            // Apply updated rect immediately (local-first feedback on every move).
-            if let Some(tile) = scene.tiles.get_mut(&tile_id) {
-                let size_changed = tile.bounds.width != snapshot.rect.width
-                    || tile.bounds.height != snapshot.rect.height;
-                tile.bounds.x = snapshot.rect.x;
-                tile.bounds.y = snapshot.rect.y;
-                tile.bounds.width = snapshot.rect.width;
-                tile.bounds.height = snapshot.rect.height;
-                if size_changed {
-                    scene.version += 1;
-                }
-            }
+            // Apply the updated whole-portal rect immediately (local-first).
+            let members = commit_portal_group_resize(scene, &group, old_rect, snapshot);
 
             tracing::trace!(
-                tile_id = ?tile_id,
+                anchor_tile_id = ?group.anchor_tile_id,
+                members = members.len(),
                 x,
                 y,
                 new_w = snapshot.rect.width,
                 new_h = snapshot.rect.height,
-                "portal resize: pointer-move — bounds updated locally"
+                "portal resize: pointer-move — whole-portal bounds updated locally"
             );
 
             Some(PortalResizePointerOutcome {
-                tile_id,
-                snapshot,
+                members,
                 display_w,
                 display_h,
             })
@@ -506,77 +685,43 @@ pub(super) fn apply_portal_resize_pointer_event(
 
         PointerEventKind::Up => {
             let mut active_gesture = None;
-            for (&tile_id, resize_state) in portal_resize_states.iter_mut() {
+            for (&anchor_id, resize_state) in portal_resize_states.iter_mut() {
                 if !resize_state.gesture_active() {
                     continue;
                 }
-
-                let Some(tile) = scene.tiles.get(&tile_id) else {
+                let Some(anchor_lease) = scene.tiles.get(&anchor_id).map(|t| t.lease_id) else {
                     continue;
                 };
-                let (lease_max_w, lease_max_h) = scene
-                    .leases
-                    .get(&tile.lease_id)
-                    .map(|l| {
-                        (
-                            l.spatial_budget.max_tile_width_px,
-                            l.spatial_budget.max_tile_height_px,
-                        )
-                    })
-                    .unwrap_or((0.0, 0.0));
-                let (max_width_px, max_height_px) = compute_portal_max_dims(
-                    lease_max_w,
-                    lease_max_h,
-                    display_w,
-                    display_h,
-                    tokens.min_width_px,
-                    tokens.min_height_px,
-                );
-                let resize_bounds = ResizeBounds {
-                    tokens,
-                    max_width_px,
-                    max_height_px,
-                    display_w,
-                    display_h,
-                };
-
+                let resize_bounds = resize_bounds_for_lease(scene, anchor_lease);
                 if let ResizeOutcome::GestureEnded { snapshot } =
                     resize_state.on_pointer_up(device_id, x, y, &resize_bounds)
                 {
                     active_gesture =
-                        Some((tile_id, snapshot, resize_state.current_gesture_epoch()));
+                        Some((anchor_id, snapshot, resize_state.current_gesture_epoch()));
                     break;
                 }
             }
 
-            let (tile_id, snapshot, gesture_epoch) = active_gesture?;
+            let (anchor_id, snapshot, gesture_epoch) = active_gesture?;
+            let group = resolve_portal_group(scene, anchor_id)?;
+            let old_rect = group.portal_rect;
 
-            // Apply final clamped rect (local-first).
-            if let Some(tile) = scene.tiles.get_mut(&tile_id) {
-                let size_changed = tile.bounds.width != snapshot.rect.width
-                    || tile.bounds.height != snapshot.rect.height;
-                tile.bounds.x = snapshot.rect.x;
-                tile.bounds.y = snapshot.rect.y;
-                tile.bounds.width = snapshot.rect.width;
-                tile.bounds.height = snapshot.rect.height;
-                if size_changed {
-                    scene.version += 1;
-                }
-            }
+            // Apply final clamped whole-portal rect (local-first).
+            let members = commit_portal_group_resize(scene, &group, old_rect, snapshot);
 
             tracing::debug!(
-                tile_id = ?tile_id,
+                anchor_tile_id = ?group.anchor_tile_id,
+                members = members.len(),
                 x,
                 y,
                 final_w = snapshot.rect.width,
                 final_h = snapshot.rect.height,
                 gesture_epoch,
-                "portal resize: pointer-up — gesture ended, final bounds applied"
+                "portal resize: pointer-up — whole-portal gesture ended, final bounds applied"
             );
 
             Some(PortalResizePointerOutcome {
-                tile_id,
-                snapshot,
+                members,
                 display_w,
                 display_h,
             })
@@ -869,9 +1014,13 @@ impl WinitApp {
             None => return false,
         };
 
-        // Acquire scene + check if focused tile is a portal (has scroll config).
-        // Resolve the bounds and display dimensions we need for clamping.
-        let (current_rect, bounds, portal_id_hash) = {
+        let display_w = self.state.config.window.width as f32;
+        let display_h = self.state.config.window.height as f32;
+
+        // Acquire scene + check if the focused tile is a portal surface (has a
+        // scroll config), resolve the whole-portal group, and build the bounds
+        // for clamping the whole-portal rect.
+        let (group, old_rect, bounds) = {
             // A resize hotkey is a deliberate user action that must produce
             // visible feedback this frame; acquire with a bounded spin rather
             // than a single try_lock so a contended scene lock (compositor /
@@ -887,18 +1036,17 @@ impl WinitApp {
             if scene.tile_scroll_config(focused_tile_id).is_none() {
                 return false;
             }
-            let tile = match scene.tiles.get(&focused_tile_id) {
-                Some(t) => t,
-                None => return false,
+            // Resolve the whole portal (frame anchor + constituent surfaces)
+            // that owns the focused surface, so the step scales the unit rather
+            // than the single focused tile (hud-fb3en).
+            let Some(group) = resolve_portal_group(&scene, focused_tile_id) else {
+                return false;
             };
-            let display_w = self.state.config.window.width as f32;
-            let display_h = self.state.config.window.height as f32;
-            let current = PortalRect {
-                x: tile.bounds.x,
-                y: tile.bounds.y,
-                width: tile.bounds.width,
-                height: tile.bounds.height,
+            let Some(anchor_lease) = scene.tiles.get(&group.anchor_tile_id).map(|t| t.lease_id)
+            else {
+                return false;
             };
+            let old_rect = group.portal_rect;
             let portal_part = tze_hud_config::resolve_portal_tokens(&self.state.global_tokens);
             let tokens = PortalWindowTokens {
                 min_width_px: portal_part.window_min_width_px,
@@ -906,10 +1054,11 @@ impl WinitApp {
                 resize_step_px: portal_part.window_resize_step_px,
                 affordance_px: portal_part.window_resize_affordance_px,
             };
-            // Resolve spatial budget from the authoritative lease entry.
+            // Resolve spatial budget from the anchor/frame's lease (the
+            // whole-portal rect clamps against the portal's lease budget).
             let (lease_max_w, lease_max_h) = scene
                 .leases
-                .get(&tile.lease_id)
+                .get(&anchor_lease)
                 .map(|l| {
                     (
                         l.spatial_budget.max_tile_width_px,
@@ -932,25 +1081,22 @@ impl WinitApp {
                 display_w,
                 display_h,
             };
-            // Stable hash of the tile's interaction_id to use as `portal_id_hash`
-            // in `PortalResizeState`. We use the `SceneId`'s UUID bytes as a cheap
-            // 64-bit hash (truncating the 128-bit UUID to its lower 64 bits).
-            let hash = focused_tile_id.as_uuid().as_u128() as u64;
-            (current, resize_bounds, hash)
+            (group, old_rect, resize_bounds)
         };
 
-        // Get or lazily create the per-portal resize state.
+        // Get or lazily create the per-portal resize state, keyed by the anchor
+        // (frame) tile so one gesture state tracks the whole portal.
         let resize_state = self
             .state
             .portal_resize_states
-            .entry(focused_tile_id)
-            .or_insert_with(|| PortalResizeState::new(portal_id_hash));
+            .entry(group.anchor_tile_id)
+            .or_insert_with(|| PortalResizeState::new(group.portal_id_hash));
 
-        // Apply the hotkey resize (O(1), no allocation on hot path per §6b perf contract).
+        // Apply the hotkey resize to the whole-portal rect (O(1) on the hot path).
         let outcome = apply_hotkey_resize(
             true, // portal is focused (checked above)
             dir,
-            current_rect,
+            old_rect,
             &bounds,
             resize_state,
         );
@@ -960,17 +1106,14 @@ impl WinitApp {
             tze_hud_input::HotkeyResizeOutcome::NotFocused => return false,
         };
 
-        // Local-first feedback: update tile bounds immediately in the scene
-        // (same frame, no adapter roundtrip) per §6b.2 / local-feedback-first.
-        //
-        // scene.version is incremented so that `prime_truncation_cache` in the
-        // compositor detects the geometry change and re-resolves the tile's
-        // overflow contract at this intermediate geometry (hud-ghhxa — spec §6b.3).
-        // The adaptive cadence gate in `prime_truncation_cache` caps the
-        // re-prime rate so repeated hotkey presses during a fast resize do not
-        // blow the frame budget (re-prime rate is content-length-dependent;
-        // see `adaptive_reprime_interval_ms` in the compositor).
-        {
+        // Local-first feedback: scale every constituent surface immediately in
+        // the scene (same frame, no adapter roundtrip) per §6b.2 /
+        // local-feedback-first, preserving relative layout around the top-left
+        // anchor. `commit_portal_group_resize` bumps `scene.version` once when
+        // the geometry actually changes, so the compositor re-primes the
+        // truncation cache at the new geometry (hud-ghhxa — spec §6b.3) without
+        // churning at a clamped boundary.
+        let members = {
             let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
             else {
                 return true; // hotkey consumed even if local update fails
@@ -978,51 +1121,33 @@ impl WinitApp {
             let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
                 return true;
             };
-            if let Some(tile) = scene.tiles.get_mut(&focused_tile_id) {
-                let size_changed = tile.bounds.width != snapshot.rect.width
-                    || tile.bounds.height != snapshot.rect.height;
-                tile.bounds.x = snapshot.rect.x;
-                tile.bounds.y = snapshot.rect.y;
-                tile.bounds.width = snapshot.rect.width;
-                tile.bounds.height = snapshot.rect.height;
-                if size_changed {
-                    // Increment scene version so the truncation cache is
-                    // invalidated and re-primed at the new (intermediate)
-                    // geometry.  Guard on size_changed to avoid spurious
-                    // cache invalidations when the hotkey is pressed at a
-                    // clamped boundary (geometry identical, only sequence
-                    // number advanced).
-                    scene.version += 1;
-                }
-            }
+            commit_portal_group_resize(&mut scene, &group, old_rect, snapshot)
+        };
+
+        // Broadcast a geometry snapshot per constituent surface to gRPC
+        // subscribers via ElementRepositionedEvent (§6b.4: coalescible
+        // state-stream delivery), and mirror each into the in-process projection
+        // authority so the drain loop sees the updated bounds next cycle.
+        for member in &members {
+            dispatch_portal_geometry_event(
+                &self.state.element_repositioned_tx,
+                member.tile_id,
+                &member.snapshot,
+                display_w,
+                display_h,
+            );
+            self.state
+                .portal_projection_driver
+                .push_geometry_snapshot_for_tile(member.tile_id, member.snapshot);
         }
 
-        // Broadcast geometry snapshot to gRPC subscribers via ElementRepositionedEvent.
-        // Local-first: scene bounds were already updated above.  This notifies adapters
-        // that the portal geometry has changed (§6b.4: coalescible state-stream delivery).
-        dispatch_portal_geometry_event(
-            &self.state.element_repositioned_tx,
-            focused_tile_id,
-            &snapshot,
-            self.state.config.window.width as f32,
-            self.state.config.window.height as f32,
-        );
-
-        // §6b.4 producer wiring (hud-npq6g): push the geometry snapshot into the
-        // in-process projection authority so the drain loop (geometry_batch consumer)
-        // receives the updated bounds on the next about_to_wait cycle.
-        // This gives the producer its first genuine production caller — previously
-        // push_geometry_snapshot was called only from a bin test.
-        self.state
-            .portal_projection_driver
-            .push_geometry_snapshot_for_tile(focused_tile_id, snapshot);
-
         tracing::debug!(
-            tile_id = ?focused_tile_id,
+            anchor_tile_id = ?group.anchor_tile_id,
+            members = members.len(),
             new_width = snapshot.rect.width,
             new_height = snapshot.rect.height,
             sequence = snapshot.sequence,
-            "portal resize: hotkey applied — tile bounds updated locally"
+            "portal resize: hotkey applied — whole-portal bounds updated locally"
         );
 
         true // hotkey consumed
@@ -2053,11 +2178,11 @@ mod tests {
         );
         let outcome = outcome.unwrap();
         assert_eq!(
-            outcome.tile_id, tile_id,
+            outcome.members[0].tile_id, tile_id,
             "outcome must reference the focused portal tile"
         );
         assert!(
-            outcome.snapshot.gesture_active,
+            outcome.members[0].snapshot.gesture_active,
             "snapshot must have gesture_active=true on pointer-down"
         );
 
@@ -2206,11 +2331,11 @@ mod tests {
         );
         let outcome = outcome.unwrap();
         assert!(
-            !outcome.snapshot.gesture_active,
+            !outcome.members[0].snapshot.gesture_active,
             "snapshot gesture_active must be false after pointer-up"
         );
         assert_eq!(
-            outcome.tile_id, tile_id,
+            outcome.members[0].tile_id, tile_id,
             "outcome tile_id must match the resized portal"
         );
 
@@ -2280,7 +2405,7 @@ mod tests {
             tokens,
         )
         .expect("device 1 down must start a resize on tile A");
-        assert_eq!(outcome_a.tile_id, tile_a);
+        assert_eq!(outcome_a.members[0].tile_id, tile_a);
 
         let (focus_result, _) = fm.request_focus(
             FocusRequest {
@@ -2316,7 +2441,7 @@ mod tests {
             tokens,
         )
         .expect("device 2 down must start a resize on tile B");
-        assert_eq!(outcome_b.tile_id, tile_b);
+        assert_eq!(outcome_b.members[0].tile_id, tile_b);
 
         let active_order = resize_states
             .iter()
@@ -2359,7 +2484,7 @@ mod tests {
         .expect("move must find the portal whose gesture belongs to this device");
 
         assert_eq!(
-            move_outcome.tile_id, target_tile,
+            move_outcome.members[0].tile_id, target_tile,
             "move must update the active portal for the current device"
         );
         assert!(
@@ -2391,7 +2516,7 @@ mod tests {
         .expect("up must end the portal gesture for the current device");
 
         assert_eq!(
-            up_outcome.tile_id, target_tile,
+            up_outcome.members[0].tile_id, target_tile,
             "up must end the active portal for the current device"
         );
         assert!(
@@ -3021,6 +3146,380 @@ mod tests {
         assert_eq!(
             scene.version, version_before_noop,
             "scene.version must NOT change when pointer-move produces no size delta"
+        );
+    }
+
+    // ── Whole-portal resize (hud-fb3en) ──────────────────────────────────────
+
+    /// Build a multi-surface portal (frame + transcript pane + composer pane +
+    /// far-corner drag shield) sharing one lease, with keyboard focus on the
+    /// composer/input pane — the exact live configuration that made Ctrl resize
+    /// scale only the focused pane. Returns (scene, tab, frame, transcript,
+    /// composer, drag_shield, focus_manager).
+    #[allow(clippy::type_complexity)]
+    fn multi_surface_portal_scene() -> (
+        tze_hud_scene::graph::SceneGraph,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        FocusManager,
+    ) {
+        use tze_hud_scene::types::TileScrollConfig;
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        // Frame is the portal-sized anchor (largest area, not scrollable).
+        let frame_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        // Transcript (output) pane — a scrollable surface inside the frame.
+        let transcript_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(110.0, 110.0, 180.0, 280.0),
+                3,
+            )
+            .unwrap();
+        // Composer (input) pane — a scrollable surface inside the frame.
+        let composer_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(300.0, 110.0, 190.0, 280.0),
+                3,
+            )
+            .unwrap();
+        // Drag shield — parked in the far display corner, NOT scrollable, NOT
+        // spatially part of the portal frame.
+        let shield_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(1900.0, 1070.0, 1.0, 1.0),
+                20,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(transcript_id, TileScrollConfig::vertical())
+            .unwrap();
+        scene
+            .register_tile_scroll_config(composer_id, TileScrollConfig::vertical())
+            .unwrap();
+
+        // Focus the composer/input pane — the live trigger for the bug.
+        let mut fm = FocusManager::new();
+        fm.request_focus(
+            FocusRequest {
+                tile_id: composer_id,
+                node_id: None,
+                steal: true,
+                requesting_namespace: "portal-agent".to_string(),
+            },
+            tab_id,
+            &scene,
+        );
+
+        (
+            scene,
+            tab_id,
+            frame_id,
+            transcript_id,
+            composer_id,
+            shield_id,
+            fm,
+        )
+    }
+
+    /// Relative geometry of a surface `b` expressed as fractions of the frame
+    /// `f`: (x offset, y offset, width, height) all divided by the frame rect.
+    /// Two surfaces share a portal layout iff these tuples are (approx) equal
+    /// before and after a resize.
+    fn rel_to_frame(b: tze_hud_scene::Rect, f: tze_hud_scene::Rect) -> (f32, f32, f32, f32) {
+        (
+            (b.x - f.x) / f.width,
+            (b.y - f.y) / f.height,
+            b.width / f.width,
+            b.height / f.height,
+        )
+    }
+
+    fn approx_tuple(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 1e-3
+            && (a.1 - b.1).abs() < 1e-3
+            && (a.2 - b.2).abs() < 1e-3
+            && (a.3 - b.3).abs() < 1e-3
+    }
+
+    /// Core hud-fb3en regression: focusing the composer and pressing Ctrl+= must
+    /// grow the WHOLE portal — every constituent surface scales together,
+    /// preserving relative layout, anchored top-left — not just the focused
+    /// pane. The far-corner drag shield must NOT move.
+    #[test]
+    fn ctrl_resize_hotkey_scales_whole_portal_not_just_focused_surface() {
+        use tze_hud_input::{HotkeyResizeDir, InputProcessor};
+
+        let (scene, tab_id, frame_id, transcript_id, composer_id, shield_id, fm) =
+            multi_surface_portal_scene();
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, InputProcessor::new());
+
+        let read = |app: &WinitApp, id: tze_hud_scene::SceneId| {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get(&id).unwrap().bounds
+        };
+
+        let frame_before = read(&app, frame_id);
+        let composer_before = read(&app, composer_id);
+        let transcript_before = read(&app, transcript_id);
+        let shield_before = read(&app, shield_id);
+
+        let consumed = app.apply_portal_resize_hotkey(tab_id, HotkeyResizeDir::Grow);
+        assert!(
+            consumed,
+            "Ctrl resize hotkey must be consumed for a focused portal surface"
+        );
+
+        let frame_after = read(&app, frame_id);
+        let composer_after = read(&app, composer_id);
+        let transcript_after = read(&app, transcript_id);
+        let shield_after = read(&app, shield_id);
+
+        // Frame (anchor) grew, top-left anchored (origin fixed).
+        assert!(
+            frame_after.width > frame_before.width && frame_after.height > frame_before.height,
+            "the portal frame must grow"
+        );
+        assert_eq!(
+            (frame_after.x, frame_after.y),
+            (frame_before.x, frame_before.y),
+            "grow must be anchored at the frame's top-left corner"
+        );
+
+        // Both panes scaled with the portal — not left in place, not resized in
+        // isolation.
+        assert!(
+            composer_after.width > composer_before.width
+                && composer_after.height > composer_before.height,
+            "the focused composer pane must scale WITH the whole portal"
+        );
+        assert!(
+            transcript_after.width > transcript_before.width
+                && transcript_after.height > transcript_before.height,
+            "the transcript pane must scale WITH the whole portal"
+        );
+
+        // Relative layout preserved for every constituent surface.
+        assert!(
+            approx_tuple(
+                rel_to_frame(composer_before, frame_before),
+                rel_to_frame(composer_after, frame_after)
+            ),
+            "composer must keep its relative position/size within the portal"
+        );
+        assert!(
+            approx_tuple(
+                rel_to_frame(transcript_before, frame_before),
+                rel_to_frame(transcript_after, frame_after)
+            ),
+            "transcript must keep its relative position/size within the portal"
+        );
+
+        // The spatially-detached drag shield is not a spatial member of the
+        // portal frame and must not scale or move.
+        assert_eq!(
+            shield_after, shield_before,
+            "the far-corner drag shield must not scale/move with a portal resize"
+        );
+    }
+
+    /// A non-portal (non-scrollable) focused surface must not consume the resize
+    /// hotkey nor change any geometry — the whole-portal path only engages for a
+    /// focused portal surface.
+    #[test]
+    fn ctrl_resize_hotkey_ignored_when_focused_surface_is_not_a_portal() {
+        use tze_hud_input::{HotkeyResizeDir, InputProcessor};
+
+        let (scene, tab_id, frame_id, _transcript_id, _composer_id, _shield_id, _fm) =
+            multi_surface_portal_scene();
+
+        // Focus the frame, which is NOT a scrollable portal surface.
+        let mut fm = FocusManager::new();
+        fm.request_focus(
+            FocusRequest {
+                tile_id: frame_id,
+                node_id: None,
+                steal: true,
+                requesting_namespace: "portal-agent".to_string(),
+            },
+            tab_id,
+            &scene,
+        );
+
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, InputProcessor::new());
+
+        let read = |app: &WinitApp, id: tze_hud_scene::SceneId| {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get(&id).unwrap().bounds
+        };
+        let frame_before = read(&app, frame_id);
+
+        let consumed = app.apply_portal_resize_hotkey(tab_id, HotkeyResizeDir::Grow);
+        assert!(
+            !consumed,
+            "resize hotkey must not be consumed when the focused surface is not a portal"
+        );
+        assert_eq!(
+            read(&app, frame_id),
+            frame_before,
+            "geometry must not change when the focused surface is not a portal"
+        );
+    }
+
+    /// Pointer-affordance resize (dragging the frame's bottom-right corner) must
+    /// also scale the WHOLE portal: the returned member set covers the frame and
+    /// both panes but excludes the far-corner drag shield, and every member
+    /// scales together while the shield stays put.
+    #[test]
+    fn pointer_affordance_resize_scales_whole_portal_from_frame() {
+        use tze_hud_input::{
+            PointerEvent, PointerEventKind, PortalResizeState, PortalWindowTokens,
+        };
+
+        let (mut scene, tab_id, frame_id, transcript_id, composer_id, shield_id, fm) =
+            multi_surface_portal_scene();
+        let mut states: std::collections::HashMap<tze_hud_scene::SceneId, PortalResizeState> =
+            std::collections::HashMap::new();
+        let tokens = PortalWindowTokens::default();
+        let (display_w, display_h) = (1920.0_f32, 1080.0_f32);
+
+        let read = |scene: &tze_hud_scene::graph::SceneGraph, id: tze_hud_scene::SceneId| {
+            scene.tiles.get(&id).unwrap().bounds
+        };
+        let frame_before = read(&scene, frame_id);
+        let composer_before = read(&scene, composer_id);
+        let transcript_before = read(&scene, transcript_id);
+        let shield_before = read(&scene, shield_id);
+
+        // PointerDown on the frame's bottom-right corner affordance (500, 400).
+        let down = PointerEvent {
+            x: 498.0,
+            y: 398.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        let out_down = apply_portal_resize_pointer_event(
+            &down,
+            &mut states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
+        );
+        assert!(
+            out_down.is_some(),
+            "pointer-down on the frame resize affordance must start a whole-portal gesture even with the composer focused"
+        );
+
+        // PointerMove outward to grow the portal.
+        let mv = PointerEvent {
+            x: 570.0,
+            y: 470.0,
+            kind: PointerEventKind::Move,
+            device_id: 0,
+            timestamp: None,
+        };
+        let out_move = apply_portal_resize_pointer_event(
+            &mv,
+            &mut states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
+        )
+        .expect("pointer-move must update the whole portal");
+
+        let member_ids: Vec<_> = out_move.members.iter().map(|m| m.tile_id).collect();
+        assert!(
+            member_ids.contains(&frame_id)
+                && member_ids.contains(&composer_id)
+                && member_ids.contains(&transcript_id),
+            "whole-portal resize members must include the frame and both panes"
+        );
+        assert!(
+            !member_ids.contains(&shield_id),
+            "the far-corner drag shield must be excluded from resize members"
+        );
+
+        let frame_after = read(&scene, frame_id);
+        let composer_after = read(&scene, composer_id);
+        let transcript_after = read(&scene, transcript_id);
+        let shield_after = read(&scene, shield_id);
+
+        assert!(
+            frame_after.width > frame_before.width && frame_after.height > frame_before.height,
+            "pointer resize must grow the frame"
+        );
+        assert!(
+            composer_after.width > composer_before.width,
+            "pointer resize must scale the composer pane with the portal"
+        );
+        assert!(
+            transcript_after.width > transcript_before.width,
+            "pointer resize must scale the transcript pane with the portal"
+        );
+        assert!(
+            approx_tuple(
+                rel_to_frame(composer_before, frame_before),
+                rel_to_frame(composer_after, frame_after)
+            ),
+            "pointer resize must preserve the composer's relative layout"
+        );
+        assert_eq!(
+            shield_after, shield_before,
+            "pointer resize must not move the far-corner drag shield"
+        );
+
+        // End the gesture cleanly.
+        let up = PointerEvent {
+            x: 570.0,
+            y: 470.0,
+            kind: PointerEventKind::Up,
+            device_id: 0,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &up,
+            &mut states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
         );
     }
 }

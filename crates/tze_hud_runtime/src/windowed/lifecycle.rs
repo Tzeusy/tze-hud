@@ -1227,19 +1227,25 @@ impl WinitApp {
         // lifecycle.  Fire-and-forget (best-effort coalescible state-stream
         // delivery per §6b.4).
         if let Some(outcome) = portal_resize_outcome {
-            dispatch_portal_geometry_event(
-                &self.state.element_repositioned_tx,
-                outcome.tile_id,
-                &outcome.snapshot,
-                outcome.display_w,
-                outcome.display_h,
-            );
-            // §6b.4 producer wiring (hud-npq6g): push snapshot into the in-process
-            // projection authority so the drain loop consumer sees live pointer-
-            // affordance geometry (same path as the hotkey resize wiring above).
-            self.state
-                .portal_projection_driver
-                .push_geometry_snapshot_for_tile(outcome.tile_id, outcome.snapshot);
+            // Broadcast one geometry event per constituent surface of the portal
+            // — a resize scales the whole portal as a unit (hud-fb3en), so every
+            // member's new bounds must reach adapters/subscribers.
+            for member in &outcome.members {
+                dispatch_portal_geometry_event(
+                    &self.state.element_repositioned_tx,
+                    member.tile_id,
+                    &member.snapshot,
+                    outcome.display_w,
+                    outcome.display_h,
+                );
+                // §6b.4 producer wiring (hud-npq6g): push snapshot into the
+                // in-process projection authority so the drain loop consumer sees
+                // live pointer-affordance geometry (same path as the hotkey
+                // resize wiring above).
+                self.state
+                    .portal_projection_driver
+                    .push_geometry_snapshot_for_tile(member.tile_id, member.snapshot);
+            }
         }
 
         // Post-lock: clear local composer echo if composer focus was lost inside
