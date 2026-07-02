@@ -315,14 +315,20 @@ impl Compositor {
         let Some(region) = Self::composer_region_bounds(tile, scene, cs.node_id) else {
             return;
         };
+        // Confine the composer chrome to the single input-line strip so it does
+        // not paint over the whole portal (hud-2zsbf). Kept in lockstep with
+        // `collect_composer_text_item`, which anchors the draft to the same strip.
+        let line_height_multiplier =
+            crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        let strip = Self::composer_input_strip(region, tokens.font_size_px, line_height_multiplier);
 
         // Background fill.
         let bg_color = [tokens.bg_r, tokens.bg_g, tokens.bg_b, tokens.bg_a];
         vertices.extend_from_slice(&rect_vertices(
-            region.x,
-            region.y,
-            region.width,
-            region.height,
+            strip.x,
+            strip.y,
+            strip.width,
+            strip.height,
             sw,
             sh,
             bg_color,
@@ -337,10 +343,10 @@ impl Compositor {
                 tokens.at_capacity_a,
             ];
             vertices.extend_from_slice(&rect_vertices(
-                region.x,
-                region.y,
+                strip.x,
+                strip.y,
                 2.0,
-                region.height,
+                strip.height,
                 sw,
                 sh,
                 accent,
@@ -372,6 +378,35 @@ impl Compositor {
             right - left,
             bottom - top,
         ))
+    }
+
+    /// Confine the rendered composer echo to a single input-line strip at the
+    /// BOTTOM of the composer region (hud-2zsbf).
+    ///
+    /// The composer HitRegion published by the projection authority spans the
+    /// WHOLE portal (`resident_grpc::local_bounds_for_state` → `x:0, y:0, w, h`)
+    /// so a pointer-down anywhere in the portal focuses the composer (hud-v4k1h).
+    /// That full-portal region is the correct *pointer/focus* target, but using
+    /// it verbatim as the echo's layout+clip box laid the single unwrapped draft
+    /// line across the entire portal width at the portal's TOP — reading live as
+    /// "the draft extends forever past the composer box". The clip was effective;
+    /// the box was simply the whole portal.
+    ///
+    /// This derives the actual composer *input box* from that region: one text
+    /// line tall (font line-height plus symmetric vertical padding equal to the
+    /// horizontal text margin), pinned to the bottom edge where a chat-style
+    /// composer belongs. Width and x are unchanged, so horizontal caret-follow is
+    /// unaffected; only the vertical placement + clip height shrink to one line.
+    /// For a composer region that is already ~one line tall (the intended
+    /// promotion-era structured composer node) the strip equals the region, so
+    /// behaviour there is unchanged.
+    fn composer_input_strip(region: Rect, font_size_px: f32, line_height_multiplier: f32) -> Rect {
+        let line_height = (font_size_px * line_height_multiplier).max(1.0);
+        let strip_height = (line_height + COMPOSER_TEXT_MARGIN * 2.0)
+            .min(region.height)
+            .max(1.0);
+        let strip_y = region.y + (region.height - strip_height).max(0.0);
+        Rect::new(region.x, strip_y, region.width, strip_height)
     }
 
     /// Depth-first search for `target` in the node sub-tree rooted at `node_id`.
@@ -507,6 +542,15 @@ impl Compositor {
         let cs = self.local_composer.as_ref()?;
         self.text_rasterizer.as_ref()?;
         let region = Self::composer_region_bounds(tile, scene, cs.node_id)?;
+        // The full HitRegion spans the whole portal (click-anywhere-to-focus,
+        // hud-v4k1h); confine the rendered draft to the single input-line strip
+        // at its bottom edge so it does not stretch across the portal (hud-2zsbf).
+        // Width/x are preserved, so horizontal caret-follow is unchanged.
+        let strip = Self::composer_input_strip(
+            region,
+            tokens.font_size_px,
+            crate::markdown::MarkdownTokens::default().line_height_multiplier,
+        );
 
         // Insert the caret glyph at the cursor byte offset, gated by the blink
         // phase.  composer_display_text_blink handles OOB and non-char-boundary
@@ -544,7 +588,7 @@ impl Compositor {
         ];
 
         let bw = (region.width - text_margin * 2.0).max(1.0);
-        let bh = (region.height - text_margin * 2.0).max(1.0);
+        let bh = (strip.height - text_margin * 2.0).max(1.0);
 
         let _ = sw; // retained for API symmetry with other collect helpers
         let _ = sh;
@@ -605,15 +649,16 @@ impl Compositor {
             text: Arc::from(display_text.as_str()),
             // Shift the draft left by the caret-follow scroll offset (0 when it fits).
             pixel_x: region.x + text_margin - scroll_offset,
-            pixel_y: region.y + text_margin,
+            pixel_y: strip.y + text_margin,
             bounds_width: layout_width,
             bounds_height: bh,
-            // Clip stays pinned to the region interior so scrolled-off text is
-            // clipped at the box edge, never painted outside it.
+            // Clip stays pinned to the input strip interior so scrolled-off text
+            // is clipped at the box edge, never painted outside it. Vertically the
+            // clip is the single-line strip (hud-2zsbf), not the full portal.
             clip_pixel_x: region.x + text_margin,
-            clip_pixel_y: region.y,
+            clip_pixel_y: strip.y,
             clip_bounds_width: bw.max(1.0),
-            clip_bounds_height: region.height.max(1.0),
+            clip_bounds_height: strip.height.max(1.0),
             font_size_px: tokens.font_size_px,
             font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
             font_weight: 400,
