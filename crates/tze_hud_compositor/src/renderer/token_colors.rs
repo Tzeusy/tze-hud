@@ -549,6 +549,44 @@ pub(super) fn resolve_scroll_indicator_tokens(
     }
 }
 
+/// Resolved focus-ring visual tokens (linear sRGB color + width in px).
+///
+/// The keyboard focus ring is drawn by [`Compositor::render_node`] around the
+/// focused `HitRegionNode` so a keyboard-only viewer can always see where focus
+/// landed (RFC 0004 §5.6). Color and width are token-driven — never hardcoded in
+/// the compositor — with defaults mirrored from `tze_hud_input`'s
+/// [`DEFAULT_FOCUS_RING_COLOR`](tze_hud_input::DEFAULT_FOCUS_RING_COLOR) /
+/// [`DEFAULT_FOCUS_RING_WIDTH_PX`](tze_hud_input::DEFAULT_FOCUS_RING_WIDTH_PX)
+/// so both crates stay in sync.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FocusRingTokens {
+    /// Ring color as a linear-sRGB `[r, g, b, a]` array (ready for `gpu_color_raw`).
+    pub(super) color: [f32; 4],
+    /// Ring stroke width in physical pixels.
+    pub(super) width_px: f32,
+}
+
+/// Resolve [`FocusRingTokens`] from the compositor token map.
+///
+/// Keys follow the portal token namespace (`portal.focus_ring.*`). Falls back to
+/// the `tze_hud_input` focus-ring defaults for any missing/unparsable token.
+#[inline]
+pub(super) fn resolve_focus_ring_tokens(token_map: &HashMap<String, String>) -> FocusRingTokens {
+    let default_color = tze_hud_input::DEFAULT_FOCUS_RING_COLOR;
+
+    let color = resolve_token_color(token_map, "portal.focus_ring.color")
+        .unwrap_or(default_color)
+        .to_array();
+
+    let width_px = token_map
+        .get("portal.focus_ring.width_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(tze_hud_input::DEFAULT_FOCUS_RING_WIDTH_PX);
+
+    FocusRingTokens { color, width_px }
+}
+
 #[inline]
 pub(super) fn notification_dismiss_bounds(
     x: f32,

@@ -3,13 +3,14 @@ use std::ops::ControlFlow;
 use std::time::Instant;
 
 use tze_hud_input::{
-    HotkeyResizeDir, KeyboardModifiers, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
-    ShellReservedShortcut,
+    AgentDispatch, AgentDispatchKind, HotkeyResizeDir, KeyboardModifiers, PortalFocusTarget,
+    RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ShellReservedShortcut,
 };
 
 use super::WinitApp;
 use super::input_dispatch::{
-    dispatch_focus_event, dispatch_keyboard_event, dispatch_scroll_offset_event,
+    dispatch_focus_event, dispatch_keyboard_event, dispatch_pointer_event,
+    dispatch_scroll_offset_event,
 };
 use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire};
 
@@ -148,6 +149,60 @@ pub(super) enum PendingKeyboardEvent {
 pub(super) enum TabFocusOutcome {
     Done,
     Busy,
+}
+
+/// Synthetic device id used for keyboard-driven control activation (hud-2v8br).
+///
+/// Enter / Space on a Tab-focused portal control synthesizes a pointer
+/// down+up so the owning agent's existing click handler fires. A distinct,
+/// out-of-range id keeps these synthetic events from colliding with real
+/// pointer-device state (capture, drag) keyed by device id.
+const KEYBOARD_ACTIVATION_DEVICE_ID: u32 = u32::MAX;
+
+/// Result of classifying the active tab's keyboard focus for portal
+/// typing-recovery (hud-2v8br). The runtime-local analogue of
+/// [`tze_hud_input::PortalFocusTarget`], enriched with the namespace and
+/// pointer coordinates needed to synthesize a control activation, plus a `Busy`
+/// state for lock contention so the caller can defer the event.
+enum PortalKeyFocus {
+    /// A required lock stayed contended — defer the event and retry.
+    Busy,
+    /// Focus is on the composer — normal editing, no recovery.
+    Composer,
+    /// Focus is anywhere recovery does not apply.
+    Other,
+    /// Focus is on a non-composer portal control sharing a tile with a composer.
+    Control(PortalControlSnapshot),
+}
+
+/// Owned snapshot of a focused portal control (hud-2v8br), captured under the
+/// scene lock so the runtime can act (refocus / activate) after releasing it.
+struct PortalControlSnapshot {
+    tile_id: tze_hud_scene::SceneId,
+    node_id: tze_hud_scene::SceneId,
+    interaction_id: String,
+    /// The sibling composer node to redirect typing / Escape into.
+    composer_node: tze_hud_scene::SceneId,
+    /// Owning agent namespace (for the synthetic activation dispatch).
+    namespace: String,
+    /// Control center in tile-local coordinates.
+    local_x: f32,
+    local_y: f32,
+    /// Control center in display-space coordinates.
+    display_x: f32,
+    display_y: f32,
+}
+
+/// Returns `true` for the Escape key (recovery-to-composer trigger, hud-2v8br).
+fn is_escape_key(key: &str, key_code: &str) -> bool {
+    key_code == "Escape" || key == "Escape"
+}
+
+/// Returns `true` for Enter / Space — the activation keys for a Tab-focused
+/// portal control (hud-2v8br), mirroring a pointer click.
+fn is_activation_key(key: &str, key_code: &str) -> bool {
+    matches!(key_code, "Enter" | "NumpadEnter" | "Space")
+        || matches!(key, "Enter" | "\r" | "\n" | " ")
 }
 
 fn restore_front_requeued_event(
@@ -413,6 +468,51 @@ impl WinitApp {
             return;
         }
 
+        // ── Portal control keyboard recovery / activation (hud-2v8br) ──────
+        //
+        // When Tab has parked focus on a non-composer portal control (minimize /
+        // restore / submit), a keyboard-only viewer must never be stranded:
+        //   - Escape recovers focus to the composer (explicit recovery),
+        //   - Enter / Space activate the control (mirroring a pointer click),
+        //   - any other key is consumed here so it never leaks to the agent as
+        //     raw input; printable text recovers to the composer via the
+        //     following Character event (dispatch_character_event_inner).
+        // Gated on `!is_composer_active()` so normal composer editing (where the
+        // composer is the focus sink) is untouched — Enter submits, Space types,
+        // Escape cancels there, all handled by the intercept below.
+        if !self.state.input_processor.is_composer_active() {
+            match self.portal_key_focus(tab_id) {
+                PortalKeyFocus::Busy => {
+                    self.state
+                        .pending_keyboard_events
+                        .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+                    return;
+                }
+                PortalKeyFocus::Control(control) => {
+                    if is_escape_key(&raw.key, &raw.key_code) {
+                        if self.refocus_composer_from_control(
+                            tab_id,
+                            control.tile_id,
+                            control.composer_node,
+                        ) == TabFocusOutcome::Busy
+                        {
+                            self.state
+                                .pending_keyboard_events
+                                .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+                        }
+                        return;
+                    }
+                    if is_activation_key(&raw.key, &raw.key_code) {
+                        self.activate_portal_control(&control);
+                        return;
+                    }
+                    // Consume: printable text recovers via the Character event.
+                    return;
+                }
+                PortalKeyFocus::Composer | PortalKeyFocus::Other => {}
+            }
+        }
+
         // ── Composer draft intercept (§4.4) ──────────────────────────────
         if self.state.input_processor.is_composer_active() {
             let delivery_context = match self.composer_delivery_context_for_tab(tab_id) {
@@ -591,6 +691,143 @@ impl WinitApp {
         }
 
         TabFocusOutcome::Done
+    }
+
+    /// Classify the active tab's keyboard focus for portal typing-recovery
+    /// (hud-2v8br) under a bounded scene lock.
+    ///
+    /// Returns [`PortalKeyFocus::Busy`] when the shared-state / scene lock stays
+    /// contended past [`INTERACTION_LOCK_BUDGET`] (caller defers the event);
+    /// otherwise the classification, with a [`PortalControlSnapshot`] (namespace
+    /// + activation coordinates resolved from the scene) for the `Control` case.
+    fn portal_key_focus(&self, tab_id: tze_hud_scene::SceneId) -> PortalKeyFocus {
+        let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET) else {
+            return PortalKeyFocus::Busy;
+        };
+        let Some(scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
+            return PortalKeyFocus::Busy;
+        };
+        let owner = self.state.focus_manager.current_owner(tab_id).clone();
+        match self
+            .state
+            .input_processor
+            .classify_portal_focus(&owner, &scene)
+        {
+            PortalFocusTarget::Composer => PortalKeyFocus::Composer,
+            PortalFocusTarget::Other => PortalKeyFocus::Other,
+            PortalFocusTarget::Control {
+                tile_id,
+                node_id,
+                interaction_id,
+                composer_node,
+            } => {
+                let (Some(tile), Some(node)) =
+                    (scene.tiles.get(&tile_id), scene.nodes.get(&node_id))
+                else {
+                    return PortalKeyFocus::Other;
+                };
+                let tze_hud_scene::types::NodeData::HitRegion(hr) = &node.data else {
+                    return PortalKeyFocus::Other;
+                };
+                let local_x = hr.bounds.x + hr.bounds.width / 2.0;
+                let local_y = hr.bounds.y + hr.bounds.height / 2.0;
+                PortalKeyFocus::Control(PortalControlSnapshot {
+                    tile_id,
+                    node_id,
+                    interaction_id,
+                    composer_node,
+                    namespace: tile.namespace.clone(),
+                    local_x,
+                    local_y,
+                    display_x: tile.bounds.x + local_x,
+                    display_y: tile.bounds.y + local_y,
+                })
+            }
+        }
+    }
+
+    /// Redirect keyboard focus from a portal control to its sibling composer
+    /// (typing / Escape recovery, hud-2v8br) and broadcast the transition.
+    ///
+    /// Mirrors [`Self::navigate_portal_focus`]'s lock + broadcast handling.
+    /// Returns [`TabFocusOutcome::Busy`] on lock contention so the caller defers.
+    fn refocus_composer_from_control(
+        &mut self,
+        tab_id: tze_hud_scene::SceneId,
+        tile_id: tze_hud_scene::SceneId,
+        composer_node: tze_hud_scene::SceneId,
+    ) -> TabFocusOutcome {
+        let transition = {
+            let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+            else {
+                return TabFocusOutcome::Busy;
+            };
+            let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
+                return TabFocusOutcome::Busy;
+            };
+            self.state.input_processor.recover_composer_focus(
+                &mut self.state.focus_manager,
+                &mut scene,
+                tab_id,
+                tile_id,
+                composer_node,
+            )
+        };
+
+        // Mirror the pointer / Tab transition broadcast (locks already released).
+        let mut composer_focus_lost = false;
+        if transition.gained.is_some() {
+            self.state.pending_blur_delivery_context = None;
+        }
+        if let Some((ev, ns)) = &transition.lost {
+            if let Some(node_id) = ev.node_id {
+                self.state.pending_blur_delivery_context = Some(ComposerDeliveryContext {
+                    namespace: ns.clone(),
+                    node_id_bytes: *node_id.as_uuid().as_bytes(),
+                    tile_id: ev.tile_id,
+                });
+            }
+            composer_focus_lost = true;
+        }
+        tracing::debug!("portal recovery: focus redirected to composer");
+        dispatch_focus_event(&self.state.input_event_tx, transition);
+        if composer_focus_lost {
+            self.clear_local_composer_echo();
+        }
+        TabFocusOutcome::Done
+    }
+
+    /// Activate a Tab-focused portal control by synthesizing a pointer
+    /// down+up to the owning agent (hud-2v8br), so Enter / Space fire the same
+    /// handler a pointer click does. The control's behavior (minimize / restore /
+    /// submit) is agent-owned and keyed off `interaction_id`, so a synthetic
+    /// press+release on the same node is the faithful keyboard analogue.
+    fn activate_portal_control(&mut self, control: &PortalControlSnapshot) {
+        let base = AgentDispatch {
+            namespace: control.namespace.clone(),
+            tile_id: control.tile_id,
+            node_id: control.node_id,
+            interaction_id: control.interaction_id.clone(),
+            local_x: control.local_x,
+            local_y: control.local_y,
+            display_x: control.display_x,
+            display_y: control.display_y,
+            device_id: KEYBOARD_ACTIVATION_DEVICE_ID,
+            kind: AgentDispatchKind::PointerDown,
+            capture_released_reason: None,
+        };
+        tracing::debug!(
+            interaction_id = %str_preview(&control.interaction_id),
+            "portal control activated via keyboard (synthetic pointer down+up)"
+        );
+        dispatch_pointer_event(&self.state.input_event_tx, base.clone());
+        dispatch_pointer_event(
+            &self.state.input_event_tx,
+            AgentDispatch {
+                kind: AgentDispatchKind::PointerUp,
+                ..base
+            },
+        );
     }
 
     /// Translate a raw key-up event through the `KeyboardProcessor`, log it,
@@ -799,6 +1036,47 @@ impl WinitApp {
         active_tab: Option<tze_hud_scene::SceneId>,
     ) {
         let Some(tab_id) = active_tab else { return };
+
+        // ── Portal control typing recovery (hud-2v8br) ──────────────────────
+        //
+        // A printable character typed while a non-composer portal control holds
+        // focus recovers to the composer so the keystroke lands in the input box
+        // instead of being dispatched to the agent as a raw CharacterEvent. After
+        // the redirect the composer is active, so the intercept below inserts the
+        // character. Whitespace-only characters (e.g. the Space that just
+        // activated a control) are consumed without typing, matching the
+        // Enter/Space activation semantics in dispatch_key_down_event_inner.
+        if !self.state.input_processor.is_composer_active() {
+            match self.portal_key_focus(tab_id) {
+                PortalKeyFocus::Busy => {
+                    self.state
+                        .pending_keyboard_events
+                        .push_back(PendingKeyboardEvent::Character(raw.clone()));
+                    return;
+                }
+                PortalKeyFocus::Control(control) => {
+                    if raw.character.trim().is_empty() {
+                        // Space/whitespace on a control is an activation key, not
+                        // text — consume it so it neither types nor leaks.
+                        return;
+                    }
+                    if self.refocus_composer_from_control(
+                        tab_id,
+                        control.tile_id,
+                        control.composer_node,
+                    ) == TabFocusOutcome::Busy
+                    {
+                        self.state
+                            .pending_keyboard_events
+                            .push_back(PendingKeyboardEvent::Character(raw.clone()));
+                        return;
+                    }
+                    // Composer now active — fall through to the intercept below,
+                    // which inserts raw.character into the draft.
+                }
+                PortalKeyFocus::Composer | PortalKeyFocus::Other => {}
+            }
+        }
 
         // ── Composer draft intercept (§4.4) ──────────────────────────────
         //

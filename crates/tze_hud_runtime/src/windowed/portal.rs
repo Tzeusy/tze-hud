@@ -2171,6 +2171,239 @@ mod tests {
         }
     }
 
+    // ── Portal control keyboard recovery / activation (hud-2v8br) ──────────
+    //
+    // Build a portal tile whose root composer (accepts_composer_input) has a
+    // non-composer minimize control as a focusable child, land Tab focus on the
+    // control, and assert the runtime never strands the keyboard user.
+
+    /// Construct a portal scene: one tile rooted at a composer node with a
+    /// focusable non-composer control child. Returns
+    /// `(scene, tab_id, tile_id, composer_id, control_id)`.
+    fn portal_scene_with_control() -> (
+        tze_hud_scene::graph::SceneGraph,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+        tze_hud_scene::SceneId,
+    ) {
+        use tze_hud_scene::types::{HitRegionNode, TileScrollConfig};
+        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+            .unwrap();
+
+        let composer_id = SceneId::new();
+        let control_id = SceneId::new();
+        scene.nodes.insert(
+            composer_id,
+            Node {
+                id: composer_id,
+                children: vec![control_id],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 400.0, 60.0),
+                    interaction_id: "portal-composer".to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        scene.nodes.insert(
+            control_id,
+            Node {
+                id: control_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(10.0, 80.0, 40.0, 40.0),
+                    interaction_id: "portal-minimize".to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: false,
+                    ..Default::default()
+                }),
+            },
+        );
+        scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(composer_id);
+        (scene, tab_id, tile_id, composer_id, control_id)
+    }
+
+    /// Enter on a Tab-focused portal control activates it by broadcasting a
+    /// synthetic PointerDown (+PointerUp) carrying the control's interaction_id,
+    /// so the owning agent's click handler fires — the control is not a dead stop.
+    #[test]
+    fn enter_on_focused_portal_control_activates_via_synthetic_pointer() {
+        use tze_hud_input::KeyboardModifiers;
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+        let (mut scene, tab_id, _tile_id, composer_id, control_id) = portal_scene_with_control();
+        let mut processor = InputProcessor::new();
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+        // Tab onto the composer, then Tab again onto the control.
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        assert_eq!(
+            focus_manager.current_owner(tab_id).node_id(),
+            Some(control_id),
+            "test setup: focus must rest on the non-composer control"
+        );
+        assert!(
+            !processor.is_composer_active(),
+            "composer must be inactive while the control holds focus"
+        );
+
+        let (mut app, mut input_event_rx) =
+            make_windowed_keyboard_test_app(scene, focus_manager, processor);
+
+        app.dispatch_key_down_event_inner(
+            &RawKeyDownEvent {
+                key_code: "Enter".to_string(),
+                key: "Enter".to_string(),
+                modifiers: KeyboardModifiers::NONE,
+                repeat: false,
+                timestamp_mono_us: tze_hud_scene::MonoUs(1),
+            },
+            Some(tab_id),
+        );
+
+        // First broadcast must be a synthetic PointerDown on the control.
+        let (namespace, batch) = input_event_rx
+            .try_recv()
+            .expect("Enter on a focused control must broadcast a synthetic pointer event");
+        assert_eq!(namespace, "portal-agent");
+        match batch.events.first().and_then(|e| e.event.as_ref()) {
+            Some(InputEvent::PointerDown(ev)) => {
+                assert_eq!(
+                    ev.interaction_id, "portal-minimize",
+                    "activation must target the focused control's interaction_id"
+                );
+            }
+            other => panic!("expected synthetic PointerDown, got {other:?}"),
+        }
+        // A matching PointerUp completes the synthetic click.
+        let (_ns, up_batch) = input_event_rx
+            .try_recv()
+            .expect("activation must also broadcast a PointerUp");
+        assert!(
+            matches!(
+                up_batch.events.first().and_then(|e| e.event.as_ref()),
+                Some(InputEvent::PointerUp(_))
+            ),
+            "second synthetic event must be a PointerUp"
+        );
+        // Focus stays on the control (activation is not a focus move).
+        let _ = composer_id;
+    }
+
+    /// Typing a printable character while a portal control holds focus recovers
+    /// to the composer and inserts the character — a keyboard user is never
+    /// stranded with dead typing.
+    #[test]
+    fn typing_on_focused_portal_control_recovers_to_composer() {
+        use tze_hud_input::RawCharacterEvent;
+
+        let (mut scene, tab_id, _tile_id, composer_id, control_id) = portal_scene_with_control();
+        let mut processor = InputProcessor::new();
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        assert_eq!(
+            focus_manager.current_owner(tab_id).node_id(),
+            Some(control_id),
+            "test setup: focus must rest on the control"
+        );
+
+        let (mut app, _input_event_rx) =
+            make_windowed_keyboard_test_app(scene, focus_manager, processor);
+
+        app.dispatch_character_event_inner(
+            &RawCharacterEvent {
+                character: "h".to_string(),
+                timestamp_mono_us: tze_hud_scene::MonoUs(1),
+            },
+            Some(tab_id),
+        );
+
+        assert!(
+            app.state.input_processor.is_composer_active(),
+            "typing on a control must recover focus to the composer (draft active)"
+        );
+        assert_eq!(
+            app.state.focus_manager.current_owner(tab_id).node_id(),
+            Some(composer_id),
+            "recovery must move focus onto the composer node"
+        );
+        assert_eq!(
+            app.state
+                .input_processor
+                .composer_draft_snapshot()
+                .map(|s| s.0),
+            Some("h".to_string()),
+            "the typed character must land in the composer draft after recovery"
+        );
+    }
+
+    /// Escape on a Tab-focused portal control recovers focus to the composer.
+    #[test]
+    fn escape_on_focused_portal_control_recovers_to_composer() {
+        use tze_hud_input::KeyboardModifiers;
+
+        let (mut scene, tab_id, _tile_id, composer_id, control_id) = portal_scene_with_control();
+        let mut processor = InputProcessor::new();
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        assert_eq!(
+            focus_manager.current_owner(tab_id).node_id(),
+            Some(control_id)
+        );
+
+        let (mut app, _input_event_rx) =
+            make_windowed_keyboard_test_app(scene, focus_manager, processor);
+
+        app.dispatch_key_down_event_inner(
+            &RawKeyDownEvent {
+                key_code: "Escape".to_string(),
+                key: "Escape".to_string(),
+                modifiers: KeyboardModifiers::NONE,
+                repeat: false,
+                timestamp_mono_us: tze_hud_scene::MonoUs(1),
+            },
+            Some(tab_id),
+        );
+
+        assert_eq!(
+            app.state.focus_manager.current_owner(tab_id).node_id(),
+            Some(composer_id),
+            "Escape on a control must recover focus to the composer"
+        );
+        assert!(
+            app.state.input_processor.is_composer_active(),
+            "composer draft must be active after Escape recovery"
+        );
+    }
+
     #[test]
     fn shell_reserved_ctrl_tab_does_not_resize_focused_portal() {
         use tze_hud_input::{InputProcessor, KeyboardModifiers};

@@ -49,6 +49,15 @@ impl FocusOwner {
         }
     }
 
+    /// Returns the focused node id, or `None` when focus is tile-level, chrome,
+    /// or absent.
+    pub fn node_id(&self) -> Option<SceneId> {
+        match self {
+            FocusOwner::Node { node_id, .. } => Some(*node_id),
+            _ => None,
+        }
+    }
+
     /// Returns true if the focus owner is for the given tile or a node in it.
     pub fn is_on_tile(&self, tile_id: SceneId) -> bool {
         self.tile_id() == Some(tile_id)

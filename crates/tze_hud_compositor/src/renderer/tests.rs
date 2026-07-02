@@ -223,6 +223,114 @@ async fn test_static_image_node_composited_with_other_nodes() {
     // Just verify the frame completed without panic and returned the expected buffer size.
 }
 
+/// hud-2v8br: a Tab-focused hit-region node MUST emit a visible focus ring in
+/// overlay mode. Before this fix the ring was computed in `tze_hud_input`
+/// (`compute_ring`) but never drawn — nothing in the compositor read the
+/// `hit_region_states.focused` flag — so a keyboard-only viewer had no way to
+/// see where Tab focus landed on the transparent overlay ("input doesn't work").
+///
+/// This is a draw-list-level assertion (no pixel readback) so it is safe to run
+/// synchronously without the headless llvmpipe readback deadlock.
+#[tokio::test]
+async fn test_focused_hit_region_emits_focus_ring_in_overlay_mode() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    // The live windowed path is always in overlay mode; the ring must show there.
+    compositor.overlay_mode = true;
+
+    let mut scene = SceneGraph::new(400.0, 300.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(50.0, 40.0, 300.0, 200.0),
+            1,
+        )
+        .unwrap();
+
+    let node_id = SceneId::new();
+    let hit = HitRegionNode {
+        bounds: Rect::new(20.0, 30.0, 120.0, 40.0),
+        interaction_id: "portal-minimize".to_owned(),
+        accepts_focus: true,
+        accepts_pointer: true,
+        ..Default::default()
+    };
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: node_id,
+                children: vec![],
+                data: NodeData::HitRegion(hit),
+            },
+        )
+        .unwrap();
+
+    // Baseline: an unfocused hit region is invisible — it paints nothing.
+    {
+        let tile = scene.tiles.get(&tile_id).unwrap();
+        let mut before: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_node(
+            node_id,
+            tile,
+            &scene,
+            &mut before,
+            &mut Vec::new(),
+            400.0,
+            300.0,
+        );
+        assert!(
+            before.is_empty(),
+            "unfocused hit region must paint nothing, got {} verts",
+            before.len()
+        );
+    }
+
+    // Tab-focus the node → a ring of four edge quads must appear.
+    scene.update_focused_state(node_id, true);
+    let mut after: Vec<crate::pipeline::RectVertex> = Vec::new();
+    {
+        let tile = scene.tiles.get(&tile_id).unwrap();
+        compositor.render_node(
+            node_id,
+            tile,
+            &scene,
+            &mut after,
+            &mut Vec::new(),
+            400.0,
+            300.0,
+        );
+    }
+
+    // 4 edge quads × 6 vertices each.
+    assert_eq!(
+        after.len(),
+        24,
+        "focus ring must emit 4 edge quads (24 verts), got {}",
+        after.len()
+    );
+
+    // Every ring vertex must carry the token-driven focus-ring color with a
+    // visible (non-zero) alpha — otherwise the ring would be invisible on the
+    // transparent overlay.
+    let expected = compositor.gpu_color_raw(tze_hud_input::DEFAULT_FOCUS_RING_COLOR.to_array());
+    assert!(
+        expected[3] > 0.0,
+        "focus ring default alpha must be visible"
+    );
+    for v in &after {
+        for (c, (actual, want)) in v.color.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - want).abs() < 1e-3,
+                "ring color channel {c} mismatch: {actual} vs {want}"
+            );
+        }
+    }
+}
+
 // ── Chrome layer pixel tests ──────────────────────────────────────────────
 
 /// Layer 1 pixel test: chrome layer is always visible above max-z-order agent tile.

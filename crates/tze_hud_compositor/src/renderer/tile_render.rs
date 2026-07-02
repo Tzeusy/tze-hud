@@ -39,7 +39,8 @@ use super::draw_cmds::{TexturedDrawCmd, compute_fit_mode};
 use super::image_cache::{caret_visible_at, composer_display_text_blink, composer_scroll_offset};
 use super::token_colors::{
     ComposerOverlayTokens, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE, TILE_BG_TEXT_MARKDOWN,
-    linear_to_srgb, resolve_composer_overlay_tokens, resolve_tile_bg_token,
+    linear_to_srgb, resolve_composer_overlay_tokens, resolve_focus_ring_tokens,
+    resolve_tile_bg_token,
 };
 
 /// Horizontal inset (physical px) between the composer region edge and the draft
@@ -129,6 +130,35 @@ impl Compositor {
             sh,
             color,
         ));
+    }
+
+    /// Four edge rectangles forming a `width`-px focus ring stroked *inside* the
+    /// edges of `region` (top, bottom, left, right).
+    ///
+    /// Drawing inward (rather than outward) keeps the ring within the focused
+    /// region's own bounds, so it never bleeds past the owning tile and is
+    /// clipped consistently with the region it decorates. The width is clamped to
+    /// half the smaller dimension so a thin region cannot produce inverted rects.
+    /// Returns empty edges (zero-size rects are dropped by
+    /// `append_clipped_rect_vertices`) when `region` has no area.
+    fn focus_ring_edge_rects(region: Rect, width: f32) -> [Rect; 4] {
+        let w = width
+            .max(0.0)
+            .min(region.width / 2.0)
+            .min(region.height / 2.0);
+        if w <= 0.0 || region.width <= 0.0 || region.height <= 0.0 {
+            return [Rect::new(0.0, 0.0, 0.0, 0.0); 4];
+        }
+        [
+            // Top edge.
+            Rect::new(region.x, region.y, region.width, w),
+            // Bottom edge.
+            Rect::new(region.x, region.y + region.height - w, region.width, w),
+            // Left edge.
+            Rect::new(region.x, region.y, w, region.height),
+            // Right edge.
+            Rect::new(region.x + region.width - w, region.y, w, region.height),
+        ]
     }
 
     fn clipped_textured_rect(
@@ -889,6 +919,30 @@ impl Compositor {
                         self.gpu_color_raw(color),
                         vertices,
                     );
+                }
+
+                // ── Keyboard focus ring (RFC 0004 §5.6) ────────────────────────
+                // When this hit region holds keyboard focus, stroke a token-driven
+                // ring around its display-space bounds so a keyboard-only viewer
+                // can always see where Tab focus landed — even on the transparent
+                // overlay where the region itself paints nothing (hud-2v8br). The
+                // ring renders in overlay mode identically to fullscreen: it's flat
+                // rect geometry through the same `gpu_color_raw` path the hover /
+                // press tints above use, which are proven to show on overlay.
+                if state.is_some_and(|s| s.focused) {
+                    let ring = resolve_focus_ring_tokens(&self.token_map);
+                    let ring_color = self.gpu_color_raw(ring.color);
+                    let region = Rect::new(
+                        tile.bounds.x + hr.bounds.x - scroll_x,
+                        tile.bounds.y + hr.bounds.y - scroll_y,
+                        hr.bounds.width,
+                        hr.bounds.height,
+                    );
+                    for edge in Self::focus_ring_edge_rects(region, ring.width_px) {
+                        Self::append_clipped_rect_vertices(
+                            tile, edge, sw, sh, ring_color, vertices,
+                        );
+                    }
                 }
             }
             NodeData::StaticImage(img) => {
