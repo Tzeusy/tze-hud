@@ -36,11 +36,18 @@ use crate::pipeline::{RectVertex, rect_vertices};
 
 use super::Compositor;
 use super::draw_cmds::{TexturedDrawCmd, compute_fit_mode};
-use super::image_cache::{caret_visible_at, composer_display_text_blink};
+use super::image_cache::{caret_visible_at, composer_display_text_blink, composer_scroll_offset};
 use super::token_colors::{
     ComposerOverlayTokens, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE, TILE_BG_TEXT_MARKDOWN,
-    linear_to_srgb, resolve_tile_bg_token,
+    linear_to_srgb, resolve_composer_overlay_tokens, resolve_tile_bg_token,
 };
+
+/// Horizontal inset (physical px) between the composer region edge and the draft
+/// text, on both the left and right.  Shared by [`Compositor::collect_composer_text_item`]
+/// (where it positions the draft and its clip) and [`Compositor::prime_composer_scroll_offset`]
+/// (where it defines the caret-follow window and keep-visible margin), so the two
+/// stay in lockstep.  Matches the composer strip's visual padding.
+const COMPOSER_TEXT_MARGIN: f32 = 6.0;
 
 impl Compositor {
     // ─── Drag-boost helpers ───────────────────────────────────────────────────
@@ -372,6 +379,70 @@ impl Compositor {
         None
     }
 
+    /// Recompute the active composer's horizontal caret-follow scroll offset
+    /// (hud-zlfi4) into `self.composer_scroll_offset`, ready for the following
+    /// `collect_text_items` pass.
+    ///
+    /// Must be called once per frame BEFORE `collect_text_items` (it measures the
+    /// caret x against the composer font via the mutable text rasterizer, which
+    /// the immutable collect path cannot do).  When no composer is active, the
+    /// text rasterizer is missing, or the composer region cannot be located, the
+    /// offset is reset to `0.0` (left-aligned, no scroll).
+    ///
+    /// The measured window and keep-visible margin here mirror exactly the
+    /// geometry `collect_composer_text_item` uses to place the draft, so the
+    /// shift lands the caret inside the visible strip. This is local presentation
+    /// state — no adapter round trip.
+    pub(crate) fn prime_composer_scroll_offset(&mut self, scene: &SceneGraph) {
+        self.composer_scroll_offset = 0.0;
+        self.composer_content_width = 0.0;
+
+        // Gather the immutable inputs first (draft text, caret, region geometry,
+        // font size) so the mutable text-rasterizer borrow below does not overlap
+        // the `&self` reads.
+        let Some(cs) = self.local_composer.as_ref() else {
+            return;
+        };
+        if self.text_rasterizer.is_none() {
+            return;
+        }
+
+        // Locate the composer region the same way collect_composer_text_item does:
+        // the first visible tile whose subtree contains the focused composer node.
+        let mut region: Option<Rect> = None;
+        for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
+            if let Some(r) = Self::composer_region_bounds(tile, scene, cs.node_id) {
+                region = Some(r);
+                break;
+            }
+        }
+        let Some(region) = region else {
+            return;
+        };
+
+        let font_size_px = resolve_composer_overlay_tokens(&self.token_map).font_size_px;
+        // Visible text window = region interior width (region width minus the left
+        // and right text margins).  This is the same `bw` collect uses.
+        let window_width = (region.width - COMPOSER_TEXT_MARGIN * 2.0).max(1.0);
+        let line_height_multiplier =
+            crate::markdown::MarkdownTokens::default().line_height_multiplier;
+
+        // Own the measurement inputs, then drop the `&self` borrow before the
+        // mutable rasterizer borrow.
+        let text = cs.text.clone();
+        let cursor_byte = cs.cursor_byte;
+
+        let Some(tr) = self.text_rasterizer.as_mut() else {
+            return;
+        };
+        let (caret_x, content_width) =
+            tr.measure_composer_caret(&text, cursor_byte, font_size_px, line_height_multiplier);
+
+        self.composer_content_width = content_width;
+        self.composer_scroll_offset =
+            composer_scroll_offset(caret_x, content_width, window_width, COMPOSER_TEXT_MARGIN);
+    }
+
     /// Build a [`TextItem`] for the local composer echo draft text.
     ///
     /// Returns `None` when:
@@ -432,7 +503,16 @@ impl Compositor {
             has_selection || caret_visible_at(self.composer_caret_blink_start.elapsed());
         let display_text = composer_display_text_blink(&cs.text, cs.cursor_byte, caret_visible);
 
-        let text_margin = 6.0;
+        let text_margin = COMPOSER_TEXT_MARGIN;
+
+        // Horizontal caret-follow (hud-zlfi4): shift the draft LEFT by the
+        // per-frame scroll offset primed in `prime_composer_scroll_offset` so the
+        // caret stays visible once the draft is wider than the strip.  Only the
+        // draft `pixel_x` moves; the clip rectangle stays pinned to the region
+        // interior, so overflowing text is clipped (never painted outside the
+        // box) and the selection run — being byte-anchored relative to `pixel_x`
+        // — scrolls with the text automatically.  `0.0` when the draft fits.
+        let scroll_offset = self.composer_scroll_offset;
 
         // Convert linear-sRGB floats → sRGB u8 for TextItem (matches rgba_to_srgb_u8
         // in text.rs: RGB channels go through the sRGB transfer curve; alpha is linear).
@@ -495,12 +575,23 @@ impl Compositor {
             }
         };
 
+        // Lay the draft out on ONE unwrapped line: the layout width is the wider
+        // of the visible strip and the measured content width plus one em of slack
+        // for the caret glyph.  Word-wrap (which glyphon applies against
+        // `bounds_width`) is thereby never triggered, so an overflowing draft
+        // scrolls horizontally and is clipped rather than wrapping to a second
+        // line that the single-line strip would hide.
+        let layout_width = bw.max(self.composer_content_width + tokens.font_size_px);
+
         Some(crate::text::TextItem {
             text: Arc::from(display_text.as_str()),
-            pixel_x: region.x + text_margin,
+            // Shift the draft left by the caret-follow scroll offset (0 when it fits).
+            pixel_x: region.x + text_margin - scroll_offset,
             pixel_y: region.y + text_margin,
-            bounds_width: bw,
+            bounds_width: layout_width,
             bounds_height: bh,
+            // Clip stays pinned to the region interior so scrolled-off text is
+            // clipped at the box edge, never painted outside it.
             clip_pixel_x: region.x + text_margin,
             clip_pixel_y: region.y,
             clip_bounds_width: bw.max(1.0),
