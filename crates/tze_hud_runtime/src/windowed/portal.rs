@@ -1612,6 +1612,125 @@ mod tests {
         );
     }
 
+    /// hud-02sp5: focus acquired via keyboard Tab traversal (no pointer) must
+    /// enable the same keyboard operations as click-to-focus. A keyboard-only
+    /// viewer (Mobile Presence Node / glasses) Tabs onto the portal composer and
+    /// then the Ctrl+= resize chord must resolve and resize the focused portal —
+    /// exactly as it does when focus was acquired by a click.
+    #[test]
+    fn ctrl_resize_hotkey_resizes_portal_focused_via_tab_without_pointer() {
+        use tze_hud_input::{FocusManager, InputProcessor, KeyboardModifiers};
+        use tze_hud_scene::types::{HitRegionNode, TileScrollConfig};
+        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+            .unwrap();
+
+        // Focusable composer affordance — the only Tab stop in this portal.
+        let composer_id = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: composer_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 400.0, 60.0),
+                        interaction_id: "portal-composer".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        accepts_composer_input: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        // NB: no pointer event is ever synthesized. Focus is acquired purely
+        // through the windowed Tab key path.
+        let processor = InputProcessor::new();
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+
+        let (mut app, _input_event_rx) =
+            make_windowed_keyboard_test_app(scene, focus_manager, processor);
+
+        let bounds = |app: &WinitApp| {
+            let shared = app
+                .state
+                .shared_state
+                .try_lock()
+                .expect("shared state must be available during key dispatch test");
+            let scene = shared
+                .scene
+                .try_lock()
+                .expect("scene must be available during key dispatch test");
+            scene.tiles.get(&tile_id).unwrap().bounds
+        };
+
+        // Bare Tab (no modifiers) advances focus onto the composer — the
+        // no-pointer analogue of a click. This is the wiring proven by
+        // hud-v0cal (PR #980); here we assert it unlocks the resize chord.
+        app.dispatch_key_down_event_inner(
+            &RawKeyDownEvent {
+                key_code: "Tab".to_string(),
+                key: "Tab".to_string(),
+                modifiers: KeyboardModifiers::NONE,
+                repeat: false,
+                timestamp_mono_us: tze_hud_scene::MonoUs(1),
+            },
+            Some(tab_id),
+        );
+        assert!(
+            app.state.input_processor.is_composer_active(),
+            "bare Tab must focus the portal composer without any pointer event"
+        );
+
+        let dispatch_ctrl_key =
+            |app: &mut WinitApp, key_code: &str, key: &str, shift: bool, timestamp: u64| {
+                app.dispatch_key_down_event_inner(
+                    &RawKeyDownEvent {
+                        key_code: key_code.to_string(),
+                        key: key.to_string(),
+                        modifiers: KeyboardModifiers {
+                            ctrl: true,
+                            shift,
+                            ..KeyboardModifiers::NONE
+                        },
+                        repeat: false,
+                        timestamp_mono_us: tze_hud_scene::MonoUs(timestamp),
+                    },
+                    Some(tab_id),
+                );
+            };
+
+        let before = bounds(&app);
+        dispatch_ctrl_key(&mut app, "Equal", "=", false, 2);
+        let after = bounds(&app);
+        assert!(
+            after.width > before.width && after.height > before.height,
+            "Ctrl+= must grow the portal whose composer was focused via Tab \
+             (Tab-acquired focus must enable the same keyboard ops as a click)"
+        );
+    }
+
     /// Regression for hud-v4k1h: on live Windows the OS (SendInput) can deliver
     /// ONLY the `KeyUp` for the Equal/Minus chord — the `KeyDown` never arrives
     /// while Ctrl is held. A key-down-only resize intercept therefore silently

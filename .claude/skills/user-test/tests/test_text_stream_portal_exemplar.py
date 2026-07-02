@@ -395,6 +395,154 @@ class ComposerInputModeRoutingTests(unittest.TestCase):
         )
 
 
+class PortalFocusTraversalRingTests(unittest.TestCase):
+    """Tab/Shift+Tab focus-traversal stops for the portal (hud-02sp5).
+
+    The runtime focus ring (tze_hud_input::FocusManager::build_focus_cycle)
+    collects only HitRegionNodes with accepts_focus=True (input-model spec
+    "Focus Cycling"). The text-stream-portals spec names the focusable
+    "portal controls" as the composer plus the expand, collapse, and reply
+    affordances; drag/resize are pointer-only. Before this fix every frame
+    affordance was accepts_focus=False, so a keyboard-only viewer (Mobile
+    Presence Node / glasses) had no reachable stops. These tests pin the
+    deliberate tab-ring set so it cannot silently regress in either
+    direction (interactive control dropped, or a pointer-only drag/resize
+    handle blindly promoted into the ring).
+    """
+
+    @staticmethod
+    def _collect_hit_regions(children):
+        regions = {}
+        for node in children:
+            if node.HasField("hit_region"):
+                # A portal can carry two hit regions with the same
+                # interaction_id (e.g. the L-shaped restore target); keep a
+                # list so callers can assert every fragment agrees.
+                regions.setdefault(node.hit_region.interaction_id, []).append(
+                    node.hit_region
+                )
+        return regions
+
+    # ── Expanded frame: interactive controls ARE focus stops ──────────────
+
+    def test_minimize_collapse_control_is_focusable(self) -> None:
+        _root, children = portal.build_portal_nodes(
+            "title", "subtitle", "body", "footer",
+        )
+        regions = self._collect_hit_regions(children)
+        self.assertIn(
+            portal.PORTAL_MINIMIZE_INTERACTION_ID,
+            regions,
+            "frame chrome must expose the minimize/collapse control",
+        )
+        for hit in regions[portal.PORTAL_MINIMIZE_INTERACTION_ID]:
+            self.assertTrue(
+                hit.accepts_focus,
+                "minimize is a collapse control and MUST be a Tab stop so a "
+                "keyboard-only viewer can collapse the portal without a pointer",
+            )
+
+    def test_submit_reply_control_is_focusable(self) -> None:
+        _root, children = portal.build_portal_nodes(
+            "title", "subtitle", "body", "footer",
+        )
+        regions = self._collect_hit_regions(children)
+        self.assertIn(portal.SUBMIT_INTERACTION_ID, regions)
+        for hit in regions[portal.SUBMIT_INTERACTION_ID]:
+            self.assertTrue(
+                hit.accepts_focus,
+                "submit is the reply affordance and MUST be a Tab stop",
+            )
+
+    # ── Minimized icon: restore/expand IS a focus stop ────────────────────
+
+    def test_restore_expand_control_is_focusable(self) -> None:
+        _root, children = portal.build_minimized_icon_nodes(
+            attention=False, pulse=False,
+        )
+        regions = self._collect_hit_regions(children)
+        self.assertIn(
+            portal.PORTAL_RESTORE_INTERACTION_ID,
+            regions,
+            "minimized icon must expose the restore/expand control",
+        )
+        for hit in regions[portal.PORTAL_RESTORE_INTERACTION_ID]:
+            self.assertTrue(
+                hit.accepts_focus,
+                "restore is the expand control and MUST be a Tab stop so a "
+                "minimized portal can be re-expanded without a pointer",
+            )
+
+    # ── Pointer-only affordances are NOT focus stops (deliberate) ─────────
+
+    def test_pointer_only_frame_affordances_are_not_focusable(self) -> None:
+        _root, children = portal.build_portal_nodes(
+            "title", "subtitle", "body", "footer",
+        )
+        regions = self._collect_hit_regions(children)
+        for interaction_id in (
+            portal.PORTAL_DRAG_INTERACTION_ID,
+            portal.PANE_RESIZE_INTERACTION_ID,
+            portal.PORTAL_RESIZE_INTERACTION_ID,
+        ):
+            self.assertIn(interaction_id, regions)
+            for hit in regions[interaction_id]:
+                self.assertFalse(
+                    hit.accepts_focus,
+                    f"{interaction_id} is a pointer-only drag/resize handle and "
+                    "MUST NOT be a Tab stop (matches Telegram-style chrome: the "
+                    "title bar and resize grips are not tabbable)",
+                )
+
+    def test_minimized_icon_drag_is_not_focusable(self) -> None:
+        _root, children = portal.build_minimized_icon_nodes(
+            attention=False, pulse=False,
+        )
+        regions = self._collect_hit_regions(children)
+        self.assertIn(portal.PORTAL_ICON_DRAG_INTERACTION_ID, regions)
+        for hit in regions[portal.PORTAL_ICON_DRAG_INTERACTION_ID]:
+            self.assertFalse(
+                hit.accepts_focus,
+                "the minimized-icon drag handle is pointer-only and MUST NOT be "
+                "a Tab stop",
+            )
+
+    def test_capture_backstop_is_not_focusable(self) -> None:
+        _root, children = portal.build_capture_backstop_nodes(1920.0, 1080.0)
+        regions = self._collect_hit_regions(children)
+        for hits in regions.values():
+            for hit in hits:
+                self.assertFalse(
+                    hit.accepts_focus,
+                    "the capture backstop is an invisible pointer-capture surface "
+                    "and MUST NOT be a Tab stop",
+                )
+
+    # ── Whole-ring shape assertion ────────────────────────────────────────
+
+    def test_expanded_tab_ring_is_the_deliberate_control_set(self) -> None:
+        """The union of focusable frame + composer stops is exactly the
+        interactive control set — no pointer-only handle leaks in."""
+        _root, frame = portal.build_portal_nodes(
+            "title", "subtitle", "body", "footer",
+        )
+        _croot, composer = portal.build_input_scroll_nodes("")
+        focusable = set()
+        pointer_only = set()
+        for children in (frame, composer):
+            for iid, hits in self._collect_hit_regions(children).items():
+                for hit in hits:
+                    (focusable if hit.accepts_focus else pointer_only).add(iid)
+        # Interactive controls that a keyboard-only viewer must be able to reach.
+        self.assertIn(portal.PORTAL_MINIMIZE_INTERACTION_ID, focusable)
+        self.assertIn(portal.SUBMIT_INTERACTION_ID, focusable)
+        self.assertIn(portal.COMPOSER_INTERACTION_ID, focusable)
+        # Pointer-only chrome must stay out of the ring.
+        self.assertNotIn(portal.PORTAL_DRAG_INTERACTION_ID, focusable)
+        self.assertNotIn(portal.PORTAL_RESIZE_INTERACTION_ID, focusable)
+        self.assertNotIn(portal.PANE_RESIZE_INTERACTION_ID, focusable)
+
+
 class PromotionGateEvidenceSchemaTests(unittest.TestCase):
     """Headless coverage for the RFC 0013 §7.2 promotion-gate evidence schema.
 

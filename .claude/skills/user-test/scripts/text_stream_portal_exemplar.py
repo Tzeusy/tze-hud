@@ -1341,7 +1341,11 @@ def build_portal_nodes(
         0.0,
         MINIMIZE_HIT_W,
         MINIMIZE_HIT_H,
-        accepts_focus=False,
+        # hud-02sp5: minimize is the collapse control. The text-stream-portals
+        # spec names expand/collapse/reply as focusable "portal controls", so it
+        # is a keyboard Tab stop (reachable on pointer-less Mobile Presence Node
+        # surfaces). Contrast the header drag bar below, which stays pointer-only.
+        accepts_focus=True,
     )
     activity_dot = make_solid_color_node(
         *ACTIVITY_DOT_RGBA,
@@ -2493,17 +2497,21 @@ def build_minimized_icon_nodes(
         43.0, 49.0, 7.0, 2.0,
         radius=1.0,
     )
+    # hud-02sp5: restore is the expand control (minimized icon → full portal).
+    # The L-shaped target is split into two hit regions so the icon-drag square
+    # stays pointer-draggable; both fragments are focusable so Tab can re-expand
+    # a minimized portal without a pointer.
     restore_hit_top = make_hit_region(
         PORTAL_RESTORE_INTERACTION_ID,
         0.0, 0.0,
         MINIMIZED_ICON_SIZE, 36.0,
-        accepts_focus=False,
+        accepts_focus=True,
     )
     restore_hit_left = make_hit_region(
         PORTAL_RESTORE_INTERACTION_ID,
         0.0, 36.0,
         36.0, MINIMIZED_ICON_SIZE - 36.0,
-        accepts_focus=False,
+        accepts_focus=True,
     )
     drag_hit = make_hit_region(
         PORTAL_ICON_DRAG_INTERACTION_ID,
