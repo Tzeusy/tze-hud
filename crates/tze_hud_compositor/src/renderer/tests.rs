@@ -322,12 +322,10 @@ async fn test_focused_hit_region_emits_focus_ring_in_overlay_mode() {
         "focus ring default alpha must be visible"
     );
     for v in &after {
-        for c in 0..4 {
+        for (c, (actual, want)) in v.color.iter().zip(expected.iter()).enumerate() {
             assert!(
-                (v.color[c] - expected[c]).abs() < 1e-3,
-                "ring color channel {c} mismatch: {} vs {}",
-                v.color[c],
-                expected[c]
+                (actual - want).abs() < 1e-3,
+                "ring color channel {c} mismatch: {actual} vs {want}"
             );
         }
     }
