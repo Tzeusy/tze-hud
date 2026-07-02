@@ -11562,3 +11562,168 @@ async fn load_font_bytes_new_font_resets_truncation_cache_scene_version() {
              — dedup guard prevents spurious cache invalidation [hud-v2z6u]"
     );
 }
+
+// ─── hud-w41ef: portal tile backdrop fades as one unit (no see-through on a ──
+// geometry change that exposes tile-backdrop-only regions) ───────────────────
+
+/// Build a scrollable (portal-like) TextMarkdown tile with an OPAQUE background,
+/// mirroring the resident portal node the projection driver publishes.
+fn w41ef_portal_tile(scene: &mut SceneGraph, bounds: Rect, node_bounds: Rect) -> SceneId {
+    let tab_id = scene.create_tab("t", 0).unwrap();
+    let lease_id = scene.grant_lease("t", 60_000, vec![]);
+    let tile_id = scene.create_tile(tab_id, "t", lease_id, bounds, 1).unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+        .unwrap();
+    let node = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            // Single short glyph: leaves the rest of the node body textless so a
+            // pixel probe reads the backdrop alone (not a glyph drawn over it).
+            content: "x".to_owned(),
+            bounds: node_bounds,
+            font_size_px: 14.0,
+            font_family: FontFamily::SystemSansSerif,
+            color: Rgba::new(0.9, 0.9, 0.9, 1.0),
+            // Opaque backdrop (#0A0D11-ish), matching portal.transcript.background.
+            background: Some(Rgba::new(0.04, 0.05, 0.07, 1.0)),
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
+        }),
+    };
+    scene.set_tile_root(tile_id, node).unwrap();
+    tile_id
+}
+
+/// Regression for hud-w41ef: when a portal tile's opaque body is faded (§6.3
+/// portal transition opacity, or any tile opacity < 1), the whole tile MUST fade
+/// as one unit. Before the fix, the flat tile backdrop (`tile_background_color`)
+/// and the tile text honoured the fade but the content-node background
+/// (`tm.background` painted in `render_node`) did not — so a region covered only
+/// by the flat backdrop (e.g. the newly-exposed area after a resize-grow, while
+/// the content node still lags at its old smaller size) rendered see-through
+/// while the content region stayed fully opaque. This asserts backdrop
+/// uniformity: the tile-backdrop-only region and the content region paint at the
+/// SAME alpha.
+///
+/// Asserted at the draw-list (vertex) level rather than by pixel readback: the
+/// live overlay geometry pass uses the `clear_pipeline` (REPLACE, no blending),
+/// but `render_frame_headless` always uses the blending pipeline, so a readback
+/// composites the two overlapping backdrop quads instead of letting the last
+/// write win — it cannot represent the live REPLACE alpha. The generated
+/// backdrop colors, however, are blend-independent (hud-w41ef).
+#[tokio::test]
+async fn hud_w41ef_portal_content_background_scaled_by_tile_opacity() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    // No text renderer: `render_node` takes the fallback branch which still emits
+    // the content-node background quad first. overlay_mode stays false so
+    // `gpu_color` is identity and the emitted alpha is directly comparable.
+
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let bg = Rgba::new(0.04, 0.05, 0.07, 1.0); // opaque backdrop
+    let tab_id = scene.create_tab("t", 0).unwrap();
+    let lease_id = scene.grant_lease("t", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(tab_id, "t", lease_id, Rect::new(0.0, 0.0, 120.0, 120.0), 1)
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+        .unwrap();
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::TextMarkdown(TextMarkdownNode {
+                    content: "x".to_owned(),
+                    bounds: Rect::new(0.0, 0.0, 120.0, 120.0),
+                    font_size_px: 14.0,
+                    font_family: FontFamily::SystemSansSerif,
+                    color: Rgba::new(0.9, 0.9, 0.9, 1.0),
+                    background: Some(bg),
+                    alignment: TextAlign::Start,
+                    overflow: TextOverflow::Ellipsis,
+                    color_runs: Box::default(),
+                }),
+            },
+        )
+        .unwrap();
+
+    // Half-fade the whole tile (deterministic stand-in for a §6.3 portal fade).
+    scene.tiles.get_mut(&tile_id).unwrap().opacity = 0.5;
+    let tile = scene.tiles.get(&tile_id).unwrap().clone();
+
+    // Flat tile backdrop alpha (already opacity-scaled).
+    let flat_bg = compositor
+        .tile_background_color(&tile, &scene)
+        .expect("markdown tile always has a flat backdrop");
+    let flat_alpha = flat_bg[3];
+
+    // Content-node backdrop quad, as emitted by render_node.
+    let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+    let mut cmds: Vec<super::draw_cmds::TexturedDrawCmd> = Vec::new();
+    compositor.render_node(root_id, &tile, &scene, &mut verts, &mut cmds, 120.0, 120.0);
+    let node_bg_alpha = verts
+        .first()
+        .expect("render_node must emit the content background quad first")
+        .color[3];
+
+    // Fix: the content-node background must be scaled by the tile opacity, exactly
+    // like the flat backdrop, so the tile fades as one unit. Before the fix the
+    // node background was painted at full alpha (bg.a = 1.0) while the flat
+    // backdrop was 0.5 — the exact divergence that renders the tile-backdrop-only
+    // region see-through relative to the content region on a resize/fade.
+    assert!(
+        (node_bg_alpha - 0.5 * bg.a).abs() < 1e-4,
+        "content-node background alpha must be tile-opacity-scaled: got {node_bg_alpha}, \
+         expected {} (bg.a {} × tile.opacity 0.5)",
+        0.5 * bg.a,
+        bg.a
+    );
+    assert!(
+        (node_bg_alpha - flat_alpha).abs() < 1e-4,
+        "content-node backdrop ({node_bg_alpha}) and flat tile backdrop ({flat_alpha}) \
+         must paint at the SAME alpha so the tile fades uniformly (hud-w41ef)"
+    );
+}
+
+/// Complement: at full tile opacity (an established portal, no fade), the grown
+/// tile-backdrop-only region stays fully opaque — the desktop never shows through
+/// after a resize-grow. This is the steady-state "not see-through" guarantee.
+#[tokio::test]
+async fn hud_w41ef_portal_backdrop_opaque_after_resize_grow_no_fade() {
+    let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    compositor.overlay_mode = true;
+
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let tile_id = w41ef_portal_tile(
+        &mut scene,
+        Rect::new(10.0, 10.0, 100.0, 100.0),
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+    );
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+    compositor.render_frame_headless(&mut scene, &surface);
+    compositor.portal_tile_anim_states.clear();
+
+    if let Some(t) = scene.tiles.get_mut(&tile_id) {
+        t.bounds.width = 200.0;
+        t.bounds.height = 200.0;
+        scene.version += 1;
+    }
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+    compositor.render_frame_headless(&mut scene, &surface);
+    let px = surface.read_pixels(&compositor.device);
+
+    let a_grown = crate::surface::HeadlessSurface::pixel_at(&px, 256, 180, 180)[3];
+    assert!(
+        a_grown > 250,
+        "grown portal backdrop must stay opaque at full opacity (got alpha={a_grown})"
+    );
+}
