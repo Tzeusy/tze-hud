@@ -67,7 +67,7 @@ toml = "0.8"
 schemars = { version = "0.8", features = ["derive"] }
 
 # XML parsing (SVG validation for widget asset bundle system)
-quick-xml = "0.37"
+quick-xml = "0.41"
 
 # SVG rendering for widget compositor pipeline.
 # Keep raster-images disabled; enable text + system fonts so widget <text>
