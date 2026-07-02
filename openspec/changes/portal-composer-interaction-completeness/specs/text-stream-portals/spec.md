@@ -75,3 +75,34 @@ Source: RFC 0013 §4.3 and §8 (open question 1), RFC 0004 focus semantics, `abo
 - **WHEN** the runtime enters safe mode while a composer draft is focused
 - **THEN** input SHALL be captured in chrome per the existing override contract
 - **AND** the draft surface SHALL suspend with the portal without leaking draft content past the active redaction policy
+
+## ADDED Requirements
+
+### Requirement: Portal Keyboard Focus Recovery
+
+Keyboard focus traversal within a portal MUST NOT strand the viewer: at all times either the composer holds focus (typing works), or the focused portal control presents a visible, token-driven focus ring, and a bounded number of focus-advance steps returns focus to the composer. A focusable portal control SHALL be activatable from the keyboard: an activation key (Enter or Space) on a focused control SHALL trigger the same interaction as pointer activation of that control, preserving the control's interaction identity. Typing SHALL route to the conversation like a chat application: when a printable character arrives while a non-composer portal control holds focus, the runtime SHALL refocus that portal's composer and apply the keystroke to the draft rather than silently discarding it; a dedicated recovery key (Escape) on any focused portal control SHALL likewise refocus the composer. Pointer click-to-focus on the composer SHALL restore composer focus from any control stop. The focus ring is geometry-only presentation resolved from design tokens; it SHALL render on transparent overlay surfaces the same as on opaque surfaces, SHALL remain present under redaction without revealing content, and focus transitions SHALL NOT raise interruption class.
+
+Source: `openspec/specs/input-model/spec.md` (Focus Cycling, Focus Ring), RFC 0004 focus semantics, live defect hud-2v8br (2026-07-03 tzehouse-windows: Tab stranded typing with no visible ring; ring mechanism had no render consumer), PR #988
+
+#### Scenario: focused control shows a visible ring on the overlay
+
+- **WHEN** keyboard traversal moves focus to a non-composer portal control on a transparent overlay surface
+- **THEN** the runtime SHALL render a token-driven focus ring around the focused control
+- **AND** the ring SHALL be visible against the overlay without revealing redacted content
+
+#### Scenario: typing on a control refocuses the composer
+
+- **WHEN** a printable character arrives while a non-composer portal control holds focus
+- **THEN** the runtime SHALL refocus the portal's composer and apply the keystroke to the draft with local-first echo
+- **AND** the keystroke SHALL NOT be silently discarded
+
+#### Scenario: activation keys operate the focused control
+
+- **WHEN** the viewer presses Enter or Space while a portal control holds keyboard focus
+- **THEN** the runtime SHALL activate the control with the same semantics as pointer activation, preserving its interaction identity
+
+#### Scenario: escape and click both recover composer focus
+
+- **WHEN** the viewer presses Escape while any portal control holds focus, or clicks the composer region
+- **THEN** composer focus SHALL be restored and subsequent typing SHALL edit the draft
+- **AND** repeated focus-advance steps SHALL also return to the composer within one full traversal cycle
