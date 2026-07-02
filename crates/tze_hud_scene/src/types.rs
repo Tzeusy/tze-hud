@@ -535,6 +535,35 @@ pub enum NodeData {
     StaticImage(StaticImageNode),
 }
 
+impl NodeData {
+    /// The node's tile-local geometry (origin + extent relative to the parent
+    /// tile's top-left). Every visual node variant carries its own `bounds`
+    /// separate from `Tile::bounds`; the compositor combines the two only at
+    /// render time (`tile.bounds.origin + node.bounds`).
+    pub fn bounds(&self) -> Rect {
+        match self {
+            NodeData::SolidColor(n) => n.bounds,
+            NodeData::TextMarkdown(n) => n.bounds,
+            NodeData::HitRegion(n) => n.bounds,
+            NodeData::StaticImage(n) => n.bounds,
+        }
+    }
+
+    /// Mutable access to the node's tile-local geometry. Used by the viewer
+    /// whole-portal resize to scale a tile's node tree in lock-step with the
+    /// tile, so text wrap width (`TextMarkdownNode::bounds.width`, which the
+    /// compositor uses as the layout column) re-resolves to the new geometry
+    /// instead of staying pinned to the attach-time width.
+    pub fn bounds_mut(&mut self) -> &mut Rect {
+        match self {
+            NodeData::SolidColor(n) => &mut n.bounds,
+            NodeData::TextMarkdown(n) => &mut n.bounds,
+            NodeData::HitRegion(n) => &mut n.bounds,
+            NodeData::StaticImage(n) => &mut n.bounds,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SolidColorNode {
     pub color: Rgba,

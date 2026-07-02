@@ -483,6 +483,49 @@ fn scale_portal_members(
     updates
 }
 
+/// Scale a tile's node tree in place by the per-axis ratio `(r_w, r_h)`.
+///
+/// Node bounds are **tile-local** (origin + extent relative to the tile's
+/// top-left) and independent of `Tile::bounds` — nothing derives them from the
+/// tile size. So when the viewer resizes a tile, the node tree must scale by the
+/// same ratio or content keeps laying out to the old geometry. In particular the
+/// compositor wraps `TextMarkdownNode` text to `node.bounds.width` (the layout
+/// column in `TextItem::from_text_markdown_cached` / `from_text_markdown_node`),
+/// so without this the transcript/composer text keeps its attach-time wrap width
+/// and does not re-flow to the resized pane (hud-rpmwt). Font size is untouched —
+/// text reflows to the new width, it does not zoom.
+fn scale_tile_node_tree(
+    scene: &mut tze_hud_scene::graph::SceneGraph,
+    tile_id: tze_hud_scene::SceneId,
+    r_w: f32,
+    r_h: f32,
+) {
+    let Some(root) = scene.tiles.get(&tile_id).and_then(|t| t.root_node) else {
+        return;
+    };
+    // Collect the subtree ids with an immutable walk first, then mutate — a
+    // tile's node tree is a small DAG-free tree (≤ MAX_NODES_PER_TILE) so this
+    // avoids aliasing the node store while descending `children`.
+    let mut stack = vec![root];
+    let mut ids = Vec::new();
+    while let Some(id) = stack.pop() {
+        let Some(node) = scene.nodes.get(&id) else {
+            continue;
+        };
+        ids.push(id);
+        stack.extend(node.children.iter().copied());
+    }
+    for id in ids {
+        if let Some(node) = scene.nodes.get_mut(&id) {
+            let b = node.data.bounds_mut();
+            b.x *= r_w;
+            b.y *= r_h;
+            b.width *= r_w;
+            b.height *= r_h;
+        }
+    }
+}
+
 /// Apply a resolved whole-portal resize to the scene: write each member's scaled
 /// bounds, bump the scene version once if any geometry changed, and build the
 /// per-member geometry snapshots to broadcast.
@@ -503,11 +546,33 @@ fn commit_portal_group_resize(
     let mut any_changed = false;
     let mut members = Vec::with_capacity(updates.len());
     for (tile_id, new_bounds) in updates {
+        let old_tile_bounds = scene.tiles.get(&tile_id).map(|t| t.bounds);
         if let Some(tile) = scene.tiles.get_mut(&tile_id) {
             if tile.bounds.width != new_bounds.width || tile.bounds.height != new_bounds.height {
                 any_changed = true;
             }
             tile.bounds = new_bounds;
+        }
+        // Scale the tile's node tree in lock-step with the tile so tile-local
+        // node geometry — and the text wrap width the compositor reads from
+        // `TextMarkdownNode::bounds.width` — re-resolves to the new pane. Use
+        // each tile's OWN size ratio (not the whole-portal ratio) so the nodes
+        // track exactly the tile they live in. Without this the frame scales but
+        // the transcript/composer text stays wrapped at the old width (hud-rpmwt).
+        if let Some(old) = old_tile_bounds {
+            let node_r_w = if old.width > 0.0 {
+                new_bounds.width / old.width
+            } else {
+                1.0
+            };
+            let node_r_h = if old.height > 0.0 {
+                new_bounds.height / old.height
+            } else {
+                1.0
+            };
+            if node_r_w != 1.0 || node_r_h != 1.0 {
+                scale_tile_node_tree(scene, tile_id, node_r_w, node_r_h);
+            }
         }
         // The viewer now owns this member's geometry: take authority so an
         // adapter republishing its stale client-side layout on the next content
@@ -3964,6 +4029,123 @@ mod tests {
             sequence: 1,
         };
         commit_portal_group_resize(scene, &group, old_rect, snapshot);
+    }
+
+    /// hud-rpmwt core: after a whole-portal resize the transcript/composer text
+    /// must re-resolve to the NEW pane geometry, not stay wrapped at the
+    /// attach-time width. The compositor wraps `TextMarkdownNode` text to the
+    /// node's own `bounds.width` (tile-local, see
+    /// `TextItem::from_text_markdown_node` / `from_text_markdown_cached`), so a
+    /// resize that scales only `tile.bounds` — leaving the node tree stale —
+    /// leaves the text wrapped at the old column: "resize works but the text
+    /// isn't being resized". Assert both the node bounds AND the resulting
+    /// `TextItem` layout width track the resized pane, at the draw-item seam.
+    #[test]
+    fn whole_portal_resize_reflows_transcript_text_to_new_pane_width() {
+        use tze_hud_compositor::TextItem;
+        use tze_hud_scene::SceneId;
+        use tze_hud_scene::types::{
+            FontFamily, Node, NodeData, Rect, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
+        };
+
+        let (mut scene, _tab_id, frame_id, transcript_id, _composer_id, _shield_id, _fm) =
+            multi_surface_portal_scene();
+
+        // Attach a wrapping TextMarkdown node to the transcript pane. Node bounds
+        // are tile-local: fill the transcript tile (180 x 280 from the fixture).
+        let text_id = SceneId::new();
+        scene.nodes.insert(
+            text_id,
+            Node {
+                id: text_id,
+                children: vec![],
+                data: NodeData::TextMarkdown(TextMarkdownNode {
+                    content: "the quick brown fox jumps over the lazy dog again and again"
+                        .to_owned(),
+                    bounds: Rect::new(0.0, 0.0, 180.0, 280.0),
+                    font_size_px: 14.0,
+                    font_family: FontFamily::SystemSansSerif,
+                    color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                    background: None,
+                    alignment: TextAlign::Start,
+                    overflow: TextOverflow::Clip,
+                    color_runs: Box::default(),
+                }),
+            },
+        );
+        scene.tiles.get_mut(&transcript_id).unwrap().root_node = Some(text_id);
+
+        let node_width = |scene: &tze_hud_scene::graph::SceneGraph| match &scene
+            .nodes
+            .get(&text_id)
+            .unwrap()
+            .data
+        {
+            NodeData::TextMarkdown(tm) => tm.bounds.width,
+            other => panic!("expected TextMarkdown, got {other:?}"),
+        };
+        // Wrap column the compositor would use, before the resize.
+        let layout_width_before = {
+            let NodeData::TextMarkdown(tm) = &scene.nodes.get(&text_id).unwrap().data else {
+                unreachable!()
+            };
+            TextItem::from_text_markdown_node(tm, 0.0, 0.0).bounds_width
+        };
+        let node_width_before = node_width(&scene);
+        let transcript_before = scene.tiles.get(&transcript_id).unwrap().bounds;
+
+        // Grow the whole portal ~1.5x in width, ~1.3x in height.
+        resize_group_to(
+            &mut scene,
+            frame_id,
+            tze_hud_input::PortalRect {
+                x: 100.0,
+                y: 100.0,
+                width: 600.0,
+                height: 390.0,
+            },
+        );
+
+        let transcript_after = scene.tiles.get(&transcript_id).unwrap().bounds;
+        assert!(
+            transcript_after.width > transcript_before.width,
+            "precondition: the transcript tile must have grown"
+        );
+
+        // 1) The node tree re-resolved: node width scaled with its tile.
+        let node_width_after = node_width(&scene);
+        let tile_ratio = transcript_after.width / transcript_before.width;
+        let expected_node_width = node_width_before * tile_ratio;
+        assert!(
+            (node_width_after - expected_node_width).abs() < 1e-2,
+            "transcript text node width must scale with the pane: expected \
+             ~{expected_node_width}, got {node_width_after}"
+        );
+
+        // 2) The draw-item wrap column tracks the new pane — the seam the
+        //    compositor shapes/wraps against. Before the fix this stayed pinned
+        //    to the attach-time width.
+        let layout_width_after = {
+            let NodeData::TextMarkdown(tm) = &scene.nodes.get(&text_id).unwrap().data else {
+                unreachable!()
+            };
+            TextItem::from_text_markdown_node(tm, 0.0, 0.0).bounds_width
+        };
+        assert!(
+            layout_width_after > layout_width_before + 1.0,
+            "TextItem layout/wrap width must grow with the resized pane: \
+             before={layout_width_before}, after={layout_width_after}"
+        );
+
+        // 3) The wrap column stays within the resized pane — no layout to a
+        //    width wider than the tile (overflow contract: no partially clipped
+        //    glyphs from a stale-wide layout).
+        assert!(
+            layout_width_after <= transcript_after.width + 1e-3,
+            "wrap width {layout_width_after} must not exceed the resized pane \
+             width {}",
+            transcript_after.width
+        );
     }
 
     /// hud-lyqun core: dragging one constituent surface of a text-stream portal
