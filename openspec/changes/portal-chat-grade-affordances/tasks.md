@@ -10,7 +10,7 @@ This change is SPEC-FIRST (epic hud-g0c9g STEP 1). Sections 1–2 are this chang
 
 ## 2. Land + sync
 
-- [ ] 2.1 Commit + push the change directory to main
+- [x] 2.1 Commit + push the change directory to main (30bdfc62)
 - [ ] 2.2 `/opsx:sync` the delta into `openspec/specs/text-stream-portals/spec.md` — DEFERRED until promotion implementation lands (convention per hud-hpuzp); change dir stays open as the requirement source for hud-g1ena.1..7
 - [x] 2.3 Update epic hud-g0c9g: STEP 1 done, note the change name and requirement list
 
