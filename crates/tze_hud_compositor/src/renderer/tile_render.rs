@@ -159,6 +159,27 @@ impl Compositor {
         ))
     }
 
+    /// Effective per-frame render opacity for a tile: scene-level tile opacity
+    /// (with drag boost) multiplied by the §6.3 portal-transition fade opacity
+    /// for scrollable (portal) tiles, clamped to `[0, 1]`.
+    ///
+    /// This is the single source of truth for "how faded is the whole tile this
+    /// frame". It MUST be applied uniformly to every element that composes the
+    /// tile's opaque body — both the flat tile backdrop ([`tile_background_color`])
+    /// and the content-node backgrounds painted in [`render_node`] — so the tile
+    /// backdrop fades as a single unit. (The text pass fades on the portal-fade
+    /// component alone via `portal_tile_anim_opacity`, which for a portal — where
+    /// `tile.opacity` stays 1 — equals this value.) A backdrop site that omits it
+    /// paints at full opacity while its neighbours fade, leaving that region
+    /// see-through relative to the rest of the tile on any fade or geometry change
+    /// that exposes it (hud-w41ef).
+    pub(super) fn tile_effective_opacity(&self, tile: &Tile, scene: &SceneGraph) -> f32 {
+        // Base opacity from drag state (scene-level tile.opacity × drag boost).
+        let base_opacity = Self::effective_tile_opacity(tile, scene);
+        // §6.3: multiply portal tile animation opacity for scrollable (portal) tiles.
+        (base_opacity * self.portal_tile_anim_opacity(tile.id)).clamp(0.0, 1.0)
+    }
+
     /// Determine the background fill color for a tile based on its root content.
     ///
     /// Colors are resolved from design tokens (`color.tile.background.*`) with
@@ -174,10 +195,7 @@ impl Compositor {
         tile: &Tile,
         scene: &SceneGraph,
     ) -> Option<[f32; 4]> {
-        // Base opacity from drag state (scene-level tile.opacity × drag boost).
-        let base_opacity = Self::effective_tile_opacity(tile, scene);
-        // §6.3: multiply portal tile animation opacity for scrollable (portal) tiles.
-        let opacity = (base_opacity * self.portal_tile_anim_opacity(tile.id)).clamp(0.0, 1.0);
+        let opacity = self.tile_effective_opacity(tile, scene);
         if let Some(root_id) = tile.root_node
             && let Some(node) = scene.nodes.get(&root_id)
         {
@@ -545,6 +563,12 @@ impl Compositor {
             None => return,
         };
         let (scroll_x, scroll_y) = self.display_tile_scroll_offset(scene, tile.id);
+        // §6.3 fade: the whole tile (backdrop + content backgrounds + text) must
+        // fade as one unit. `tile_background_color` and `collect_text_items`
+        // already apply this; the content-node backgrounds below MUST match, or a
+        // faded/resized tile shows the content background at full opacity while
+        // the flat backdrop around it goes see-through (hud-w41ef).
+        let tile_opacity = self.tile_effective_opacity(tile, scene);
 
         match &node.data {
             NodeData::SolidColor(sc) => {
@@ -577,7 +601,10 @@ impl Compositor {
                             ),
                             sw,
                             sh,
-                            self.gpu_color(bg),
+                            self.gpu_color(Rgba {
+                                a: bg.a * tile_opacity,
+                                ..bg
+                            }),
                             vertices,
                         );
                     }
@@ -662,7 +689,10 @@ impl Compositor {
                         ),
                         sw,
                         sh,
-                        self.gpu_color(bg),
+                        self.gpu_color(Rgba {
+                            a: bg.a * tile_opacity,
+                            ..bg
+                        }),
                         vertices,
                     );
 
