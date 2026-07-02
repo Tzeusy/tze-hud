@@ -2,6 +2,7 @@ use super::*;
 use crate::surface::HeadlessSurface;
 use image_cache::{
     CARET_BLINK_HALF_PERIOD, caret_visible_at, composer_display_text, composer_display_text_blink,
+    composer_scroll_offset,
 };
 use tze_hud_input::{DRAG_OPACITY_BOOST, DRAG_Z_ORDER_BOOST};
 use tze_hud_scene::graph::SceneGraph;
@@ -10323,6 +10324,198 @@ fn composer_caret_mid_multibyte_snaps_to_boundary() {
     assert!(
         snap_result.is_ok(),
         "composer_display_text must not panic on mid-multibyte cursor_byte"
+    );
+}
+
+// ─── Horizontal caret-follow (hud-zlfi4) ─────────────────────────────────────
+//
+// `composer_scroll_offset` is the pure, GPU-free core of the composer's
+// horizontal caret-follow: given a caret x and full draft width (both measured
+// against the composer font by the renderer), it returns how far to scroll the
+// draft left so the caret stays visible. These CPU-only tests pin the standard
+// single-line chat-input semantics; the measurement + apply path is exercised
+// by the live-verify pass.
+
+/// Fixed keep-visible margin used across the caret-follow tests (mirrors the
+/// composer's `text_margin`).
+const FOLLOW_MARGIN: f32 = 6.0;
+
+/// When the draft fits inside the visible window, the offset is always 0
+/// (left-aligned) regardless of caret position.
+#[test]
+fn caret_follow_no_scroll_when_text_fits() {
+    let window = 100.0;
+    // Caret at start, middle, and end of a draft narrower than the window.
+    for &caret_x in &[0.0_f32, 25.0, 50.0] {
+        let off = composer_scroll_offset(caret_x, 50.0, window, FOLLOW_MARGIN);
+        assert_eq!(
+            off, 0.0,
+            "fitting draft must never scroll (caret_x={caret_x})"
+        );
+    }
+    // Exactly-fitting draft (content == window) still does not scroll.
+    assert_eq!(
+        composer_scroll_offset(100.0, 100.0, window, FOLLOW_MARGIN),
+        0.0
+    );
+}
+
+/// Typing past the box width advances the scroll offset so the caret's on-screen
+/// x stays within the visible window (caret is at the draft end while typing).
+#[test]
+fn caret_follow_advances_when_typing_past_width() {
+    let window = 100.0;
+    // Draft has grown to 150px; caret sits at the end (typing).
+    let off = composer_scroll_offset(150.0, 150.0, window, FOLLOW_MARGIN);
+    assert!(off > 0.0, "overflowing draft must scroll, got {off}");
+    // Caret on-screen position = caret_x - offset must be inside [margin, window-margin].
+    let caret_on_screen = 150.0 - off;
+    assert!(
+        caret_on_screen >= FOLLOW_MARGIN - 0.5 && caret_on_screen <= window - FOLLOW_MARGIN + 0.5,
+        "caret must stay within the keep-visible band, got {caret_on_screen}"
+    );
+    assert!(
+        caret_on_screen <= window,
+        "caret must not fall off the right edge"
+    );
+}
+
+/// Home (caret_x == 0) resets the scroll offset to 0, revealing the draft start.
+#[test]
+fn caret_follow_home_resets_to_zero() {
+    let window = 100.0;
+    // Long draft (500px) but caret jumped to Home.
+    let off = composer_scroll_offset(0.0, 500.0, window, FOLLOW_MARGIN);
+    assert_eq!(off, 0.0, "Home must reset scroll to 0");
+}
+
+/// End (caret_x == content_width) reveals the tail: the caret sits at the right
+/// keep-visible band and the offset is the maximum (no dead space past the end).
+#[test]
+fn caret_follow_end_shows_tail() {
+    let window = 100.0;
+    let content = 500.0;
+    let off = composer_scroll_offset(content, content, window, FOLLOW_MARGIN);
+    let max_scroll = content + FOLLOW_MARGIN - window;
+    assert!(
+        (off - max_scroll).abs() < 0.5,
+        "End must scroll to the tail (max_scroll={max_scroll}), got {off}"
+    );
+    // Caret sits exactly at the right keep-visible band.
+    let caret_on_screen = content - off;
+    assert!(
+        (caret_on_screen - (window - FOLLOW_MARGIN)).abs() < 0.5,
+        "End caret must sit at window - margin, got {caret_on_screen}"
+    );
+}
+
+/// A caret parked in the MIDDLE of a wide draft stays visible on screen.
+#[test]
+fn caret_follow_mid_text_stays_visible() {
+    let window = 100.0;
+    let content = 500.0;
+    let off = composer_scroll_offset(300.0, content, window, FOLLOW_MARGIN);
+    let caret_on_screen = 300.0 - off;
+    assert!(
+        caret_on_screen >= 0.0 && caret_on_screen <= window,
+        "mid-text caret must remain within the window, got {caret_on_screen}"
+    );
+}
+
+/// Sweeping the caret from End back toward Home keeps it visible at every step
+/// and monotonically reveals earlier text (offset never increases as caret_x
+/// decreases). Guards the spec scenario "moving the caret back toward the start
+/// SHALL reveal the earlier text, keeping the caret visible throughout".
+#[test]
+fn caret_follow_moving_left_reveals_earlier_text() {
+    let window = 100.0;
+    let content = 500.0;
+    let mut prev_off = f32::INFINITY;
+    let mut caret_x = content;
+    while caret_x >= 0.0 {
+        let off = composer_scroll_offset(caret_x, content, window, FOLLOW_MARGIN);
+        // Caret stays on-screen throughout.
+        let caret_on_screen = caret_x - off;
+        assert!(
+            caret_on_screen >= -0.5 && caret_on_screen <= window + 0.5,
+            "caret must stay visible while moving left (caret_x={caret_x}, on_screen={caret_on_screen})"
+        );
+        // Offset is monotonically non-increasing as the caret moves left.
+        assert!(
+            off <= prev_off + 0.001,
+            "moving the caret left must not scroll further right (caret_x={caret_x}, off={off}, prev={prev_off})"
+        );
+        prev_off = off;
+        caret_x -= 20.0;
+    }
+    // Fully at Home the earlier text is revealed (offset 0).
+    assert_eq!(
+        composer_scroll_offset(0.0, content, window, FOLLOW_MARGIN),
+        0.0
+    );
+}
+
+/// Deleting text (draft shrinks) scrolls back left with no dead space: the
+/// offset is clamped so nothing past the draft-end + margin is ever revealed.
+#[test]
+fn caret_follow_delete_scrolls_back_no_dead_space() {
+    let window = 100.0;
+    // Draft was wide (offset was large); now the user deleted down to 120px with
+    // the caret at the new end.
+    let off = composer_scroll_offset(120.0, 120.0, window, FOLLOW_MARGIN);
+    let max_scroll = 120.0 + FOLLOW_MARGIN - window;
+    assert!(
+        off <= max_scroll + 0.001,
+        "offset must not exceed max_scroll after delete (got {off}, max {max_scroll})"
+    );
+    // Delete further so the draft now fits — offset snaps back to 0.
+    assert_eq!(
+        composer_scroll_offset(80.0, 80.0, window, FOLLOW_MARGIN),
+        0.0,
+        "once the draft fits again the window must left-align (no dead space)"
+    );
+}
+
+/// The returned offset is always within `[0, max_scroll]` and finite for a
+/// range of inputs — never negative, never NaN, never past the tail.
+#[test]
+fn caret_follow_offset_always_bounded() {
+    let window = 100.0;
+    for &content in &[0.0_f32, 50.0, 100.0, 250.0, 1000.0] {
+        for step in 0..=10 {
+            let caret_x = content * (step as f32) / 10.0;
+            let off = composer_scroll_offset(caret_x, content, window, FOLLOW_MARGIN);
+            assert!(off.is_finite(), "offset must be finite");
+            assert!(off >= 0.0, "offset must be non-negative, got {off}");
+            let max_scroll = (content + FOLLOW_MARGIN - window).max(0.0);
+            assert!(
+                off <= max_scroll + 0.001,
+                "offset must not exceed max_scroll (off={off}, max={max_scroll}, content={content})"
+            );
+        }
+    }
+}
+
+/// A degenerate (zero/negative) window never scrolls, and a margin wider than the
+/// window is clamped so the target band cannot invert (narrow-box robustness).
+#[test]
+fn caret_follow_degenerate_inputs_are_safe() {
+    // Zero-width window → no scroll, no panic.
+    assert_eq!(composer_scroll_offset(50.0, 500.0, 0.0, FOLLOW_MARGIN), 0.0);
+    assert_eq!(
+        composer_scroll_offset(50.0, 500.0, -10.0, FOLLOW_MARGIN),
+        0.0
+    );
+
+    // Very narrow box with an over-wide margin: margin is clamped to window/2, so
+    // the caret still lands inside the window and the offset stays bounded.
+    let window = 8.0;
+    let content = 100.0;
+    let off = composer_scroll_offset(content, content, window, /* margin */ 100.0);
+    let caret_on_screen = content - off;
+    assert!(
+        caret_on_screen >= 0.0 && caret_on_screen <= window,
+        "narrow-box caret must stay within the window, got {caret_on_screen}"
     );
 }
 

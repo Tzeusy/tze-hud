@@ -19,9 +19,9 @@ beads below.
 
 ## 3. Implement — horizontal caret-follow (`hud-zlfi4`)
 
-- [ ] 3.1 Compute a per-composer horizontal scroll offset at render time so the active caret cluster stays within `[text_margin, width - text_margin]`; shift draft `pixel_x` and the selection-run x by the same offset. Coordinate with the promotion epic (renderer ownership).
-- [ ] 3.2 The offset is local presentation state and obeys the same redaction/safe-mode/focus rules; no adapter round trip.
-- [ ] 3.3 Test: caret stays visible as the draft grows past the box width, and when the caret moves back left.
+- [x] 3.1 Compute a per-composer horizontal scroll offset at render time so the active caret cluster stays within `[text_margin, width - text_margin]`; shift draft `pixel_x` and the selection-run x by the same offset. Coordinate with the promotion epic (renderer ownership). Landed as a render-time recompute: `Compositor::prime_composer_scroll_offset` measures caret x against the composer font (mutable rasterizer) BEFORE `collect_text_items`; `composer_scroll_offset` (pure) clamps it to standard chat-input semantics; `collect_composer_text_item` shifts draft `pixel_x` by `-offset` while pinning the clip to the region interior (selection run is byte-anchored to `pixel_x` so it scrolls with the text). Draft now lays out on one unwrapped line (widened layout width) so overflow scrolls + clips instead of wrapping.
+- [x] 3.2 The offset is local presentation state and obeys the same redaction/safe-mode/focus rules; no adapter round trip. The offset lives on the compositor, is recomputed per frame from runtime-owned draft state, and is only ever applied while the composer overlay itself renders (which already carries the redaction/safe-mode/focus gating); no adapter traffic is involved.
+- [x] 3.3 Test: caret stays visible as the draft grows past the box width, and when the caret moves back left. Covered by 9 CPU-only unit tests over the pure `composer_scroll_offset` core (fits→no-scroll, typing-past-width, Home→0, End→tail, mid-text-visible, left-sweep-monotonic-reveal, delete→no-dead-space, bounded-offset, degenerate/narrow-box). Full GPU end-to-end rendering remains for the live-verify pass (§5).
 
 ## 4. Already-covered compliance (`hud-hxhnt`) — no delta
 

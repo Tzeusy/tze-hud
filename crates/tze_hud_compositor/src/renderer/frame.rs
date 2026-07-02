@@ -817,6 +817,10 @@ impl Compositor {
         }
 
         // ── Stage 6: Text pass (between content and chrome) ──────────────────
+        // Prime the composer horizontal caret-follow offset (hud-zlfi4) before
+        // collecting text items (measures the caret x with a mutable rasterizer
+        // borrow the collect path lacks).  No-op when no composer is active.
+        self.prime_composer_scroll_offset(scene);
         // Text is content — rendered above geometry rectangles but below chrome.
         let text_items_chrome: Vec<TextItem> = if self.text_rasterizer.is_some() {
             self.collect_text_items(scene, sw, sh)

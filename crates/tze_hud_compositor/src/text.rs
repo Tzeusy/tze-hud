@@ -509,6 +509,67 @@ impl TextRasterizer {
         self.viewport.update(queue, Resolution { width, height });
     }
 
+    /// Measure the composer draft for horizontal caret-follow (hud-zlfi4).
+    ///
+    /// Shapes `text` as a single unwrapped line with the sans-serif composer font
+    /// and returns `(caret_x, content_width)` in physical pixels, both measured
+    /// from the start of the draft (x = 0 at the first glyph):
+    /// - `caret_x` — the x of the glyph the caret sits before (`0` at `cursor_byte
+    ///   == 0`, `content_width` when the caret is at or past the draft end).
+    /// - `content_width` — the full draft line width (`line_w`).
+    ///
+    /// `cursor_byte` is snapped down to a valid UTF-8 boundary (agent-provided
+    /// offsets may land mid-character), so this never panics on the input.
+    ///
+    /// The caller ([`Compositor::prime_composer_scroll_offset`]) feeds the result
+    /// into [`crate::renderer::image_cache::composer_scroll_offset`]. This runs
+    /// once per frame only while a composer is active — not on the transcript hot
+    /// path — so a single short single-line shape here is negligible.
+    pub(crate) fn measure_composer_caret(
+        &mut self,
+        text: &str,
+        cursor_byte: usize,
+        font_size_px: f32,
+        line_height_multiplier: f32,
+    ) -> (f32, f32) {
+        // Snap the caret offset to a char boundary at or below the requested byte.
+        let mut cursor = cursor_byte.min(text.len());
+        while cursor > 0 && !text.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+
+        let line_height = font_size_px * line_height_multiplier;
+        let mut buf = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(font_size_px, line_height),
+        );
+        // Unbounded width + no wrap → the natural single-line width, matching how
+        // the composer strip lays out (it is always one line for v1).
+        buf.set_size(&mut self.font_system, None, None);
+        buf.set_wrap(&mut self.font_system, Wrap::None);
+        let base_attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
+        buf.set_text(&mut self.font_system, text, base_attrs, Shaping::Advanced);
+        buf.shape_until_scroll(&mut self.font_system, false);
+
+        let Some(run) = buf.layout_runs().next() else {
+            // Empty text (or no shaped run) → caret at origin, zero-width draft.
+            return (0.0, 0.0);
+        };
+        let content_width = run.line_w;
+        // The caret sits before the first glyph whose logical start is at or after
+        // the cursor byte. If the cursor is past every glyph (End), it sits at the
+        // line width. Glyphs are in visual order; for the single-line, LTR draft
+        // this v1 composer supports, logical `start` is monotonic.
+        let mut caret_x = content_width;
+        for glyph in run.glyphs.iter() {
+            if glyph.start >= cursor {
+                caret_x = glyph.x;
+                break;
+            }
+        }
+        (caret_x, content_width)
+    }
+
     /// Prime the truncation cache for all `TextOverflow::Ellipsis` items in `items`.
     ///
     /// Must be called **outside the per-frame pipeline** (at content-commit time

@@ -183,6 +183,66 @@ pub(crate) fn apply_composer_slot(
     false
 }
 
+/// Compute the composer's horizontal scroll offset — the number of physical
+/// pixels to shift the draft text LEFT within its visible window so the active
+/// caret stays visible once the draft is wider than the composer box (hud-zlfi4).
+///
+/// This is the pure, GPU-free core of horizontal caret-follow: given the caret's
+/// x position and the full draft width — both measured against the composer font
+/// by the renderer once per frame — it returns how far to scroll so the caret
+/// sits inside the visible text window with a keep-visible margin. Keeping the
+/// clamp semantics here (rather than inline in the render path) lets them be
+/// unit-tested without a text rasterizer.
+///
+/// All coordinates are physical pixels measured from the start of the draft text
+/// (x = 0 is the first glyph's left edge):
+/// - `caret_x`       — the caret's x within the draft (`0` at Home, `content_width` at End).
+/// - `content_width` — the full draft width laid out on one unwrapped line.
+/// - `window_width`  — visible text width inside the composer box (box width minus
+///   the left + right text margins).
+/// - `margin`        — keep-visible gap held between the caret and each window edge.
+///
+/// Semantics (standard single-line chat-input follow, e.g. Telegram/iMessage):
+/// - Draft fits (`content_width <= window_width`) → offset `0` (left-aligned).
+/// - Otherwise the caret is pinned to the right keep-visible band as the draft
+///   grows past the box, and moving the caret back toward Home reveals the
+///   earlier text while keeping the caret visible throughout.
+/// - The offset is clamped to `[0, content_width + margin - window_width]`, so the
+///   tail (End) is fully revealed with the caret inside the margin and deleting
+///   text scrolls back left with no blank "dead space" past the draft end.
+///
+/// The offset is recomputed each frame from the current caret, so no persistent
+/// per-composer scroll state is required.
+pub(crate) fn composer_scroll_offset(
+    caret_x: f32,
+    content_width: f32,
+    window_width: f32,
+    margin: f32,
+) -> f32 {
+    // Degenerate window: nothing sensible to scroll.
+    if window_width <= 0.0 {
+        return 0.0;
+    }
+    // Draft fits entirely — left-align and never scroll. This avoids a stray
+    // offset when the caret sits at the end of a draft only slightly narrower
+    // than the window.
+    if content_width <= window_width {
+        return 0.0;
+    }
+    // Keep the margin sane for very narrow boxes so the target band never inverts.
+    let margin = margin.clamp(0.0, window_width * 0.5);
+    // Allow the caret + right margin to sit just past the last glyph at End, but
+    // no further. Clamping to this bound is what prevents dead space when the
+    // draft shrinks (delete) below the current scroll.
+    let max_scroll = (content_width + margin - window_width).max(0.0);
+    // Right keep-visible band: place the caret `window_width - margin` from the
+    // window's left edge once it would otherwise fall off the right. Starting the
+    // target at 0 (prefer showing the draft start) and pushing right only as far
+    // as needed yields Home → 0 and End → max_scroll for free.
+    let target = caret_x - (window_width - margin);
+    target.clamp(0.0, max_scroll)
+}
+
 // ─── Font / image loading methods ────────────────────────────────────────────
 
 impl super::Compositor {
