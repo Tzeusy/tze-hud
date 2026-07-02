@@ -188,11 +188,21 @@ pub(super) fn apply_drag_handle_pointer_event(
             ..
         } => {
             // Update tile bounds directly (chrome-layer bypass — no lease check).
-            if let Some(tile) = scene.tiles.get_mut(&eid) {
-                let old = tile.bounds;
-                tile.bounds.x = new_x;
-                tile.bounds.y = new_y;
-                scene.version += 1;
+            // For a text-stream portal the drag moves the WHOLE portal as one
+            // unit (hud-lyqun): translate every group member by the same delta so
+            // the constituents never fracture. Falls back to a single-tile move
+            // for non-portal drags.
+            let old = scene.tiles.get(&eid).map(|t| t.bounds);
+            if let Some(old) = old {
+                let dx = new_x - old.x;
+                let dy = new_y - old.y;
+                if !translate_portal_group_on_drag(scene, eid, dx, dy) {
+                    if let Some(tile) = scene.tiles.get_mut(&eid) {
+                        tile.bounds.x = new_x;
+                        tile.bounds.y = new_y;
+                        scene.version += 1;
+                    }
+                }
                 tracing::trace!(
                     element_id = %eid,
                     old_x = old.x,
@@ -210,17 +220,23 @@ pub(super) fn apply_drag_handle_pointer_event(
             final_y,
             element_kind: _,
         } => {
-            let (width, height) = scene
+            let (old_x, old_y, width, height) = scene
                 .tiles
                 .get(&eid)
-                .map(|t| (t.bounds.width, t.bounds.height))
-                .unwrap_or((0.0, 0.0));
+                .map(|t| (t.bounds.x, t.bounds.y, t.bounds.width, t.bounds.height))
+                .unwrap_or((0.0, 0.0, 0.0, 0.0));
 
-            // Apply final position to tile bounds.
-            if let Some(tile) = scene.tiles.get_mut(&eid) {
-                tile.bounds.x = final_x;
-                tile.bounds.y = final_y;
-                scene.version += 1;
+            // Apply the final position. As with move, a portal drag relocates the
+            // whole group coherently (hud-lyqun); non-portal drags move the single
+            // tile.
+            let dx = final_x - old_x;
+            let dy = final_y - old_y;
+            if !translate_portal_group_on_drag(scene, eid, dx, dy) {
+                if let Some(tile) = scene.tiles.get_mut(&eid) {
+                    tile.bounds.x = final_x;
+                    tile.bounds.y = final_y;
+                    scene.version += 1;
+                }
             }
 
             let namespace = scene
@@ -360,7 +376,7 @@ fn rect_contains(outer: &tze_hud_scene::Rect, inner: &tze_hud_scene::Rect, eps: 
 /// frame rect (plus the seed tile itself, defensively).
 ///
 /// Returns `None` if the tile does not exist.
-fn resolve_portal_group(
+pub(super) fn resolve_portal_group(
     scene: &tze_hud_scene::graph::SceneGraph,
     member_tile_id: tze_hud_scene::SceneId,
 ) -> Option<PortalGroup> {
@@ -493,6 +509,12 @@ fn commit_portal_group_resize(
             }
             tile.bounds = new_bounds;
         }
+        // The viewer now owns this member's geometry: take authority so an
+        // adapter republishing its stale client-side layout on the next content
+        // publish or drag cannot stomp the member back and fracture the portal
+        // group (hud-lyqun). Viewer-driven resize writes `tile.bounds` directly
+        // (above), so this only gates adapter-originated `UpdateTileBounds`.
+        scene.lock_viewer_geometry(tile_id);
         let snapshot = tze_hud_input::GeometrySnapshot {
             rect: PortalRect {
                 x: new_bounds.x,
@@ -511,6 +533,56 @@ fn commit_portal_group_resize(
         scene.version += 1;
     }
     members
+}
+
+/// Translate a whole portal group by `(dx, dy)` when the viewer drags one of its
+/// constituent surfaces, preserving the group's relative layout and taking
+/// viewer geometry authority over every member (hud-lyqun).
+///
+/// A text-stream portal is N independent tiles (frame + scrollable panes + drag
+/// shield). Before this, the chrome drag handler moved only the single grabbed
+/// tile, so dragging a portal fractured it (and, after a prior whole-portal
+/// resize, the grabbed surface floated away from the rest). Here the dragged
+/// tile's motion delta is applied to every group member so the portal moves as
+/// one coherent unit — the completion of the whole-unit gesture work started for
+/// resize in PR #984.
+///
+/// Gated to real portals: the resolved group must have more than one member and
+/// contain at least one scrollable constituent surface. A plain single tile /
+/// widget / zone drag resolves to a lone or non-portal group and is left to the
+/// single-element move path (returns `false`). The far-corner drag shield is
+/// excluded by `resolve_portal_group` and stays parked.
+///
+/// Returns `true` when a whole-portal translate was applied.
+fn translate_portal_group_on_drag(
+    scene: &mut tze_hud_scene::graph::SceneGraph,
+    dragged_tile_id: tze_hud_scene::SceneId,
+    dx: f32,
+    dy: f32,
+) -> bool {
+    let Some(group) = resolve_portal_group(scene, dragged_tile_id) else {
+        return false;
+    };
+    let is_portal = group.member_ids.len() > 1
+        && group
+            .member_ids
+            .iter()
+            .any(|id| scene.tile_scroll_config(*id).is_some());
+    if !is_portal {
+        return false;
+    }
+
+    for &tile_id in &group.member_ids {
+        if let Some(tile) = scene.tiles.get_mut(&tile_id) {
+            tile.bounds.x += dx;
+            tile.bounds.y += dy;
+        }
+        // Viewer geometry authority — same as the resize path — so an adapter
+        // republish cannot pull a member back to its stale layout.
+        scene.lock_viewer_geometry(tile_id);
+    }
+    scene.version += 1;
+    true
 }
 
 /// Pointer-driven portal resize state machine step.
@@ -3640,5 +3712,251 @@ mod tests {
             display_h,
             tokens,
         );
+    }
+
+    /// Grow the whole portal group that owns `frame_id` to `new_rect`, mirroring
+    /// what a viewer resize gesture commits. Returns after the members have been
+    /// scaled and viewer-geometry-locked.
+    fn resize_group_to(
+        scene: &mut tze_hud_scene::graph::SceneGraph,
+        frame_id: tze_hud_scene::SceneId,
+        new_rect: tze_hud_input::PortalRect,
+    ) {
+        let group = resolve_portal_group(scene, frame_id).expect("group must resolve");
+        let old_rect = group.portal_rect;
+        let snapshot = tze_hud_input::GeometrySnapshot {
+            portal_id_hash: group.portal_id_hash,
+            rect: new_rect,
+            gesture_active: false,
+            sequence: 1,
+        };
+        commit_portal_group_resize(scene, &group, old_rect, snapshot);
+    }
+
+    /// hud-lyqun core: dragging one constituent surface of a text-stream portal
+    /// must translate the WHOLE portal by the same delta — every member moves
+    /// together preserving relative layout, the far-corner drag shield stays
+    /// parked, and every moved member takes viewer geometry authority.
+    #[test]
+    fn drag_move_translates_whole_portal_group_coherently() {
+        let (mut scene, _tab_id, frame_id, transcript_id, composer_id, shield_id, _fm) =
+            multi_surface_portal_scene();
+
+        let read =
+            |scene: &tze_hud_scene::graph::SceneGraph, id| scene.tiles.get(&id).unwrap().bounds;
+        let frame_before = read(&scene, frame_id);
+        let transcript_before = read(&scene, transcript_id);
+        let composer_before = read(&scene, composer_id);
+        let shield_before = read(&scene, shield_id);
+
+        let (dx, dy) = (140.0_f32, -35.0_f32);
+        let translated = translate_portal_group_on_drag(&mut scene, frame_id, dx, dy);
+        assert!(
+            translated,
+            "dragging a portal surface must engage the whole-portal translate path"
+        );
+
+        let frame_after = read(&scene, frame_id);
+        let transcript_after = read(&scene, transcript_id);
+        let composer_after = read(&scene, composer_id);
+        let shield_after = read(&scene, shield_id);
+
+        // Every constituent surface moved by exactly the drag delta.
+        for (before, after, name) in [
+            (frame_before, frame_after, "frame"),
+            (transcript_before, transcript_after, "transcript"),
+            (composer_before, composer_after, "composer"),
+        ] {
+            assert!(
+                (after.x - (before.x + dx)).abs() < 1e-3
+                    && (after.y - (before.y + dy)).abs() < 1e-3,
+                "{name} must translate by the drag delta"
+            );
+            assert!(
+                (after.width - before.width).abs() < 1e-3
+                    && (after.height - before.height).abs() < 1e-3,
+                "{name} size must not change on a move"
+            );
+        }
+
+        // Relative layout preserved for every member.
+        assert!(approx_tuple(
+            rel_to_frame(transcript_before, frame_before),
+            rel_to_frame(transcript_after, frame_after)
+        ));
+        assert!(approx_tuple(
+            rel_to_frame(composer_before, frame_before),
+            rel_to_frame(composer_after, frame_after)
+        ));
+
+        // The far-corner drag shield is not a spatial member and stays put.
+        assert_eq!(
+            shield_after, shield_before,
+            "the far-corner drag shield must not move with a portal drag"
+        );
+
+        // Every moved member now holds viewer geometry authority.
+        for id in [frame_id, transcript_id, composer_id] {
+            assert!(
+                scene.is_viewer_geometry_locked(id),
+                "each dragged portal member must take viewer geometry authority"
+            );
+        }
+        assert!(
+            !scene.is_viewer_geometry_locked(shield_id),
+            "the untouched drag shield must not be locked"
+        );
+    }
+
+    /// A single non-portal tile drag must NOT engage the whole-portal translate
+    /// path (no scrollable constituent), so behavior is unchanged for plain tiles.
+    #[test]
+    fn drag_move_single_non_portal_tile_is_not_group_translated() {
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(10.0, 10.0, 100.0, 80.0),
+                1,
+            )
+            .unwrap();
+
+        let translated = translate_portal_group_on_drag(&mut scene, tile_id, 20.0, 20.0);
+        assert!(
+            !translated,
+            "a plain non-portal tile must be left to the single-tile move path"
+        );
+        assert!(
+            !scene.is_viewer_geometry_locked(tile_id),
+            "a non-portal single-tile drag must not take geometry authority"
+        );
+    }
+
+    /// hud-lyqun regression: resize the whole portal, THEN drag it — the group
+    /// must stay coherent (relative layout preserved) rather than fracturing.
+    #[test]
+    fn resize_then_drag_keeps_portal_group_coherent() {
+        let (mut scene, _tab_id, frame_id, transcript_id, composer_id, _shield_id, _fm) =
+            multi_surface_portal_scene();
+
+        // Grow the portal (top-left anchored) to a larger rect.
+        resize_group_to(
+            &mut scene,
+            frame_id,
+            tze_hud_input::PortalRect {
+                x: 100.0,
+                y: 100.0,
+                width: 560.0,
+                height: 420.0,
+            },
+        );
+
+        let read =
+            |scene: &tze_hud_scene::graph::SceneGraph, id| scene.tiles.get(&id).unwrap().bounds;
+        let frame_mid = read(&scene, frame_id);
+        let transcript_mid = read(&scene, transcript_id);
+        let composer_mid = read(&scene, composer_id);
+
+        // Now drag the resized portal.
+        let (dx, dy) = (-60.0_f32, 90.0_f32);
+        assert!(translate_portal_group_on_drag(&mut scene, frame_id, dx, dy));
+
+        let frame_after = read(&scene, frame_id);
+        let transcript_after = read(&scene, transcript_id);
+        let composer_after = read(&scene, composer_id);
+
+        // Relative layout is preserved through resize AND the subsequent drag.
+        assert!(
+            approx_tuple(
+                rel_to_frame(transcript_mid, frame_mid),
+                rel_to_frame(transcript_after, frame_after)
+            ),
+            "transcript must keep relative layout after resize+drag"
+        );
+        assert!(
+            approx_tuple(
+                rel_to_frame(composer_mid, frame_mid),
+                rel_to_frame(composer_after, frame_after)
+            ),
+            "composer must keep relative layout after resize+drag"
+        );
+        // Frame translated by the drag delta.
+        assert!(
+            (frame_after.x - (frame_mid.x + dx)).abs() < 1e-3
+                && (frame_after.y - (frame_mid.y + dy)).abs() < 1e-3,
+            "frame must translate by the drag delta after a resize"
+        );
+    }
+
+    /// hud-lyqun proof: after a whole-portal resize, an adapter republishing its
+    /// stale client-side member layout (via `update_tile_bounds`) CANNOT move any
+    /// member — the group cannot be fractured.
+    #[test]
+    fn adapter_republish_cannot_fracture_resized_portal_group() {
+        let (mut scene, _tab_id, frame_id, transcript_id, composer_id, _shield_id, _fm) =
+            multi_surface_portal_scene();
+
+        resize_group_to(
+            &mut scene,
+            frame_id,
+            tze_hud_input::PortalRect {
+                x: 100.0,
+                y: 100.0,
+                width: 560.0,
+                height: 420.0,
+            },
+        );
+
+        let read =
+            |scene: &tze_hud_scene::graph::SceneGraph, id| scene.tiles.get(&id).unwrap().bounds;
+        let frame_scaled = read(&scene, frame_id);
+        let transcript_scaled = read(&scene, transcript_id);
+        let composer_scaled = read(&scene, composer_id);
+
+        // The adapter re-emits its OLD pre-resize client-side layout for a subset
+        // of members (exactly the live-observed fracture: some members stomped to
+        // stale bounds while others keep runtime-scaled bounds).
+        let _ = scene.update_tile_bounds(
+            transcript_id,
+            tze_hud_scene::Rect::new(110.0, 110.0, 180.0, 280.0),
+            "portal-agent",
+        );
+        let _ = scene.update_tile_bounds(
+            composer_id,
+            tze_hud_scene::Rect::new(300.0, 110.0, 190.0, 280.0),
+            "portal-agent",
+        );
+
+        // Nothing moved: the runtime-owned scaled geometry held for every member.
+        assert_eq!(
+            read(&scene, transcript_id),
+            transcript_scaled,
+            "adapter republish must not stomp the transcript pane after a resize"
+        );
+        assert_eq!(
+            read(&scene, composer_id),
+            composer_scaled,
+            "adapter republish must not stomp the composer pane after a resize"
+        );
+        assert_eq!(
+            read(&scene, frame_id),
+            frame_scaled,
+            "the frame must keep its resized geometry"
+        );
+
+        // The group is still internally coherent (relative layout intact).
+        assert!(approx_tuple(
+            rel_to_frame(transcript_scaled, frame_scaled),
+            rel_to_frame(read(&scene, transcript_id), read(&scene, frame_id))
+        ));
     }
 }

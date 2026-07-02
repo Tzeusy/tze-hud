@@ -138,6 +138,30 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub recently_removed_tile_ids: Vec<SceneId>,
+    /// Tile IDs whose geometry the viewer has taken control of via a whole-portal
+    /// move or resize gesture (hud-lyqun).
+    ///
+    /// While a tile is in this set the runtime holds geometry authority over it:
+    /// the owning adapter's [`SceneMutation::UpdateTileBounds`] republishes become
+    /// a bounds no-op (see [`SceneGraph::update_tile_bounds`]), so an adapter that
+    /// re-emits its stale client-side layout on the next content publish or drag
+    /// can no longer stomp individual members and fracture the portal. Content
+    /// mutations (`SetTileRoot`/`PublishToTile`, `AddNode`, accents, input mode)
+    /// are unaffected — they apply within the viewer-defined geometry, per the
+    /// text-stream-portals resize contract ("the owning adapter … MUST NOT veto
+    /// or reposition the surface"; adapter content "SHALL apply within the
+    /// gesture-defined geometry").
+    ///
+    /// Viewer-driven resize/drag write `tile.bounds` directly and therefore
+    /// bypass the lock; only adapter-originated `update_tile_bounds` calls are
+    /// gated. Cleared per tile by the reset-geometry affordance and on tile
+    /// removal.
+    ///
+    /// [`SceneMutation::UpdateTileBounds`]: crate::mutation::SceneMutation::UpdateTileBounds
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub viewer_geometry_locked: HashSet<SceneId>,
 }
 
 use super::SceneGraph;
@@ -170,6 +194,28 @@ impl SceneGraph {
     /// outside the scene graph (e.g. `portal_resize_states`).
     pub fn drain_removed_tile_ids(&mut self) -> Vec<SceneId> {
         self.overlay.recently_removed_tile_ids.drain(..).collect()
+    }
+
+    /// Take viewer geometry authority over a tile (hud-lyqun).
+    ///
+    /// Called for every member of a portal group when the viewer moves or
+    /// resizes the whole portal, so a subsequent adapter `UpdateTileBounds`
+    /// republish cannot reposition the member and fracture the group.
+    pub fn lock_viewer_geometry(&mut self, tile_id: SceneId) {
+        self.overlay.viewer_geometry_locked.insert(tile_id);
+    }
+
+    /// Release viewer geometry authority over a tile, restoring adapter control
+    /// of its bounds. Called by the reset-geometry affordance and on tile
+    /// removal.
+    pub fn unlock_viewer_geometry(&mut self, tile_id: SceneId) {
+        self.overlay.viewer_geometry_locked.remove(&tile_id);
+    }
+
+    /// Whether the viewer holds geometry authority over `tile_id` — i.e. adapter
+    /// bounds republishes are currently suppressed for it.
+    pub fn is_viewer_geometry_locked(&self, tile_id: SceneId) -> bool {
+        self.overlay.viewer_geometry_locked.contains(&tile_id)
     }
 
     /// Register local-first scroll config for a tile.

@@ -162,6 +162,18 @@ impl SceneGraph {
         self.require_active_lease(lease_id)?;
         self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
 
+        // Viewer geometry authority (hud-lyqun): once the viewer has moved or
+        // resized this tile as part of a whole-portal gesture, the adapter no
+        // longer controls its bounds. Silently accept the mutation but leave the
+        // bounds untouched — the adapter's content updates still apply within the
+        // viewer-defined geometry, but its stale client-side layout can never
+        // reposition the member and fracture the portal group. Viewer-driven
+        // resize/drag write `tile.bounds` directly and so are not affected by
+        // this gate; only adapter-originated `UpdateTileBounds` reaches here.
+        if self.is_viewer_geometry_locked(tile_id) {
+            return Ok(());
+        }
+
         if bounds.width <= 0.0 || bounds.height <= 0.0 {
             return Err(ValidationError::BoundsOutOfRange {
                 reason: format!(

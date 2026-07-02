@@ -42,6 +42,7 @@ impl SceneGraph {
         self.overlay.tile_follow_tail_at_tail.remove(&tile_id);
         self.overlay.tile_lifecycle_accents.remove(&tile_id);
         self.overlay.drag_active_elements.remove(&tile_id);
+        self.overlay.viewer_geometry_locked.remove(&tile_id);
         // Notify the windowed runtime so it can eagerly prune per-tile state
         // that cannot live in the scene graph (e.g. `portal_resize_states`).
         // Drained by `SceneGraph::drain_removed_tile_ids` in `about_to_wait`.
