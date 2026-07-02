@@ -10134,25 +10134,298 @@ async fn local_composer_text_item_uses_hit_region_bounds() {
         .collect_composer_text_item(tile, &scene, 320.0, 200.0, &tokens)
         .expect("focused composer HitRegion must produce a text item");
 
+    // The composer echo is confined to a single input-line strip pinned to the
+    // BOTTOM of the composer region (hud-2zsbf): the full HitRegion can span the
+    // whole portal (click-anywhere-to-focus), so the rendered draft must not
+    // stretch across it. Strip height = font_line_height + 2*margin
+    // = 16*1.4 + 12 = 34.4; strip_y = region.y + (region.height - strip_height)
+    // = 46 + (72 - 34.4) = 83.6.
+    let strip_height = 16.0 * crate::text::LINE_HEIGHT_MULTIPLIER + 12.0;
+    let strip_y = 46.0 + (72.0 - strip_height);
     assert_eq!(
         item.pixel_x, 38.0,
-        "text x must anchor to hit-region x + margin"
+        "text x must anchor to hit-region x + margin (horizontal unchanged)"
     );
     assert_eq!(
-        item.pixel_y, 52.0,
-        "text y must anchor to hit-region y + margin"
+        item.pixel_y,
+        strip_y + 6.0,
+        "text y must anchor to the bottom input strip top + margin"
     );
     assert_eq!(
-        item.clip_pixel_y, 46.0,
-        "clip y must use the hit-region top, not the tile bottom strip"
+        item.clip_pixel_y, strip_y,
+        "clip y must use the input-strip top (bottom of region), not the region top"
     );
     assert_eq!(
         item.bounds_width, 128.0,
         "text bounds width must be the hit-region width minus horizontal margins"
     );
     assert_eq!(
-        item.bounds_height, 60.0,
-        "text bounds height must be the hit-region height minus vertical margins"
+        item.bounds_height,
+        strip_height - 12.0,
+        "text bounds height must be one input line (strip height minus vertical margins)"
+    );
+    assert_eq!(
+        item.clip_bounds_height, strip_height,
+        "clip height must be one input-line strip, not the full region height"
+    );
+}
+
+/// Regression (hud-2zsbf): mirror the resident portal — a FULL-TILE composer
+/// HitRegion (as `resident_grpc::render_batch` publishes via
+/// `local_bounds_for_state`) with a long draft. The local echo MUST be confined
+/// to a single input-line strip pinned to the BOTTOM of the portal, not laid as
+/// a full-width line across the portal TOP (the live P1 "extends forever").
+///
+/// Transcript body is rendered dim so only the (bright) composer echo registers.
+#[tokio::test]
+async fn composer_echo_confined_to_bottom_strip_full_tile_hitregion() {
+    let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(600, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let mut scene = SceneGraph::new(600.0, 300.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("test", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "test",
+            lease_id,
+            Rect::new(0.0, 0.0, 600.0, 300.0),
+            1,
+        )
+        .unwrap();
+    let root_id = SceneId::new();
+    // Portal body: an opaque dark backdrop (no transcript text) so the only
+    // bright pixels are the composer echo glyphs.
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.02, 0.02, 0.02, 1.0),
+                    bounds: Rect::new(0.0, 0.0, 600.0, 300.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+    // Composer HitRegion == full tile (matches resident_grpc local_bounds_for_state).
+    let hit_id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(root_id),
+            Node {
+                id: hit_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 600.0, 300.0),
+                    interaction_id: "composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+    let draft = "M".repeat(200);
+    let draft_len = draft.len();
+    compositor.local_composer = Some(LocalComposerState {
+        text: draft,
+        cursor_byte: draft_len,
+        selection_anchor: draft_len,
+        at_capacity: false,
+        node_id: hit_id,
+    });
+
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+    compositor.render_frame_headless(&mut scene, &surface);
+
+    let pixels = surface.read_pixels(&compositor.device);
+    let is_bright = |o: usize| pixels[o] > 160 && pixels[o + 1] > 160 && pixels[o + 2] > 160;
+    let (mut minx, mut miny, mut maxx, mut maxy) = (600usize, 300usize, 0usize, 0usize);
+    let mut count = 0usize;
+    for row in 0..300usize {
+        for col in 0..600usize {
+            if is_bright((row * 600 + col) * 4) {
+                count += 1;
+                minx = minx.min(col);
+                maxx = maxx.max(col);
+                miny = miny.min(row);
+                maxy = maxy.max(row);
+            }
+        }
+    }
+    assert!(count > 0, "composer echo must render some glyphs");
+    let _ = (minx, miny); // bbox min unused; discrimination is by band distribution
+
+    // Input strip: line_height + 2*margin = 16*1.4 + 12 = 34.4, pinned to the
+    // bottom of the 300px-tall region → strip_top ≈ 265.6. The echo glyphs form a
+    // single input line inside that strip. Pre-fix, the draft was laid out as a
+    // full-width line at the PORTAL TOP (the "extends forever" P1); post-fix its
+    // bulk sits in the bottom strip and the portal body carries no echo line.
+    let strip_height = 16.0 * crate::text::LINE_HEIGHT_MULTIPLIER + 12.0;
+    let strip_top = (300.0 - strip_height) as usize; // ≈ 265
+
+    // The portal body between the top chrome row and the input strip must be
+    // free of echo glyphs (the draft is not laid across the portal).
+    let body_bright = (20..strip_top.saturating_sub(2))
+        .flat_map(|r| (0..600usize).map(move |c| (r, c)))
+        .filter(|(r, c)| is_bright((r * 600 + c) * 4))
+        .count();
+    assert_eq!(
+        body_bright, 0,
+        "composer echo leaked into the portal body: {body_bright} bright glyph pixels \
+         between y=20 and the input strip top (≈{strip_top}); the draft must not span the portal"
+    );
+
+    // The echo bulk must live in the bottom input strip.
+    let strip_bright = (strip_top.saturating_sub(2)..300usize)
+        .flat_map(|r| (0..600usize).map(move |c| (r, c)))
+        .filter(|(r, c)| is_bright((r * 600 + c) * 4))
+        .count();
+    assert!(
+        strip_bright > 1000,
+        "composer echo not rendered in the bottom input strip (strip_bright={strip_bright})"
+    );
+    assert!(
+        strip_bright * 100 >= count * 90,
+        "most echo glyphs must sit in the bottom input strip: {strip_bright}/{count} \
+         (pre-fix the draft rendered at the portal top instead)"
+    );
+
+    // Horizontal clip still holds: nothing past the region interior right edge.
+    assert!(
+        maxx <= 594,
+        "composer echo overflowed horizontally to x={maxx} (region interior right = 594)"
+    );
+}
+
+/// Repro (hud-2zsbf): a composer draft wider than the box must be CLIPPED to the
+/// composer interior — no glyph pixels may appear to the RIGHT of the box edge.
+///
+/// This renders through the full headless GPU pipeline (the same
+/// `collect_composer_text_item` → glyphon `TextBounds` path the live overlay
+/// uses) with an overflowing single-line draft and asserts the region to the
+/// right of the composer interior stays background-dark.  The live P1 was that
+/// the single unwrapped line "extends forever" past the box.
+#[tokio::test]
+async fn composer_draft_overflow_is_clipped_to_box_headless() {
+    let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(400, 160).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let mut scene = SceneGraph::new(400.0, 160.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("test", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "test",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 160.0),
+            1,
+        )
+        .unwrap();
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    // Opaque dark backdrop so overflow glyphs (bright) stand out.
+                    color: Rgba::new(0.02, 0.02, 0.02, 1.0),
+                    bounds: Rect::new(0.0, 0.0, 400.0, 160.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+
+    // Composer HitRegion: a narrow input strip at local (20, 60) sized 120x40.
+    // Region interior (clip) right edge = 20 + 120 - COMPOSER_TEXT_MARGIN(6) = 134.
+    let hit_id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(root_id),
+            Node {
+                id: hit_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(20.0, 60.0, 120.0, 40.0),
+                    interaction_id: "composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+    // A draft far wider than the 120px strip, cursor at end (caret pinned right).
+    let draft = "M".repeat(60);
+    let draft_len = draft.len();
+    compositor.local_composer = Some(LocalComposerState {
+        text: draft,
+        cursor_byte: draft_len,
+        selection_anchor: draft_len,
+        at_capacity: false,
+        node_id: hit_id,
+    });
+
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+    compositor.render_frame_headless(&mut scene, &surface);
+
+    let pixels = surface.read_pixels(&compositor.device);
+    let px = |row: usize, col: usize| -> [u8; 4] {
+        let o = (row * 400 + col) * 4;
+        [pixels[o], pixels[o + 1], pixels[o + 2], pixels[o + 3]]
+    };
+    let is_bright = |p: [u8; 4]| p[0] > 160 && p[1] > 160 && p[2] > 160;
+
+    // Sanity: SOME bright glyph pixel must appear INSIDE the box interior
+    // (x in [26, 134)) across the composer text band (y in [60, 100)).
+    let mut bright_inside = false;
+    for row in 60..100usize {
+        for col in 26..134usize {
+            if is_bright(px(row, col)) {
+                bright_inside = true;
+                break;
+            }
+        }
+        if bright_inside {
+            break;
+        }
+    }
+    assert!(
+        bright_inside,
+        "expected composer draft glyphs to render inside the box interior"
+    );
+
+    // Defect assertion: NO bright glyph pixel may appear to the RIGHT of the box
+    // interior (x >= 140, a few px past the 134 clip edge to avoid AA fringe)
+    // within the composer text band.
+    let mut overflow_col: Option<usize> = None;
+    'outer: for row in 60..100usize {
+        for col in 140..400usize {
+            if is_bright(px(row, col)) {
+                overflow_col = Some(col);
+                break 'outer;
+            }
+        }
+    }
+    assert!(
+        overflow_col.is_none(),
+        "composer draft overflowed the box: bright glyph pixel at col {overflow_col:?} \
+         (clip interior right edge is x=134)"
     );
 }
 
