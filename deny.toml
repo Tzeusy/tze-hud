@@ -34,6 +34,28 @@ ignore = [
     # runtime attack surface.
     # Action: Remove when MSRV is bumped to Rust 1.92+ and wgpu upgraded to 28+.
     { id = "RUSTSEC-2024-0436", reason = "Transitive dep via metal←wgpu-hal←wgpu←glyphon. Compile-time proc-macro, no runtime attack surface. Blocked on wgpu 28+ (needs Rust 1.92+ MSRV bump, tracked with glyphon/wgpu version chain in Cargo.toml)." },
+    # RUSTSEC-2026-0192: `ttf-parser` is unmaintained (author statement,
+    # harfbuzz/ttf-parser#217). Transitive chains: ttf-parser@0.20 ← fontdb ←
+    # cosmic-text ← glyphon and ttf-parser@0.21 ← cosmic-text ← glyphon. Both
+    # pinned by the same glyphon 0.8.x → wgpu 24.x → Rust 1.88 co-pin as the
+    # `paste` waiver above; no safe upgrade exists (advisory suggests migrating
+    # the ecosystem to `skrifa`, which cosmic-text has not done at our pin).
+    # Risk: font parsing of locally-installed system fonts only — no untrusted
+    # font ingestion path exists in the runtime.
+    # Action: Remove when the glyphon/wgpu chain is bumped (wgpu 28+, Rust
+    # 1.92+ MSRV) and cosmic-text's font stack moves off ttf-parser.
+    { id = "RUSTSEC-2026-0192", reason = "Unmaintained ttf-parser via cosmic-text/fontdb←glyphon, pinned by the glyphon→wgpu→Rust 1.88 co-pin (same chain as the paste waiver). Parses locally-installed system fonts only. Remove with the wgpu 28+ MSRV bump." },
+    # RUSTSEC-2026-0194 / RUSTSEC-2026-0195: quick-xml DoS (quadratic dup-attr
+    # check; unbounded NsReader namespace allocation), fixed in >=0.41. Our
+    # DIRECT workspace dependency was bumped to 0.41 (2026-07-02, hud-sv7z2);
+    # the ONLY remaining vulnerable instance is quick-xml@0.39.2 inside
+    # `wayland-scanner`, a compile-time proc-macro (smithay-client-toolkit ←
+    # sctk-adwaita ← winit 0.30) that parses the vendored Wayland protocol XML
+    # at build time. Zero runtime attack surface; input is trusted repo-pinned
+    # XML, not attacker-controlled.
+    # Action: Remove when winit's wayland stack updates quick-xml to >=0.41.
+    { id = "RUSTSEC-2026-0194", reason = "Only remaining instance is build-time wayland-scanner proc-macro (via winit 0.30) parsing trusted vendored protocol XML. Direct workspace dep already bumped to 0.41. Remove when winit updates its wayland stack." },
+    { id = "RUSTSEC-2026-0195", reason = "Only remaining instance is build-time wayland-scanner proc-macro (via winit 0.30) parsing trusted vendored protocol XML. Direct workspace dep already bumped to 0.41. Remove when winit updates its wayland stack." },
 ]
 
 # ─── Licenses ────────────────────────────────────────────────────────────────
