@@ -377,6 +377,36 @@ impl FocusManager {
         )
     }
 
+    /// Move focus directly to a specific node via a runtime-initiated command
+    /// (source [`FocusSource::CommandInput`]).
+    ///
+    /// Used by the keyboard typing-recovery path (hud-2v8br): when the user types
+    /// while a non-composer portal control holds focus, the runtime redirects
+    /// focus to the tile's composer so the keystroke lands in the input box
+    /// rather than being swallowed. Unlike [`Self::request_focus`] this bypasses
+    /// namespace/steal validation because it is a runtime-owned recovery action,
+    /// not an agent request; the caller is responsible for passing a node that
+    /// belongs to `tile_id` on `tab_id`.
+    ///
+    /// Returns the [`FocusTransition`] so the caller can broadcast the
+    /// gained/lost events exactly as the Tab / click paths do. A no-op transition
+    /// is returned when focus already rests on the target node.
+    pub fn focus_node_via_command(
+        &mut self,
+        tab_id: SceneId,
+        tile_id: SceneId,
+        node_id: SceneId,
+        scene: &SceneGraph,
+    ) -> FocusTransition {
+        self.apply_transition(
+            tab_id,
+            FocusOwner::Node { tile_id, node_id },
+            FocusSource::CommandInput,
+            FocusLostReason::CommandInput,
+            scene,
+        )
+    }
+
     // ─── Destruction fallback (spec lines 57-58) ────────────────────────
 
     /// Called when a tile is destroyed. If the destroyed tile holds focus,

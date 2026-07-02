@@ -289,6 +289,36 @@ pub struct CaptureReleaseRequest {
     pub device_id: u32,
 }
 
+/// Classification of the currently focused element for portal keyboard
+/// typing-recovery decisions (hud-2v8br).
+///
+/// A keyboard-only viewer must never be stranded: when Tab moves focus off the
+/// composer onto a portal control (minimize / restore / submit), typed text must
+/// still reach the composer instead of being silently dispatched to the agent as
+/// raw key events. The runtime classifies the focus owner via
+/// [`InputProcessor::classify_portal_focus`] and uses the result to route
+/// keystrokes: printable typing and Escape recover to the composer, while
+/// Enter / Space activate the focused control.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PortalFocusTarget {
+    /// Focus rests on a composer-input region — normal editing, no recovery.
+    Composer,
+    /// Focus rests on a non-composer focusable control that shares a tile with a
+    /// composer node. `composer_node` is the recovery target for typing / Escape;
+    /// `node_id` / `interaction_id` identify the control for Enter / Space
+    /// activation.
+    Control {
+        tile_id: SceneId,
+        node_id: SceneId,
+        interaction_id: String,
+        /// The composer node in the same tile to redirect typing / Escape to.
+        composer_node: SceneId,
+    },
+    /// Any other focus state (none, chrome, tile-level, or a focusable node whose
+    /// tile has no composer) — typing-recovery does not apply.
+    Other,
+}
+
 /// The input processor. Tracks state across events for local feedback.
 pub struct InputProcessor {
     /// Currently hovered node.
@@ -728,6 +758,82 @@ impl InputProcessor {
         } else {
             focus_manager.navigate_next(tab_id, scene)
         };
+        self.apply_focus_transition_side_effects(&transition, scene);
+        transition
+    }
+
+    /// Classify the current keyboard-focus `owner` for portal typing-recovery
+    /// (hud-2v8br).
+    ///
+    /// - [`PortalFocusTarget::Composer`] when the focused node accepts composer
+    ///   input (normal editing).
+    /// - [`PortalFocusTarget::Control`] when the focused node is a *non-composer*
+    ///   focusable `HitRegionNode` whose owning tile also contains a composer
+    ///   node — i.e. a portal control (minimize / restore / submit) from which a
+    ///   keyboard user must be able to recover to the input box. Carries the
+    ///   sibling composer node as the recovery target.
+    /// - [`PortalFocusTarget::Other`] otherwise (no focus, chrome, tile-level, or
+    ///   a focusable node whose tile has no composer).
+    ///
+    /// This is a pure query — it does not mutate focus. The caller decides how to
+    /// route the keystroke based on the result.
+    pub fn classify_portal_focus(
+        &self,
+        owner: &FocusOwner,
+        scene: &SceneGraph,
+    ) -> PortalFocusTarget {
+        let FocusOwner::Node { tile_id, node_id } = owner else {
+            return PortalFocusTarget::Other;
+        };
+        let Some(node) = scene.nodes.get(node_id) else {
+            return PortalFocusTarget::Other;
+        };
+        let NodeData::HitRegion(hr) = &node.data else {
+            return PortalFocusTarget::Other;
+        };
+        if hr.accepts_composer_input {
+            return PortalFocusTarget::Composer;
+        }
+        if !hr.accepts_focus {
+            return PortalFocusTarget::Other;
+        }
+        // A non-composer focusable control: only a recovery target when the tile
+        // actually has a composer to redirect typing into.
+        let Some(tile) = scene.tiles.get(tile_id) else {
+            return PortalFocusTarget::Other;
+        };
+        match find_composer_node(tile.root_node, &scene.nodes) {
+            Some(composer_node) => PortalFocusTarget::Control {
+                tile_id: *tile_id,
+                node_id: *node_id,
+                interaction_id: hr.interaction_id.clone(),
+                composer_node,
+            },
+            None => PortalFocusTarget::Other,
+        }
+    }
+
+    /// Redirect keyboard focus to a tile's composer node (typing-recovery,
+    /// hud-2v8br) and apply the composer-activation side effects.
+    ///
+    /// Called when the user types (or presses Escape) while a non-composer portal
+    /// control holds focus, so the keystroke lands in the input box instead of
+    /// being swallowed. After this returns, [`Self::is_composer_active`] is `true`
+    /// and the caller may route the triggering character into the draft via the
+    /// normal composer path.
+    ///
+    /// Returns the [`FocusTransition`] so the caller broadcasts gained/lost events
+    /// exactly as the Tab / click paths do.
+    pub fn recover_composer_focus(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        scene: &mut SceneGraph,
+        tab_id: SceneId,
+        tile_id: SceneId,
+        composer_node: SceneId,
+    ) -> FocusTransition {
+        let transition =
+            focus_manager.focus_node_via_command(tab_id, tile_id, composer_node, scene);
         self.apply_focus_transition_side_effects(&transition, scene);
         transition
     }
@@ -1815,6 +1921,30 @@ fn node_accepts_composer_input(scene: &SceneGraph, node_id: SceneId) -> bool {
             false
         }
     })
+}
+
+/// Depth-first search for the first composer node (a `HitRegionNode` with
+/// `accepts_composer_input = true`) reachable from `root`.
+///
+/// Used by [`InputProcessor::classify_portal_focus`] to find a control's sibling
+/// composer as the typing-recovery target (hud-2v8br).
+fn find_composer_node(
+    root: Option<SceneId>,
+    nodes: &std::collections::HashMap<SceneId, tze_hud_scene::types::Node>,
+) -> Option<SceneId> {
+    let root_id = root?;
+    let node = nodes.get(&root_id)?;
+    if let NodeData::HitRegion(hr) = &node.data {
+        if hr.accepts_composer_input {
+            return Some(root_id);
+        }
+    }
+    for child in &node.children {
+        if let Some(found) = find_composer_node(Some(*child), nodes) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Resolve the namespace and interaction_id for a tile/node pair.
@@ -3738,6 +3868,175 @@ mod tests {
         assert!(
             !processor.is_composer_active(),
             "composer must deactivate once focus leaves the composer region"
+        );
+    }
+
+    // ─── Portal typing-recovery (hud-2v8br) ──────────────────────────────
+    //
+    // A keyboard-only viewer must never be stranded: when Tab moves focus off
+    // the composer onto a portal control, typed text must recover to the
+    // composer instead of being swallowed. These tests pin the classification
+    // and recovery primitives the runtime keyboard path drives.
+
+    /// A non-composer focusable control that shares a tile with a composer node
+    /// classifies as `Control`, carrying the sibling composer as the recovery
+    /// target.
+    #[test]
+    fn classify_portal_focus_control_with_composer_sibling() {
+        let (mut scene, tab_id, tile_id, composer_id, plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // Tab twice: composer → plain control.
+        processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+        processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+
+        let owner = fm.current_owner(tab_id).clone();
+        let target = processor.classify_portal_focus(&owner, &scene);
+        assert_eq!(
+            target,
+            PortalFocusTarget::Control {
+                tile_id,
+                node_id: plain_id,
+                interaction_id: "plain-button".to_string(),
+                composer_node: composer_id,
+            },
+            "a non-composer control sharing a tile with a composer must classify as Control"
+        );
+    }
+
+    /// Focus on the composer region classifies as `Composer` (normal editing).
+    #[test]
+    fn classify_portal_focus_composer_is_normal_editing() {
+        let (mut scene, tab_id, _tile_id, _composer_id, _plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        processor.navigate_focus(&mut fm, &mut scene, tab_id, false); // → composer
+        let owner = fm.current_owner(tab_id).clone();
+        assert_eq!(
+            processor.classify_portal_focus(&owner, &scene),
+            PortalFocusTarget::Composer,
+            "focus on a composer-input region must classify as Composer"
+        );
+    }
+
+    /// Recovery redirects focus to the composer, activates the draft manager, and
+    /// the triggering character then edits the draft — the "typing refocuses the
+    /// composer and applies the keystroke" policy end-to-end.
+    #[test]
+    fn recover_composer_focus_activates_and_accepts_typing() {
+        let (mut scene, tab_id, tile_id, composer_id, _plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // Land on the plain control (2nd stop) and confirm the composer is idle.
+        processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+        processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+        assert!(
+            !processor.is_composer_active(),
+            "composer must be idle while a non-composer control holds focus"
+        );
+
+        // Recover to the composer (as the runtime does on a printable keystroke).
+        let transition =
+            processor.recover_composer_focus(&mut fm, &mut scene, tab_id, tile_id, composer_id);
+        assert_eq!(
+            transition.gained.as_ref().and_then(|(g, _)| g.node_id),
+            Some(composer_id),
+            "recovery must move focus onto the composer node"
+        );
+        assert_eq!(
+            transition.gained.as_ref().map(|(g, _)| g.source),
+            Some(FocusSource::CommandInput),
+            "recovery focus source must be CommandInput"
+        );
+        assert!(
+            processor.is_composer_active(),
+            "recovery must activate the composer draft manager"
+        );
+
+        // The character that triggered recovery now edits the draft.
+        let (outcome, _batch) = processor.route_character_to_composer("h");
+        assert_eq!(outcome, EditOutcome::Mutated);
+        assert_eq!(
+            processor.composer_draft_snapshot().map(|s| s.0),
+            Some("h".to_string()),
+            "the typed character must land in the composer draft after recovery"
+        );
+    }
+
+    /// Cycle integrity: from any stop, repeated Tab returns focus to the composer
+    /// within the cycle length — a keyboard user is never permanently stranded.
+    #[test]
+    fn tab_cycle_returns_to_composer_within_cycle_length() {
+        let (mut scene, tab_id, _tile_id, composer_id, _plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // Start on the composer.
+        processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+        assert_eq!(fm.current_owner(tab_id).node_id(), Some(composer_id));
+
+        // From anywhere, pressing Tab at most `bound` times must revisit the
+        // composer (the cycle wraps). `bound` is a generous upper limit on the
+        // number of focusable stops in this scene.
+        let bound = 8;
+        let mut returned = false;
+        for _ in 0..bound {
+            processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+            if fm.current_owner(tab_id).node_id() == Some(composer_id) {
+                returned = true;
+                break;
+            }
+        }
+        assert!(
+            returned,
+            "repeated Tab must return focus to the composer within {bound} presses"
+        );
+    }
+
+    /// Click recovery (hud-2v8br regression): clicking the composer region while
+    /// a non-composer control holds keyboard focus must restore composer focus
+    /// and re-activate the draft (the pointer click-to-focus path from #981).
+    #[test]
+    fn click_composer_recovers_focus_from_control() {
+        let (mut scene, tab_id, _tile_id, composer_id, plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // Park focus on the plain control via Tab traversal.
+        processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+        processor.navigate_focus(&mut fm, &mut scene, tab_id, false);
+        assert_eq!(fm.current_owner(tab_id).node_id(), Some(plain_id));
+        assert!(
+            !processor.is_composer_active(),
+            "composer must be idle while the control holds focus"
+        );
+
+        // Click inside the composer region (bounds: 0,0 → 800,60).
+        let event = PointerEvent {
+            x: 100.0,
+            y: 10.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&event, &mut scene, &mut fm, tab_id);
+
+        assert_eq!(
+            fm.current_owner(tab_id).node_id(),
+            Some(composer_id),
+            "clicking the composer must move focus back onto it"
+        );
+        assert!(
+            processor.is_composer_active(),
+            "clicking the composer must re-activate the draft manager"
         );
     }
 
