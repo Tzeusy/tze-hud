@@ -316,12 +316,31 @@ impl WinitApp {
                 tracing::warn!("perform_reset_element_geometry: could not acquire shared state");
                 return;
             };
+            // Hand geometry authority back to the adapter FIRST (hud-lyqun),
+            // before the override no-op short-circuit below: a whole-portal
+            // move/resize takes the viewer lock but does not always write an
+            // element-store override, so the lock must be released here even when
+            // there is no override to clear. A portal member's reset releases the
+            // WHOLE portal group so every constituent surface becomes
+            // adapter-controlled again — not just the one the reset menu was
+            // opened on.
+            if let Ok(mut scene) = state.scene.try_lock() {
+                match super::portal::resolve_portal_group(&scene, element_id) {
+                    Some(group) => {
+                        for member_id in group.member_ids {
+                            scene.unlock_viewer_geometry(member_id);
+                        }
+                    }
+                    None => scene.unlock_viewer_geometry(element_id),
+                }
+            }
+
             // Clear the override.
             let previous = state.element_store.reset_geometry_override(element_id);
             let Some(previous) = previous else {
                 tracing::debug!(
                     element_id = %element_id,
-                    "perform_reset_element_geometry: no override — no-op"
+                    "perform_reset_element_geometry: no override — geometry lock released, no override to clear"
                 );
                 return;
             };

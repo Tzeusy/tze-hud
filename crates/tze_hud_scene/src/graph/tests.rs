@@ -3865,3 +3865,100 @@ fn test_lease_expiry_returns_lease_expiry_struct() {
     assert_eq!(expiries[0].terminal_state, LeaseState::Expired);
     assert!(expiries[0].removed_tiles.contains(&tile_id));
 }
+
+/// hud-lyqun viewer geometry authority: once a tile is viewer-geometry-locked
+/// (the viewer moved/resized the whole portal), an adapter's `update_tile_bounds`
+/// republish MUST NOT reposition it — the call succeeds but the bounds are held.
+/// Unlocking restores adapter control. This is the guard that keeps a portal
+/// group coherent against a stale client-side layout republish.
+#[test]
+fn locked_tile_ignores_adapter_update_tile_bounds() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease(
+        "agent",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(10.0, 10.0, 100.0, 80.0),
+            1,
+        )
+        .unwrap();
+
+    // Before locking, the adapter can move the tile normally.
+    scene
+        .update_tile_bounds(tile_id, Rect::new(50.0, 60.0, 120.0, 90.0), "agent")
+        .expect("unlocked adapter bounds update must apply");
+    assert_eq!(
+        scene.tiles[&tile_id].bounds,
+        Rect::new(50.0, 60.0, 120.0, 90.0),
+        "unlocked tile must accept adapter bounds"
+    );
+
+    // The viewer takes geometry authority (as a whole-portal move/resize would).
+    scene.lock_viewer_geometry(tile_id);
+    assert!(scene.is_viewer_geometry_locked(tile_id));
+    let held = scene.tiles[&tile_id].bounds;
+    let version_before = scene.version;
+
+    // The adapter republishes its stale client-side layout — this must be a
+    // no-op on geometry (Ok, but bounds unchanged and version not bumped).
+    scene
+        .update_tile_bounds(tile_id, Rect::new(300.0, 400.0, 200.0, 150.0), "agent")
+        .expect("locked adapter bounds update must succeed as a no-op");
+    assert_eq!(
+        scene.tiles[&tile_id].bounds, held,
+        "a viewer-geometry-locked tile must ignore adapter bounds republish"
+    );
+    assert_eq!(
+        scene.version, version_before,
+        "a suppressed adapter bounds republish must not bump the scene version"
+    );
+
+    // Unlocking restores adapter control.
+    scene.unlock_viewer_geometry(tile_id);
+    assert!(!scene.is_viewer_geometry_locked(tile_id));
+    scene
+        .update_tile_bounds(tile_id, Rect::new(11.0, 12.0, 130.0, 95.0), "agent")
+        .expect("unlocked adapter bounds update must apply again");
+    assert_eq!(
+        scene.tiles[&tile_id].bounds,
+        Rect::new(11.0, 12.0, 130.0, 95.0),
+        "after unlock the adapter regains bounds control"
+    );
+}
+
+/// Removing a tile must clear its viewer-geometry lock so a recycled SceneId
+/// never inherits a stale authority flag.
+#[test]
+fn removing_tile_clears_viewer_geometry_lock() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease(
+        "agent",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(10.0, 10.0, 100.0, 80.0),
+            1,
+        )
+        .unwrap();
+    scene.lock_viewer_geometry(tile_id);
+    assert!(scene.is_viewer_geometry_locked(tile_id));
+
+    scene.remove_tile_and_nodes(tile_id);
+    assert!(
+        !scene.is_viewer_geometry_locked(tile_id),
+        "removing a tile must drop its viewer-geometry lock"
+    );
+}
