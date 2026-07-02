@@ -1465,6 +1465,117 @@ mod tests {
         );
     }
 
+    /// hud-02sp5: a portal frame tile mixes genuinely-interactive controls
+    /// (collapse / composer / reply) with pointer-only drag & resize handles.
+    /// Tab traversal must stop on the interactive controls in depth-first
+    /// left-to-right order, Shift+Tab must reverse that order, and the
+    /// pointer-only handles must be skipped entirely.
+    #[test]
+    fn portal_tab_ring_visits_controls_and_skips_pointer_only_handles() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+
+        // A portal frame: a SolidColor container root with affordance children
+        // in render order, matching the exemplar's build_portal_nodes layout —
+        // minimize (collapse control), header drag bar (pointer-only), composer
+        // (reply text entry), submit (reply control), corner resize (pointer-only).
+        let child = |scene: &mut SceneGraph, iid: &str, accepts_focus: bool| -> SceneId {
+            let id = SceneId::new();
+            scene.nodes.insert(
+                id,
+                Node {
+                    id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 40.0, 40.0),
+                        interaction_id: iid.into(),
+                        accepts_focus,
+                        accepts_pointer: true,
+                        ..Default::default()
+                    }),
+                },
+            );
+            id
+        };
+        let minimize = child(&mut scene, "portal-minimize", true);
+        let drag = child(&mut scene, "portal-drag-header", false);
+        let composer = child(&mut scene, "portal-composer-focus", true);
+        let submit = child(&mut scene, "portal-submit", true);
+        let resize = child(&mut scene, "portal-resize-bottom-right", false);
+
+        let root = SceneId::new();
+        scene.nodes.insert(
+            root,
+            Node {
+                id: root,
+                children: vec![minimize, drag, composer, submit, resize],
+                data: NodeData::SolidColor(tze_hud_scene::SolidColorNode {
+                    color: tze_hud_scene::Rgba::new(0.0, 0.0, 0.0, 1.0),
+                    bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                    radius: None,
+                }),
+            },
+        );
+        scene.tiles.get_mut(&tile).unwrap().root_node = Some(root);
+
+        let node = |id: SceneId| FocusOwner::Node {
+            tile_id: tile,
+            node_id: id,
+        };
+
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // Tab forward: only the interactive controls, in DFS render order.
+        // The pointer-only drag bar and resize handle are never visited.
+        for expected in [minimize, composer, submit, minimize] {
+            fm.navigate_next(tab_id, &scene);
+            assert_eq!(
+                fm.trees[&tab_id].current().clone(),
+                node(expected),
+                "Tab must stop only on interactive controls in render order"
+            );
+        }
+
+        // Shift+Tab reverses the same ring (currently on `minimize`).
+        for expected in [submit, composer, minimize] {
+            fm.navigate_prev(tab_id, &scene);
+            assert_eq!(
+                fm.trees[&tab_id].current().clone(),
+                node(expected),
+                "Shift+Tab must reverse the ring"
+            );
+        }
+
+        // The pointer-only handles never appear as focus owners.
+        let cycle = build_focus_cycle(tab_id, &scene);
+        for step in &cycle {
+            if let CycleStep::Node { node_id, .. } = step {
+                assert_ne!(*node_id, drag, "drag bar must not be a Tab stop");
+                assert_ne!(*node_id, resize, "resize handle must not be a Tab stop");
+            }
+        }
+        assert_eq!(
+            cycle.len(),
+            3,
+            "exactly the three interactive controls form the ring"
+        );
+    }
+
     #[test]
     fn test_passthrough_tile_excluded_from_cycle() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
