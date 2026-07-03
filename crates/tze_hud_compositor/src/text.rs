@@ -411,6 +411,20 @@ pub struct TextRasterizer {
     /// `shape_until_scroll`; read via [`TextRasterizer::shape_call_count`].
     #[allow(dead_code)] // read only by the hud-991cj scroll-reshape benchmark
     pub(crate) shape_call_count: u64,
+    /// Shaped-buffer reuse cache (hud-991cj): a glyphon `Buffer` keyed by a
+    /// content-and-geometry `ShapeKey` (BLAKE3 of every input that affects the
+    /// shaped glyphs — see [`shape_key_for_item`]). The **scroll offset is
+    /// deliberately NOT in the key** — a Clip pane's shaped output is
+    /// offset-independent (offset only moves the draw position), so a pure scroll
+    /// reuses the shaped buffer with zero re-shape (the whole win). Content /
+    /// bounds / font / run change → key miss → exactly one re-shape.
+    ///
+    /// Bounded by construction: `prepare_text_items` moves the whole map out at
+    /// the top of the frame and rebuilds it from *this frame's* live items, so it
+    /// only ever holds the currently-rendered set (stale keys are dropped, not
+    /// accumulated). Front-runs the Wave-3 "perf-whole-scene-reshape-per-frame"
+    /// shaped-buffer-reuse item.
+    shape_cache: HashMap<[u8; 32], Buffer>,
 }
 
 impl TextRasterizer {
@@ -452,6 +466,7 @@ impl TextRasterizer {
             loaded_font_ids: HashSet::new(),
             truncation_cache: TruncationCache::new(),
             shape_call_count: 0,
+            shape_cache: HashMap::new(),
         }
     }
 
@@ -495,6 +510,12 @@ impl TextRasterizer {
         self.font_system.db_mut().load_font_data(data.to_vec());
 
         self.loaded_font_ids.insert(resource_id);
+
+        // A new face can change font fallback / substitution for text that was
+        // already shaped, so every cached shaped buffer is now potentially stale
+        // (the ShapeKey does not capture FontSystem state). Drop the cache; it is
+        // rebuilt from the next frame's items on the miss path (hud-991cj).
+        self.shape_cache.clear();
 
         tracing::info!(
             resource_id = %format_resource_id(&resource_id),
@@ -882,197 +903,50 @@ impl TextRasterizer {
         let mut effective_styled_runs_per_item: Vec<Vec<StyledRunItem>> =
             Vec::with_capacity(items.len());
 
-        let buffers: Vec<Buffer> = items
-            .iter()
-            .zip(truncated_texts.iter())
-            .map(|(item, truncated)| {
-                let line_height = item.font_size_px * item.line_height_multiplier;
-                let mut buf = Buffer::new(
-                    &mut self.font_system,
-                    Metrics::new(item.font_size_px, line_height),
-                );
-                buf.set_size(
-                    &mut self.font_system,
-                    Some(item.bounds_width),
-                    Some(item.bounds_height),
-                );
-                buf.set_wrap(&mut self.font_system, Wrap::Word);
-                let family = match item.font_family {
-                    FontFamily::SystemSansSerif => Family::SansSerif,
-                    FontFamily::SystemMonospace => Family::Monospace,
-                    FontFamily::SystemSerif => Family::Serif,
-                };
-                // Map CSS-style weight (100–900) to glyphon Weight.
-                // Clamp to [100, 900]; Weight(0) would select arbitrary fallback fonts.
-                let weight = Weight(item.font_weight.clamp(100, 900));
-                let base_attrs = Attrs::new().family(family).weight(weight);
+        // Phase 1 shaped-buffer cache (hud-991cj): move the whole cache out and
+        // rebuild it from THIS frame's items. Each item's `ShapeKey` hashes every
+        // input that affects the shaped glyphs (original + effective/truncated
+        // text, bounds, font, weight, alignment, overflow, viewport, line-height,
+        // styled/color runs) but NOT the scroll offset — a Clip pane's shaped
+        // output is offset-independent, so a pure scroll hits every key and
+        // re-shapes zero buffers (the whole win). A key miss (content / geometry /
+        // font / runs changed) re-shapes exactly once. Buffers not reused this
+        // frame are dropped when `old_cache` falls out of scope, so the cache
+        // never accumulates stale entries — it holds only the currently-rendered
+        // set.
+        let mut old_cache = std::mem::take(&mut self.shape_cache);
+        let mut shape_keys: Vec<[u8; 32]> = Vec::with_capacity(items.len());
+        let mut buffers: Vec<Buffer> = Vec::with_capacity(items.len());
 
-                // Use the pre-truncated text when overflow == Ellipsis; otherwise use item.text.
-                let effective_text: &str = truncated.as_deref().unwrap_or(&item.text);
+        for (item, truncated) in items.iter().zip(truncated_texts.iter()) {
+            let effective_text: &str = truncated.as_deref().unwrap_or(&item.text);
 
-                if !item.styled_runs.is_empty() {
-                    // Phase-1 markdown styled-run path (hud-5jbra.2).
-                    //
-                    // `styled_runs` carry per-span weight, italic, monospace, and
-                    // optional color from the parse cache.  We build `(text_slice,
-                    // Attrs)` pairs and call `set_rich_text` once — zero re-parse cost.
-                    //
-                    // When ellipsis truncation was applied, byte offsets in
-                    // `styled_runs` must be remapped to the truncated string's
-                    // coordinate system (hud-so7zu).
-                    //
-                    // HeadAnchored: truncated text is "{prefix}…" (trailing
-                    // ellipsis).  Offsets within the prefix are valid as-is;
-                    // we clamp at prefix_len = len - ELLIPSIS.len().
-                    //
-                    // TailAnchored: truncated text is "…\n{tail}" (leading
-                    // ellipsis, hud-fe4ik).  Original offsets address the tail
-                    // portion of the original text; they must be shifted so
-                    // they address the correct bytes in "…\n{tail}".  See
-                    // `reslice_styled_runs_tail_anchored` for the shift logic.
-                    if let Some(truncated_str) = truncated {
-                        let resliced = reslice_styled_runs_for_item(item, truncated_str);
-                        if resliced.is_empty() {
-                            // No runs survive truncation — fall back to plain text.
-                            buf.set_text(
-                                &mut self.font_system,
-                                effective_text,
-                                base_attrs,
-                                Shaping::Advanced,
-                            );
-                        } else {
-                            let spans = styled_run_spans(
-                                effective_text,
-                                &resliced,
-                                base_attrs,
-                                item.font_family,
-                                item.font_size_px,
-                                item.line_height_multiplier,
-                            );
-                            buf.set_rich_text(
-                                &mut self.font_system,
-                                spans,
-                                base_attrs,
-                                Shaping::Advanced,
-                            );
-                        }
-                        // Record the effective styled runs (resliced to truncated
-                        // text coordinate space) so compute_inline_backdrop_quads
-                        // matches glyph byte offsets correctly.
-                        effective_styled_runs_per_item.push(resliced);
-                    } else {
-                        let spans = styled_run_spans(
-                            &item.text,
-                            &item.styled_runs,
-                            base_attrs,
-                            item.font_family,
-                            item.font_size_px,
-                            item.line_height_multiplier,
-                        );
-                        buf.set_rich_text(
-                            &mut self.font_system,
-                            spans,
-                            base_attrs,
-                            Shaping::Advanced,
-                        );
-                        // No truncation — original styled_runs byte offsets are correct.
-                        effective_styled_runs_per_item.push(item.styled_runs.to_vec());
-                    }
-                } else if item.color_runs.is_empty() {
-                    // Fast path: no inline runs — use uniform base color.
-                    buf.set_text(
-                        &mut self.font_system,
-                        effective_text,
-                        base_attrs,
-                        Shaping::Advanced,
-                    );
-                    // No styled_runs means no backdrop quads possible.
-                    effective_styled_runs_per_item.push(vec![]);
-                } else {
-                    // Single-pass styled path: build (text_slice, Attrs) pairs and
-                    // call set_rich_text once.  This avoids the double-shape that
-                    // occurred when set_text created BufferLines and set_attrs_list
-                    // then invalidated their shaping state.
-                    //
-                    // color_runs are sorted, non-overlapping byte ranges.  We walk
-                    // the text left-to-right, emitting an unstyled span for any gap
-                    // before a run, then a colored span for the run itself.  Text
-                    // after the last run (if any) is emitted as a final unstyled span.
-                    //
-                    // `default_color` on TextArea acts as the fallback for glyphs
-                    // without a color_opt set, so base_attrs carries no color_opt and
-                    // run attrs carry explicit Color values.
-                    //
-                    // When ellipsis truncation was applied, remap color_run
-                    // byte offsets to the truncated string's coordinate system
-                    // (hud-so7zu / hud-fe4ik).  TailAnchored uses a
-                    // leading-ellipsis shift; HeadAnchored uses a trailing-
-                    // ellipsis clamp.  See reslice_color_runs_tail_anchored.
-                    if let Some(truncated_str) = truncated {
-                        let resliced = if truncated_str == &*item.text {
-                            // Text fit without truncation — preserve original color runs.
-                            item.color_runs.to_vec()
-                        } else if item.viewport == TruncationViewport::TailAnchored
-                            && truncated_str.starts_with(crate::overflow::ELLIPSIS)
-                        {
-                            reslice_color_runs_tail_anchored(
-                                &item.text,
-                                truncated_str,
-                                &item.color_runs,
-                            )
-                        } else {
-                            let content_end = truncated_str
-                                .strip_suffix(crate::overflow::ELLIPSIS)
-                                .map(|s| s.len())
-                                .unwrap_or(truncated_str.len());
-                            reslice_color_runs(&item.color_runs, content_end)
-                        };
-                        if resliced.is_empty() {
-                            buf.set_text(
-                                &mut self.font_system,
-                                effective_text,
-                                base_attrs,
-                                Shaping::Advanced,
-                            );
-                        } else {
-                            let spans = color_run_spans(effective_text, &resliced, base_attrs);
-                            buf.set_rich_text(
-                                &mut self.font_system,
-                                spans,
-                                base_attrs,
-                                Shaping::Advanced,
-                            );
-                        }
-                    } else {
-                        let spans = color_run_spans(&item.text, &item.color_runs, base_attrs);
-                        buf.set_rich_text(
-                            &mut self.font_system,
-                            spans,
-                            base_attrs,
-                            Shaping::Advanced,
-                        );
-                    }
-                    // color_runs don't carry background_color; no backdrop quads.
-                    effective_styled_runs_per_item.push(vec![]);
-                }
+            // Effective (resliced) styled runs are needed EVERY frame for inline
+            // backdrop quads (their pixel positions shift with scroll), so this
+            // pure run-computation runs on both the cache-hit and cache-miss
+            // paths — split from the set_text/shape work that only runs on a miss.
+            // THE SUBTLETY (hud-991cj): the interleave of run-computation with
+            // set_text+shape is untangled here so a hit does zero shaping while
+            // pinned behaviors (styled runs, truncation reslicing, backdrop quads)
+            // still reproduce byte-for-byte.
+            effective_styled_runs_per_item
+                .push(effective_styled_runs_for_item(item, truncated.as_deref()));
 
-                // Apply text alignment to all lines in the buffer.
-                let ct_align = match item.alignment {
-                    TextAlign::Start => glyphon::cosmic_text::Align::Left,
-                    TextAlign::Center => glyphon::cosmic_text::Align::Center,
-                    TextAlign::End => glyphon::cosmic_text::Align::End,
-                };
-                for line in buf.lines.iter_mut() {
-                    line.set_align(Some(ct_align));
-                }
-                // Measurement lever for hud-991cj: every per-frame shape is
-                // counted so the scroll benchmark/regression can prove a pure
-                // scroll (unchanged shape inputs) performs zero re-shapes.
-                self.shape_call_count += 1;
-                buf.shape_until_scroll(&mut self.font_system, false);
-                buf
-            })
-            .collect();
+            let key = shape_key_for_item(item, effective_text);
+            shape_keys.push(key);
+
+            let buf = if let Some(reused) = old_cache.remove(&key) {
+                // Every shape input is unchanged → reuse the shaped buffer with no
+                // re-shape. `shape_call_count` deliberately does NOT advance.
+                reused
+            } else {
+                self.build_and_shape_buffer(item, truncated.as_deref())
+            };
+            buffers.push(buf);
+        }
+        // Stale buffers (content/geometry/font changed, or items no longer
+        // present this frame) are freed here.
+        drop(old_cache);
 
         // Inline backdrop quads (Phase 2, hud-9ieev): compute pixel-exact rects
         // from glyph layout data.  Must happen here, between buffer shaping and
@@ -1136,7 +1010,8 @@ impl TextRasterizer {
             });
         }
 
-        self.renderer
+        let prepare_result = self
+            .renderer
             .prepare(
                 device,
                 queue,
@@ -1146,8 +1021,164 @@ impl TextRasterizer {
                 text_areas,
                 &mut self.swash_cache,
             )
-            .map_err(|e| format!("glyphon prepare: {e:?}"))
-            .map(|()| inline_backdrop_quads)
+            .map_err(|e| format!("glyphon prepare: {e:?}"));
+
+        // Rebuild the shaped-buffer cache from this frame's buffers now that the
+        // `TextArea` borrows of `buffers` have ended (prepare consumed them). Only
+        // the currently-rendered set is retained (hud-991cj); on a duplicate key
+        // the later buffer wins, which is harmless (identical shape inputs).
+        self.shape_cache = shape_keys.into_iter().zip(buffers).collect();
+
+        prepare_result.map(|()| inline_backdrop_quads)
+    }
+
+    /// Build and shape a single `Buffer` for `item` — the cache-MISS path of
+    /// [`prepare_text_items`] (hud-991cj).
+    ///
+    /// This is the shaping half of the old inline buffer-building closure,
+    /// factored out so a cache HIT can skip it entirely. It performs the actual
+    /// `set_text`/`set_rich_text` + `shape_until_scroll` — the only work that a
+    /// pure scroll must avoid. It increments [`Self::shape_call_count`] exactly
+    /// once (the measurement lever). It does NOT compute the effective styled
+    /// runs (those are produced separately by [`effective_styled_runs_for_item`]
+    /// so the backdrop-quad path runs on both hit and miss); every styling input
+    /// used here is captured by the item's `ShapeKey`, so a reuse is byte-exact.
+    fn build_and_shape_buffer(&mut self, item: &TextItem, truncated: Option<&str>) -> Buffer {
+        let line_height = item.font_size_px * item.line_height_multiplier;
+        let mut buf = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(item.font_size_px, line_height),
+        );
+        buf.set_size(
+            &mut self.font_system,
+            Some(item.bounds_width),
+            Some(item.bounds_height),
+        );
+        buf.set_wrap(&mut self.font_system, Wrap::Word);
+        let family = match item.font_family {
+            FontFamily::SystemSansSerif => Family::SansSerif,
+            FontFamily::SystemMonospace => Family::Monospace,
+            FontFamily::SystemSerif => Family::Serif,
+        };
+        // Map CSS-style weight (100–900) to glyphon Weight.
+        // Clamp to [100, 900]; Weight(0) would select arbitrary fallback fonts.
+        let weight = Weight(item.font_weight.clamp(100, 900));
+        let base_attrs = Attrs::new().family(family).weight(weight);
+
+        // Use the pre-truncated text when overflow == Ellipsis; otherwise item.text.
+        let effective_text: &str = truncated.unwrap_or(&item.text);
+
+        if !item.styled_runs.is_empty() {
+            // Phase-1 markdown styled-run path (hud-5jbra.2).
+            //
+            // `styled_runs` carry per-span weight, italic, monospace, and
+            // optional color from the parse cache.  We build `(text_slice,
+            // Attrs)` pairs and call `set_rich_text` once — zero re-parse cost.
+            //
+            // When ellipsis truncation was applied, byte offsets in `styled_runs`
+            // must be remapped to the truncated string's coordinate system
+            // (hud-so7zu). HeadAnchored: "{prefix}…" (clamp at prefix_len).
+            // TailAnchored: "…\n{tail}" (leading ellipsis, hud-fe4ik — offsets
+            // shifted; see `reslice_styled_runs_tail_anchored`).
+            if let Some(truncated_str) = truncated {
+                let resliced = reslice_styled_runs_for_item(item, truncated_str);
+                if resliced.is_empty() {
+                    // No runs survive truncation — fall back to plain text.
+                    buf.set_text(
+                        &mut self.font_system,
+                        effective_text,
+                        base_attrs,
+                        Shaping::Advanced,
+                    );
+                } else {
+                    let spans = styled_run_spans(
+                        effective_text,
+                        &resliced,
+                        base_attrs,
+                        item.font_family,
+                        item.font_size_px,
+                        item.line_height_multiplier,
+                    );
+                    buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Advanced);
+                }
+            } else {
+                let spans = styled_run_spans(
+                    &item.text,
+                    &item.styled_runs,
+                    base_attrs,
+                    item.font_family,
+                    item.font_size_px,
+                    item.line_height_multiplier,
+                );
+                buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Advanced);
+            }
+        } else if item.color_runs.is_empty() {
+            // Fast path: no inline runs — use uniform base color.
+            buf.set_text(
+                &mut self.font_system,
+                effective_text,
+                base_attrs,
+                Shaping::Advanced,
+            );
+        } else {
+            // Single-pass styled path: build (text_slice, Attrs) pairs and call
+            // set_rich_text once.  This avoids the double-shape that occurred when
+            // set_text created BufferLines and set_attrs_list then invalidated
+            // their shaping state.
+            //
+            // color_runs are sorted, non-overlapping byte ranges. `default_color`
+            // on TextArea acts as the fallback for glyphs without a color_opt, so
+            // base_attrs carries no color_opt and run attrs carry explicit Colors.
+            //
+            // When ellipsis truncation was applied, remap color_run byte offsets
+            // to the truncated string's coordinate system (hud-so7zu / hud-fe4ik).
+            if let Some(truncated_str) = truncated {
+                let resliced = if truncated_str == &*item.text {
+                    // Text fit without truncation — preserve original color runs.
+                    item.color_runs.to_vec()
+                } else if item.viewport == TruncationViewport::TailAnchored
+                    && truncated_str.starts_with(crate::overflow::ELLIPSIS)
+                {
+                    reslice_color_runs_tail_anchored(&item.text, truncated_str, &item.color_runs)
+                } else {
+                    let content_end = truncated_str
+                        .strip_suffix(crate::overflow::ELLIPSIS)
+                        .map(|s| s.len())
+                        .unwrap_or(truncated_str.len());
+                    reslice_color_runs(&item.color_runs, content_end)
+                };
+                if resliced.is_empty() {
+                    buf.set_text(
+                        &mut self.font_system,
+                        effective_text,
+                        base_attrs,
+                        Shaping::Advanced,
+                    );
+                } else {
+                    let spans = color_run_spans(effective_text, &resliced, base_attrs);
+                    buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Advanced);
+                }
+            } else {
+                let spans = color_run_spans(&item.text, &item.color_runs, base_attrs);
+                buf.set_rich_text(&mut self.font_system, spans, base_attrs, Shaping::Advanced);
+            }
+        }
+
+        // Apply text alignment to all lines in the buffer.
+        let ct_align = match item.alignment {
+            TextAlign::Start => glyphon::cosmic_text::Align::Left,
+            TextAlign::Center => glyphon::cosmic_text::Align::Center,
+            TextAlign::End => glyphon::cosmic_text::Align::End,
+        };
+        for line in buf.lines.iter_mut() {
+            line.set_align(Some(ct_align));
+        }
+        // Measurement lever for hud-991cj: every per-frame shape is counted so the
+        // scroll benchmark/regression can prove a pure scroll (unchanged shape
+        // inputs, cache hit) performs zero re-shapes.
+        self.shape_call_count += 1;
+        buf.shape_until_scroll(&mut self.font_system, false);
+        buf
     }
 
     /// Record the glyphon text pass into `render_pass`.
@@ -1193,6 +1224,141 @@ pub struct InlineBackdropQuad {
     pub h: f32,
     /// sRGB backdrop color [r, g, b, a] from the design token.
     pub color: [u8; 4],
+}
+
+/// Compute the shaped-buffer cache key for `item` (hud-991cj).
+///
+/// The key is a BLAKE3 digest over EVERY input that changes the shaped glyphs —
+/// the original text and the effective (post-truncation) text, bounds, font
+/// size / family / weight, alignment, overflow, truncation viewport, line-height
+/// multiplier, and the full styled-run and color-run sets (including per-run
+/// colors, which the streaming-reveal fade and token-map changes rewrite into
+/// `styled_runs` upstream, so both are captured here as ordinary key misses).
+///
+/// The scroll offset (`pixel_x`/`pixel_y`, `clip_*`) is deliberately EXCLUDED:
+/// a Clip pane's shaped output is offset-independent — the offset only moves the
+/// draw position and clip rect — so a pure scroll reuses the shaped buffer with
+/// zero re-shape. `item.color`/`opacity`/`outline_*` are also excluded: for the
+/// plain and gap glyphs the color is applied at `TextArea` draw time (rebuilt
+/// every frame via `default_color`), never baked into the shaped buffer; baked
+/// per-run colors travel through `styled_runs`/`color_runs`, which ARE hashed.
+///
+/// Every variable-length field is length-prefixed and every `Option` is tagged
+/// so distinct inputs cannot alias to the same digest.
+fn shape_key_for_item(item: &TextItem, effective_text: &str) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+
+    fn hash_bytes(h: &mut blake3::Hasher, b: &[u8]) {
+        h.update(&(b.len() as u64).to_le_bytes());
+        h.update(b);
+    }
+    fn hash_opt_u16(h: &mut blake3::Hasher, v: Option<u16>) {
+        match v {
+            Some(x) => {
+                h.update(&[1u8]);
+                h.update(&x.to_le_bytes());
+            }
+            None => {
+                h.update(&[0u8]);
+            }
+        }
+    }
+    fn hash_opt_color(h: &mut blake3::Hasher, v: Option<[u8; 4]>) {
+        match v {
+            Some(c) => {
+                h.update(&[1u8]);
+                h.update(&c);
+            }
+            None => {
+                h.update(&[0u8]);
+            }
+        }
+    }
+    fn hash_opt_f32(h: &mut blake3::Hasher, v: Option<f32>) {
+        match v {
+            Some(x) => {
+                h.update(&[1u8]);
+                h.update(&x.to_bits().to_le_bytes());
+            }
+            None => {
+                h.update(&[0u8]);
+            }
+        }
+    }
+
+    // Text: original (run reslicing maps from original byte offsets) + effective
+    // (the exact string shaped when truncated).
+    hash_bytes(&mut h, item.text.as_bytes());
+    hash_bytes(&mut h, effective_text.as_bytes());
+
+    // Layout-affecting geometry / font (scroll-invariant).
+    h.update(&item.bounds_width.to_bits().to_le_bytes());
+    h.update(&item.bounds_height.to_bits().to_le_bytes());
+    h.update(&item.font_size_px.to_bits().to_le_bytes());
+    h.update(&item.line_height_multiplier.to_bits().to_le_bytes());
+    h.update(&item.font_weight.to_le_bytes());
+
+    // Fieldless-enum discriminants (matched explicitly — do not rely on `as u8`).
+    h.update(&[match item.font_family {
+        FontFamily::SystemSansSerif => 0u8,
+        FontFamily::SystemMonospace => 1,
+        FontFamily::SystemSerif => 2,
+    }]);
+    h.update(&[match item.alignment {
+        TextAlign::Start => 0u8,
+        TextAlign::Center => 1,
+        TextAlign::End => 2,
+    }]);
+    h.update(&[match item.overflow {
+        TextOverflow::Clip => 0u8,
+        TextOverflow::Ellipsis => 1,
+    }]);
+    h.update(&[match item.viewport {
+        TruncationViewport::HeadAnchored => 0u8,
+        TruncationViewport::TailAnchored => 1,
+    }]);
+
+    // Styled runs (per-run colors here also carry the reveal-fade / token colors).
+    h.update(&(item.styled_runs.len() as u64).to_le_bytes());
+    for r in item.styled_runs.iter() {
+        h.update(&(r.start_byte as u64).to_le_bytes());
+        h.update(&(r.end_byte as u64).to_le_bytes());
+        hash_opt_u16(&mut h, r.weight);
+        h.update(&[r.italic as u8, r.monospace as u8]);
+        hash_opt_color(&mut h, r.color);
+        hash_opt_color(&mut h, r.background_color);
+        hash_opt_f32(&mut h, r.size_scale);
+    }
+
+    // Color runs.
+    h.update(&(item.color_runs.len() as u64).to_le_bytes());
+    for r in item.color_runs.iter() {
+        h.update(&(r.start_byte as u64).to_le_bytes());
+        h.update(&(r.end_byte as u64).to_le_bytes());
+        h.update(&r.color);
+    }
+
+    *h.finalize().as_bytes()
+}
+
+/// Effective (resliced) styled runs used for a frame's inline backdrop quads
+/// (hud-991cj).
+///
+/// Mirrors exactly what [`TextRasterizer::build_and_shape_buffer`] feeds to
+/// `set_rich_text`, computed separately so the backdrop-quad path runs on BOTH
+/// the cache-hit and cache-miss paths:
+/// - non-empty `styled_runs`, truncated → runs resliced into the truncated
+///   string's coordinate space (`reslice_styled_runs_for_item`);
+/// - non-empty `styled_runs`, not truncated → the original runs;
+/// - otherwise (plain text or color-run items) → none (no backdrop quads).
+fn effective_styled_runs_for_item(item: &TextItem, truncated: Option<&str>) -> Vec<StyledRunItem> {
+    if item.styled_runs.is_empty() {
+        return Vec::new();
+    }
+    match truncated {
+        Some(truncated_str) => reslice_styled_runs_for_item(item, truncated_str),
+        None => item.styled_runs.to_vec(),
+    }
 }
 
 /// Compute pixel-exact backdrop quads for inline code spans from glyph layout data.
