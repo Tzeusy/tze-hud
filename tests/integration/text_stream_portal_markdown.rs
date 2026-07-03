@@ -27,7 +27,7 @@ fn parse(s: &str) -> ParsedMarkdown {
     let tokens = default_tokens();
     let mut cache = MarkdownCache::new();
     cache.prime(s, &tokens);
-    cache.get(s).unwrap().clone()
+    cache.get(s, &tokens).unwrap().clone()
 }
 
 // ── Task 2.4: subset constructs ───────────────────────────────────────────────
@@ -292,7 +292,7 @@ fn link_non_navigable_with_custom_token_color() {
     let mut cache = MarkdownCache::new();
     let content = "[Visit site](https://not-in-output.example.org/path?q=1)";
     cache.prime(content, &tokens);
-    let md = cache.get(content).unwrap();
+    let md = cache.get(content, &tokens).unwrap();
     assert!(
         !md.plain_text.contains("not-in-output"),
         "URL must not appear in plain text; got {:?}",
@@ -320,7 +320,9 @@ fn max_payload_node_budget_parses_without_panic() {
     let mut cache = MarkdownCache::new();
     // Must not panic.
     cache.prime(&payload, &tokens);
-    let md = cache.get(&payload).expect("entry must exist after prime");
+    let md = cache
+        .get(&payload, &tokens)
+        .expect("entry must exist after prime");
     assert!(
         !md.plain_text.is_empty(),
         "65535-byte payload must produce non-empty plain text"
@@ -337,12 +339,12 @@ fn cache_hit_after_prime_is_zero_cost() {
     let mut cache = MarkdownCache::new();
     let content = "## Section\n\nSome **bold** text with `code`.";
     assert!(
-        cache.get(content).is_none(),
+        cache.get(content, &tokens).is_none(),
         "must be a cache miss before prime"
     );
     cache.prime(content, &tokens);
     assert!(
-        cache.get(content).is_some(),
+        cache.get(content, &tokens).is_some(),
         "must be a cache hit after prime"
     );
 }
@@ -357,7 +359,7 @@ fn repeated_gets_are_all_cache_hits() {
     cache.prime(content, &tokens);
     for _ in 0..100 {
         assert!(
-            cache.get(content).is_some(),
+            cache.get(content, &tokens).is_some(),
             "every get must be a cache hit"
         );
     }
@@ -394,7 +396,7 @@ fn max_payload_cache_hit_is_sub_millisecond() {
     const SAMPLE_COUNT: u32 = 100;
     let t0 = std::time::Instant::now();
     for _ in 0..SAMPLE_COUNT {
-        let _ = cache.get(&payload);
+        let _ = cache.get(&payload, &tokens);
     }
     let total_elapsed = t0.elapsed();
     let avg_us = total_elapsed.as_micros() / u128::from(SAMPLE_COUNT);
@@ -425,12 +427,12 @@ fn different_token_maps_produce_different_styled_runs() {
     // Prime with token set A.
     let mut cache_a = MarkdownCache::new();
     cache_a.prime(content, &tokens_a);
-    let md_a = cache_a.get(content).unwrap().clone();
+    let md_a = cache_a.get(content, &tokens_a).unwrap().clone();
 
     // Prime with token set B (simulates design-token refresh clearing the cache).
     let mut cache_b = MarkdownCache::new();
     cache_b.prime(content, &tokens_b);
-    let md_b = cache_b.get(content).unwrap().clone();
+    let md_b = cache_b.get(content, &tokens_b).unwrap().clone();
 
     // Weights must differ because tokens differ.
     let weight_a = md_a
