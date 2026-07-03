@@ -406,6 +406,100 @@ async fn test_viewer_echo_renders_kind_distinct_line_above_composer() {
     );
 }
 
+/// hud-xgtuf: the viewer-echo stack must anchor to the TOP of the LIVE
+/// (`visible_lines`-aware) composer box, so a growing multi-line draft never
+/// grows into the echo history. As the composer box grows (1 → N lines) the echo
+/// stack must ride upward and stay strictly above the box; shrinking back must
+/// return it to the resting position. Draw-list-level (no readback).
+#[tokio::test]
+async fn test_viewer_echo_stack_tracks_live_composer_box() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let mut scene = SceneGraph::new(400.0, 300.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            1,
+        )
+        .unwrap();
+    let composer_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: composer_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                    interaction_id: "portal-composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+    compositor
+        .viewer_echoes
+        .append(tile_id, "the reply".to_owned(), 1);
+
+    // Geometry the code derives internally, reconstructed here to assert against.
+    let region = Rect::new(0.0, 0.0, 400.0, 300.0);
+    let lhm = crate::markdown::MarkdownTokens::default().line_height_multiplier;
+    let composer_font =
+        super::token_colors::resolve_composer_overlay_tokens(&compositor.token_map).font_size_px;
+    let echo_font =
+        super::token_colors::resolve_viewer_echo_tokens(&compositor.token_map).font_size_px;
+    let echo_line_h = (echo_font * lhm).max(1.0);
+
+    let echo_y = |c: &Compositor, scene: &SceneGraph| -> f32 {
+        c.collect_text_items(scene, 400.0, 300.0)
+            .iter()
+            .find(|t| &*t.text == "the reply")
+            .expect("viewer echo must render")
+            .pixel_y
+    };
+
+    // Resting (single-line) box: echo sits strictly above the box top.
+    compositor.composer_layout.visible_lines = 1.0;
+    let y_rest = echo_y(&compositor, &scene);
+    let box_top_1 = Compositor::composer_input_box(region, composer_font, lhm, 1.0).y;
+    assert!(
+        y_rest + echo_line_h <= box_top_1 + 0.5,
+        "resting: echo bottom {} must be at/above the 1-line box top {box_top_1}",
+        y_rest + echo_line_h
+    );
+
+    // Grow the draft to 4 lines: the echo must ride UP and stay above the taller box.
+    compositor.composer_layout.visible_lines = 4.0;
+    let y_grown = echo_y(&compositor, &scene);
+    let box_top_4 = Compositor::composer_input_box(region, composer_font, lhm, 4.0).y;
+    assert!(
+        y_grown < y_rest,
+        "echo must move up as the composer box grows (grown {y_grown} < resting {y_rest})"
+    );
+    assert!(
+        y_grown + echo_line_h <= box_top_4 + 0.5,
+        "grown: echo bottom {} must be at/above the 4-line box top {box_top_4} (no overlap)",
+        y_grown + echo_line_h
+    );
+
+    // Shrink back to one line: the echo returns to its resting position.
+    compositor.composer_layout.visible_lines = 1.0;
+    let y_shrunk = echo_y(&compositor, &scene);
+    assert!(
+        (y_shrunk - y_rest).abs() < 0.5,
+        "echo must return to the resting position on shrink ({y_shrunk} vs {y_rest})"
+    );
+}
+
 // ── Chrome layer pixel tests ──────────────────────────────────────────────
 
 /// Layer 1 pixel test: chrome layer is always visible above max-z-order agent tile.
