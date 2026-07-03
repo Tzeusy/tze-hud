@@ -1696,6 +1696,27 @@ pub const PORTAL_HEADER_DRAG_BAND_TOKEN: &str = "portal.header.drag_band_px";
 /// visible header chrome.
 pub const PORTAL_HEADER_DRAG_BAND_PX_DEFAULT: f32 = 52.0;
 
+/// Design token key for the minimum legible font size (px) when whole-portal
+/// resize scales text down (hud-ovjxu.1, spec §Portal Resize Text Scaling).
+/// The compositor reads this from the display token map; when absent it falls
+/// back to [`PORTAL_TEXT_MIN_FONT_PX_DEFAULT`]. Never hardcode the clamp in the
+/// compositor (CLAUDE.md "never hardcode visual properties in the compositor").
+pub const PORTAL_TEXT_MIN_FONT_PX_TOKEN: &str = "portal.text.min_font_px";
+
+/// Design token key for the maximum legible font size (px) when whole-portal
+/// resize scales text up. Fallback: [`PORTAL_TEXT_MAX_FONT_PX_DEFAULT`].
+pub const PORTAL_TEXT_MAX_FONT_PX_TOKEN: &str = "portal.text.max_font_px";
+
+/// Fallback minimum legible font size (px) for resize text scaling. Small enough
+/// to let a shrunk portal keep several lines visible, large enough to stay
+/// readable; below this the font clamps and only the content window shrinks.
+pub const PORTAL_TEXT_MIN_FONT_PX_DEFAULT: f32 = 9.0;
+
+/// Fallback maximum legible font size (px) for resize text scaling. Caps how
+/// large text grows on a grown portal so a huge window does not produce
+/// absurdly large glyphs.
+pub const PORTAL_TEXT_MAX_FONT_PX_DEFAULT: f32 = 48.0;
+
 /// Design-token bundle for runtime drag handle visuals.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DragHandleStyle {

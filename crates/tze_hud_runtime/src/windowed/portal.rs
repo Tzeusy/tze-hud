@@ -546,6 +546,18 @@ fn commit_portal_group_resize(
     let new_rect = primary.rect;
     let updates = scale_portal_members(scene, group, old_rect, new_rect);
     let mut any_changed = false;
+    // Whole-portal WIDTH ratio — the single deterministic ratio the spec mandates
+    // for text scaling (never anisotropic): the viewer-local per-tile font-scale
+    // multiplier accumulates this factor across resize steps so transcript and
+    // composer text grow/shrink with the portal (hud-ovjxu.1). Applied per member
+    // below (gated on a real change); the compositor clamps the effective font to
+    // the token-defined legible min/max at render, never mutating the
+    // adapter-published `font_size_px`.
+    let font_ratio = if old_rect.width > 0.0 {
+        new_rect.width / old_rect.width
+    } else {
+        1.0
+    };
     let mut members = Vec::with_capacity(updates.len());
     for (tile_id, new_bounds) in updates {
         let old_tile_bounds = scene.tiles.get(&tile_id).map(|t| t.bounds);
@@ -582,6 +594,14 @@ fn commit_portal_group_resize(
         // group (hud-lyqun). Viewer-driven resize writes `tile.bounds` directly
         // (above), so this only gates adapter-originated `UpdateTileBounds`.
         scene.lock_viewer_geometry(tile_id);
+        // Accumulate the whole-portal width ratio into this member's viewer-local
+        // font-scale (hud-ovjxu.1). Gated on a real ratio so a clamped-at-boundary
+        // press does not drift the scale. Uniform across members (all get the same
+        // portal ratio) so text stays consistent portal-wide.
+        if (font_ratio - 1.0).abs() > f32::EPSILON {
+            let next = scene.tile_font_scale(tile_id) * font_ratio;
+            scene.set_tile_font_scale(tile_id, next);
+        }
         let snapshot = tze_hud_input::GeometrySnapshot {
             rect: PortalRect {
                 x: new_bounds.x,
@@ -4049,6 +4069,69 @@ mod tests {
     /// leaves the text wrapped at the old column: "resize works but the text
     /// isn't being resized". Assert both the node bounds AND the resulting
     /// `TextItem` layout width track the resized pane, at the draw-item seam.
+    #[test]
+    fn whole_portal_resize_accumulates_font_scale_by_width_ratio() {
+        // hud-ovjxu.1: whole-portal resize records a viewer-local per-tile font
+        // scale = the portal WIDTH ratio, uniform across every member, and
+        // accumulates across steps. Bumps scene.version exactly once per step so
+        // text re-shapes at most once per commit.
+        let (mut scene, _tab, frame_id, transcript_id, composer_id, _shield, _fm) =
+            multi_surface_portal_scene();
+        let members = [frame_id, transcript_id, composer_id];
+        let old_w = scene.tiles.get(&frame_id).unwrap().bounds.width; // 400 (fixture)
+
+        // Default: no scaling before any resize.
+        for id in members {
+            assert_eq!(scene.tile_font_scale(id), 1.0);
+        }
+
+        // ── Grow to width 560 → ratio 1.4, applied to every member. ──────────
+        let v0 = scene.version;
+        resize_group_to(
+            &mut scene,
+            frame_id,
+            tze_hud_input::PortalRect {
+                x: 100.0,
+                y: 100.0,
+                width: 560.0,
+                height: 420.0,
+            },
+        );
+        let grow_ratio = 560.0 / old_w;
+        for id in members {
+            assert!(
+                (scene.tile_font_scale(id) - grow_ratio).abs() < 1e-3,
+                "every member's font scale must equal the portal width ratio after grow"
+            );
+        }
+        assert_eq!(
+            scene.version,
+            v0 + 1,
+            "a resize step must bump scene.version exactly once (single re-shape)"
+        );
+
+        // ── Shrink to width 280 → step ratio 0.5, ACCUMULATES to 1.4*0.5=0.7. ─
+        resize_group_to(
+            &mut scene,
+            frame_id,
+            tze_hud_input::PortalRect {
+                x: 100.0,
+                y: 100.0,
+                width: 280.0,
+                height: 210.0,
+            },
+        );
+        let accumulated = grow_ratio * (280.0 / 560.0);
+        for id in members {
+            assert!(
+                (scene.tile_font_scale(id) - accumulated).abs() < 1e-3,
+                "font scale must accumulate multiplicatively across resize steps \
+                 (got {}, want {accumulated})",
+                scene.tile_font_scale(id)
+            );
+        }
+    }
+
     #[test]
     fn whole_portal_resize_reflows_transcript_text_to_new_pane_width() {
         use tze_hud_compositor::TextItem;

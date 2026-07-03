@@ -1362,6 +1362,11 @@ impl Compositor {
         self.truncation_cache_scene_version = scene.version;
         self.resize_reprime_last_at = Some(std::time::Instant::now());
 
+        // Resolve the resize font clamp range BEFORE the &mut text_rasterizer
+        // borrow below (hud-ovjxu.1) — the ellipsis collector applies the same
+        // viewer-local font scaling as the render path so truncation keys match.
+        let font_clamp = self.portal_font_clamp_range();
+
         // Safe: checked is_none() above and returned; rasterizer stays Some
         // (this method holds &mut self exclusively).
         let rasterizer = self
@@ -1385,12 +1390,14 @@ impl Compositor {
                 collect_ellipsis_text_items_from_node(
                     root_id,
                     scene,
+                    tile.id,
                     tile_x,
                     tile_y,
                     at_tail,
                     &markdown_cache,
                     &self.node_key_cache,
                     &self.markdown_tokens,
+                    font_clamp,
                     &mut live_items,
                 );
             }

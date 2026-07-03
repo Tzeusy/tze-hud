@@ -1035,6 +1035,53 @@ impl super::Compositor {
     /// mode.  When `true` and the node uses `TextOverflow::Ellipsis`, the
     /// resulting `TextItem`'s viewport is set to `TailAnchored` so the
     /// per-frame truncation key matches the primed cache entry (hud-lu50e).
+    /// Apply the viewer-local whole-portal resize font scaling (hud-ovjxu.1) to a
+    /// base `font_size_px`.
+    ///
+    /// When the tile carries a font-scale multiplier (from a whole-portal
+    /// resize), the effective font is `base * scale` clamped to the token-defined
+    /// legible min/max — so text grows and shrinks with the portal, and further
+    /// shrink past the minimum holds the font at the floor while only the content
+    /// window keeps shrinking (spec §Portal Resize Text Scaling). At the default
+    /// scale (1.0 — no resize) the adapter-published font is returned untouched,
+    /// so non-resized portals and all other text are unaffected.
+    ///
+    /// Both the render collector and the ellipsis/truncation collector call this
+    /// with the same inputs, so the truncation cache key (which includes
+    /// `font_size_px`) matches what the render path shapes.
+    pub(super) fn scaled_portal_font(
+        &self,
+        base_font_px: f32,
+        tile_id: SceneId,
+        scene: &SceneGraph,
+    ) -> f32 {
+        let scale = scene.tile_font_scale(tile_id);
+        if (scale - 1.0).abs() < f32::EPSILON {
+            return base_font_px;
+        }
+        let (min, max) = self.portal_font_clamp_range();
+        scale_portal_font_px(base_font_px, scale, min, max)
+    }
+
+    /// Resolve the legible font clamp range `(min, max)` from the display token
+    /// map, falling back to the tze_hud_scene defaults (hud-ovjxu.1). Shared by
+    /// the render path and the truncation-prime path so both clamp identically.
+    pub(super) fn portal_font_clamp_range(&self) -> (f32, f32) {
+        let min = self
+            .token_map
+            .get(tze_hud_scene::types::PORTAL_TEXT_MIN_FONT_PX_TOKEN)
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(tze_hud_scene::types::PORTAL_TEXT_MIN_FONT_PX_DEFAULT);
+        let max = self
+            .token_map
+            .get(tze_hud_scene::types::PORTAL_TEXT_MAX_FONT_PX_TOKEN)
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(tze_hud_scene::types::PORTAL_TEXT_MAX_FONT_PX_DEFAULT);
+        (min, max)
+    }
+
     #[allow(clippy::only_used_in_recursion)]
     // All arguments are required: node identity, tile geometry, scene reference,
     // scroll offsets, tail-follow state, and the output accumulator.
@@ -1146,6 +1193,11 @@ impl super::Compositor {
                     tile.bounds.y - scroll_y,
                 )
             };
+            // Viewer-local whole-portal resize font scaling (hud-ovjxu.1): scale
+            // the shaped font by the tile's resize multiplier, clamped to the
+            // token legible range. No-op at the default scale. Must mirror the
+            // ellipsis collector so truncation keys match this shaped font.
+            item.font_size_px = self.scaled_portal_font(item.font_size_px, tile.id, scene);
             // Override viewport for at-tail Ellipsis tiles (hud-lu50e).
             // The prime path (collect_ellipsis_text_items_from_node) already
             // primes TailAnchored keys for these tiles; the per-frame key must
@@ -1179,6 +1231,20 @@ impl super::Compositor {
 }
 
 // ─── Module-level text helpers ────────────────────────────────────────────────
+
+/// Core math for viewer-local resize font scaling (hud-ovjxu.1): `base * scale`
+/// clamped to the legible `[min, max]` range. A `scale` of 1.0 returns `base`
+/// unchanged (adapter font untouched). Guards an inverted `(min, max)` pair so
+/// `clamp` never panics. Shared by the render path (`scaled_portal_font`) and the
+/// truncation-prime path so both produce identical shaped font sizes — the
+/// truncation key includes `font_size_px`, so any divergence would miss the cache.
+pub(super) fn scale_portal_font_px(base_font_px: f32, scale: f32, min: f32, max: f32) -> f32 {
+    if (scale - 1.0).abs() < f32::EPSILON {
+        return base_font_px;
+    }
+    let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+    (base_font_px * scale).clamp(lo, hi)
+}
 
 /// Apply the per-segment streaming-reveal fade to a portal-tile markdown
 /// [`TextItem`], in place (hud-bl7yi).
@@ -1310,12 +1376,14 @@ fn apply_portal_reveal_fade(
 pub(super) fn collect_ellipsis_text_items_from_node(
     node_id: SceneId,
     scene: &SceneGraph,
+    tile_id: SceneId,
     tile_x: f32,
     tile_y: f32,
     at_tail: bool,
     markdown_cache: &crate::markdown::MarkdownCache,
     node_key_cache: &HashMap<SceneId, [u8; 32]>,
     markdown_tokens: &crate::markdown::MarkdownTokens,
+    font_clamp: (f32, f32),
     items: &mut Vec<TextItem>,
 ) {
     let node = match scene.nodes.get(&node_id) {
@@ -1366,6 +1434,15 @@ pub(super) fn collect_ellipsis_text_items_from_node(
             } else {
                 TextItem::from_text_markdown_node(tm, tile_x, tile_y)
             };
+            // Apply the SAME viewer-local resize font scaling as the render path
+            // (hud-ovjxu.1) so the primed truncation key (which includes
+            // font_size_px) matches what collect_text_items_from_node shapes.
+            item.font_size_px = scale_portal_font_px(
+                item.font_size_px,
+                scene.tile_font_scale(tile_id),
+                font_clamp.0,
+                font_clamp.1,
+            );
             // Override viewport based on the tile's follow-tail state.
             if at_tail {
                 item.viewport = crate::overflow::TruncationViewport::TailAnchored;
@@ -1378,12 +1455,14 @@ pub(super) fn collect_ellipsis_text_items_from_node(
         collect_ellipsis_text_items_from_node(
             *child_id,
             scene,
+            tile_id,
             tile_x,
             tile_y,
             at_tail,
             markdown_cache,
             node_key_cache,
             markdown_tokens,
+            font_clamp,
             items,
         );
     }
@@ -1397,6 +1476,22 @@ mod portal_reveal_render_tests {
     use crate::markdown::{ParsedMarkdown, StyleAttr, StyledSpan};
     use crate::text::TextItem;
     use std::sync::Arc;
+
+    // hud-ovjxu.1: resize font-scale clamp math (pure — no GPU).
+    #[test]
+    fn scale_portal_font_px_scales_and_clamps() {
+        use super::scale_portal_font_px;
+        // Grow: base * scale, within the legible range.
+        assert!((scale_portal_font_px(16.0, 1.5, 9.0, 48.0) - 24.0).abs() < 1e-4);
+        // Grow past the max clamps to max.
+        assert!((scale_portal_font_px(16.0, 10.0, 9.0, 48.0) - 48.0).abs() < 1e-4);
+        // Shrink past the min clamps to min (spec: font holds at the floor).
+        assert!((scale_portal_font_px(16.0, 0.1, 9.0, 48.0) - 9.0).abs() < 1e-4);
+        // Scale exactly 1.0 returns the base untouched (adapter font).
+        assert!((scale_portal_font_px(16.0, 1.0, 9.0, 48.0) - 16.0).abs() < 1e-4);
+        // Inverted (min, max) pair is tolerated (no clamp panic).
+        assert!((scale_portal_font_px(16.0, 2.0, 48.0, 9.0) - 32.0).abs() < 1e-4);
+    }
     use tze_hud_scene::types::{FontFamily, Rect, Rgba, TextAlign, TextMarkdownNode, TextOverflow};
 
     fn plain_attr() -> StyleAttr {

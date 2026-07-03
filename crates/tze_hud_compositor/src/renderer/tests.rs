@@ -7161,6 +7161,37 @@ async fn portal_frame_gets_full_width_header_band_handle() {
     );
 }
 
+/// hud-ovjxu.1: the compositor applies the tile's viewer-local font-scale
+/// multiplier, clamped to the token-default legible range, when resolving a
+/// portal text node's effective font. GPU only builds the compositor (no readback).
+#[tokio::test]
+async fn portal_resize_scales_and_clamps_text_font() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab = scene.create_tab("Main", 0).unwrap();
+    let lease = scene.grant_lease("agent", 60_000, vec![]);
+    let tile = scene
+        .create_tile(tab, "agent", lease, Rect::new(0.0, 0.0, 400.0, 300.0), 1)
+        .unwrap();
+
+    // No scale (default 1.0) → adapter-published font returned untouched.
+    assert!((compositor.scaled_portal_font(16.0, tile, &scene) - 16.0).abs() < 1e-4);
+
+    // Grow 2× → 32px, within the default legible range [9, 48].
+    scene.set_tile_font_scale(tile, 2.0);
+    assert!((compositor.scaled_portal_font(16.0, tile, &scene) - 32.0).abs() < 1e-4);
+
+    // Grow far → clamp at the token-default max (48).
+    scene.set_tile_font_scale(tile, 10.0);
+    assert!((compositor.scaled_portal_font(16.0, tile, &scene) - 48.0).abs() < 1e-4);
+
+    // Shrink far → clamp at the token-default min (9); further shrink only
+    // reduces the content window (bounds), not the font.
+    scene.set_tile_font_scale(tile, 0.1);
+    assert!((compositor.scaled_portal_font(16.0, tile, &scene) - 9.0).abs() < 1e-4);
+}
+
 #[tokio::test]
 async fn drag_handle_regions_cover_visible_tile_zone_and_widget() {
     let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
