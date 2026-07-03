@@ -53,3 +53,23 @@ Source: RFC 0013 §4.1 and §4.2, RFC 0004 (input model, focus, key press/releas
 - **WHEN** transcript content overflows its pane for a viewer whose policy redacts the portal's content
 - **THEN** the token-styled scroll-position indicator SHALL remain present and reflect scroll position
 - **AND** the indicator SHALL NOT convey transcript content beyond geometry
+
+## ADDED Requirements
+
+### Requirement: Portal Resize Text Scaling
+
+Whole-portal resize SHALL scale the portal's text with the portal: on a group grow or shrink, per-node font sizes SHALL scale by the portal's scale ratio, clamped to token-defined minimum and maximum legible sizes, with pane layout re-resolving (wrap, overflow, ellipsis) at the scaled font within the new geometry. Font scaling is viewer-local presentation: it MUST NOT require adapter cooperation and MUST NOT alter the adapter-published content or its logical structure. When the horizontal and vertical scale ratios differ, the text scale SHALL derive from a single deterministic ratio (the width ratio) so glyphs never distort anisotropically.
+
+Source: owner live direction 2026-07-03 ("I kinda wish text shrunk and grew with it", hud-ovjxu), supersedes the constant-font reading of the reflow clause above
+Scope: v1
+
+#### Scenario: growing the portal grows the text
+
+- **WHEN** the viewer grows a portal via the resize affordances or hotkeys
+- **THEN** transcript and composer text SHALL render at a proportionally larger font, clamped to the token-defined maximum
+- **AND** the layout SHALL re-resolve at the new font and geometry with no partially clipped glyphs
+
+#### Scenario: shrinking clamps at legible minimum
+
+- **WHEN** the viewer shrinks a portal such that proportional scaling would drop below the token-defined minimum legible size
+- **THEN** the font SHALL clamp at the minimum and further shrink SHALL reduce only the visible content window
