@@ -1353,5 +1353,101 @@ class SteadyStatePublishAtomicityTests(unittest.TestCase):
         self.assertIn("body", portal.OUTPUT_RUNTIME_NODE_IDS)
 
 
+class LeaseRenewalTests(unittest.TestCase):
+    """Regression coverage for hud-hk8kl: sustained portal runs must renew their
+    lease so they survive past the original TTL instead of self-terminating with
+    MUTATION_REJECTED / "lease expired" mid-run."""
+
+    def test_renew_interval_lands_strictly_before_expiry(self) -> None:
+        # A 600s lease renews at 450s — a comfortable margin before expiry.
+        self.assertEqual(portal.lease_renew_interval_s(600_000), 450.0)
+        self.assertLess(portal.lease_renew_interval_s(600_000), 600.0)
+        # Tiny/zero TTLs clamp to the minimum instead of busy-looping.
+        self.assertEqual(
+            portal.lease_renew_interval_s(10), portal.LEASE_RENEW_MIN_INTERVAL_S
+        )
+        self.assertEqual(
+            portal.lease_renew_interval_s(0), portal.LEASE_RENEW_MIN_INTERVAL_S
+        )
+
+    def test_scheduled_renewals_keep_lease_alive_past_original_ttl(self) -> None:
+        # Pure schedule simulation: a run 6x longer than the initial TTL. Model
+        # the loop exactly — sleep(interval), then renew (fresh full TTL from now)
+        # — and assert the lease deadline is never behind the clock.
+        ttl_ms = 600_000
+        ttl_s = ttl_ms / 1000.0
+        run_duration_s = 3600.0
+        interval_s = portal.lease_renew_interval_s(ttl_ms)
+
+        clock = 0.0
+        lease_deadline = ttl_s  # granted at t=0 for one TTL
+        next_renew_at = interval_s
+        step = 5.0
+        while clock < run_duration_s:
+            clock += step
+            self.assertLess(
+                clock,
+                lease_deadline,
+                f"lease expired at t={clock:.0f}s (deadline {lease_deadline:.0f}s)",
+            )
+            if clock >= next_renew_at:
+                lease_deadline = clock + ttl_s
+                next_renew_at = clock + interval_s
+
+        self.assertGreater(clock, ttl_s, "simulation must outlast the original TTL")
+
+    def test_lease_renewal_loop_renews_before_expiry_over_long_run(self) -> None:
+        # Drive the real lease_renewal_loop with a fake client and a virtual
+        # clock. Prove it renews repeatedly, always before the TTL elapses, and
+        # keeps going well past the original TTL.
+        ttl_ms = 600_000
+        ttl_s = ttl_ms / 1000.0
+        run_duration_s = 3600.0
+
+        clock = {"t": 0.0}
+        renew_calls: list[float] = []
+
+        class _FakeRenewClient:
+            def __init__(self) -> None:
+                self.last_granted_lease_ttl_ms = ttl_ms
+
+            async def renew_lease(self, lease_id, new_ttl_ms=0):
+                renew_calls.append(clock["t"])
+                return ttl_ms
+
+        async def fake_sleep(delay_s: float) -> None:
+            clock["t"] += delay_s
+            if clock["t"] > run_duration_s:
+                # End the otherwise-infinite loop the way session cleanup does.
+                raise asyncio.CancelledError
+
+        original_sleep = portal.asyncio.sleep
+
+        async def run() -> None:
+            portal.asyncio.sleep = fake_sleep
+            try:
+                await portal.lease_renewal_loop(_FakeRenewClient(), b"lease", ttl_ms)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                portal.asyncio.sleep = original_sleep
+
+        asyncio.run(run())
+
+        self.assertGreaterEqual(
+            len(renew_calls), 5, "long run must renew the lease several times"
+        )
+        self.assertLess(
+            renew_calls[0], ttl_s, "first renewal must land before the original TTL"
+        )
+        for prev, cur in zip(renew_calls, renew_calls[1:]):
+            self.assertLess(
+                cur - prev, ttl_s, "consecutive renewals must stay inside one TTL"
+            )
+        self.assertGreater(
+            renew_calls[-1], ttl_s, "renewals must continue past the original TTL"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

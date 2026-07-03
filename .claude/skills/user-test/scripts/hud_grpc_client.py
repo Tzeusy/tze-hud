@@ -602,6 +602,11 @@ class HudClient:
         self.session_id: Optional[bytes] = None
         self.namespace: Optional[str] = None
         self.heartbeat_interval_ms: Optional[int] = None
+        # TTL (ms) granted by the most recent request_lease/renew_lease. Long-lived
+        # callers (soak, sustained streaming) read this to schedule renewals before
+        # the lease expires — otherwise the runtime rejects mutations with
+        # MUTATION_REJECTED / "lease expired" mid-run (hud-hk8kl).
+        self.last_granted_lease_ttl_ms: int = 0
         self.granted_capabilities: list[str] = []
         self.scene_snapshot_json: Optional[str] = None
         self.scene_display_area: Optional[tuple[float, float]] = None
@@ -938,9 +943,35 @@ class HudClient:
             if deny_code:
                 raise RuntimeError(f"Lease denied [{deny_code}]: {deny_reason}")
             raise RuntimeError(f"Lease denied: {deny_reason}")
+        self.last_granted_lease_ttl_ms = lr.granted_ttl_ms
         print(f"  [grpc] Lease granted: ttl={lr.granted_ttl_ms}ms, "
               f"priority={lr.granted_priority}", flush=True)
         return lr.lease_id
+
+    async def renew_lease(self, lease_id: bytes, new_ttl_ms: int = 0) -> int:
+        """Renew an existing lease's TTL and return the newly granted TTL (ms).
+
+        ``new_ttl_ms=0`` asks the runtime to re-grant the lease's original TTL
+        (see ``LeaseRenew.new_ttl_ms`` in session.proto). Sustained callers renew
+        before ~75% of the granted TTL elapses so the lease never expires mid-run.
+        """
+        await self._send(
+            lease_renew=session_pb2.LeaseRenew(
+                lease_id=lease_id,
+                new_ttl_ms=new_ttl_ms,
+            )
+        )
+        resp = await self._wait_for("lease_response", timeout=5.0)
+        lr = resp.lease_response
+        if not lr.granted:
+            deny_reason = getattr(lr, "deny_reason", "") or "unspecified denial"
+            deny_code = getattr(lr, "deny_code", "")
+            if deny_code:
+                raise RuntimeError(f"Lease renew denied [{deny_code}]: {deny_reason}")
+            raise RuntimeError(f"Lease renew denied: {deny_reason}")
+        self.last_granted_lease_ttl_ms = lr.granted_ttl_ms
+        print(f"  [grpc] Lease renewed: ttl={lr.granted_ttl_ms}ms", flush=True)
+        return lr.granted_ttl_ms
 
     async def _await_resource_upload_result(
         self,
