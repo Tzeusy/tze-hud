@@ -166,6 +166,122 @@ impl Selection {
     }
 }
 
+// ─── Visual (wrapped) line layout (hud-21o6x) ───────────────────────────────
+
+/// One visual (wrapped) line of the composer draft, in RAW-draft byte space.
+///
+/// Produced by the compositor (`measure_composer_visual_layout`) each frame and
+/// consumed by the input layer for vertical caret movement across soft-wrapped
+/// lines. A visual line is a single on-screen row: soft word-wrap splits one
+/// logical (`\n`-delimited) line into several of these, and hard newlines start
+/// new ones — so consecutive `ComposerVisualLine`s are the exact visual rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComposerVisualLine {
+    /// Inclusive raw-text byte offset where this visual row begins.
+    pub start_byte: usize,
+    /// Exclusive raw-text byte offset where this visual row's content ends.
+    pub end_byte: usize,
+    /// `(byte_offset, x_px)` at each glyph boundary on this row, ascending by
+    /// byte, with a trailing `(end_byte, line_width_px)` sentinel. Maps caret byte
+    /// ↔ pixel x for pixel-precise goal-x tracking.
+    pub glyph_x: Vec<(usize, f32)>,
+}
+
+/// The composer draft's wrapped layout: the ordered visual rows plus the draft
+/// length it was measured for (a staleness guard, hud-21o6x).
+///
+/// Local presentation state published from the compositor render thread to the
+/// input thread via a shared slot (mirrors the forward `LocalComposerState`
+/// channel). One-frame staleness is imperceptible for caret movement; when the
+/// draft changed since measurement (`text_len` mismatch) the input layer falls
+/// back to hard-newline vertical movement for that keystroke.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ComposerVisualLayout {
+    /// Visual rows, top to bottom.
+    pub lines: Vec<ComposerVisualLine>,
+    /// Raw-draft byte length this layout was measured for.
+    pub text_len: usize,
+}
+
+impl ComposerVisualLine {
+    /// Caret x (px) at raw byte `byte` on this row: the x of the first glyph
+    /// boundary at or after `byte` (the caret sits at that glyph's left edge);
+    /// the trailing line-width sentinel covers the row end.
+    pub fn x_at_byte(&self, byte: usize) -> f32 {
+        for &(b, x) in &self.glyph_x {
+            if b >= byte {
+                return x;
+            }
+        }
+        self.glyph_x.last().map(|&(_, x)| x).unwrap_or(0.0)
+    }
+
+    /// Raw byte whose glyph boundary is nearest `goal_x` (px), clamped to this
+    /// row's `[start_byte, end_byte]`. Lands a vertical move near the goal column.
+    pub fn byte_at_x(&self, goal_x: f32) -> usize {
+        let mut best_byte = self.start_byte;
+        let mut best_dist = f32::INFINITY;
+        for &(b, x) in &self.glyph_x {
+            let d = (x - goal_x).abs();
+            if d < best_dist {
+                best_dist = d;
+                best_byte = b;
+            }
+        }
+        best_byte.clamp(self.start_byte, self.end_byte)
+    }
+}
+
+impl ComposerVisualLayout {
+    /// Index of the visual row containing raw byte `cursor`. At a soft-wrap
+    /// boundary (`cursor == end_of_row_i == start_of_row_{i+1}`) the caret has
+    /// affinity to the LATER row (standard editor behavior: it renders at the
+    /// next row's start). Returns `None` when there are no rows.
+    pub fn line_of(&self, cursor: usize) -> Option<usize> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        for (i, line) in self.lines.iter().enumerate() {
+            if cursor >= line.start_byte && cursor < line.end_byte {
+                return Some(i);
+            }
+        }
+        // cursor at (or past) the last row's end.
+        Some(self.lines.len() - 1)
+    }
+
+    /// Caret x (px) at raw byte `cursor` on its visual row.
+    pub fn x_at_cursor(&self, cursor: usize) -> f32 {
+        match self.line_of(cursor) {
+            Some(i) => self.lines[i].x_at_byte(cursor),
+            None => 0.0,
+        }
+    }
+
+    /// Raw byte the caret should move to for one visual-row vertical step at
+    /// `goal_x` (px). `up` selects the previous row; otherwise the next. On the
+    /// first row an upward step goes to byte 0; on the last row a downward step
+    /// goes to `text_len`. Returns `None` when already at that boundary.
+    pub fn vertical_target(&self, cursor: usize, up: bool, goal_x: f32) -> Option<usize> {
+        let cur = self.line_of(cursor)?;
+        if up {
+            if cur == 0 {
+                return if cursor == 0 { None } else { Some(0) };
+            }
+            Some(self.lines[cur - 1].byte_at_x(goal_x))
+        } else {
+            if cur + 1 >= self.lines.len() {
+                return if cursor >= self.text_len {
+                    None
+                } else {
+                    Some(self.text_len)
+                };
+            }
+            Some(self.lines[cur + 1].byte_at_x(goal_x))
+        }
+    }
+}
+
 // ─── ComposerDraft ────────────────────────────────────────────────────────────
 
 /// Runtime-owned bounded plain-text draft buffer.
@@ -683,6 +799,43 @@ impl ComposerDraft {
             }
             _ => EditOutcome::Unchanged,
         }
+    }
+
+    /// Move the caret to an absolute byte offset, collapsing any selection
+    /// (hud-21o6x). Used by visual-line vertical movement, which computes a target
+    /// byte from the compositor's wrapped-line layout. The byte is clamped to
+    /// `text.len()` and snapped down to a char boundary so a stale layout can
+    /// never place the caret mid-character.
+    pub fn move_to_byte(&mut self, byte: usize) -> EditOutcome {
+        let target = self.snap_byte(byte);
+        if target == self.cursor && !self.has_selection() {
+            return EditOutcome::Unchanged;
+        }
+        self.cursor = target;
+        self.selection_anchor = target;
+        self.bump_sequence();
+        EditOutcome::Mutated
+    }
+
+    /// Extend the selection to an absolute byte offset without collapsing the
+    /// anchor (Shift + visual vertical move, hud-21o6x).
+    pub fn select_to_byte(&mut self, byte: usize) -> EditOutcome {
+        let target = self.snap_byte(byte);
+        if target == self.cursor {
+            return EditOutcome::Unchanged;
+        }
+        self.cursor = target;
+        self.bump_sequence();
+        EditOutcome::Mutated
+    }
+
+    /// Clamp `byte` to `text.len()` and snap DOWN to the nearest char boundary.
+    fn snap_byte(&self, byte: usize) -> usize {
+        let mut b = byte.min(self.text.len());
+        while b > 0 && !self.text.is_char_boundary(b) {
+            b -= 1;
+        }
+        b
     }
 
     // ── Selection editing operations (shift + movement) ───────────────────
@@ -1321,6 +1474,17 @@ pub struct ComposerDraftManager {
     /// has no font metrics, so this tracks logical columns across the draft's
     /// hard newlines. See [`Self::route_key_down`].
     vertical_goal_col: Option<usize>,
+    /// Pixel goal-x preserved across a run of vertical moves when a fresh visual
+    /// layout is available (hud-21o6x). The visual-line path uses this instead of
+    /// `vertical_goal_col` so the caret tracks the same on-screen x across
+    /// soft-wrapped rows of differing character widths. Set/cleared with the same
+    /// lifecycle as `vertical_goal_col`.
+    vertical_goal_x: Option<f32>,
+    /// Latest wrapped-line layout for the active composer, pushed from the
+    /// compositor render thread each frame (hud-21o6x). Consumed by ArrowUp/Down
+    /// for visual-row vertical movement; `None` when no multi-line composer is
+    /// active. May be one frame stale — guarded by `text_len` before use.
+    latest_visual_layout: Option<ComposerVisualLayout>,
 }
 
 impl ComposerDraftManager {
@@ -1497,12 +1661,13 @@ impl ComposerDraftManager {
         ctrl: bool,
         alt: bool,
     ) -> (bool, Option<DraftNotificationBatch>) {
-        // Take the preserved vertical goal column: it survives ONLY a run of
-        // consecutive ArrowUp/ArrowDown keys (those arms re-store it). Any other
-        // key clears it here, so the next vertical move re-seeds the column from
-        // the caret (standard editor "desired column" reset on horizontal move /
-        // edit).
+        // Take the preserved vertical goal (grapheme column AND pixel x): both
+        // survive ONLY a run of consecutive ArrowUp/ArrowDown keys (those arms
+        // re-store the relevant one). Any other key clears them here, so the next
+        // vertical move re-seeds from the caret (standard editor "desired column"
+        // reset on horizontal move / edit).
         let prev_goal = self.vertical_goal_col.take();
+        let prev_goal_x = self.vertical_goal_x.take();
 
         let Some(draft) = self.draft.as_mut() else {
             return (false, None);
@@ -1566,17 +1731,41 @@ impl ComposerDraftManager {
                 (true, None)
             }
             "ArrowUp" | "ArrowDown" => {
-                // Seed the goal column from the caret on the first vertical move of
-                // a run, then preserve it across consecutive Up/Down (prev_goal was
-                // taken at the top; re-store it here so only vertical keys keep it).
-                let goal = prev_goal.unwrap_or_else(|| draft.current_col());
-                self.vertical_goal_col = Some(goal);
                 let up = key_code == "ArrowUp";
-                let o = match (up, shift) {
-                    (true, false) => draft.move_up(goal),
-                    (false, false) => draft.move_down(goal),
-                    (true, true) => draft.select_up(goal),
-                    (false, true) => draft.select_down(goal),
+                // Prefer the compositor's wrapped-line layout when it is FRESH
+                // (measured for exactly this draft) and actually multi-row, so the
+                // caret steps between VISUAL rows (soft-wrap aware) at a pixel
+                // goal-x (hud-21o6x). Otherwise fall back to hard-newline movement
+                // at a grapheme goal-column (hud-nx7yq.2) — used for the
+                // single-line profile and for the one keystroke right after a
+                // wrap-changing edit, before the next frame re-measures.
+                let fresh_layout = self
+                    .latest_visual_layout
+                    .as_ref()
+                    .filter(|l| l.text_len == draft.text().len() && l.lines.len() > 1);
+                let o = if let Some(layout) = fresh_layout {
+                    let goal_x = prev_goal_x.unwrap_or_else(|| layout.x_at_cursor(draft.cursor()));
+                    self.vertical_goal_x = Some(goal_x);
+                    match layout.vertical_target(draft.cursor(), up, goal_x) {
+                        Some(target) => {
+                            if shift {
+                                draft.select_to_byte(target)
+                            } else {
+                                draft.move_to_byte(target)
+                            }
+                        }
+                        None => EditOutcome::Unchanged,
+                    }
+                } else {
+                    // Hard-newline fallback: grapheme goal-column.
+                    let goal = prev_goal.unwrap_or_else(|| draft.current_col());
+                    self.vertical_goal_col = Some(goal);
+                    match (up, shift) {
+                        (true, false) => draft.move_up(goal),
+                        (false, false) => draft.move_down(goal),
+                        (true, true) => draft.select_up(goal),
+                        (false, true) => draft.select_down(goal),
+                    }
                 };
                 if o == EditOutcome::Mutated {
                     self.scheduler.push_notification(draft.snapshot());
@@ -1677,6 +1866,15 @@ impl ComposerDraftManager {
         if let Some(draft) = self.draft.as_mut() {
             draft.set_suspended(suspended);
         }
+    }
+
+    /// Update the wrapped-line layout used for visual-row vertical caret movement
+    /// (hud-21o6x). Called by the runtime each time it observes a fresh layout
+    /// from the compositor (before dispatching an ArrowUp/ArrowDown). `None`
+    /// clears it (no multi-line composer active), reverting to hard-newline
+    /// vertical movement.
+    pub fn set_visual_layout(&mut self, layout: Option<ComposerVisualLayout>) {
+        self.latest_visual_layout = layout;
     }
 
     /// Returns a reference to the active draft buffer, if any.
@@ -2799,6 +2997,194 @@ mod tests {
             mgr.draft().unwrap().cursor(),
             6,
             "goal column re-seeded to 0 after the horizontal move (start of 'hi')"
+        );
+    }
+
+    // ─── Soft-wrap visual-line vertical movement (hud-21o6x) ──────────────────
+
+    /// Build a synthetic 2-row layout for "abcdef" wrapped as "abc" / "def" at a
+    /// uniform 10px advance (each row's x restarts at 0, as cosmic-text reports).
+    fn two_row_layout() -> ComposerVisualLayout {
+        ComposerVisualLayout {
+            lines: vec![
+                ComposerVisualLine {
+                    start_byte: 0,
+                    end_byte: 3,
+                    glyph_x: vec![(0, 0.0), (1, 10.0), (2, 20.0), (3, 30.0)],
+                },
+                ComposerVisualLine {
+                    start_byte: 3,
+                    end_byte: 6,
+                    glyph_x: vec![(3, 0.0), (4, 10.0), (5, 20.0), (6, 30.0)],
+                },
+            ],
+            text_len: 6,
+        }
+    }
+
+    #[test]
+    fn visual_layout_line_of_has_wrap_boundary_affinity() {
+        let l = two_row_layout();
+        assert_eq!(l.line_of(0), Some(0));
+        assert_eq!(l.line_of(2), Some(0));
+        // Boundary byte 3 = end of row 0 = start of row 1 → affinity to the LATER row.
+        assert_eq!(l.line_of(3), Some(1));
+        assert_eq!(l.line_of(5), Some(1));
+        assert_eq!(
+            l.line_of(6),
+            Some(1),
+            "caret past last glyph is on the last row"
+        );
+    }
+
+    #[test]
+    fn visual_layout_byte_at_x_lands_near_goal() {
+        let l = two_row_layout();
+        assert_eq!(l.lines[0].byte_at_x(20.0), 2, "x=20 → byte 2 on row 0");
+        assert_eq!(l.lines[1].byte_at_x(20.0), 5, "x=20 → byte 5 on row 1");
+        // Clamped to the row's byte range.
+        assert_eq!(
+            l.lines[0].byte_at_x(999.0),
+            3,
+            "far-right clamps to row end"
+        );
+    }
+
+    #[test]
+    fn visual_layout_vertical_target_moves_between_rows() {
+        let l = two_row_layout();
+        // Down from row 0 col-x 20 (byte 2) → row 1 near x=20 → byte 5.
+        assert_eq!(l.vertical_target(2, false, 20.0), Some(5));
+        // Up from row 1 (byte 5, x=20) → row 0 near x=20 → byte 2.
+        assert_eq!(l.vertical_target(5, true, 20.0), Some(2));
+        // Up on the first row goes to buffer start; at start → None.
+        assert_eq!(l.vertical_target(2, true, 20.0), Some(0));
+        assert_eq!(l.vertical_target(0, true, 0.0), None);
+        // Down on the last row goes to buffer end; at end → None.
+        assert_eq!(l.vertical_target(5, false, 20.0), Some(6));
+        assert_eq!(l.vertical_target(6, false, 30.0), None);
+    }
+
+    #[test]
+    fn move_to_byte_collapses_and_snaps() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        for c in ["a", "b", "c"] {
+            draft.insert(c);
+        }
+        draft.select_left(); // selection anchor 3, cursor 2
+        assert!(draft.has_selection());
+        assert_eq!(draft.move_to_byte(1), EditOutcome::Mutated);
+        assert_eq!(draft.cursor(), 1);
+        assert!(!draft.has_selection(), "move_to_byte collapses selection");
+        // Out-of-range clamps to text end.
+        assert_eq!(draft.move_to_byte(99), EditOutcome::Mutated);
+        assert_eq!(draft.cursor(), 3);
+    }
+
+    /// With a fresh multi-row layout, ArrowUp steps between VISUAL rows at pixel
+    /// goal-x — NOT to buffer start (which is what hard-newline movement would do
+    /// for this single-logical-line draft).
+    #[test]
+    fn manager_arrow_uses_visual_layout_when_fresh() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for c in ["a", "b", "c", "d", "e", "f"] {
+            mgr.route_character(c);
+        }
+        // Caret at end (byte 6). Move left to a mid-row position (byte 5).
+        mgr.route_key_down("ArrowLeft", "ArrowLeft", false, false, false);
+        assert_eq!(mgr.draft().unwrap().cursor(), 5);
+
+        mgr.set_visual_layout(Some(two_row_layout()));
+        // ArrowUp: visual path → row 1 (byte 5, x=20) up to row 0 near x=20 → byte 2.
+        mgr.route_key_down("ArrowUp", "ArrowUp", false, false, false);
+        assert_eq!(
+            mgr.draft().unwrap().cursor(),
+            2,
+            "visual ArrowUp lands on the adjacent row near goal-x, not buffer start"
+        );
+        // ArrowDown preserves goal-x=20 → back to row 1 byte 5.
+        mgr.route_key_down("ArrowDown", "ArrowDown", false, false, false);
+        assert_eq!(
+            mgr.draft().unwrap().cursor(),
+            5,
+            "pixel goal-x preserved across consecutive visual vertical moves"
+        );
+    }
+
+    /// A stale layout (measured for a different draft length) is ignored — the
+    /// keystroke falls back to hard-newline movement until the next frame.
+    #[test]
+    fn manager_arrow_falls_back_when_layout_stale() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for c in ["a", "b", "c", "d", "e", "f"] {
+            mgr.route_character(c);
+        }
+        // Layout for a DIFFERENT text length → not fresh.
+        let mut stale = two_row_layout();
+        stale.text_len = 99;
+        mgr.set_visual_layout(Some(stale));
+        // Caret at byte 6; hard-newline ArrowUp on a single logical line → buffer start.
+        mgr.route_key_down("ArrowUp", "ArrowUp", false, false, false);
+        assert_eq!(
+            mgr.draft().unwrap().cursor(),
+            0,
+            "stale layout ignored → hard-newline fallback (to buffer start)"
+        );
+    }
+
+    /// With no layout (e.g. single-line profile), vertical movement uses the
+    /// hard-newline fallback unchanged.
+    #[test]
+    fn manager_arrow_no_layout_uses_hard_newline() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for c in ["a", "b", "c"] {
+            mgr.route_character(c);
+        }
+        // No layout set. ArrowDown on single logical line → buffer end.
+        mgr.route_key_down("ArrowDown", "ArrowDown", false, false, false);
+        assert_eq!(
+            mgr.draft().unwrap().cursor(),
+            3,
+            "hard-newline fallback to end"
+        );
+    }
+
+    /// Boundaries update after a wrap-changing edit: once a new layout arrives,
+    /// vertical movement uses the new visual rows.
+    #[test]
+    fn manager_visual_layout_updates_after_edit() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for c in ["a", "b", "c", "d", "e", "f"] {
+            mgr.route_character(c);
+        }
+        mgr.set_visual_layout(Some(two_row_layout()));
+        // Delete two chars → "abcd" (len 4); the old layout (text_len 6) is now stale.
+        mgr.route_key_down("Backspace", "Backspace", false, false, false);
+        mgr.route_key_down("Backspace", "Backspace", false, false, false);
+        assert_eq!(mgr.draft().unwrap().text(), "abcd");
+        // New layout for "abcd" as one row [0,4) — single row → vertical falls back.
+        mgr.set_visual_layout(Some(ComposerVisualLayout {
+            lines: vec![ComposerVisualLine {
+                start_byte: 0,
+                end_byte: 4,
+                glyph_x: vec![(0, 0.0), (1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0)],
+            }],
+            text_len: 4,
+        }));
+        // Single-row layout (lines.len()==1) is not multi-row → hard-newline: Up → start.
+        mgr.route_key_down("ArrowUp", "ArrowUp", false, false, false);
+        assert_eq!(
+            mgr.draft().unwrap().cursor(),
+            0,
+            "post-edit layout consulted"
         );
     }
 

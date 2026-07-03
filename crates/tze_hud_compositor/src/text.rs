@@ -634,6 +634,91 @@ impl TextRasterizer {
         (total_lines.max(1), caret_line)
     }
 
+    /// Measure the composer draft's wrapped VISUAL-LINE layout for soft-wrap
+    /// vertical caret movement (hud-21o6x).
+    ///
+    /// Shapes the RAW draft text (no caret glyph — the caret is a rendering
+    /// artifact; navigation is over raw bytes) wrapped to `wrap_width` with the
+    /// same params as the render path, then records, per visual row, its raw-text
+    /// byte range plus the `(byte, x)` of each glyph boundary. The result is
+    /// published to the input thread, which maps caret byte ↔ pixel x for
+    /// visual-row Up/Down.
+    ///
+    /// Byte offsets are full-text: cosmic-text glyph `start`/`end` are relative to
+    /// their `BufferLine` (one per hard `\n`), so a per-BufferLine base offset is
+    /// added (same accounting as `compute_inline_backdrop_quads`).
+    pub(crate) fn measure_composer_visual_layout(
+        &mut self,
+        text: &str,
+        wrap_width: f32,
+        font_size_px: f32,
+        line_height_multiplier: f32,
+    ) -> tze_hud_input::ComposerVisualLayout {
+        let line_height = font_size_px * line_height_multiplier;
+        let mut buf = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(font_size_px, line_height),
+        );
+        buf.set_size(&mut self.font_system, Some(wrap_width.max(1.0)), None);
+        buf.set_wrap(&mut self.font_system, Wrap::Word);
+        let base_attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
+        buf.set_text(&mut self.font_system, text, base_attrs, Shaping::Advanced);
+        buf.shape_until_scroll(&mut self.font_system, false);
+
+        // Full-text byte offset where each BufferLine (hard-newline paragraph)
+        // begins: line N starts after all prior lines' text + their '\n'.
+        let line_byte_offsets: Vec<usize> = {
+            let mut offsets = Vec::with_capacity(buf.lines.len());
+            let mut running = 0usize;
+            for line in buf.lines.iter() {
+                offsets.push(running);
+                running += line.text().len() + 1;
+            }
+            offsets
+        };
+
+        let mut lines: Vec<tze_hud_input::ComposerVisualLine> = Vec::new();
+        for run in buf.layout_runs() {
+            let line_offset = line_byte_offsets.get(run.line_i).copied().unwrap_or(0);
+            let mut glyph_x: Vec<(usize, f32)> = Vec::with_capacity(run.glyphs.len() + 1);
+            let mut min_start = usize::MAX;
+            let mut max_end = 0usize;
+            for g in run.glyphs.iter() {
+                let gs = line_offset + g.start;
+                let ge = line_offset + g.end;
+                glyph_x.push((gs, g.x));
+                min_start = min_start.min(gs);
+                max_end = max_end.max(ge);
+            }
+            let (start_byte, end_byte) = if run.glyphs.is_empty() {
+                (line_offset, line_offset)
+            } else {
+                (min_start, max_end)
+            };
+            // Trailing sentinel maps the row end (caret past the last glyph).
+            glyph_x.push((end_byte, run.line_w));
+            // Ascending by byte (LTR shaping is already logical order; sort to be
+            // robust to any reordering).
+            glyph_x.sort_by(|a, b| a.0.cmp(&b.0));
+            lines.push(tze_hud_input::ComposerVisualLine {
+                start_byte,
+                end_byte,
+                glyph_x,
+            });
+        }
+        if lines.is_empty() {
+            lines.push(tze_hud_input::ComposerVisualLine {
+                start_byte: 0,
+                end_byte: 0,
+                glyph_x: vec![(0, 0.0)],
+            });
+        }
+        tze_hud_input::ComposerVisualLayout {
+            lines,
+            text_len: text.len(),
+        }
+    }
+
     /// Prime the truncation cache for all `TextOverflow::Ellipsis` items in `items`.
     ///
     /// Must be called **outside the per-frame pipeline** (at content-commit time

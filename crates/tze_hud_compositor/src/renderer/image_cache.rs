@@ -81,6 +81,15 @@ pub struct LocalComposerState {
 /// frame at the top of the render loop.
 pub type LocalComposerStateHandle = Arc<StdMutex<Option<Option<LocalComposerState>>>>;
 
+/// Reverse channel for soft-wrap vertical caret movement (hud-21o6x): the
+/// compositor thread publishes the active composer's wrapped-line layout here
+/// each frame; the input thread reads it before dispatching ArrowUp/ArrowDown.
+///
+/// `Some(layout)` when a multi-line composer is active and was measured this
+/// frame; `None` when there is no composer or it is the single-line profile.
+/// Mirrors [`LocalComposerStateHandle`] in the opposite direction.
+pub type ComposerVisualLayoutHandle = Arc<StdMutex<Option<tze_hud_input::ComposerVisualLayout>>>;
+
 /// Caret blink half-period: the caret stays solid for this long, then hidden
 /// for this long, repeating.  ~530 ms is the conventional editor blink rate.
 pub(crate) const CARET_BLINK_HALF_PERIOD: std::time::Duration =

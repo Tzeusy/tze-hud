@@ -440,6 +440,11 @@ struct WindowedRuntimeState {
     /// thread pushes the submitted text; the compositor drains it into its
     /// per-tile viewer-echo store and renders it above the composer strip.
     viewer_echo_queue: PortalViewerEchoQueue,
+    /// Reverse channel (hud-21o6x): the compositor publishes the active composer's
+    /// wrapped-line layout here each frame; this (main) thread reads it before
+    /// dispatching ArrowUp/ArrowDown so the caret can step between soft-wrapped
+    /// visual rows. Cloned from `compositor.composer_visual_layout` at init.
+    composer_visual_layout: tze_hud_compositor::ComposerVisualLayoutHandle,
     /// In-process portal projection authority driver (hud-2iup7).
     ///
     /// Hosts a `ProjectionAuthority` in the runtime process and drives the portal
@@ -858,6 +863,9 @@ impl ApplicationHandler for WinitApp {
         // additional allocations or locks on the hot path.
         self.state.local_composer_state = Arc::clone(&compositor.local_composer_state);
         self.state.viewer_echo_queue = Arc::clone(&compositor.viewer_echo_queue);
+        // Reverse channel: read the compositor's per-frame wrapped-line layout for
+        // soft-wrap vertical caret movement (hud-21o6x).
+        self.state.composer_visual_layout = Arc::clone(&compositor.composer_visual_layout);
 
         // ── Wire compositor thread ─────────────────────────────────────────
         // Pre-clone the scene Arc so the compositor thread can lock the scene
@@ -2124,6 +2132,8 @@ impl WindowedRuntime {
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
+            // Placeholder; replaced in resumed() with the compositor's Arc (hud-21o6x).
+            composer_visual_layout: Arc::new(StdMutex::new(None)),
             portal_projection_driver,
             portal_op_rx: portal_op_rx_opt.take(),
             pending_keyboard_events: VecDeque::new(),

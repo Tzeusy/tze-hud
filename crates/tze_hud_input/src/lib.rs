@@ -112,9 +112,9 @@ pub use command::{
     RawCommandEvent,
 };
 pub use composer_draft::{
-    ComposerDraft, ComposerDraftManager, DEFAULT_DRAFT_CAP, DraftCancel, DraftNotificationBatch,
-    DraftScheduler, DraftStateNotification, DraftSubmission, EditOutcome, MAX_DRAFT_BYTES,
-    Selection,
+    ComposerDraft, ComposerDraftManager, ComposerVisualLayout, ComposerVisualLine,
+    DEFAULT_DRAFT_CAP, DraftCancel, DraftNotificationBatch, DraftScheduler, DraftStateNotification,
+    DraftSubmission, EditOutcome, MAX_DRAFT_BYTES, Selection,
 };
 pub use focus::{
     FocusGainedEvent, FocusLostEvent, FocusLostReason, FocusManager, FocusRequest, FocusResult,
@@ -862,6 +862,14 @@ impl InputProcessor {
     ) -> (bool, Option<DraftNotificationBatch>) {
         self.composer_draft_manager
             .route_key_down(key_code, key, shift, ctrl, alt)
+    }
+
+    /// Update the composer's wrapped-line layout for visual-row vertical caret
+    /// movement (hud-21o6x). The runtime forwards the compositor's latest layout
+    /// here before dispatching an ArrowUp/ArrowDown; `None` reverts to
+    /// hard-newline vertical movement.
+    pub fn set_composer_visual_layout(&mut self, layout: Option<ComposerVisualLayout>) {
+        self.composer_draft_manager.set_visual_layout(layout);
     }
 
     /// Route a post-IME character event to the composer draft manager if a

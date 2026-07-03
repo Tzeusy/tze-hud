@@ -525,6 +525,22 @@ impl WinitApp {
                 }
                 ComposerDeliveryContextLookup::Unavailable => None,
             };
+            // Soft-wrap vertical caret movement (hud-21o6x): for ArrowUp/ArrowDown,
+            // hand the input layer the compositor's latest wrapped-line layout so
+            // the caret can step between visual rows. Read the reverse channel only
+            // for the vertical keys (avoids cloning the layout on every keystroke);
+            // `None`/stale simply falls back to hard-newline movement.
+            if matches!(raw.key_code.as_str(), "ArrowUp" | "ArrowDown") {
+                let layout = self
+                    .state
+                    .composer_visual_layout
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone());
+                self.state
+                    .input_processor
+                    .set_composer_visual_layout(layout);
+            }
             // Capture the input-started-at instant for local-ack latency
             // measurement on the composer keystroke path (hud-r3ax6 / hud-o9ybl).
             let composer_input_started = Instant::now();

@@ -548,6 +548,13 @@ impl Compositor {
     /// state — no adapter round trip.
     pub(crate) fn prime_composer_scroll_offset(&mut self, scene: &SceneGraph) {
         self.composer_layout = ComposerLayout::default();
+        // Clear the reverse visual-layout channel by default (hud-21o6x); only the
+        // multi-line branch below republishes a fresh layout. Every early return
+        // (no composer / no rasterizer / no region / single-line) leaves it `None`,
+        // so the input layer falls back to hard-newline vertical movement.
+        if let Ok(mut guard) = self.composer_visual_layout.lock() {
+            *guard = None;
+        }
 
         // Gather the immutable inputs first (draft text, caret, region geometry,
         // font size) so the mutable text-rasterizer borrow below does not overlap
@@ -633,6 +640,20 @@ impl Compositor {
             total_lines: total_lines as f32,
             vscroll_px: first_visible as f32 * line_height,
         };
+
+        // Publish the wrapped VISUAL-LINE layout for the input thread's soft-wrap
+        // vertical caret movement (hud-21o6x). Measured on the RAW draft (byte
+        // space the caret uses), same wrap width as the render, so the input layer
+        // maps caret byte ↔ visual row ↔ pixel x.
+        let visual_layout = tr.measure_composer_visual_layout(
+            &text,
+            window_width,
+            font_size_px,
+            line_height_multiplier,
+        );
+        if let Ok(mut guard) = self.composer_visual_layout.lock() {
+            *guard = Some(visual_layout);
+        }
     }
 
     /// Build a [`TextItem`] for the local composer echo draft text.
