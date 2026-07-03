@@ -8609,6 +8609,18 @@ async fn scrolled_portal_output_tile_clips_geometry_outside_viewport() {
         )
         .unwrap();
 
+    // Settle the §6.3 portal fade-in before probing. A freshly-created scrollable
+    // tile begins a fade-in animation, and since hud-b0x0m every node fill (incl.
+    // this SolidColor pane) honours the tile fade — so at t=0 the pane fill renders
+    // translucent and composites toward the frame behind it. This test is about
+    // geometry clipping, not the transition, so warm one frame to register the
+    // appear, then clear the animation state so the probes below observe the
+    // steady-state (fully opaque) fills.
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+    compositor.render_frame_headless(&mut scene, &surface);
+    compositor.portal_tile_anim_states.clear();
+
     for scroll_y in [0.0_f32, 48.0, 96.0] {
         scene
             .set_tile_scroll_offset_local(output_id, 0.0, scroll_y)
