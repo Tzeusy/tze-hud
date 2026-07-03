@@ -30,7 +30,8 @@ Collect these before executing:
 - `target` (default: `x86_64-pc-windows-gnu`)
 - `profile` (`release` or `debug`, default: `release`)
 - `win_user` (default: `hud-user`)
-- `win_host` (default: `windows-host.example`)
+- `win_host` (default: `windows-host.example`; for autonomous runs use the
+  `hud-windows` VM — see "Autonomous testhost" below)
 - `ssh_key_path` (default in local environment: `~/.ssh/hud-ssh-key`)
 - `task_name` (default: `TzeHudOverlay`)
 - `mcp_http_url` (default: `http://windows-host.example:9090`)
@@ -42,6 +43,55 @@ For the exact `messages` / `widget_messages` payload shapes, content types by
 zone, widget parameter types, and `widget_name` instance-discovery semantics
 (`list_widgets`), see
 [references/message-payloads.md](references/message-payloads.md).
+
+## Autonomous Testhost (hud-windows VM)
+
+When the flow needs no human eyes (or tzehouse is unavailable), target the
+IaC-managed Windows 11 VM on the Sentinel Proxmox host instead. Same account
+contract as tzehouse: `hud-user` (SCP), `admin-user` (autologon desktop owner,
+process control), both keyed with `~/.ssh/hud-ssh-key`. `C:\tze_hud` exists;
+firewall already allows 22/9090/50051 inbound.
+
+Resolve the address at test time (DHCP; reachable via Sentinel's tailnet
+subnet route):
+
+```bash
+WIN_HOST=$(ssh root@sentinel.parrot-hen.ts.net \
+  "qm agent 110 network-get-interfaces" | python3 -c "import json,sys; \
+print(next(a['ip-address'] for i in json.load(sys.stdin) \
+for a in i.get('ip-addresses',[]) \
+if a['ip-address-type']=='ipv4' and not a['ip-address'].startswith('127')))")
+```
+
+Launch contract (verified 2026-07-04, end-to-end: SCP deploy → task launch →
+networked MCP publish → subtitle rendered on the VM console):
+
+- Scheduled task **`TzeHudFullscreen`** (exe-direct, pre-registered by the
+  VM's firstboot IaC):
+  `C:\tze_hud\tze_hud.exe --window-mode fullscreen --config C:\tze_hud\tze_hud.toml --bind-all-interfaces`
+  Deploy = SCP the exe, `taskkill /F /IM tze_hud.exe` (admin-user), then
+  `schtasks /Run /TN TzeHudFullscreen`.
+- `C:\tze_hud\tze_hud.toml` (profile `full-display`) and the PSK machine env
+  (`TZE_HUD_PSK` = `TZE_HUD_MCP_RESIDENT_PRINCIPAL`) are provisioned by
+  firstboot. The PSK value is `HUD_WINDOWS_PSK` in
+  `~/gt/homelab/mayor/rig/.env` on the controller.
+- Console proof shots without a human: on sentinel,
+  `pvesh create /nodes/sentinel/qemu/110/monitor -command "screendump /var/tmp/vm110.ppm"`,
+  scp + convert locally.
+
+Capabilities and limits vs tzehouse:
+
+- **No discrete GPU** (yet — iGPU passthrough is a tracked follow-up): wgpu
+  runs on WARP software rendering (verified working: full HUD + zone
+  publishes render). Functional/protocol validation only; rendering fidelity
+  and performance results are NOT representative.
+- **Use `--window-mode fullscreen`, not `overlay`** (the only two modes).
+  Overlay transparency needs Vulkan + a real GPU; overlay-path validation
+  stays on tzehouse.
+- 3 vCPUs (Intel N150 E-cores), 6 GB RAM — keep perf expectations low.
+- The VM is cattle: rebuild from scratch via the homelab repo
+  (`~/gt/homelab/mayor/rig/ansible`, `--tags windows`; see its README).
+  Eval license: 90 days per rebuild.
 
 ## Subskills
 
