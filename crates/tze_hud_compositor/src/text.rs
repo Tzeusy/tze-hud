@@ -1208,6 +1208,33 @@ pub struct InlineBackdropQuad {
 ///
 /// Quads are clipped to each item's `clip_pixel_x/y + clip_bounds_width/height`
 /// before being returned, so they never bleed outside the item's `TextBounds`.
+/// Extend a per-visual-line selection quad toward the box edges for the standard
+/// multi-line text-selection shape (hud-scgyw).
+///
+/// `clip_x0`/`clip_x1` are the box interior left/right (the text item's clip
+/// bounds). `continues_left` means the selection began on a previous visual line
+/// (so this line's highlight should start at the box left); `continues_right`
+/// means it continues onto the next line (highlight to the box right). A fully
+/// interior line has both → a full-width band; the first line extends right only,
+/// the last line left only, and a single-line selection extends neither.
+fn extend_selection_quad_to_box(
+    mut q: InlineBackdropQuad,
+    clip_x0: f32,
+    clip_x1: f32,
+    continues_left: bool,
+    continues_right: bool,
+) -> InlineBackdropQuad {
+    if continues_left {
+        let right = q.x + q.w;
+        q.x = clip_x0;
+        q.w = (right - clip_x0).max(0.0);
+    }
+    if continues_right {
+        q.w = (clip_x1 - q.x).max(0.0);
+    }
+    q
+}
+
 pub fn compute_inline_backdrop_quads(
     items: &[TextItem],
     buffers: &[Buffer],
@@ -1269,6 +1296,21 @@ pub fn compute_inline_backdrop_quads(
         for run in buf.layout_runs() {
             let line_offset = line_byte_offsets.get(run.line_i).copied().unwrap_or(0);
 
+            // Full-text byte span of THIS visual line (hud-scgyw): the min/max glyph
+            // byte over the run. Used to decide, for a `fill_line_width` selection
+            // run, whether the selection continues onto the previous/next line so
+            // the highlight can extend to the box edge (standard text-selection
+            // shape: full-width interior lines, partial first/last).
+            let (line_first_byte, line_last_byte) =
+                run.glyphs
+                    .iter()
+                    .fold((usize::MAX, 0usize), |(min_b, max_b), g| {
+                        (
+                            min_b.min(line_offset + g.start),
+                            max_b.max(line_offset + g.end),
+                        )
+                    });
+
             // For each StyledRunItem (from the effective/resliced set) with a
             // background_color, find glyphs that overlap its byte range and
             // accumulate a quad.  Using `eff_runs` (not `item.styled_runs`) ensures
@@ -1328,7 +1370,22 @@ pub fn compute_inline_backdrop_quads(
                 }
 
                 // Flush any in-progress quad after scanning all glyphs in this run.
-                if let Some(q) = current_quad.take() {
+                if let Some(mut q) = current_quad.take() {
+                    // Full-width selection shape (hud-scgyw): when this selection run
+                    // continues from the previous visual line, extend the highlight
+                    // left to the box edge; when it continues onto the next line,
+                    // extend right to the box edge. Interior lines get both → a
+                    // full-width band; the first/last lines stay partial. The final
+                    // clip pass below trims to the item's TextBounds.
+                    if styled_run.fill_line_width && line_first_byte != usize::MAX {
+                        q = extend_selection_quad_to_box(
+                            q,
+                            clip_x0,
+                            clip_x1,
+                            sr_start < line_first_byte, // continues from previous line
+                            sr_end > line_last_byte,    // continues onto next line
+                        );
+                    }
                     quads.push(q);
                 }
             }
@@ -1483,6 +1540,15 @@ pub struct StyledRunItem {
     /// `Attrs::metrics` in `styled_run_spans`.  Used to render heading levels
     /// at the token-defined size.
     pub size_scale: Option<f32>,
+    /// When `true`, a multi-line `background_color` run is drawn as a standard
+    /// text-selection shape rather than tight per-glyph quads (hud-scgyw): the
+    /// first visual line is highlighted from the selection start to the line's
+    /// right edge, fully-interior lines span the FULL box width, and the last
+    /// line runs from the box's left edge to the selection end.
+    ///
+    /// Set only for the composer's selection run. Inline-code backdrops leave it
+    /// `false` so a wrapped inline-code span keeps its tight per-glyph backdrop.
+    pub fill_line_width: bool,
 }
 
 /// A single resolved color run for `TextItem` rendering, with byte offsets
@@ -1728,6 +1794,7 @@ impl TextItem {
                     color,
                     background_color,
                     size_scale: span.attr.size_scale,
+                    fill_line_width: false,
                 })
             })
             .collect::<Vec<_>>()
@@ -2245,6 +2312,7 @@ pub(crate) fn reslice_styled_runs(
                 color: run.color,
                 background_color: run.background_color,
                 size_scale: run.size_scale,
+                fill_line_width: false,
             })
         })
         .collect()
@@ -2381,6 +2449,7 @@ pub(crate) fn reslice_styled_runs_tail_anchored(
                 color: run.color,
                 background_color: run.background_color,
                 size_scale: run.size_scale,
+                fill_line_width: false,
             })
         })
         .collect()
@@ -4518,6 +4587,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
             StyledRunItem {
                 start_byte: 5,
@@ -4528,6 +4598,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
         ];
         // content_end = 10: both runs fit entirely
@@ -4552,6 +4623,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
             StyledRunItem {
                 start_byte: 5,
@@ -4562,6 +4634,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
         ];
         // content_end = 4: second run (5..10) is entirely beyond truncation point
@@ -4583,6 +4656,7 @@ mod tests {
             color: None,
             background_color: None,
             size_scale: None,
+            fill_line_width: false,
         }];
         // content_end = 8: run 3..12 overlaps; should become 3..8
         let result = reslice_styled_runs(&runs, 8);
@@ -4681,6 +4755,7 @@ mod tests {
             color: None,
             background_color: None,
             size_scale: None,
+            fill_line_width: false,
         }];
         let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
         assert_eq!(weight, 700, "bold run must raise effective weight to 700");
@@ -4699,6 +4774,7 @@ mod tests {
             color: None,
             background_color: None,
             size_scale: None,
+            fill_line_width: false,
         }];
         let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
         assert_eq!(
@@ -4721,6 +4797,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
             StyledRunItem {
                 start_byte: 4,
@@ -4731,6 +4808,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
             StyledRunItem {
                 start_byte: 9,
@@ -4741,6 +4819,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
         ];
         let (weight, mono) = styled_runs_effective_measurement(&runs, 400);
@@ -4798,6 +4877,7 @@ mod tests {
             color: None,
             background_color: None,
             size_scale: None,
+            fill_line_width: false,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
         assert_eq!(
@@ -4844,6 +4924,7 @@ mod tests {
             color: None,
             background_color: None,
             size_scale: None,
+            fill_line_width: false,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
         assert_eq!(
@@ -4879,6 +4960,7 @@ mod tests {
             color: None,
             background_color: None,
             size_scale: None,
+            fill_line_width: false,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
         assert!(
@@ -4905,6 +4987,7 @@ mod tests {
             color: None,
             background_color: None,
             size_scale: None,
+            fill_line_width: false,
         }];
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
         assert_eq!(
@@ -4949,6 +5032,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
             // Run on visible tail ("line2") → should map to [4..9] in effective_text
             StyledRunItem {
@@ -4960,6 +5044,7 @@ mod tests {
                 color: Some([255, 0, 0, 255]),
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
         ];
 
@@ -5051,6 +5136,7 @@ mod tests {
             color: None,
             background_color: None,
             size_scale: None,
+            fill_line_width: false,
         }];
         // original.ends_with("this_is_a_very…\nline3") is false, so empty is returned.
         let result = reslice_styled_runs_tail_anchored(original, truncated, &runs);
@@ -5089,6 +5175,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
             StyledRunItem {
                 start_byte: 3,
@@ -5099,6 +5186,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             },
         ];
 
@@ -5278,6 +5366,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             }]),
             viewport: TruncationViewport::HeadAnchored,
             line_height_multiplier: 1.4,
@@ -5403,6 +5492,7 @@ mod tests {
                 color: None,
                 background_color: None,
                 size_scale: None,
+                fill_line_width: false,
             }]),
             viewport: TruncationViewport::HeadAnchored,
             line_height_multiplier: 1.4,
@@ -5597,6 +5687,7 @@ mod tests {
                 color: None,
                 background_color: Some(bg_color),
                 size_scale: None,
+                fill_line_width: false,
             }]),
             viewport: TruncationViewport::HeadAnchored,
         };
@@ -5657,6 +5748,252 @@ mod tests {
             first.y >= pixel_y,
             "hud-9ieev: quad y ({}) must be >= item pixel_y ({pixel_y})",
             first.y
+        );
+    }
+
+    // ─── Multi-line composer selection highlight (hud-scgyw) ─────────────────
+
+    /// Pure three-part-shape math: a single-line selection is untouched; the
+    /// first line extends to the right edge; the last line to the left edge; a
+    /// fully-interior line spans the full box width.
+    #[test]
+    fn extend_selection_quad_to_box_three_part_shape() {
+        let q = |x: f32, w: f32| InlineBackdropQuad {
+            x,
+            y: 0.0,
+            w,
+            h: 10.0,
+            color: [0, 0, 0, 255],
+        };
+        let (c0, c1) = (10.0_f32, 200.0_f32);
+
+        // Single line (no continuation) → unchanged.
+        let s = extend_selection_quad_to_box(q(50.0, 30.0), c0, c1, false, false);
+        assert_eq!((s.x, s.w), (50.0, 30.0));
+
+        // First line (continues onto the next) → extend RIGHT to the box edge.
+        let f = extend_selection_quad_to_box(q(50.0, 30.0), c0, c1, false, true);
+        assert_eq!(f.x, 50.0, "first-line left edge unchanged");
+        assert!(
+            (f.x + f.w - c1).abs() < 0.01,
+            "first-line extends to box right"
+        );
+
+        // Last line (continues from the previous) → extend LEFT to the box edge.
+        let l = extend_selection_quad_to_box(q(50.0, 30.0), c0, c1, true, false);
+        assert!((l.x - c0).abs() < 0.01, "last-line extends to box left");
+        assert!(
+            (l.x + l.w - 80.0).abs() < 0.01,
+            "last-line right edge preserved"
+        );
+
+        // Interior line (continues both ways) → full box width.
+        let m = extend_selection_quad_to_box(q(50.0, 30.0), c0, c1, true, true);
+        assert!(
+            (m.x - c0).abs() < 0.01 && (m.x + m.w - c1).abs() < 0.01,
+            "interior full width"
+        );
+    }
+
+    /// A `fill_line_width` selection spanning 3 wrapped visual lines produces the
+    /// standard shape: partial first line (to the right edge), a FULL-WIDTH
+    /// interior line, and a partial last line (from the left edge). Shaped with a
+    /// CPU `FontSystem` (no GPU).
+    #[test]
+    fn multiline_selection_fills_interior_line_width() {
+        let mut fs = FontSystem::new();
+        // Narrow width forces one 4-char word per visual line: "aaaa"/"bbbb"/"cccc".
+        let text: Arc<str> = Arc::from("aaaa bbbb cccc");
+        let font_size = 16.0_f32;
+        let line_height = font_size * 1.4;
+        let (pixel_x, pixel_y, width, height) = (10.0_f32, 20.0_f32, 45.0_f32, 200.0_f32);
+        let sel_bg: [u8; 4] = [58, 123, 213, 115];
+
+        let mut buf = Buffer::new(&mut fs, Metrics::new(font_size, line_height));
+        buf.set_size(&mut fs, Some(width), Some(height));
+        buf.set_wrap(&mut fs, Wrap::Word);
+        buf.set_text(
+            &mut fs,
+            &text,
+            Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+        );
+        buf.shape_until_scroll(&mut fs, false);
+        assert!(
+            buf.layout_runs().count() >= 3,
+            "text must wrap to >= 3 visual rows"
+        );
+
+        // Selection from mid-first-word (byte 1) to mid-last-word (byte 13) spans all rows.
+        let make_item = |fill: bool| TextItem {
+            text: Arc::clone(&text),
+            pixel_x,
+            pixel_y,
+            bounds_width: width,
+            bounds_height: height,
+            clip_pixel_x: pixel_x,
+            clip_pixel_y: pixel_y,
+            clip_bounds_width: width,
+            clip_bounds_height: height,
+            font_size_px: font_size,
+            line_height_multiplier: 1.4,
+            font_family: FontFamily::SystemSansSerif,
+            font_weight: 400,
+            color: [255, 255, 255, 255],
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
+            color_runs: Box::new([]),
+            styled_runs: Box::new([StyledRunItem {
+                start_byte: 1,
+                end_byte: 13,
+                weight: None,
+                italic: false,
+                monospace: false,
+                color: None,
+                background_color: Some(sel_bg),
+                size_scale: None,
+                fill_line_width: fill,
+            }]),
+            viewport: TruncationViewport::HeadAnchored,
+        };
+
+        // Re-shape a second buffer for the control item (buffers are consumed by value).
+        let mut buf2 = Buffer::new(&mut fs, Metrics::new(font_size, line_height));
+        buf2.set_size(&mut fs, Some(width), Some(height));
+        buf2.set_wrap(&mut fs, Wrap::Word);
+        buf2.set_text(
+            &mut fs,
+            &text,
+            Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+        );
+        buf2.shape_until_scroll(&mut fs, false);
+
+        let item = make_item(true);
+        let eff = vec![item.styled_runs.to_vec()];
+        let quads = compute_inline_backdrop_quads(&[item], &[buf], &eff);
+        assert!(
+            quads.len() >= 3,
+            "one selection quad per wrapped line, got {}",
+            quads.len()
+        );
+
+        let box_left = pixel_x;
+        let box_right = pixel_x + width;
+        // Quads are emitted in visual-line order.
+        let (first, interior, last) = (&quads[0], &quads[1], &quads[2]);
+        // First line: extends to the box right edge (partial left).
+        assert!(
+            (first.x + first.w - box_right).abs() < 1.0 && first.x > box_left + 1.0,
+            "first line: partial-left, extends to box right (x={}, right={})",
+            first.x,
+            first.x + first.w
+        );
+        // Interior line: full box width.
+        assert!(
+            (interior.x - box_left).abs() < 1.0
+                && (interior.x + interior.w - box_right).abs() < 1.0,
+            "interior line must span the full box width (x={}, right={})",
+            interior.x,
+            interior.x + interior.w
+        );
+        // Last line: starts at the box left edge (partial right).
+        assert!(
+            (last.x - box_left).abs() < 1.0 && last.x + last.w < box_right - 1.0,
+            "last line: extends to box left, partial-right (x={}, right={})",
+            last.x,
+            last.x + last.w
+        );
+
+        // CONTROL: without fill_line_width, interior quads are tight to glyphs
+        // (NOT full width) — proving the flag drives the shape.
+        let control = make_item(false);
+        let eff2 = vec![control.styled_runs.to_vec()];
+        let control_quads = compute_inline_backdrop_quads(&[control], &[buf2], &eff2);
+        assert!(control_quads.len() >= 3);
+        let ci = &control_quads[1];
+        assert!(
+            (ci.x + ci.w - box_right).abs() > 1.0 || (ci.x - box_left).abs() > 1.0,
+            "without fill_line_width the interior quad must NOT span the full box width"
+        );
+    }
+
+    /// A selection that spans a HARD newline (Ctrl+Enter draft) also produces the
+    /// full-width-interior shape — the byte-offset accounting across BufferLines
+    /// (`line_byte_offsets`) keeps the per-line quads correct (hud-scgyw).
+    #[test]
+    fn multiline_selection_across_hard_newline_fills_interior() {
+        let mut fs = FontSystem::new();
+        // Three hard lines; a wide box so nothing SOFT-wraps — the line breaks are
+        // the '\n's at bytes 2 and 5.
+        let text: Arc<str> = Arc::from("aa\nbb\ncc");
+        let font_size = 16.0_f32;
+        let line_height = font_size * 1.4;
+        let (pixel_x, pixel_y, width, height) = (10.0_f32, 20.0_f32, 300.0_f32, 200.0_f32);
+        let sel_bg: [u8; 4] = [58, 123, 213, 115];
+
+        let mut buf = Buffer::new(&mut fs, Metrics::new(font_size, line_height));
+        buf.set_size(&mut fs, Some(width), Some(height));
+        buf.set_wrap(&mut fs, Wrap::Word);
+        buf.set_text(
+            &mut fs,
+            &text,
+            Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+        );
+        buf.shape_until_scroll(&mut fs, false);
+
+        // Select from byte 1 (mid "aa") to byte 7 (mid "cc") — spans both newlines.
+        let item = TextItem {
+            text: Arc::clone(&text),
+            pixel_x,
+            pixel_y,
+            bounds_width: width,
+            bounds_height: height,
+            clip_pixel_x: pixel_x,
+            clip_pixel_y: pixel_y,
+            clip_bounds_width: width,
+            clip_bounds_height: height,
+            font_size_px: font_size,
+            line_height_multiplier: 1.4,
+            font_family: FontFamily::SystemSansSerif,
+            font_weight: 400,
+            color: [255, 255, 255, 255],
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
+            color_runs: Box::new([]),
+            styled_runs: Box::new([StyledRunItem {
+                start_byte: 1,
+                end_byte: 7,
+                weight: None,
+                italic: false,
+                monospace: false,
+                color: None,
+                background_color: Some(sel_bg),
+                size_scale: None,
+                fill_line_width: true,
+            }]),
+            viewport: TruncationViewport::HeadAnchored,
+        };
+        let eff = vec![item.styled_runs.to_vec()];
+        let quads = compute_inline_backdrop_quads(&[item], &[buf], &eff);
+        assert_eq!(quads.len(), 3, "one quad per hard line");
+        let box_right = pixel_x + width;
+        // The interior line ("bb") is fully selected → full box width.
+        assert!(
+            (quads[1].x - pixel_x).abs() < 1.0 && (quads[1].x + quads[1].w - box_right).abs() < 1.0,
+            "interior hard line spans full box width"
+        );
+        // Quads stack top-to-bottom (distinct y per line).
+        assert!(
+            quads[0].y < quads[1].y && quads[1].y < quads[2].y,
+            "quads stack per line"
         );
     }
 

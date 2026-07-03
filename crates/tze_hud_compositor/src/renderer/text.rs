@@ -1361,6 +1361,7 @@ fn apply_portal_reveal_fade(
                 .and_then(|r| r.background_color)
                 .map(|c| apply_opacity_to_color(c, alpha)),
             size_scale: style.and_then(|r| r.size_scale),
+            fill_line_width: false,
         });
     }
     item.styled_runs = faded.into_boxed_slice();

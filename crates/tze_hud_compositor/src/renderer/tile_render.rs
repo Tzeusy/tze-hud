@@ -691,7 +691,9 @@ impl Compositor {
     /// The selection byte range is display-string byte offsets, so the highlight
     /// spans correctly across wrapped lines in the multi-line profile (the text
     /// pipeline positions each glyph on its own line); the offset math above is
-    /// unaffected by wrapping.
+    /// unaffected by wrapping. The run sets `fill_line_width` so the text pipeline
+    /// draws the standard multi-line text-selection shape (hud-scgyw): partial
+    /// first/last line, full-width interior lines.
     pub(super) fn collect_composer_text_item(
         &self,
         tile: &Tile,
@@ -795,6 +797,9 @@ impl Compositor {
                         color: None,
                         background_color: Some(tokens.selection_bg),
                         size_scale: None,
+                        // Standard multi-line text-selection shape: full-width
+                        // interior lines when the selection wraps (hud-scgyw).
+                        fill_line_width: true,
                     }])
                 } else {
                     Box::new([])
