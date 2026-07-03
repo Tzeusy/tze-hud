@@ -4232,3 +4232,56 @@ fn portal_anchor_tile_picks_largest_area_member() {
     assert_eq!(scene.portal_anchor_tile(pane_id), Some(frame_id));
     assert_eq!(scene.portal_anchor_tile(frame_id), Some(frame_id));
 }
+
+// ── hud-ovjxu.1: viewer-local resize font-scale multiplier ───────────────────
+
+#[test]
+fn tile_font_scale_defaults_to_one_and_round_trips() {
+    let mut scene = SceneGraph::new(800.0, 600.0);
+    let id = SceneId::new();
+    // Absent entry → default 1.0 (no scaling).
+    assert_eq!(scene.tile_font_scale(id), 1.0);
+
+    scene.set_tile_font_scale(id, 1.4);
+    assert!((scene.tile_font_scale(id) - 1.4).abs() < 1e-6);
+
+    // Setting back to exactly 1.0 drops the entry (map only holds zoomed tiles).
+    scene.set_tile_font_scale(id, 1.0);
+    assert_eq!(scene.tile_font_scale(id), 1.0);
+    assert!(!scene.overlay.tile_font_scale.contains_key(&id));
+
+    // Non-finite / non-positive factors are ignored (defensive).
+    scene.set_tile_font_scale(id, 0.75);
+    scene.set_tile_font_scale(id, f32::NAN);
+    scene.set_tile_font_scale(id, -2.0);
+    scene.set_tile_font_scale(id, 0.0);
+    assert!((scene.tile_font_scale(id) - 0.75).abs() < 1e-6);
+
+    scene.clear_tile_font_scale(id);
+    assert_eq!(scene.tile_font_scale(id), 1.0);
+}
+
+#[test]
+fn tile_font_scale_cleared_on_tile_removal() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTiles]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 100.0, 80.0),
+            1,
+        )
+        .unwrap();
+    scene.set_tile_font_scale(tile_id, 1.5);
+    assert!((scene.tile_font_scale(tile_id) - 1.5).abs() < 1e-6);
+
+    scene.remove_tile_and_nodes(tile_id);
+    assert_eq!(
+        scene.tile_font_scale(tile_id),
+        1.0,
+        "removing a tile must drop its viewer font scale"
+    );
+}

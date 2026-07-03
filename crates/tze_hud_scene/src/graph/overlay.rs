@@ -162,6 +162,28 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub viewer_geometry_locked: HashSet<SceneId>,
+
+    /// Viewer-local per-tile font-scale multiplier for whole-portal resize text
+    /// scaling (hud-ovjxu.1, spec §Portal Resize Text Scaling).
+    ///
+    /// Accumulates the portal's WIDTH ratio across resize steps (grow ⇒ >1,
+    /// shrink ⇒ <1). The compositor multiplies each text node's published
+    /// `font_size_px` by this factor at text-collection time and clamps the
+    /// result to the token-defined legible min/max — so the text grows and
+    /// shrinks with the portal without ever mutating the adapter-published node
+    /// content. This is the durable, viewer-local design required by the spec
+    /// ("font scaling ... MUST NOT alter the adapter-published content"): a
+    /// content republish carries the base font, and the multiplier re-applies at
+    /// render, so an adapter update can never reset the viewer's zoom (contrast a
+    /// stored-font mutation, which a republish would stomp — the reason the
+    /// [`Self::viewer_geometry_locked`] lock exists for bounds).
+    ///
+    /// Absent entry ⇒ 1.0 (no scaling). Cleared on tile removal and by the
+    /// reset-geometry affordance alongside the geometry lock.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_font_scale: HashMap<SceneId, f32>,
 }
 
 use super::SceneGraph;
@@ -210,6 +232,40 @@ impl SceneGraph {
     /// removal.
     pub fn unlock_viewer_geometry(&mut self, tile_id: SceneId) {
         self.overlay.viewer_geometry_locked.remove(&tile_id);
+    }
+
+    /// The viewer-local font-scale multiplier for `tile_id` (hud-ovjxu.1).
+    /// Returns `1.0` when no scaling has been applied (the common case).
+    pub fn tile_font_scale(&self, tile_id: SceneId) -> f32 {
+        self.overlay
+            .tile_font_scale
+            .get(&tile_id)
+            .copied()
+            .unwrap_or(1.0)
+    }
+
+    /// Set the viewer-local font-scale multiplier for `tile_id` (hud-ovjxu.1).
+    ///
+    /// A factor of exactly `1.0` removes the entry (back to the default) so the
+    /// map only holds tiles the viewer has actually zoomed. Non-finite or
+    /// non-positive factors are ignored (defensive — a resize ratio is always a
+    /// positive finite number).
+    pub fn set_tile_font_scale(&mut self, tile_id: SceneId, factor: f32) {
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        if (factor - 1.0).abs() < f32::EPSILON {
+            self.overlay.tile_font_scale.remove(&tile_id);
+        } else {
+            self.overlay.tile_font_scale.insert(tile_id, factor);
+        }
+    }
+
+    /// Clear any viewer-local font scaling for `tile_id`, restoring the
+    /// adapter-published font size. Called by the reset-geometry affordance and
+    /// on tile removal, alongside [`Self::unlock_viewer_geometry`].
+    pub fn clear_tile_font_scale(&mut self, tile_id: SceneId) {
+        self.overlay.tile_font_scale.remove(&tile_id);
     }
 
     /// Whether the viewer holds geometry authority over `tile_id` — i.e. adapter
