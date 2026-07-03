@@ -1217,6 +1217,7 @@ def make_hit_region(
     interaction_id: str, x: float, y: float, w: float, h: float,
     *,
     accepts_focus: bool = True,
+    accepts_pointer: bool = True,
     auto_capture: bool = False,
     release_on_up: bool = False,
     accepts_composer_input: bool = False,
@@ -1226,7 +1227,7 @@ def make_hit_region(
         "hit_region": {
             "interaction_id": interaction_id,
             "accepts_focus": accepts_focus,
-            "accepts_pointer": True,
+            "accepts_pointer": accepts_pointer,
             "auto_capture": auto_capture,
             "release_on_up": release_on_up,
             "accepts_composer_input": accepts_composer_input,
@@ -1377,13 +1378,23 @@ def build_portal_nodes(
         grip_h,
         radius=grip_h / 2.0,
     )
+    # Header drag region. As of hud-643dv the runtime owns whole-portal move via a
+    # geometry-driven HEADER BAND drag handle it generates for the portal frame
+    # tile (the full top strip drags like a Windows titlebar, yielding to the
+    # minimize control). This node is therefore a pure visual/semantic marker of
+    # the drag band — it does NOT drive movement — so it is inert: accepts_pointer
+    # is False (the runtime band, not this node, handles the pointer) and
+    # accepts_focus stays False (pointer-only chrome, never a Tab stop). It spans
+    # the full header width to document the whole-band drag surface. An
+    # accepts_pointer node here would instead shadow the minimize hit-region and
+    # be caught by the runtime band's "yield to interactive nodes" rule, so it
+    # MUST stay non-pointer.
     portal_drag_hit = make_hit_region(
         PORTAL_DRAG_INTERACTION_ID,
-        MINIMIZE_HIT_W, 0.0,
-        PORTAL_W - MINIMIZE_HIT_W, HEADER_H,
+        0.0, 0.0,
+        PORTAL_W, HEADER_H,
         accepts_focus=False,
-        auto_capture=True,
-        release_on_up=True,
+        accepts_pointer=False,
     )
 
     # ── Pane geometry ─────────────────────────────────────────────────────

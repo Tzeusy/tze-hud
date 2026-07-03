@@ -58,6 +58,17 @@ impl Compositor {
         out
     }
 
+    /// Clamp a display-space rect so it stays fully on screen without changing
+    /// its top-left anchoring (used for the header-band drag handle, which is the
+    /// frame's top strip — not centered like the grip). hud-643dv.
+    fn clamp_rect_to_display(r: Rect, sw: f32, sh: f32) -> Rect {
+        let x = r.x.clamp(0.0, sw.max(0.0));
+        let y = r.y.clamp(0.0, sh.max(0.0));
+        let w = r.width.max(1.0).min((sw - x).max(1.0));
+        let h = r.height.max(1.0).min((sh - y).max(1.0));
+        Rect::new(x, y, w, h)
+    }
+
     fn drag_handle_bounds(element_bounds: Rect, style: DragHandleStyle, sw: f32, sh: f32) -> Rect {
         let w = style.width_dp.max(1.0).min(sw.max(1.0));
         let h = style.height_dp.max(1.0).min(sh.max(1.0));
@@ -75,9 +86,41 @@ impl Compositor {
         let style = DragHandleStyle::default();
         let mut entries: Vec<DragHandleEntry> = Vec::new();
 
+        // Portal frame tiles get a full-width HEADER BAND drag handle instead of
+        // the small centered grip — the whole top strip drags like a Windows
+        // titlebar (hud-643dv). The band height is token-driven; the anchor set
+        // comes from the shared structural portal-group resolution so only the
+        // frame/anchor tile (not the panes) gets the band.
+        let band_h = self
+            .token_map
+            .get(tze_hud_scene::types::PORTAL_HEADER_DRAG_BAND_TOKEN)
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(tze_hud_scene::types::PORTAL_HEADER_DRAG_BAND_PX_DEFAULT);
+        let band_rects: std::collections::HashMap<SceneId, Rect> = scene
+            .portal_header_band_anchors(band_h)
+            .into_iter()
+            .collect();
+
         for tile in scene.visible_tiles() {
-            let bounds = Self::drag_handle_bounds(tile.bounds, style, sw, sh);
             let interaction_id = format!("drag-handle:{}", Self::scene_id_hex(tile.id));
+            if let Some(band_rect) = band_rects.get(&tile.id) {
+                // Header-band handle: clamp the frame-relative band rect to the
+                // display like the grip does, but keep it full-width at the top
+                // of the frame (no centering / top-edge straddle).
+                let bounds = Self::clamp_rect_to_display(*band_rect, sw, sh);
+                entries.push(DragHandleEntry {
+                    element_id: tile.id,
+                    element_kind: DragHandleElementKind::Tile,
+                    bounds,
+                    element_bounds: tile.bounds,
+                    interaction_id,
+                    style,
+                    is_header_band: true,
+                });
+                continue;
+            }
+            let bounds = Self::drag_handle_bounds(tile.bounds, style, sw, sh);
             entries.push(DragHandleEntry {
                 element_id: tile.id,
                 element_kind: DragHandleElementKind::Tile,
@@ -85,6 +128,7 @@ impl Compositor {
                 element_bounds: tile.bounds,
                 interaction_id,
                 style,
+                is_header_band: false,
             });
         }
 
@@ -114,6 +158,7 @@ impl Compositor {
                 element_bounds: element_bounds_zone,
                 interaction_id,
                 style,
+                is_header_band: false,
             });
         }
 
@@ -158,6 +203,7 @@ impl Compositor {
                 element_bounds: element_bounds_widget,
                 interaction_id,
                 style,
+                is_header_band: false,
             });
         }
 
@@ -204,6 +250,15 @@ impl Compositor {
                     sh,
                     highlight_color,
                 );
+            }
+
+            // Header-band handles are invisible (hud-643dv): the client draws the
+            // header chrome, so the band paints no grip fill/glyph of its own — it
+            // only contributes the active-drag highlight border above. Painting a
+            // translucent slab over the whole header would double-draw the client
+            // header and look wrong.
+            if entry.is_header_band {
+                continue;
             }
 
             let mut base = entry.style.color;

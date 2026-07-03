@@ -7089,6 +7089,78 @@ async fn zone_hit_populate_clears_on_repeated_calls() {
     );
 }
 
+/// hud-643dv: a portal frame tile (largest-area member of a scrollable lease)
+/// gets a full-width HEADER-BAND drag handle (Windows-titlebar), while the panes
+/// keep the legacy centered grip. The band height is token-driven with a sane
+/// default consistent with the exemplar header height.
+#[tokio::test]
+async fn portal_frame_gets_full_width_header_band_handle() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab = scene.create_tab("Main", 0).unwrap();
+    let lease = scene.grant_lease("portal", 60_000, vec![]);
+    // Frame = the large anchor.
+    let frame_id = scene
+        .create_tile(
+            tab,
+            "portal",
+            lease,
+            Rect::new(100.0, 100.0, 600.0, 400.0),
+            1,
+        )
+        .unwrap();
+    // Scrollable pane inside the frame (makes the lease a portal group).
+    let pane_id = scene
+        .create_tile(
+            tab,
+            "portal",
+            lease,
+            Rect::new(110.0, 160.0, 200.0, 320.0),
+            3,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(pane_id, tze_hud_scene::types::TileScrollConfig::vertical())
+        .unwrap();
+
+    let handles = compositor.collect_drag_handle_entries(&scene, 1920.0, 1080.0);
+
+    let frame = handles
+        .iter()
+        .find(|h| h.element_id == frame_id)
+        .expect("frame tile must have a drag handle");
+    assert!(
+        frame.is_header_band,
+        "the portal frame must get a header-band drag handle"
+    );
+    // Full width of the frame, top-anchored, height = default band (52).
+    assert_eq!(frame.bounds.x, 100.0);
+    assert_eq!(frame.bounds.y, 100.0);
+    assert_eq!(
+        frame.bounds.width, 600.0,
+        "band must span the full frame width"
+    );
+    assert_eq!(
+        frame.bounds.height,
+        tze_hud_scene::types::PORTAL_HEADER_DRAG_BAND_PX_DEFAULT,
+        "band height must come from the token default, not a magic value"
+    );
+
+    let pane = handles
+        .iter()
+        .find(|h| h.element_id == pane_id)
+        .expect("pane tile must still have a drag handle");
+    assert!(
+        !pane.is_header_band,
+        "panes keep the legacy centered grip, not a band"
+    );
+    assert!(
+        pane.bounds.width < 600.0,
+        "the pane grip must be the small centered grip, not a full-width band"
+    );
+}
+
 #[tokio::test]
 async fn drag_handle_regions_cover_visible_tile_zone_and_widget() {
     let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);

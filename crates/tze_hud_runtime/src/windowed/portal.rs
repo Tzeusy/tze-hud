@@ -397,23 +397,11 @@ pub(super) fn resolve_portal_group(
     let seed = scene.tiles.get(&member_tile_id)?;
     let lease_id = seed.lease_id;
 
-    // Largest-area lease member is the frame/anchor. Ties are broken by lowest
-    // id for determinism (an equal-area frame + capture backstop share
-    // identical bounds, so either choice yields the same portal rect).
-    let mut anchor_id = member_tile_id;
-    let mut anchor_bounds = seed.bounds;
-    let mut anchor_area = seed.bounds.width * seed.bounds.height;
-    for (id, tile) in scene.tiles.iter() {
-        if tile.lease_id != lease_id {
-            continue;
-        }
-        let area = tile.bounds.width * tile.bounds.height;
-        if area > anchor_area || (area == anchor_area && *id < anchor_id) {
-            anchor_area = area;
-            anchor_id = *id;
-            anchor_bounds = tile.bounds;
-        }
-    }
+    // Largest-area lease member is the frame/anchor (ties → lowest id). Delegated
+    // to the scene-crate resolver so the frame pick is a single source of truth
+    // shared with the compositor's header-band drag handle (hud-643dv).
+    let anchor_id = scene.portal_anchor_tile(member_tile_id)?;
+    let anchor_bounds = scene.tiles.get(&anchor_id)?.bounds;
 
     // Members = lease tiles spatially within the frame rect. The far-corner
     // drag shield falls outside the frame and is excluded. The seed and anchor
@@ -4377,6 +4365,56 @@ mod tests {
             epoch_before + 1,
             "single-tile move must advance geometry_epoch so it repaints"
         );
+    }
+
+    /// hud-643dv: the runtime header-band drag handle targets the portal FRAME
+    /// (the largest-area lease member), and a drag originating from that anchor —
+    /// exactly what the band produces — moves the whole group position-only
+    /// (leverages the #991 geometry-epoch path: no `scene.version` bump).
+    #[test]
+    fn header_band_anchor_is_the_frame_and_band_drag_is_position_only() {
+        let (mut scene, _tab, frame_id, transcript_id, composer_id, _shield, _fm) =
+            multi_surface_portal_scene();
+
+        // The band handle the compositor emits targets the frame/anchor tile.
+        let anchors = scene.portal_header_band_anchors(52.0);
+        assert!(
+            anchors.iter().any(|(a, _)| *a == frame_id),
+            "the header-band drag handle must target the portal frame anchor"
+        );
+        assert!(
+            !anchors
+                .iter()
+                .any(|(a, _)| *a == transcript_id || *a == composer_id),
+            "panes must NOT get their own header band"
+        );
+
+        // Dragging from the anchor (as a band drag does) moves the whole group
+        // position-only: no scene.version bump, geometry_epoch advances once.
+        let read = |s: &tze_hud_scene::graph::SceneGraph, id| s.tiles.get(&id).unwrap().bounds;
+        let (fb, tb, cb) = (
+            read(&scene, frame_id),
+            read(&scene, transcript_id),
+            read(&scene, composer_id),
+        );
+        let version_before = scene.version;
+        let epoch_before = scene.geometry_epoch;
+        let (dx, dy) = (40.0_f32, -25.0_f32);
+        assert!(translate_portal_group_on_drag(&mut scene, frame_id, dx, dy));
+
+        assert_eq!(
+            scene.version, version_before,
+            "a band drag must be position-only — no content-cache re-prime (hud-uyhpn)"
+        );
+        assert_eq!(scene.geometry_epoch, epoch_before + 1);
+        for (before, id) in [(fb, frame_id), (tb, transcript_id), (cb, composer_id)] {
+            let after = read(&scene, id);
+            assert!(
+                (after.x - (before.x + dx)).abs() < 1e-3
+                    && (after.y - (before.y + dy)).abs() < 1e-3,
+                "every member must translate by the band-drag delta"
+            );
+        }
     }
 
     /// A single non-portal tile drag must NOT engage the whole-portal translate

@@ -14,6 +14,75 @@ impl SceneGraph {
         tiles
     }
 
+    // ─── Portal frame / header-band resolution (hud-643dv) ───────────────
+    //
+    // Shared structural portal-group resolution used by BOTH the compositor
+    // (to place the header-band drag handle on the frame tile) and the runtime
+    // (`resolve_portal_group`, which delegates its anchor pick here so there is
+    // a single source of truth for "which tile is the frame").  The rule mirrors
+    // #984/#986: the largest-area tile sharing a lease is the frame/anchor; ties
+    // break to the lowest id for determinism.
+
+    /// The frame/anchor tile of the portal group that owns `tile_id`: the
+    /// largest-area tile sharing its lease (ties broken by lowest id).
+    ///
+    /// A single-tile lease resolves to itself (a degenerate one-member group).
+    /// Returns `None` only if `tile_id` does not exist.
+    pub fn portal_anchor_tile(&self, tile_id: SceneId) -> Option<SceneId> {
+        let seed = self.tiles.get(&tile_id)?;
+        let lease_id = seed.lease_id;
+        let mut anchor_id = tile_id;
+        let mut anchor_area = seed.bounds.width * seed.bounds.height;
+        for (id, tile) in self.tiles.iter() {
+            if tile.lease_id != lease_id {
+                continue;
+            }
+            let area = tile.bounds.width * tile.bounds.height;
+            if area > anchor_area || (area == anchor_area && *id < anchor_id) {
+                anchor_area = area;
+                anchor_id = *id;
+            }
+        }
+        Some(anchor_id)
+    }
+
+    /// `(anchor_tile_id, header_band_rect)` for every text-stream portal frame on
+    /// the scene — the top `band_h` strip of each portal frame's bounds.
+    ///
+    /// A "portal" is any lease group with at least one scrollable member (the
+    /// same gate `translate_portal_group_on_drag` uses); a single scrollable tile
+    /// qualifies as a degenerate one-member portal and gets the band too. The
+    /// band belongs to the frame/anchor tile ONLY, never the panes/backstop.
+    ///
+    /// Used by the compositor to emit the header-band drag handle (hud-643dv).
+    /// Returned sorted by anchor id so handle ordering is deterministic.
+    pub fn portal_header_band_anchors(&self, band_h: f32) -> Vec<(SceneId, Rect)> {
+        let mut anchors: std::collections::HashSet<SceneId> = std::collections::HashSet::new();
+        for (id, _tile) in self.tiles.iter() {
+            // Only scrollable surfaces seed a portal group.
+            if self.tile_scroll_config(*id).is_none() {
+                continue;
+            }
+            if let Some(anchor) = self.portal_anchor_tile(*id) {
+                anchors.insert(anchor);
+            }
+        }
+        let mut out: Vec<(SceneId, Rect)> = anchors
+            .into_iter()
+            .filter_map(|anchor| {
+                let tile = self.tiles.get(&anchor)?;
+                // Clamp the band to the tile so a tiny frame never over-extends.
+                let h = band_h.min(tile.bounds.height).max(1.0);
+                Some((
+                    anchor,
+                    Rect::new(tile.bounds.x, tile.bounds.y, tile.bounds.width, h),
+                ))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Map a 2D display-coordinate point to the deepest interactive element.
     ///
     /// Traversal order (per scene-graph/spec.md §Requirement: Hit-Testing Contract,
@@ -44,6 +113,17 @@ impl SceneGraph {
         // ── Chrome drag-handle hit regions (global, chrome-priority) ────────
         for region in &self.overlay.drag_handle_hit_regions {
             if region.hit_region.accepts_pointer && region.bounds.contains_point(x, y) {
+                // Header-band handles (hud-643dv) span the whole top strip of a
+                // portal frame and legitimately overlap interactive controls
+                // (minimize, reply). Windows-titlebar semantics: a control on the
+                // band wins; the band drags only empty header space. So a band
+                // yields to any `accepts_pointer` HitRegionNode under the point,
+                // letting the normal tile/node walk below return that control.
+                // Legacy grips keep their original chrome-priority (they never
+                // overlap controls), so this only affects band handles.
+                if region.is_header_band && self.header_band_yields_to_node(region, x, y) {
+                    break;
+                }
                 return HitResult::ZoneInteraction {
                     zone_name: "__chrome_drag_handle__".to_string(),
                     published_at_wall_us: 0,
@@ -267,6 +347,60 @@ impl SceneGraph {
                 .or_default()
                 .pressed = pressed;
         }
+    }
+
+    /// True when a header-band drag handle should yield the point to an
+    /// interactive control beneath it (hud-643dv).
+    ///
+    /// Probes the band's frame tile (`region.element_id`) for an `accepts_pointer`
+    /// HitRegionNode under `(x, y)` and yields ONLY when that node's bounds fit
+    /// **inside the band rect** (small epsilon). This is true Windows-titlebar
+    /// semantics: a titlebar button (e.g. minimize, which fits within the header
+    /// strip) beats the drag, but the client area does not reach into the
+    /// titlebar.
+    ///
+    /// The containment gate is essential, not cosmetic: the #981/#987 projection
+    /// portal publishes its composer hit-region spanning the WHOLE tile
+    /// (`x:0,y:0,w,h`) for click-anywhere-to-focus. On a single-tile projection
+    /// portal that region overlaps the band at every point; a blanket "yield to
+    /// any pointer node" rule would kill drag on exactly the surface live sessions
+    /// use. A full-tile region is taller than the band, so it is not contained and
+    /// the band keeps the drag; only header-sized controls yield.
+    fn header_band_yields_to_node(&self, region: &DragHandleHitRegion, x: f32, y: f32) -> bool {
+        let Some(tile) = self.tiles.get(&region.element_id) else {
+            return false;
+        };
+        let Some(root_id) = tile.root_node else {
+            return false;
+        };
+        let (scroll_x, scroll_y) = self.effective_tile_scroll_offset_local(tile.id);
+        let local_x = x - tile.bounds.x + scroll_x;
+        let local_y = y - tile.bounds.y + scroll_y;
+        let Some(node_id) = self.hit_test_node(root_id, local_x, local_y) else {
+            return false;
+        };
+        // Resolve the hit node's bounds and map them into display space to compare
+        // against the (display-space) band rect.
+        let Some(node_local) = self.nodes.get(&node_id).and_then(|n| match &n.data {
+            NodeData::HitRegion(hr) => Some(hr.bounds),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let node_disp = Rect::new(
+            tile.bounds.x - scroll_x + node_local.x,
+            tile.bounds.y - scroll_y + node_local.y,
+            node_local.width,
+            node_local.height,
+        );
+        // Yield only when the control fits within the band (titlebar buttons win;
+        // full-tile / client-area regions do not).
+        const EPS: f32 = 0.5;
+        let band = &region.bounds;
+        node_disp.x >= band.x - EPS
+            && node_disp.y >= band.y - EPS
+            && node_disp.x + node_disp.width <= band.x + band.width + EPS
+            && node_disp.y + node_disp.height <= band.y + band.height + EPS
     }
 
     pub(super) fn hit_test_node(&self, node_id: SceneId, x: f32, y: f32) -> Option<SceneId> {

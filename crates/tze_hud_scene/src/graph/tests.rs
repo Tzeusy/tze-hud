@@ -3962,3 +3962,273 @@ fn removing_tile_clears_viewer_geometry_lock() {
         "removing a tile must drop its viewer-geometry lock"
     );
 }
+
+// ── hud-643dv: portal header-band drag handle + precedence ───────────────────
+
+/// Build a minimal portal: a large frame tile (the anchor) carrying a minimize
+/// HitRegion node in its header, plus a scrollable pane sharing the lease so the
+/// lease group qualifies as a text-stream portal. Returns
+/// `(scene, frame_id, pane_id, minimize_node_id)`.
+fn portal_scene_with_minimize() -> (SceneGraph, SceneId, SceneId, SceneId) {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease(
+        "portal",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    // Frame = the large anchor at (100,100) 600x400.
+    let frame_id = scene
+        .create_tile(
+            tab_id,
+            "portal",
+            lease_id,
+            Rect::new(100.0, 100.0, 600.0, 400.0),
+            1,
+        )
+        .unwrap();
+    // Minimize control in the header (tile-local x 0..44, y 0..52).
+    let minimize_id = SceneId::new();
+    let minimize = Node {
+        id: minimize_id,
+        children: vec![],
+        data: NodeData::HitRegion(HitRegionNode {
+            bounds: Rect::new(0.0, 0.0, 44.0, 52.0),
+            interaction_id: "portal-minimize".to_string(),
+            accepts_focus: true,
+            accepts_pointer: true,
+            ..Default::default()
+        }),
+    };
+    scene.set_tile_root(frame_id, minimize).unwrap();
+    // A scrollable pane member inside the frame → makes this a portal group.
+    let pane_id = scene
+        .create_tile(
+            tab_id,
+            "portal",
+            lease_id,
+            Rect::new(110.0, 160.0, 200.0, 320.0),
+            3,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(pane_id, TileScrollConfig::vertical())
+        .unwrap();
+    (scene, frame_id, pane_id, minimize_id)
+}
+
+fn push_drag_handle(scene: &mut SceneGraph, element_id: SceneId, bounds: Rect, is_band: bool) {
+    let interaction_id = "drag-handle:test".to_string();
+    scene
+        .overlay
+        .drag_handle_hit_regions
+        .push(DragHandleHitRegion {
+            element_id,
+            element_kind: DragHandleElementKind::Tile,
+            bounds,
+            interaction_id: interaction_id.clone(),
+            hit_region: HitRegionNode {
+                bounds,
+                interaction_id,
+                accepts_pointer: true,
+                ..Default::default()
+            },
+            tab_order: 0,
+            is_header_band: is_band,
+        });
+}
+
+#[test]
+fn header_band_drags_empty_header_but_yields_to_minimize_control() {
+    let (mut scene, frame_id, _pane, minimize_id) = portal_scene_with_minimize();
+    // Full-width header band over the frame's top strip (display space).
+    push_drag_handle(
+        &mut scene,
+        frame_id,
+        Rect::new(100.0, 100.0, 600.0, 52.0),
+        true,
+    );
+
+    // A point on the band but NOT over the minimize control (global x=400 is
+    // past the minimize rect which ends at global x=144) → the band drags.
+    match scene.hit_test(400.0, 120.0) {
+        HitResult::ZoneInteraction {
+            kind: ZoneInteractionKind::DragHandle { element_id, .. },
+            ..
+        } => assert_eq!(element_id, frame_id, "empty header must drag the frame"),
+        other => panic!("empty header band must hit the drag handle, got {other:?}"),
+    }
+
+    // A point over the minimize control (global (120,120) = tile-local (20,20),
+    // inside the 44x52 minimize rect) → the CONTROL wins, not the band.
+    assert_eq!(
+        scene.hit_test(120.0, 120.0),
+        HitResult::NodeHit {
+            tile_id: frame_id,
+            node_id: minimize_id,
+            interaction_id: "portal-minimize".to_string(),
+        },
+        "an interactive control on the band must win over the drag band (Windows-titlebar)"
+    );
+}
+
+#[test]
+fn header_band_survives_full_tile_click_to_focus_region() {
+    // Regression (hud-643dv): the #981/#987 projection portal publishes its
+    // composer hit-region spanning the WHOLE tile (x:0,y:0,w,h, accepts_pointer)
+    // for click-anywhere-to-focus. On a single-tile projection portal that region
+    // overlaps the header band at EVERY point. A blanket "yield to any pointer
+    // node" rule would make the band yield everywhere → drag dead on exactly the
+    // surface live sessions use. The band must only yield to controls that FIT
+    // INSIDE it (titlebar buttons), never a full-tile client-area region.
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("proj", 60_000, vec![Capability::CreateTiles]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "proj",
+            lease_id,
+            Rect::new(0.0, 0.0, 300.0, 200.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+        .unwrap();
+    // Full-tile click-to-focus composer region (the #981 projection shape).
+    let composer_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: composer_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+                    interaction_id: "proj-composer".to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+    // Header band over the top strip of the single tile.
+    push_drag_handle(&mut scene, tile_id, Rect::new(0.0, 0.0, 300.0, 52.0), true);
+
+    // A pointer-down inside the header band (also inside the full-tile composer)
+    // must STILL resolve to the band → drag works on projection portals.
+    match scene.hit_test(150.0, 20.0) {
+        HitResult::ZoneInteraction {
+            kind: ZoneInteractionKind::DragHandle { element_id, .. },
+            ..
+        } => assert_eq!(element_id, tile_id),
+        other => {
+            panic!("header band must drag over a full-tile click-to-focus region, got {other:?}")
+        }
+    }
+
+    // Below the band (client area) the composer region still wins — the band
+    // never reaches into the body.
+    assert_eq!(
+        scene.hit_test(150.0, 120.0),
+        HitResult::NodeHit {
+            tile_id,
+            node_id: composer_id,
+            interaction_id: "proj-composer".to_string(),
+        },
+        "outside the band the full-tile composer region still handles the click"
+    );
+}
+
+#[test]
+fn legacy_grip_keeps_chrome_priority_over_nodes() {
+    // Regression guard: the header-band yield rule must NOT change legacy grip
+    // precedence. A non-band grip overlapping a control still wins (grips never
+    // overlap controls in practice, so their original chrome-priority stands).
+    let (mut scene, frame_id, _pane, _minimize) = portal_scene_with_minimize();
+    // Grip overlapping the minimize control (is_band=false).
+    push_drag_handle(
+        &mut scene,
+        frame_id,
+        Rect::new(100.0, 100.0, 44.0, 52.0),
+        false,
+    );
+
+    match scene.hit_test(120.0, 120.0) {
+        HitResult::ZoneInteraction {
+            kind: ZoneInteractionKind::DragHandle { element_id, .. },
+            ..
+        } => assert_eq!(element_id, frame_id),
+        other => panic!("legacy grip must keep chrome priority over nodes, got {other:?}"),
+    }
+}
+
+#[test]
+fn portal_header_band_anchors_targets_frame_only() {
+    let (scene, frame_id, pane_id, _minimize) = portal_scene_with_minimize();
+    let anchors = scene.portal_header_band_anchors(52.0);
+    assert_eq!(anchors.len(), 1, "one portal → one header band");
+    let (anchor, rect) = anchors[0];
+    assert_eq!(
+        anchor, frame_id,
+        "the band belongs to the frame/anchor, not a pane"
+    );
+    assert_ne!(anchor, pane_id);
+    // Band = top strip of the frame.
+    assert_eq!(rect, Rect::new(100.0, 100.0, 600.0, 52.0));
+}
+
+#[test]
+fn portal_header_band_anchors_includes_single_scrollable_tile() {
+    // A degenerate one-member scrollable lease still gets the band (owner: same
+    // as it gets whole-portal resize today).
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("solo", 60_000, vec![Capability::CreateTiles]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "solo",
+            lease_id,
+            Rect::new(0.0, 0.0, 300.0, 200.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+        .unwrap();
+    let anchors = scene.portal_header_band_anchors(52.0);
+    assert_eq!(anchors, vec![(tile_id, Rect::new(0.0, 0.0, 300.0, 52.0))]);
+}
+
+#[test]
+fn portal_header_band_anchors_excludes_non_scrollable_tiles() {
+    // A plain (non-scrollable) tile is not a portal and gets no band — it keeps
+    // the legacy grip.
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("plain", 60_000, vec![Capability::CreateTiles]);
+    scene
+        .create_tile(
+            tab_id,
+            "plain",
+            lease_id,
+            Rect::new(0.0, 0.0, 300.0, 200.0),
+            1,
+        )
+        .unwrap();
+    assert!(
+        scene.portal_header_band_anchors(52.0).is_empty(),
+        "non-scrollable tiles must not get a header band"
+    );
+}
+
+#[test]
+fn portal_anchor_tile_picks_largest_area_member() {
+    let (scene, frame_id, pane_id, _minimize) = portal_scene_with_minimize();
+    // From any member, the anchor resolves to the largest-area tile (the frame).
+    assert_eq!(scene.portal_anchor_tile(pane_id), Some(frame_id));
+    assert_eq!(scene.portal_anchor_tile(frame_id), Some(frame_id));
+}
