@@ -25,6 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
+use crate::markdown::MarkdownScope;
 use crate::pipeline::{
     ChromeDrawCmd, ROUNDED_RECT_OVERLAY_SHADER, ROUNDED_RECT_SHADER, RectVertex,
     RoundedRectDrawCmd, RoundedRectVertex, create_texture_rect_bind_group_layout,
@@ -264,11 +265,21 @@ pub struct Compositor {
     /// Invalidated and rebuilt on every `prime_markdown_cache` call when the
     /// scene version changes.  Evicted in sync with `markdown_cache.evict_except`.
     pub(crate) node_key_cache: HashMap<SceneId, [u8; 32]>,
-    /// Design-token–resolved markdown styling (hud-5jbra.2).
+    /// Design-token–resolved markdown styling for the **portal** transcript
+    /// surface (hud-5jbra.2) — prefers `portal.*`-namespaced keys.
     ///
     /// Rebuilt from `token_map` whenever `set_token_map` is called.
-    /// Consumed by `prime_markdown_cache` when new content is parsed.
+    /// Consumed by `prime_markdown_cache` and the render path for markdown nodes
+    /// that belong to a governed portal surface (a tile with a scroll config).
     pub(crate) markdown_tokens: crate::markdown::MarkdownTokens,
+    /// Design-token–resolved markdown styling for any **non-portal** markdown
+    /// surface (hud-3ryie) — resolves only the generic keys, ignoring every
+    /// `portal.*`-namespaced token so a portal preference cannot leak onto it.
+    ///
+    /// Rebuilt alongside [`Self::markdown_tokens`] in `set_token_map`.  In v1
+    /// there is no non-portal markdown surface, so this is never selected; it
+    /// exists so per-tile scoping is correct the moment one is introduced.
+    pub(crate) markdown_tokens_generic: crate::markdown::MarkdownTokens,
     /// The `SceneGraph::version` value at the last `prime_markdown_cache` call.
     ///
     /// `prime_markdown_cache` is gated on this value so it only runs when the
@@ -562,6 +573,7 @@ impl Compositor {
             markdown_primer: crate::markdown::MarkdownPrimer::new(),
             node_key_cache: HashMap::new(),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
+            markdown_tokens_generic: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
             truncation_cache_scene_version: u64::MAX,
             configured_max_truncation_input_bytes: None,
@@ -848,6 +860,7 @@ impl Compositor {
             markdown_primer: crate::markdown::MarkdownPrimer::new(),
             node_key_cache: HashMap::new(),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
+            markdown_tokens_generic: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
             truncation_cache_scene_version: u64::MAX,
             configured_max_truncation_input_bytes: None,
@@ -1136,7 +1149,14 @@ impl Compositor {
         // colors, and code family are in sync with the current theme.
         // Clear the markdown cache so existing entries are re-parsed with the
         // new token values on the next prime() call.
-        self.markdown_tokens = crate::markdown::MarkdownTokens::from_token_map(&map);
+        self.markdown_tokens =
+            crate::markdown::MarkdownTokens::from_token_map_scoped(&map, MarkdownScope::Portal);
+        // Resolve the non-portal (generic) scope too so per-tile token selection
+        // is correct the moment a non-portal markdown surface is introduced
+        // (hud-3ryie).  In v1 this set is never selected (the portal transcript
+        // is the sole governed markdown surface).
+        self.markdown_tokens_generic =
+            crate::markdown::MarkdownTokens::from_token_map_scoped(&map, MarkdownScope::Generic);
         self.markdown_primer.reset();
         // Clear the per-node key cache: it will be repopulated by the next
         // prime_markdown_cache call once the version sentinel fires.
@@ -1281,9 +1301,26 @@ impl Compositor {
         // Rebuild the node key cache for this scene version.
         self.node_key_cache.clear();
 
+        // Classify markdown nodes by scope (hud-3ryie): a node under a governed
+        // portal surface (a tile with a scroll config) resolves the portal token
+        // set; every other markdown node resolves the generic set.  The chosen
+        // token identity is folded into the cache key, so the two scopes never
+        // collide on identical content.  In v1 every markdown node lives under a
+        // portal tile, so `generic` is unused and behavior is identical to before
+        // per-tile scoping.
+        let portal_node_ids = portal_markdown_node_ids(scene);
+        // One `Arc` per scope, cloned by refcount bump onto each job.
+        let portal_tokens = std::sync::Arc::new(self.markdown_tokens.clone());
+        let generic_tokens = std::sync::Arc::new(self.markdown_tokens_generic.clone());
+
         for (node_id, node) in scene.nodes.iter() {
             if let NodeData::TextMarkdown(tm) = &node.data {
-                let key = crate::markdown::MarkdownCache::compute_key(&tm.content);
+                let tokens = if portal_node_ids.contains(node_id) {
+                    &portal_tokens
+                } else {
+                    &generic_tokens
+                };
+                let key = crate::markdown::MarkdownCache::compute_key(&tm.content, tokens);
                 // Store the precomputed key so the frame path can look it up
                 // in O(1) without re-hashing content.
                 self.node_key_cache.insert(*node_id, key);
@@ -1294,17 +1331,21 @@ impl Compositor {
                 } else {
                     None
                 };
-                jobs.push(crate::markdown::PrimeJob { key, content });
+                jobs.push(crate::markdown::PrimeJob {
+                    key,
+                    content,
+                    tokens: std::sync::Arc::clone(tokens),
+                });
             }
         }
 
         // Hand the complete live set to the primer.  It parses any missing
         // content (inline for small payloads, on the background thread for large
-        // ones), atomically swaps in the new snapshot, and evicts dead entries
-        // implicitly (the new snapshot is exactly the live set).  Gated on
-        // scene.version so a late background result never clobbers a newer one.
-        self.markdown_primer
-            .prime(jobs, &self.markdown_tokens, scene.version);
+        // ones) with each job's own scoped tokens, atomically swaps in the new
+        // snapshot, and evicts dead entries implicitly (the new snapshot is
+        // exactly the live set).  Gated on scene.version so a late background
+        // result never clobbers a newer one.
+        self.markdown_primer.prime(jobs, scene.version);
     }
 
     /// Load the current markdown parse-cache snapshot lock-free (hud-33qo7).
@@ -1456,6 +1497,15 @@ impl Compositor {
             // Use the shared helper so this computation is identical to
             // collect_text_items_from_node (hud-plz8q / hud-lu50e).
             let at_tail = tile_at_tail_for_ellipsis(tile.id, scene);
+            // Per-tile token scope (hud-3ryie): a portal surface (scrollable
+            // tile) resolves the portal token set; any other markdown surface
+            // resolves the generic set.  The whole subtree shares the tile's
+            // scope, so select once and thread it down the recursion.
+            let md_tokens = if scene.tile_scroll_config(tile.id).is_some() {
+                &self.markdown_tokens
+            } else {
+                &self.markdown_tokens_generic
+            };
             if let Some(root_id) = tile.root_node {
                 collect_ellipsis_text_items_from_node(
                     root_id,
@@ -1466,7 +1516,7 @@ impl Compositor {
                     at_tail,
                     &markdown_cache,
                     &self.node_key_cache,
-                    &self.markdown_tokens,
+                    md_tokens,
                     font_clamp,
                     &mut live_items,
                 );
@@ -1946,6 +1996,47 @@ pub(crate) fn should_defer_reprime(last_at: Option<std::time::Instant>, interval
 /// `must-mirror` comment that previously guarded the two call sites (hud-plz8q).
 pub(crate) fn tile_at_tail_for_ellipsis(tile_id: SceneId, scene: &SceneGraph) -> bool {
     scene.tile_follow_tail_at_tail(tile_id)
+}
+
+/// Collect the ids of every node that belongs to a **governed portal surface**
+/// — a tile whose scroll config is set (hud-3ryie).
+///
+/// A node is portal-scoped iff it lies in the subtree of a scrollable tile.
+/// This mirrors the "portal = tile has `TileScrollConfig`" gate used elsewhere
+/// (e.g. `SceneGraph::portal_header_band_anchors`).  The returned set is
+/// consulted by `prime_markdown_cache` (and must agree with the render path's
+/// per-tile token selection) to decide whether a markdown node resolves the
+/// portal or the generic token set.
+///
+/// In v1 every markdown node is under a portal tile, so this returns all of
+/// them and per-tile scoping is a no-op (identical to pre-hud-3ryie behavior).
+fn portal_markdown_node_ids(scene: &SceneGraph) -> HashSet<SceneId> {
+    let mut ids = HashSet::new();
+    for tile in scene.tiles.values() {
+        if scene.tile_scroll_config(tile.id).is_none() {
+            continue;
+        }
+        if let Some(root) = tile.root_node {
+            collect_subtree_node_ids(scene, root, &mut ids);
+        }
+    }
+    ids
+}
+
+/// Depth-first collect `node_id` and all its descendants into `out`.
+///
+/// The `insert` return value doubles as a visited-guard, so a malformed graph
+/// with a shared or cyclic child reference terminates instead of recursing
+/// forever.
+fn collect_subtree_node_ids(scene: &SceneGraph, node_id: SceneId, out: &mut HashSet<SceneId>) {
+    if !out.insert(node_id) {
+        return;
+    }
+    if let Some(node) = scene.nodes.get(&node_id) {
+        for child in &node.children {
+            collect_subtree_node_ids(scene, *child, out);
+        }
+    }
 }
 
 /// Resolve the pixel dimensions for a widget instance.

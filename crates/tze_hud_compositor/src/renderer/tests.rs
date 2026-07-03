@@ -10019,26 +10019,27 @@ fn markdown_cache_compute_key_is_deterministic_and_content_addressed() {
     // in isolation by exercising MarkdownCache directly (which is the same
     // code path called by prime_markdown_cache).
     //
-    // The key contract to verify: the BLAKE3 key for content_a matches
-    // MarkdownCache::compute_key(content_a).
-    let expected_key_a = crate::markdown::MarkdownCache::compute_key(content_a);
-    let expected_key_b = crate::markdown::MarkdownCache::compute_key(content_b);
+    // The key contract to verify: the key for content_a matches
+    // MarkdownCache::compute_key(content_a, tokens).  The key folds the
+    // token-set identity (hud-3ryie), so it is computed with a token set.
+    let tokens = crate::markdown::MarkdownTokens::default();
+    let expected_key_a = crate::markdown::MarkdownCache::compute_key(content_a, &tokens);
+    let expected_key_b = crate::markdown::MarkdownCache::compute_key(content_b, &tokens);
 
-    // Verify that compute_key is deterministic (same content → same key).
+    // Verify that compute_key is deterministic (same content + tokens → same key).
     assert_eq!(
         expected_key_a,
-        crate::markdown::MarkdownCache::compute_key(content_a),
+        crate::markdown::MarkdownCache::compute_key(content_a, &tokens),
         "compute_key must be deterministic"
     );
 
     // Verify that distinct content produces distinct keys.
     assert_ne!(
         expected_key_a, expected_key_b,
-        "distinct content must produce distinct BLAKE3 keys"
+        "distinct content must produce distinct keys"
     );
 
     // Verify that the cache hit path returns the same data as compute_key.
-    let tokens = crate::markdown::MarkdownTokens::default();
     let mut cache = crate::markdown::MarkdownCache::new();
     cache.prime(content_a, &tokens);
     assert!(
@@ -10046,7 +10047,7 @@ fn markdown_cache_compute_key_is_deterministic_and_content_addressed() {
         "get_by_key must find content after prime"
     );
     assert!(
-        cache.get(content_a).is_some(),
+        cache.get(content_a, &tokens).is_some(),
         "get must also find content after prime"
     );
 
@@ -10057,6 +10058,85 @@ fn markdown_cache_compute_key_is_deterministic_and_content_addressed() {
     // Contract: after prime_markdown_cache, node_key_cache[node_a_id] ==
     // MarkdownCache::compute_key(content_a).
     let _ = (scene, node_a_id, tile_id, content_b); // mark used
+}
+
+/// Per-tile markdown scoping (hud-3ryie): `portal_markdown_node_ids` classifies
+/// a markdown node under a scrollable (portal) tile as portal-scoped, while a
+/// node under a non-scrollable tile is NOT — so the compositor selects the
+/// portal token set only for the governed portal surface and the generic set
+/// everywhere else.  GPU-free: exercises the classifier directly.
+#[test]
+fn portal_markdown_node_ids_scopes_by_scroll_config() {
+    use tze_hud_scene::types::{
+        FontFamily, NodeData, Rect, TextAlign, TextMarkdownNode, TextOverflow, TileScrollConfig,
+    };
+
+    fn md_node(id: SceneId, content: &str) -> Node {
+        Node {
+            id,
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.to_string(),
+                bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: tze_hud_scene::types::Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
+            }),
+        }
+    }
+
+    let mut scene = SceneGraph::new(512.0, 256.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("test", 60_000, vec![]);
+
+    // Portal tile: has a scroll config → governed portal surface.
+    let portal_node_id = SceneId::new();
+    let portal_tile = scene
+        .create_tile(
+            tab_id,
+            "portal",
+            lease_id,
+            Rect::new(0.0, 0.0, 256.0, 256.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .set_tile_root(portal_tile, md_node(portal_node_id, "# Portal"))
+        .unwrap();
+    scene
+        .register_tile_scroll_config(portal_tile, TileScrollConfig::vertical())
+        .unwrap();
+
+    // Plain tile: NO scroll config → non-portal markdown surface.
+    let plain_node_id = SceneId::new();
+    let plain_tile = scene
+        .create_tile(
+            tab_id,
+            "plain",
+            lease_id,
+            Rect::new(256.0, 0.0, 256.0, 256.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .set_tile_root(plain_tile, md_node(plain_node_id, "# Plain"))
+        .unwrap();
+
+    let portal_ids = super::portal_markdown_node_ids(&scene);
+
+    assert!(
+        portal_ids.contains(&portal_node_id),
+        "a node under a scrollable (portal) tile must be portal-scoped"
+    );
+    assert!(
+        !portal_ids.contains(&plain_node_id),
+        "a node under a non-scrollable tile must NOT be portal-scoped, so \
+         portal.transcript.* preferences cannot reach it"
+    );
 }
 
 /// MarkdownCache::prime is idempotent: repeated calls with the same content
@@ -10127,7 +10207,12 @@ async fn prime_markdown_cache_builds_node_key_cache_entry() {
     let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
 
     let content = "## Heading\n\nParagraph with *italic* text.";
-    let expected_key = crate::markdown::MarkdownCache::compute_key(content);
+    // Empty token map → portal and generic scopes both resolve to defaults, so
+    // the key is scope-independent here (hud-3ryie).
+    let expected_key = crate::markdown::MarkdownCache::compute_key(
+        content,
+        &crate::markdown::MarkdownTokens::default(),
+    );
 
     let node_id = SceneId::new();
     let node = Node {
@@ -10648,7 +10733,7 @@ fn markdown_cache_miss_fallback_is_non_lossy() {
     let tokens = crate::markdown::MarkdownTokens::default();
 
     // Verify the cache is cold (no entry for this content).
-    let content_key = crate::markdown::MarkdownCache::compute_key(content);
+    let content_key = crate::markdown::MarkdownCache::compute_key(content, &tokens);
     assert!(
         cold_cache.get_by_key(&content_key).is_none(),
         "cache must be cold before the test"

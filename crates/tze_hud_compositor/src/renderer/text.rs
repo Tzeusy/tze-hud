@@ -1162,12 +1162,23 @@ impl super::Compositor {
             // cached/styled markdown path instead of dropping to the lossy
             // raw-content constructor.  Only genuine pixel runs (start < end)
             // force the legacy path. (hud-9v3t6)
+            // Per-tile token scope (hud-3ryie): a portal surface (scrollable
+            // tile) resolves the portal token set; any other markdown surface
+            // resolves the generic set.  Used for the cache-miss key/inline
+            // parse so it agrees with the scope `prime_markdown_cache` used.
+            let md_tokens = if scene.tile_scroll_config(tile.id).is_some() {
+                &self.markdown_tokens
+            } else {
+                &self.markdown_tokens_generic
+            };
             let mut item = if !crate::text::markdown_node_has_pixel_runs(tm) {
                 let content_key = self
                     .node_key_cache
                     .get(&node_id)
                     .copied()
-                    .unwrap_or_else(|| crate::markdown::MarkdownCache::compute_key(&tm.content));
+                    .unwrap_or_else(|| {
+                        crate::markdown::MarkdownCache::compute_key(&tm.content, md_tokens)
+                    });
                 // Load the current snapshot lock-free (hud-33qo7).  Pinned by the
                 // returned Arc for the duration of this lookup.
                 let markdown_cache = self.markdown_cache();
@@ -1192,8 +1203,7 @@ impl super::Compositor {
                         "markdown cache miss on render path — expected commit-time prime \
                          (hud-xcp9b); parsing inline to preserve styling [hud-380dl]"
                     );
-                    let parsed =
-                        crate::markdown::parse_markdown_subset(&tm.content, &self.markdown_tokens);
+                    let parsed = crate::markdown::parse_markdown_subset(&tm.content, md_tokens);
                     TextItem::from_text_markdown_cached(
                         tm,
                         tile.bounds.x - scroll_x,
@@ -1430,10 +1440,11 @@ pub(super) fn collect_ellipsis_text_items_from_node(
             // sentinel runs carry metadata only and must not force the lossy
             // raw-content path. (hud-9v3t6)
             let mut item = if !crate::text::markdown_node_has_pixel_runs(tm) {
-                let content_key = node_key_cache
-                    .get(&node_id)
-                    .copied()
-                    .unwrap_or_else(|| crate::markdown::MarkdownCache::compute_key(&tm.content));
+                let content_key = node_key_cache.get(&node_id).copied().unwrap_or_else(|| {
+                    // Key with the tile-scoped tokens the caller selected
+                    // (hud-3ryie) so it agrees with prime_markdown_cache.
+                    crate::markdown::MarkdownCache::compute_key(&tm.content, markdown_tokens)
+                });
                 if let Some(parsed) = markdown_cache.get_by_key(&content_key) {
                     TextItem::from_text_markdown_cached(tm, tile_x, tile_y, parsed)
                 } else {
