@@ -829,6 +829,9 @@ impl Compositor {
         // collecting text items (measures the caret x with a mutable rasterizer
         // borrow the collect path lacks).  No-op when no composer is active.
         self.prime_composer_scroll_offset(scene);
+        // Measure the viewer-echo history wrap once per frame, before the
+        // text pass reads the line count for bottom-alignment (hud-pncm3).
+        self.prime_viewer_echo_layout(scene);
         // Text is content — rendered above geometry rectangles but below chrome.
         let text_items_chrome: Vec<TextItem> = if self.text_rasterizer.is_some() {
             self.collect_text_items(scene, sw, sh)

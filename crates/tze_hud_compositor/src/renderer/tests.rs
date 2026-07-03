@@ -500,6 +500,178 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
     );
 }
 
+// ── Viewer-echo wrap + newline rendering (hud-pncm3) ───────────────────────
+
+/// Build a portal tile rooted at a composer-input HitRegion spanning the tile,
+/// returning `(scene, tile_id)`. The composer region equals the tile, so there
+/// is room above the composer box for viewer history.
+fn viewer_echo_test_scene() -> (SceneGraph, SceneId) {
+    let mut scene = SceneGraph::new(400.0, 300.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            1,
+        )
+        .unwrap();
+    let composer_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: composer_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                    interaction_id: "portal-composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+    (scene, tile_id)
+}
+
+const VIEWER_ECHO_COLOR: [u8; 4] = [0x8A, 0xB4, 0xF8, 0xFF];
+
+fn find_echo(items: &[crate::text::TextItem]) -> &crate::text::TextItem {
+    items
+        .iter()
+        .find(|t| t.color == VIEWER_ECHO_COLOR)
+        .expect("a viewer-echo text item must be present")
+}
+
+/// Geometry helpers matching what the code derives internally.
+fn echo_geometry(compositor: &Compositor) -> (f32, f32) {
+    let region = Rect::new(0.0, 0.0, 400.0, 300.0);
+    let lhm = crate::markdown::MarkdownTokens::default().line_height_multiplier;
+    let composer_font =
+        super::token_colors::resolve_composer_overlay_tokens(&compositor.token_map).font_size_px;
+    let echo_font =
+        super::token_colors::resolve_viewer_echo_tokens(&compositor.token_map).font_size_px;
+    let box_top = Compositor::composer_input_box(region, composer_font, lhm, 1.0).y;
+    let echo_line_h = (echo_font * lhm).max(1.0);
+    (box_top, echo_line_h)
+}
+
+/// hud-pncm3 (a): an entry with an embedded newline (Ctrl+Enter draft, #992)
+/// renders as a multi-line block — the `\n` is preserved and the block is at
+/// least two visual lines tall — with wrapping enabled (zone-width bounds).
+#[tokio::test]
+async fn test_viewer_echo_renders_embedded_newline_as_multiple_lines() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, tile_id) = viewer_echo_test_scene();
+    compositor
+        .viewer_echoes
+        .append(tile_id, "line one\nline two".to_owned(), 1);
+
+    compositor.prime_viewer_echo_layout(&scene);
+    let items = compositor.collect_text_items(&scene, 400.0, 300.0);
+    let echo = find_echo(&items);
+
+    assert_eq!(
+        &*echo.text, "line one\nline two",
+        "the embedded newline must be preserved in the echo text (not stripped)"
+    );
+    assert!(
+        echo.bounds_width < 1000.0,
+        "echo must wrap to the zone width (bounds_width {}), not a forced single line",
+        echo.bounds_width
+    );
+    let (box_top, echo_line_h) = echo_geometry(&compositor);
+    let block_height = box_top - echo.pixel_y;
+    assert!(
+        block_height >= 2.0 * echo_line_h - 0.5,
+        "two logical lines must render a >=2-line block (height {block_height}, line {echo_line_h})"
+    );
+    // Bottom-aligned: the block sits directly above the composer box.
+    assert!(
+        (echo.pixel_y + echo.bounds_height - box_top).abs() < 0.5,
+        "block bottom must align to the live composer box top"
+    );
+}
+
+/// hud-pncm3 (b): a single logical line wider than the zone wraps to multiple
+/// visual lines (measured via the prime), rather than overflowing on one line.
+#[tokio::test]
+async fn test_viewer_echo_wraps_long_entry() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, tile_id) = viewer_echo_test_scene();
+    // No newline; far wider than the ~388px zone at the echo font.
+    compositor
+        .viewer_echoes
+        .append(tile_id, "wrap ".repeat(60).trim_end().to_owned(), 1);
+
+    compositor.prime_viewer_echo_layout(&scene);
+    let items = compositor.collect_text_items(&scene, 400.0, 300.0);
+    let echo = find_echo(&items);
+
+    let (box_top, echo_line_h) = echo_geometry(&compositor);
+    let block_height = box_top - echo.pixel_y;
+    assert!(
+        block_height >= 2.0 * echo_line_h - 0.5,
+        "a long entry must wrap to >=2 visual lines (block height {block_height})"
+    );
+    assert!(
+        echo.bounds_width <= 400.0,
+        "wrap width must be the zone width, not an unbounded single line"
+    );
+}
+
+/// hud-pncm3 (c): a history taller than the band above the composer box stays
+/// bounded — the scissor clips to the band and never intrudes into the box, and
+/// the newest reply stays bottom-aligned to the box top.
+#[tokio::test]
+async fn test_viewer_echo_history_bounded_above_live_box() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, tile_id) = viewer_echo_test_scene();
+    // Many wrapping entries → the joined block far exceeds the band height.
+    for i in 0..8 {
+        compositor
+            .viewer_echoes
+            .append(tile_id, format!("reply {i} ").repeat(20), i as u64);
+    }
+
+    compositor.prime_viewer_echo_layout(&scene);
+    let items = compositor.collect_text_items(&scene, 400.0, 300.0);
+    let echo = find_echo(&items);
+
+    let region = Rect::new(0.0, 0.0, 400.0, 300.0);
+    let (box_top, _) = echo_geometry(&compositor);
+    let band_height = box_top - region.y;
+
+    // The scissor is exactly the band above the box — it does not grow with the
+    // history and never extends into the composer box.
+    assert!(
+        (echo.clip_pixel_y - region.y).abs() < 0.5,
+        "clip top must be the region top"
+    );
+    assert!(
+        (echo.clip_bounds_height - band_height).abs() < 0.5,
+        "clip height must equal the band above the box (bounded), got {}",
+        echo.clip_bounds_height
+    );
+    assert!(
+        echo.clip_pixel_y + echo.clip_bounds_height <= box_top + 0.5,
+        "the echo must never intrude into the live composer box"
+    );
+    // Newest reply stays pinned to the box top even when older lines clip.
+    assert!(
+        (echo.pixel_y + echo.bounds_height - box_top).abs() < 0.5,
+        "block bottom (newest) must remain aligned to the box top under overflow"
+    );
+}
+
 // ── Chrome layer pixel tests ──────────────────────────────────────────────
 
 /// Layer 1 pixel test: chrome layer is always visible above max-z-order agent tile.

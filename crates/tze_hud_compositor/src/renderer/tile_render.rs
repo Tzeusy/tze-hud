@@ -43,7 +43,7 @@ use super::image_cache::{
 use super::token_colors::{
     ComposerOverlayTokens, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE, TILE_BG_TEXT_MARKDOWN,
     linear_to_srgb, resolve_composer_overlay_tokens, resolve_focus_ring_tokens,
-    resolve_tile_bg_token,
+    resolve_tile_bg_token, resolve_viewer_echo_tokens,
 };
 
 /// Horizontal inset (physical px) between the composer region edge and the draft
@@ -879,12 +879,81 @@ impl Compositor {
         dfs(tile.root_node?, scene)
     }
 
+    /// The zone width available for viewer-echo text inside `region` (the
+    /// composer region), i.e. the region interior minus the horizontal text
+    /// margins.  Shared by the prime (wrap measurement) and collect (render) so
+    /// the measured line count and the rendered wrap agree.
+    fn viewer_echo_zone_width(region: Rect) -> f32 {
+        (region.width - COMPOSER_TEXT_MARGIN * 2.0).max(1.0)
+    }
+
+    /// The retained viewer-echo entries for `tile` joined oldest-first with `\n`,
+    /// so the rendered block reads top (oldest) to bottom (newest) and embedded
+    /// newlines from Ctrl+Enter drafts (#992) break as their own lines (hud-pncm3).
+    fn viewer_echo_joined_text(&self, tile_id: SceneId) -> Option<String> {
+        let entries = self.viewer_echoes.entries_for(tile_id)?;
+        Some(
+            entries
+                .iter()
+                .map(|e| e.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    /// Measure the wrapped visual-line count of each tile's viewer-echo history
+    /// once per frame (hud-pncm3), storing it in `viewer_echo_line_counts`.
+    ///
+    /// Word-wrap measurement needs the `&mut` text rasterizer (font metrics),
+    /// which the `&self` `collect_viewer_echo_text_items` cannot reach — so it is
+    /// primed here, mirroring `prime_composer_scroll_offset`. Must run once per
+    /// frame BEFORE the text pass. Off the transcript hot path: it runs only when
+    /// echoes exist and over a bounded (`MAX_VIEWER_ECHO_ENTRIES`) history.
+    pub(crate) fn prime_viewer_echo_layout(&mut self, scene: &SceneGraph) {
+        self.viewer_echo_line_counts.clear();
+        if self.viewer_echoes.is_empty() || self.text_rasterizer.is_none() {
+            return;
+        }
+        let lhm = crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        let echo_font = resolve_viewer_echo_tokens(&self.token_map).font_size_px;
+
+        // Gather (tile, zone_width, joined_text) under &self first, then measure
+        // under &mut self.text_rasterizer — the two borrows do not overlap.
+        let mut jobs: Vec<(SceneId, f32, String)> = Vec::new();
+        for tile in scene.visible_tiles() {
+            let Some(composer_node) = Self::find_composer_node_in_tile(tile, scene) else {
+                continue;
+            };
+            let Some(region) = Self::composer_region_bounds(tile, scene, composer_node) else {
+                continue;
+            };
+            let Some(joined) = self.viewer_echo_joined_text(tile.id) else {
+                continue;
+            };
+            jobs.push((tile.id, Self::viewer_echo_zone_width(region), joined));
+        }
+
+        let mut counts: Vec<(SceneId, usize)> = Vec::with_capacity(jobs.len());
+        if let Some(tr) = self.text_rasterizer.as_mut() {
+            for (tile_id, zone_width, joined) in &jobs {
+                let (total_lines, _) =
+                    tr.measure_composer_wrapped(joined, 0, *zone_width, echo_font, lhm);
+                counts.push((*tile_id, total_lines.max(1)));
+            }
+        }
+        for (tile_id, count) in counts {
+            self.viewer_echo_line_counts.insert(tile_id, count);
+        }
+    }
+
     /// Collect kind-distinct `TextItem`s for the runtime-authored viewer reply
-    /// echo (hud-nx7yq.3), stacked upward from the top of the LIVE composer input
-    /// box — newest reply nearest the composer. Anchoring to the current
-    /// `visible_lines`-aware box (not the fixed single-line strip) keeps the echo
-    /// history riding above a growing multi-line draft rather than colliding with
-    /// it (hud-xgtuf).
+    /// echo (hud-nx7yq.3), as a single wrapped block bottom-aligned to the top of
+    /// the LIVE composer input box — newest reply nearest the composer. Anchoring
+    /// to the current `visible_lines`-aware box (not the fixed single-line strip)
+    /// keeps the echo history riding above a growing multi-line draft rather than
+    /// colliding with it (hud-xgtuf). The block word-wraps to the zone width and
+    /// honors embedded newlines (hud-pncm3); the oldest lines clip first when the
+    /// history would exceed the band above the composer box.
     ///
     /// Returns an empty vec when the tile has no retained viewer echoes, no
     /// composer node to anchor to, or the text rasterizer is unavailable. Lines
@@ -901,12 +970,12 @@ impl Compositor {
     ) -> Vec<crate::text::TextItem> {
         let _ = (sw, sh); // retained for API symmetry with sibling collect helpers
         let mut items = Vec::new();
-        let Some(entries) = self.viewer_echoes.entries_for(tile.id) else {
-            return items;
-        };
         if self.text_rasterizer.is_none() {
             return items;
         }
+        let Some(joined) = self.viewer_echo_joined_text(tile.id) else {
+            return items;
+        };
         let Some(composer_node) = Self::find_composer_node_in_tile(tile, scene) else {
             return items;
         };
@@ -916,14 +985,14 @@ impl Compositor {
 
         let line_height_multiplier =
             crate::markdown::MarkdownTokens::default().line_height_multiplier;
-        // Anchor the history stack to the TOP of the LIVE composer input box —
+        // Anchor the history block to the TOP of the LIVE composer input box —
         // the same `visible_lines`-aware box the draft render uses (hud-xgtuf).
         // Post-submit the box rests at one line (composer_layout resets to
         // default each frame), but while the viewer types a multi-line draft the
-        // box grows upward; anchoring here keeps the echo stack riding above the
-        // live draft instead of the fixed single-line position it would otherwise
-        // grow into. The box is measured with the COMPOSER font (matching the
-        // draft box exactly), while the echo lines use their own font below.
+        // box grows upward; anchoring here keeps the echo riding above the live
+        // draft instead of the fixed single-line position it would otherwise grow
+        // into. The box is measured with the COMPOSER font (matching the draft box
+        // exactly), while the echo lines use their own font below.
         let composer_font_size_px = resolve_composer_overlay_tokens(&self.token_map).font_size_px;
         let draft_box = Self::composer_input_box(
             region,
@@ -934,45 +1003,60 @@ impl Compositor {
         let line_h = (tokens.font_size_px * line_height_multiplier).max(1.0);
         let margin = COMPOSER_TEXT_MARGIN;
         let opacity = self.tile_effective_opacity(tile, scene);
+        let zone_width = Self::viewer_echo_zone_width(region);
 
         // The band available for history: from the region top down to the box top.
         let band_top = region.y;
-
-        // Newest entry nearest the box top (bottom of the stack), older above.
-        for (i, entry) in entries.iter().rev().enumerate() {
-            let line_top = draft_box.y - (i as f32 + 1.0) * line_h;
-            if line_top < band_top {
-                // Above the composer region — outside the bounded window.
-                break;
-            }
-            items.push(crate::text::TextItem {
-                text: Arc::from(entry.text.as_str()),
-                pixel_x: region.x + margin,
-                pixel_y: line_top,
-                // A wide layout width keeps each reply on a single line; the clip
-                // below confines it to the region interior so overflow is clipped
-                // at the box edge rather than wrapping onto a second row.
-                bounds_width: 100_000.0,
-                bounds_height: line_h,
-                clip_pixel_x: region.x + margin,
-                clip_pixel_y: line_top,
-                clip_bounds_width: (region.width - margin * 2.0).max(1.0),
-                clip_bounds_height: line_h,
-                font_size_px: tokens.font_size_px,
-                font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
-                font_weight: 400,
-                color: tokens.color,
-                alignment: tze_hud_scene::types::TextAlign::Start,
-                overflow: tze_hud_scene::types::TextOverflow::Clip,
-                outline_color: None,
-                outline_width: None,
-                opacity,
-                color_runs: Box::new([]),
-                styled_runs: Box::new([]),
-                line_height_multiplier,
-                viewport: crate::overflow::TruncationViewport::HeadAnchored,
-            });
+        let band_height = draft_box.y - band_top;
+        if band_height <= 0.0 {
+            return items;
         }
+
+        // Total WRAPPED visual-line count of the joined history: primed
+        // (wrap-accurate) or, absent a prime this frame, the logical `\n`-split
+        // count so embedded newlines still lay out one-line-per-break (hud-pncm3).
+        let total_lines = self
+            .viewer_echo_line_counts
+            .get(&tile.id)
+            .copied()
+            .unwrap_or_else(|| joined.split('\n').count())
+            .max(1);
+        let block_height = (total_lines as f32 * line_h).max(line_h);
+
+        // Bottom-align the block so the NEWEST reply sits just above the composer
+        // box; the block grows upward. When the history is taller than the band,
+        // the top (oldest) lines fall above `band_top` and are clipped by the
+        // scissor below — the newest replies stay visible and the bound holds.
+        let block_top = draft_box.y - block_height;
+
+        items.push(crate::text::TextItem {
+            text: Arc::from(joined.as_str()),
+            pixel_x: region.x + margin,
+            pixel_y: block_top,
+            // Wrap to the zone width (Wrap::Word in the render path) so long
+            // replies wrap instead of overflowing, and embedded `\n`s break.
+            bounds_width: zone_width,
+            bounds_height: block_height,
+            // Scissor to the band between the region top and the live box top:
+            // oldest lines clip first; the block never intrudes into the box.
+            clip_pixel_x: region.x + margin,
+            clip_pixel_y: band_top,
+            clip_bounds_width: zone_width,
+            clip_bounds_height: band_height,
+            font_size_px: tokens.font_size_px,
+            font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
+            font_weight: 400,
+            color: tokens.color,
+            alignment: tze_hud_scene::types::TextAlign::Start,
+            overflow: tze_hud_scene::types::TextOverflow::Clip,
+            outline_color: None,
+            outline_width: None,
+            opacity,
+            color_runs: Box::new([]),
+            styled_runs: Box::new([]),
+            line_height_multiplier,
+            viewport: crate::overflow::TruncationViewport::HeadAnchored,
+        });
         items
     }
 
