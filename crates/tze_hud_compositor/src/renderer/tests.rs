@@ -7482,6 +7482,7 @@ async fn drag_handle_hit_test_wins_on_passthrough_tile() {
                 ZoneInteractionKind::DragHandle {
                     element_id,
                     element_kind,
+                    ..
                 },
             interaction_id,
             ..

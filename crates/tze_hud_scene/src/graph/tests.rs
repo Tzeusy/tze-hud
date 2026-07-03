@@ -4235,6 +4235,222 @@ fn portal_anchor_tile_picks_largest_area_member() {
 
 // ── hud-ovjxu.1: viewer-local resize font-scale multiplier ───────────────────
 
+// ── hud-cpjqe: live top-band drag flakiness diagnosis ────────────────────────
+
+/// Build the EXACT live exemplar portal tile structure (PORTAL_W=860, H=680):
+/// a capture-backstop and a frame with IDENTICAL bounds sharing the lease, plus
+/// two scrollable panes, a far-corner drag shield, and a minimized-icon tile —
+/// backstop/shield/minimized-icon in PASSTHROUGH, frame/panes in CAPTURE. The
+/// frame carries the header nodes (minimize 44x52 accepts_pointer; the header
+/// drag marker is inert). Returns (scene, frame, backstop, input, output).
+fn live_exemplar_portal_scene() -> (SceneGraph, SceneId, SceneId, SceneId, SceneId) {
+    const PX: f32 = 100.0;
+    const PY: f32 = 100.0;
+    const PORTAL_W: f32 = 860.0;
+    const PORTAL_H: f32 = 680.0;
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab = scene.create_tab("Main", 0).unwrap();
+    let lease = scene.grant_lease(
+        "portal",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    // Backstop FIRST (z lowest), same bounds as the frame.
+    let backstop = scene
+        .create_tile(
+            tab,
+            "portal",
+            lease,
+            Rect::new(PX, PY, PORTAL_W, PORTAL_H),
+            0,
+        )
+        .unwrap();
+    scene
+        .update_tile_input_mode(backstop, InputMode::Passthrough, "portal")
+        .unwrap();
+    // Frame — identical bounds, CAPTURE. Carries the header nodes.
+    let frame = scene
+        .create_tile(
+            tab,
+            "portal",
+            lease,
+            Rect::new(PX, PY, PORTAL_W, PORTAL_H),
+            1,
+        )
+        .unwrap();
+    let minimize_id = SceneId::new();
+    scene
+        .set_tile_root(
+            frame,
+            Node {
+                id: minimize_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 44.0, 52.0),
+                    interaction_id: "portal-minimize".to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+    // Panes (scrollable, CAPTURE), below the 52px header.
+    let input = scene
+        .create_tile(
+            tab,
+            "portal",
+            lease,
+            Rect::new(PX, PY + 53.0, 420.0, 590.0),
+            3,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(input, TileScrollConfig::vertical())
+        .unwrap();
+    let output = scene
+        .create_tile(
+            tab,
+            "portal",
+            lease,
+            Rect::new(PX + 440.0, PY + 53.0, 420.0, 590.0),
+            4,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(output, TileScrollConfig::vertical())
+        .unwrap();
+    // Far-corner drag shield (passthrough, outside the frame).
+    let shield = scene
+        .create_tile(
+            tab,
+            "portal",
+            lease,
+            Rect::new(1919.0, 1079.0, 1.0, 1.0),
+            20,
+        )
+        .unwrap();
+    scene
+        .update_tile_input_mode(shield, InputMode::Passthrough, "portal")
+        .unwrap();
+    (scene, frame, backstop, input, output)
+}
+
+/// Replicate the compositor's `collect_drag_handle_entries` + populate step
+/// (band for the portal anchor, legacy 24x8 grip for every other visible tile)
+/// so `hit_test` can be swept without a GPU.
+fn populate_live_drag_handles(scene: &mut SceneGraph) {
+    let band_rects: std::collections::HashMap<SceneId, Rect> =
+        scene.portal_header_band_anchors(52.0).into_iter().collect();
+    let tiles: Vec<(SceneId, Rect)> = scene
+        .visible_tiles()
+        .iter()
+        .map(|t| (t.id, t.bounds))
+        .collect();
+    scene.overlay.drag_handle_hit_regions.clear();
+    for (tab_order, (id, bounds)) in (0u32..).zip(tiles) {
+        let (rect, is_band) = if let Some(band) = band_rects.get(&id) {
+            (*band, true)
+        } else {
+            // drag_handle_bounds: 24x8 centered grip straddling the top edge.
+            let w = 24.0_f32;
+            let h = 8.0_f32;
+            let x = (bounds.x + (bounds.width - w) * 0.5).clamp(0.0, 1920.0 - w);
+            let y = (bounds.y - h * 0.5).clamp(0.0, 1080.0 - h);
+            (Rect::new(x, y, w, h), false)
+        };
+        scene
+            .overlay
+            .drag_handle_hit_regions
+            .push(DragHandleHitRegion {
+                element_id: id,
+                element_kind: DragHandleElementKind::Tile,
+                bounds: rect,
+                interaction_id: format!("drag-handle:{id:?}"),
+                hit_region: HitRegionNode {
+                    bounds: rect,
+                    interaction_id: format!("drag-handle:{id:?}"),
+                    accepts_pointer: true,
+                    ..Default::default()
+                },
+                tab_order,
+                is_header_band: is_band,
+            });
+    }
+}
+
+#[test]
+fn header_band_anchor_is_deterministically_the_visible_frame_not_backstop() {
+    // hud-cpjqe root cause: the capture-backstop and the frame have IDENTICAL
+    // bounds, so the largest-area anchor pick tie-breaks on random UUIDs — the
+    // header band lands on a non-deterministic tile each session ("fails half the
+    // time"). The band MUST deterministically anchor on the visible interactive
+    // frame, never the invisible passthrough backstop.
+    let (scene, frame, backstop, _in, _out) = live_exemplar_portal_scene();
+    let anchors = scene.portal_header_band_anchors(52.0);
+    let anchor_ids: Vec<SceneId> = anchors.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        anchor_ids,
+        vec![frame],
+        "the header band must anchor on the visible frame, not the passthrough backstop"
+    );
+    assert!(
+        !anchor_ids.contains(&backstop),
+        "a passthrough capture-backstop must never own the drag band"
+    );
+}
+
+#[test]
+fn header_band_drag_engages_across_full_empty_header_width() {
+    // hud-cpjqe: sweep hit_test across the full band width at three header y
+    // values against the real live tile structure. Every empty-header point (past
+    // the minimize control) MUST resolve to a whole-portal drag; the minimize
+    // control MUST still win in its own rect. A DragHandle whose element resolves
+    // into the portal group is a successful drag-engage.
+    let (mut scene, frame, backstop, _in, _out) = live_exemplar_portal_scene();
+    populate_live_drag_handles(&mut scene);
+
+    // Any of the portal's structural tiles resolving to the same group = a good
+    // drag (translate_portal_group_on_drag re-resolves the group from the anchor).
+    let group_ids = [frame, backstop];
+    let px = 100.0_f32;
+    let py = 100.0_f32;
+    let mut misses: Vec<(f32, f32, String)> = Vec::new();
+    for &ly in &[10.0_f32, 26.0, 40.0] {
+        let mut x = 2.0_f32;
+        while x < 860.0 {
+            let gx = px + x;
+            let gy = py + ly;
+            let hit = scene.hit_test(gx, gy);
+            let ok = match &hit {
+                HitResult::ZoneInteraction {
+                    kind: ZoneInteractionKind::DragHandle { element_id, .. },
+                    ..
+                } => {
+                    group_ids.contains(element_id)
+                        || scene.portal_anchor_tile(*element_id) == Some(frame)
+                }
+                HitResult::NodeHit { interaction_id, .. } => {
+                    // Only acceptable non-drag hit is the minimize control (x<44).
+                    interaction_id == "portal-minimize" && x < 44.0
+                }
+                _ => false,
+            };
+            if !ok {
+                misses.push((x, ly, format!("{hit:?}")));
+            }
+            x += 8.0;
+        }
+    }
+    assert!(
+        misses.is_empty(),
+        "hud-cpjqe: {} header points did not engage a whole-portal drag \
+         (dead spots => flaky drag). First few: {:?}",
+        misses.len(),
+        &misses[..misses.len().min(6)]
+    );
+}
+
 #[test]
 fn tile_font_scale_defaults_to_one_and_round_trips() {
     let mut scene = SceneGraph::new(800.0, 600.0);

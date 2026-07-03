@@ -121,12 +121,18 @@ pub struct DeviceDragState {
     pub threshold_ms: u64,
     /// Long-press progress last emitted (0.0–1.0).
     pub last_progress: f32,
+    /// Immediate-activation handle (hud-cpjqe): a portal header BAND drags on the
+    /// first pointer-move with no long-press hold and no early-movement cancel —
+    /// Windows-titlebar semantics. `false` for the legacy grip, which keeps the
+    /// long-press hysteresis to distinguish tap-to-focus from drag.
+    pub immediate: bool,
 }
 
 impl DeviceDragState {
     /// Construct a new state for a pointer-down event.
     ///
-    /// `threshold_ms` is 250 for pointer/mouse or 1000 for touch.
+    /// `threshold_ms` is 250 for pointer/mouse or 1000 for touch. `immediate`
+    /// marks a header-band handle that activates on the first move (hud-cpjqe).
     pub fn new(
         interaction_id: String,
         element_id: SceneId,
@@ -134,6 +140,7 @@ impl DeviceDragState {
         press_x: f32,
         press_y: f32,
         threshold_ms: u64,
+        immediate: bool,
     ) -> Self {
         Self {
             phase: DragPhase::Accumulating,
@@ -147,6 +154,7 @@ impl DeviceDragState {
             grab_offset_y: 0.0,
             threshold_ms,
             last_progress: 0.0,
+            immediate,
         }
     }
 
@@ -395,6 +403,7 @@ mod tests {
             100.0,
             200.0,
             250,
+            false,
         );
         assert_eq!(state.phase, DragPhase::Accumulating);
         assert!(state.last_progress == 0.0);
@@ -409,6 +418,7 @@ mod tests {
             100.0,
             200.0,
             250,
+            false,
         );
         // Brand-new state — threshold not met
         assert!(!state.is_threshold_met());
@@ -423,6 +433,7 @@ mod tests {
             100.0,
             200.0,
             1, // 1ms threshold so it passes immediately in tests
+            false,
         );
         std::thread::sleep(Duration::from_millis(5));
         assert!(state.is_threshold_met());
@@ -439,6 +450,7 @@ mod tests {
             100.0,
             200.0,
             250,
+            false,
         );
         // 5dp movement — below 10dp threshold
         assert!(
@@ -456,6 +468,7 @@ mod tests {
             100.0,
             200.0,
             250,
+            false,
         );
         // 15dp movement — above 10dp threshold
         assert!(
