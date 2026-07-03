@@ -1475,6 +1475,7 @@ mod tests {
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
+            composer_visual_layout: Arc::new(StdMutex::new(None)),
             portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
             portal_op_rx: None,
             pending_keyboard_events: VecDeque::new(),

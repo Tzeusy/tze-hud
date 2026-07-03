@@ -62,7 +62,9 @@ use icon::*;
 // LocalComposerStateHandle) so callers via `tze_hud_compositor::renderer::*`
 // see unchanged paths.  The pub(crate) helpers are brought in separately.
 use image_cache::apply_composer_slot;
-pub use image_cache::{ImageTextureEntry, LocalComposerState, LocalComposerStateHandle};
+pub use image_cache::{
+    ComposerVisualLayoutHandle, ImageTextureEntry, LocalComposerState, LocalComposerStateHandle,
+};
 use text::*;
 use token_colors::*;
 pub use viewer_echo::{
@@ -348,6 +350,14 @@ pub struct Compositor {
     /// as kind-distinct lines above the composer input strip.  Fed by draining
     /// `viewer_echo_queue` and pruned to the live tile set each frame.
     pub(crate) viewer_echoes: viewer_echo::ViewerEchoStore,
+    /// Reverse channel: the active composer's wrapped-line layout, published each
+    /// frame for the input thread's soft-wrap vertical caret movement (hud-21o6x).
+    ///
+    /// Written at the tail of [`Compositor::prime_composer_scroll_offset`] (this
+    /// thread) with the multi-line profile's freshly measured layout, or `None`
+    /// otherwise. The runtime clones this `Arc` at init and reads it on the main
+    /// thread before dispatching ArrowUp/ArrowDown.
+    pub composer_visual_layout: image_cache::ComposerVisualLayoutHandle,
     /// Most-recently drained local composer state for this frame.
     ///
     /// Populated by draining `local_composer_state` at frame start.
@@ -550,6 +560,7 @@ impl Compositor {
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
             viewer_echoes: viewer_echo::ViewerEchoStore::new(),
+            composer_visual_layout: Arc::new(StdMutex::new(None)),
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),
@@ -832,6 +843,7 @@ impl Compositor {
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
             viewer_echoes: viewer_echo::ViewerEchoStore::new(),
+            composer_visual_layout: Arc::new(StdMutex::new(None)),
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),
