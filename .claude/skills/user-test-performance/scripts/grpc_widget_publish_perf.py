@@ -63,6 +63,14 @@ class SessionClient:
         self.bytes_in_total = 0
         self.payload_counts: dict[str, int] = {}
 
+        # TTL (ms) granted by the most recent renew_lease(). Long-lived perf paths
+        # that drive a lease directly read this to schedule renewals before the
+        # lease expires; otherwise the runtime rejects mutations with
+        # MUTATION_REJECTED / "lease expired" mid-run (parity with hud-hk8kl/#1010).
+        # The current WidgetPublish benchmark is capability-based and drives no
+        # lease, so nothing renews yet.
+        self.last_granted_lease_ttl_ms: int = 0
+
     def next_seq(self) -> int:
         self.seq += 1
         return self.seq
@@ -137,6 +145,35 @@ class SessionClient:
             if which == "session_error":
                 err = msg.session_error
                 raise RuntimeError(f"session_error: {err.code} {err.message} ({err.hint})")
+
+    async def renew_lease(self, lease_id: bytes, new_ttl_ms: int = 0) -> int:
+        """Renew an existing lease's TTL and return the newly granted TTL (ms).
+
+        ``new_ttl_ms=0`` asks the runtime to re-grant the lease's original TTL
+        (see ``LeaseRenew.new_ttl_ms`` in session.proto). Sustained callers renew
+        before ~75% of the granted TTL elapses so the lease never expires mid-run.
+
+        Mirrors ``HudClient.renew_lease`` in the user-test skill (hud-hk8kl/#1010).
+        This benchmark's WidgetPublish path is capability-based and drives no
+        lease, so no caller renews yet; the method exists so a future long-lived,
+        lease-driven perf path never hits the runtime's "lease expired" rejection.
+        """
+        await self.send(
+            lease_renew=session_pb2.LeaseRenew(
+                lease_id=lease_id,
+                new_ttl_ms=new_ttl_ms,
+            )
+        )
+        msg = await self.wait_for_payload("lease_response", timeout_s=5.0)
+        lr = msg.lease_response
+        if not lr.granted:
+            deny_reason = getattr(lr, "deny_reason", "") or "unspecified denial"
+            deny_code = getattr(lr, "deny_code", "")
+            if deny_code:
+                raise RuntimeError(f"Lease renew denied [{deny_code}]: {deny_reason}")
+            raise RuntimeError(f"Lease renew denied: {deny_reason}")
+        self.last_granted_lease_ttl_ms = lr.granted_ttl_ms
+        return lr.granted_ttl_ms
 
 
 def default_benchmark_name(args: argparse.Namespace) -> str:
