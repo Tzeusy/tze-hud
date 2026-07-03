@@ -1,8 +1,9 @@
 use super::*;
 use crate::surface::HeadlessSurface;
 use image_cache::{
-    CARET_BLINK_HALF_PERIOD, caret_visible_at, composer_display_text, composer_display_text_blink,
-    composer_scroll_offset,
+    CARET_BLINK_HALF_PERIOD, ComposerLayout, caret_visible_at, composer_display_text,
+    composer_display_text_blink, composer_scroll_offset, composer_vertical_line_offset,
+    composer_visible_line_count,
 };
 use tze_hud_input::{DRAG_OPACITY_BOOST, DRAG_Z_ORDER_BOOST};
 use tze_hud_scene::graph::SceneGraph;
@@ -10898,6 +10899,202 @@ fn caret_follow_degenerate_inputs_are_safe() {
         caret_on_screen >= 0.0 && caret_on_screen <= window,
         "narrow-box caret must stay within the window, got {caret_on_screen}"
     );
+}
+
+// ─── Multi-line composer wrap / growth / vscroll (hud-nx7yq.1) ────────────────
+//
+// CPU-only tests over the pure layout core: how many lines the box shows, how far
+// it scrolls vertically to keep the caret line visible, the upward-grown box
+// geometry, and the max-lines token. The wrap measurement + GPU render are
+// exercised by CI's pixel-readback lane (headless llvmpipe readback deadlocks
+// under a synchronous local run).
+
+/// Default sans-serif line-height multiplier used to size composer boxes.
+const NX_LH_MULT: f32 = 1.4;
+
+/// The box shows `min(total_lines, max_lines)` lines, but never fewer than one.
+#[test]
+fn multiline_visible_line_count_grows_then_caps() {
+    assert_eq!(
+        composer_visible_line_count(1, 6),
+        1,
+        "one line stays one line"
+    );
+    assert_eq!(
+        composer_visible_line_count(3, 6),
+        3,
+        "grows with wrapped lines"
+    );
+    assert_eq!(composer_visible_line_count(6, 6), 6, "reaches the max");
+    assert_eq!(composer_visible_line_count(10, 6), 6, "caps at the max");
+    assert_eq!(
+        composer_visible_line_count(0, 6),
+        1,
+        "empty draft still shows one line"
+    );
+    // max_lines == 1 is the single-line profile: always one visible line.
+    assert_eq!(composer_visible_line_count(5, 1), 1);
+}
+
+/// Vertical scroll keeps the caret line visible: no scroll while the draft fits,
+/// bottom-pin as it grows, and reveal-upward as the caret moves toward the top.
+#[test]
+fn multiline_vertical_offset_keeps_caret_line_visible() {
+    let max = 6;
+    // Fits within the window → never scrolls, regardless of caret line.
+    for caret in 0..=3 {
+        assert_eq!(
+            composer_vertical_line_offset(caret, 4, max),
+            0,
+            "fits: no vscroll"
+        );
+    }
+    // 10 lines, caret at the end (typing): bottom-pin shows lines 4..=9.
+    let first = composer_vertical_line_offset(9, 10, max);
+    assert_eq!(first, 4, "caret at last line pins to the bottom window");
+    assert!(
+        9 >= first && 9 < first + max,
+        "caret line stays within the window"
+    );
+    // Caret jumped to the top → reveal the earliest lines.
+    assert_eq!(
+        composer_vertical_line_offset(0, 10, max),
+        0,
+        "top caret reveals line 0"
+    );
+    // Caret in the middle stays visible (bottom-pinned).
+    let firstm = composer_vertical_line_offset(7, 10, max);
+    assert!(
+        7 >= firstm && 7 < firstm + max,
+        "mid caret stays within the window"
+    );
+}
+
+/// Moving the caret upward line-by-line never scrolls further down and keeps the
+/// caret visible throughout (vertical analogue of the horizontal left-sweep test).
+#[test]
+fn multiline_vertical_offset_moving_up_reveals_earlier_lines() {
+    let (total, max) = (12usize, 5usize);
+    let mut prev = usize::MAX;
+    for caret in (0..total).rev() {
+        let first = composer_vertical_line_offset(caret, total, max);
+        assert!(
+            caret >= first && caret < first + max,
+            "caret line {caret} must stay within window [{first},{})",
+            first + max
+        );
+        assert!(
+            first <= prev,
+            "moving up must not scroll further down (caret={caret})"
+        );
+        prev = first;
+    }
+    assert_eq!(composer_vertical_line_offset(0, total, max), 0);
+}
+
+/// The offset never exceeds `total_lines - max_lines` (no dead space below the
+/// last line) and is zero once the draft shrinks back within the window.
+#[test]
+fn multiline_vertical_offset_bounded_and_shrinks_back() {
+    let max = 6;
+    for total in [1usize, 6, 7, 20] {
+        let max_first = total.saturating_sub(max);
+        for caret in 0..total {
+            let first = composer_vertical_line_offset(caret, total, max);
+            assert!(
+                first <= max_first,
+                "offset {first} exceeds max_first {max_first}"
+            );
+        }
+    }
+    // Draft shrank back to fit → scroll resets to 0 (transcript reclaims space).
+    assert_eq!(composer_vertical_line_offset(3, 4, max), 0);
+}
+
+/// `composer_input_box` grows UPWARD from the bottom edge as `visible_lines`
+/// increases, and `visible_lines == 1` reproduces the single-line strip exactly.
+#[test]
+fn multiline_input_box_grows_upward_pinned_bottom() {
+    let region = Rect::new(10.0, 100.0, 600.0, 300.0); // bottom edge at y=400
+    let font = 16.0;
+    let line_height = font * NX_LH_MULT;
+    let margin = 6.0; // COMPOSER_TEXT_MARGIN
+
+    let one = Compositor::composer_input_box(region, font, NX_LH_MULT, 1.0);
+    let expected_one_h = line_height + margin * 2.0;
+    assert!(
+        (one.height - expected_one_h).abs() < 0.01,
+        "one-line height"
+    );
+    assert!(
+        (one.y + one.height - (region.y + region.height)).abs() < 0.01,
+        "one-line box is pinned to the region bottom"
+    );
+
+    let three = Compositor::composer_input_box(region, font, NX_LH_MULT, 3.0);
+    let expected_three_h = line_height * 3.0 + margin * 2.0;
+    assert!(
+        (three.height - expected_three_h).abs() < 0.01,
+        "three-line height"
+    );
+    // Grew upward: taller box, same bottom edge, higher (smaller y) top.
+    assert!(three.height > one.height, "box grew with more lines");
+    assert!(three.y < one.y, "box grew UPWARD (top moved up)");
+    assert!(
+        (three.y + three.height - (region.y + region.height)).abs() < 0.01,
+        "box stays pinned to the region bottom while growing"
+    );
+    // Width and x are untouched (portal outer geometry unaffected).
+    assert_eq!(three.x, region.x);
+    assert_eq!(three.width, region.width);
+}
+
+/// The box height is clamped to the region height so a huge line count cannot
+/// exceed the portal.
+#[test]
+fn multiline_input_box_clamped_to_region() {
+    let region = Rect::new(0.0, 0.0, 400.0, 50.0);
+    let box_rect = Compositor::composer_input_box(region, 16.0, NX_LH_MULT, 20.0);
+    assert!(
+        box_rect.height <= region.height + 0.01,
+        "clamped to region height"
+    );
+    assert!(box_rect.y >= region.y - 0.01, "top not above the region");
+}
+
+/// The `portal.composer.max_lines` token defaults to 6, parses an override, and
+/// clamps a stray `0` up to the single-line floor of 1.
+#[test]
+fn multiline_max_lines_token_default_and_clamp() {
+    use std::collections::HashMap;
+    // Default (empty map) → 6.
+    let def = resolve_composer_overlay_tokens(&HashMap::new());
+    assert_eq!(def.max_lines, 6, "default max_lines is 6");
+    // Explicit override.
+    let mut m = HashMap::new();
+    m.insert("portal.composer.max_lines".to_owned(), "3".to_owned());
+    assert_eq!(resolve_composer_overlay_tokens(&m).max_lines, 3);
+    // Single-line profile.
+    let mut m1 = HashMap::new();
+    m1.insert("portal.composer.max_lines".to_owned(), "1".to_owned());
+    assert_eq!(resolve_composer_overlay_tokens(&m1).max_lines, 1);
+    // Stray 0 → rejected, falls back to the default (never a zero-height box).
+    let mut m0 = HashMap::new();
+    m0.insert("portal.composer.max_lines".to_owned(), "0".to_owned());
+    assert_eq!(resolve_composer_overlay_tokens(&m0).max_lines, 6);
+}
+
+/// The default `ComposerLayout` is the inert single-line profile, so a frame with
+/// no active composer (or an unmeasured one) never wraps or scrolls — preserving
+/// the hud-zlfi4 single-line behavior exactly.
+#[test]
+fn multiline_default_layout_is_single_line() {
+    let d = ComposerLayout::default();
+    assert!(!d.wrap, "default profile is single-line");
+    assert_eq!(d.h_scroll_px, 0.0);
+    assert_eq!(d.vscroll_px, 0.0);
+    assert_eq!(d.visible_lines, 1.0, "default box is one line tall");
+    assert_eq!(d.total_lines, 1.0);
 }
 
 /// `resolve_composer_overlay_tokens` must return valid, non-degenerate token

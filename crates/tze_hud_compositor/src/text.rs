@@ -570,6 +570,70 @@ impl TextRasterizer {
         (caret_x, content_width)
     }
 
+    /// Measure a composer draft under WORD WRAP for the multi-line profile
+    /// (hud-nx7yq.1).
+    ///
+    /// Shapes `text` wrapped to `wrap_width` (the composer's interior width) with
+    /// the sans-serif composer font and returns `(total_lines, caret_line)`:
+    /// - `total_lines` — number of wrapped visual lines (≥ 1, even for empty text).
+    /// - `caret_line`  — zero-based wrapped-line index the caret at `caret_byte`
+    ///   sits on (the line of the first glyph whose logical start is ≥ the caret
+    ///   byte; the last line when the caret is at or past the end).
+    ///
+    /// `caret_byte` is snapped down to a valid UTF-8 boundary, so agent-provided
+    /// offsets never panic. `text` is expected to already contain the caret glyph
+    /// at `caret_byte` (the caller passes the display string) so the measured wrap
+    /// matches what is rendered — sizing the box for the caret-present layout keeps
+    /// the box from clipping the caret at a wrap boundary.
+    ///
+    /// Same wrap parameters as the render path (`bounds_width = wrap_width`,
+    /// `Wrap::Word`), so the line counts agree. Runs once per frame only while a
+    /// multi-line composer is active — off the transcript hot path.
+    pub(crate) fn measure_composer_wrapped(
+        &mut self,
+        text: &str,
+        caret_byte: usize,
+        wrap_width: f32,
+        font_size_px: f32,
+        line_height_multiplier: f32,
+    ) -> (usize, usize) {
+        // Snap the caret offset to a char boundary at or below the requested byte.
+        let mut caret = caret_byte.min(text.len());
+        while caret > 0 && !text.is_char_boundary(caret) {
+            caret -= 1;
+        }
+
+        let line_height = font_size_px * line_height_multiplier;
+        let mut buf = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(font_size_px, line_height),
+        );
+        // Bounded width + word wrap → the same multi-line layout the render path
+        // produces (collect_composer_text_item sets bounds_width = wrap_width).
+        buf.set_size(&mut self.font_system, Some(wrap_width.max(1.0)), None);
+        buf.set_wrap(&mut self.font_system, Wrap::Word);
+        let base_attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
+        buf.set_text(&mut self.font_system, text, base_attrs, Shaping::Advanced);
+        buf.shape_until_scroll(&mut self.font_system, false);
+
+        // Walk the visual lines in top-to-bottom order. `total_lines` is the run
+        // count; `caret_line` is the first run holding a glyph at/after the caret
+        // byte (defaults to the last line when the caret is past every glyph).
+        let mut total_lines = 0usize;
+        let mut caret_line = 0usize;
+        let mut found = false;
+        for (line_idx, run) in buf.layout_runs().enumerate() {
+            total_lines = line_idx + 1;
+            if !found {
+                caret_line = line_idx;
+                if run.glyphs.iter().any(|g| g.start >= caret) {
+                    found = true;
+                }
+            }
+        }
+        (total_lines.max(1), caret_line)
+    }
+
     /// Prime the truncation cache for all `TextOverflow::Ellipsis` items in `items`.
     ///
     /// Must be called **outside the per-frame pipeline** (at content-commit time

@@ -631,9 +631,22 @@ pub(super) struct ComposerOverlayTokens {
     pub(super) selection_bg: [u8; 4],
     /// Font size in pixels.
     pub(super) font_size_px: f32,
+    /// Maximum number of text lines the composer box grows to before it scrolls
+    /// internally (hud-nx7yq.1).
+    ///
+    /// `1` selects the single-line horizontal caret-follow profile (hud-zlfi4);
+    /// `> 1` selects the multi-line wrap-and-grow profile. Sourced from the
+    /// `portal.composer.max_lines` token; defaults to
+    /// [`COMPOSER_OVERLAY_DEFAULT_MAX_LINES`].
+    pub(super) max_lines: u32,
 }
 
 const COMPOSER_OVERLAY_DEFAULT_FONT_SIZE_PX: f32 = 16.0;
+
+/// Default composer max-line bound: the box grows to at most this many wrapped
+/// lines, then scrolls internally (design proposal default, hud-nx7yq.1). A small
+/// bound so a tall draft cannot swallow the transcript pane.
+const COMPOSER_OVERLAY_DEFAULT_MAX_LINES: u32 = 6;
 
 pub(super) fn resolve_composer_overlay_tokens(
     token_map: &HashMap<String, String>,
@@ -677,6 +690,14 @@ pub(super) fn resolve_composer_overlay_tokens(
         .filter(|&v| v.is_finite() && v > 0.0)
         .unwrap_or(COMPOSER_OVERLAY_DEFAULT_FONT_SIZE_PX);
 
+    // Max visible line count before internal scroll. Clamp to at least 1 so a
+    // stray `0`/negative token cannot degenerate the box to zero height.
+    let max_lines = token_map
+        .get("portal.composer.max_lines")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&v| v >= 1)
+        .unwrap_or(COMPOSER_OVERLAY_DEFAULT_MAX_LINES);
+
     ComposerOverlayTokens {
         bg_r,
         bg_g,
@@ -692,6 +713,7 @@ pub(super) fn resolve_composer_overlay_tokens(
         at_capacity_a,
         selection_bg,
         font_size_px,
+        max_lines,
     }
 }
 

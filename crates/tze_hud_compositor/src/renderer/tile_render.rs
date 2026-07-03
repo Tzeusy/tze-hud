@@ -36,7 +36,10 @@ use crate::pipeline::{RectVertex, rect_vertices};
 
 use super::Compositor;
 use super::draw_cmds::{TexturedDrawCmd, compute_fit_mode};
-use super::image_cache::{caret_visible_at, composer_display_text_blink, composer_scroll_offset};
+use super::image_cache::{
+    ComposerLayout, caret_visible_at, composer_display_text_blink, composer_scroll_offset,
+    composer_vertical_line_offset, composer_visible_line_count,
+};
 use super::token_colors::{
     ComposerOverlayTokens, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE, TILE_BG_TEXT_MARKDOWN,
     linear_to_srgb, resolve_composer_overlay_tokens, resolve_focus_ring_tokens,
@@ -345,26 +348,33 @@ impl Compositor {
         let Some(region) = Self::composer_region_bounds(tile, scene, cs.node_id) else {
             return;
         };
-        // Confine the composer chrome to the single input-line strip so it does
-        // not paint over the whole portal (hud-2zsbf). Kept in lockstep with
-        // `collect_composer_text_item`, which anchors the draft to the same strip.
+        // Confine the composer chrome to the input box so it does not paint over
+        // the whole portal (hud-2zsbf). The box grows upward with the wrapped-line
+        // count primed into `composer_layout` (hud-nx7yq.1); `visible_lines == 1`
+        // keeps the single-line strip. Kept in lockstep with
+        // `collect_composer_text_item`, which anchors the draft to the same box.
         let line_height_multiplier =
             crate::markdown::MarkdownTokens::default().line_height_multiplier;
-        let strip = Self::composer_input_strip(region, tokens.font_size_px, line_height_multiplier);
+        let input_box = Self::composer_input_box(
+            region,
+            tokens.font_size_px,
+            line_height_multiplier,
+            self.composer_layout.visible_lines,
+        );
 
         // Background fill.
         let bg_color = [tokens.bg_r, tokens.bg_g, tokens.bg_b, tokens.bg_a];
         vertices.extend_from_slice(&rect_vertices(
-            strip.x,
-            strip.y,
-            strip.width,
-            strip.height,
+            input_box.x,
+            input_box.y,
+            input_box.width,
+            input_box.height,
             sw,
             sh,
             bg_color,
         ));
 
-        // At-capacity left-edge accent (2px wide, full strip height).
+        // At-capacity left-edge accent (2px wide, full box height).
         if cs.at_capacity {
             let accent = [
                 tokens.at_capacity_r,
@@ -373,10 +383,10 @@ impl Compositor {
                 tokens.at_capacity_a,
             ];
             vertices.extend_from_slice(&rect_vertices(
-                strip.x,
-                strip.y,
+                input_box.x,
+                input_box.y,
                 2.0,
-                strip.height,
+                input_box.height,
                 sw,
                 sh,
                 accent,
@@ -430,13 +440,29 @@ impl Compositor {
     /// For a composer region that is already ~one line tall (the intended
     /// promotion-era structured composer node) the strip equals the region, so
     /// behaviour there is unchanged.
-    fn composer_input_strip(region: Rect, font_size_px: f32, line_height_multiplier: f32) -> Rect {
+    /// Composer input box for `visible_lines` wrapped text lines, pinned to the
+    /// BOTTOM of the region and grown UPWARD (hud-nx7yq.1).
+    ///
+    /// Height is `visible_lines` text lines plus symmetric vertical padding (equal
+    /// to the horizontal text margin), clamped to the region height.
+    /// `visible_lines == 1.0` reproduces the single input-line strip (hud-2zsbf)
+    /// exactly, so single-line behaviour is unchanged.
+    ///
+    /// Growth is viewer-local: the box extends upward over the transcript, which
+    /// yields the space by occlusion; the portal's outer geometry is untouched.
+    pub(super) fn composer_input_box(
+        region: Rect,
+        font_size_px: f32,
+        line_height_multiplier: f32,
+        visible_lines: f32,
+    ) -> Rect {
         let line_height = (font_size_px * line_height_multiplier).max(1.0);
-        let strip_height = (line_height + COMPOSER_TEXT_MARGIN * 2.0)
+        let lines = visible_lines.max(1.0);
+        let box_height = (line_height * lines + COMPOSER_TEXT_MARGIN * 2.0)
             .min(region.height)
             .max(1.0);
-        let strip_y = region.y + (region.height - strip_height).max(0.0);
-        Rect::new(region.x, strip_y, region.width, strip_height)
+        let box_y = region.y + (region.height - box_height).max(0.0);
+        Rect::new(region.x, box_y, region.width, box_height)
     }
 
     /// Depth-first search for `target` in the node sub-tree rooted at `node_id`.
@@ -462,23 +488,28 @@ impl Compositor {
         None
     }
 
-    /// Recompute the active composer's horizontal caret-follow scroll offset
-    /// (hud-zlfi4) into `self.composer_scroll_offset`, ready for the following
-    /// `collect_text_items` pass.
+    /// Recompute the active composer's per-frame layout into `self.composer_layout`,
+    /// ready for the following `collect_text_items` pass (hud-zlfi4 single-line
+    /// caret-follow + hud-nx7yq.1 multi-line wrap / upward growth / vertical scroll).
     ///
     /// Must be called once per frame BEFORE `collect_text_items` (it measures the
-    /// caret x against the composer font via the mutable text rasterizer, which
-    /// the immutable collect path cannot do).  When no composer is active, the
-    /// text rasterizer is missing, or the composer region cannot be located, the
-    /// offset is reset to `0.0` (left-aligned, no scroll).
+    /// draft against the composer font via the mutable text rasterizer, which the
+    /// immutable collect path cannot do).  When no composer is active, the text
+    /// rasterizer is missing, or the composer region cannot be located, the layout
+    /// resets to [`ComposerLayout::default`] (single line, no scroll).
     ///
-    /// The measured window and keep-visible margin here mirror exactly the
-    /// geometry `collect_composer_text_item` uses to place the draft, so the
-    /// shift lands the caret inside the visible strip. This is local presentation
+    /// Two profiles, selected by the `portal.composer.max_lines` token:
+    /// - **max_lines == 1** — single-line profile: measure the caret x and pin a
+    ///   horizontal scroll offset so the caret stays visible (hud-zlfi4).
+    /// - **max_lines > 1** — multi-line profile: wrap-measure the draft to the box
+    ///   width, size the box to grow upward to at most `max_lines`, and pin a
+    ///   vertical scroll once the draft exceeds that bound.
+    ///
+    /// The measured window / margin / wrap width here mirror exactly the geometry
+    /// `collect_composer_text_item` uses to place the draft. Local presentation
     /// state — no adapter round trip.
     pub(crate) fn prime_composer_scroll_offset(&mut self, scene: &SceneGraph) {
-        self.composer_scroll_offset = 0.0;
-        self.composer_content_width = 0.0;
+        self.composer_layout = ComposerLayout::default();
 
         // Gather the immutable inputs first (draft text, caret, region geometry,
         // font size) so the mutable text-rasterizer borrow below does not overlap
@@ -503,12 +534,15 @@ impl Compositor {
             return;
         };
 
-        let font_size_px = resolve_composer_overlay_tokens(&self.token_map).font_size_px;
+        let tokens = resolve_composer_overlay_tokens(&self.token_map);
+        let font_size_px = tokens.font_size_px;
+        let max_lines = tokens.max_lines.max(1);
         // Visible text window = region interior width (region width minus the left
         // and right text margins).  This is the same `bw` collect uses.
         let window_width = (region.width - COMPOSER_TEXT_MARGIN * 2.0).max(1.0);
         let line_height_multiplier =
             crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        let line_height = (font_size_px * line_height_multiplier).max(1.0);
 
         // Own the measurement inputs, then drop the `&self` borrow before the
         // mutable rasterizer borrow.
@@ -518,12 +552,49 @@ impl Compositor {
         let Some(tr) = self.text_rasterizer.as_mut() else {
             return;
         };
-        let (caret_x, content_width) =
-            tr.measure_composer_caret(&text, cursor_byte, font_size_px, line_height_multiplier);
 
-        self.composer_content_width = content_width;
-        self.composer_scroll_offset =
-            composer_scroll_offset(caret_x, content_width, window_width, COMPOSER_TEXT_MARGIN);
+        if max_lines <= 1 {
+            // ── Single-line profile (hud-zlfi4): horizontal caret-follow. ──
+            let (caret_x, content_width) =
+                tr.measure_composer_caret(&text, cursor_byte, font_size_px, line_height_multiplier);
+            self.composer_layout = ComposerLayout {
+                wrap: false,
+                h_scroll_px: composer_scroll_offset(
+                    caret_x,
+                    content_width,
+                    window_width,
+                    COMPOSER_TEXT_MARGIN,
+                ),
+                content_width,
+                visible_lines: 1.0,
+                total_lines: 1.0,
+                vscroll_px: 0.0,
+            };
+            return;
+        }
+
+        // ── Multi-line profile (hud-nx7yq.1): wrap, grow upward, vscroll. ──
+        // Measure the DISPLAY string (caret glyph inserted) so the measured wrap
+        // matches the rendered wrap and the box never clips the caret line.
+        let display = composer_display_text_blink(&text, cursor_byte, true);
+        let (total_lines, caret_line) = tr.measure_composer_wrapped(
+            &display,
+            cursor_byte,
+            window_width,
+            font_size_px,
+            line_height_multiplier,
+        );
+        let visible_lines = composer_visible_line_count(total_lines, max_lines as usize);
+        let first_visible =
+            composer_vertical_line_offset(caret_line, total_lines, max_lines as usize);
+        self.composer_layout = ComposerLayout {
+            wrap: true,
+            h_scroll_px: 0.0,
+            content_width: 0.0,
+            visible_lines: visible_lines as f32,
+            total_lines: total_lines as f32,
+            vscroll_px: first_visible as f32 * line_height,
+        };
     }
 
     /// Build a [`TextItem`] for the local composer echo draft text.
@@ -558,9 +629,10 @@ impl Compositor {
     ///   - `display_sel_start = selection_anchor` (unshifted, before ▌)
     ///   - `display_sel_end   = cursor_byte + 3` (▌ is after the selection)
     ///
-    /// NOTE: single-line selection only.  Multi-line composer is out of scope
-    /// for v1 (the composer strip is always one line); a follow-up bead covers
-    /// multi-line layouts when they land.
+    /// The selection byte range is display-string byte offsets, so the highlight
+    /// spans correctly across wrapped lines in the multi-line profile (the text
+    /// pipeline positions each glyph on its own line); the offset math above is
+    /// unaffected by wrapping.
     pub(super) fn collect_composer_text_item(
         &self,
         tile: &Tile,
@@ -572,14 +644,17 @@ impl Compositor {
         let cs = self.local_composer.as_ref()?;
         self.text_rasterizer.as_ref()?;
         let region = Self::composer_region_bounds(tile, scene, cs.node_id)?;
+        let layout = self.composer_layout;
         // The full HitRegion spans the whole portal (click-anywhere-to-focus,
-        // hud-v4k1h); confine the rendered draft to the single input-line strip
-        // at its bottom edge so it does not stretch across the portal (hud-2zsbf).
-        // Width/x are preserved, so horizontal caret-follow is unchanged.
-        let strip = Self::composer_input_strip(
+        // hud-v4k1h); confine the rendered draft to the input box at its bottom
+        // edge so it does not stretch across the portal (hud-2zsbf). The box grows
+        // upward with the wrapped-line count (hud-nx7yq.1); `visible_lines == 1`
+        // reproduces the single input-line strip.
+        let input_box = Self::composer_input_box(
             region,
             tokens.font_size_px,
             crate::markdown::MarkdownTokens::default().line_height_multiplier,
+            layout.visible_lines,
         );
 
         // Insert the caret glyph at the cursor byte offset, gated by the blink
@@ -597,14 +672,15 @@ impl Compositor {
 
         let text_margin = COMPOSER_TEXT_MARGIN;
 
-        // Horizontal caret-follow (hud-zlfi4): shift the draft LEFT by the
-        // per-frame scroll offset primed in `prime_composer_scroll_offset` so the
-        // caret stays visible once the draft is wider than the strip.  Only the
-        // draft `pixel_x` moves; the clip rectangle stays pinned to the region
-        // interior, so overflowing text is clipped (never painted outside the
-        // box) and the selection run — being byte-anchored relative to `pixel_x`
-        // — scrolls with the text automatically.  `0.0` when the draft fits.
-        let scroll_offset = self.composer_scroll_offset;
+        // Horizontal caret-follow (hud-zlfi4, single-line profile only): shift the
+        // draft LEFT by the per-frame scroll offset primed in
+        // `prime_composer_scroll_offset` so the caret stays visible once the draft
+        // is wider than the box.  Only the draft `pixel_x` moves; the clip stays
+        // pinned to the box interior, so overflowing text is clipped (never painted
+        // outside the box) and the selection run — byte-anchored relative to
+        // `pixel_x` — scrolls with the text.  `0.0` in the multi-line profile,
+        // which wraps instead of sliding horizontally.
+        let scroll_offset = layout.h_scroll_px;
 
         // Convert linear-sRGB floats → sRGB u8 for TextItem (matches rgba_to_srgb_u8
         // in text.rs: RGB channels go through the sRGB transfer curve; alpha is linear).
@@ -618,7 +694,9 @@ impl Compositor {
         ];
 
         let bw = (region.width - text_margin * 2.0).max(1.0);
-        let bh = (strip.height - text_margin * 2.0).max(1.0);
+        let line_height = (tokens.font_size_px
+            * crate::markdown::MarkdownTokens::default().line_height_multiplier)
+            .max(1.0);
 
         let _ = sw; // retained for API symmetry with other collect helpers
         let _ = sh;
@@ -667,28 +745,40 @@ impl Compositor {
             }
         };
 
-        // Lay the draft out on ONE unwrapped line: the layout width is the wider
-        // of the visible strip and the measured content width plus one em of slack
-        // for the caret glyph.  Word-wrap (which glyphon applies against
-        // `bounds_width`) is thereby never triggered, so an overflowing draft
-        // scrolls horizontally and is clipped rather than wrapping to a second
-        // line that the single-line strip would hide.
-        let layout_width = bw.max(self.composer_content_width + tokens.font_size_px);
+        // Per-profile text layout:
+        // - Single-line (hud-zlfi4): lay the draft on ONE unwrapped line — layout
+        //   width is the wider of the box and the measured content width plus one
+        //   em of slack for the caret glyph, so word-wrap never triggers and the
+        //   draft slides horizontally + clips instead of wrapping.
+        // - Multi-line (hud-nx7yq.1): layout width is the box interior so glyphon
+        //   word-wraps within it; layout height is the FULL wrapped-content height
+        //   so every line lays out, and the box then clips + vertically scrolls it.
+        let (layout_width, bounds_height) = if layout.wrap {
+            let content_height = (layout.total_lines * line_height + text_margin * 2.0).max(1.0);
+            (bw, content_height)
+        } else {
+            // One-line interior height — identical to the pre-multiline strip.
+            let one_line = (input_box.height - text_margin * 2.0).max(1.0);
+            (bw.max(layout.content_width + tokens.font_size_px), one_line)
+        };
 
         Some(crate::text::TextItem {
             text: Arc::from(display_text.as_str()),
-            // Shift the draft left by the caret-follow scroll offset (0 when it fits).
+            // Shift the draft left by the horizontal caret-follow offset (0 in the
+            // multi-line profile).
             pixel_x: region.x + text_margin - scroll_offset,
-            pixel_y: strip.y + text_margin,
+            // Shift the draft up by the vertical scroll offset (0 in the single-line
+            // profile and until the multi-line draft exceeds the max line count).
+            pixel_y: input_box.y + text_margin - layout.vscroll_px,
             bounds_width: layout_width,
-            bounds_height: bh,
-            // Clip stays pinned to the input strip interior so scrolled-off text
-            // is clipped at the box edge, never painted outside it. Vertically the
-            // clip is the single-line strip (hud-2zsbf), not the full portal.
+            bounds_height,
+            // Clip stays pinned to the input box interior so scrolled-off text
+            // (horizontally or vertically) is clipped at the box edge, never painted
+            // outside it. The box grows upward with the wrapped-line count (hud-nx7yq.1).
             clip_pixel_x: region.x + text_margin,
-            clip_pixel_y: strip.y,
+            clip_pixel_y: input_box.y,
             clip_bounds_width: bw.max(1.0),
-            clip_bounds_height: strip.height.max(1.0),
+            clip_bounds_height: input_box.height.max(1.0),
             font_size_px: tokens.font_size_px,
             font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
             font_weight: 400,

@@ -349,29 +349,18 @@ pub struct Compositor {
     /// typing.  Computed per-frame in `collect_composer_text_item`; the model is
     /// never in this loop.
     pub(crate) composer_caret_blink_start: std::time::Instant,
-    /// Horizontal caret-follow scroll offset for the active composer, in physical
-    /// pixels (hud-zlfi4).
+    /// Per-frame composer layout state (hud-zlfi4 single-line caret-follow +
+    /// hud-nx7yq.1 multi-line wrap / upward growth / vertical scroll).
     ///
-    /// The draft text is shifted LEFT by this many pixels so the caret stays
-    /// visible once the draft is wider than the composer box.  Recomputed once
-    /// per frame by [`Compositor::prime_composer_scroll_offset`] (which measures
-    /// the caret x against the composer font) BEFORE `collect_text_items`, and
-    /// consumed by `collect_composer_text_item`.  `0.0` when no composer is
-    /// active or the draft fits.  This is local presentation state — no adapter
-    /// round trip — subject to the same redaction / safe-mode / focus rules as
-    /// the rest of the draft (the offset is only ever applied while the composer
-    /// overlay itself renders).
-    pub(crate) composer_scroll_offset: f32,
-    /// Natural single-line width of the active composer draft, in physical pixels
-    /// (hud-zlfi4).
-    ///
-    /// Measured alongside `composer_scroll_offset` in
-    /// [`Compositor::prime_composer_scroll_offset`].  `collect_composer_text_item`
-    /// uses it to size the draft `TextItem`'s layout width WIDER than the visible
-    /// strip, so the draft lays out on one unwrapped line (and is then clipped +
-    /// scrolled horizontally) instead of word-wrapping inside the box.  `0.0` when
-    /// no composer is active.
-    pub(crate) composer_content_width: f32,
+    /// Recomputed once per frame by [`Compositor::prime_composer_scroll_offset`]
+    /// (which measures the draft against the composer font — a mutable rasterizer
+    /// borrow the immutable collect path lacks) BEFORE `collect_text_items`, and
+    /// consumed by `render_composer_overlay` + `collect_composer_text_item`.
+    /// Resets to [`ComposerLayout::default`] when no composer is active.  This is
+    /// local presentation state — no adapter round trip — subject to the same
+    /// redaction / safe-mode / focus rules as the rest of the draft (it is only
+    /// ever applied while the composer overlay itself renders).
+    pub(crate) composer_layout: image_cache::ComposerLayout,
 }
 
 /// Partitioned rounded-rectangle draw commands organized by layer.
@@ -547,8 +536,7 @@ impl Compositor {
             local_composer_state: Arc::new(StdMutex::new(None)),
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
-            composer_scroll_offset: 0.0,
-            composer_content_width: 0.0,
+            composer_layout: image_cache::ComposerLayout::default(),
         })
     }
 
@@ -828,8 +816,7 @@ impl Compositor {
             local_composer_state: Arc::new(StdMutex::new(None)),
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
-            composer_scroll_offset: 0.0,
-            composer_content_width: 0.0,
+            composer_layout: image_cache::ComposerLayout::default(),
         };
 
         let window_surface = WindowSurface::new(surface, config);
