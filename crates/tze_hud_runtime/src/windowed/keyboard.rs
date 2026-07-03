@@ -151,6 +151,17 @@ pub(super) enum TabFocusOutcome {
     Busy,
 }
 
+/// Outcome of an Escape-clear attempt on a composer-less focus stop (hud-k6yvb).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum EscapeClearOutcome {
+    /// Focus was released (a node/tile owner was cleared).
+    Cleared,
+    /// No owner to clear — the caller proceeds with normal Escape handling.
+    NoOwner,
+    /// A required lock stayed contended — the caller defers the event.
+    Busy,
+}
+
 /// Synthetic device id used for keyboard-driven control activation (hud-2v8br).
 ///
 /// Enter / Space on a Tab-focused portal control synthesizes a pointer
@@ -509,7 +520,25 @@ impl WinitApp {
                     // Consume: printable text recovers via the Character event.
                     return;
                 }
-                PortalKeyFocus::Composer | PortalKeyFocus::Other => {}
+                PortalKeyFocus::Other => {
+                    // Escape on a composer-less focus stop (a focusable node with
+                    // no composer sibling, or a tile-level stop) clears focus so
+                    // the keyboard user is never stranded on a control they cannot
+                    // type into — a later Tab re-enters the cycle (hud-k6yvb).
+                    if is_escape_key(&raw.key, &raw.key_code) {
+                        match self.try_escape_clear_focus(tab_id) {
+                            EscapeClearOutcome::Cleared => return,
+                            EscapeClearOutcome::Busy => {
+                                self.state
+                                    .pending_keyboard_events
+                                    .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+                                return;
+                            }
+                            EscapeClearOutcome::NoOwner => {}
+                        }
+                    }
+                }
+                PortalKeyFocus::Composer => {}
             }
         }
 
@@ -811,6 +840,38 @@ impl WinitApp {
             self.clear_local_composer_echo();
         }
         TabFocusOutcome::Done
+    }
+
+    /// Escape recovery for a composer-less focus stop (hud-k6yvb): a focusable
+    /// node whose tile has no composer, or a tile-level stop. Clears focus to
+    /// `None` so a keyboard user is never stranded on a control they cannot type
+    /// into; a subsequent Tab re-enters the cycle at the first stop.
+    ///
+    /// Returns [`EscapeClearOutcome::Cleared`] when it released a real owner,
+    /// [`EscapeClearOutcome::NoOwner`] when there was nothing to clear (caller
+    /// proceeds normally), or [`EscapeClearOutcome::Busy`] on lock contention
+    /// (caller defers the event).
+    fn try_escape_clear_focus(&mut self, tab_id: tze_hud_scene::SceneId) -> EscapeClearOutcome {
+        let transition = {
+            let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+            else {
+                return EscapeClearOutcome::Busy;
+            };
+            let Some(scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
+                return EscapeClearOutcome::Busy;
+            };
+            // Nothing to clear when focus is already absent / on chrome.
+            if matches!(
+                self.state.focus_manager.current_owner(tab_id),
+                tze_hud_input::FocusOwner::None | tze_hud_input::FocusOwner::ChromeElement(_)
+            ) {
+                return EscapeClearOutcome::NoOwner;
+            }
+            self.state.focus_manager.clear_focus(tab_id, &scene)
+        };
+        tracing::debug!("portal recovery: Escape cleared composer-less focus stop");
+        dispatch_focus_event(&self.state.input_event_tx, transition);
+        EscapeClearOutcome::Cleared
     }
 
     /// Activate a Tab-focused portal control by synthesizing a pointer

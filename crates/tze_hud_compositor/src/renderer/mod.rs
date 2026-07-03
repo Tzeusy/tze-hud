@@ -42,6 +42,7 @@ pub mod animation;
 pub mod draw_cmds;
 pub mod easing;
 pub mod encode_pass;
+pub mod focus_ring;
 pub mod frame;
 pub mod hit_regions;
 pub mod icon;
@@ -61,6 +62,7 @@ use icon::*;
 // pub use re-exports the public items (ImageTextureEntry, LocalComposerState,
 // LocalComposerStateHandle) so callers via `tze_hud_compositor::renderer::*`
 // see unchanged paths.  The pub(crate) helpers are brought in separately.
+pub use focus_ring::{FocusRingOwner, FocusRingOwnerHandle};
 use image_cache::apply_composer_slot;
 pub use image_cache::{
     ComposerVisualLayoutHandle, ImageTextureEntry, LocalComposerState, LocalComposerStateHandle,
@@ -366,6 +368,13 @@ pub struct Compositor {
     /// to bottom-align the history block above the live composer box. Absent =>
     /// the collect path falls back to the logical (`\n`-split) line count.
     pub(crate) viewer_echo_line_counts: HashMap<SceneId, usize>,
+    /// Shared handle carrying the current keyboard-focus owner from the runtime
+    /// `FocusManager` (hud-k6yvb). Drained at frame start into `focus_ring_owner`;
+    /// the chrome-layer ring pass draws the ring for whatever owner it names.
+    pub focus_ring_owner_state: focus_ring::FocusRingOwnerHandle,
+    /// Most-recently drained focus-ring owner for this frame. `None` when focus is
+    /// cleared / chrome / on another tab.
+    pub(crate) focus_ring_owner: Option<focus_ring::FocusRingOwner>,
     /// Most-recently drained local composer state for this frame.
     ///
     /// Populated by draining `local_composer_state` at frame start.
@@ -570,6 +579,8 @@ impl Compositor {
             viewer_echoes: viewer_echo::ViewerEchoStore::new(),
             composer_visual_layout: Arc::new(StdMutex::new(None)),
             viewer_echo_line_counts: HashMap::new(),
+            focus_ring_owner_state: Arc::new(StdMutex::new(None)),
+            focus_ring_owner: None,
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),
@@ -854,6 +865,8 @@ impl Compositor {
             viewer_echoes: viewer_echo::ViewerEchoStore::new(),
             composer_visual_layout: Arc::new(StdMutex::new(None)),
             viewer_echo_line_counts: HashMap::new(),
+            focus_ring_owner_state: Arc::new(StdMutex::new(None)),
+            focus_ring_owner: None,
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),
@@ -1168,6 +1181,11 @@ impl Compositor {
             // Reset the blink phase so the caret is solid right after typing or
             // moving the caret (standard editor behavior).
             self.composer_caret_blink_start = std::time::Instant::now();
+        }
+        // Latest-wins read of the focus-ring owner (hud-k6yvb): a plain overwrite,
+        // so a momentary lock contention simply keeps the prior owner this frame.
+        if let Ok(slot) = self.focus_ring_owner_state.lock() {
+            self.focus_ring_owner = *slot;
         }
     }
 

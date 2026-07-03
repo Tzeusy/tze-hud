@@ -420,6 +420,16 @@ impl Compositor {
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
         self.encode_drag_handle_pass(&mut encoder, &frame.view, &drag_handle_vertices);
 
+        // ── Keyboard focus ring (chrome layer, hud-k6yvb) ───────────────────
+        // Drawn above all agent content (input-model §416) for the current focus
+        // owner — node OR tile-level, any tile — via the same LoadOp::Load chrome
+        // pass the drag handles use.
+        let mut focus_ring_vertices: Vec<RectVertex> = Vec::new();
+        self.append_focus_ring_vertices(scene, &mut focus_ring_vertices, sw, sh);
+        if !focus_ring_vertices.is_empty() {
+            self.encode_drag_handle_pass(&mut encoder, &frame.view, &focus_ring_vertices);
+        }
+
         // ── Chrome context menu (hud-zc7f) ─────────────────────────────────
         // Render the drag-handle reset context menu on top of everything.
         let context_menu_vertices = self.collect_context_menu_vertices(scene, sw, sh);
@@ -589,6 +599,13 @@ impl Compositor {
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
         self.encode_drag_handle_pass(&mut encoder, &frame.view, &drag_handle_vertices);
 
+        // ── Keyboard focus ring (chrome layer, hud-k6yvb) ───────────────────
+        let mut focus_ring_vertices: Vec<RectVertex> = Vec::new();
+        self.append_focus_ring_vertices(scene, &mut focus_ring_vertices, sw, sh);
+        if !focus_ring_vertices.is_empty() {
+            self.encode_drag_handle_pass(&mut encoder, &frame.view, &focus_ring_vertices);
+        }
+
         // ── Chrome context menu (hud-zc7f) ─────────────────────────────────
         let context_menu_vertices = self.collect_context_menu_vertices(scene, sw, sh);
         if !context_menu_vertices.is_empty() {
@@ -729,6 +746,8 @@ impl Compositor {
         }
         let drag_handles = self.collect_drag_handle_entries(scene, sw, sh);
         self.append_drag_handle_vertices(scene, &drag_handles, &mut chrome_vertices, sw, sh);
+        // Keyboard focus ring in the chrome pass, above all content (hud-k6yvb).
+        self.append_focus_ring_vertices(scene, &mut chrome_vertices, sw, sh);
 
         let chrome_buffer = if chrome_vertices.is_empty() {
             None

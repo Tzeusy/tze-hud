@@ -232,6 +232,13 @@ async fn test_static_image_node_composited_with_other_nodes() {
 ///
 /// This is a draw-list-level assertion (no pixel readback) so it is safe to run
 /// synchronously without the headless llvmpipe readback deadlock.
+///
+/// hud-k6yvb: the ring now emits from the CHROME-LAYER pass
+/// (`append_focus_ring_vertices`, above all content, §416) driven by the
+/// runtime-plumbed focus owner — not from `render_node`. The behavioral
+/// guarantee is preserved and asserted here: a focused node produces a visible,
+/// token-colored ring of four edge quads in overlay mode at the node's
+/// display-space bounds; nothing renders when focus is absent.
 #[tokio::test]
 async fn test_focused_hit_region_emits_focus_ring_in_overlay_mode() {
     let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
@@ -270,41 +277,25 @@ async fn test_focused_hit_region_emits_focus_ring_in_overlay_mode() {
         )
         .unwrap();
 
-    // Baseline: an unfocused hit region is invisible — it paints nothing.
+    // Baseline: no focus owner plumbed → the chrome ring pass paints nothing.
     {
-        let tile = scene.tiles.get(&tile_id).unwrap();
         let mut before: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_node(
-            node_id,
-            tile,
-            &scene,
-            &mut before,
-            &mut Vec::new(),
-            400.0,
-            300.0,
-        );
+        compositor.append_focus_ring_vertices(&scene, &mut before, 400.0, 300.0);
         assert!(
             before.is_empty(),
-            "unfocused hit region must paint nothing, got {} verts",
+            "no focus owner must paint no ring, got {} verts",
             before.len()
         );
     }
 
-    // Tab-focus the node → a ring of four edge quads must appear.
-    scene.update_focused_state(node_id, true);
+    // Plumb node-level focus → a ring of four edge quads must appear.
+    compositor.focus_ring_owner = Some(crate::renderer::FocusRingOwner {
+        tab_id,
+        tile_id,
+        node_id: Some(node_id),
+    });
     let mut after: Vec<crate::pipeline::RectVertex> = Vec::new();
-    {
-        let tile = scene.tiles.get(&tile_id).unwrap();
-        compositor.render_node(
-            node_id,
-            tile,
-            &scene,
-            &mut after,
-            &mut Vec::new(),
-            400.0,
-            300.0,
-        );
-    }
+    compositor.append_focus_ring_vertices(&scene, &mut after, 400.0, 300.0);
 
     // 4 edge quads × 6 vertices each.
     assert_eq!(
@@ -330,6 +321,142 @@ async fn test_focused_hit_region_emits_focus_ring_in_overlay_mode() {
             );
         }
     }
+}
+
+/// hud-k6yvb: a TILE-LEVEL focus owner (a non-passthrough tile with no focusable
+/// nodes) must get a visible ring around the whole tile from the chrome pass —
+/// the case #988 could not draw because tile-level focus has no scene state.
+#[tokio::test]
+async fn test_tile_level_focus_owner_emits_ring_in_overlay_mode() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.overlay_mode = true;
+
+    let mut scene = SceneGraph::new(400.0, 300.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(30.0, 20.0, 200.0, 150.0),
+            1,
+        )
+        .unwrap();
+
+    compositor.focus_ring_owner = Some(crate::renderer::FocusRingOwner {
+        tab_id,
+        tile_id,
+        node_id: None, // tile-level stop
+    });
+    let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+    compositor.append_focus_ring_vertices(&scene, &mut verts, 400.0, 300.0);
+
+    assert_eq!(
+        verts.len(),
+        24,
+        "tile-level focus must emit a 4-edge ring (24 verts), got {}",
+        verts.len()
+    );
+    let expected = compositor.gpu_color_raw(tze_hud_input::DEFAULT_FOCUS_RING_COLOR.to_array());
+    for v in &verts {
+        for (actual, want) in v.color.iter().zip(expected.iter()) {
+            assert!(
+                (actual - want).abs() < 1e-3,
+                "ring must use the token color"
+            );
+        }
+    }
+}
+
+/// hud-k6yvb: a focusable node in a COMPOSER-LESS tile still gets a ring (the
+/// ring is independent of typing-recovery / composer presence).
+#[tokio::test]
+async fn test_composerless_node_focus_emits_ring() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.overlay_mode = true;
+
+    let mut scene = SceneGraph::new(400.0, 300.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            1,
+        )
+        .unwrap();
+    // A plain focusable control — NOT a composer (accepts_composer_input = false).
+    let node_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: node_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(10.0, 10.0, 80.0, 30.0),
+                    interaction_id: "plain-button".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: false,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+    compositor.focus_ring_owner = Some(crate::renderer::FocusRingOwner {
+        tab_id,
+        tile_id,
+        node_id: Some(node_id),
+    });
+    let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+    compositor.append_focus_ring_vertices(&scene, &mut verts, 400.0, 300.0);
+    assert_eq!(
+        verts.len(),
+        24,
+        "a composer-less focusable node must still get a ring, got {}",
+        verts.len()
+    );
+}
+
+/// hud-k6yvb: the ring is per-tab — an owner on a non-active tab draws nothing.
+#[tokio::test]
+async fn test_focus_ring_suppressed_on_non_active_tab() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.overlay_mode = true;
+
+    let mut scene = SceneGraph::new(400.0, 300.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let other_tab = scene.create_tab("agent2", 1).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 200.0, 150.0),
+            1,
+        )
+        .unwrap();
+    // Active tab is `tab_id`; claim focus on it but then switch active away.
+    scene.switch_active_tab(other_tab).unwrap();
+
+    compositor.focus_ring_owner = Some(crate::renderer::FocusRingOwner {
+        tab_id,
+        tile_id,
+        node_id: None,
+    });
+    let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+    compositor.append_focus_ring_vertices(&scene, &mut verts, 400.0, 300.0);
+    assert!(
+        verts.is_empty(),
+        "an owner on a non-active tab must not draw a ring, got {} verts",
+        verts.len()
+    );
 }
 
 /// hud-nx7yq.3: a runtime-authored viewer echo entry must render as a

@@ -662,6 +662,43 @@ impl WinitApp {
         state.refresh_active_tab_mirror(&scene);
     }
 
+    /// Publish the active tab's current keyboard-focus owner to the compositor's
+    /// chrome-layer focus-ring pass (hud-k6yvb).
+    ///
+    /// Maps the `FocusManager` owner to a [`FocusRingOwner`]: a focusable node
+    /// (`Some(node_id)`) or a tile-level stop (`None`). `FocusOwner::None` and
+    /// chrome owners publish `None`, clearing the ring. Uses the lock-free
+    /// active-tab mirror so it never stalls the event loop.
+    pub(super) fn push_focus_ring_owner(&self) {
+        let owner = self
+            .active_tab_for_keyboard_dispatch()
+            .flatten()
+            .map(|tab_id| {
+                (
+                    tab_id,
+                    self.state.focus_manager.current_owner(tab_id).clone(),
+                )
+            });
+        let ring_owner = owner.and_then(|(tab_id, focus)| match focus {
+            tze_hud_input::FocusOwner::Node { tile_id, node_id } => {
+                Some(tze_hud_compositor::FocusRingOwner {
+                    tab_id,
+                    tile_id,
+                    node_id: Some(node_id),
+                })
+            }
+            tze_hud_input::FocusOwner::Tile(tile_id) => Some(tze_hud_compositor::FocusRingOwner {
+                tab_id,
+                tile_id,
+                node_id: None,
+            }),
+            tze_hud_input::FocusOwner::None | tze_hud_input::FocusOwner::ChromeElement(_) => None,
+        });
+        if let Ok(mut slot) = self.state.focus_ring_owner_state.lock() {
+            *slot = ring_owner;
+        }
+    }
+
     pub(super) fn drain_input_capture_commands(&mut self) {
         while let Ok(command) = self.state.input_capture_rx.try_recv() {
             self.state.pending_input_capture_commands.push_back(command);
