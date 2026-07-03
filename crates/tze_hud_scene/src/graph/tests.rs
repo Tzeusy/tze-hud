@@ -4073,6 +4073,76 @@ fn header_band_drags_empty_header_but_yields_to_minimize_control() {
 }
 
 #[test]
+fn header_band_survives_full_tile_click_to_focus_region() {
+    // Regression (hud-643dv): the #981/#987 projection portal publishes its
+    // composer hit-region spanning the WHOLE tile (x:0,y:0,w,h, accepts_pointer)
+    // for click-anywhere-to-focus. On a single-tile projection portal that region
+    // overlaps the header band at EVERY point. A blanket "yield to any pointer
+    // node" rule would make the band yield everywhere → drag dead on exactly the
+    // surface live sessions use. The band must only yield to controls that FIT
+    // INSIDE it (titlebar buttons), never a full-tile client-area region.
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("proj", 60_000, vec![Capability::CreateTiles]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "proj",
+            lease_id,
+            Rect::new(0.0, 0.0, 300.0, 200.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+        .unwrap();
+    // Full-tile click-to-focus composer region (the #981 projection shape).
+    let composer_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: composer_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+                    interaction_id: "proj-composer".to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+    // Header band over the top strip of the single tile.
+    push_drag_handle(&mut scene, tile_id, Rect::new(0.0, 0.0, 300.0, 52.0), true);
+
+    // A pointer-down inside the header band (also inside the full-tile composer)
+    // must STILL resolve to the band → drag works on projection portals.
+    match scene.hit_test(150.0, 20.0) {
+        HitResult::ZoneInteraction {
+            kind: ZoneInteractionKind::DragHandle { element_id, .. },
+            ..
+        } => assert_eq!(element_id, tile_id),
+        other => {
+            panic!("header band must drag over a full-tile click-to-focus region, got {other:?}")
+        }
+    }
+
+    // Below the band (client area) the composer region still wins — the band
+    // never reaches into the body.
+    assert_eq!(
+        scene.hit_test(150.0, 120.0),
+        HitResult::NodeHit {
+            tile_id,
+            node_id: composer_id,
+            interaction_id: "proj-composer".to_string(),
+        },
+        "outside the band the full-tile composer region still handles the click"
+    );
+}
+
+#[test]
 fn legacy_grip_keeps_chrome_priority_over_nodes() {
     // Regression guard: the header-band yield rule must NOT change legacy grip
     // precedence. A non-band grip overlapping a control still wins (grips never

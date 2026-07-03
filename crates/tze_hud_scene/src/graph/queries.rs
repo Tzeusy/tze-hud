@@ -352,12 +352,20 @@ impl SceneGraph {
     /// True when a header-band drag handle should yield the point to an
     /// interactive control beneath it (hud-643dv).
     ///
-    /// Probes the band's frame tile (`region.element_id`) for any
-    /// `accepts_pointer` HitRegionNode under `(x, y)`. When one is present (e.g.
-    /// the minimize button on the header), the band steps aside so the normal
-    /// tile/node walk returns that control — Windows-titlebar precedence. When
-    /// the header space under the point is inert (title text, empty strip), the
-    /// band keeps the hit and drives the drag.
+    /// Probes the band's frame tile (`region.element_id`) for an `accepts_pointer`
+    /// HitRegionNode under `(x, y)` and yields ONLY when that node's bounds fit
+    /// **inside the band rect** (small epsilon). This is true Windows-titlebar
+    /// semantics: a titlebar button (e.g. minimize, which fits within the header
+    /// strip) beats the drag, but the client area does not reach into the
+    /// titlebar.
+    ///
+    /// The containment gate is essential, not cosmetic: the #981/#987 projection
+    /// portal publishes its composer hit-region spanning the WHOLE tile
+    /// (`x:0,y:0,w,h`) for click-anywhere-to-focus. On a single-tile projection
+    /// portal that region overlaps the band at every point; a blanket "yield to
+    /// any pointer node" rule would kill drag on exactly the surface live sessions
+    /// use. A full-tile region is taller than the band, so it is not contained and
+    /// the band keeps the drag; only header-sized controls yield.
     fn header_band_yields_to_node(&self, region: &DragHandleHitRegion, x: f32, y: f32) -> bool {
         let Some(tile) = self.tiles.get(&region.element_id) else {
             return false;
@@ -368,7 +376,31 @@ impl SceneGraph {
         let (scroll_x, scroll_y) = self.effective_tile_scroll_offset_local(tile.id);
         let local_x = x - tile.bounds.x + scroll_x;
         let local_y = y - tile.bounds.y + scroll_y;
-        self.hit_test_node(root_id, local_x, local_y).is_some()
+        let Some(node_id) = self.hit_test_node(root_id, local_x, local_y) else {
+            return false;
+        };
+        // Resolve the hit node's bounds and map them into display space to compare
+        // against the (display-space) band rect.
+        let Some(node_local) = self.nodes.get(&node_id).and_then(|n| match &n.data {
+            NodeData::HitRegion(hr) => Some(hr.bounds),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let node_disp = Rect::new(
+            tile.bounds.x - scroll_x + node_local.x,
+            tile.bounds.y - scroll_y + node_local.y,
+            node_local.width,
+            node_local.height,
+        );
+        // Yield only when the control fits within the band (titlebar buttons win;
+        // full-tile / client-area regions do not).
+        const EPS: f32 = 0.5;
+        let band = &region.bounds;
+        node_disp.x >= band.x - EPS
+            && node_disp.y >= band.y - EPS
+            && node_disp.x + node_disp.width <= band.x + band.width + EPS
+            && node_disp.y + node_disp.height <= band.y + band.height + EPS
     }
 
     pub(super) fn hit_test_node(&self, node_id: SceneId, x: f32, y: f32) -> Option<SceneId> {
