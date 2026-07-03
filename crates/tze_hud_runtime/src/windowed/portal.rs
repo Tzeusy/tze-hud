@@ -48,6 +48,17 @@ pub(super) struct DragReleasedData {
     display_height: f32,
     /// Agent namespace that owns the tile, used for `ElementRepositionedEvent` routing.
     namespace: String,
+    /// When the release ended a **whole-portal** drag, the final bounds of every
+    /// group member (including the grabbed tile), keyed by SceneId. Empty for a
+    /// plain single-tile move.
+    ///
+    /// A text-stream portal is N tiles that share one namespace, so the
+    /// namespace-matched `persist_drag_geometry` path reaches only one arbitrary
+    /// member. To give *every* member a durable geometry override — so
+    /// `list_elements` reports `has_user_override=true` for all of them and an
+    /// adapter republish cannot pull any member back post-restart — the release
+    /// carries each member's id + final rect for an id-keyed persist (hud-8vejp).
+    group_members: Vec<(tze_hud_scene::SceneId, tze_hud_scene::types::Rect)>,
 }
 
 // ── Portal-resize pointer: geometry carried out of scene lock ────────────────
@@ -75,6 +86,11 @@ pub(super) struct PortalResizePointerOutcome {
     pub(super) display_w: f32,
     /// Display height at the time of the event.
     pub(super) display_h: f32,
+    /// Whether this step should durably persist each member's geometry override
+    /// to the element store (hud-8vejp). Set only on the terminal PointerUp so
+    /// the disk write fires once per gesture; intermediate down/move steps keep
+    /// the group coherent via the in-session lock without touching disk.
+    pub(super) persist: bool,
 }
 
 // The input processor, pointer event, hit result, scene, and display dimensions
@@ -249,20 +265,37 @@ pub(super) fn apply_drag_handle_pointer_event(
             // tile.
             let dx = final_x - old_x;
             let dy = final_y - old_y;
-            if !translate_portal_group_on_drag(scene, eid, dx, dy) {
-                let moved = if let Some(tile) = scene.tiles.get_mut(&eid) {
-                    tile.bounds.x = final_x;
-                    tile.bounds.y = final_y;
-                    true
+            let group_members: Vec<(tze_hud_scene::SceneId, tze_hud_scene::types::Rect)> =
+                if translate_portal_group_on_drag(scene, eid, dx, dy) {
+                    // Whole-portal move applied: snapshot every member's final
+                    // bounds so the caller can persist a durable per-member
+                    // geometry override keyed by SceneId (hud-8vejp). Without
+                    // this only the grabbed member's namespace-matched entry
+                    // gets an override.
+                    resolve_portal_group(scene, eid)
+                        .map(|group| {
+                            group
+                                .member_ids
+                                .iter()
+                                .filter_map(|id| scene.tiles.get(id).map(|t| (*id, t.bounds)))
+                                .collect()
+                        })
+                        .unwrap_or_default()
                 } else {
-                    false
+                    let moved = if let Some(tile) = scene.tiles.get_mut(&eid) {
+                        tile.bounds.x = final_x;
+                        tile.bounds.y = final_y;
+                        true
+                    } else {
+                        false
+                    };
+                    if moved {
+                        // Position-only single-tile move: geometry epoch, not
+                        // version — same reasoning as the group path (hud-uyhpn).
+                        scene.bump_geometry_epoch();
+                    }
+                    Vec::new()
                 };
-                if moved {
-                    // Position-only single-tile move: geometry epoch, not
-                    // version — same reasoning as the group path (hud-uyhpn).
-                    scene.bump_geometry_epoch();
-                }
-            }
 
             let namespace = scene
                 .tiles
@@ -289,6 +322,7 @@ pub(super) fn apply_drag_handle_pointer_event(
                 display_width,
                 display_height,
                 namespace,
+                group_members,
             })
         }
     }
@@ -548,6 +582,35 @@ fn scale_tile_node_tree(
 /// snapshot carries the same sequence / gesture flag but with that member's own
 /// scaled rect, so per-member `ElementRepositionedEvent`s report correct
 /// geometry.
+/// Write a durable `Relative` geometry override into the element store for each
+/// `(SceneId, rect)` member, keyed by its stable scene id (hud-8vejp).
+///
+/// Shared by the whole-portal resize persist path
+/// ([`WinitApp::persist_portal_member_overrides`]) and the whole-portal drag
+/// persist path ([`WinitApp::persist_drag_release`]). Keying by id — not by the
+/// shared portal namespace — is what gives *every* member its own durable
+/// override, so `list_elements` reports `has_user_override=true` for all members
+/// (not just the drag-release/namespace one) and an adapter republish can never
+/// reposition a member post-restart (the stored override is authoritative at the
+/// publish ingress). `rect` is absolute display-pixel bounds, normalised to a
+/// `Relative` policy against `display_w`/`display_h` before storage.
+///
+/// Members with no matching store entry are skipped (the id-keyed setter is a
+/// no-op) — a member tile must be registered in the store before it can carry a
+/// durable override.
+fn write_member_geometry_overrides(
+    store: &mut tze_hud_scene::element_store::ElementStore,
+    members: &[(tze_hud_scene::SceneId, tze_hud_scene::types::Rect)],
+    display_w: f32,
+    display_h: f32,
+) {
+    for (id, bounds) in members {
+        let policy =
+            tze_hud_scene::types::rect_to_relative_geometry_policy(*bounds, display_w, display_h);
+        store.set_geometry_override(*id, policy);
+    }
+}
+
 fn commit_portal_group_resize(
     scene: &mut tze_hud_scene::graph::SceneGraph,
     group: &PortalGroup,
@@ -815,6 +878,7 @@ pub(super) fn apply_portal_resize_pointer_event(
                 members,
                 display_w,
                 display_h,
+                persist: false,
             })
         }
 
@@ -857,6 +921,7 @@ pub(super) fn apply_portal_resize_pointer_event(
                 members,
                 display_w,
                 display_h,
+                persist: false,
             })
         }
 
@@ -901,6 +966,7 @@ pub(super) fn apply_portal_resize_pointer_event(
                 members,
                 display_w,
                 display_h,
+                persist: true,
             })
         }
     }
@@ -1024,17 +1090,35 @@ impl WinitApp {
                 released.display_height,
             );
 
-            InputProcessor::persist_drag_geometry(
-                &mut state.element_store,
-                ElementType::Tile,
-                &released.namespace,
-                released.final_x,
-                released.final_y,
-                released.width,
-                released.height,
-                released.display_width,
-                released.display_height,
-            );
+            if released.group_members.is_empty() {
+                // Plain single-tile move: match the store entry by namespace and
+                // write its geometry override (the pre-existing path).
+                InputProcessor::persist_drag_geometry(
+                    &mut state.element_store,
+                    ElementType::Tile,
+                    &released.namespace,
+                    released.final_x,
+                    released.final_y,
+                    released.width,
+                    released.height,
+                    released.display_width,
+                    released.display_height,
+                );
+            } else {
+                // Whole-portal move (hud-8vejp): a portal's constituent tiles
+                // share one namespace, so a namespace match would give only one
+                // arbitrary member a durable override. Write a Relative override
+                // for EVERY member keyed by its own SceneId so `list_elements`
+                // reports `has_user_override=true` for all of them and an adapter
+                // republish can never pull a member back — in-session or after a
+                // restart (the override is authoritative at the publish ingress).
+                write_member_geometry_overrides(
+                    &mut state.element_store,
+                    &released.group_members,
+                    released.display_width,
+                    released.display_height,
+                );
+            }
 
             let store_snapshot = state.element_store.clone();
             let persist_path = state.element_store_path.clone();
@@ -1078,6 +1162,64 @@ impl WinitApp {
             );
         }
     }
+
+    /// Persist a durable, id-keyed geometry override for each `(SceneId, rect)`
+    /// pair and flush the element store to disk on a background thread.
+    ///
+    /// Used by the whole-portal resize path (hud-8vejp) to give every group
+    /// member its own durable override after a viewer resize — the drag path
+    /// persists inline in [`Self::persist_drag_release`]. `rect` is absolute
+    /// display-pixel bounds; it is normalised to a `Relative` policy against the
+    /// supplied display size before being stored, matching how drag-release and
+    /// adapter republishes resolve geometry.
+    ///
+    /// A no-op (no lock, no disk write) when `members` is empty. Lock contention
+    /// on `shared_state` is logged and skipped: the transient in-session
+    /// `viewer_geometry_locked` set already keeps the group coherent this
+    /// session, and the next viewer gesture will retry the durable write.
+    pub(super) fn persist_portal_member_overrides(
+        &mut self,
+        members: &[(tze_hud_scene::SceneId, tze_hud_scene::types::Rect)],
+        display_w: f32,
+        display_h: f32,
+    ) {
+        if members.is_empty() {
+            return;
+        }
+
+        let (store_snapshot, persist_path) = {
+            let Ok(mut state) = self.state.shared_state.try_lock() else {
+                tracing::warn!(
+                    "persist_portal_member_overrides: could not acquire shared_state lock"
+                );
+                return;
+            };
+            write_member_geometry_overrides(
+                &mut state.element_store,
+                members,
+                display_w,
+                display_h,
+            );
+            (
+                state.element_store.clone(),
+                state.element_store_path.clone(),
+            )
+        };
+
+        if let Some(path) = persist_path {
+            std::thread::spawn(move || {
+                if let Err(e) =
+                    crate::element_store::persist_element_store_to_path(&store_snapshot, &path)
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "persist_portal_member_overrides: element store persist failed"
+                    );
+                }
+            });
+        }
+    }
+
     /// Run the in-process portal projection drain loop (hud-2iup7).
     ///
     /// Drain pending [`PortalOp`] messages from the MCP channel (hud-bq0gl.2).
@@ -1351,6 +1493,8 @@ impl WinitApp {
         // subscribers via ElementRepositionedEvent (§6b.4: coalescible
         // state-stream delivery), and mirror each into the in-process projection
         // authority so the drain loop sees the updated bounds next cycle.
+        let mut member_bounds: Vec<(tze_hud_scene::SceneId, tze_hud_scene::types::Rect)> =
+            Vec::with_capacity(members.len());
         for member in &members {
             dispatch_portal_geometry_event(
                 &self.state.element_repositioned_tx,
@@ -1362,7 +1506,19 @@ impl WinitApp {
             self.state
                 .portal_projection_driver
                 .push_geometry_snapshot_for_tile(member.tile_id, member.snapshot);
+            let r = member.snapshot.rect;
+            member_bounds.push((
+                member.tile_id,
+                tze_hud_scene::types::Rect::new(r.x, r.y, r.width, r.height),
+            ));
         }
+
+        // Durably record every member's post-resize geometry as an id-keyed
+        // override (hud-8vejp). Unlike the pointer path there is no terminal
+        // PointerUp — each hotkey press is a discrete committed resize step — so
+        // persist on every applied step; the write only fires when the geometry
+        // actually changed (a clamped-at-boundary press applies nothing new).
+        self.persist_portal_member_overrides(&member_bounds, display_w, display_h);
 
         tracing::debug!(
             anchor_tile_id = ?group.anchor_tile_id,
@@ -4078,6 +4234,146 @@ mod tests {
         assert_eq!(
             shield_after, shield_before,
             "the far-corner drag shield must not scale/move with a portal resize"
+        );
+    }
+
+    /// Register an `ElementType::Tile` entry (no override) in a shared state's
+    /// element store for each id, so an id-keyed override write has a target.
+    /// Mirrors the runtime tile-creation reconcile that seeds these entries.
+    fn seed_tile_entries(app: &WinitApp, ids: &[tze_hud_scene::SceneId], namespace: &str) {
+        use tze_hud_scene::element_store::{ElementStoreEntry, ElementType};
+        let mut state = app.state.shared_state.try_lock().unwrap();
+        for id in ids {
+            state.element_store.entries.insert(
+                *id,
+                ElementStoreEntry {
+                    element_type: ElementType::Tile,
+                    namespace: namespace.to_string(),
+                    created_at: 1,
+                    last_published_at: 1,
+                    geometry_override: None,
+                },
+            );
+        }
+    }
+
+    fn has_override(app: &WinitApp, id: tze_hud_scene::SceneId) -> bool {
+        let state = app.state.shared_state.try_lock().unwrap();
+        state
+            .element_store
+            .entries
+            .get(&id)
+            .map(|e| e.geometry_override.is_some())
+            .unwrap_or(false)
+    }
+
+    /// hud-8vejp: a whole-portal resize must write a durable per-member geometry
+    /// override for EVERY constituent surface — not just one namespace/drag
+    /// member — so `list_elements` reports `has_user_override=true` for all of
+    /// them (the override key is `has_user_override = geometry_override.is_some()`).
+    #[test]
+    fn whole_portal_resize_writes_durable_override_for_every_member() {
+        use tze_hud_input::{HotkeyResizeDir, InputProcessor};
+
+        let (scene, tab_id, frame_id, transcript_id, composer_id, _shield_id, fm) =
+            multi_surface_portal_scene();
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, InputProcessor::new());
+
+        // Seed store entries for the members (as the runtime does on tile
+        // creation) so the id-keyed override write has a target.
+        seed_tile_entries(
+            &app,
+            &[frame_id, transcript_id, composer_id],
+            "portal-agent",
+        );
+
+        // Pre-condition: no member carries a user override.
+        for id in [frame_id, transcript_id, composer_id] {
+            assert!(
+                !has_override(&app, id),
+                "no member should have an override before the resize"
+            );
+        }
+
+        assert!(
+            app.apply_portal_resize_hotkey(tab_id, HotkeyResizeDir::Grow),
+            "hotkey must be consumed for a focused portal surface"
+        );
+
+        // Every member — frame, transcript, composer — now has a durable
+        // override, not just the anchor/one namespace member.
+        for id in [frame_id, transcript_id, composer_id] {
+            assert!(
+                has_override(&app, id),
+                "every portal member must have a durable geometry override after a whole-portal resize"
+            );
+        }
+    }
+
+    /// hud-8vejp: a whole-portal drag-move must write a durable per-member
+    /// override for EVERY member (a portal's tiles share one namespace, so the
+    /// legacy namespace-matched persist reached only one). Drives the real
+    /// capture (`translate_portal_group_on_drag` + `resolve_portal_group`) and
+    /// the real persist (`persist_drag_release`).
+    #[test]
+    fn whole_portal_drag_writes_durable_override_for_every_member() {
+        use tze_hud_input::InputProcessor;
+
+        let (scene, _tab, frame_id, transcript_id, composer_id, shield_id, fm) =
+            multi_surface_portal_scene();
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, InputProcessor::new());
+        seed_tile_entries(
+            &app,
+            &[frame_id, transcript_id, composer_id, shield_id],
+            "portal-agent",
+        );
+
+        // Reproduce exactly what the `Released` arm does: translate the whole
+        // group, then collect each member's final bounds by SceneId.
+        let (frame_final, group_members) = {
+            let state = app.state.shared_state.try_lock().unwrap();
+            let mut scene = state.scene.try_lock().unwrap();
+            let (dx, dy) = (60.0_f32, -30.0_f32);
+            assert!(
+                translate_portal_group_on_drag(&mut scene, frame_id, dx, dy),
+                "a multi-surface portal must engage the whole-portal translate"
+            );
+            let members: Vec<(tze_hud_scene::SceneId, tze_hud_scene::types::Rect)> =
+                resolve_portal_group(&scene, frame_id)
+                    .unwrap()
+                    .member_ids
+                    .iter()
+                    .filter_map(|id| scene.tiles.get(id).map(|t| (*id, t.bounds)))
+                    .collect();
+            let frame_final = scene.tiles.get(&frame_id).unwrap().bounds;
+            (frame_final, members)
+        };
+
+        let released = DragReleasedData {
+            element_id: frame_id,
+            final_x: frame_final.x,
+            final_y: frame_final.y,
+            width: frame_final.width,
+            height: frame_final.height,
+            display_width: 1920.0,
+            display_height: 1080.0,
+            namespace: "portal-agent".to_string(),
+            group_members,
+        };
+        app.persist_drag_release(released);
+
+        // Every spatial portal member has a durable override.
+        for id in [frame_id, transcript_id, composer_id] {
+            assert!(
+                has_override(&app, id),
+                "every portal member must have a durable geometry override after a whole-portal drag"
+            );
+        }
+        // The far-corner drag shield is not a spatial portal member, so it is not
+        // translated and gets no override.
+        assert!(
+            !has_override(&app, shield_id),
+            "the detached drag shield is not a portal member and must not get an override"
         );
     }
 

@@ -68,6 +68,27 @@ impl ElementStore {
         entry.geometry_override.take()
     }
 
+    /// Set the user geometry override for the entry keyed by `element_id`.
+    ///
+    /// Unlike [`crate::graph`]-adjacent `persist_geometry_override` (in
+    /// `tze_hud_input::drag`), which matches by `(element_type, namespace)` and
+    /// writes a single entry, this targets one exact entry by its stable
+    /// `SceneId`. Portal members share a namespace but have distinct scene ids,
+    /// so a whole-portal resize/move must key each member's durable override by
+    /// id — a namespace match would only reach one arbitrary member (hud-8vejp).
+    ///
+    /// Returns `true` if an entry existed and was updated; `false` if no entry
+    /// is keyed by `element_id` (no-op — the element is not yet registered).
+    pub fn set_geometry_override(&mut self, element_id: SceneId, geometry: GeometryPolicy) -> bool {
+        match self.entries.get_mut(&element_id) {
+            Some(entry) => {
+                entry.geometry_override = Some(geometry);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Find an entry by `(element_type, namespace)`.
     ///
     /// If duplicates exist, returns the oldest (then lexicographically smallest ID).
@@ -209,6 +230,56 @@ mod tests {
         assert!(
             store.entries[&id].geometry_override.is_none(),
             "override should be cleared"
+        );
+    }
+
+    #[test]
+    fn set_geometry_override_updates_only_the_keyed_entry() {
+        // Two Tile entries that SHARE a namespace — exactly the portal-member
+        // shape: a namespace match would be ambiguous, so the override must be
+        // keyed by id (hud-8vejp).
+        let now = 1_710_000_000_000u64;
+        let a = SceneId::new();
+        let b = SceneId::new();
+        let mut entries = HashMap::new();
+        for id in [a, b] {
+            entries.insert(
+                id,
+                ElementStoreEntry {
+                    element_type: ElementType::Tile,
+                    namespace: "portal".to_string(),
+                    created_at: now,
+                    last_published_at: now,
+                    geometry_override: None,
+                },
+            );
+        }
+        let mut store = ElementStore { entries };
+
+        let policy = GeometryPolicy::Relative {
+            x_pct: 0.1,
+            y_pct: 0.2,
+            width_pct: 0.3,
+            height_pct: 0.4,
+        };
+        assert!(
+            store.set_geometry_override(a, policy),
+            "setting an override on a known id returns true"
+        );
+        assert_eq!(
+            store.entries[&a].geometry_override,
+            Some(policy),
+            "the keyed entry gets the override"
+        );
+        assert!(
+            store.entries[&b].geometry_override.is_none(),
+            "the sibling sharing the namespace is untouched"
+        );
+
+        // Unknown id is a no-op.
+        assert!(
+            !store.set_geometry_override(SceneId::new(), policy),
+            "setting an override on an unknown id returns false"
         );
     }
 }
