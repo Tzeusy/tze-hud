@@ -192,26 +192,50 @@ impl MarkdownTokens {
             }
         }
 
-        // Link color: color.link.text (hex #RRGGBB or #RRGGBBAA)
-        if let Some(c) = map.get("color.link.text").and_then(|v| parse_hex_color(v)) {
+        // Portal markdown-subset preference (Promotion P2, hud-8691s): for the
+        // markdown-subset code/link styling the transcript renders, prefer the
+        // portal-scoped canonical keys (`portal.transcript.*`) over the generic
+        // ones (`color.code.*` / `color.link.text` / `typography.code.family`),
+        // falling back to the generic key when the portal key is unset. This lets
+        // a portal profile restyle its own code/link treatment while the generic
+        // markdown defaults are preserved when no portal key is present.
+        //
+        // NOTE: `self.markdown_tokens` is a single global instance (the portal is
+        // the sole governed markdown surface in v1), so this preference applies
+        // wherever markdown renders. When a distinct non-portal markdown surface
+        // is introduced, per-tile token scoping is required (the parse cache is
+        // keyed on content only) — tracked as a follow-up.
+        let prefer = |portal_key: &str, generic_key: &str| {
+            map.get(portal_key).or_else(|| map.get(generic_key))
+        };
+
+        // Link color: portal.transcript.link_color → color.link.text (hex).
+        if let Some(c) = prefer("portal.transcript.link_color", "color.link.text")
+            .and_then(|v| parse_hex_color(v))
+        {
             tokens.link_color = Some(c);
         }
 
-        // Code family: typography.code.family = "monospace" | "sans-serif" | ...
-        if let Some(fam) = map.get("typography.code.family") {
+        // Code family: portal.transcript.code_font_family → typography.code.family
+        // = "monospace" | "sans-serif" | ...
+        if let Some(fam) = prefer(
+            "portal.transcript.code_font_family",
+            "typography.code.family",
+        ) {
             tokens.code_monospace = fam.to_lowercase().contains("mono");
         }
 
-        // Code foreground: color.code.text
-        if let Some(c) = map.get("color.code.text").and_then(|v| parse_hex_color(v)) {
+        // Code foreground: portal.transcript.code_text → color.code.text.
+        if let Some(c) = prefer("portal.transcript.code_text", "color.code.text")
+            .and_then(|v| parse_hex_color(v))
+        {
             tokens.code_color = Some(c);
         }
 
-        // Code background: color.code.background
+        // Code background: portal.transcript.code_background → color.code.background.
         // Phase 1: stored for use as a foreground color modifier when no
         // code_color is set (see StyleAttr::code_effective_color).
-        if let Some(c) = map
-            .get("color.code.background")
+        if let Some(c) = prefer("portal.transcript.code_background", "color.code.background")
             .and_then(|v| parse_hex_color(v))
         {
             tokens.code_background = Some(c);
@@ -2732,6 +2756,129 @@ mod tests {
         // #0066FF sRGB → r≈0, g≈0.14, b≈1.0 after gamma conversion — just
         // check that blue dominates.
         assert!(c.b > c.r, "blue must dominate for #0066FF");
+    }
+
+    // ── Portal markdown-subset token preference (Promotion P2, hud-8691s) ──────
+
+    /// When BOTH a portal-scoped key and its generic counterpart are set, the
+    /// portal key wins for the markdown-subset code/link styling the transcript
+    /// renders (hud-8691s preference).
+    #[test]
+    fn portal_transcript_keys_win_over_generic() {
+        let mut map = HashMap::new();
+        // Generic (would-be) values.
+        map.insert("color.link.text".to_string(), "#FF0000".to_string()); // red
+        map.insert("color.code.text".to_string(), "#FF0000".to_string());
+        map.insert("color.code.background".to_string(), "#FF0000".to_string());
+        map.insert(
+            "typography.code.family".to_string(),
+            "sans-serif".to_string(),
+        );
+        // Portal-scoped overrides (must win).
+        map.insert(
+            "portal.transcript.link_color".to_string(),
+            "#0000FF".to_string(),
+        ); // blue
+        map.insert(
+            "portal.transcript.code_text".to_string(),
+            "#0000FF".to_string(),
+        );
+        map.insert(
+            "portal.transcript.code_background".to_string(),
+            "#0000FF".to_string(),
+        );
+        map.insert(
+            "portal.transcript.code_font_family".to_string(),
+            "monospace".to_string(),
+        );
+
+        let t = MarkdownTokens::from_token_map(&map);
+        let link = t.link_color.expect("link color set");
+        assert!(
+            link.b > link.r,
+            "portal link_color (blue) must win over generic (red)"
+        );
+        let code_fg = t.code_color.expect("code fg set");
+        assert!(
+            code_fg.b > code_fg.r,
+            "portal code_text (blue) must win over generic (red)"
+        );
+        let code_bg = t.code_background.expect("code bg set");
+        assert!(
+            code_bg.b > code_bg.r,
+            "portal code_background (blue) must win over generic (red)"
+        );
+        assert!(
+            t.code_monospace,
+            "portal code_font_family=monospace must win over generic sans-serif"
+        );
+    }
+
+    /// When a portal-scoped key is UNSET, the generic key is used (fallback), so
+    /// nothing regresses for maps that only carry the generic keys (hud-8691s).
+    #[test]
+    fn portal_transcript_falls_back_to_generic_when_portal_unset() {
+        let mut map = HashMap::new();
+        map.insert("color.link.text".to_string(), "#00CC44".to_string()); // green
+        map.insert("color.code.background".to_string(), "#00CC44".to_string());
+        map.insert(
+            "typography.code.family".to_string(),
+            "sans-serif".to_string(),
+        );
+        // No portal.transcript.* keys present.
+
+        let t = MarkdownTokens::from_token_map(&map);
+        let link = t.link_color.expect("link color falls back to generic");
+        assert!(
+            link.g > link.r && link.g > link.b,
+            "generic green link used as fallback"
+        );
+        assert!(
+            t.code_background.is_some(),
+            "generic code background used as fallback"
+        );
+        assert!(
+            !t.code_monospace,
+            "generic sans-serif code family used as fallback"
+        );
+    }
+
+    /// With neither the portal nor the generic key set, the markdown-subset code/
+    /// link styling stays unset (canonical default = unset), so the transcript
+    /// renders exactly as before promotion (hud-8691s propagation/default).
+    #[test]
+    fn portal_transcript_unset_leaves_defaults() {
+        let map = HashMap::new();
+        let t = MarkdownTokens::from_token_map(&map);
+        assert!(t.link_color.is_none(), "link unset by default");
+        assert!(t.code_color.is_none(), "code fg unset by default");
+        assert!(t.code_background.is_none(), "code bg unset by default");
+        assert!(t.code_monospace, "code family defaults to monospace");
+    }
+
+    /// A profile swap (changing only the portal-scoped keys) reskins the resolved
+    /// markdown tokens on the next resolve — the propagation the AC requires
+    /// (hud-8691s). Distinct portal values yield distinct resolved colors.
+    #[test]
+    fn portal_transcript_profile_swap_reskins_markdown_tokens() {
+        let mut profile_a = HashMap::new();
+        profile_a.insert(
+            "portal.transcript.code_background".to_string(),
+            "#111111".to_string(),
+        );
+        let a = MarkdownTokens::from_token_map(&profile_a);
+
+        let mut profile_b = HashMap::new();
+        profile_b.insert(
+            "portal.transcript.code_background".to_string(),
+            "#EEEEEE".to_string(),
+        );
+        let b = MarkdownTokens::from_token_map(&profile_b);
+
+        assert_ne!(
+            a.code_background, b.code_background,
+            "swapping portal.transcript.code_background must reskin the markdown tokens"
+        );
     }
 
     /// `parse_hex_color` handles #RGB, #RRGGBB, and #RRGGBBAA.
