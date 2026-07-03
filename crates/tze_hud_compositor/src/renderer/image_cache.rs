@@ -243,6 +243,95 @@ pub(crate) fn composer_scroll_offset(
     target.clamp(0.0, max_scroll)
 }
 
+/// Per-frame composer layout state, computed by
+/// [`super::Compositor::prime_composer_scroll_offset`] and consumed by
+/// `render_composer_overlay` / `collect_composer_text_item` (hud-nx7yq.1).
+///
+/// One of two profiles is active per frame:
+/// - **Single-line** (`wrap == false`, max-lines token = 1): the draft is laid
+///   out on one unwrapped line and slides horizontally so the caret stays visible
+///   (hud-zlfi4). `h_scroll_px` / `content_width` drive it; the vertical fields
+///   stay at their one-line defaults.
+/// - **Multi-line** (`wrap == true`, max-lines token > 1): the draft wraps within
+///   the composer width, the box grows upward to `visible_lines`, and past the
+///   token-bounded maximum it scrolls vertically by `vscroll_px` to keep the caret
+///   line visible. `h_scroll_px` stays `0` (no horizontal slide).
+///
+/// All state is local presentation state recomputed each frame from runtime-owned
+/// draft text + geometry — no adapter round trip.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ComposerLayout {
+    /// `true` = multi-line wrap profile; `false` = single-line horizontal caret-follow.
+    pub(crate) wrap: bool,
+    /// Horizontal scroll offset (px) — single-line profile only; `0` when wrapping.
+    pub(crate) h_scroll_px: f32,
+    /// Natural single-line content width (px) — single-line profile only.
+    pub(crate) content_width: f32,
+    /// Number of text lines the box currently shows (`1..=max_lines`); drives the
+    /// upward-grown box height.
+    pub(crate) visible_lines: f32,
+    /// Total wrapped line count of the draft (≥ `visible_lines`); the full content
+    /// height the draft lays out into before vertical clipping.
+    pub(crate) total_lines: f32,
+    /// Vertical scroll offset (px) — multi-line profile, non-zero only once the
+    /// draft exceeds `max_lines` lines.
+    pub(crate) vscroll_px: f32,
+}
+
+impl Default for ComposerLayout {
+    fn default() -> Self {
+        // Single-line, one line tall, no scroll — the inert state when no composer
+        // is active or the draft is empty.
+        Self {
+            wrap: false,
+            h_scroll_px: 0.0,
+            content_width: 0.0,
+            visible_lines: 1.0,
+            total_lines: 1.0,
+            vscroll_px: 0.0,
+        }
+    }
+}
+
+/// Number of text lines the composer box shows for a wrapped draft (hud-nx7yq.1).
+///
+/// The box grows from one line up to the token-bounded `max_lines`; beyond that it
+/// stops growing and scrolls internally (see [`composer_vertical_line_offset`]).
+/// Always at least one line so an empty draft still shows a one-line box.
+pub(crate) fn composer_visible_line_count(total_lines: usize, max_lines: usize) -> usize {
+    total_lines.clamp(1, max_lines.max(1))
+}
+
+/// First visible wrapped line (count scrolled off the top) so the caret line stays
+/// visible inside the bounded `max_lines` window (hud-nx7yq.1).
+///
+/// The vertical analogue of [`composer_scroll_offset`]'s right-pin: when the draft
+/// fits within `max_lines` there is no scroll; otherwise the caret line is pinned
+/// to the BOTTOM visible line as the draft grows, and moving the caret up reveals
+/// earlier lines. Recomputed each frame from the caret line — no persistent state.
+///
+/// - `caret_line`  — zero-based wrapped-line index the caret sits on.
+/// - `total_lines` — total wrapped line count.
+/// - `max_lines`   — token-bounded maximum visible line count.
+///
+/// Returns a first-visible-line index in `[0, total_lines - max_lines]`.
+pub(crate) fn composer_vertical_line_offset(
+    caret_line: usize,
+    total_lines: usize,
+    max_lines: usize,
+) -> usize {
+    let max_lines = max_lines.max(1);
+    // Draft fits in the window → no vertical scroll.
+    if total_lines <= max_lines {
+        return 0;
+    }
+    let max_first = total_lines - max_lines;
+    // Bottom-pin: keep the caret on the last visible line as the draft grows;
+    // `saturating_sub` keeps early caret lines (0..max_lines-1) at first-visible 0.
+    let desired = caret_line.saturating_sub(max_lines - 1);
+    desired.min(max_first)
+}
+
 // ─── Font / image loading methods ────────────────────────────────────────────
 
 impl super::Compositor {
