@@ -1088,21 +1088,30 @@ fn composer_feedback_line(feedback: &PortalInputFeedback) -> String {
     }
 }
 
-/// Build the composer region line for the expanded portal node.
+/// Build the composer status line for the expanded portal node.
 ///
-/// Renders the current draft text with an inline `▌` caret marker inserted at
-/// the cursor byte offset. The caret marker is chosen because it is a Unicode
-/// block character that is visually distinct in monospace/proportional fonts
-/// and does not require compositor-level cursor blinking support.
+/// This line is a **content-free status affordance**, not the draft surface. The
+/// live draft text + caret are rendered exclusively by the compositor's
+/// bottom-pinned input strip, which is the single source of truth for the draft
+/// (hud-2zsbf: `Compositor::composer_input_box` confines the echo to a one-line
+/// strip at the portal bottom). Embedding the draft here as well produced a
+/// SECOND copy in the transcript flow — mid-portal, right after the transcript —
+/// at a different Y than the bottom strip, reading live as a double / misaligned
+/// composer (hud-f6zfa). So this line never carries the draft glyphs; it only
+/// reflects composer availability.
 ///
-/// When the draft is at capacity, the prefix `[!] ` is prepended to make the
-/// at-capacity state text-visible. The color_run path (via `composer_color_runs`)
-/// additionally applies `composer_at_capacity_color` to the line for the
-/// token-driven visual indicator. Both mechanisms are redundant by design:
-/// the text prefix is readable in environments where color runs are unavailable.
+/// States:
+/// - `interaction_enabled == false` → `composer: unavailable`.
+/// - no active draft (`composer_display` is None) → `composer: ready`.
+/// - active draft → `composer: composing` (the draft itself is in the bottom
+///   strip). When the draft is at capacity the line becomes
+///   `composer: [!] at capacity`, keeping the at-capacity state text-visible for
+///   environments without color runs; `composer_color_runs` still emits the
+///   token-driven at-capacity color independently.
 ///
-/// When no draft is active (composer_display is None), returns "composer: ready"
-/// to indicate the composer is available for input.
+/// The promotion-era structured composer node (a dedicated footer input box with
+/// its own bounds) will let the echo, chrome, and status share one geometry and
+/// retire this interim dedup.
 fn composer_line(
     composer_display: Option<&ComposerDisplayState>,
     interaction_enabled: bool,
@@ -1114,25 +1123,13 @@ fn composer_line(
         return "composer: ready".to_string();
     };
 
-    let text = &display.text;
-    let cursor = display.cursor.min(text.len());
-
-    // Insert the caret marker (▌ U+258C LEFT HALF BLOCK) at the cursor position.
-    // The cursor is a byte offset; we snap backward to the nearest valid char
-    // boundary at or before the offset to avoid panics on multi-byte characters.
-    let mut snap = cursor;
-    while snap > 0 && !text.is_char_boundary(snap) {
-        snap -= 1;
-    }
-    let (before, after) = text.split_at(snap);
-    let with_caret = format!("{before}▌{after}");
-
     if display.at_capacity {
-        // Text-visible at-capacity prefix + draft with caret.
-        // The color_runs path applies the token-driven color independently.
-        format!("[!] {with_caret}")
+        // Text-visible at-capacity marker WITHOUT the draft text (the bottom
+        // strip owns the draft). The color_runs path applies the token-driven
+        // color independently.
+        "composer: [!] at capacity".to_string()
     } else {
-        with_caret
+        "composer: composing".to_string()
     }
 }
 
@@ -2230,6 +2227,72 @@ mod tests {
         assert!(
             markdown.contains("composer: unavailable"),
             "§2: degraded portal must show composer as unavailable"
+        );
+    }
+
+    /// hud-f6zfa: with an active draft the compositor's bottom-pinned input
+    /// strip is the single source of truth for the live draft. The markdown
+    /// `composer:` line MUST NOT embed the draft text or caret glyph — doing so
+    /// rendered a SECOND copy mid-transcript at a different Y than the bottom
+    /// strip (a double / misaligned composer). The line stays a content-free
+    /// status affordance.
+    #[test]
+    fn active_draft_not_duplicated_in_markdown_composer_line() {
+        let state = make_expanded_interaction_state("portal-composer-dedup");
+        let display = ComposerDisplayState {
+            text: "hello world draft".to_string(),
+            cursor: 5,
+            at_capacity: false,
+            sequence: 1,
+        };
+
+        let markdown = portal_markdown(&state, Some(&display));
+
+        // The draft text + caret live ONLY in the bottom input strip, never in
+        // the transcript-flow markdown — otherwise the draft appears twice at
+        // different Y positions.
+        assert!(
+            !markdown.contains("hello world draft"),
+            "draft text must not be embedded in the markdown composer line: {markdown}"
+        );
+        assert!(
+            !markdown.contains('▌'),
+            "caret glyph must not appear in the markdown (bottom strip owns it): {markdown}"
+        );
+        // A content-free composer affordance is still present so the surface
+        // reflects that the composer is active.
+        assert!(
+            markdown.contains("composer: composing"),
+            "composer status affordance should be present: {markdown}"
+        );
+    }
+
+    /// hud-f6zfa: at-capacity stays text-visible on the markdown composer status
+    /// line even though the draft glyphs themselves are owned by the bottom
+    /// strip — the `[!]` marker must not disappear with the draft dedup.
+    #[test]
+    fn at_capacity_draft_marks_capacity_without_draft_text() {
+        let state = make_expanded_interaction_state("portal-composer-cap");
+        let display = ComposerDisplayState {
+            text: "some capped draft text".to_string(),
+            cursor: 4,
+            at_capacity: true,
+            sequence: 2,
+        };
+
+        let markdown = portal_markdown(&state, Some(&display));
+
+        assert!(
+            !markdown.contains("some capped draft text"),
+            "draft text must not be duplicated in markdown: {markdown}"
+        );
+        assert!(
+            !markdown.contains('▌'),
+            "caret glyph must not appear in the markdown: {markdown}"
+        );
+        assert!(
+            markdown.contains("[!]"),
+            "at-capacity must remain text-visible on the status line: {markdown}"
         );
     }
 
