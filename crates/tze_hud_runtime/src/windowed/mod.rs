@@ -90,7 +90,8 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel}
 
 use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{
-    Compositor, LocalComposerStateHandle, PortalViewerEchoQueue, WindowSurface,
+    Compositor, FocusRingOwnerHandle, LocalComposerStateHandle, PortalViewerEchoQueue,
+    WindowSurface,
 };
 use tze_hud_config::resolve_runtime_widget_asset_store;
 use tze_hud_input::{
@@ -440,6 +441,11 @@ struct WindowedRuntimeState {
     /// thread pushes the submitted text; the compositor drains it into its
     /// per-tile viewer-echo store and renders it above the composer strip.
     viewer_echo_queue: PortalViewerEchoQueue,
+    /// Shared handle carrying the current keyboard-focus owner to the compositor's
+    /// chrome-layer ring pass (hud-k6yvb). Written each frame in `about_to_wait`
+    /// from the active tab's `FocusManager` owner; the compositor draws the ring
+    /// for whatever owner it names (node or tile-level), above all content.
+    focus_ring_owner_state: FocusRingOwnerHandle,
     /// Reverse channel (hud-21o6x): the compositor publishes the active composer's
     /// wrapped-line layout here each frame; this (main) thread reads it before
     /// dispatching ArrowUp/ArrowDown so the caret can step between soft-wrapped
@@ -541,6 +547,12 @@ impl ApplicationHandler for WinitApp {
         // try_lock — never stalls the event loop; simply skips this frame if the
         // scene lock is momentarily busy.
         self.refresh_active_tab_mirror_opportunistic();
+        // Publish the active tab's current focus owner to the compositor's
+        // chrome-layer ring pass (hud-k6yvb). Per-frame + latest-wins so the ring
+        // tracks Tab/click/Escape focus changes without instrumenting every
+        // transition site; the compositor recomputes bounds from the live scene,
+        // so geometry changes (resize/drag) stay fresh without a focus event.
+        self.push_focus_ring_owner();
         // Retry any keyboard events that were deferred because the scene lock
         // was busy during dispatch (hud-2fz34).  Runs after composer flush so
         // deferred keystrokes re-enter the same path as fresh ones.
@@ -863,6 +875,7 @@ impl ApplicationHandler for WinitApp {
         // additional allocations or locks on the hot path.
         self.state.local_composer_state = Arc::clone(&compositor.local_composer_state);
         self.state.viewer_echo_queue = Arc::clone(&compositor.viewer_echo_queue);
+        self.state.focus_ring_owner_state = Arc::clone(&compositor.focus_ring_owner_state);
         // Reverse channel: read the compositor's per-frame wrapped-line layout for
         // soft-wrap vertical caret movement (hud-21o6x).
         self.state.composer_visual_layout = Arc::clone(&compositor.composer_visual_layout);
@@ -2132,6 +2145,7 @@ impl WindowedRuntime {
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
+            focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             // Placeholder; replaced in resumed() with the compositor's Arc (hud-21o6x).
             composer_visual_layout: Arc::new(StdMutex::new(None)),
             portal_projection_driver,

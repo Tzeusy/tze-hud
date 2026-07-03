@@ -407,6 +407,33 @@ impl FocusManager {
         )
     }
 
+    /// Clear keyboard focus on `tab_id` to [`FocusOwner::None`] via a
+    /// runtime-initiated command (hud-k6yvb).
+    ///
+    /// This is the Escape recovery for a focus stop that has no composer to fall
+    /// back into (a tile-level stop, or a focusable node whose tile carries no
+    /// composer): rather than stranding focus on a control the keyboard user
+    /// cannot type into, Escape releases focus entirely. A subsequent Tab
+    /// re-enters the cycle at the first stop (`navigate_next` from `None`), so
+    /// this is never a dead end.
+    ///
+    /// Emits a `FocusLostEvent` for the released owner and a ring-clearing update.
+    /// Returns a no-op transition when focus is already `None`/chrome.
+    pub fn clear_focus(&mut self, tab_id: SceneId, scene: &SceneGraph) -> FocusTransition {
+        let old_owner = self.tree_for(tab_id).current().clone();
+        if matches!(old_owner, FocusOwner::None | FocusOwner::ChromeElement(_)) {
+            return FocusTransition::default();
+        }
+        let lost = build_lost_event(&old_owner, FocusLostReason::CommandInput, scene);
+        self.tree_for(tab_id).set_focus(FocusOwner::None);
+        let ring_update = Some(self.compute_ring_update(tab_id, scene));
+        FocusTransition {
+            lost,
+            gained: None,
+            ring_update,
+        }
+    }
+
     // ─── Destruction fallback (spec lines 57-58) ────────────────────────
 
     /// Called when a tile is destroyed. If the destroyed tile holds focus,
@@ -1012,6 +1039,66 @@ mod tests {
         };
         scene.set_tile_root(tile_id, node).unwrap();
         node_id
+    }
+
+    // ── Escape recovery: clear-to-no-focus then Tab re-enters (hud-k6yvb) ──
+
+    #[test]
+    fn clear_focus_releases_and_tab_reenters_cycle() {
+        // A composer-less tile with one focusable node — the case #988 could
+        // strand: no composer to recover into.
+        let (mut scene, tab_id, tile_id) = setup_scene();
+        let node_id = add_hit_region(
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "control",
+            true,
+        );
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // Land focus on the control.
+        fm.navigate_next(tab_id, &scene);
+        assert_eq!(fm.current_owner(tab_id).node_id(), Some(node_id));
+
+        // Escape clears focus entirely (no composer to fall back into).
+        let cleared = fm.clear_focus(tab_id, &scene);
+        assert!(
+            cleared.lost.is_some(),
+            "clearing focus must emit a FocusLostEvent for the released control"
+        );
+        assert_eq!(
+            *fm.current_owner(tab_id),
+            FocusOwner::None,
+            "Escape on a composer-less stop must clear focus to None"
+        );
+        // Ring update clears (no bounds) since focus is None.
+        assert!(
+            cleared
+                .ring_update
+                .as_ref()
+                .map(|r| r.bounds.is_none())
+                .unwrap_or(false),
+            "cleared focus must clear the ring"
+        );
+
+        // Tab re-enters the cycle at the first stop — never a dead end.
+        fm.navigate_next(tab_id, &scene);
+        assert_eq!(
+            fm.current_owner(tab_id).node_id(),
+            Some(node_id),
+            "Tab after clear must re-enter the cycle at the first stop"
+        );
+    }
+
+    #[test]
+    fn clear_focus_is_noop_when_already_unfocused() {
+        let (scene, tab_id, _tile_id) = setup_scene();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+        let t = fm.clear_focus(tab_id, &scene);
+        assert!(t.lost.is_none() && t.gained.is_none());
     }
 
     // ── Invariant: single focus owner per tab ────────────────────────────

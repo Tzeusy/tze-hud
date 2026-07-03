@@ -202,6 +202,65 @@ impl Compositor {
         ]
     }
 
+    /// Emit the keyboard focus ring for the current focus owner into `vertices`,
+    /// for the chrome-layer pass drawn above all agent content (hud-k6yvb).
+    ///
+    /// Reads the runtime-plumbed [`focus_ring::FocusRingOwner`] (drained into
+    /// `self.focus_ring_owner`). Draws nothing when focus is cleared, on a
+    /// non-active tab, or the owning tile is gone. The ring covers BOTH owner
+    /// kinds a keyboard user can land on:
+    /// - **node** focus → a ring around the node's display-space bounds (with the
+    ///   tile's scroll offset applied so it tracks the visibly-rendered node);
+    /// - **tile-level** focus (a non-passthrough tile with no focusable nodes) →
+    ///   a ring around the whole tile.
+    ///
+    /// Token-driven color/width; clipped to the owning tile so a scrolled-off
+    /// node's ring never bleeds outside the portal. Overlay-safe (same
+    /// `gpu_color_raw` flat-rect path as the hover/press tints).
+    pub(super) fn append_focus_ring_vertices(
+        &self,
+        scene: &SceneGraph,
+        vertices: &mut Vec<RectVertex>,
+        sw: f32,
+        sh: f32,
+    ) {
+        let Some(owner) = self.focus_ring_owner else {
+            return;
+        };
+        // Only the active tab's focus draws a ring (focus is per-tab).
+        if scene.active_tab != Some(owner.tab_id) {
+            return;
+        }
+        let Some(tile) = scene.tiles.get(&owner.tile_id) else {
+            return;
+        };
+
+        let region = match owner.node_id {
+            Some(node_id) => {
+                let Some(node) = scene.nodes.get(&node_id) else {
+                    return;
+                };
+                let NodeData::HitRegion(hr) = &node.data else {
+                    return;
+                };
+                let (scroll_x, scroll_y) = self.display_tile_scroll_offset(scene, owner.tile_id);
+                Rect::new(
+                    tile.bounds.x + hr.bounds.x - scroll_x,
+                    tile.bounds.y + hr.bounds.y - scroll_y,
+                    hr.bounds.width,
+                    hr.bounds.height,
+                )
+            }
+            None => tile.bounds,
+        };
+
+        let ring = resolve_focus_ring_tokens(&self.token_map);
+        let ring_color = self.gpu_color_raw(ring.color);
+        for edge in Self::focus_ring_edge_rects(region, ring.width_px) {
+            Self::append_clipped_rect_vertices(tile, edge, sw, sh, ring_color, vertices);
+        }
+    }
+
     fn clipped_textured_rect(
         tile: &Tile,
         rect: Rect,
@@ -1313,29 +1372,11 @@ impl Compositor {
                     );
                 }
 
-                // ── Keyboard focus ring (RFC 0004 §5.6) ────────────────────────
-                // When this hit region holds keyboard focus, stroke a token-driven
-                // ring around its display-space bounds so a keyboard-only viewer
-                // can always see where Tab focus landed — even on the transparent
-                // overlay where the region itself paints nothing (hud-2v8br). The
-                // ring renders in overlay mode identically to fullscreen: it's flat
-                // rect geometry through the same `gpu_color_raw` path the hover /
-                // press tints above use, which are proven to show on overlay.
-                if state.is_some_and(|s| s.focused) {
-                    let ring = resolve_focus_ring_tokens(&self.token_map);
-                    let ring_color = self.gpu_color_raw(ring.color);
-                    let region = Rect::new(
-                        tile.bounds.x + hr.bounds.x - scroll_x,
-                        tile.bounds.y + hr.bounds.y - scroll_y,
-                        hr.bounds.width,
-                        hr.bounds.height,
-                    );
-                    for edge in Self::focus_ring_edge_rects(region, ring.width_px) {
-                        Self::append_clipped_rect_vertices(
-                            tile, edge, sw, sh, ring_color, vertices,
-                        );
-                    }
-                }
+                // The keyboard focus ring is NOT drawn here: it moved to the
+                // chrome-layer pass (`append_focus_ring_vertices`, hud-k6yvb) so it
+                // renders above all agent content (input-model §416) and covers
+                // tile-level / composer-less focus owners the per-node scene state
+                // cannot express.
             }
             NodeData::StaticImage(img) => {
                 // If a GPU texture is cached for this resource, emit a textured

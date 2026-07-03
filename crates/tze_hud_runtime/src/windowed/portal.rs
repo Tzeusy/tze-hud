@@ -1475,6 +1475,7 @@ mod tests {
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
+            focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             composer_visual_layout: Arc::new(StdMutex::new(None)),
             portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
             portal_op_rx: None,
@@ -2543,6 +2544,89 @@ mod tests {
         assert!(
             app.state.input_processor.is_composer_active(),
             "composer draft must be active after Escape recovery"
+        );
+    }
+
+    /// hud-k6yvb: Escape on a composer-less focus stop (a focusable node whose
+    /// tile has no composer) clears focus to None — the keyboard user is never
+    /// stranded — and broadcasts a FocusLost for the released node.
+    #[test]
+    fn escape_on_composerless_stop_clears_focus_to_none() {
+        use tze_hud_input::{FocusManager, InputProcessor, KeyboardModifiers};
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+        use tze_hud_scene::types::HitRegionNode;
+        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(100.0, 100.0, 300.0, 200.0),
+                1,
+            )
+            .unwrap();
+        // A plain focusable control — NO composer in the tile.
+        let node_id = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 120.0, 40.0),
+                        interaction_id: "plain".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        accepts_composer_input: false,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        assert_eq!(focus_manager.current_owner(tab_id).node_id(), Some(node_id));
+
+        let (mut app, mut rx) = make_windowed_keyboard_test_app(scene, focus_manager, processor);
+
+        app.dispatch_key_down_event_inner(
+            &RawKeyDownEvent {
+                key_code: "Escape".to_string(),
+                key: "Escape".to_string(),
+                modifiers: KeyboardModifiers::NONE,
+                repeat: false,
+                timestamp_mono_us: tze_hud_scene::MonoUs(1),
+            },
+            Some(tab_id),
+        );
+
+        assert_eq!(
+            *app.state.focus_manager.current_owner(tab_id),
+            tze_hud_input::FocusOwner::None,
+            "Escape on a composer-less stop must clear focus to None"
+        );
+        // A FocusLost event was broadcast for the released node.
+        let (_ns, batch) = rx
+            .try_recv()
+            .expect("clearing focus must broadcast a FocusLost event");
+        assert!(
+            matches!(
+                batch.events.first().and_then(|e| e.event.as_ref()),
+                Some(InputEvent::FocusLost(_))
+            ),
+            "the broadcast must be a FocusLost for the released control"
         );
     }
 
