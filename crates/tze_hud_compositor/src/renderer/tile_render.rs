@@ -1019,7 +1019,10 @@ impl Compositor {
                         ),
                         sw,
                         sh,
-                        self.gpu_color(sc.color),
+                        self.gpu_color(Rgba {
+                            a: sc.color.a * tile_opacity,
+                            ..sc.color
+                        }),
                         vertices,
                     );
                 }
@@ -1182,7 +1185,10 @@ impl Compositor {
                             ),
                             sw,
                             sh,
-                            self.gpu_color(tm.color),
+                            self.gpu_color(Rgba {
+                                a: tm.color.a * tile_opacity,
+                                ..tm.color
+                            }),
                             vertices,
                         );
                     }
@@ -1276,12 +1282,15 @@ impl Compositor {
                             w: clipped.width,
                             h: clipped.height,
                             uv_rect: clipped_uv,
-                            tint: [1.0, 1.0, 1.0, Self::effective_tile_opacity(tile, scene)],
+                            // Fade the image with the whole tile (drag + §6.3 portal
+                            // transition), matching the tile backdrop/text so a
+                            // faded/resized tile stays uniform (hud-b0x0m).
+                            tint: [1.0, 1.0, 1.0, tile_opacity],
                         });
                     }
                 } else {
                     // Fallback: warm-gray placeholder when bytes not registered.
-                    let outer_color = [0.55_f32, 0.50, 0.45, 1.0];
+                    let outer_color = [0.55_f32, 0.50, 0.45, tile_opacity];
                     Self::append_clipped_rect_vertices(
                         tile,
                         Rect::new(
@@ -1298,7 +1307,7 @@ impl Compositor {
 
                     let margin = 4.0_f32;
                     if img.bounds.width > margin * 2.0 && img.bounds.height > margin * 2.0 {
-                        let accent_color = [0.75_f32, 0.70, 0.65, 1.0];
+                        let accent_color = [0.75_f32, 0.70, 0.65, tile_opacity];
                         Self::append_clipped_rect_vertices(
                             tile,
                             Rect::new(

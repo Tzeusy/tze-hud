@@ -12758,3 +12758,196 @@ async fn hud_w41ef_portal_backdrop_opaque_after_resize_grow_no_fade() {
         "grown portal backdrop must stay opaque at full opacity (got alpha={a_grown})"
     );
 }
+
+// ─── hud-b0x0m: every tile node fill type fades with the tile, not just the ──
+// portal TextMarkdown background fixed in hud-w41ef. Draw-list-level assertions
+// (not pixel readback): the live overlay geometry pass uses the REPLACE
+// clear_pipeline while render_frame_headless always blends, so a readback cannot
+// represent live overlay alpha — but the generated fill colors are
+// blend-independent. overlay_mode stays false so `gpu_color` is identity and the
+// emitted alpha is directly comparable to `color.a × tile_opacity`.
+
+fn b0x0m_tile_with_root(
+    scene: &mut SceneGraph,
+    bounds: Rect,
+    root_id: SceneId,
+    data: NodeData,
+) -> SceneId {
+    let tab_id = scene.create_tab("t", 0).unwrap();
+    let lease_id = scene.grant_lease("t", 60_000, vec![]);
+    let tile_id = scene.create_tile(tab_id, "t", lease_id, bounds, 1).unwrap();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data,
+            },
+        )
+        .unwrap();
+    tile_id
+}
+
+/// A non-rounded `SolidColor` node fill must be scaled by the whole-tile fade
+/// (hud-b0x0m). Before the fix it was painted at `sc.color.a` regardless of tile
+/// opacity — the same divergence hud-w41ef fixed for portal backgrounds.
+#[tokio::test]
+async fn hud_b0x0m_solid_color_node_fill_scaled_by_tile_opacity() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    let color = Rgba::new(0.2, 0.4, 0.6, 0.8);
+    let root_id = SceneId::new();
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let tile_id = b0x0m_tile_with_root(
+        &mut scene,
+        Rect::new(0.0, 0.0, 120.0, 120.0),
+        root_id,
+        NodeData::SolidColor(SolidColorNode {
+            color,
+            bounds: Rect::new(0.0, 0.0, 120.0, 120.0),
+            radius: None,
+        }),
+    );
+
+    // Faded tile: fill alpha must track tile.opacity.
+    scene.tiles.get_mut(&tile_id).unwrap().opacity = 0.5;
+    let tile = scene.tiles.get(&tile_id).unwrap().clone();
+    let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+    let mut cmds: Vec<super::draw_cmds::TexturedDrawCmd> = Vec::new();
+    compositor.render_node(root_id, &tile, &scene, &mut verts, &mut cmds, 120.0, 120.0);
+    let faded = verts
+        .first()
+        .expect("SolidColor node must emit a fill quad")
+        .color[3];
+    assert!(
+        (faded - 0.5 * color.a).abs() < 1e-4,
+        "SolidColor fill alpha must be tile-opacity-scaled: got {faded}, expected {}",
+        0.5 * color.a
+    );
+
+    // Full opacity: fill alpha unchanged (= color.a).
+    scene.tiles.get_mut(&tile_id).unwrap().opacity = 1.0;
+    let tile = scene.tiles.get(&tile_id).unwrap().clone();
+    let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+    let mut cmds: Vec<super::draw_cmds::TexturedDrawCmd> = Vec::new();
+    compositor.render_node(root_id, &tile, &scene, &mut verts, &mut cmds, 120.0, 120.0);
+    let full = verts.first().unwrap().color[3];
+    assert!(
+        (full - color.a).abs() < 1e-4,
+        "at full opacity SolidColor fill alpha must be unchanged: got {full}, expected {}",
+        color.a
+    );
+}
+
+/// A rounded `SolidColor` node (painted via the SDF rounded-rect pass, not the
+/// flat vertex pass) must also fade with the tile (hud-b0x0m).
+#[tokio::test]
+async fn hud_b0x0m_rounded_solid_color_scaled_by_tile_opacity() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    let color = Rgba::new(0.3, 0.3, 0.35, 1.0);
+    let root_id = SceneId::new();
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let tile_id = b0x0m_tile_with_root(
+        &mut scene,
+        Rect::new(0.0, 0.0, 120.0, 120.0),
+        root_id,
+        NodeData::SolidColor(SolidColorNode {
+            color,
+            bounds: Rect::new(0.0, 0.0, 120.0, 120.0),
+            radius: Some(12.0),
+        }),
+    );
+
+    scene.tiles.get_mut(&tile_id).unwrap().opacity = 0.5;
+    let cmds = compositor.collect_tile_rounded_rect_cmds(&scene);
+    let faded = cmds
+        .first()
+        .expect("rounded SolidColor root must emit a rounded-rect cmd")
+        .color[3];
+    assert!(
+        (faded - 0.5 * color.a).abs() < 1e-4,
+        "rounded SolidColor alpha must be tile-opacity-scaled: got {faded}, expected {}",
+        0.5 * color.a
+    );
+
+    scene.tiles.get_mut(&tile_id).unwrap().opacity = 1.0;
+    let full = compositor
+        .collect_tile_rounded_rect_cmds(&scene)
+        .first()
+        .unwrap()
+        .color[3];
+    assert!(
+        (full - color.a).abs() < 1e-4,
+        "at full opacity rounded SolidColor alpha must be unchanged: got {full}, expected {}",
+        color.a
+    );
+}
+
+/// A `StaticImage` textured quad's tint alpha must be scaled by the FULL tile
+/// fade — `tile_effective_opacity`, which includes the §6.3 portal-transition
+/// component — not just `effective_tile_opacity` (hud-b0x0m).
+#[tokio::test]
+async fn hud_b0x0m_static_image_tint_scaled_by_tile_opacity() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+    let resource_id = ResourceId::of(b"hud-b0x0m 2x2 image");
+    // Register real RGBA bytes + upload the GPU texture so render_node takes the
+    // textured (tint) path rather than the fallback placeholder.
+    let rgba: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![255u8; 2 * 2 * 4]);
+    compositor.register_image_bytes(resource_id, rgba, 2, 2);
+    assert!(
+        compositor.ensure_image_texture(resource_id, 2, 2),
+        "image texture must upload for the tint path"
+    );
+
+    let root_id = SceneId::new();
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    scene.register_resource(resource_id);
+    let tile_id = b0x0m_tile_with_root(
+        &mut scene,
+        Rect::new(0.0, 0.0, 120.0, 120.0),
+        root_id,
+        NodeData::StaticImage(StaticImageNode {
+            resource_id,
+            width: 2,
+            height: 2,
+            decoded_bytes: 2 * 2 * 4,
+            fit_mode: ImageFitMode::Fill,
+            bounds: Rect::new(0.0, 0.0, 120.0, 120.0),
+        }),
+    );
+
+    // Drive the §6.3 portal-transition component specifically (NOT tile.opacity):
+    // leave tile.opacity = 1.0 and pin a deterministic portal fade at 0.5. This is
+    // the exact case the old code missed — it used `effective_tile_opacity`
+    // (tile.opacity + drag = 1.0 here) and ignored the portal fade, so the image
+    // stayed fully opaque while the faded tile backdrop/text went to 0.5.
+    // `duration_ms: 0` makes `current_opacity_eased` return `target_opacity`
+    // (time-independent), so the pinned 0.5 is deterministic.
+    compositor.portal_tile_anim_states.insert(
+        tile_id,
+        super::draw_cmds::ZoneAnimationState {
+            transition_start: std::time::Instant::now(),
+            duration_ms: 0,
+            from_opacity: 0.5,
+            target_opacity: 0.5,
+        },
+    );
+    assert!(
+        (compositor.portal_tile_anim_opacity(tile_id) - 0.5).abs() < 1e-4,
+        "test setup: portal fade must be pinned at 0.5"
+    );
+
+    let tile = scene.tiles.get(&tile_id).unwrap().clone();
+    let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+    let mut cmds: Vec<super::draw_cmds::TexturedDrawCmd> = Vec::new();
+    compositor.render_node(root_id, &tile, &scene, &mut verts, &mut cmds, 120.0, 120.0);
+    let tint_a = cmds
+        .first()
+        .expect("StaticImage with a cached texture must emit a textured draw cmd")
+        .tint[3];
+    assert!(
+        (tint_a - 0.5).abs() < 1e-4,
+        "StaticImage tint alpha must be tile-opacity-scaled: got {tint_a}, expected 0.5"
+    );
+}
