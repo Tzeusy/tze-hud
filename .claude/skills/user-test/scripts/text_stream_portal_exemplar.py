@@ -3927,11 +3927,90 @@ async def run_rapid(
     })
 
 
+# --- Soak completion marker contract ------------------------------------------
+#
+# A soak run is a FULL-DURATION memory-drift measurement. The authoritative
+# completion marker must therefore be written ONLY when the soak actually ran
+# its intended duration to the end without a fatal early termination (e.g. the
+# portal lease expiring mid-run). Any early / lease-death / exception
+# termination writes a DISTINCT aborted marker (with the termination reason)
+# instead, and never leaves a completion marker behind — so an automated gate
+# keying on ``soak-complete.marker`` cannot false-pass a soak that died early.
+SOAK_COMPLETE_MARKER_NAME = "soak-complete.marker"
+SOAK_ABORTED_MARKER_NAME = "soak-aborted.marker"
+SOAK_COMPLETE_TOKEN = "SOAK_COMPLETE"
+SOAK_ABORTED_TOKEN = "SOAK_ABORTED"
+# A genuinely completed soak must reach at least this fraction of its intended
+# duration. The soak loop only exits normally once elapsed >= duration_s, so a
+# real completion clears this comfortably; the guard exists so a completion
+# marker can never be stamped onto a run that was actually cut short.
+SOAK_COMPLETION_MIN_FRACTION = 0.98
+
+
+def soak_run_completed(intended_s: float, actual_s: float) -> bool:
+    """Return True only if a soak ran (about) its full intended duration.
+
+    Early lease-death / exception runs fall short of ``intended_s`` and must not
+    be treated as genuine completions.
+    """
+    if intended_s <= 0.0:
+        return True
+    return actual_s >= intended_s * SOAK_COMPLETION_MIN_FRACTION
+
+
+def write_soak_outcome_marker(
+    marker_dir: "Path | str",
+    *,
+    completed: bool,
+    intended_s: float,
+    actual_s: float,
+    cycles: int,
+    reason: str = "",
+) -> Path:
+    """Write the authoritative soak completion/abort marker.
+
+    Writes ``soak-complete.marker`` (``SOAK_COMPLETE``) ONLY when the soak
+    reached a genuine full-duration completion (``completed`` is True AND the
+    actual duration is within tolerance of the intended duration). Any early /
+    lease-death / exception / short-duration termination writes
+    ``soak-aborted.marker`` (``SOAK_ABORTED``) with the termination reason
+    instead. Exactly one of the two markers exists in ``marker_dir`` afterwards
+    (the other is removed), so a gate consumer can treat the presence of
+    ``soak-complete.marker`` as authoritative proof of a real full-duration
+    soak.
+
+    Returns the path of the marker that was written.
+    """
+    marker_dir = Path(marker_dir)
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    complete_path = marker_dir / SOAK_COMPLETE_MARKER_NAME
+    aborted_path = marker_dir / SOAK_ABORTED_MARKER_NAME
+    genuine = bool(completed) and soak_run_completed(intended_s, actual_s)
+    if genuine:
+        # Clear any stale abort marker from an earlier attempt in this dir.
+        aborted_path.unlink(missing_ok=True)
+        complete_path.write_text(f"{SOAK_COMPLETE_TOKEN}\n", encoding="utf-8")
+        return complete_path
+    # Aborted / short / errored: never leave a stale completion marker behind,
+    # so a gate cannot false-pass on a marker from a prior full run.
+    complete_path.unlink(missing_ok=True)
+    lines = [
+        SOAK_ABORTED_TOKEN,
+        f"reason={reason or 'early_termination'}",
+        f"intended_duration_s={intended_s:.3f}",
+        f"actual_duration_s={actual_s:.3f}",
+        f"cycles={cycles}",
+    ]
+    aborted_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return aborted_path
+
+
 async def run_soak(
     client: HudClient, lease_id: bytes, tiles: PortalTiles,
     body_full: str, transcript: list[dict[str, Any]],
     duration_s: float, interval_ms: int, window_lines: int,
     mutation_lock: asyncio.Lock,
+    marker_dir: "Path | str | None" = None,
 ) -> None:
     """Sustained streaming memory-drift soak (task 5.5).
 
@@ -3957,39 +4036,73 @@ async def run_soak(
     t0 = time.monotonic()
     next_checkpoint = 60.0
     cycle = 0
-    while True:
-        cycle_started = time.monotonic()
-        elapsed = cycle_started - t0
-        if elapsed >= duration_s:
-            break
-        cycle += 1
-        append_soak_tail_line(lines, seed, cycle, elapsed, window_lines)
-        window = bounded_transcript(lines, 0, window_lines)
-        await publish_portal(
-            client, lease_id, tiles,
-            title="Exemplar Review Portal",
-            subtitle="sustained streaming soak (task 5.5)",
-            body=window,
-            footer_meta=f"soak  •  cycle {cycle}  •  t+{elapsed:.0f}s / {duration_s:.0f}s",
-            include_tile_setup=(cycle == 1),
-            mutation_lock=mutation_lock,
-        )
-        if elapsed >= next_checkpoint:
-            emit_step_event(transcript, 11, "checkpoint", {
-                "code": "soak:progress",
-                "title": "Soak progress",
-                "action": f"sustained streaming at cycle {cycle}",
-                "expected_visual": "portal still scrolling smoothly; no flicker",
-            }, cycle=cycle, elapsed_s=round(elapsed, 1), window_lines=window_lines)
-            next_checkpoint = (int(elapsed // 60.0) + 1) * 60.0
-        cycle_elapsed_s = time.monotonic() - cycle_started
-        await asyncio.sleep(max(0.0, interval_s - cycle_elapsed_s))
+    try:
+        while True:
+            cycle_started = time.monotonic()
+            elapsed = cycle_started - t0
+            if elapsed >= duration_s:
+                break
+            cycle += 1
+            append_soak_tail_line(lines, seed, cycle, elapsed, window_lines)
+            window = bounded_transcript(lines, 0, window_lines)
+            await publish_portal(
+                client, lease_id, tiles,
+                title="Exemplar Review Portal",
+                subtitle="sustained streaming soak (task 5.5)",
+                body=window,
+                footer_meta=f"soak  •  cycle {cycle}  •  t+{elapsed:.0f}s / {duration_s:.0f}s",
+                include_tile_setup=(cycle == 1),
+                mutation_lock=mutation_lock,
+            )
+            if elapsed >= next_checkpoint:
+                emit_step_event(transcript, 11, "checkpoint", {
+                    "code": "soak:progress",
+                    "title": "Soak progress",
+                    "action": f"sustained streaming at cycle {cycle}",
+                    "expected_visual": "portal still scrolling smoothly; no flicker",
+                }, cycle=cycle, elapsed_s=round(elapsed, 1), window_lines=window_lines)
+                next_checkpoint = (int(elapsed // 60.0) + 1) * 60.0
+            cycle_elapsed_s = time.monotonic() - cycle_started
+            await asyncio.sleep(max(0.0, interval_s - cycle_elapsed_s))
+    except Exception as exc:
+        # Early termination (e.g. lease expired mid-soak). Record a distinct
+        # aborted marker with the reason so no completion marker is left behind,
+        # then re-raise so the run still surfaces as a failure to its caller.
+        actual_s = time.monotonic() - t0
+        reason = f"{type(exc).__name__}: {exc}"
+        if marker_dir is not None:
+            write_soak_outcome_marker(
+                marker_dir,
+                completed=False,
+                intended_s=duration_s,
+                actual_s=actual_s,
+                cycles=cycle,
+                reason=reason,
+            )
+        emit_step_event(transcript, 11, "failed", {
+            "code": "soak:aborted",
+            "title": "Sustained streaming soak aborted",
+            "action": f"soak terminated early after {cycle} cycles",
+            "expected_visual": "soak did NOT reach full duration; run is a FAIL",
+        }, cycles=cycle, duration_s=round(actual_s, 3),
+           intended_duration_s=round(duration_s, 3), error=reason)
+        raise
+    actual_s = time.monotonic() - t0
     emit_step_event(transcript, 11, "completed", {
         "code": "soak",
         "title": "Sustained streaming soak",
-        "action": f"completed {cycle} cycles over {time.monotonic() - t0:.0f}s",
+        "action": f"completed {cycle} cycles over {actual_s:.0f}s",
         "expected_visual": "portal settled on last tail window",
-    }, cycles=cycle, duration_s=round(time.monotonic() - t0, 1))
+    }, cycles=cycle, duration_s=round(actual_s, 1))
+    if marker_dir is not None:
+        write_soak_outcome_marker(
+            marker_dir,
+            completed=True,
+            intended_s=duration_s,
+            actual_s=actual_s,
+            cycles=cycle,
+            reason="",
+        )
 
 
 async def run_composer_smoke(
@@ -4804,6 +4917,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
                     client, lease_id, tiles, body, transcript,
                     args.soak_duration_s, args.soak_interval_ms,
                     args.soak_window_lines, mutation_lock,
+                    marker_dir=args.soak_marker_dir,
                 )
             elif phase == "composer-smoke":
                 await run_composer_smoke(
@@ -5180,6 +5294,12 @@ def parse_args() -> argparse.Namespace:
                    help="Inter-append pacing in ms for the 'soak' phase")
     p.add_argument("--soak-window-lines", type=int, default=60,
                    help="Constant tail-window line count republished each soak cycle")
+    p.add_argument("--soak-marker-dir", default=None,
+                   help="Directory in which the harness writes the authoritative soak "
+                        "outcome marker: soak-complete.marker (SOAK_COMPLETE) ONLY on a "
+                        "genuine full-duration completion, or soak-aborted.marker "
+                        "(SOAK_ABORTED, with the termination reason) on early / lease-death "
+                        "/ exception termination. Omit to write no marker.")
     p.add_argument("--cleanup-timeout-s", type=float, default=5.0)
     p.add_argument("--clipboard-user", default="admin-user")
     p.add_argument("--clipboard-ssh-key", default=DEFAULT_SSH_KEY)

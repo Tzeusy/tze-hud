@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import math
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -956,6 +957,180 @@ class SoakPhaseTests(unittest.TestCase):
         self.assertTrue(all(sleep_s >= 0.0 for sleep_s in sleeps))
         completed = [step for step in transcript if step["status"] == "completed"][-1]
         self.assertEqual(completed["cycles"], 4)
+
+    def test_write_soak_outcome_marker_full_duration_writes_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker_dir = Path(tmp)
+            written = portal.write_soak_outcome_marker(
+                marker_dir,
+                completed=True,
+                intended_s=3600.0,
+                actual_s=3601.2,
+                cycles=14400,
+            )
+            complete = marker_dir / portal.SOAK_COMPLETE_MARKER_NAME
+            aborted = marker_dir / portal.SOAK_ABORTED_MARKER_NAME
+            self.assertEqual(written, complete)
+            self.assertTrue(complete.is_file())
+            self.assertFalse(aborted.exists())
+            self.assertEqual(complete.read_text(encoding="utf-8").strip(),
+                             portal.SOAK_COMPLETE_TOKEN)
+
+    def test_write_soak_outcome_marker_short_duration_writes_aborted(self) -> None:
+        # Even when a caller claims completion, a run that fell far short of its
+        # intended duration must be recorded as aborted, never SOAK_COMPLETE.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker_dir = Path(tmp)
+            written = portal.write_soak_outcome_marker(
+                marker_dir,
+                completed=True,
+                intended_s=3600.0,
+                actual_s=608.0,
+                cycles=2400,
+                reason="lease expired",
+            )
+            complete = marker_dir / portal.SOAK_COMPLETE_MARKER_NAME
+            aborted = marker_dir / portal.SOAK_ABORTED_MARKER_NAME
+            self.assertEqual(written, aborted)
+            self.assertFalse(complete.exists())
+            self.assertTrue(aborted.is_file())
+            body = aborted.read_text(encoding="utf-8")
+            self.assertIn(portal.SOAK_ABORTED_TOKEN, body)
+            self.assertIn("reason=lease expired", body)
+            self.assertIn("actual_duration_s=608.000", body)
+            self.assertIn("intended_duration_s=3600.000", body)
+
+    def test_write_soak_outcome_marker_abort_removes_stale_complete(self) -> None:
+        # A prior full run may have left a completion marker in a reused dir;
+        # an abort must clear it so a gate cannot false-pass on the stale marker.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker_dir = Path(tmp)
+            complete = marker_dir / portal.SOAK_COMPLETE_MARKER_NAME
+            complete.write_text(f"{portal.SOAK_COMPLETE_TOKEN}\n", encoding="utf-8")
+            portal.write_soak_outcome_marker(
+                marker_dir,
+                completed=False,
+                intended_s=3600.0,
+                actual_s=608.0,
+                cycles=2400,
+                reason="MUTATION_REJECTED — lease expired",
+            )
+            aborted = marker_dir / portal.SOAK_ABORTED_MARKER_NAME
+            self.assertFalse(complete.exists())
+            self.assertTrue(aborted.is_file())
+            self.assertIn("lease expired", aborted.read_text(encoding="utf-8"))
+
+    def test_run_soak_full_duration_writes_complete_marker(self) -> None:
+        now = 0.0
+
+        original_publish = portal.publish_portal
+        original_sleep = portal.asyncio.sleep
+        original_monotonic = portal.time.monotonic
+
+        def fake_monotonic() -> float:
+            return now
+
+        async def fake_publish_portal(*args, body: str, **kwargs) -> None:
+            nonlocal now
+            now += 0.07
+
+        async def fake_sleep(delay_s: float) -> None:
+            nonlocal now
+            sleeps_delay = max(0.0, delay_s)
+            now += sleeps_delay
+
+        async def run(marker_dir: Path) -> None:
+            await portal.run_soak(
+                client=object(),
+                lease_id=b"lease",
+                tiles=_portal_tiles(),
+                body_full="\n".join(f"seed {i}" for i in range(5)),
+                transcript=[],
+                duration_s=0.8,
+                interval_ms=250,
+                window_lines=3,
+                mutation_lock=asyncio.Lock(),
+                marker_dir=marker_dir,
+            )
+
+        portal.publish_portal = fake_publish_portal
+        portal.asyncio.sleep = fake_sleep
+        portal.time.monotonic = fake_monotonic
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                marker_dir = Path(tmp)
+                asyncio.run(run(marker_dir))
+                complete = marker_dir / portal.SOAK_COMPLETE_MARKER_NAME
+                aborted = marker_dir / portal.SOAK_ABORTED_MARKER_NAME
+                self.assertTrue(complete.is_file())
+                self.assertFalse(aborted.exists())
+                self.assertEqual(complete.read_text(encoding="utf-8").strip(),
+                                 portal.SOAK_COMPLETE_TOKEN)
+        finally:
+            portal.publish_portal = original_publish
+            portal.asyncio.sleep = original_sleep
+            portal.time.monotonic = original_monotonic
+
+    def test_run_soak_lease_death_writes_aborted_not_complete(self) -> None:
+        now = 0.0
+        published = 0
+
+        original_publish = portal.publish_portal
+        original_sleep = portal.asyncio.sleep
+        original_monotonic = portal.time.monotonic
+
+        def fake_monotonic() -> float:
+            return now
+
+        async def fake_publish_portal(*args, body: str, **kwargs) -> None:
+            nonlocal now, published
+            published += 1
+            if published >= 3:
+                raise RuntimeError(
+                    "Mutation batch rejected: MUTATION_REJECTED — lease expired"
+                )
+            now += 0.05
+
+        async def fake_sleep(delay_s: float) -> None:
+            nonlocal now
+            now += max(0.0, delay_s)
+
+        async def run(marker_dir: Path) -> None:
+            await portal.run_soak(
+                client=object(),
+                lease_id=b"lease",
+                tiles=_portal_tiles(),
+                body_full="\n".join(f"seed {i}" for i in range(5)),
+                transcript=[],
+                duration_s=3600.0,
+                interval_ms=250,
+                window_lines=3,
+                mutation_lock=asyncio.Lock(),
+                marker_dir=marker_dir,
+            )
+
+        portal.publish_portal = fake_publish_portal
+        portal.asyncio.sleep = fake_sleep
+        portal.time.monotonic = fake_monotonic
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                marker_dir = Path(tmp)
+                with self.assertRaises(RuntimeError):
+                    asyncio.run(run(marker_dir))
+                complete = marker_dir / portal.SOAK_COMPLETE_MARKER_NAME
+                aborted = marker_dir / portal.SOAK_ABORTED_MARKER_NAME
+                self.assertFalse(
+                    complete.exists(),
+                    "lease-death soak must NOT write the completion marker",
+                )
+                self.assertTrue(aborted.is_file())
+                body = aborted.read_text(encoding="utf-8")
+                self.assertIn(portal.SOAK_ABORTED_TOKEN, body)
+                self.assertIn("lease expired", body)
+        finally:
+            portal.publish_portal = original_publish
+            portal.asyncio.sleep = original_sleep
+            portal.time.monotonic = original_monotonic
 
     def test_soak_phase_extends_initial_lease_ttl(self) -> None:
         self.assertEqual(
