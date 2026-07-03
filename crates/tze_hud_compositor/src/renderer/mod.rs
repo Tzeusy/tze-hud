@@ -1246,6 +1246,18 @@ impl Compositor {
     /// any scene node, keeping the cache bounded to the live node set.
     ///
     /// [`TextMarkdownNode`]: tze_hud_scene::types::TextMarkdownNode
+    /// Cumulative per-frame text `shape_until_scroll` count (hud-991cj).
+    ///
+    /// Zero when no text renderer is initialised. Used by the scroll-reshape
+    /// benchmark/regression to prove that a pure scroll performs no re-shapes.
+    #[allow(dead_code)] // used by the hud-991cj scroll-reshape benchmark
+    pub(crate) fn text_shape_call_count(&self) -> u64 {
+        self.text_rasterizer
+            .as_ref()
+            .map(|r| r.shape_call_count())
+            .unwrap_or(0)
+    }
+
     pub fn prime_markdown_cache(&mut self, scene: &SceneGraph) {
         use tze_hud_scene::types::NodeData;
 

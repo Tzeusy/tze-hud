@@ -12389,6 +12389,89 @@ fn resolve_tile_bg_token_static_image_override() {
     );
 }
 
+/// hud-991cj measurement: today a pure scroll re-shapes the scrollable pane's
+/// full content EVERY frame — `prepare_text_items` rebuilds+shapes every TextItem
+/// per render and the output pane is a full-content Clip node (no truncation
+/// windowing), so scroll (repaint-per-frame) churns the whole transcript through
+/// `shape_until_scroll`. That per-frame full re-shape is the flicker source.
+///
+/// This counts per-frame `shape_until_scroll` calls over an N-frame synthetic
+/// scroll. BASELINE: ≥1 re-shape per scroll frame (unchanged content, only the
+/// offset moved). Once the shaped-buffer cache lands, this asserts ZERO re-shapes
+/// during a pure scroll. GPU builds the compositor; render_frame_headless is used
+/// (single targeted test — no suite-wide readback contention).
+#[tokio::test]
+async fn scroll_reshape_bench_hud991cj() {
+    use tze_hud_scene::types::{
+        FontFamily, NodeData, Rect, TextAlign, TextMarkdownNode, TextOverflow,
+    };
+
+    let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    // Large transcript, Clip overflow, laid out far taller than the tile so the
+    // pane is scrollable (windowed by offset, not truncated).
+    let content = "The quick brown fox jumps over the lazy dog.\n".repeat(200);
+    let node = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            content,
+            bounds: Rect::new(0.0, 0.0, 240.0, 4000.0),
+            font_size_px: 14.0,
+            font_family: FontFamily::SystemMonospace,
+            color: tze_hud_scene::types::Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
+        }),
+    };
+    let mut scene = scene_with_node(node);
+    let tile_id = *scene.tiles.keys().next().unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, tze_hud_scene::types::TileScrollConfig::vertical())
+        .unwrap();
+
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+
+    // Warm frame establishes the initial shape.
+    let _ = compositor.render_frame_headless(&mut scene, &surface);
+    let after_warm = compositor.text_shape_call_count();
+
+    const FRAMES: u64 = 30;
+    let start = std::time::Instant::now();
+    for i in 1..=FRAMES {
+        scene
+            .set_tile_scroll_offset_local(tile_id, 0.0, i as f32 * 40.0)
+            .unwrap();
+        let _ = compositor.render_frame_headless(&mut scene, &surface);
+    }
+    let elapsed = start.elapsed();
+    let reshapes = compositor.text_shape_call_count() - after_warm;
+
+    eprintln!(
+        "hud-991cj bench: pure scroll FRAMES={FRAMES} re-shapes={reshapes} \
+         ({:.2}/frame) wall={:?}",
+        reshapes as f64 / FRAMES as f64,
+        elapsed
+    );
+
+    // BASELINE (pre-cache): the transcript re-shapes on every scroll frame even
+    // though its content/bounds/font never changed. After the shaped-buffer cache
+    // this flips to `assert_eq!(reshapes, 0)`.
+    assert!(
+        reshapes >= FRAMES,
+        "baseline: expected ≥1 full re-shape per scroll frame, got {reshapes} over {FRAMES}"
+    );
+}
+
 /// Token override: `color.tile.background.default` overrides the fallback.
 ///
 /// Uses pure green (#00FF00) — clearly distinct from the default blue-dark.

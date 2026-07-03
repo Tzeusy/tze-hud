@@ -401,6 +401,16 @@ pub struct TextRasterizer {
     /// §3.4, §4.2): `truncate_for_ellipsis` is called exactly once per
     /// content/geometry change, never on every frame.
     pub(crate) truncation_cache: TruncationCache,
+    /// Cumulative count of `shape_until_scroll` invocations on the per-frame
+    /// `prepare_text_items` path (hud-991cj).
+    ///
+    /// This is the measurement lever for the scroll-flicker fix: a `Buffer` is
+    /// shaped only when its content/geometry/font changed, so on a pure scroll
+    /// (offset changes but shape inputs do not) this counter must stay flat once
+    /// a shaped-buffer cache lands. Incremented immediately before each frame-path
+    /// `shape_until_scroll`; read via [`TextRasterizer::shape_call_count`].
+    #[allow(dead_code)] // read only by the hud-991cj scroll-reshape benchmark
+    pub(crate) shape_call_count: u64,
 }
 
 impl TextRasterizer {
@@ -441,7 +451,17 @@ impl TextRasterizer {
             renderer,
             loaded_font_ids: HashSet::new(),
             truncation_cache: TruncationCache::new(),
+            shape_call_count: 0,
         }
+    }
+
+    /// Cumulative number of per-frame `shape_until_scroll` calls (hud-991cj).
+    /// Used by the scroll-reshape benchmark/regression to prove a pure scroll
+    /// performs zero re-shapes once the shaped-buffer cache is in place.
+    #[inline]
+    #[allow(dead_code)] // used by the hud-991cj scroll-reshape benchmark
+    pub(crate) fn shape_call_count(&self) -> u64 {
+        self.shape_call_count
     }
 
     /// Load raw font bytes (TTF or OTF) into glyphon's `FontSystem`.
@@ -1045,6 +1065,10 @@ impl TextRasterizer {
                 for line in buf.lines.iter_mut() {
                     line.set_align(Some(ct_align));
                 }
+                // Measurement lever for hud-991cj: every per-frame shape is
+                // counted so the scroll benchmark/regression can prove a pure
+                // scroll (unchanged shape inputs) performs zero re-shapes.
+                self.shape_call_count += 1;
                 buf.shape_until_scroll(&mut self.font_system, false);
                 buf
             })
