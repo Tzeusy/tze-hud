@@ -137,11 +137,26 @@ pub fn run_component_startup(
         "component_startup: step 2 — design tokens loaded"
     );
 
+    // ── Step 2.5: Config-declared tab bootstrap ───────────────────────────────
+    // Materialize every `[[tabs]]` entry as a scene tab (honoring `default_tab`
+    // as the active one) BEFORE widget bundle loading. The config loader requires
+    // ≥1 `[[tabs]]`, so an empty scene here means the runtime silently ignored a
+    // declared contract: tile-creating mutations would fail PRECONDITION_FAILED
+    // "No active tab" until a manual `create_tab`. Bootstrapping all declared
+    // tabs (not just widget-hosting ones) fixes that.
+    let tab_map = bootstrap_config_tabs(scene, raw);
+
+    tracing::info!(
+        tab_count = tab_map.len(),
+        "component_startup: step 2.5 — config-declared tabs materialized"
+    );
+
     // ── Step 3: Global widget bundle loading ──────────────────────────────────
     // Calls init_widget_registry with the global token map so {{token.key}}
     // placeholders in SVG files are resolved at load time.
     // (Profile-scoped widget bundles are handled in step 4 below.)
-    let tab_map = std::collections::HashMap::new();
+    // Widget instances bind to the tabs materialized in step 2.5 via `tab_map`;
+    // init_widget_registry's own tab pre-creation is now a defensive fallback.
     let widget_svg_assets =
         init_widget_registry(scene, raw, config_parent, &tab_map, &global_tokens);
 
@@ -435,6 +450,86 @@ pub fn register_profile_widgets(
             .widget_registry
             .register_definition(bundle.definition.clone());
     }
+}
+
+// ─── Config-declared tab bootstrap ────────────────────────────────────────────
+
+/// Materialize every config-declared `[[tabs]]` entry as a scene tab.
+///
+/// The config loader requires at least one `[[tabs]]` entry and validates tab
+/// name presence/uniqueness plus at-most-one `default_tab` (see
+/// `tze_hud_config::loader::validate_tabs`). Prior to this step, scene tabs were
+/// only pre-created for tabs that host widget instances (`widget_startup.rs`), so
+/// a minimal valid config (one bare `[[tabs]]`, no widgets) booted with an empty
+/// `scene.tabs` — every tile-creating mutation then failed PRECONDITION_FAILED
+/// "No active tab" until a manual `create_tab`. This function honors the declared
+/// contract: all tabs materialize, and `default_tab` (if any) becomes active.
+///
+/// Returns a map from tab name to its `SceneId` so widget instances can bind to
+/// the already-created tabs in the subsequent widget-registry step.
+///
+/// Spec reference: configuration/spec.md §Tab Configuration Validation.
+fn bootstrap_config_tabs(
+    scene: &mut tze_hud_scene::graph::SceneGraph,
+    raw: &RawConfig,
+) -> HashMap<String, tze_hud_scene::types::SceneId> {
+    let mut tab_map: HashMap<String, tze_hud_scene::types::SceneId> = HashMap::new();
+    let mut default_tab_id: Option<tze_hud_scene::types::SceneId> = None;
+
+    for (tab_idx, tab) in raw.tabs.iter().enumerate() {
+        // validate_tabs enforces a non-empty name; guard defensively so a
+        // malformed-but-parsed config cannot panic startup.
+        let tab_name = match tab.name.as_deref() {
+            Some(n) if !n.is_empty() => n,
+            _ => {
+                tracing::warn!(
+                    tab_idx,
+                    "component_startup: [[tabs]] entry missing name; skipping bootstrap"
+                );
+                continue;
+            }
+        };
+
+        // Idempotent on duplicate names (validate_tabs rejects these, but be safe).
+        let id = match tab_map.get(tab_name) {
+            Some(&existing) => existing,
+            None => match scene.create_tab(tab_name, tab_idx as u32) {
+                Ok(id) => {
+                    tab_map.insert(tab_name.to_string(), id);
+                    tracing::debug!(
+                        tab_name,
+                        "component_startup: materialized config-declared tab"
+                    );
+                    id
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tab_name,
+                        error = %e,
+                        "component_startup: could not create config-declared tab; skipping"
+                    );
+                    continue;
+                }
+            },
+        };
+
+        if tab.default_tab {
+            default_tab_id = Some(id);
+        }
+    }
+
+    // Honor `default_tab` as the active tab. When no tab is marked default,
+    // `create_tab` already left the first-created tab active (first-wins).
+    if let Some(id) = default_tab_id {
+        if let Err(e) = scene.switch_active_tab(id) {
+            tracing::warn!(
+                error = %e,
+                "component_startup: could not activate default tab"
+            );
+        }
+    }
+
+    tab_map
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -875,6 +970,115 @@ notification = "notification-stack-exemplar"
                 .map(|s| s.as_str()),
             Some("#000000"),
             "profile urgency.low token should override global design_token value in compositor_tokens"
+        );
+    }
+
+    // ── Step 2.5: Config-declared tab bootstrap (hud-d5rcd) ───────────────────
+
+    /// WHEN a minimal valid config declares a single widget-less `[[tabs]]` with
+    /// `default_tab = true` THEN that tab materializes in `scene.tabs` at startup
+    /// and is set active — so tile-creating mutations succeed without a manual
+    /// `create_tab` (regression test for hud-d5rcd).
+    #[test]
+    fn widgetless_config_tab_materializes_and_is_active() {
+        let toml_str = r##"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Main"
+default_tab = true
+"##;
+        let raw: RawConfig = toml::from_str(toml_str).expect("TOML parse should succeed");
+        let mut scene = make_scene();
+        run_component_startup(&raw, None, Some("headless"), &mut scene);
+
+        // The declared tab must exist even though it hosts no widgets.
+        assert_eq!(
+            scene.tabs.len(),
+            1,
+            "config-declared tab must materialize even without widget instances"
+        );
+        let (tab_id, tab) = scene.tabs.iter().next().expect("one tab present");
+        assert_eq!(
+            tab.name, "Main",
+            "materialized tab should carry the config name"
+        );
+
+        // default_tab = true must be honored as the active tab.
+        assert_eq!(
+            scene.active_tab,
+            Some(*tab_id),
+            "default_tab must be the active tab after startup"
+        );
+    }
+
+    /// WHEN multiple tabs are declared and a non-first one is `default_tab` THEN
+    /// all tabs materialize and the marked default (not the first-declared) is
+    /// active.
+    #[test]
+    fn multiple_tabs_honor_default_tab_selection() {
+        let toml_str = r##"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "First"
+
+[[tabs]]
+name = "Second"
+default_tab = true
+
+[[tabs]]
+name = "Third"
+"##;
+        let raw: RawConfig = toml::from_str(toml_str).expect("TOML parse should succeed");
+        let mut scene = make_scene();
+        run_component_startup(&raw, None, Some("headless"), &mut scene);
+
+        assert_eq!(scene.tabs.len(), 3, "all declared tabs must materialize");
+        let second_id = scene
+            .tabs
+            .iter()
+            .find(|(_, t)| t.name == "Second")
+            .map(|(id, _)| *id)
+            .expect("Second tab present");
+        assert_eq!(
+            scene.active_tab,
+            Some(second_id),
+            "the tab marked default_tab must be active, not the first declared"
+        );
+    }
+
+    /// WHEN tabs are declared with no `default_tab` THEN all materialize and the
+    /// first-declared tab is active (first-wins fallback from `create_tab`).
+    #[test]
+    fn tabs_without_default_activate_first_declared() {
+        let toml_str = r##"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Alpha"
+
+[[tabs]]
+name = "Beta"
+"##;
+        let raw: RawConfig = toml::from_str(toml_str).expect("TOML parse should succeed");
+        let mut scene = make_scene();
+        run_component_startup(&raw, None, Some("headless"), &mut scene);
+
+        assert_eq!(scene.tabs.len(), 2, "all declared tabs must materialize");
+        let alpha_id = scene
+            .tabs
+            .iter()
+            .find(|(_, t)| t.name == "Alpha")
+            .map(|(id, _)| *id)
+            .expect("Alpha tab present");
+        assert_eq!(
+            scene.active_tab,
+            Some(alpha_id),
+            "with no default_tab, the first-declared tab should be active"
         );
     }
 }
