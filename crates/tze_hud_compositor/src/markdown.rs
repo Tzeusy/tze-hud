@@ -124,6 +124,20 @@ pub struct MarkdownTokens {
     /// blank line between items); `1.0` inserts one blank line between items.
     /// Must be in `[0.0, 4.0]`.
     pub list_item_spacing: f32,
+    /// Color of a thematic-break (`---`/`***`/`___`) divider — the transcript
+    /// turn separator (hud-nx7yq.4).  `None` disables separator rendering: a
+    /// thematic-break line then renders as ordinary text (no divider), preserving
+    /// pre-existing behavior for surfaces with no separator token configured.
+    ///
+    /// Resolved from `portal.divider.color`.  Rendered as a thin geometry quad on
+    /// the break's line — content-free, so it carries no text and reveals nothing
+    /// under redaction (the transcript units are zeroed upstream when redacted).
+    pub separator_color: Option<Rgba>,
+    /// Thickness (physical px) of the thematic-break divider quad (hud-nx7yq.4).
+    ///
+    /// Resolved from `portal.divider.thickness_px`.  Default `1.0`; clamped to a
+    /// sane minimum at render time so a stray `0` cannot make the divider vanish.
+    pub separator_thickness_px: f32,
 }
 
 impl Default for MarkdownTokens {
@@ -143,6 +157,8 @@ impl Default for MarkdownTokens {
             heading_margin_top: 0.0,
             heading_margin_bottom: 0.0,
             list_item_spacing: 0.0,
+            separator_color: None,
+            separator_thickness_px: 1.0,
         }
     }
 }
@@ -246,6 +262,22 @@ impl MarkdownTokens {
         {
             if v.is_finite() && (0.0..=4.0).contains(&v) {
                 tokens.list_item_spacing = v;
+            }
+        }
+
+        // Transcript turn separator: portal.divider.color / .thickness_px (hud-nx7yq.4)
+        if let Some(c) = map
+            .get("portal.divider.color")
+            .and_then(|v| parse_hex_color(v))
+        {
+            tokens.separator_color = Some(c);
+        }
+        if let Some(t) = map
+            .get("portal.divider.thickness_px")
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            if t.is_finite() && t > 0.0 {
+                tokens.separator_thickness_px = t;
             }
         }
 
@@ -416,6 +448,14 @@ pub struct ParsedMarkdown {
     /// `content_start_byte - item_start_byte` to compute the bullet prefix
     /// width for hanging-indent layout.
     pub list_items: Vec<ListItemSpan>,
+    /// Byte offsets (into `plain_text`) of thematic-break divider lines — the
+    /// transcript turn separators (hud-nx7yq.4).  Each offset points at the start
+    /// of a blank line the renderer draws a token-styled divider quad on.
+    ///
+    /// Non-empty only when `tokens.separator_color` is `Some`; a thematic break
+    /// (`---`/`***`/`___`) is otherwise treated as ordinary text.  Sorted
+    /// ascending (parse order is source order).
+    pub thematic_breaks: Vec<usize>,
     /// Line-height multiplier resolved from the `typography.line_height.multiplier`
     /// token at parse time.
     ///
@@ -905,6 +945,8 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
     let mut code_panels: Vec<CodePanelSpan> = Vec::new();
     // Per-list-item hanging-indent metadata.
     let mut list_items: Vec<ListItemSpan> = Vec::new();
+    // Thematic-break divider offsets (transcript turn separators, hud-nx7yq.4).
+    let mut thematic_breaks: Vec<usize> = Vec::new();
 
     let mut in_fenced_block = false;
     let mut fence_char: Option<char> = None;
@@ -1018,6 +1060,24 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
                 }
             }
             prev_was_empty = body.is_empty();
+            i += 1;
+            continue;
+        }
+
+        // ── Thematic break (---, ***, ___) → transcript turn separator ───
+        // Gated on a configured separator color so surfaces without the
+        // `portal.divider.color` token keep the prior behavior (a `---` line
+        // renders as ordinary text). The break occupies one blank line the
+        // renderer draws a token-styled divider quad on (hud-nx7yq.4).
+        if !in_fenced_block && tokens.separator_color.is_some() && is_thematic_break(raw) {
+            // Close the previous line so the break sits on its own row.
+            if !prev_was_empty && !plain.is_empty() {
+                plain.push('\n');
+            }
+            // Record the divider's (blank) line start, then reserve the line.
+            thematic_breaks.push(plain.len());
+            plain.push('\n');
+            prev_was_empty = true;
             i += 1;
             continue;
         }
@@ -1162,8 +1222,41 @@ pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMa
         spans,
         code_panels,
         list_items,
+        thematic_breaks,
         line_height_multiplier: tokens.line_height_multiplier,
     }
+}
+
+/// Whether `line` is a CommonMark thematic break: three or more matching `-`,
+/// `*`, or `_` characters, optionally separated by spaces (hud-nx7yq.4).
+///
+/// Used to render transcript turn separators. Kept intentionally simple (the
+/// leading-indent and internal-space allowances of full CommonMark are a
+/// superset of what the transcript lowering emits).
+fn is_thematic_break(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let mut marker: Option<char> = None;
+    let mut count = 0usize;
+    for c in trimmed.chars() {
+        if c.is_whitespace() {
+            continue;
+        }
+        if c != '-' && c != '*' && c != '_' {
+            return false;
+        }
+        match marker {
+            None => {
+                marker = Some(c);
+                count = 1;
+            }
+            Some(m) if m == c => count += 1,
+            Some(_) => return false, // mixed markers are not a thematic break
+        }
+    }
+    count >= 3
 }
 
 // ─── Inline processing ───────────────────────────────────────────────────────
@@ -2140,6 +2233,96 @@ mod tests {
 
     fn parse(s: &str) -> ParsedMarkdown {
         parse_markdown_subset(s, &tokens())
+    }
+
+    // ─── Transcript turn separators (hud-nx7yq.4) ────────────────────────────
+
+    fn tokens_with_separator() -> MarkdownTokens {
+        MarkdownTokens {
+            separator_color: Some(Rgba::new(0.16, 0.2, 0.27, 1.0)),
+            ..MarkdownTokens::default()
+        }
+    }
+
+    #[test]
+    fn is_thematic_break_recognizes_valid_markers() {
+        for s in [
+            "---", "***", "___", "----", "- - -", "  ---  ", "* * *", "-- -",
+        ] {
+            assert!(is_thematic_break(s), "{s:?} should be a thematic break");
+        }
+        // Fewer than 3 markers, mixed markers, or any other character disqualify.
+        for s in ["", "--", "**", "---x", "abc", "-*-", "a---", "==="] {
+            assert!(
+                !is_thematic_break(s),
+                "{s:?} should NOT be a thematic break"
+            );
+        }
+    }
+
+    /// With a separator token set, a `---` line becomes a divider: recorded in
+    /// `thematic_breaks`, rendered as a blank line (not literal `---` text).
+    #[test]
+    fn thematic_break_recorded_with_separator_token() {
+        let parsed = parse_markdown_subset("A\n---\nB", &tokens_with_separator());
+        assert_eq!(parsed.thematic_breaks.len(), 1, "one divider recorded");
+        let plain = parsed.plain_text.as_ref();
+        assert!(
+            !plain.contains("---"),
+            "divider is not literal text: {plain:?}"
+        );
+        // The recorded offset is at the divider's blank line (1 newline before it).
+        let off = parsed.thematic_breaks[0];
+        let lines_before = plain[..off].chars().filter(|&c| c == '\n').count();
+        assert_eq!(
+            lines_before, 1,
+            "divider sits on the blank line between A and B"
+        );
+        // Both entries survive around the divider.
+        assert!(plain.starts_with('A'));
+        assert!(plain.ends_with('B'));
+    }
+
+    /// Without a separator token, `---` keeps the prior behavior — ordinary text,
+    /// no divider recorded (minimal blast radius for non-portal surfaces).
+    #[test]
+    fn thematic_break_ignored_without_separator_token() {
+        let parsed = parse("A\n---\nB");
+        assert!(
+            parsed.thematic_breaks.is_empty(),
+            "no divider without the token"
+        );
+        assert!(
+            parsed.plain_text.contains("---"),
+            "without the token, --- renders as literal text"
+        );
+    }
+
+    /// Multiple entries produce one divider between each adjacent pair.
+    #[test]
+    fn multiple_thematic_breaks_recorded_in_order() {
+        let parsed = parse_markdown_subset("A\n---\nB\n---\nC", &tokens_with_separator());
+        assert_eq!(parsed.thematic_breaks.len(), 2);
+        assert!(
+            parsed.thematic_breaks[0] < parsed.thematic_breaks[1],
+            "sorted"
+        );
+    }
+
+    #[test]
+    fn separator_tokens_resolve_from_map() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert("portal.divider.color".to_owned(), "#2A3344".to_owned());
+        map.insert("portal.divider.thickness_px".to_owned(), "2".to_owned());
+        let t = MarkdownTokens::from_token_map(&map);
+        assert!(t.separator_color.is_some(), "separator color resolved");
+        assert_eq!(t.separator_thickness_px, 2.0);
+
+        // Absent token → no separator, default thickness.
+        let empty = MarkdownTokens::from_token_map(&HashMap::new());
+        assert!(empty.separator_color.is_none());
+        assert_eq!(empty.separator_thickness_px, 1.0);
     }
 
     // ── Task 2.4 — Subset construct tests ─────────────────────────────────────

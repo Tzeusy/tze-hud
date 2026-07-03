@@ -53,6 +53,44 @@ use super::token_colors::{
 /// stay in lockstep.  Matches the composer strip's visual padding.
 const COMPOSER_TEXT_MARGIN: f32 = 6.0;
 
+/// Compute divider rectangles for transcript turn separators (hud-nx7yq.4).
+///
+/// Pure geometry: for each thematic-break byte offset in `breaks`, count the
+/// newlines in `plain[..offset]` to find the break's blank-line index, then place
+/// a `thickness`-tall full-width rule centred vertically within that line. The
+/// origin (`origin_x`, `origin_y`) is the node's top-left in display space (tile
+/// and node bounds, minus scroll); `width` is the node width. Returns
+/// absolute-space `Rect`s the caller clips to the tile and fills with the token
+/// divider color.
+///
+/// Kept free-standing (no `self`, no GPU) so the line-counting / centring math is
+/// unit-testable without a headless compositor.
+pub(super) fn transcript_separator_rects(
+    plain: &str,
+    breaks: &[usize],
+    origin_x: f32,
+    origin_y: f32,
+    width: f32,
+    line_height: f32,
+    thickness: f32,
+) -> Vec<Rect> {
+    let w = width.max(0.0);
+    if w <= 0.0 || thickness <= 0.0 {
+        return Vec::new();
+    }
+    let mut rects = Vec::with_capacity(breaks.len());
+    for &offset in breaks {
+        let clamped = offset.min(plain.len());
+        // Line index of the divider's (blank) line = newlines before it.
+        let lines_before = plain[..clamped].chars().filter(|&c| c == '\n').count();
+        // Centre the rule within its line, then offset up by half its thickness.
+        let center_y = (lines_before as f32 + 0.5) * line_height;
+        let y = origin_y + center_y - thickness / 2.0;
+        rects.push(Rect::new(origin_x, y, w, thickness));
+    }
+    rects
+}
+
 impl Compositor {
     // ─── Drag-boost helpers ───────────────────────────────────────────────────
 
@@ -927,6 +965,44 @@ impl Compositor {
                                             vertices,
                                         );
                                     }
+                                }
+                            }
+                        }
+                    }
+                    // Transcript turn separators: thin token-styled divider quads on
+                    // thematic-break (`---`) lines (hud-nx7yq.4). Same line-counted
+                    // geometry approximation as code panels. Content-free geometry —
+                    // no text, so nothing is revealed under redaction (the transcript
+                    // units are zeroed upstream when redacted, removing the breaks).
+                    if let Some(sep_color) = self.markdown_tokens.separator_color {
+                        let markdown_cache = self.markdown_cache();
+                        if let Some(key) = self.node_key_cache.get(&node_id) {
+                            if let Some(parsed) = markdown_cache.get_by_key(key) {
+                                let line_height = tm.font_size_px * 1.4;
+                                let thickness =
+                                    self.markdown_tokens.separator_thickness_px.max(1.0);
+                                let divider_color = self.gpu_color(Rgba {
+                                    a: sep_color.a * tile_opacity,
+                                    ..sep_color
+                                });
+                                let rects = transcript_separator_rects(
+                                    parsed.plain_text.as_ref(),
+                                    &parsed.thematic_breaks,
+                                    tile.bounds.x + tm.bounds.x - scroll_x,
+                                    tile.bounds.y + tm.bounds.y - scroll_y,
+                                    tm.bounds.width,
+                                    line_height,
+                                    thickness,
+                                );
+                                for rect in rects {
+                                    Self::append_clipped_rect_vertices(
+                                        tile,
+                                        rect,
+                                        sw,
+                                        sh,
+                                        divider_color,
+                                        vertices,
+                                    );
                                 }
                             }
                         }

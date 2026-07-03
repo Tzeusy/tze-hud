@@ -1425,6 +1425,7 @@ mod portal_reveal_render_tests {
             }],
             code_panels: vec![],
             list_items: vec![],
+            thematic_breaks: vec![],
             line_height_multiplier: 1.4,
         };
         let node = TextMarkdownNode {

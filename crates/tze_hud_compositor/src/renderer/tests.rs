@@ -11169,6 +11169,79 @@ fn multiline_default_layout_is_single_line() {
     assert_eq!(d.total_lines, 1.0);
 }
 
+// ─── Transcript turn separators (hud-nx7yq.4) ────────────────────────────────
+
+/// A divider rect is placed on each thematic-break line, centred vertically and
+/// spanning the node width, at the newline-counted y-offset.
+#[test]
+fn separator_rects_placed_on_break_lines() {
+    // "A\n\nB\n\nC": two blank lines (index 1 and 3) hold dividers.
+    let plain = "A\n\nB\n\nC";
+    let breaks = vec![2usize, 5usize]; // start of blank line 1, start of blank line 3
+    let line_height = 20.0;
+    let thickness = 2.0;
+    let rects = tile_render::transcript_separator_rects(
+        plain,
+        &breaks,
+        100.0,
+        50.0,
+        300.0,
+        line_height,
+        thickness,
+    );
+    assert_eq!(rects.len(), 2, "one rect per break");
+    // First divider: blank line index 1 → center_y = 1.5*20 = 30 → y = 50+30-1 = 79.
+    assert!(
+        (rects[0].y - 79.0).abs() < 0.01,
+        "first divider y, got {}",
+        rects[0].y
+    );
+    assert_eq!(rects[0].x, 100.0, "spans from the node origin");
+    assert_eq!(rects[0].width, 300.0, "spans the node width");
+    assert_eq!(rects[0].height, 2.0, "thickness drives height");
+    // Second divider: blank line index 3 → center_y = 3.5*20 = 70 → y = 50+70-1 = 119.
+    assert!(
+        (rects[1].y - 119.0).abs() < 0.01,
+        "second divider y, got {}",
+        rects[1].y
+    );
+}
+
+/// No breaks, zero width, or zero thickness produce no divider rects.
+#[test]
+fn separator_rects_degenerate_inputs_are_empty() {
+    assert!(
+        tile_render::transcript_separator_rects("abc", &[], 0.0, 0.0, 300.0, 20.0, 1.0).is_empty()
+    );
+    assert!(
+        tile_render::transcript_separator_rects("a\n\nb", &[2], 0.0, 0.0, 0.0, 20.0, 1.0)
+            .is_empty(),
+        "zero width → no rects"
+    );
+    assert!(
+        tile_render::transcript_separator_rects("a\n\nb", &[2], 0.0, 0.0, 300.0, 20.0, 0.0)
+            .is_empty(),
+        "zero thickness → no rects"
+    );
+}
+
+/// The `portal.divider.*` canonical tokens flow into the compositor's resolved
+/// `markdown_tokens`, so separators render by default (owner "mini border").
+#[test]
+fn portal_divider_canonical_tokens_reach_markdown_tokens() {
+    use std::collections::HashMap;
+    // Simulate the canonical-resolved token map the runtime hands the compositor.
+    let mut map = HashMap::new();
+    map.insert("portal.divider.color".to_owned(), "#2A3344".to_owned());
+    map.insert("portal.divider.thickness_px".to_owned(), "1".to_owned());
+    let mt = crate::markdown::MarkdownTokens::from_token_map(&map);
+    assert!(
+        mt.separator_color.is_some(),
+        "canonical divider color resolved"
+    );
+    assert_eq!(mt.separator_thickness_px, 1.0);
+}
+
 /// `resolve_composer_overlay_tokens` must return valid, non-degenerate token
 /// values for an empty token map (all defaults applied).
 ///
