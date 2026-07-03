@@ -859,8 +859,11 @@ impl Compositor {
     }
 
     /// Collect kind-distinct `TextItem`s for the runtime-authored viewer reply
-    /// echo (hud-nx7yq.3), stacked upward from just above the composer input
-    /// strip — newest reply nearest the composer.
+    /// echo (hud-nx7yq.3), stacked upward from the top of the LIVE composer input
+    /// box — newest reply nearest the composer. Anchoring to the current
+    /// `visible_lines`-aware box (not the fixed single-line strip) keeps the echo
+    /// history riding above a growing multi-line draft rather than colliding with
+    /// it (hud-xgtuf).
     ///
     /// Returns an empty vec when the tile has no retained viewer echoes, no
     /// composer node to anchor to, or the text rasterizer is unavailable. Lines
@@ -892,20 +895,31 @@ impl Compositor {
 
         let line_height_multiplier =
             crate::markdown::MarkdownTokens::default().line_height_multiplier;
-        // Anchor history to the single-line composer input box position (the
-        // post-submit resting height); viewer lines stack upward from its top.
-        let strip =
-            Self::composer_input_box(region, tokens.font_size_px, line_height_multiplier, 1.0);
+        // Anchor the history stack to the TOP of the LIVE composer input box —
+        // the same `visible_lines`-aware box the draft render uses (hud-xgtuf).
+        // Post-submit the box rests at one line (composer_layout resets to
+        // default each frame), but while the viewer types a multi-line draft the
+        // box grows upward; anchoring here keeps the echo stack riding above the
+        // live draft instead of the fixed single-line position it would otherwise
+        // grow into. The box is measured with the COMPOSER font (matching the
+        // draft box exactly), while the echo lines use their own font below.
+        let composer_font_size_px = resolve_composer_overlay_tokens(&self.token_map).font_size_px;
+        let draft_box = Self::composer_input_box(
+            region,
+            composer_font_size_px,
+            line_height_multiplier,
+            self.composer_layout.visible_lines,
+        );
         let line_h = (tokens.font_size_px * line_height_multiplier).max(1.0);
         let margin = COMPOSER_TEXT_MARGIN;
         let opacity = self.tile_effective_opacity(tile, scene);
 
-        // The band available for history: from the region top down to the strip.
+        // The band available for history: from the region top down to the box top.
         let band_top = region.y;
 
-        // Newest entry nearest the strip (bottom), older entries stacked above.
+        // Newest entry nearest the box top (bottom of the stack), older above.
         for (i, entry) in entries.iter().rev().enumerate() {
-            let line_top = strip.y - (i as f32 + 1.0) * line_h;
+            let line_top = draft_box.y - (i as f32 + 1.0) * line_h;
             if line_top < band_top {
                 // Above the composer region — outside the bounded window.
                 break;
