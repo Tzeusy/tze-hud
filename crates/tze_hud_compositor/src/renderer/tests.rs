@@ -10858,6 +10858,114 @@ async fn composer_echo_confined_to_bottom_strip_full_tile_hitregion() {
     );
 }
 
+/// Repro (hud-nottc): a WRAPPED multi-line draft in a SHORT composer pane (the
+/// exemplar's top input strip) must keep its glyphs — including the caret on the
+/// last visual line — CONFINED to the composer region, not clipped away or laid
+/// outside it. The live P1 was the blinking caret showing at the portal's
+/// top-left when a long draft wrapped in a short input pane: the multi-line
+/// growth/scroll used the `max_lines` token instead of what the pane fits, so the
+/// caret line fell outside the box. This renders through the full headless GPU
+/// pipeline and asserts the composer glyphs sit within the pane rect.
+#[tokio::test]
+async fn composer_wrapped_draft_stays_in_short_pane_headless() {
+    let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(600, 400).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let mut scene = SceneGraph::new(600.0, 400.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("test", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "test",
+            lease_id,
+            Rect::new(0.0, 0.0, 600.0, 400.0),
+            1,
+        )
+        .unwrap();
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.02, 0.02, 0.02, 1.0),
+                    bounds: Rect::new(0.0, 0.0, 600.0, 400.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+    // SHORT composer input pane at the TOP-LEFT of the tile (exemplar-style,
+    // ~2 text lines tall). local bounds are tile-relative.
+    const PANE_H: f32 = 60.0;
+    let hit_id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(root_id),
+            Node {
+                id: hit_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 400.0, PANE_H),
+                    interaction_id: "composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+    // A long draft with spaces so it word-wraps to many visual lines in the
+    // 400px-wide pane; caret at the end (typing).
+    let draft = "word ".repeat(40); // ~200 chars → wraps well past the 2-line pane
+    let draft_len = draft.len();
+    compositor.local_composer = Some(LocalComposerState {
+        text: draft,
+        cursor_byte: draft_len,
+        selection_anchor: draft_len,
+        at_capacity: false,
+        node_id: hit_id,
+    });
+
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+    compositor.render_frame_headless(&mut scene, &surface);
+
+    let pixels = surface.read_pixels(&compositor.device);
+    let is_bright = |o: usize| pixels[o] > 160 && pixels[o + 1] > 160 && pixels[o + 2] > 160;
+    let (mut miny, mut maxy, mut count) = (400usize, 0usize, 0usize);
+    for row in 0..400usize {
+        for col in 0..600usize {
+            if is_bright((row * 600 + col) * 4) {
+                count += 1;
+                miny = miny.min(row);
+                maxy = maxy.max(row);
+            }
+        }
+    }
+    // The caret + draft must render (not clipped entirely away).
+    assert!(
+        count > 0,
+        "composer draft/caret must render some glyphs in the pane"
+    );
+    // All composer glyphs stay within the input pane rect (top-anchored, 60px).
+    // A small tolerance covers glyph descenders / anti-aliasing at the edge.
+    assert!(
+        maxy <= (PANE_H as usize) + 3,
+        "composer glyphs rendered below the input pane (maxy={maxy} > {PANE_H}); \
+         a wrapped draft must stay within its box, not overflow"
+    );
+    assert!(
+        miny <= PANE_H as usize,
+        "composer glyphs must be inside the pane, got miny={miny}"
+    );
+}
+
 /// Repro (hud-2zsbf): a composer draft wider than the box must be CLIPPED to the
 /// composer interior — no glyph pixels may appear to the RIGHT of the box edge.
 ///
@@ -11504,6 +11612,65 @@ fn multiline_input_box_clamped_to_region() {
         "clamped to region height"
     );
     assert!(box_rect.y >= region.y - 0.01, "top not above the region");
+}
+
+// ─── Caret stays in the box for a short composer pane (hud-nottc) ─────────────
+
+/// `composer_region_fit_lines` reports how many text lines a region interior fits.
+#[test]
+fn composer_region_fit_lines_computes_capacity() {
+    let lh = 16.0 * NX_LH_MULT; // 22.4
+    let m = 6.0;
+    // (60 - 12) / 22.4 = 2.14 → 2 lines (the exemplar-style short input pane).
+    assert_eq!(image_cache::composer_region_fit_lines(60.0, lh, m), 2);
+    // Tall region fits many lines: (300 - 12) / 22.4 = 12.85 → 12.
+    assert_eq!(image_cache::composer_region_fit_lines(300.0, lh, m), 12);
+    // Too short for even one line → floors to 1 (never zero).
+    assert_eq!(image_cache::composer_region_fit_lines(20.0, lh, m), 1);
+    // Degenerate line height → 1.
+    assert_eq!(image_cache::composer_region_fit_lines(60.0, 0.0, m), 1);
+}
+
+/// Regression for hud-nottc: a wrapped draft in a SHORT composer pane must keep
+/// the caret line inside the visible box. Bounding growth + scroll only by the
+/// `max_lines` token (not the region capacity) left the caret clipped OUTSIDE the
+/// box — the top-left-caret live symptom. Bounding by the region fit keeps it in.
+#[test]
+fn caret_stays_within_short_composer_pane() {
+    let region_h = 60.0;
+    let line_height = 16.0 * NX_LH_MULT; // 22.4
+    let margin = 6.0;
+    let fit = image_cache::composer_region_fit_lines(region_h, line_height, margin);
+    assert_eq!(fit, 2, "the 60px pane fits 2 text lines");
+
+    // A long single line wrapped to 3 visual rows; caret at the end (last row).
+    let (total_lines, caret_line, token_max) = (3usize, 2usize, 6usize);
+
+    // BUGGY path — scroll bounded only by the token: the box only fits `fit` rows,
+    // but the caret's box-relative row is >= fit, i.e. clipped out of the box.
+    let bad_first = composer_vertical_line_offset(caret_line, total_lines, token_max);
+    assert!(
+        caret_line - bad_first >= fit,
+        "token-only scroll leaves the caret outside the {fit}-line box (the bug)"
+    );
+
+    // FIXED path — bound growth AND scroll by the region fit.
+    let eff = token_max.min(fit).max(1);
+    let good_first = composer_vertical_line_offset(caret_line, total_lines, eff);
+    let good_visible = composer_visible_line_count(total_lines, eff);
+    assert!(
+        good_visible <= fit,
+        "box never grows past what the pane fits ({good_visible} <= {fit})"
+    );
+    assert!(
+        caret_line >= good_first && caret_line < good_first + good_visible,
+        "caret line {caret_line} within the visible window [{good_first}, {})",
+        good_first + good_visible
+    );
+    assert!(
+        caret_line - good_first < fit,
+        "caret's box-relative row fits inside the box"
+    );
 }
 
 /// The `portal.composer.max_lines` token defaults to 6, parses an override, and
