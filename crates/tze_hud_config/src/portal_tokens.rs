@@ -37,6 +37,10 @@
 //! | `portal.transcript.background` | transcript body | content backdrop color (RGBA hex) |
 //! | `portal.transcript.text_color` | transcript body | content text color (RGBA hex) |
 //! | `portal.transcript.font_size` | transcript body | content font size in px |
+//! | `portal.transcript.code_background` | transcript body | code-span backdrop; prefers over `color.code.background` (RGBA hex) |
+//! | `portal.transcript.code_text` | transcript body | code-span foreground; prefers over `color.code.text` (RGBA hex) |
+//! | `portal.transcript.link_color` | transcript body | link text color; prefers over `color.link.text` (RGBA hex) |
+//! | `portal.transcript.code_font_family` | transcript body | code font family; prefers over `typography.code.family` |
 //! | `portal.transcript.dim_text_color` | transcript body | dimmed text shown while disconnected/stale (RGBA hex) |
 //! | `portal.transcript.dim_background` | transcript body | dimmed backdrop shown while disconnected/stale (RGBA hex) |
 //! | `portal.stale_marker.color` | stale marker | content-free disconnect marker color (RGBA hex) |
@@ -92,6 +96,37 @@ pub const PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR: &str = "portal.composer.at_ca
 pub const PORTAL_TOKEN_TRANSCRIPT_BACKGROUND: &str = "portal.transcript.background";
 pub const PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR: &str = "portal.transcript.text_color";
 pub const PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE: &str = "portal.transcript.font_size";
+
+// ── Transcript markdown-subset styling (Promotion P2, hud-8691s) ─────────────
+//
+// Portal-scoped canonical keys for the Phase-1 markdown subset the transcript
+// renders (fenced/inline code, links). Before promotion these values were only
+// reachable via the generic `color.code.*` / `color.link.text` /
+// `typography.code.family` keys, with no `portal.*` name a profile could target
+// per the surface. The portal markdown consumer prefers these keys and falls
+// back to the generic ones when unset, so a portal profile can restyle its own
+// code/link treatment without disturbing the generic markdown defaults. Unset by
+// default (no canonical schema default exists for the generic keys either), so
+// the transcript renders exactly as today until a profile opts in.
+//
+// CONSTRAINT (hud-hjckr): the `portal.*`-over-generic preference is applied in
+// the compositor's SINGLE global `MarkdownTokens` (the markdown parse cache is
+// keyed on content only), so it is effectively GLOBAL. This is safe only while
+// the text-stream portal is the sole governed markdown surface. Before ANY
+// second governed markdown surface ships, markdown token resolution must become
+// per-tile-scoped, or these portal keys will leak onto that surface.
+/// Background fill behind fenced/inline code spans in the transcript (RGBA hex).
+/// Prefer over the generic `color.code.background`.
+pub const PORTAL_TOKEN_TRANSCRIPT_CODE_BACKGROUND: &str = "portal.transcript.code_background";
+/// Foreground color for code spans in the transcript (RGBA hex). Prefer over the
+/// generic `color.code.text`.
+pub const PORTAL_TOKEN_TRANSCRIPT_CODE_TEXT: &str = "portal.transcript.code_text";
+/// Link text color in the transcript (RGBA hex). Prefer over the generic
+/// `color.link.text`.
+pub const PORTAL_TOKEN_TRANSCRIPT_LINK_COLOR: &str = "portal.transcript.link_color";
+/// Code font family for the transcript (`"monospace"` | `"sans-serif"` | …).
+/// Prefer over the generic `typography.code.family`.
+pub const PORTAL_TOKEN_TRANSCRIPT_CODE_FONT_FAMILY: &str = "portal.transcript.code_font_family";
 
 // ── Degraded / disconnect tokens (portal-disconnect-resume-ux §2/§3) ─────────
 //
