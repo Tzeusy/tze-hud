@@ -311,6 +311,35 @@ pub(crate) fn composer_visible_line_count(total_lines: usize, max_lines: usize) 
     total_lines.clamp(1, max_lines.max(1))
 }
 
+/// How many composer text lines the region interior can actually display
+/// (hud-nottc).
+///
+/// The rendered box height is `visible_lines * line_height + 2*margin` clamped to
+/// the region height (see `Compositor::composer_input_box`), so a composer region
+/// only fits `floor((region_height - 2*margin) / line_height)` full lines — at
+/// least one. The multi-line growth (`composer_visible_line_count`) and internal
+/// scroll (`composer_vertical_line_offset`) must be bounded by THIS, not just the
+/// `max_lines` token: a short composer pane (e.g. a one/two-line input strip)
+/// would otherwise "grow" past its bounds and the vertical-scroll math — computed
+/// against `max_lines` — would leave the caret line clipped outside the visible
+/// box. Bounding both by the region fit keeps the caret inside the box.
+pub(crate) fn composer_region_fit_lines(
+    region_height: f32,
+    line_height: f32,
+    margin: f32,
+) -> usize {
+    if line_height <= 0.0 {
+        return 1;
+    }
+    let interior = region_height - margin * 2.0;
+    let fit = (interior / line_height).floor();
+    if fit.is_finite() && fit >= 1.0 {
+        fit as usize
+    } else {
+        1
+    }
+}
+
 /// First visible wrapped line (count scrolled off the top) so the caret line stays
 /// visible inside the bounded `max_lines` window (hud-nx7yq.1).
 ///

@@ -37,8 +37,8 @@ use crate::pipeline::{RectVertex, rect_vertices};
 use super::Compositor;
 use super::draw_cmds::{TexturedDrawCmd, compute_fit_mode};
 use super::image_cache::{
-    ComposerLayout, caret_visible_at, composer_display_text_blink, composer_scroll_offset,
-    composer_vertical_line_offset, composer_visible_line_count,
+    ComposerLayout, caret_visible_at, composer_display_text_blink, composer_region_fit_lines,
+    composer_scroll_offset, composer_vertical_line_offset, composer_visible_line_count,
 };
 use super::token_colors::{
     ComposerOverlayTokens, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE, TILE_BG_TEXT_MARKDOWN,
@@ -629,9 +629,19 @@ impl Compositor {
             font_size_px,
             line_height_multiplier,
         );
-        let visible_lines = composer_visible_line_count(total_lines, max_lines as usize);
+        // Bound growth AND vertical scroll to what the composer REGION actually
+        // fits (hud-nottc), not just the `max_lines` token. A short composer pane
+        // (e.g. the exemplar's top input strip, ~2 lines) would otherwise grow the
+        // box past its bounds while the scroll math — keyed on `max_lines` — left
+        // the caret line clipped outside the visible box. `composer_input_box`
+        // clamps the box height to the region too, so this keeps visible_lines,
+        // the box, and vscroll mutually consistent and the caret always in view.
+        let region_fit_lines =
+            composer_region_fit_lines(region.height, line_height, COMPOSER_TEXT_MARGIN);
+        let effective_max_lines = (max_lines as usize).min(region_fit_lines).max(1);
+        let visible_lines = composer_visible_line_count(total_lines, effective_max_lines);
         let first_visible =
-            composer_vertical_line_offset(caret_line, total_lines, max_lines as usize);
+            composer_vertical_line_offset(caret_line, total_lines, effective_max_lines);
         self.composer_layout = ComposerLayout {
             wrap: true,
             h_scroll_px: 0.0,
