@@ -108,6 +108,13 @@ pub const PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE: &str = "portal.transcript.font_size
 // code/link treatment without disturbing the generic markdown defaults. Unset by
 // default (no canonical schema default exists for the generic keys either), so
 // the transcript renders exactly as today until a profile opts in.
+//
+// CONSTRAINT (hud-hjckr): the `portal.*`-over-generic preference is applied in
+// the compositor's SINGLE global `MarkdownTokens` (the markdown parse cache is
+// keyed on content only), so it is effectively GLOBAL. This is safe only while
+// the text-stream portal is the sole governed markdown surface. Before ANY
+// second governed markdown surface ships, markdown token resolution must become
+// per-tile-scoped, or these portal keys will leak onto that surface.
 /// Background fill behind fenced/inline code spans in the transcript (RGBA hex).
 /// Prefer over the generic `color.code.background`.
 pub const PORTAL_TOKEN_TRANSCRIPT_CODE_BACKGROUND: &str = "portal.transcript.code_background";

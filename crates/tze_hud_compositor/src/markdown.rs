@@ -200,11 +200,11 @@ impl MarkdownTokens {
         // a portal profile restyle its own code/link treatment while the generic
         // markdown defaults are preserved when no portal key is present.
         //
-        // NOTE: `self.markdown_tokens` is a single global instance (the portal is
-        // the sole governed markdown surface in v1), so this preference applies
-        // wherever markdown renders. When a distinct non-portal markdown surface
-        // is introduced, per-tile token scoping is required (the parse cache is
-        // keyed on content only) — tracked as a follow-up.
+        // NOTE (hud-hjckr): `self.markdown_tokens` is a single global instance
+        // (the portal is the sole governed markdown surface in v1), so this
+        // preference applies wherever markdown renders. Before ANY second governed
+        // markdown surface ships, per-tile token scoping is required (the parse
+        // cache is keyed on content only) or these portal keys will leak onto it.
         let prefer = |portal_key: &str, generic_key: &str| {
             map.get(portal_key).or_else(|| map.get(generic_key))
         };
