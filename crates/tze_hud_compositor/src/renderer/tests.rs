@@ -12053,6 +12053,115 @@ async fn prime_truncation_cache_is_commit_primed_before_render_frame_headless() 
     );
 }
 
+/// hud-uyhpn benchmark: a portal drag-move is position-only, so it must NOT
+/// re-prime the version-gated content caches. This measures re-primes per drag
+/// frame two ways over the REAL cache gates:
+///
+///   * BASELINE (pre-fix) — each drag frame bumps `scene.version` (the old
+///     `translate_portal_group_on_drag` behavior). The markdown cache has no
+///     cadence gate, so it re-hashes all content + rebuilds the node-key cache
+///     EVERY frame → `FRAMES` re-primes. This is the per-frame re-shape the live
+///     low-fps drag exhibited.
+///   * FIXED — each drag frame bumps `scene.geometry_epoch` and leaves
+///     `scene.version` frozen (the new drag path). The version gate short-circuits
+///     immediately → ZERO re-primes, near-zero wall time.
+///
+/// The eprintln! line carries the before/after numbers for the PR body. GPU is
+/// required only to construct the compositor/text renderer; the test never
+/// renders (no pixel readback), so it is safe under llvmpipe.
+#[tokio::test]
+async fn drag_move_position_only_skips_content_cache_reprimes_bench() {
+    use std::time::Instant;
+    use tze_hud_scene::types::{
+        FontFamily, NodeData, Rect, TextAlign, TextMarkdownNode, TextOverflow,
+    };
+
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    // A realistically large transcript so the per-frame re-hash cost is visible.
+    let content = "The quick brown fox jumps over the lazy dog. ".repeat(400);
+    let node = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            content,
+            bounds: Rect::new(0.0, 0.0, 256.0, 240.0),
+            font_size_px: 14.0,
+            font_family: FontFamily::SystemMonospace,
+            color: tze_hud_scene::types::Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
+        }),
+    };
+    let mut scene = scene_with_node(node);
+    let tile_id = *scene.tiles.keys().next().unwrap();
+
+    // Commit-time prime at rest — caches now match scene.version.
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+    assert_eq!(compositor.markdown_cache_scene_version, scene.version);
+
+    const FRAMES: u64 = 60;
+    let (dx, dy) = (3.0_f32, -2.0_f32);
+
+    // ── BASELINE: pre-fix translate — move + bump scene.version each frame ──
+    let mut md_reprimes_baseline = 0u64;
+    let baseline_start = Instant::now();
+    for _ in 0..FRAMES {
+        if let Some(t) = scene.tiles.get_mut(&tile_id) {
+            t.bounds.x += dx;
+            t.bounds.y += dy;
+        }
+        scene.version += 1; // old drag path invalidated content caches here
+        let before = compositor.markdown_cache_scene_version;
+        compositor.prime_markdown_cache(&scene);
+        if compositor.markdown_cache_scene_version != before {
+            md_reprimes_baseline += 1;
+        }
+    }
+    let baseline_us = baseline_start.elapsed().as_micros();
+
+    // ── FIXED: new drag path — move + bump geometry_epoch each frame ──
+    let mut md_reprimes_fixed = 0u64;
+    let fixed_start = Instant::now();
+    for _ in 0..FRAMES {
+        if let Some(t) = scene.tiles.get_mut(&tile_id) {
+            t.bounds.x += dx;
+            t.bounds.y += dy;
+        }
+        scene.bump_geometry_epoch(); // position-only: version stays frozen
+        let before = compositor.markdown_cache_scene_version;
+        compositor.prime_markdown_cache(&scene);
+        if compositor.markdown_cache_scene_version != before {
+            md_reprimes_fixed += 1;
+        }
+    }
+    let fixed_us = fixed_start.elapsed().as_micros();
+
+    eprintln!(
+        "hud-uyhpn bench (FRAMES={FRAMES}): markdown cache re-primes \
+         baseline={md_reprimes_baseline} fixed={md_reprimes_fixed}; \
+         prime wall-time baseline={baseline_us}us fixed={fixed_us}us"
+    );
+
+    assert_eq!(
+        md_reprimes_baseline, FRAMES,
+        "pre-fix: a version bump per drag frame re-primes the markdown cache every frame"
+    );
+    assert_eq!(
+        md_reprimes_fixed, 0,
+        "fixed: a geometry-epoch (position-only) drag must NEVER re-prime the markdown cache"
+    );
+}
+
 /// Verify that `load_font_bytes` resets the truncation cache sentinel to
 /// `u64::MAX` when a NEW font is loaded, forcing a re-prime on the next
 /// `prime_truncation_cache` call (hud-v2z6u item b).

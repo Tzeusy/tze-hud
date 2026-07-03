@@ -925,6 +925,12 @@ impl ApplicationHandler for WinitApp {
                 // flight, freeing idle CPU/GPU/streaming budget without dropping any
                 // real change. u64::MAX guarantees the very first frame renders.
                 let mut last_rendered_scene_version: u64 = u64::MAX;
+                // Position-only drag-move mutations advance scene.geometry_epoch
+                // (not scene.version), so the present-gate must also repaint when
+                // the epoch changes — otherwise a smooth drag would stall on the
+                // idle gate. Content caches stay gated on scene.version so the
+                // translate never re-primes them (hud-uyhpn).
+                let mut last_rendered_geometry_epoch: u64 = u64::MAX;
                 crate::diag::diag_write("compositor thread: frame loop STARTED");
 
                 tracing::info!(
@@ -1061,6 +1067,7 @@ impl ApplicationHandler for WinitApp {
                         // gate; an in-flight eased transition / TTL fade / reveal /
                         // smooth-scroll forces a render so it never freezes.
                         let dirty = scene.version != last_rendered_scene_version
+                            || scene.geometry_epoch != last_rendered_geometry_epoch
                             || compositor.has_inflight_animation(&scene)
                             || composer_needs_render;
 
@@ -1096,6 +1103,7 @@ impl ApplicationHandler for WinitApp {
                             // Record the version we just presented so an unchanged
                             // scene idles on the next iteration.
                             last_rendered_scene_version = scene.version;
+                            last_rendered_geometry_epoch = scene.geometry_epoch;
                             drop(scene); // Release lock before signalling main thread.
 
                             // ── Signal main thread to present ─────────────────

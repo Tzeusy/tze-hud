@@ -197,10 +197,17 @@ pub(super) fn apply_drag_handle_pointer_event(
                 let dx = new_x - old.x;
                 let dy = new_y - old.y;
                 if !translate_portal_group_on_drag(scene, eid, dx, dy) {
-                    if let Some(tile) = scene.tiles.get_mut(&eid) {
+                    let moved = if let Some(tile) = scene.tiles.get_mut(&eid) {
                         tile.bounds.x = new_x;
                         tile.bounds.y = new_y;
-                        scene.version += 1;
+                        true
+                    } else {
+                        false
+                    };
+                    if moved {
+                        // Position-only single-tile move: geometry epoch, not
+                        // version — same reasoning as the group path (hud-uyhpn).
+                        scene.bump_geometry_epoch();
                     }
                 }
                 tracing::trace!(
@@ -232,10 +239,17 @@ pub(super) fn apply_drag_handle_pointer_event(
             let dx = final_x - old_x;
             let dy = final_y - old_y;
             if !translate_portal_group_on_drag(scene, eid, dx, dy) {
-                if let Some(tile) = scene.tiles.get_mut(&eid) {
+                let moved = if let Some(tile) = scene.tiles.get_mut(&eid) {
                     tile.bounds.x = final_x;
                     tile.bounds.y = final_y;
-                    scene.version += 1;
+                    true
+                } else {
+                    false
+                };
+                if moved {
+                    // Position-only single-tile move: geometry epoch, not
+                    // version — same reasoning as the group path (hud-uyhpn).
+                    scene.bump_geometry_epoch();
                 }
             }
 
@@ -646,7 +660,14 @@ fn translate_portal_group_on_drag(
         // republish cannot pull a member back to its stale layout.
         scene.lock_viewer_geometry(tile_id);
     }
-    scene.version += 1;
+    // Position-only mutation: bump the geometry epoch (re-arms the present-gate
+    // so every member paints at its new position this frame) but NOT
+    // scene.version — a translation changes no content and no size, so the
+    // compositor's version-gated markdown/truncation caches must NOT re-prime.
+    // Bumping version here forced a full per-frame re-hash/re-shape and made the
+    // live drag low-fps / flickery (hud-uyhpn). #986 group coherence and #989
+    // resize reflow both key off size and are unaffected.
+    scene.bump_geometry_epoch();
     true
 }
 
@@ -4220,6 +4241,141 @@ mod tests {
         assert!(
             !scene.is_viewer_geometry_locked(shield_id),
             "the untouched drag shield must not be locked"
+        );
+    }
+
+    /// hud-uyhpn core: a multi-frame drag-move is a POSITION-ONLY mutation. It
+    /// must NOT bump `scene.version` (the sentinel the compositor's markdown /
+    /// truncation caches gate on) — otherwise every pointer delta invalidates the
+    /// content-shaped caches and forces a full re-hash / re-shape per frame, the
+    /// low-fps / flickery drag observed live. Instead each frame advances
+    /// `scene.geometry_epoch` so the present-gate still repaints the moved portal.
+    ///
+    /// Baseline (pre-fix) over a K-frame drag: `scene.version` advanced K times →
+    /// K content-cache re-primes. Fixed: `scene.version` advances 0 times → ZERO
+    /// re-primes, while position updates every frame (`geometry_epoch` +K, bounds
+    /// move each frame).
+    #[test]
+    fn drag_move_is_position_only_no_version_bump_repaints_each_frame() {
+        let (mut scene, _tab_id, frame_id, transcript_id, composer_id, _shield_id, _fm) =
+            multi_surface_portal_scene();
+
+        let read =
+            |scene: &tze_hud_scene::graph::SceneGraph, id| scene.tiles.get(&id).unwrap().bounds;
+
+        // Settle to a known baseline as if content had just been committed and the
+        // compositor primed its caches at this version.
+        let version_at_drag_start = scene.version;
+        let epoch_at_drag_start = scene.geometry_epoch;
+
+        // Simulate a K-frame pointer drag: many small deltas, one per frame.
+        const FRAMES: usize = 30;
+        let (dx, dy) = (3.0_f32, -2.0_f32);
+        let members = [frame_id, transcript_id, composer_id];
+        let mut prev: Vec<_> = members.iter().map(|&id| read(&scene, id)).collect();
+
+        for frame in 0..FRAMES {
+            let translated = translate_portal_group_on_drag(&mut scene, frame_id, dx, dy);
+            assert!(translated, "frame {frame}: portal translate must engage");
+
+            // Content-cache sentinel must NOT move: version is frozen across the
+            // whole drag, so the version-gated markdown/truncation caches skip
+            // every frame — ZERO re-primes / re-shapes.
+            assert_eq!(
+                scene.version, version_at_drag_start,
+                "frame {frame}: a position-only drag must NOT bump scene.version \
+                 (would re-prime content caches every frame — hud-uyhpn)"
+            );
+
+            // The present-gate must still see the frame as dirty: geometry_epoch
+            // advances exactly once per applied translate.
+            assert_eq!(
+                scene.geometry_epoch,
+                epoch_at_drag_start + (frame as u64 + 1),
+                "frame {frame}: geometry_epoch must advance once per drag frame so \
+                 the moved portal repaints"
+            );
+
+            // Every member actually moved by the delta this frame.
+            for (i, &id) in members.iter().enumerate() {
+                let now = read(&scene, id);
+                assert!(
+                    (now.x - (prev[i].x + dx)).abs() < 1e-3
+                        && (now.y - (prev[i].y + dy)).abs() < 1e-3,
+                    "frame {frame}: member {i} must translate by the per-frame delta"
+                );
+                // Size never changes on a move — so truncation keys (size-based)
+                // stay identical and the cache stays valid the whole drag.
+                assert!(
+                    (now.width - prev[i].width).abs() < 1e-3
+                        && (now.height - prev[i].height).abs() < 1e-3,
+                    "frame {frame}: member {i} size must not change on a move"
+                );
+                prev[i] = now;
+            }
+        }
+
+        // Over the whole drag: version never moved (0 re-primes), geometry_epoch
+        // moved once per frame (FRAMES repaints).
+        assert_eq!(
+            scene.version, version_at_drag_start,
+            "scene.version must be unchanged across the entire drag"
+        );
+        assert_eq!(
+            scene.geometry_epoch,
+            epoch_at_drag_start + FRAMES as u64,
+            "geometry_epoch must have advanced once per drag frame"
+        );
+    }
+
+    /// hud-uyhpn: the single-tile (non-portal) move fallback is also position-only
+    /// — it must advance `geometry_epoch`, not `scene.version`.
+    #[test]
+    fn single_tile_move_fallback_is_position_only() {
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(10.0, 10.0, 100.0, 80.0),
+                1,
+            )
+            .unwrap();
+
+        let version_before = scene.version;
+        let epoch_before = scene.geometry_epoch;
+
+        // A plain tile resolves to the single-tile fallback (translate returns
+        // false); the caller then applies bounds + geometry epoch. Reproduce that
+        // position-only contract exactly.
+        assert!(
+            !translate_portal_group_on_drag(&mut scene, tile_id, 20.0, 15.0),
+            "a plain tile must fall through to the single-tile move path"
+        );
+        if scene.tiles.contains_key(&tile_id) {
+            if let Some(tile) = scene.tiles.get_mut(&tile_id) {
+                tile.bounds.x += 20.0;
+                tile.bounds.y += 15.0;
+            }
+            scene.bump_geometry_epoch();
+        }
+
+        assert_eq!(
+            scene.version, version_before,
+            "single-tile move must not bump scene.version (position-only)"
+        );
+        assert_eq!(
+            scene.geometry_epoch,
+            epoch_before + 1,
+            "single-tile move must advance geometry_epoch so it repaints"
         );
     }
 
