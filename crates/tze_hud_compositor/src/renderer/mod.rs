@@ -50,6 +50,7 @@ pub mod text;
 pub mod tile_render;
 pub mod token_colors;
 pub mod video;
+pub mod viewer_echo;
 pub mod widget_geometry;
 pub mod zone_render;
 
@@ -64,6 +65,10 @@ use image_cache::apply_composer_slot;
 pub use image_cache::{ImageTextureEntry, LocalComposerState, LocalComposerStateHandle};
 use text::*;
 use token_colors::*;
+pub use viewer_echo::{
+    MAX_VIEWER_ECHO_ENTRIES, PortalViewerEchoQueue, ViewerEchoAppend, ViewerEchoEntry,
+    ViewerEchoStore,
+};
 
 pub struct Compositor {
     pub device: wgpu::Device,
@@ -334,6 +339,15 @@ pub struct Compositor {
     /// thread.  `None` when no composer is active or no draft has arrived
     /// for the current frame.
     pub local_composer_state: LocalComposerStateHandle,
+    /// Shared queue for runtime-authored viewer reply echoes on raw-tile portals
+    /// (hud-nx7yq.3).  The windowed runtime pushes a [`viewer_echo::ViewerEchoAppend`]
+    /// on each accepted raw-tile composer submission; the compositor drains it
+    /// into `viewer_echoes` at frame start.
+    pub viewer_echo_queue: viewer_echo::PortalViewerEchoQueue,
+    /// Per-tile bounded store of runtime-authored viewer echo entries, rendered
+    /// as kind-distinct lines above the composer input strip.  Fed by draining
+    /// `viewer_echo_queue` and pruned to the live tile set each frame.
+    pub(crate) viewer_echoes: viewer_echo::ViewerEchoStore,
     /// Most-recently drained local composer state for this frame.
     ///
     /// Populated by draining `local_composer_state` at frame start.
@@ -534,6 +548,8 @@ impl Compositor {
             #[cfg(feature = "v2_preview")]
             video_frame_cache: HashMap::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
+            viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
+            viewer_echoes: viewer_echo::ViewerEchoStore::new(),
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),
@@ -814,6 +830,8 @@ impl Compositor {
             #[cfg(feature = "v2_preview")]
             video_frame_cache: HashMap::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
+            viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
+            viewer_echoes: viewer_echo::ViewerEchoStore::new(),
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),

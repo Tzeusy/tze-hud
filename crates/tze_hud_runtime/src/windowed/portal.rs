@@ -881,7 +881,23 @@ impl WinitApp {
         context: ComposerDeliveryContext,
         batch: tze_hud_input::DraftNotificationBatch,
     ) {
-        self.route_portal_composer_batch(context.tile_id, &batch);
+        let authority_handled = self.route_portal_composer_batch(context.tile_id, &batch);
+
+        // Runtime-authored viewer reply echo (hud-nx7yq.3): on the raw-tile pilot
+        // path (a portal NOT attached to the projection authority, so
+        // `route_portal_composer_batch` returned false and no `append_viewer_echo`
+        // fired), the submitted text would otherwise vanish on Enter. Author a
+        // kind-distinct viewer entry at submit time so the reply bubbles into the
+        // transcript. Authority-attached portals already echo via
+        // `submit_portal_input`, so we skip them to avoid a double.
+        if !authority_handled {
+            if let Some(submission) = batch.submission.as_ref() {
+                if !submission.text.trim().is_empty() {
+                    self.append_raw_tile_viewer_echo(context.tile_id, submission.text.clone());
+                }
+            }
+        }
+
         deliver_composer_batch(
             &self.state.input_event_tx,
             context.namespace,
@@ -890,13 +906,40 @@ impl WinitApp {
         );
     }
 
+    /// Push a runtime-authored viewer echo entry onto the shared queue the
+    /// compositor drains (hud-nx7yq.3).
+    ///
+    /// Pure local presentation: it never touches unread counts or attention
+    /// state, and it is authored by the runtime — an adapter cannot forge a
+    /// viewer entry through this path (the output-publication contract's viewer
+    /// rejection is unchanged).
+    fn append_raw_tile_viewer_echo(&mut self, tile_id: tze_hud_scene::SceneId, text: String) {
+        let submitted_at_wall_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        if let Ok(mut queue) = self.state.viewer_echo_queue.lock() {
+            queue.push(tze_hud_compositor::ViewerEchoAppend {
+                tile_id,
+                text,
+                submitted_at_wall_us,
+            });
+        }
+    }
+
     /// Route submitted focused-portal composer text into the in-process
     /// projection authority before the legacy namespace broadcast is emitted.
+    ///
+    /// Returns `true` when the tile is owned by an attached in-process projection
+    /// (the authority consumed the batch and echoed on its own path), `false`
+    /// for a raw-tile pilot portal — the caller uses this to decide whether a
+    /// runtime-authored viewer echo is needed (hud-nx7yq.3).
     fn route_portal_composer_batch(
         &mut self,
         tile_id: tze_hud_scene::SceneId,
         batch: &tze_hud_input::DraftNotificationBatch,
-    ) {
+    ) -> bool {
         let submitted_at_wall_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -920,6 +963,9 @@ impl WinitApp {
                 feedback_state = ?feedback.feedback_state,
                 "composer: routed portal submission to projection authority"
             );
+            true
+        } else {
+            false
         }
     }
 
@@ -1408,6 +1454,7 @@ mod tests {
             portal_resize_states: std::collections::HashMap::new(),
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
+            viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
             portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
             portal_op_rx: None,
             pending_keyboard_events: VecDeque::new(),
@@ -2475,6 +2522,76 @@ mod tests {
         assert!(
             app.state.input_processor.is_composer_active(),
             "composer draft must be active after Escape recovery"
+        );
+    }
+
+    // ── Pilot-path viewer history (hud-nx7yq.3) ────────────────────────────
+
+    fn viewer_echo_context(tile_id: tze_hud_scene::SceneId) -> ComposerDeliveryContext {
+        ComposerDeliveryContext {
+            namespace: "portal-agent".to_string(),
+            node_id_bytes: [0u8; 16],
+            tile_id,
+        }
+    }
+
+    /// An accepted submission on a raw-tile portal (not authority-attached)
+    /// enqueues a runtime-authored viewer echo carrying the submitted text.
+    #[test]
+    fn accepted_raw_tile_submission_enqueues_viewer_echo() {
+        let (scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.record_submission(tze_hud_input::DraftSubmission {
+            text: "hello from the viewer".to_string(),
+            sequence: 1,
+        });
+
+        app.route_and_deliver_composer_batch(viewer_echo_context(tile_id), batch);
+
+        let queue = app.state.viewer_echo_queue.lock().unwrap();
+        assert_eq!(queue.len(), 1, "one viewer echo must be enqueued on submit");
+        assert_eq!(queue[0].tile_id, tile_id);
+        assert_eq!(queue[0].text, "hello from the viewer");
+    }
+
+    /// A batch with no transactional submission (draft state only, or empty)
+    /// enqueues nothing — rejected/non-submissions are never echoed.
+    #[test]
+    fn non_submission_batch_enqueues_no_viewer_echo() {
+        let (scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        // An empty batch (no submission) — e.g. a cancel or a plain state update.
+        let batch = tze_hud_input::DraftNotificationBatch::new();
+        app.route_and_deliver_composer_batch(viewer_echo_context(tile_id), batch);
+
+        assert!(
+            app.state.viewer_echo_queue.lock().unwrap().is_empty(),
+            "no submission => no viewer echo (rejected submissions append nothing)"
+        );
+    }
+
+    /// A whitespace-only submission is not echoed (empty content is a no-op).
+    #[test]
+    fn whitespace_only_submission_enqueues_no_viewer_echo() {
+        let (scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.record_submission(tze_hud_input::DraftSubmission {
+            text: "   ".to_string(),
+            sequence: 1,
+        });
+        app.route_and_deliver_composer_batch(viewer_echo_context(tile_id), batch);
+
+        assert!(
+            app.state.viewer_echo_queue.lock().unwrap().is_empty(),
+            "whitespace-only submission must not enqueue a viewer echo"
         );
     }
 

@@ -42,6 +42,7 @@ pub use overflow::{
 pub use pipeline::{ChromeDrawCmd, RoundedRectDrawCmd, TexturedRectVertex};
 pub use renderer::{
     Compositor, CompositorError, ImageTextureEntry, LocalComposerState, LocalComposerStateHandle,
+    PortalViewerEchoQueue, ViewerEchoAppend, ViewerEchoEntry, ViewerEchoStore,
 };
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
 pub use text::{LINE_HEIGHT_MULTIPLIER, StyledRunItem, TextItem, TextRasterizer};

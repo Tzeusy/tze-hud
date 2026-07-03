@@ -89,7 +89,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
 use crate::component_startup::{register_profile_widgets, run_component_startup};
-use tze_hud_compositor::{Compositor, LocalComposerStateHandle, WindowSurface};
+use tze_hud_compositor::{
+    Compositor, LocalComposerStateHandle, PortalViewerEchoQueue, WindowSurface,
+};
 use tze_hud_config::resolve_runtime_widget_asset_store;
 use tze_hud_input::{
     CursorIconTracker, FocusManager, InputProcessor, KeyboardProcessor, PointerEventKind,
@@ -432,6 +434,12 @@ struct WindowedRuntimeState {
     /// `Some(Some(state))` = new draft snapshot; `Some(None)` = deactivate.
     /// `None` = no update since last drain (compositor keeps prior state).
     local_composer_state: LocalComposerStateHandle,
+    /// Shared queue for runtime-authored viewer reply echoes on raw-tile portals
+    /// (hud-nx7yq.3).  On an accepted composer submission for a raw tile (one not
+    /// attached to the projection authority, which echoes on its own path), this
+    /// thread pushes the submitted text; the compositor drains it into its
+    /// per-tile viewer-echo store and renders it above the composer strip.
+    viewer_echo_queue: PortalViewerEchoQueue,
     /// In-process portal projection authority driver (hud-2iup7).
     ///
     /// Hosts a `ProjectionAuthority` in the runtime process and drives the portal
@@ -849,6 +857,7 @@ impl ApplicationHandler for WinitApp {
         // thread) can push draft snapshots to the compositor thread without any
         // additional allocations or locks on the hot path.
         self.state.local_composer_state = Arc::clone(&compositor.local_composer_state);
+        self.state.viewer_echo_queue = Arc::clone(&compositor.viewer_echo_queue);
 
         // ── Wire compositor thread ─────────────────────────────────────────
         // Pre-clone the scene Arc so the compositor thread can lock the scene
@@ -2114,6 +2123,7 @@ impl WindowedRuntime {
             // Placeholder; replaced in resumed() with the Arc cloned from the
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
+            viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
             portal_projection_driver,
             portal_op_rx: portal_op_rx_opt.take(),
             pending_keyboard_events: VecDeque::new(),
